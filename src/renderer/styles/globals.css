@@ -73,14 +73,44 @@
   --bg-secondary: rgba(30, 41, 59, 0.9);
   --bg-glass: rgba(30, 41, 59, 0.7);
   --bg-glass-strong: rgba(30, 41, 59, 0.95);
-  --bg-canvas: #0d1525;
+  --bg-canvas: #0f192b;
 
   --text-primary: #f1f5f9;
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
 
-  --border-primary: rgba(148, 163, 184, 0.1);
+  --border-primary: rgba(148, 163, 184, 0.12);
   --border-hover: rgba(99, 102, 241, 0.5);
+
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.15);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.25), 0 2px 8px rgba(0,0,0,0.2);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.25);
+  --shadow-xl: 0 20px 60px rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.3);
+}
+
+.dark .canvas-grid path {
+  stroke: rgba(148, 163, 184, 0.06) !important;
+}
+
+.dark .canvas-grid path + path {
+  stroke: rgba(148, 163, 184, 0.14) !important;
+}
+
+.dark .ai-dialog-backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.dark .log-entries::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.15);
+}
+
+.dark .dropdown-menu {
+  border-color: rgba(148, 163, 184, 0.15);
+}
+
+.dark .ai-assistant-header,
+.dark .settings-header {
+  border-bottom-color: rgba(148, 163, 184, 0.1);
 }
 
 /* ============================================================
@@ -1181,7 +1211,7 @@ textarea.form-input {
 
 .log-entries::-webkit-scrollbar { width: 4px; }
 .log-entries::-webkit-scrollbar-track { background: transparent; }
-.log-entries::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+.log-entries::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 2px; }
 
 .log-entry {
   display: flex;

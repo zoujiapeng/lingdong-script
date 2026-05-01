@@ -591,8 +591,8 @@ export const useStore = create<AppStore>()(
       const minY = Math.min(...nodes.map((n) => n.y));
       const maxX = Math.max(...nodes.map((n) => n.x + 200));
       const maxY = Math.max(...nodes.map((n) => n.y + 80));
-      const W = window.innerWidth - 580;
-      const H = window.innerHeight - 100;
+      const W = window.innerWidth - 120;
+      const H = window.innerHeight - 120;
       const scaleX = W / (maxX - minX + 100);
       const scaleY = H / (maxY - minY + 100);
       const scale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.3), 1.5);

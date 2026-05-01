@@ -18,6 +18,7 @@ export function FlowCanvas() {
 
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const panRAF = useRef<number>(0);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
@@ -90,7 +91,10 @@ export function FlowCanvas() {
     const el = wrapperRef.current;
     if (!el) return;
     el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
+    return () => {
+      el.removeEventListener('wheel', handleWheel);
+      cancelAnimationFrame(panRAF.current);
+    };
   }, [handleWheel]);
 
   // Delete/Backspace key to delete selected nodes and edges
@@ -156,7 +160,14 @@ export function FlowCanvas() {
       setMousePos({ x: e.clientX, y: e.clientY });
 
       if (isPanning) {
-        setCanvasTransform({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+        cancelAnimationFrame(panRAF.current);
+        const px = e.clientX, py = e.clientY;
+        panRAF.current = requestAnimationFrame(() => {
+          useStore.setState((state) => {
+            state.ui.canvas_transform.x = px - panStart.x;
+            state.ui.canvas_transform.y = py - panStart.y;
+          });
+        });
         return;
       }
 

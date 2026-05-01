@@ -44,11 +44,6 @@ export function PropertyPanel({ forcedVisible = false }: { forcedVisible?: boole
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6, textAlign: 'center', lineHeight: 1.6 }}>
             点击画布中的节点<br />来编辑其参数
           </div>
-
-          {/* Global script settings */}
-          <div style={{ marginTop: 24, width: '100%' }}>
-            <GlobalSettings />
-          </div>
         </div>
       </div>
     );
@@ -140,25 +135,3 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
   }
 }
 
-function GlobalSettings() {
-  const { script, setUI, ui } = useStore();
-  return (
-    <div style={{ padding: '12px', background: 'rgba(148,163,184,0.06)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-primary)' }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-        全局设置
-      </div>
-      <div className="toggle-group">
-        <span className="toggle-label">显示网格</span>
-        <button className={`toggle ${ui.show_grid ? 'on' : ''}`} onClick={() => setUI({ show_grid: !ui.show_grid })} />
-      </div>
-      <div className="toggle-group">
-        <span className="toggle-label">网格吸附</span>
-        <button className={`toggle ${ui.snap_to_grid ? 'on' : ''}`} onClick={() => setUI({ snap_to_grid: !ui.snap_to_grid })} />
-      </div>
-      <div className="toggle-group">
-        <span className="toggle-label">暗色模式</span>
-        <button className={`toggle ${ui.dark_mode ? 'on' : ''}`} onClick={() => setUI({ dark_mode: !ui.dark_mode })} />
-      </div>
-    </div>
-  );
-}
