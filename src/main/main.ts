@@ -106,13 +106,9 @@ function startPythonEngine(scriptJson: string) {
 function stopPythonEngine() {
   if (pythonProcess) {
     pythonProcess.kill('SIGTERM');
-    setTimeout(() => {
-      if (pythonProcess) {
-        pythonProcess.kill('SIGKILL');
-        pythonProcess = null;
-      }
-      _engineRunning = false;
-    }, 3000);
+    // Force immediate cleanup — on Windows SIGTERM is TerminateProcess
+    pythonProcess = null;
+    _engineRunning = false;
   } else {
     _engineRunning = false;
   }

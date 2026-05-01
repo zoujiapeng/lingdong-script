@@ -344,6 +344,16 @@ html, body, #root {
   box-shadow: 0 2px 8px rgba(239, 68, 68, 0.35);
 }
 
+.btn-secondary {
+  background: var(--bg-glass);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+}
+.btn-secondary:hover {
+  background: var(--bg-glass-strong);
+  border-color: var(--text-muted);
+}
+
 .btn-icon {
   padding: 0;
   width: 34px;
@@ -1040,6 +1050,19 @@ textarea.form-input {
   gap: 6px;
   justify-content: center;
   margin-top: 8px;
+}
+
+.image-upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  padding: 12px 0;
+}
+
+.image-upload-placeholder span {
+  font-size: 12px;
 }
 
 .section-divider {
