@@ -59,34 +59,36 @@ function genClickNode(params: any): string {
   const x = params.x ?? 0;
   const y = params.y ?? 0;
   const method = params.method ?? 'single';
-  let line = `click (${x}, ${y})`;
+  let line = `点击 (${x}, ${y})`;
   if (method !== 'single') {
-    line += ` ${method}`;
+    const methodMap: Record<string, string> = { 'double': '双击', 'right': '右击', 'middle': '中键' };
+    line += ` ${methodMap[method] || method}`;
   }
   if (params.delay_after && params.delay_after !== 0.5) {
-    line += ` delay=${params.delay_after}`;
+    line += ` 延迟=${params.delay_after}`;
   }
   return line;
 }
 
 function genImageClickNode(params: any): string {
   const targets = params.targets ?? [];
-  let line = 'click image';
+  let line = '点击图片';
   for (const t of targets) {
     line += ` "${t.path}"`;
   }
   const parts: string[] = [];
   if (params.similarity && params.similarity !== 90) {
-    parts.push(`similarity=${params.similarity}`);
+    parts.push(`相似度=${params.similarity}`);
   }
   if (params.timeout && params.timeout !== 5) {
-    parts.push(`timeout=${params.timeout}`);
+    parts.push(`超时=${params.timeout}`);
   }
   if (params.offset_x || params.offset_y) {
-    parts.push(`offset(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
+    parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
   }
   if (params.method && params.method !== 'single') {
-    parts.push(params.method);
+    const methodMap: Record<string, string> = { 'double': '双击', 'right': '右击', 'middle': '中键' };
+    parts.push(methodMap[params.method] || params.method);
   }
   if (parts.length > 0) {
     line += ' ' + parts.join(' ');
@@ -97,27 +99,27 @@ function genImageClickNode(params: any): string {
 function genWaitNode(params: any): string {
   const wt = params.wait_type ?? 'time';
   if (wt === 'time') {
-    return `wait ${params.duration ?? 1}`;
+    return `等待 ${params.duration ?? 1}`;
   }
   if (wt === 'image') {
-    const timeout = params.timeout ? ` timeout=${params.timeout}` : '';
-    return `wait image "${params.template_path ?? ''}"${timeout}`;
+    const timeout = params.timeout ? ` 超时=${params.timeout}` : '';
+    return `等待图片 "${params.template_path ?? ''}"${timeout}`;
   }
   if (wt === 'window') {
-    const timeout = params.timeout ? ` timeout=${params.timeout}` : '';
-    return `wait window "${params.window_title ?? ''}"${timeout}`;
+    const timeout = params.timeout ? ` 超时=${params.timeout}` : '';
+    return `等待窗口 "${params.window_title ?? ''}"${timeout}`;
   }
-  return 'wait 1';
+  return '等待 1';
 }
 
 function genInputNode(params: any): string {
   const text = params.text ?? '';
-  let line = `type ${JSON.stringify(text)}`;
+  let line = `输入 ${JSON.stringify(text)}`;
   if (params.x != null && params.y != null && params.click_before) {
-    line += ` at (${params.x}, ${params.y})`;
+    line += ` 位置 (${params.x}, ${params.y})`;
   }
   if (params.clear_before !== undefined && !params.clear_before) {
-    line += ' clear=False';
+    line += ' 不清空=False';
   }
   return line;
 }
@@ -126,9 +128,9 @@ function genKeyboardNode(params: any): string {
   const keys = params.keys ?? [];
   const modifiers = params.modifiers ?? [];
   if (modifiers.length > 0) {
-    return `press ${modifiers.map((m: string) => m.toLowerCase()).join('+')}+${keys[0]?.toLowerCase() || ''}`;
+    return `按键 ${modifiers.map((m: string) => m.toLowerCase()).join('+')}+${keys[0]?.toLowerCase() || ''}`;
   }
-  return `press ${keys.map((k: string) => k.toLowerCase()).join('+')}`;
+  return `按键 ${keys.map((k: string) => k.toLowerCase()).join('+')}`;
 }
 
 function genSwipeNode(params: any): string {
@@ -136,33 +138,33 @@ function genSwipeNode(params: any): string {
   const sy = params.start_y ?? 0;
   const ex = params.end_x ?? 0;
   const ey = params.end_y ?? 0;
-  let line = `swipe (${sx},${sy}) to (${ex},${ey})`;
+  let line = `滑动 (${sx},${sy}) 到 (${ex},${ey})`;
   if (params.duration && params.duration !== 0.5) {
-    line += ` duration=${params.duration}`;
+    line += ` 时长=${params.duration}`;
   }
   return line;
 }
 
 function genConditionExpr(params: any): string {
   const ct = params.condition_type ?? 'always_true';
-  if (ct === 'always_true') return 'true';
+  if (ct === 'always_true') return '真';
   if (ct === 'image_exists') {
-    const sim = params.similarity ? ` similarity=${params.similarity}` : '';
-    return `image_exists "${params.template_path ?? ''}"${sim}`;
+    const sim = params.similarity ? ` 相似度=${params.similarity}` : '';
+    return `图片存在 "${params.template_path ?? ''}"${sim}`;
   }
   if (ct === 'window_exists') {
-    return `window_exists "${params.window_title ?? ''}"`;
+    return `窗口存在 "${params.window_title ?? ''}"`;
   }
   if (ct === 'variable_equals') {
-    return `var_eq ${params.variable_name ?? ''} "${params.variable_value ?? ''}"`;
+    return `变量等于 ${params.variable_name ?? ''} "${params.variable_value ?? ''}"`;
   }
   if (ct === 'variable_greater') {
-    return `var_gt ${params.variable_name ?? ''} ${params.variable_value ?? ''}`;
+    return `变量大于 ${params.variable_name ?? ''} ${params.variable_value ?? ''}`;
   }
   if (ct === 'variable_less') {
-    return `var_lt ${params.variable_name ?? ''} ${params.variable_value ?? ''}`;
+    return `变量小于 ${params.variable_name ?? ''} ${params.variable_value ?? ''}`;
   }
-  return 'true';
+  return '真';
 }
 
 function genVariableSetNode(params: any): string {
@@ -174,7 +176,7 @@ function genVariableGetNode(params: any): string {
 }
 
 function genSubScriptNode(params: any): string {
-  return `run "${params.script_name ?? ''}"`;
+  return `运行 "${params.script_name ?? ''}"`;
 }
 
 // ─── Main traversal ───
@@ -258,12 +260,12 @@ function generateNode(
       if (yesEdge && noEdge) {
         const conv = findConvergence(yesEdge.to_node, noEdge.to_node, state.outgoing);
 
-        emit(state, `if ${condExpr}:`);
+        emit(state, `如果 ${condExpr}:`);
         state.indent++;
         generateLinear(yesEdge.to_node, state, conv);
         state.indent--;
 
-        emit(state, `else:`);
+        emit(state, `否则:`);
         state.indent++;
         generateLinear(noEdge.to_node, state, conv);
         state.indent--;
@@ -276,7 +278,7 @@ function generateNode(
         const implicitNo = getEdge(state.outgoing, nodeId, 'no');
         if (implicitNo) {
           const conv = findConvergence(yesEdge.to_node, implicitNo.to_node, state.outgoing);
-          emit(state, `if ${condExpr}:`);
+          emit(state, `如果 ${condExpr}:`);
           state.indent++;
           generateLinear(yesEdge.to_node, state, conv);
           state.indent--;
@@ -285,7 +287,7 @@ function generateNode(
             generateNode(conv, state, convergence);
           }
         } else {
-          emit(state, `if ${condExpr}:`);
+          emit(state, `如果 ${condExpr}:`);
           state.indent++;
           generateLinear(yesEdge.to_node, state, undefined);
           state.indent--;
@@ -305,12 +307,12 @@ function generateNode(
       const endEdge = getEdge(state.outgoing, nodeId, 'loop_end');
 
       if (lt === 'infinite') {
-        emit(state, `loop infinite:`);
+        emit(state, `无限循环:`);
       } else if (lt === 'count') {
-        emit(state, `loop ${count}:`);
+        emit(state, `循环 ${count}:`);
       } else {
         const condExpr = genConditionExpr(params.condition ?? { condition_type: 'always_true' });
-        emit(state, `loop while ${condExpr}:`);
+        emit(state, `条件循环 ${condExpr}:`);
       }
 
       state.indent++;
@@ -328,7 +330,7 @@ function generateNode(
     }
 
     case 'screenshot': {
-      emit(state, 'screenshot');
+      emit(state, '截图');
       forward(nodeId, 'output', state, convergence);
       break;
     }

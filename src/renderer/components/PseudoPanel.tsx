@@ -252,21 +252,21 @@ function highlightPseudo(code: string): string {
         '<span class="hl-number">$1</span>'
       );
 
-      // Keywords: if, else, loop, break, and/not/or
+      // Keywords: if, else, loop, break, and/or 中文关键词
       h = h.replace(
-        /\b(if|else|loop|infinite|while|break|and|or|not)\b/g,
+        /\b(如果|否则|循环|无限循环|条件循环|跳出|if|else|loop|infinite|while|break|and|or|not)\b/g,
         '<span class="hl-keyword">$1</span>'
       );
 
-      // Operations: click, type, press, wait, swipe, screenshot, run
+      // Operations: click, type, press, wait, swipe, screenshot, run / 中文操作
       h = h.replace(
-        /\b(click|type|press|wait|swipe|screenshot|run)\b/g,
+        /\b(点击图片|点击|输入|按键|等待图片|等待窗口|等待|滑动|截图|运行|click|image|type|press|wait|swipe|screenshot|run)\b/g,
         '<span class="hl-module">$1</span>'
       );
 
-      // Conditions: image_exists, window_exists, var_eq, var_gt, var_lt
+      // Conditions: image_exists, window_exists, var_eq, var_gt, var_lt / 中文条件
       h = h.replace(
-        /\b(image_exists|window_exists|var_eq|var_gt|var_lt)\b/g,
+        /\b(图片存在|窗口存在|变量等于|变量大于|变量小于|image_exists|window_exists|var_eq|var_gt|var_lt|真|true)\b/g,
         '<span class="hl-annotation">$1</span>'
       );
 

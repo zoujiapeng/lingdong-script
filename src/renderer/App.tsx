@@ -114,7 +114,6 @@ export default function App() {
         ) : viewMode === 'ai' ? (
           <div className="canvas-area">
             <AIAssistant />
-            {ui.show_log_panel && <LogPanel />}
           </div>
         ) : (
           <>

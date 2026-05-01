@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useStore } from '../store';
 import { parsePseudoToFlow } from '../utils/pseudoParser';
-import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings, ExternalLink } from 'lucide-react';
+import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings } from 'lucide-react';
 
 export function AIAssistant() {
   const [input, setInput] = useState('');
@@ -13,7 +13,6 @@ export function AIAssistant() {
   const handleGenerate = useCallback(async () => {
     if (!input.trim()) return;
 
-    // Read key from localStorage (set by SettingsPanel) or window
     let apiKey = (window as any).__DEEPSEEK_KEY__;
     if (!apiKey) {
       try { apiKey = localStorage.getItem('lingdong-deepseek-key') || ''; } catch {}
@@ -43,11 +42,33 @@ export function AIAssistant() {
               content: `你是一个桌面自动化脚本生成器。
 将用户需求转换为灵动脚本伪代码，返回JSON格式：{"pseudocode":"...","explanation":"..."}
 
-命令：click (x,y)、click image "路径"、type "文本"、press 键、wait 秒、swipe (x1,y1) to (x2,y2)、screenshot、$变量="值"
-控制流：if 条件: ... else: ...、loop N: ...、loop infinite: ...、break
-条件：true、image_exists、window_exists、var_eq、var_gt、var_lt
+## 关键词（必须使用中文关键词）
+点击 (x,y) [双击|右击|中键] — 鼠标点击
+点击图片 "路径" [相似度=N] [超时=N] — 图片识别点击
+输入 "文本" [位置 (x,y)] — 输入文本
+按键 键1+键2 — 键盘操作
+等待 秒数 — 等待时间
+等待图片 "路径" [超时=N] — 等待图片出现
+等待窗口 "标题" [超时=N] — 等待窗口出现
+滑动 (x1,y1) 到 (x2,y2) — 滑动操作
+截图 — 全屏截图
+$变量名="值" — 设置变量
+运行 "脚本名" — 调用子脚本
 
-示例：{"pseudocode":"press win+r\\nwait 0.5\\ntype \\"notepad\\"\\npress enter\\nwait 1\\ntype \\"hello\\"","explanation":"打开运行→启动记事本→输入文本"}`,
+## 控制流
+如果 条件: ... 否则: ... — 条件分支
+循环 N: — 计数循环
+无限循环: — 无限循环
+跳出 — 跳出循环
+
+## 条件
+真 — 始终为真
+图片存在 "路径" [相似度=N] — 检测图片
+窗口存在 "标题" — 检测窗口
+变量等于 变量名 "值" — 变量比较
+
+## 示例
+{"pseudocode":"按键 win+r\\n等待 0.5\\n输入 \\"notepad\\"\\n按键 enter\\n等待 1\\n输入 \\"hello\\"","explanation":"打开运行→启动记事本→输入文本"}`,
             },
             { role: 'user', content: input },
           ],
@@ -120,31 +141,32 @@ export function AIAssistant() {
       <div className="ai-assistant-header">
         <Sparkles size={18} />
         <span>AI 助手</span>
+        <span className="ai-assistant-subtitle">用自然语言描述操作，AI自动生成脚本</span>
       </div>
 
       <div className="ai-assistant-body">
-        {/* Input */}
-        <div className="ai-input-area">
+        {/* Input section - takes full space when no results, half when results */}
+        <div className={`ai-input-section${result ? ' ai-input-section-split' : ''}`}>
           <textarea
             className="ai-textarea"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="用自然语言描述你要自动化的操作，例如：&#10;打开记事本，输入 hello world，然后截图保存"
-            rows={4}
           />
-          <button
-            className="btn btn-primary"
-            onClick={handleGenerate}
-            disabled={loading || !input.trim()}
-            style={{ gap: 6, alignSelf: 'flex-end' }}
-          >
-            {loading ? (
-              <Loader2 size={15} className="spin" />
-            ) : (
-              <Sparkles size={15} />
-            )}
-            {loading ? '生成中...' : '生成伪代码'}
-          </button>
+          <div className="ai-input-actions">
+            <button
+              className="btn btn-primary ai-generate-btn"
+              onClick={handleGenerate}
+              disabled={loading || !input.trim()}
+            >
+              {loading ? (
+                <Loader2 size={16} className="spin" />
+              ) : (
+                <Sparkles size={16} />
+              )}
+              {loading ? '生成中...' : '生成脚本'}
+            </button>
+          </div>
         </div>
 
         {/* Error */}
@@ -191,6 +213,10 @@ export function AIAssistant() {
               <button className="btn btn-ghost" onClick={handleViewCode} style={{ gap: 6 }}>
                 <Eye size={14} />
                 查看流程图
+              </button>
+              <button className="btn btn-ghost" onClick={() => { setInput(result.pseudocode); setResult(null); }} style={{ gap: 6 }}>
+                <Settings size={14} />
+                继续编辑
               </button>
             </div>
 

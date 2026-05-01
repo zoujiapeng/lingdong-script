@@ -37,26 +37,25 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   // Comments
   if (line.startsWith('#')) return null;
 
-  // Break
-  if (/^break\b/i.test(line)) return { type: 'break', params: {}, isBreak: true };
+  // Break / 跳出
+  if (/^(?:break|跳出)\b/i.test(line)) return { type: 'break', params: {}, isBreak: true };
 
-  // click image "path1" "path2" ...
-  const imgClickRe = /^click\s+image\s+(.+)/i;
+  // click image "path1" "path2" ... / 点击图片 "path1" ...
+  const imgClickRe = /^(?:click\s+image|点击图片)\s+(.+)/i;
   const imgMatch = line.match(imgClickRe);
   if (imgMatch) {
     const rest = imgMatch[1].trim();
     const targets: { path: string }[] = [];
-    // Extract quoted strings (paths)
     const pathRe = /"([^"]*)"/g;
     let m;
     while ((m = pathRe.exec(rest)) !== null) {
       if (m[1]) targets.push({ path: m[1] });
     }
-    // Parse options after paths
-    const simMatch = rest.match(/\bsimilarity[=:](\d+)/i);
-    const timeoutMatch = rest.match(/\btimeout[=:](\d+(\.\d+)?)/i);
-    const offsetMatch = rest.match(/\boffset\((-?\d+),(-?\d+)\)/i);
-    const methodMatch = rest.match(/\b(single|double|right|middle)\b/i);
+    // Parse options — support both English and Chinese keys
+    const simMatch = rest.match(/\b(?:similarity|相似度)[=:](\d+)/i);
+    const timeoutMatch = rest.match(/\b(?:timeout|超时)[=:](\d+(\.\d+)?)/i);
+    const offsetMatch = rest.match(/\b(?:offset|偏移)\((-?\d+),(-?\d+)\)/i);
+    const methodMatch = rest.match(/\b(single|double|right|middle|单击|双击|右击|中键)\b/i);
 
     const params: any = {
       targets,
@@ -66,31 +65,37 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
       offset_y: offsetMatch ? parseInt(offsetMatch[2]) : 0,
       delay_after: 0.5,
     };
-    if (methodMatch) params.method = methodMatch[1].toLowerCase();
+    if (methodMatch) {
+      const m = methodMatch[1].toLowerCase();
+      params.method = { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle' }[m] || m;
+    }
     return { type: 'image_click', params };
   }
 
-  // click (x, y) [method]
-  const clickRe = /^click\s+\((\d+)\s*,\s*(\d+)\)\s*(single|double|right|middle)?\s*(.*)?/i;
+  // click (x, y) [method] / 点击 (x, y) [method]
+  // Also handle "点击图片" already caught above, so "点击" alone is click coordinate
+  const clickRe = /^(?:click|点击)\s+\((\d+)\s*,\s*(\d+)\)\s*(single|double|right|middle|单击|双击|右击|中键)?\s*(.*)?/i;
   const clickMatch = line.match(clickRe);
   if (clickMatch) {
-    const delayMatch = line.match(/\bdelay[=:](\d+(\.\d+)?)/i);
+    const delayMatch = line.match(/\b(?:delay|延迟)[=:](\d+(\.\d+)?)/i);
+    const m = (clickMatch[3] || 'single').toLowerCase();
     return {
       type: 'click',
       params: {
         x: parseInt(clickMatch[1]),
         y: parseInt(clickMatch[2]),
-        method: (clickMatch[3] || 'single').toLowerCase(),
+        method: { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle' }[m] || m,
         delay_after: delayMatch ? parseFloat(delayMatch[1]) : 0.5,
       },
     };
   }
 
-  // type "text" [at (x,y)] [clear=True|False]
-  const inputRe = /^type\s+"([^"]*)"(?:\s+at\s+\((\d+)\s*,\s*(\d+)\))?\s*(.*)?/i;
+  // type "text" [at (x,y)] / 输入 "text" [位置 (x,y)]
+  const inputRe = /^(?:type|输入)\s+"([^"]*)"(?:\s+(?:at|位置)\s+\((\d+)\s*,\s*(\d+)\))?\s*(.*)?/i;
   const inputMatch = line.match(inputRe);
   if (inputMatch) {
-    const clearMatch = line.match(/\bclear[=:](True|False|true|false)/i);
+    const clearMatch = line.match(/\b(?:clear|不清空)[=:](True|False|true|false)/i);
+    const clearVal = clearMatch ? clearMatch[1].toLowerCase() === 'true' : true;
     return {
       type: 'input_text',
       params: {
@@ -98,14 +103,14 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
         x: inputMatch[2] ? parseInt(inputMatch[2]) : undefined,
         y: inputMatch[3] ? parseInt(inputMatch[3]) : undefined,
         click_before: !!inputMatch[2],
-        clear_before: clearMatch ? clearMatch[1].toLowerCase() === 'true' : true,
+        clear_before: clearMatch ? !clearVal : true, // "不清空=True" means clear_before=false
         delay_after: 0.3,
       },
     };
   }
 
-  // press key1+key2+...
-  const pressRe = /^press\s+(.+)/i;
+  // press key1+key2+... / 按键 key1+key2+...
+  const pressRe = /^(?:press|按键)\s+(.+)/i;
   const pressMatch = line.match(pressRe);
   if (pressMatch) {
     const keys = pressMatch[1].split('+').map((k) => k.trim().toLowerCase());
@@ -122,8 +127,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // wait N
-  const waitTimeRe = /^wait\s+(\d+(\.\d+)?)\s*$/i;
+  // wait N / 等待 N
+  const waitTimeRe = /^(?:wait|等待)\s+(\d+(\.\d+)?)\s*$/i;
   const waitTimeMatch = line.match(waitTimeRe);
   if (waitTimeMatch) {
     return {
@@ -132,8 +137,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // wait image "path" [timeout=N]
-  const waitImgRe = /^wait\s+image\s+"([^"]*)"(?:\s+timeout[=:](\d+(\.\d+)?))?\s*/i;
+  // wait image "path" / 等待图片 "path"
+  const waitImgRe = /^(?:wait\s+image|等待图片)\s+"([^"]*)"(?:\s+(?:timeout|超时)[=:](\d+(\.\d+)?))?\s*/i;
   const waitImgMatch = line.match(waitImgRe);
   if (waitImgMatch) {
     return {
@@ -146,8 +151,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // wait window "title" [timeout=N]
-  const waitWinRe = /^wait\s+window\s+"([^"]*)"(?:\s+timeout[=:](\d+(\.\d+)?))?\s*/i;
+  // wait window "title" / 等待窗口 "title"
+  const waitWinRe = /^(?:wait\s+window|等待窗口)\s+"([^"]*)"(?:\s+(?:timeout|超时)[=:](\d+(\.\d+)?))?\s*/i;
   const waitWinMatch = line.match(waitWinRe);
   if (waitWinMatch) {
     return {
@@ -160,11 +165,11 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // swipe (x1,y1) to (x2,y2) [duration=N]
-  const swipeRe = /^swipe\s+\((\d+)\s*,\s*(\d+)\)\s+to\s+\((\d+)\s*,\s*(\d+)\)\s*(.*)?/i;
+  // swipe (x1,y1) to (x2,y2) / 滑动 (x1,y1) 到 (x2,y2)
+  const swipeRe = /^(?:swipe|滑动)\s+\((\d+)\s*,\s*(\d+)\)\s+(?:to|到)\s+\((\d+)\s*,\s*(\d+)\)\s*(.*)?/i;
   const swipeMatch = line.match(swipeRe);
   if (swipeMatch) {
-    const durMatch = line.match(/\bduration[=:](\d+(\.\d+)?)/i);
+    const durMatch = line.match(/\b(?:duration|时长)[=:](\d+(\.\d+)?)/i);
     return {
       type: 'swipe',
       params: {
@@ -178,8 +183,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // screenshot
-  if (/^screenshot\b/i.test(line)) {
+  // screenshot / 截图
+  if (/^(?:screenshot|截图)\b/i.test(line)) {
     return { type: 'screenshot', params: {} };
   }
 
@@ -203,8 +208,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // run "name"
-  const runRe = /^run\s+"([^"]*)"/i;
+  // run "name" / 运行 "name"
+  const runRe = /^(?:run|运行)\s+"([^"]*)"/i;
   const runMatch = line.match(runRe);
   if (runMatch) {
     return {
@@ -213,8 +218,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // if COND:
-  const ifRe = /^if\s+(.+):\s*$/i;
+  // if COND: / 如果 COND:
+  const ifRe = /^(?:if|如果)\s+(.+):\s*$/i;
   const ifMatch = line.match(ifRe);
   if (ifMatch) {
     const condStr = ifMatch[1].trim();
@@ -222,13 +227,13 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     return { type: 'condition', params: condition, isElse: false };
   }
 
-  // else:
-  if (/^else\s*:\s*$/i.test(line)) {
+  // else: / 否则:
+  if (/^(?:else|否则)\s*:\s*$/i.test(line)) {
     return { type: 'else', params: {}, isElse: true };
   }
 
-  // loop N:
-  const loopCountRe = /^loop\s+(\d+)\s*:\s*$/i;
+  // loop N: / 循环 N:
+  const loopCountRe = /^(?:loop|循环)\s+(\d+)\s*:\s*$/i;
   const loopCountMatch = line.match(loopCountRe);
   if (loopCountMatch) {
     return {
@@ -237,13 +242,13 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // loop infinite:
-  if (/^loop\s+infinite\s*:\s*$/i.test(line)) {
+  // loop infinite: / 无限循环:
+  if (/^(?:loop\s+infinite|无限循环)\s*:\s*$/i.test(line)) {
     return { type: 'loop', params: { loop_type: 'infinite', count: 0 } };
   }
 
-  // loop while COND:
-  const loopWhileRe = /^loop\s+while\s+(.+):\s*$/i;
+  // loop while COND: / 条件循环 COND:
+  const loopWhileRe = /^(?:loop\s+while|条件循环)\s+(.+):\s*$/i;
   const loopWhileMatch = line.match(loopWhileRe);
   if (loopWhileMatch) {
     const condStr = loopWhileMatch[1].trim();
@@ -258,13 +263,13 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
 }
 
 function parseConditionExpr(expr: string): any {
-  // true
-  if (/^true$/i.test(expr)) {
+  // true / 真
+  if (/^(?:true|真)$/i.test(expr)) {
     return { condition_type: 'always_true' };
   }
 
-  // image_exists "path" [similarity=N]
-  const imgExistsRe = /^image_exists\s+"([^"]*)"(?:\s+similarity[=:](\d+))?\s*$/i;
+  // image_exists "path" / 图片存在 "path"
+  const imgExistsRe = /^(?:image_exists|图片存在)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?\s*$/i;
   const imgMatch = expr.match(imgExistsRe);
   if (imgMatch) {
     return {
@@ -274,8 +279,8 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
-  // window_exists "title"
-  const winExistsRe = /^window_exists\s+"([^"]*)"\s*$/i;
+  // window_exists "title" / 窗口存在 "title"
+  const winExistsRe = /^(?:window_exists|窗口存在)\s+"([^"]*)"\s*$/i;
   const winMatch = expr.match(winExistsRe);
   if (winMatch) {
     return {
@@ -284,8 +289,8 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
-  // var_eq name "value"
-  const varEqRe = /^var_eq\s+(\w+)\s+"([^"]*)"\s*$/i;
+  // var_eq name "value" / 变量等于 name "value"
+  const varEqRe = /^(?:var_eq|变量等于)\s+(\w+)\s+"([^"]*)"\s*$/i;
   const varEqMatch = expr.match(varEqRe);
   if (varEqMatch) {
     return {
@@ -295,8 +300,8 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
-  // var_gt name value
-  const varGtRe = /^var_gt\s+(\w+)\s+(\S+)\s*$/i;
+  // var_gt name value / 变量大于 name value
+  const varGtRe = /^(?:var_gt|变量大于)\s+(\w+)\s+(\S+)\s*$/i;
   const varGtMatch = expr.match(varGtRe);
   if (varGtMatch) {
     return {
@@ -306,8 +311,8 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
-  // var_lt name value
-  const varLtRe = /^var_lt\s+(\w+)\s+(\S+)\s*$/i;
+  // var_lt name value / 变量小于 name value
+  const varLtRe = /^(?:var_lt|变量小于)\s+(\w+)\s+(\S+)\s*$/i;
   const varLtMatch = expr.match(varLtRe);
   if (varLtMatch) {
     return {
@@ -317,7 +322,7 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
-  // Fallback: treat as image_exists
+  // Fallback
   return { condition_type: 'always_true' };
 }
 
