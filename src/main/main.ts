@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import * as https from 'https';
@@ -40,6 +40,77 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+function buildAppMenu() {
+  const isMac = process.platform === 'darwin';
+  const template: any[] = [
+    ...(isMac ? [{ role: 'appMenu', label: '灵动脚本' }] : []),
+    {
+      label: '文件',
+      submenu: [
+        { label: '新建脚本', accelerator: 'CmdOrCtrl+N', click: () => mainWindow?.webContents.send('menu-action', 'new') },
+        { label: '打开脚本', accelerator: 'CmdOrCtrl+O', click: () => mainWindow?.webContents.send('menu-action', 'open') },
+        { label: '保存脚本', accelerator: 'CmdOrCtrl+S', click: () => mainWindow?.webContents.send('menu-action', 'save') },
+        { type: 'separator' },
+        { role: 'quit', label: '退出' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { type: 'separator' },
+        { role: 'selectAll', label: '全选' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '重新加载' },
+        { role: 'forceReload', label: '强制重新加载' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize', label: '最小化' },
+        { role: 'close', label: '关闭窗口' },
+        ...(isMac ? [
+          { type: 'separator' },
+          { role: 'front', label: '全部置于顶部' },
+        ] : []),
+      ],
+    },
+    {
+      label: '帮助',
+      submenu: [
+        { label: '关于灵动脚本', click: () => {
+          dialog.showMessageBox(mainWindow!, {
+            type: 'info',
+            title: '关于灵动脚本',
+            message: '灵动脚本 v1.0.0',
+            detail: '高级可视化自动化脚本编辑器\n\n可视化编排桌面自动化流程\n支持图片识别、条件分支、循环、变量等功能',
+          });
+        }},
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
 }
 
 // --- Python Engine Process Management ---
@@ -316,9 +387,15 @@ function confirm(){
   }
 });
 
+// --- Menu Action IPC ---
+ipcMain.on('menu-action', (_, action: string) => {
+  mainWindow?.webContents.send('menu-action', action);
+});
+
 // --- App Lifecycle ---
 
 app.whenReady().then(() => {
+  buildAppMenu();
   createWindow();
 
   // 全局 F9 热键 — 在主进程直接控制引擎启停

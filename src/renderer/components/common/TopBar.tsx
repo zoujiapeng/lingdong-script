@@ -123,15 +123,6 @@ export function TopBar() {
 
   return (
     <div className="topbar">
-      {/* Logo */}
-      <div className="topbar-logo">
-        <div className="topbar-logo-icon">
-          <Zap size={16} />
-        </div>
-        <span className="topbar-logo-text">灵动脚本</span>
-        <span className="topbar-logo-badge">PRO</span>
-      </div>
-
       {/* Title */}
       <div className="topbar-title-area">
         <button

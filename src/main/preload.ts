@@ -28,4 +28,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // AI generation (via main process to avoid CORS)
   aiGenerate: (params: { apiKey: string; messages: { role: string; content: string }[] }) =>
     ipcRenderer.invoke('ai:generate', params),
+
+  // Menu actions (from native menu bar)
+  onMenuAction: (callback: (action: string) => void) => {
+    ipcRenderer.on('menu-action', (_, action) => callback(action));
+  },
 });
