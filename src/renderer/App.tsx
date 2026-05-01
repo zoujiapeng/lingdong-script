@@ -38,24 +38,9 @@ export default function App() {
         if (edges.length > 0) store.deleteEdges(edges);
       }
       if (e.key === 'Escape') store.clearSelection();
-
-      // F9: toggle run/stop
-      if (e.key === 'F9') {
-        e.preventDefault();
-        toggleExecution();
-      }
     },
     []
   );
-
-  function toggleExecution() {
-    const st = useStore.getState();
-    if (st.execution.status === 'running' || st.execution.status === 'paused') {
-      st.stopExecution();
-    } else {
-      st.startExecution();
-    }
-  }
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);

@@ -26,28 +26,15 @@ export function ImageClickParams({ params, onChange }: Props) {
   const handleCapture = async () => {
     try {
       setCapturing(true);
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      const video = document.createElement('video');
-      video.srcObject = stream;
-      await video.play();
-
-      // Wait a frame for the video to render
-      await new Promise((r) => requestAnimationFrame(r));
-
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(video, 0, 0);
-      const dataUrl = canvas.toDataURL('image/png');
-
-      stream.getTracks().forEach((t) => t.stop());
-      video.remove();
-      onChange({ template_base64: dataUrl, template_path: '屏幕截图.png' });
-    } catch (err: any) {
-      if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') {
-        console.error('截图失败:', err);
+      const api = (window as any).electronAPI;
+      if (api?.captureScreenshot) {
+        const result = await api.captureScreenshot();
+        if (result.dataURL) {
+          onChange({ template_base64: result.dataURL, template_path: '屏幕截图.png' });
+        }
       }
+    } catch (err: any) {
+      console.error('截图失败:', err);
     } finally {
       setCapturing(false);
     }

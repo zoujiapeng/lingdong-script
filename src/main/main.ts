@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer } from 'electron';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 
@@ -161,6 +161,28 @@ ipcMain.handle('engine:resume', () => {
 ipcMain.handle('engine:status', () => {
   sendToEngine({ type: 'status' });
   return { success: true };
+});
+
+ipcMain.handle('screenshot:capture', async () => {
+  if (!mainWindow) return { error: 'no window' };
+  mainWindow.minimize();
+  await new Promise((r) => setTimeout(r, 500));
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1920, height: 1080 },
+    });
+    if (sources.length > 0) {
+      const dataURL = sources[0].thumbnail.toDataURL();
+      mainWindow.restore();
+      return { dataURL };
+    }
+    mainWindow.restore();
+    return { error: 'no sources' };
+  } catch (e: any) {
+    mainWindow.restore();
+    return { error: e.message };
+  }
 });
 
 // --- App Lifecycle ---

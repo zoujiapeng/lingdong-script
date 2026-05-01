@@ -21,4 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onEngineLog: (callback: (msg: any) => void) => {
     ipcRenderer.on('engine-log', (_, msg) => callback(msg));
   },
+
+  // Screenshot capture
+  captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
 });
