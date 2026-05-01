@@ -11,7 +11,7 @@ export function FlowCanvas() {
   const {
     script, ui,
     setCanvasTransform, addNode,
-    clearSelection, selectNodes,
+    clearSelection, selectNodes, deleteNodes, deleteEdges,
     startConnecting, stopConnecting, addEdge,
     setHoveredNode,
   } = useStore();
@@ -25,7 +25,7 @@ export function FlowCanvas() {
   const [connectingEnd, setConnectingEnd] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const { canvas_transform, connecting } = ui;
+  const { canvas_transform, connecting, selection } = ui;
 
   // Convert screen coords to canvas coords
   const screenToCanvas = useCallback(
@@ -47,16 +47,20 @@ export function FlowCanvas() {
       const NODE_W = node.type === 'start' || node.type === 'end' ? 160 : 220;
       const NODE_H = node.type === 'start' || node.type === 'end' ? 56 : 80;
 
-      let px = node.x + NODE_W / 2;
-      let py = node.y;
+      let px: number, py: number;
 
-      if (portId === 'input') { py = node.y; }
-      else if (portId === 'output') { py = node.y + NODE_H; }
-      else if (portId === 'yes') { px = node.x + NODE_W * 0.25; py = node.y + NODE_H; }
-      else if (portId === 'no') { px = node.x + NODE_W * 0.75; py = node.y + NODE_H; }
-      else if (portId === 'fail') { px = node.x + NODE_W * 0.75; py = node.y + NODE_H; }
-      else if (portId === 'loop_body') { px = node.x + NODE_W * 0.25; py = node.y + NODE_H; }
-      else if (portId === 'loop_end') { px = node.x + NODE_W * 0.75; py = node.y + NODE_H; }
+      if (portId === 'input') {
+        px = node.x + NODE_W / 2;
+        py = node.y;
+      } else {
+        // Dynamically calculate output port position matching FlowNode.tsx
+        const outputs = def?.ports?.outputs || [];
+        const total = outputs.length;
+        const idx = outputs.findIndex((p: any) => p.id === portId);
+        const leftPct = total <= 1 ? 50 : total === 2 ? (idx === 0 ? 28 : 72) : 20 + idx * 30;
+        px = node.x + NODE_W * (leftPct / 100);
+        py = node.y + NODE_H;
+      }
 
       return {
         x: px * canvas_transform.scale + canvas_transform.x,
@@ -89,6 +93,23 @@ export function FlowCanvas() {
     return () => el.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Delete/Backspace key to delete selected nodes and edges
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const st = useStore.getState();
+        if (st.ui.selection.nodes.length > 0) {
+          st.deleteNodes(st.ui.selection.nodes);
+        }
+        if (st.ui.selection.edges.length > 0) {
+          st.deleteEdges(st.ui.selection.edges);
+        }
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -99,8 +120,12 @@ export function FlowCanvas() {
       }
       if (e.button === 0) {
         const target = e.target as HTMLElement;
-        if (target === wrapperRef.current || target.classList.contains('canvas-bg') || target.classList.contains('canvas-grid')) {
-          if (connecting.active) {
+        const isCanvasBg = target === wrapperRef.current
+          || target.classList.contains('canvas-bg')
+          || target.classList.contains('canvas-grid');
+        if (isCanvasBg) {
+          // Read fresh connecting state from store to avoid stale closure
+          if (useStore.getState().ui.connecting.active) {
             stopConnecting();
             return;
           }
@@ -110,12 +135,20 @@ export function FlowCanvas() {
           setSelectionStart(canvasPos);
           setSelectionRect({ x: canvasPos.x, y: canvasPos.y, w: 0, h: 0 });
         }
+        // Click on edge SVG empty area = canvas click (paths have stopPropagation on click)
+        if (target.closest('.edges-svg') && !(target as Element).closest('g')) {
+          if (useStore.getState().ui.connecting.active) {
+            stopConnecting();
+            return;
+          }
+          clearSelection();
+        }
       }
       if (e.button === 2) {
         e.preventDefault();
       }
     },
-    [canvas_transform, connecting, clearSelection, stopConnecting, screenToCanvas]
+    [canvas_transform, clearSelection, stopConnecting, screenToCanvas]
   );
 
   const handleMouseMove = useCallback(
@@ -127,7 +160,7 @@ export function FlowCanvas() {
         return;
       }
 
-      if (connecting.active) {
+      if (useStore.getState().ui.connecting.active) {
         const rect = wrapperRef.current!.getBoundingClientRect();
         setConnectingEnd({ x: e.clientX - rect.left, y: e.clientY - rect.top });
         return;
@@ -143,12 +176,41 @@ export function FlowCanvas() {
         });
       }
     },
-    [isPanning, panStart, setCanvasTransform, connecting, selectionStart, screenToCanvas]
+    [isPanning, panStart, setCanvasTransform, selectionStart, screenToCanvas]
   );
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent) => {
       if (isPanning) { setIsPanning(false); return; }
+
+      // If connecting, check if mouse is released over a target node
+      const cn = useStore.getState().ui.connecting;
+      console.log('[CANVAS] handleMouseUp connecting:', cn.active, 'from:', cn.from_node);
+      if (cn.active && cn.from_node) {
+        const canvasPos = screenToCanvas(e.clientX, e.clientY);
+        const targetNode = script.nodes.find((n) => {
+          if (n.id === cn.from_node) return false;
+          const NW = n.type === 'start' || n.type === 'end' ? 160 : 220;
+          const NH = n.type === 'start' || n.type === 'end' ? 56 : 80;
+          return (
+            canvasPos.x >= n.x &&
+            canvasPos.x <= n.x + NW &&
+            canvasPos.y >= n.y &&
+            canvasPos.y <= n.y + NH
+          );
+        });
+        if (targetNode) {
+          addEdge({
+            from_node: cn.from_node,
+            from_port: cn.from_port || 'output',
+            to_node: targetNode.id,
+            to_port: 'input',
+          });
+        }
+        stopConnecting();
+        setConnectingEnd(null);
+        return;
+      }
 
       if (selectionStart && selectionRect && (selectionRect.w > 5 || selectionRect.h > 5)) {
         // Select nodes within rect
@@ -170,7 +232,7 @@ export function FlowCanvas() {
       setSelectionStart(null);
       setSelectionRect(null);
     },
-    [isPanning, selectionStart, selectionRect, script.nodes, selectNodes]
+    [isPanning, selectionStart, selectionRect, script.nodes, selectNodes, addEdge, stopConnecting, screenToCanvas]
   );
 
   const handleContextMenu = useCallback(
@@ -208,10 +270,12 @@ export function FlowCanvas() {
   const handlePortMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string, portId: string) => {
       e.stopPropagation();
+      console.log('[CANVAS] handlePortMouseDown', nodeId, portId);
       if (portId === 'input') return; // can't drag from input
       startConnecting(nodeId, portId);
       const rect = wrapperRef.current!.getBoundingClientRect();
       setConnectingEnd({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+      console.log('[CANVAS] connecting started, connectingEnd set');
     },
     [startConnecting]
   );
@@ -219,20 +283,26 @@ export function FlowCanvas() {
   const handlePortMouseUp = useCallback(
     (e: React.MouseEvent, nodeId: string, portId: string) => {
       e.stopPropagation();
-      if (connecting.active && connecting.from_node && portId === 'input') {
-        if (connecting.from_node !== nodeId) {
+      const st = useStore.getState().ui.connecting;
+      console.log('[CANVAS] handlePortMouseUp', nodeId, portId, 'connecting:', st.active, 'from:', st.from_node);
+      if (!st.active) return;
+      if (st.from_node && portId === 'input') {
+        if (st.from_node !== nodeId) {
+          console.log('[CANVAS] adding edge', st.from_node, '->', nodeId);
           addEdge({
-            from_node: connecting.from_node,
-            from_port: connecting.from_port || 'output',
+            from_node: st.from_node,
+            from_port: st.from_port || 'output',
             to_node: nodeId,
             to_port: 'input',
           });
         }
-        stopConnecting();
-        setConnectingEnd(null);
       }
+      // Always stop connecting — even if released on output port or non-target
+      stopConnecting();
+      setConnectingEnd(null);
+      console.log('[CANVAS] connection ended, stopConnecting called');
     },
-    [connecting, addEdge, stopConnecting]
+    [addEdge, stopConnecting]
   );
 
   // Build grid SVG pattern
@@ -278,6 +348,7 @@ export function FlowCanvas() {
 
   // Connecting line
   const connectingLine = connecting.active && connecting.from_node && connectingEnd ? (() => {
+    console.log('[CANVAS] rendering connecting line, from:', connecting.from_node, 'port:', connecting.from_port);
     const fromPos = getNodePortScreenPos(connecting.from_node!, connecting.from_port || 'output');
     if (!fromPos) return null;
     const rect = wrapperRef.current?.getBoundingClientRect();
@@ -323,9 +394,6 @@ export function FlowCanvas() {
         className="canvas-transform"
         style={{ transform: `translate(${canvas_transform.x}px, ${canvas_transform.y}px) scale(${canvas_transform.scale})` }}
       >
-        {/* Edges */}
-        <EdgeLayer />
-
         {/* Nodes */}
         {script.nodes.map((node) => (
           <FlowNodeComp
@@ -349,6 +417,9 @@ export function FlowCanvas() {
           />
         )}
       </div>
+
+      {/* Edges (screen space) */}
+      <EdgeLayer />
 
       {/* Connecting line (screen space) */}
       {connectingLine}

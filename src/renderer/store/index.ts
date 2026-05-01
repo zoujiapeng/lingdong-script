@@ -237,6 +237,7 @@ interface AppStore {
   loadTemplate: (templateId: string) => void;
   saveScript: () => void;
   setScriptName: (name: string) => void;
+  saveAsTemplate: (name: string, description?: string) => void;
 
   // Actions - Nodes
   addNode: (type: NodeType, x: number, y: number) => string;
@@ -393,6 +394,19 @@ export const useStore = create<AppStore>()(
         state.script.meta.name = name;
         state.isDirty = true;
       });
+    },
+
+    saveAsTemplate: (name, description) => {
+      const script = get().script;
+      const templates = loadCustomTemplates();
+      const id = 'custom-' + nanoid();
+      templates.push({
+        id,
+        name,
+        description: description || script.meta.description || '自定义模板',
+        script: JSON.parse(JSON.stringify(script)),
+      });
+      saveCustomTemplates(templates);
     },
 
     addNode: (type, x, y) => {
@@ -763,12 +777,14 @@ export const useStore = create<AppStore>()(
     },
 
     startConnecting: (nodeId, portId) => {
+      console.log('[CONNECT] startConnecting', nodeId, portId);
       set((state) => {
         state.ui.connecting = { active: true, from_node: nodeId, from_port: portId };
       });
     },
 
     stopConnecting: () => {
+      console.log('[CONNECT] stopConnecting');
       set((state) => { state.ui.connecting = { active: false }; });
     },
 
@@ -833,6 +849,27 @@ export const useStore = create<AppStore>()(
 
 const STORAGE_KEY = 'lingdong-script-data';
 const RECENT_KEY = 'lingdong-recent';
+const CUSTOM_TEMPLATES_KEY = 'lingdong-custom-templates';
+
+export interface CustomTemplate {
+  id: string;
+  name: string;
+  description: string;
+  script: FlowScript;
+}
+
+export function loadCustomTemplates(): CustomTemplate[] {
+  try {
+    const saved = localStorage.getItem(CUSTOM_TEMPLATES_KEY);
+    return saved ? JSON.parse(saved) : [];
+  } catch { return []; }
+}
+
+export function saveCustomTemplates(templates: CustomTemplate[]) {
+  try {
+    localStorage.setItem(CUSTOM_TEMPLATES_KEY, JSON.stringify(templates));
+  } catch {}
+}
 
 // Restore from localStorage on load
 try {

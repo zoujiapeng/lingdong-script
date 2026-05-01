@@ -161,7 +161,7 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
                 title={`输出端口: ${port.label || port.id}`}
               />
               {port.label && (
-                <span style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'nowrap', pointerEvents: 'none' }}>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4, whiteSpace: 'nowrap', pointerEvents: 'none' }}>
                   {port.label}
                 </span>
               )}

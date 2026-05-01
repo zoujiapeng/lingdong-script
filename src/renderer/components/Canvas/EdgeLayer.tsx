@@ -1,29 +1,38 @@
 import React, { useCallback } from 'react';
 import { useStore } from '../../store';
-import { FlowNode, FlowEdge } from '../../types';
+import { FlowNode } from '../../types';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 
-function getPortOffset(node: FlowNode, portId: string): { x: number; y: number } {
+function getPortScreenPos(node: FlowNode, portId: string, tx: { x: number; y: number; scale: number }): { x: number; y: number } | null {
   const isStartEnd = node.type === 'start' || node.type === 'end';
   const NW = isStartEnd ? 160 : 220;
   const NH = isStartEnd ? 56 : 80;
 
-  if (portId === 'input') return { x: node.x + NW / 2, y: node.y };
-  if (portId === 'output') return { x: node.x + NW / 2, y: node.y + NH };
-  if (portId === 'yes') return { x: node.x + NW * 0.25, y: node.y + NH };
-  if (portId === 'no') return { x: node.x + NW * 0.75, y: node.y + NH };
-  if (portId === 'fail') return { x: node.x + NW * 0.75, y: node.y + NH };
-  if (portId === 'loop_body') return { x: node.x + NW * 0.25, y: node.y + NH };
-  if (portId === 'loop_end') return { x: node.x + NW * 0.75, y: node.y + NH };
-  return { x: node.x + NW / 2, y: node.y + NH };
+  let px: number, py: number;
+
+  if (portId === 'input') {
+    px = node.x + NW / 2;
+    py = node.y;
+  } else {
+    const def = NODE_DEFINITIONS[node.type];
+    const outputs = def?.ports?.outputs || [];
+    const total = outputs.length;
+    const idx = outputs.findIndex((p: any) => p.id === portId);
+    const leftPct = total <= 1 ? 50 : total === 2 ? (idx === 0 ? 28 : 72) : 20 + idx * 30;
+    px = node.x + NW * (leftPct / 100);
+    py = node.y + NH;
+  }
+
+  return {
+    x: px * tx.scale + tx.x,
+    y: py * tx.scale + tx.y,
+  };
 }
 
 function bezierPath(fx: number, fy: number, tx: number, ty: number): string {
   const dy = Math.abs(ty - fy);
   const cp = Math.max(dy * 0.5, 60);
-  const cy1y = fy + cp;
-  const cy2y = ty - cp;
-  return `M ${fx} ${fy} C ${fx} ${cy1y} ${tx} ${cy2y} ${tx} ${ty}`;
+  return `M ${fx} ${fy} C ${fx} ${fy + cp} ${tx} ${ty - cp} ${tx} ${ty}`;
 }
 
 const EDGE_COLORS: Record<string, string> = {
@@ -38,6 +47,7 @@ const EDGE_COLORS: Record<string, string> = {
 export function EdgeLayer() {
   const { script, ui, selectEdges, deleteEdges } = useStore();
   const { selection } = ui;
+  const { canvas_transform } = ui;
 
   const handleEdgeClick = useCallback(
     (e: React.MouseEvent, edgeId: string) => {
@@ -63,15 +73,13 @@ export function EdgeLayer() {
       style={{
         position: 'absolute',
         top: 0,
+        right: 0,
+        bottom: 0,
         left: 0,
-        width: '100%',
-        height: '100%',
         overflow: 'visible',
-        pointerEvents: 'none',
       }}
     >
       <defs>
-        {/* Arrowheads for different colors */}
         {['#94a3b8', '#22c55e', '#ef4444', '#f59e0b', '#6366f1', '#3b82f6', '#6366f1'].map((color) => (
           <marker
             key={color}
@@ -95,8 +103,9 @@ export function EdgeLayer() {
         const toNode = nodeMap[edge.to_node];
         if (!fromNode || !toNode) return null;
 
-        const from = getPortOffset(fromNode, edge.from_port);
-        const to = getPortOffset(toNode, edge.to_port);
+        const from = getPortScreenPos(fromNode, edge.from_port, canvas_transform);
+        const to = getPortScreenPos(toNode, edge.to_port, canvas_transform);
+        if (!from || !to) return null;
         const path = bezierPath(from.x, from.y, to.x, to.y);
 
         const isSelected = selection.edges.includes(edge.id);
@@ -106,19 +115,19 @@ export function EdgeLayer() {
         const strokeColor = isSelected ? 'var(--accent)' : isAnimated ? '#3b82f6' : baseColor;
         const markerId = isSelected ? 'accent' : isAnimated ? '3b82f6' : baseColor.replace('#', '');
 
-        // Mid-point for label
+        // Mid-point for label (screen coords)
         const midX = (from.x + to.x) / 2;
         const midY = (from.y + to.y) / 2;
 
         return (
-          <g key={edge.id} style={{ pointerEvents: 'auto' }}>
+          <g key={edge.id}>
             {/* Invisible hit area */}
             <path
               d={path}
               fill="none"
               stroke="transparent"
               strokeWidth="16"
-              style={{ cursor: 'pointer' }}
+              style={{ cursor: 'pointer', pointerEvents: 'all' }}
               onClick={(e) => handleEdgeClick(e, edge.id)}
               onDoubleClick={(e) => handleEdgeDoubleClick(e, edge.id)}
             />
@@ -131,6 +140,7 @@ export function EdgeLayer() {
               strokeDasharray={isAnimated ? '8 4' : undefined}
               markerEnd={`url(#arrow-${markerId})`}
               style={{
+                pointerEvents: 'none',
                 transition: 'stroke 0.15s ease',
                 animation: isAnimated ? 'flow-dash 0.6s linear infinite' : undefined,
               }}

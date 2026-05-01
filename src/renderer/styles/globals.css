@@ -709,37 +709,47 @@ html, body, #root {
 /* Ports */
 .port {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: white;
-  border: 2px solid var(--border-primary);
+  border: 2.5px solid var(--border-primary);
   cursor: crosshair;
   transition: all var(--transition-fast);
   z-index: 10;
 }
 
+.port::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+
 .port:hover {
-  transform: scale(1.5);
+  transform: scale(1.4);
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.25);
 }
 
 .port.input-port {
   left: 50%;
-  top: -6px;
+  top: -8px;
   transform: translateX(-50%);
 }
 
-.port.input-port:hover { transform: translateX(-50%) scale(1.5); }
+.port.input-port:hover { transform: translateX(-50%) scale(1.4); }
 
 .port.output-port {
   left: 50%;
-  bottom: -6px;
+  bottom: -8px;
   transform: translateX(-50%);
 }
 
-.port.output-port:hover { transform: translateX(-50%) scale(1.5); }
+.port.output-port:hover { transform: translateX(-50%) scale(1.4); }
 
 .port.output-yes { left: 25%; }
 .port.output-no { left: 75%; }

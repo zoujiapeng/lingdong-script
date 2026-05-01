@@ -1,9 +1,9 @@
 import React, { useState, useRef } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus
 } from 'lucide-react';
-import { useStore } from '../../store';
+import { useStore, loadCustomTemplates, saveCustomTemplates } from '../../store';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
@@ -17,7 +17,7 @@ const PRESET_LIST = [
 export function TopBar() {
   const {
     script, isDirty, execution,
-    setScriptName, saveScript, loadScript, loadTemplate,
+    setScriptName, saveScript, loadScript, loadTemplate, saveAsTemplate,
     undo, redo,
     startExecution, pauseExecution, resumeExecution, stopExecution,
     ui, setUI, autoLayout, fitToScreen,
@@ -25,6 +25,8 @@ export function TopBar() {
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [savingName, setSavingName] = useState(false);
+  const [templateName, setTemplateName] = useState('');
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +85,29 @@ export function TopBar() {
   const handleNewFromTemplate = (templateId: string) => {
     loadTemplate(templateId);
     setShowTemplates(false);
+  };
+
+  const handleCustomTemplate = (tpl: { id: string; name: string; description: string; script: any }) => {
+    loadScript(tpl.script);
+    setShowTemplates(false);
+  };
+
+  const handleSaveAsTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    saveAsTemplate(name);
+    setTemplateName('');
+    setSavingName(false);
+    setShowTemplates(false);
+  };
+
+  const handleDeleteCustomTemplate = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const templates = loadCustomTemplates().filter((t) => t.id !== id);
+    saveCustomTemplates(templates);
+    setShowTemplates(false);
+    // Force re-render by toggling state
+    setTimeout(() => setShowTemplates(true), 50);
   };
 
   const statusMap = {
@@ -156,13 +181,77 @@ export function TopBar() {
             <ChevronDown size={12} />
           </button>
           {showTemplates && (
-            <div className="dropdown-menu">
+            <div className="dropdown-menu" style={{ maxHeight: 400, overflowY: 'auto' }}>
+              <div style={{ padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>预设模板</div>
               {PRESET_LIST.map((tpl) => (
                 <button key={tpl.id} className="dropdown-item" onClick={() => handleNewFromTemplate(tpl.id)}>
                   <div className="dropdown-item-title">{tpl.name}</div>
                   <div className="dropdown-item-desc">{tpl.desc}</div>
                 </button>
               ))}
+
+              {/* Custom templates */}
+              {(() => {
+                const customTpls = loadCustomTemplates();
+                if (customTpls.length === 0) return null;
+                return (
+                  <>
+                    <div style={{ height: 1, background: 'var(--border-primary)', margin: '4px 0' }} />
+                    <div style={{ padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>我的模板</div>
+                    {customTpls.map((tpl) => (
+                      <button key={tpl.id} className="dropdown-item" onClick={() => handleCustomTemplate(tpl)} style={{ paddingRight: 28 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                          <div>
+                            <div className="dropdown-item-title">{tpl.name}</div>
+                            <div className="dropdown-item-desc">{tpl.description}</div>
+                          </div>
+                          <span
+                            onClick={(e) => handleDeleteCustomTemplate(e, tpl.id)}
+                            style={{
+                              color: 'var(--text-muted)',
+                              cursor: 'pointer',
+                              padding: '2px 4px',
+                              borderRadius: 4,
+                              fontSize: 14,
+                              lineHeight: 1,
+                            }}
+                            title="删除模板"
+                          >
+                            ×
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                );
+              })()}
+
+              {/* Save as template */}
+              <div style={{ height: 1, background: 'var(--border-primary)', margin: '4px 0' }} />
+              {savingName ? (
+                <div style={{ padding: '6px 10px', display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <input
+                    className="topbar-title-input"
+                    value={templateName}
+                    onChange={(e) => setTemplateName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleSaveAsTemplate(); }}
+                    placeholder="模板名称..."
+                    autoFocus
+                    style={{ flex: 1, fontSize: 12, padding: '4px 8px' }}
+                  />
+                  <button className="btn btn-primary" style={{ padding: '3px 10px', fontSize: 12 }} onClick={handleSaveAsTemplate}>
+                    保存
+                  </button>
+                  <button className="btn btn-ghost" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => { setSavingName(false); setTemplateName(''); }}>
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <button className="dropdown-item" onClick={() => setSavingName(true)} style={{ color: 'var(--accent)' }}>
+                  <Plus size={14} />
+                  保存当前为模板
+                </button>
+              )}
             </div>
           )}
         </div>
