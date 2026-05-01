@@ -225,13 +225,43 @@ class ExecutionEngine:
             if cv2 is None:
                 self.log('error', 'OpenCV 不可用', node['id'])
                 return 'output'
+            template_path = params.get('template_path', '')
+            template_b64 = params.get('template_base64')
             similarity = params.get('similarity', 90) / 100.0
             timeout = params.get('timeout', 10)
             start = time.time()
+            self.log('info', f'等待图片出现，超时 {timeout} 秒', node['id'])
             while time.time() - start < timeout:
                 if self._stopped:
                     return 'fail'
-                time.sleep(0.5)
+                while self._paused and not self._stopped:
+                    time.sleep(0.1)
+                # Take screenshot and match template
+                screenshot = pyautogui.screenshot()
+                screen_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                screen_gray = cv2.cvtColor(screen_cv, cv2.COLOR_BGR2GRAY)
+
+                if template_b64:
+                    import base64
+                    img_data = base64.b64decode(template_b64.split(',')[1] if ',' in template_b64 else template_b64)
+                    nparr = np.frombuffer(img_data, np.uint8)
+                    template = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                elif template_path:
+                    template = cv2.imread(template_path)
+                else:
+                    self.log('error', '未设置目标图片', node['id'])
+                    return 'output'
+                if template is None:
+                    self.log('error', '无法加载模板图片', node['id'])
+                    return 'output'
+                template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+
+                result = cv2.matchTemplate(screen_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val >= similarity:
+                    self.log('info', f'图片已出现 (相似度: {max_val:.2%})', node['id'])
+                    return 'output'
+                time.sleep(0.3)
             self.log('info', '图片等待超时', node['id'])
             return 'output'
 
@@ -325,6 +355,47 @@ class ExecutionEngine:
 
         self.log('info', f'滑动: ({sx},{sy}) -> ({ex},{ey})', node['id'])
         return 'output'
+
+    def _check_image_exists(self, params: dict) -> bool:
+        """Check if a template image exists on screen (used by condition loops)."""
+        if cv2 is None:
+            return False
+        template_path = params.get('template_path', '')
+        template_b64 = params.get('template_base64')
+        similarity = params.get('similarity', 85) / 100.0
+        try:
+            screenshot = pyautogui.screenshot()
+            screen_cv = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            screen_gray = cv2.cvtColor(screen_cv, cv2.COLOR_BGR2GRAY)
+            if template_b64:
+                import base64
+                img_data = base64.b64decode(template_b64.split(',')[1] if ',' in template_b64 else template_b64)
+                nparr = np.frombuffer(img_data, np.uint8)
+                template = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            elif template_path:
+                template = cv2.imread(template_path)
+            else:
+                return False
+            if template is None:
+                return False
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            result = cv2.matchTemplate(screen_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            return max_val >= similarity
+        except:
+            return False
+
+    def _check_window_exists(self, params: dict) -> bool:
+        """Check if a window with given title exists (used by condition loops)."""
+        try:
+            import pygetwindow as gw
+            title = params.get('window_title', '')
+            if not title:
+                return False
+            windows = gw.getWindowsWithText(title)
+            return len(windows) > 0
+        except:
+            return False
 
     def execute_condition(self, node: dict, params: dict) -> str:
         cond_type = params.get('condition_type', 'always_true')
@@ -446,6 +517,39 @@ class ExecutionEngine:
                 i += 1
                 if i > 100000:
                     break
+
+        elif loop_type == 'condition':
+            cond_params = params.get('condition', {}) or {}
+            cond_type = cond_params.get('condition_type', 'always_true')
+            self.log('info', f'开始条件循环 (类型: {cond_type})', node['id'])
+            max_iter = params.get('count', 100)
+            for i in range(max_iter):
+                if self._stopped:
+                    return 'loop_end'
+                while self._paused and not self._stopped:
+                    time.sleep(0.1)
+                # Evaluate condition
+                condition_met = False
+                if cond_type == 'always_true':
+                    condition_met = True
+                elif cond_type == 'image_exists':
+                    condition_met = self._check_image_exists(cond_params)
+                    self.log('info', f'图片条件: {"满足" if condition_met else "不满足"}', node['id'])
+                elif cond_type == 'window_exists':
+                    condition_met = self._check_window_exists(cond_params)
+                    self.log('info', f'窗口条件: {"满足" if condition_met else "不满足"}', node['id'])
+                else:
+                    condition_met = True
+
+                if not condition_met:
+                    self.log('info', f'条件不满足，退出循环 (第 {i+1} 次)', node['id'])
+                    break
+
+                self.log('info', f'条件循环第 {i+1} 次', node['id'])
+                body_edges = self.get_output_edges(node['id'], 'loop_body')
+                if body_edges:
+                    self._follow_flow(body_edges[0]['to_node'])
+            self.log('info', '条件循环结束', node['id'])
 
         return 'loop_end'
 

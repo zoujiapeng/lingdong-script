@@ -35,113 +35,183 @@ const DEFAULT_UI_STATE: UIState = {
   dark_mode: false,
 };
 
-const DESKTOP = 'C:\\Users\\zou\\Desktop\\';
+// --- Preset Templates ---
 
-const createEmptyScript = (): FlowScript => {
-  const startId = nanoid();
-  const loopId = nanoid();
-  const img1Id = nanoid();
-  const img2Id = nanoid();
-  const img3Id = nanoid();
+interface ScriptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  createScript: () => FlowScript;
+}
 
-  return {
-    meta: {
-      id: nanoid(),
-      name: '桌面图标监控',
-      description: '循环检测桌面三张目标图片，按优先级点击第一个匹配的',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      version: '1.0.0',
+const PRESET_TEMPLATES: ScriptTemplate[] = [
+  {
+    id: 'desktop-monitor',
+    name: '桌面图标监控',
+    category: 'image',
+    description: '循环检测桌面多张目标图片，按优先级点击第一个匹配的',
+    createScript: () => {
+      const ids = { start: nanoid(), loop: nanoid(), img1: nanoid(), img2: nanoid(), img3: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '桌面图标监控', description: '循环检测桌面目标图片，按优先级点击', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: '开始' }, status: 'idle' },
+          { id: ids.loop, type: 'loop', x: 360, y: 160, params: { loop_type: 'infinite' }, status: 'idle', label: '循环检测' },
+          { id: ids.img1, type: 'image_click', x: 80, y: 340, params: { template_path: '', similarity: 85, timeout: 2, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级1' }, label: '目标图片 1', status: 'idle' },
+          { id: ids.img2, type: 'image_click', x: 320, y: 340, params: { template_path: '', similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级2' }, label: '目标图片 2', status: 'idle' },
+          { id: ids.img3, type: 'image_click', x: 560, y: 340, params: { template_path: '', similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级3' }, label: '目标图片 3', status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.loop, to_port: 'input' },
+          { id: nanoid(), from_node: ids.loop, from_port: 'loop_body', to_node: ids.img1, to_port: 'input' },
+          { id: nanoid(), from_node: ids.img1, from_port: 'fail', to_node: ids.img2, to_port: 'input' },
+          { id: nanoid(), from_node: ids.img2, from_port: 'fail', to_node: ids.img3, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS, error_handling: 'continue' },
+      };
     },
-    nodes: [
-      {
-        id: startId,
-        type: 'start',
-        x: 360,
-        y: 40,
-        params: { label: '开始' },
-        status: 'idle',
-      },
-      {
-        id: loopId,
-        type: 'loop',
-        x: 360,
-        y: 160,
-        params: { loop_type: 'infinite', label: '无限循环检测' },
-        status: 'idle',
-        label: '循环检测',
-      },
-      {
-        id: img1Id,
-        type: 'image_click',
-        x: 120,
-        y: 340,
-        params: {
-          template_path: DESKTOP + 'Screenshot 2026-05-01 152032.png',
-          similarity: 85,
-          timeout: 2,
-          method: 'single',
-          offset_x: 0,
-          offset_y: 0,
-          delay_after: 0.3,
-          multi_scale: true,
-          match_all: false,
-          description: '优先级1',
-        },
-        label: '目标图片 1',
-        status: 'idle',
-      },
-      {
-        id: img2Id,
-        type: 'image_click',
-        x: 360,
-        y: 340,
-        params: {
-          template_path: DESKTOP + 'Screenshot 2026-05-01 152429.png',
-          similarity: 85,
-          timeout: 0.5,
-          method: 'single',
-          offset_x: 0,
-          offset_y: 0,
-          delay_after: 0.3,
-          multi_scale: true,
-          match_all: false,
-          description: '优先级2',
-        },
-        label: '目标图片 2',
-        status: 'idle',
-      },
-      {
-        id: img3Id,
-        type: 'image_click',
-        x: 600,
-        y: 340,
-        params: {
-          template_path: DESKTOP + 'Screenshot 2026-05-01 152452.png',
-          similarity: 85,
-          timeout: 0.5,
-          method: 'single',
-          offset_x: 0,
-          offset_y: 0,
-          delay_after: 0.3,
-          multi_scale: true,
-          match_all: false,
-          description: '优先级3',
-        },
-        label: '目标图片 3',
-        status: 'idle',
-      },
-    ],
-    edges: [
-      { id: nanoid(), from_node: startId, from_port: 'output', to_node: loopId, to_port: 'input' },
-      { id: nanoid(), from_node: loopId, from_port: 'loop_body', to_node: img1Id, to_port: 'input' },
-      { id: nanoid(), from_node: img1Id, from_port: 'fail', to_node: img2Id, to_port: 'input' },
-      { id: nanoid(), from_node: img2Id, from_port: 'fail', to_node: img3Id, to_port: 'input' },
-    ],
-    variables: {},
-    settings: { ...DEFAULT_SETTINGS, error_handling: 'continue' },
-  };
-};
+  },
+  {
+    id: 'login-automation',
+    name: '登录自动化',
+    category: 'app',
+    description: '自动打开登录页，输入账号密码，点击登录，截图确认结果',
+    createScript: () => {
+      const ids = { start: nanoid(), click: nanoid(), inputUser: nanoid(), inputPass: nanoid(), clickLogin: nanoid(), wait: nanoid(), screenshot: nanoid(), cond: nanoid(), endSucc: nanoid(), endFail: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '登录自动化', description: '自动登录流程', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 20, params: { label: '开始' }, status: 'idle' },
+          { id: ids.click, type: 'click', x: 360, y: 120, params: { x: 500, y: 400, method: 'single', delay_after: 1.0, description: '点击用户名输入框' }, label: '点击用户名框', status: 'idle' },
+          { id: ids.inputUser, type: 'input_text', x: 360, y: 220, params: { text: 'admin', click_before: false, clear_before: true, delay_after: 0.5 }, label: '输入用户名', status: 'idle' },
+          { id: ids.inputPass, type: 'input_text', x: 360, y: 320, params: { text: 'password123', click_before: true, clear_before: true, delay_after: 0.5 }, label: '输入密码', status: 'idle' },
+          { id: ids.clickLogin, type: 'click', x: 360, y: 420, params: { x: 500, y: 550, method: 'single', delay_after: 2.0, description: '点击登录按钮' }, label: '点击登录', status: 'idle' },
+          { id: ids.wait, type: 'wait', x: 360, y: 520, params: { wait_type: 'time', duration: 3, description: '等待页面加载' }, label: '等待加载', status: 'idle' },
+          { id: ids.screenshot, type: 'screenshot', x: 360, y: 620, params: { description: '登录结果截图' }, label: '截图结果', status: 'idle' },
+          { id: ids.cond, type: 'condition', x: 360, y: 720, params: { condition_type: 'always_true', description: '模拟判断' }, label: '判断结果', status: 'idle' },
+          { id: ids.endSucc, type: 'end', x: 240, y: 820, params: { label: '登录成功' }, label: '登录成功', status: 'idle' },
+          { id: ids.endFail, type: 'end', x: 480, y: 820, params: { label: '登录失败' }, label: '登录失败', status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.click, to_port: 'input' },
+          { id: nanoid(), from_node: ids.click, from_port: 'output', to_node: ids.inputUser, to_port: 'input' },
+          { id: nanoid(), from_node: ids.inputUser, from_port: 'output', to_node: ids.inputPass, to_port: 'input' },
+          { id: nanoid(), from_node: ids.inputPass, from_port: 'output', to_node: ids.clickLogin, to_port: 'input' },
+          { id: nanoid(), from_node: ids.clickLogin, from_port: 'output', to_node: ids.wait, to_port: 'input' },
+          { id: nanoid(), from_node: ids.wait, from_port: 'output', to_node: ids.screenshot, to_port: 'input' },
+          { id: nanoid(), from_node: ids.screenshot, from_port: 'output', to_node: ids.cond, to_port: 'input' },
+          { id: nanoid(), from_node: ids.cond, from_port: 'yes', to_node: ids.endSucc, to_port: 'input' },
+          { id: nanoid(), from_node: ids.cond, from_port: 'no', to_node: ids.endFail, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
+    id: 'form-filler',
+    name: '表单填写器',
+    category: 'app',
+    description: '循环填写多组数据到表单，每次填写后截图保存',
+    createScript: () => {
+      const ids = { start: nanoid(), loop: nanoid(), clickField1: nanoid(), input1: nanoid(), clickField2: nanoid(), input2: nanoid(), submit: nanoid(), wait: nanoid(), screenshot: nanoid(), end: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '表单填写器', description: '自动循环填写表单', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 20, params: { label: '开始' }, status: 'idle' },
+          { id: ids.loop, type: 'loop', x: 360, y: 120, params: { loop_type: 'count', count: 5, description: '填写5组数据' }, label: '循环5次', status: 'idle' },
+          { id: ids.clickField1, type: 'click', x: 80, y: 280, params: { x: 400, y: 350, method: 'single', delay_after: 0.5, description: '点击第一个输入框' }, label: '点击字段1', status: 'idle' },
+          { id: ids.input1, type: 'input_text', x: 80, y: 380, params: { text: '测试数据A', click_before: false, clear_before: true, delay_after: 0.3 }, label: '输入字段1', status: 'idle' },
+          { id: ids.clickField2, type: 'click', x: 80, y: 480, params: { x: 400, y: 420, method: 'single', delay_after: 0.5, description: '点击第二个输入框' }, label: '点击字段2', status: 'idle' },
+          { id: ids.input2, type: 'input_text', x: 80, y: 580, params: { text: '测试数据B', click_before: false, clear_before: true, delay_after: 0.3 }, label: '输入字段2', status: 'idle' },
+          { id: ids.submit, type: 'click', x: 360, y: 680, params: { x: 500, y: 500, method: 'single', delay_after: 1.0, description: '点击提交按钮' }, label: '提交', status: 'idle' },
+          { id: ids.wait, type: 'wait', x: 360, y: 780, params: { wait_type: 'time', duration: 2 }, label: '等待', status: 'idle' },
+          { id: ids.screenshot, type: 'screenshot', x: 560, y: 780, params: { description: '提交结果截图' }, label: '截图', status: 'idle' },
+          { id: ids.end, type: 'end', x: 360, y: 900, params: { label: '结束' }, status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.loop, to_port: 'input' },
+          { id: nanoid(), from_node: ids.loop, from_port: 'loop_body', to_node: ids.clickField1, to_port: 'input' },
+          { id: nanoid(), from_node: ids.clickField1, from_port: 'output', to_node: ids.input1, to_port: 'input' },
+          { id: nanoid(), from_node: ids.input1, from_port: 'output', to_node: ids.clickField2, to_port: 'input' },
+          { id: nanoid(), from_node: ids.clickField2, from_port: 'output', to_node: ids.input2, to_port: 'input' },
+          { id: nanoid(), from_node: ids.input2, from_port: 'output', to_node: ids.submit, to_port: 'input' },
+          { id: nanoid(), from_node: ids.submit, from_port: 'output', to_node: ids.wait, to_port: 'input' },
+          { id: nanoid(), from_node: ids.wait, from_port: 'output', to_node: ids.screenshot, to_port: 'input' },
+          { id: nanoid(), from_node: ids.screenshot, from_port: 'output', to_node: ids.loop, to_port: 'loop_end' },
+          { id: nanoid(), from_node: ids.loop, from_port: 'loop_end', to_node: ids.end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
+    id: 'app-launcher',
+    name: '应用启动器',
+    category: 'app',
+    description: '双击桌面图标启动应用 → 等待窗口 → 执行快捷键操作 → 关闭应用',
+    createScript: () => {
+      const ids = { start: nanoid(), clickIcon: nanoid(), waitWindow: nanoid(), keyboard: nanoid(), wait2: nanoid(), screenshot: nanoid(), end: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '应用启动器', description: '启动应用并执行操作', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 20, params: { label: '开始' }, status: 'idle' },
+          { id: ids.clickIcon, type: 'click', x: 360, y: 120, params: { x: 200, y: 300, method: 'double', delay_after: 3.0, description: '双击桌面图标' }, label: '双击启动', status: 'idle' },
+          { id: ids.waitWindow, type: 'wait', x: 360, y: 220, params: { wait_type: 'window', window_title: '无标题 - 记事本', timeout: 10, description: '等待记事本窗口' }, label: '等待窗口', status: 'idle' },
+          { id: ids.keyboard, type: 'keyboard', x: 360, y: 320, params: { keys: ['你好，世界！'], modifiers: [], delay_after: 0.5 }, label: '输入文字', status: 'idle' },
+          { id: ids.wait2, type: 'wait', x: 360, y: 420, params: { wait_type: 'time', duration: 1 }, label: '等待', status: 'idle' },
+          { id: ids.screenshot, type: 'screenshot', x: 360, y: 520, params: { description: '运行结果截图' }, label: '截图保存', status: 'idle' },
+          { id: ids.end, type: 'end', x: 360, y: 620, params: { label: '结束' }, status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.clickIcon, to_port: 'input' },
+          { id: nanoid(), from_node: ids.clickIcon, from_port: 'output', to_node: ids.waitWindow, to_port: 'input' },
+          { id: nanoid(), from_node: ids.waitWindow, from_port: 'output', to_node: ids.keyboard, to_port: 'input' },
+          { id: nanoid(), from_node: ids.keyboard, from_port: 'output', to_node: ids.wait2, to_port: 'input' },
+          { id: nanoid(), from_node: ids.wait2, from_port: 'output', to_node: ids.screenshot, to_port: 'input' },
+          { id: nanoid(), from_node: ids.screenshot, from_port: 'output', to_node: ids.end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
+    id: 'screenshot-logger',
+    name: '定时截图记录',
+    category: 'system',
+    description: '每隔一段时间自动截图并保存，用于监控或记录屏幕变化',
+    createScript: () => {
+      const ids = { start: nanoid(), loop: nanoid(), screenshot: nanoid(), wait: nanoid(), end: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '定时截图记录', description: '定时自动截图', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: '开始' }, status: 'idle' },
+          { id: ids.loop, type: 'loop', x: 360, y: 140, params: { loop_type: 'infinite', description: '无限循环截图' }, label: '循环', status: 'idle' },
+          { id: ids.screenshot, type: 'screenshot', x: 360, y: 260, params: { description: '定时截图' }, label: '截图', status: 'idle' },
+          { id: ids.wait, type: 'wait', x: 360, y: 360, params: { wait_type: 'time', duration: 30, description: '间隔30秒' }, label: '等待30秒', status: 'idle' },
+          { id: ids.end, type: 'end', x: 360, y: 480, params: { label: '结束' }, status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.loop, to_port: 'input' },
+          { id: nanoid(), from_node: ids.loop, from_port: 'loop_body', to_node: ids.screenshot, to_port: 'input' },
+          { id: nanoid(), from_node: ids.screenshot, from_port: 'output', to_node: ids.wait, to_port: 'input' },
+          { id: nanoid(), from_node: ids.wait, from_port: 'output', to_node: ids.loop, to_port: 'loop_end' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS, error_handling: 'continue' },
+      };
+    },
+  },
+];
+
+function createTemplateScript(templateId: string): FlowScript {
+  const tpl = PRESET_TEMPLATES.find((t) => t.id === templateId);
+  return tpl ? tpl.createScript() : PRESET_TEMPLATES[0].createScript();
+}
 
 interface AppStore {
   // Script state
@@ -164,6 +234,7 @@ interface AppStore {
   // Actions - Script
   newScript: () => void;
   loadScript: (script: FlowScript) => void;
+  loadTemplate: (templateId: string) => void;
   saveScript: () => void;
   setScriptName: (name: string) => void;
 
@@ -237,7 +308,7 @@ function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
 
 export const useStore = create<AppStore>()(
   immer((set, get) => ({
-    script: createEmptyScript(),
+    script: createTemplateScript('desktop-monitor'),
     recentScripts: [],
     isDirty: false,
     ui: DEFAULT_UI_STATE,
@@ -250,7 +321,20 @@ export const useStore = create<AppStore>()(
     _executor: null,
 
     newScript: () => {
-      const s = createEmptyScript();
+      const s = createTemplateScript('desktop-monitor');
+      history = [];
+      historyIndex = -1;
+      pushHistory(s.nodes, s.edges);
+      set((state) => {
+        state.script = s;
+        state.isDirty = false;
+        state.ui.selection = { nodes: [], edges: [] };
+        state.execution = { status: 'idle', variables: {}, log: [] };
+      });
+    },
+
+    loadTemplate: (templateId) => {
+      const s = createTemplateScript(templateId);
       history = [];
       historyIndex = -1;
       pushHistory(s.nodes, s.edges);
@@ -273,13 +357,28 @@ export const useStore = create<AppStore>()(
       });
     },
 
-    saveScript: () => {
+    saveScript: async () => {
       set((state) => {
         state.script.meta.updated_at = new Date().toISOString();
         state.isDirty = false;
       });
       const script = get().script;
       const json = JSON.stringify(script, null, 2);
+
+      const api = (window as any).electronAPI;
+      if (api?.saveFileDialog) {
+        const result = await api.saveFileDialog(`${script.meta.name}.json`);
+        if (!result.canceled && result.filePath) {
+          try {
+            const fs = (window as any).require?.('fs');
+            if (fs) {
+              fs.writeFileSync(result.filePath, json, 'utf-8');
+              return;
+            }
+          } catch {}
+        }
+      }
+      // Browser fallback
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -729,6 +828,35 @@ export const useStore = create<AppStore>()(
     },
   }))
 );
+
+// --- localStorage Persistence ---
+
+const STORAGE_KEY = 'lingdong-script-data';
+const RECENT_KEY = 'lingdong-recent';
+
+// Restore from localStorage on load
+try {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved) {
+    const parsed = JSON.parse(saved);
+    if (parsed && parsed.nodes && parsed.meta) {
+      // Delay restore to let the store initialize first
+      setTimeout(() => {
+        useStore.setState((s) => {
+          s.script = parsed;
+          s.isDirty = false;
+        });
+      }, 0);
+    }
+  }
+} catch {}
+
+// Auto-save script to localStorage on every change
+useStore.subscribe((state) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.script));
+  } catch {}
+});
 
 // --- Register persistent IPC listeners for engine messages ---
 // This ensures global F9 (from main process) can control engine and update store

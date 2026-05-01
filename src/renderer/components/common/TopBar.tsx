@@ -1,21 +1,32 @@
 import React, { useState, useRef } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText
 } from 'lucide-react';
 import { useStore } from '../../store';
+
+// Expose preset templates list for the dropdown
+const PRESET_LIST = [
+  { id: 'desktop-monitor', name: '桌面图标监控', desc: '循环检测桌面目标图片' },
+  { id: 'login-automation', name: '登录自动化', desc: '自动输入账号密码登录' },
+  { id: 'form-filler', name: '表单填写器', desc: '循环填写表单数据' },
+  { id: 'app-launcher', name: '应用启动器', desc: '启动应用并执行操作' },
+  { id: 'screenshot-logger', name: '定时截图记录', desc: '每隔30秒自动截图' },
+];
 
 export function TopBar() {
   const {
     script, isDirty, execution,
-    setScriptName, saveScript, newScript,
+    setScriptName, saveScript, loadScript, loadTemplate,
     undo, redo,
     startExecution, pauseExecution, resumeExecution, stopExecution,
     ui, setUI, autoLayout, fitToScreen,
   } = useStore();
 
   const [editingTitle, setEditingTitle] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const handleTitleClick = () => {
     setEditingTitle(true);
@@ -28,25 +39,50 @@ export function TopBar() {
     if (e.key === 'Enter') titleRef.current?.blur();
   };
 
-  const handleLoad = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
+  const handleLoad = async () => {
+    const api = (window as any).electronAPI;
+    if (api?.openFileDialog) {
+      const result = await api.openFileDialog();
+      if (!result.canceled && result.filePaths?.[0]) {
         try {
-          const script = JSON.parse(ev.target?.result as string);
-          useStore.getState().loadScript(script);
-        } catch (err) {
-          alert('无效的脚本文件格式');
-        }
-      };
-      reader.readAsText(file);
+          const fs = (window as any).require?.('fs');
+          const content = fs?.readFileSync(result.filePaths[0], 'utf-8');
+          if (content) {
+            const script = JSON.parse(content);
+            loadScript(script);
+            return;
+          }
+        } catch {}
+        // Fallback: try fetch
+        try {
+          const resp = await fetch('file://' + result.filePaths[0]);
+          const text = await resp.text();
+          loadScript(JSON.parse(text));
+          return;
+        } catch {}
+      }
+    }
+    // Browser fallback
+    fileRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const script = JSON.parse(ev.target?.result as string);
+        loadScript(script);
+      } catch { alert('无效的脚本文件格式'); }
     };
-    input.click();
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleNewFromTemplate = (templateId: string) => {
+    loadTemplate(templateId);
+    setShowTemplates(false);
   };
 
   const statusMap = {
@@ -112,6 +148,25 @@ export function TopBar() {
 
       {/* Actions */}
       <div className="topbar-actions">
+        {/* Templates */}
+        <div className="topbar-template-dropdown">
+          <button className="btn btn-ghost" onClick={() => setShowTemplates(!showTemplates)} style={{ gap: 4, position: 'relative' }}>
+            <FileText size={14} />
+            模板
+            <ChevronDown size={12} />
+          </button>
+          {showTemplates && (
+            <div className="dropdown-menu">
+              {PRESET_LIST.map((tpl) => (
+                <button key={tpl.id} className="dropdown-item" onClick={() => handleNewFromTemplate(tpl.id)}>
+                  <div className="dropdown-item-title">{tpl.name}</div>
+                  <div className="dropdown-item-desc">{tpl.desc}</div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Layout */}
         <button className="btn btn-ghost btn-icon" onClick={autoLayout} title="自动布局">
           <LayoutGrid size={15} />
@@ -128,6 +183,7 @@ export function TopBar() {
         <button className="btn btn-ghost btn-icon" onClick={handleLoad} title="打开">
           <Upload size={15} />
         </button>
+        <input ref={fileRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleFileChange} />
         <button className="btn btn-ghost btn-icon" onClick={saveScript} title="保存 (Ctrl+S)">
           <Download size={15} />
         </button>

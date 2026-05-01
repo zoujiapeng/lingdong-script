@@ -64,6 +64,7 @@ export function ImageClickParams({ params, onChange }: Props) {
           <option value="single">单击</option>
           <option value="double">双击</option>
           <option value="right">右键</option>
+          <option value="middle">中键</option>
         </select>
       </div>
 

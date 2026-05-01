@@ -10,11 +10,11 @@ function getPortOffset(node: FlowNode, portId: string): { x: number; y: number }
 
   if (portId === 'input') return { x: node.x + NW / 2, y: node.y };
   if (portId === 'output') return { x: node.x + NW / 2, y: node.y + NH };
-  if (portId === 'yes') return { x: node.x + NW * 0.28, y: node.y + NH };
-  if (portId === 'no') return { x: node.x + NW * 0.72, y: node.y + NH };
-  if (portId === 'fail') return { x: node.x + NW * 0.72, y: node.y + NH };
-  if (portId === 'loop_body') return { x: node.x + NW * 0.28, y: node.y + NH };
-  if (portId === 'loop_end') return { x: node.x + NW * 0.72, y: node.y + NH };
+  if (portId === 'yes') return { x: node.x + NW * 0.25, y: node.y + NH };
+  if (portId === 'no') return { x: node.x + NW * 0.75, y: node.y + NH };
+  if (portId === 'fail') return { x: node.x + NW * 0.75, y: node.y + NH };
+  if (portId === 'loop_body') return { x: node.x + NW * 0.25, y: node.y + NH };
+  if (portId === 'loop_end') return { x: node.x + NW * 0.75, y: node.y + NH };
   return { x: node.x + NW / 2, y: node.y + NH };
 }
 
