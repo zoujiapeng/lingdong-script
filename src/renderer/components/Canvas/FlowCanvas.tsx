@@ -308,38 +308,14 @@ export function FlowCanvas() {
   // Build grid SVG pattern
   const { show_grid, grid_size } = ui;
   const gridSVG = show_grid ? (
-    <svg className="canvas-grid" xmlns="http://www.w3.org/2000/svg">
+    <svg className="canvas-grid" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       <defs>
-        <pattern
-          id="smallGrid"
-          width={grid_size * canvas_transform.scale}
-          height={grid_size * canvas_transform.scale}
-          patternUnits="userSpaceOnUse"
-          x={canvas_transform.x % (grid_size * canvas_transform.scale)}
-          y={canvas_transform.y % (grid_size * canvas_transform.scale)}
-        >
-          <path
-            d={`M ${grid_size * canvas_transform.scale} 0 L 0 0 0 ${grid_size * canvas_transform.scale}`}
-            fill="none"
-            stroke="rgba(148,163,184,0.18)"
-            strokeWidth="0.7"
-          />
+        <pattern id="smallGrid" width={grid_size} height={grid_size} patternUnits="userSpaceOnUse">
+          <path d={`M ${grid_size} 0 L 0 0 0 ${grid_size}`} fill="none" stroke="rgba(148,163,184,0.18)" strokeWidth="0.7" />
         </pattern>
-        <pattern
-          id="bigGrid"
-          width={grid_size * 5 * canvas_transform.scale}
-          height={grid_size * 5 * canvas_transform.scale}
-          patternUnits="userSpaceOnUse"
-          x={canvas_transform.x % (grid_size * 5 * canvas_transform.scale)}
-          y={canvas_transform.y % (grid_size * 5 * canvas_transform.scale)}
-        >
-          <rect width={grid_size * 5 * canvas_transform.scale} height={grid_size * 5 * canvas_transform.scale} fill="url(#smallGrid)" />
-          <path
-            d={`M ${grid_size * 5 * canvas_transform.scale} 0 L 0 0 0 ${grid_size * 5 * canvas_transform.scale}`}
-            fill="none"
-            stroke="rgba(148,163,184,0.3)"
-            strokeWidth="1"
-          />
+        <pattern id="bigGrid" width={grid_size * 5} height={grid_size * 5} patternUnits="userSpaceOnUse">
+          <rect width={grid_size * 5} height={grid_size * 5} fill="url(#smallGrid)" />
+          <path d={`M ${grid_size * 5} 0 L 0 0 0 ${grid_size * 5}`} fill="none" stroke="rgba(148,163,184,0.3)" strokeWidth="1" />
         </pattern>
       </defs>
       <rect width="100%" height="100%" fill="url(#bigGrid)" />
@@ -387,13 +363,14 @@ export function FlowCanvas() {
       onClick={() => contextMenu && setContextMenu(null)}
     >
       <div className="canvas-bg" />
-      {gridSVG}
 
       {/* Main transform group */}
       <div
         className="canvas-transform"
         style={{ transform: `translate(${canvas_transform.x}px, ${canvas_transform.y}px) scale(${canvas_transform.scale})` }}
       >
+        {gridSVG}
+
         {/* Nodes */}
         {script.nodes.map((node) => (
           <FlowNodeComp

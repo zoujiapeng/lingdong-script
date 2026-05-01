@@ -274,7 +274,7 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
-  viewMode: 'canvas' | 'pseudocode';
+  viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
 }
 
 // --- Node Library Definition ---

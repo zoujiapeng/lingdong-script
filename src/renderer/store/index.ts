@@ -287,7 +287,7 @@ interface AppStore {
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
-  setViewMode: (mode: 'canvas' | 'pseudocode') => void;
+  setViewMode: (mode: 'canvas' | 'pseudocode' | 'ai' | 'settings') => void;
   startConnecting: (nodeId: string, portId: string) => void;
   stopConnecting: () => void;
   setHoveredNode: (id?: string) => void;
