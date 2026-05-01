@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2 } from 'lucide-react';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
 
@@ -16,12 +16,54 @@ export function SettingsPanel() {
   const { script, ui, setUI } = useStore();
   const [apiKey, setApiKey] = useState(() => getStoredKey());
   const [apiKeySaved, setApiKeySaved] = useState(false);
+  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [testMessage, setTestMessage] = useState('');
 
   const handleSaveApiKey = () => {
     storeKey(apiKey);
     (window as any).__DEEPSEEK_KEY__ = apiKey;
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);
+  };
+
+  const handleTestKey = async () => {
+    if (!apiKey.trim()) return;
+    setTestStatus('testing');
+    setTestMessage('');
+    try {
+      const api = (window as any).electronAPI;
+      let data: any;
+      if (api?.aiGenerate) {
+        data = await api.aiGenerate({
+          apiKey: apiKey.trim(),
+          messages: [
+            { role: 'system', content: '你是一个助手。请用JSON回答。' },
+            { role: 'user', content: '回复一句"连接成功"' },
+          ],
+        });
+        if (data.error) throw new Error(data.error);
+      } else {
+        const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey.trim()}`,
+          },
+          body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages: [{ role: 'user', content: '回复"连接成功"' }],
+            max_tokens: 20,
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        data = await res.json();
+      }
+      setTestStatus('success');
+      setTestMessage(data.choices?.[0]?.message?.content?.slice(0, 50) || '连接成功');
+    } catch (e: any) {
+      setTestStatus('error');
+      setTestMessage(e.message);
+    }
   };
 
   return (
@@ -115,7 +157,21 @@ export function SettingsPanel() {
               <button className="btn btn-primary" onClick={handleSaveApiKey} style={{ padding: '6px 14px', fontSize: 12 }}>
                 {apiKeySaved ? '已保存' : '保存'}
               </button>
+              <button className="btn btn-ghost" onClick={handleTestKey} disabled={testStatus === 'testing' || !apiKey.trim()} style={{ padding: '6px 14px', fontSize: 12 }}>
+                {testStatus === 'testing' ? <Loader2 size={12} className="spin" style={{ marginRight: 4 }} /> : null}
+                测试连接
+              </button>
             </div>
+            {testStatus === 'success' && (
+              <div style={{ fontSize: 12, color: 'var(--success)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <CheckCircle size={12} /> {testMessage}
+              </div>
+            )}
+            {testStatus === 'error' && (
+              <div style={{ fontSize: 12, color: 'var(--error)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <AlertTriangle size={12} /> 连接失败: {testMessage}
+              </div>
+            )}
           </div>
         </section>
 
