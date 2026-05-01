@@ -15,7 +15,13 @@ function getNodeSummary(node: FlowNodeType): string {
   const p = node.params as any;
   switch (node.type) {
     case 'click': return `坐标: (${p.x}, ${p.y})  ${p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击'}`;
-    case 'image_click': return p.template_path ? `图片: ${p.template_path.split(/[\\/]/).pop()}  匹配度: ${p.similarity}%` : '未设置目标图片';
+    case 'image_click': {
+      const targets = (p as any).targets || [];
+      if (targets.length === 0) return '未设置目标图片';
+      const names = targets.slice(0, 3).map((t: any) => t.path.split(/[\\/]/).pop()).filter(Boolean);
+      const suffix = targets.length > 3 ? `…(+${targets.length - 3})` : '';
+      return `目标(${targets.length}): ${names.join(', ')}${suffix}  匹配度: ${p.similarity}%`;
+    }
     case 'wait': return p.wait_type === 'time' ? `等待 ${p.duration} 秒` : p.wait_type === 'image' ? `等待出现图片` : `等待窗口`;
     case 'input_text': return p.text ? `"${p.text.substring(0, 20)}${p.text.length > 20 ? '…' : ''}"` : '未设置文本';
     case 'keyboard': return `按键: ${[...p.modifiers, ...p.keys].join(' + ')}`;

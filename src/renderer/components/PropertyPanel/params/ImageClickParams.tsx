@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
-import { ImageClickNodeParams, ClickMethod } from '../../../types';
-import { Camera } from 'lucide-react';
+import { ImageClickNodeParams, ClickMethod, ImageTarget } from '../../../types';
+import { Camera, ChevronUp, ChevronDown, Trash2 } from 'lucide-react';
 
 interface Props {
   params: ImageClickNodeParams;
@@ -10,17 +10,36 @@ interface Props {
 export function ImageClickParams({ params, onChange }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [capturing, setCapturing] = useState(false);
+  const targets = params.targets || [];
 
   const handleFileSelect = () => fileRef.current?.click();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      onChange({ template_base64: ev.target?.result as string, template_path: file.name });
-    };
-    reader.readAsDataURL(file);
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    // Sort by filename
+    files.sort((a, b) => a.name.localeCompare(b.name));
+
+    const newTargets: ImageTarget[] = [];
+    let loaded = 0;
+
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        newTargets.push({
+          path: file.name,
+          base64: ev.target?.result as string,
+        });
+        loaded++;
+        if (loaded === files.length) {
+          onChange({ targets: [...targets, ...newTargets] });
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = '';
   };
 
   const handleCapture = async () => {
@@ -30,7 +49,9 @@ export function ImageClickParams({ params, onChange }: Props) {
       if (api?.captureScreenshot) {
         const result = await api.captureScreenshot();
         if (result.dataURL) {
-          onChange({ template_base64: result.dataURL, template_path: '屏幕截图.png' });
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const newTarget: ImageTarget = { path: `截图_${ts}.png`, base64: result.dataURL };
+          onChange({ targets: [...targets, newTarget] });
         }
       }
     } catch (err: any) {
@@ -40,32 +61,121 @@ export function ImageClickParams({ params, onChange }: Props) {
     }
   };
 
+  const removeTarget = (idx: number) => {
+    const next = targets.filter((_, i) => i !== idx);
+    onChange({ targets: next });
+  };
+
+  const moveTarget = (idx: number, dir: -1 | 1) => {
+    const next = [...targets];
+    const swap = idx + dir;
+    if (swap < 0 || swap >= next.length) return;
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    onChange({ targets: next });
+  };
+
+  const replaceTarget = (idx: number) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e: any) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const next = [...targets];
+        next[idx] = { path: file.name, base64: ev.target?.result as string };
+        onChange({ targets: next });
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
   return (
     <div>
+      {/* Target images */}
       <div className="form-group">
-        <label className="form-label">目标图片</label>
-        <div className="image-upload-area" onClick={handleFileSelect}>
-          {params.template_base64 ? (
-            <div>
-              <img src={params.template_base64} alt="template" className="image-upload-preview" />
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{params.template_path}</div>
-              <div className="image-upload-actions">
-                <button className="btn btn-ghost" style={{ height: 26, fontSize: 11 }} onClick={(e) => { e.stopPropagation(); onChange({ template_base64: undefined, template_path: '' }); }}>
-                  移除
+        <label className="form-label">目标图片列表 ({targets.length}张)</label>
+        <div
+          className="image-upload-area"
+          onClick={handleFileSelect}
+          style={{ cursor: 'pointer', marginBottom: 8 }}
+        >
+          <Camera size={20} />
+          <span>点击选择多张图片（按文件名排序）</span>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* Target list */}
+        {targets.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {targets.map((t, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 6px',
+                  background: 'var(--bg-secondary)',
+                  borderRadius: 6,
+                  border: '1px solid var(--border-primary)',
+                }}
+              >
+                {/* Thumbnail */}
+                {t.base64 ? (
+                  <img
+                    src={t.base64}
+                    alt=""
+                    style={{ width: 36, height: 28, objectFit: 'cover', borderRadius: 4, cursor: 'pointer' }}
+                    onClick={() => replaceTarget(i)}
+                    title="点击替换图片"
+                  />
+                ) : (
+                  <div
+                    style={{ width: 36, height: 28, borderRadius: 4, background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--text-muted)' }}
+                  >
+                    无图
+                  </div>
+                )}
+                {/* Priority */}
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 16, textAlign: 'center' }}>#{i + 1}</span>
+                {/* Filename */}
+                <span style={{ flex: 1, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t.path.split(/[\\/]/).pop()}
+                </span>
+                {/* Reorder */}
+                <button className="btn btn-ghost btn-icon" style={{ width: 22, height: 22 }} onClick={() => moveTarget(i, -1)} disabled={i === 0} title="上移">
+                  <ChevronUp size={12} />
+                </button>
+                <button className="btn btn-ghost btn-icon" style={{ width: 22, height: 22 }} onClick={() => moveTarget(i, 1)} disabled={i === targets.length - 1} title="下移">
+                  <ChevronDown size={12} />
+                </button>
+                {/* Delete */}
+                <button className="btn btn-ghost btn-icon" style={{ width: 22, height: 22, color: '#ef4444' }} onClick={() => removeTarget(i)} title="移除">
+                  <Trash2 size={12} />
                 </button>
               </div>
-            </div>
-          ) : (
-            <div className="image-upload-placeholder">
-              <Camera size={24} />
-              <span>点击选择图片 或 拖入图片文件</span>
-            </div>
-          )}
-          <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
-        </div>
-        <button className="btn btn-secondary" onClick={handleCapture} disabled={capturing} style={{ width: '100%', marginTop: 8, justifyContent: 'center' }}>
+            ))}
+          </div>
+        )}
+
+        <button
+          className="btn btn-secondary"
+          onClick={handleCapture}
+          disabled={capturing}
+          style={{ width: '100%', marginTop: 8, justifyContent: 'center' }}
+        >
           <Camera size={14} />
-          {capturing ? '截图中...' : '打开截图工具'}
+          {capturing ? '截图中...' : '截图添加'}
         </button>
       </div>
 
@@ -147,7 +257,7 @@ export function ImageClickParams({ params, onChange }: Props) {
 
       <div className="form-group">
         <label className="form-label">描述</label>
-        <input className="form-input" value={params.description || ''} onChange={(e) => onChange({ description: e.target.value })} placeholder="例如: 点击确认按钮" />
+        <input className="form-input" value={params.description || ''} onChange={(e) => onChange({ description: e.target.value })} placeholder="例如: 点击登录按钮" />
       </div>
     </div>
   );

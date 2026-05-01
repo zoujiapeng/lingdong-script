@@ -103,44 +103,16 @@ class ExecutionEngine:
         self.log('info', f'点击: ({target_x}, {target_y}) [{method}]', node['id'])
         return 'output'
 
-    def execute_image_click(self, node: dict, params: dict) -> str:
-        if cv2 is None:
-            self.log('error', 'OpenCV 不可用，无法执行图像识别', node['id'])
-            return 'fail'
-
-        template_b64 = params.get('template_base64')
-        template_path = params.get('template_path', '')
-
-        if not template_b64 and not template_path:
-            self.log('error', '未设置目标图片', node['id'])
-            return 'fail'
-
-        # Decode template image
-        if template_b64:
-            import base64
-            img_data = base64.b64decode(template_b64.split(',')[1] if ',' in template_b64 else template_b64)
-            nparr = np.frombuffer(img_data, np.uint8)
-            template = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        else:
-            template = cv2.imread(template_path)
-
-        if template is None:
-            self.log('error', f'无法加载图片: {template_path}', node['id'])
-            return 'fail'
-
-        similarity = params.get('similarity', 90) / 100.0
-        timeout = params.get('timeout', 5)
+    def _match_one_target(self, template_img, params: dict, timeout: float) -> tuple:
+        """Try to find a single template on screen within timeout. Returns (found, positions)."""
         multi_scale = params.get('multi_scale', True)
         region = params.get('region')
-
+        similarity = params.get('similarity', 90) / 100.0
         start_time = time.time()
-        found = False
-        result_positions = []
 
         while time.time() - start_time < timeout:
             if self._stopped:
-                return 'fail'
-
+                return False, []
             screenshot = pyautogui.screenshot(region=(
                 region['x'], region['y'], region['w'], region['h']
             ) if region else None)
@@ -152,28 +124,26 @@ class ExecutionEngine:
 
             for scale in scales:
                 if scale != 1.0:
-                    w = int(template.shape[1] * scale)
-                    h = int(template.shape[0] * scale)
+                    w = int(template_img.shape[1] * scale)
+                    h = int(template_img.shape[0] * scale)
                     if w < 10 or h < 10:
                         continue
-                    scaled_template = cv2.resize(template, (w, h))
+                    scaled_template = cv2.resize(template_img, (w, h))
                 else:
-                    scaled_template = template
+                    scaled_template = template_img
 
                 result = cv2.matchTemplate(haystack, scaled_template, cv2.TM_CCOEFF_NORMED)
                 locations = np.where(result >= similarity)
                 positions = list(zip(*locations[::-1]))
 
                 if positions:
-                    method = params.get('method', 'single')
                     offset_x = params.get('offset_x', 0)
                     offset_y = params.get('offset_y', 0)
                     match_all = params.get('match_all', False)
-
                     region_x = region['x'] if region else 0
                     region_y = region['y'] if region else 0
-
                     h, w = scaled_template.shape[:2]
+                    result_positions = []
                     if match_all:
                         for (px, py) in positions:
                             cx = region_x + px + w // 2 + offset_x
@@ -184,33 +154,74 @@ class ExecutionEngine:
                         cx = region_x + px + w // 2 + offset_x
                         cy = region_y + py + h // 2 + offset_y
                         result_positions.append((cx, cy))
-                        break
-
-            if result_positions:
-                found = True
-                break
+                    return True, result_positions
 
             time.sleep(0.2)
+        return False, []
 
-        if found:
-            method = params.get('method', 'single')
-            for (cx, cy) in result_positions:
-                pyautogui.moveTo(cx, cy, duration=0.15)
-                if method == 'single':
-                    pyautogui.click()
-                elif method == 'double':
-                    pyautogui.doubleClick()
-                elif method == 'right':
-                    pyautogui.rightClick()
-                self.log('info', f'图像识别点击: ({cx}, {cy})', node['id'])
+    def _load_template_image(self, target: dict) -> any:
+        """Load a single target image from path or base64. Returns None on failure."""
+        b64 = target.get('base64', '')
+        path = target.get('path', '')
+        if b64:
+            import base64
+            img_data = base64.b64decode(b64.split(',')[1] if ',' in b64 else b64)
+            nparr = np.frombuffer(img_data, np.uint8)
+            return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif path:
+            return cv2.imread(path)
+        return None
 
-            delay = params.get('delay_after', 0.5)
-            if delay > 0:
-                time.sleep(delay)
+    def execute_image_click(self, node: dict, params: dict) -> str:
+        if cv2 is None:
+            self.log('error', 'OpenCV 不可用，无法执行图像识别', node['id'])
+            return 'fail'
+
+        targets = params.get('targets', [])
+        if not targets:
+            self.log('error', '未设置目标图片', node['id'])
+            return 'fail'
+
+        timeout = params.get('timeout', 5)
+        all_found = True
+
+        for idx, target in enumerate(targets):
+            fname = target.get('path', f'目标{idx+1}').split('\\')[-1].split('/')[-1]
+            self.log('info', f'寻找目标 #{idx+1}: {fname}', node['id'])
+
+            template = self._load_template_image(target)
+            if template is None:
+                self.log('warn', f'无法加载图片: {fname}，跳过', node['id'])
+                continue
+
+            found, positions = self._match_one_target(template, params, timeout)
+            if found:
+                method = params.get('method', 'single')
+                for (cx, cy) in positions:
+                    pyautogui.moveTo(cx, cy, duration=0.15)
+                    if method == 'single':
+                        pyautogui.click()
+                    elif method == 'double':
+                        pyautogui.doubleClick()
+                    elif method == 'right':
+                        pyautogui.rightClick()
+                    elif method == 'middle':
+                        pyautogui.middleClick()
+                    self.log('info', f'已点击 #{idx+1}: ({cx}, {cy})', node['id'])
+
+                delay = params.get('delay_after', 0.5)
+                if delay > 0:
+                    time.sleep(delay)
+            else:
+                self.log('warn', f'目标 #{idx+1}: {fname} 超时未出现，继续下一张', node['id'])
+                all_found = False
+
+        if all_found:
+            self.log('info', '所有目标图片已依次点击完成')
             return 'output'
-
-        self.log('warn', f'图像识别超时: {template_path}', node['id'])
-        return 'fail'
+        else:
+            self.log('warn', '部分目标图片未找到，已完成剩余操作')
+            return 'output'
 
     def execute_wait(self, node: dict, params: dict) -> str:
         wait_type = params.get('wait_type', 'time')

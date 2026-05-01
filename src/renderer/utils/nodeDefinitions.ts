@@ -55,7 +55,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     category: 'image',
     color: '#8b5cf6',
     defaultParams: {
-      template_path: '',
+      targets: [],
       similarity: 90,
       timeout: 5,
       method: 'single',

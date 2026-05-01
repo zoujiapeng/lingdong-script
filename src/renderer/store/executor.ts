@@ -98,7 +98,8 @@ export function createFlowExecutor(
         }
 
         case 'image_click': {
-          const fname = params.template_path?.split('\\').pop() || '未知';
+          const target = (params.targets || [])[0];
+          const fname = target ? target.path.split(/[\\/]/).pop() : '未知';
           log('info', `检测图片: ${fname}`, nodeId);
           await delay(200);
 

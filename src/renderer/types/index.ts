@@ -51,9 +51,13 @@ export interface ClickNodeParams {
   description?: string;
 }
 
+export interface ImageTarget {
+  path: string;
+  base64?: string;
+}
+
 export interface ImageClickNodeParams {
-  template_path: string;
-  template_base64?: string; // for embedded storage
+  targets: ImageTarget[];
   similarity: number;       // 0-100
   timeout: number;          // seconds
   method: ClickMethod;
@@ -270,6 +274,7 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
+  viewMode: 'canvas' | 'pseudocode';
 }
 
 // --- Node Library Definition ---

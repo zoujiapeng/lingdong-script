@@ -123,6 +123,44 @@ html, body, #root {
 }
 
 /* ============================================================
+   VIEW MODE TABS
+   ============================================================ */
+.view-tabs {
+  display: flex;
+  gap: 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  padding: 0 16px;
+  height: 38px;
+  align-items: stretch;
+}
+
+.view-tab {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  font-family: inherit;
+}
+
+.view-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.view-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ============================================================
    TOPBAR
    ============================================================ */
 .topbar {
@@ -1300,3 +1338,90 @@ textarea.form-input {
   border-radius: 2px;
   pointer-events: none;
 }
+
+/* ============================================================
+   CODE PANEL
+   ============================================================ */
+.code-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.code-panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.code-panel-toolbar-left,
+.code-panel-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.code-panel-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+
+.code-panel-editor {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+.code-textarea,
+.code-display {
+  width: 100%;
+  min-height: 100%;
+  padding: 16px;
+  font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+  overflow: visible;
+}
+
+.code-textarea {
+  resize: none;
+  border: none;
+  outline: none;
+  background: #1a1b26;
+  color: #c9d1d9;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
+}
+
+.code-textarea:focus {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.code-display {
+  background: #1a1b26;
+  color: #c9d1d9;
+  pointer-events: none;
+}
+
+/* Syntax highlighting */
+.hl-comment { color: #6b7280; font-style: italic; }
+.hl-keyword { color: #818cf6; font-weight: 500; }
+.hl-string { color: #a5d6ff; }
+.hl-number { color: #fbbf24; }
+.hl-module { color: #34d399; }
+.hl-annotation { color: #f472b6; font-weight: 500; }

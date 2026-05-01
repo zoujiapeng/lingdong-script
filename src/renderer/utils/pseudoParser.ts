@@ -1,0 +1,649 @@
+import { FlowScript, FlowNode, FlowEdge, NodeType, NodeParams } from '../types';
+import { nanoid } from 'nanoid';
+
+// ─── Line parsing ───
+
+interface ParseLine {
+  indent: number;
+  text: string;
+  lineNumber: number;
+}
+
+function parseIndentation(code: string): ParseLine[] {
+  const lines: ParseLine[] = [];
+  for (const [i, raw] of code.split('\n').entries()) {
+    const trimmed = raw.trimEnd();
+    if (trimmed.trim() === '' || trimmed.trim().startsWith('#')) continue;
+    const indent = trimmed.length - trimmed.trimStart().length;
+    // Normalize: 4 spaces = 1 indent level
+    const normalizedIndent = Math.round(indent / 2);
+    lines.push({ indent: normalizedIndent, text: trimmed.trim(), lineNumber: i + 1 });
+  }
+  return lines;
+}
+
+// ─── Statement classification ───
+
+interface ParsedStmt {
+  type: string;
+  params: any;
+  indent: number;
+  children: ParsedStmt[];
+  isElse?: boolean;
+  isBreak?: boolean;
+}
+
+function parseStmt(line: string): { type: string; params: any; isElse?: boolean; isBreak?: boolean } | null {
+  // Comments
+  if (line.startsWith('#')) return null;
+
+  // Break
+  if (/^break\b/i.test(line)) return { type: 'break', params: {}, isBreak: true };
+
+  // click image "path1" "path2" ...
+  const imgClickRe = /^click\s+image\s+(.+)/i;
+  const imgMatch = line.match(imgClickRe);
+  if (imgMatch) {
+    const rest = imgMatch[1].trim();
+    const targets: { path: string }[] = [];
+    // Extract quoted strings (paths)
+    const pathRe = /"([^"]*)"/g;
+    let m;
+    while ((m = pathRe.exec(rest)) !== null) {
+      if (m[1]) targets.push({ path: m[1] });
+    }
+    // Parse options after paths
+    const simMatch = rest.match(/\bsimilarity[=:](\d+)/i);
+    const timeoutMatch = rest.match(/\btimeout[=:](\d+(\.\d+)?)/i);
+    const offsetMatch = rest.match(/\boffset\((-?\d+),(-?\d+)\)/i);
+    const methodMatch = rest.match(/\b(single|double|right|middle)\b/i);
+
+    const params: any = {
+      targets,
+      similarity: simMatch ? parseInt(simMatch[1]) : 90,
+      timeout: timeoutMatch ? parseFloat(timeoutMatch[1]) : 5,
+      offset_x: offsetMatch ? parseInt(offsetMatch[1]) : 0,
+      offset_y: offsetMatch ? parseInt(offsetMatch[2]) : 0,
+      delay_after: 0.5,
+    };
+    if (methodMatch) params.method = methodMatch[1].toLowerCase();
+    return { type: 'image_click', params };
+  }
+
+  // click (x, y) [method]
+  const clickRe = /^click\s+\((\d+)\s*,\s*(\d+)\)\s*(single|double|right|middle)?\s*(.*)?/i;
+  const clickMatch = line.match(clickRe);
+  if (clickMatch) {
+    const delayMatch = line.match(/\bdelay[=:](\d+(\.\d+)?)/i);
+    return {
+      type: 'click',
+      params: {
+        x: parseInt(clickMatch[1]),
+        y: parseInt(clickMatch[2]),
+        method: (clickMatch[3] || 'single').toLowerCase(),
+        delay_after: delayMatch ? parseFloat(delayMatch[1]) : 0.5,
+      },
+    };
+  }
+
+  // type "text" [at (x,y)] [clear=True|False]
+  const inputRe = /^type\s+"([^"]*)"(?:\s+at\s+\((\d+)\s*,\s*(\d+)\))?\s*(.*)?/i;
+  const inputMatch = line.match(inputRe);
+  if (inputMatch) {
+    const clearMatch = line.match(/\bclear[=:](True|False|true|false)/i);
+    return {
+      type: 'input_text',
+      params: {
+        text: inputMatch[1],
+        x: inputMatch[2] ? parseInt(inputMatch[2]) : undefined,
+        y: inputMatch[3] ? parseInt(inputMatch[3]) : undefined,
+        click_before: !!inputMatch[2],
+        clear_before: clearMatch ? clearMatch[1].toLowerCase() === 'true' : true,
+        delay_after: 0.3,
+      },
+    };
+  }
+
+  // press key1+key2+...
+  const pressRe = /^press\s+(.+)/i;
+  const pressMatch = line.match(pressRe);
+  if (pressMatch) {
+    const keys = pressMatch[1].split('+').map((k) => k.trim().toLowerCase());
+    const modifiers = ['ctrl', 'alt', 'shift', 'win'];
+    const foundMods = keys.filter((k) => modifiers.includes(k));
+    const foundKeys = keys.filter((k) => !modifiers.includes(k));
+    return {
+      type: 'keyboard',
+      params: {
+        keys: foundKeys.length > 0 ? foundKeys : keys,
+        modifiers: foundMods,
+        delay_after: 0.2,
+      },
+    };
+  }
+
+  // wait N
+  const waitTimeRe = /^wait\s+(\d+(\.\d+)?)\s*$/i;
+  const waitTimeMatch = line.match(waitTimeRe);
+  if (waitTimeMatch) {
+    return {
+      type: 'wait',
+      params: { wait_type: 'time', duration: parseFloat(waitTimeMatch[1]) },
+    };
+  }
+
+  // wait image "path" [timeout=N]
+  const waitImgRe = /^wait\s+image\s+"([^"]*)"(?:\s+timeout[=:](\d+(\.\d+)?))?\s*/i;
+  const waitImgMatch = line.match(waitImgRe);
+  if (waitImgMatch) {
+    return {
+      type: 'wait',
+      params: {
+        wait_type: 'image',
+        template_path: waitImgMatch[1],
+        timeout: waitImgMatch[2] ? parseFloat(waitImgMatch[2]) : 10,
+      },
+    };
+  }
+
+  // wait window "title" [timeout=N]
+  const waitWinRe = /^wait\s+window\s+"([^"]*)"(?:\s+timeout[=:](\d+(\.\d+)?))?\s*/i;
+  const waitWinMatch = line.match(waitWinRe);
+  if (waitWinMatch) {
+    return {
+      type: 'wait',
+      params: {
+        wait_type: 'window',
+        window_title: waitWinMatch[1],
+        timeout: waitWinMatch[2] ? parseFloat(waitWinMatch[2]) : 10,
+      },
+    };
+  }
+
+  // swipe (x1,y1) to (x2,y2) [duration=N]
+  const swipeRe = /^swipe\s+\((\d+)\s*,\s*(\d+)\)\s+to\s+\((\d+)\s*,\s*(\d+)\)\s*(.*)?/i;
+  const swipeMatch = line.match(swipeRe);
+  if (swipeMatch) {
+    const durMatch = line.match(/\bduration[=:](\d+(\.\d+)?)/i);
+    return {
+      type: 'swipe',
+      params: {
+        start_x: parseInt(swipeMatch[1]),
+        start_y: parseInt(swipeMatch[2]),
+        end_x: parseInt(swipeMatch[3]),
+        end_y: parseInt(swipeMatch[4]),
+        duration: durMatch ? parseFloat(durMatch[1]) : 0.5,
+        delay_after: 0.3,
+      },
+    };
+  }
+
+  // screenshot
+  if (/^screenshot\b/i.test(line)) {
+    return { type: 'screenshot', params: {} };
+  }
+
+  // $name = "value" (variable_set)
+  const varSetRe = /^\$(\w+)\s*=\s*"([^"]*)"/;
+  const varSetMatch = line.match(varSetRe);
+  if (varSetMatch) {
+    return {
+      type: 'variable_set',
+      params: { name: varSetMatch[1], value: varSetMatch[2] },
+    };
+  }
+
+  // $name (variable_get)
+  const varGetRe = /^\$(\w+)\s*$/;
+  const varGetMatch = line.match(varGetRe);
+  if (varGetMatch) {
+    return {
+      type: 'variable_get',
+      params: { name: varGetMatch[1] },
+    };
+  }
+
+  // run "name"
+  const runRe = /^run\s+"([^"]*)"/i;
+  const runMatch = line.match(runRe);
+  if (runMatch) {
+    return {
+      type: 'sub_script',
+      params: { script_name: runMatch[1], script_id: runMatch[1] },
+    };
+  }
+
+  // if COND:
+  const ifRe = /^if\s+(.+):\s*$/i;
+  const ifMatch = line.match(ifRe);
+  if (ifMatch) {
+    const condStr = ifMatch[1].trim();
+    const condition = parseConditionExpr(condStr);
+    return { type: 'condition', params: condition, isElse: false };
+  }
+
+  // else:
+  if (/^else\s*:\s*$/i.test(line)) {
+    return { type: 'else', params: {}, isElse: true };
+  }
+
+  // loop N:
+  const loopCountRe = /^loop\s+(\d+)\s*:\s*$/i;
+  const loopCountMatch = line.match(loopCountRe);
+  if (loopCountMatch) {
+    return {
+      type: 'loop',
+      params: { loop_type: 'count', count: parseInt(loopCountMatch[1]) },
+    };
+  }
+
+  // loop infinite:
+  if (/^loop\s+infinite\s*:\s*$/i.test(line)) {
+    return { type: 'loop', params: { loop_type: 'infinite', count: 0 } };
+  }
+
+  // loop while COND:
+  const loopWhileRe = /^loop\s+while\s+(.+):\s*$/i;
+  const loopWhileMatch = line.match(loopWhileRe);
+  if (loopWhileMatch) {
+    const condStr = loopWhileMatch[1].trim();
+    const condition = parseConditionExpr(condStr);
+    return {
+      type: 'loop',
+      params: { loop_type: 'condition', condition },
+    };
+  }
+
+  return null;
+}
+
+function parseConditionExpr(expr: string): any {
+  // true
+  if (/^true$/i.test(expr)) {
+    return { condition_type: 'always_true' };
+  }
+
+  // image_exists "path" [similarity=N]
+  const imgExistsRe = /^image_exists\s+"([^"]*)"(?:\s+similarity[=:](\d+))?\s*$/i;
+  const imgMatch = expr.match(imgExistsRe);
+  if (imgMatch) {
+    return {
+      condition_type: 'image_exists',
+      template_path: imgMatch[1],
+      similarity: imgMatch[2] ? parseInt(imgMatch[2]) : 85,
+    };
+  }
+
+  // window_exists "title"
+  const winExistsRe = /^window_exists\s+"([^"]*)"\s*$/i;
+  const winMatch = expr.match(winExistsRe);
+  if (winMatch) {
+    return {
+      condition_type: 'window_exists',
+      window_title: winMatch[1],
+    };
+  }
+
+  // var_eq name "value"
+  const varEqRe = /^var_eq\s+(\w+)\s+"([^"]*)"\s*$/i;
+  const varEqMatch = expr.match(varEqRe);
+  if (varEqMatch) {
+    return {
+      condition_type: 'variable_equals',
+      variable_name: varEqMatch[1],
+      variable_value: varEqMatch[2],
+    };
+  }
+
+  // var_gt name value
+  const varGtRe = /^var_gt\s+(\w+)\s+(\S+)\s*$/i;
+  const varGtMatch = expr.match(varGtRe);
+  if (varGtMatch) {
+    return {
+      condition_type: 'variable_greater',
+      variable_name: varGtMatch[1],
+      variable_value: varGtMatch[2],
+    };
+  }
+
+  // var_lt name value
+  const varLtRe = /^var_lt\s+(\w+)\s+(\S+)\s*$/i;
+  const varLtMatch = expr.match(varLtRe);
+  if (varLtMatch) {
+    return {
+      condition_type: 'variable_less',
+      variable_name: varLtMatch[1],
+      variable_value: varLtMatch[2],
+    };
+  }
+
+  // Fallback: treat as image_exists
+  return { condition_type: 'always_true' };
+}
+
+// ─── Build tree from indentation ───
+
+function buildTree(lines: ParseLine[]): ParsedStmt[] {
+  const root: ParsedStmt[] = [];
+  const stack: { indent: number; stmt: ParsedStmt }[] = [];
+  let lastIfStmt: ParsedStmt | null = null;
+
+  for (const line of lines) {
+    const result = parseStmt(line.text);
+    if (!result) continue;
+
+    const stmt: ParsedStmt = {
+      type: result.type,
+      params: result.params,
+      indent: line.indent,
+      children: [],
+      isElse: result.isElse,
+      isBreak: result.isBreak,
+    };
+
+    if (result.isBreak) {
+      // Attach break to innermost loop
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i].stmt.type === 'loop') {
+          stack[i].stmt.children.push(stmt);
+          break;
+        }
+      }
+      continue;
+    }
+
+    // else: add marker but keep the condition on the stack for else-body children
+    if (result.type === 'else') {
+      if (lastIfStmt) {
+        lastIfStmt.isElse = true;
+        lastIfStmt.children.push({
+          type: '_else',
+          params: {},
+          indent: line.indent,
+          children: [],
+          isElse: true,
+        });
+      }
+      continue;
+    }
+
+    // Pop stack until we find a parent at our indent level
+    while (stack.length > 0 && stack[stack.length - 1].indent >= line.indent) {
+      if (stack[stack.length - 1].stmt.type === 'condition') {
+        lastIfStmt = null;
+      }
+      stack.pop();
+    }
+
+    if (stack.length === 0) {
+      root.push(stmt);
+    } else {
+      stack[stack.length - 1].stmt.children.push(stmt);
+    }
+
+    // Push control flow statements onto the stack
+    if (stmt.type === 'condition' || stmt.type === 'loop') {
+      stack.push({ indent: line.indent, stmt });
+      if (stmt.type === 'condition') {
+        lastIfStmt = stmt;
+      }
+    }
+  }
+
+  return root;
+}
+
+// ─── Build FlowScript from tree ───
+
+const DEFAULT_SETTINGS = {
+  default_delay: 0.5,
+  error_handling: 'stop' as const,
+  max_retries: 0,
+  retry_delay: 1.0,
+  log_level: 'info' as const,
+};
+
+function getDefaultParams(type: string): any {
+  switch (type) {
+    case 'click': return { x: 0, y: 0, method: 'single', delay_after: 0.5 };
+    case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.5, multi_scale: false, match_all: false };
+    case 'wait': return { wait_type: 'time', duration: 1 };
+    case 'input_text': return { text: '', click_before: false, clear_before: true, delay_after: 0.3 };
+    case 'keyboard': return { keys: [], modifiers: [], delay_after: 0.2 };
+    case 'swipe': return { start_x: 0, start_y: 0, end_x: 0, end_y: 0, duration: 0.5, delay_after: 0.3 };
+    case 'condition': return { condition_type: 'always_true' };
+    case 'loop': return { loop_type: 'count', count: 10 };
+    case 'screenshot': return {};
+    case 'sub_script': return { script_id: '', script_name: '' };
+    case 'variable_set': return { name: '', value: '' };
+    case 'variable_get': return { name: '' };
+    default: return {};
+  }
+}
+
+type NodeWithBranch = {
+  id: string;
+  type: string;
+  hasElse?: boolean;
+};
+
+function buildFlowScript(stmts: ParsedStmt[]): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  const nodes: FlowNode[] = [];
+  const edges: FlowEdge[] = [];
+  const convergenceQueue: string[] = []; // nodes that need to connect to the next sibling
+  const conditionFallthroughs: string[] = []; // condition IDs that need a `no → next` edge
+
+  // Create start node
+  const startId = nanoid();
+  nodes.push({
+    id: startId,
+    type: 'start',
+    x: 60,
+    y: 60,
+    params: {},
+  });
+
+  function createNode(stmt: ParsedStmt, x: number, y: number): string {
+    const id = nanoid();
+    const defaultParams = getDefaultParams(stmt.type);
+    const mergedParams = { ...defaultParams, ...stmt.params };
+    nodes.push({
+      id,
+      type: stmt.type as NodeType,
+      x,
+      y,
+      params: mergedParams as NodeParams,
+    });
+    return id;
+  }
+
+  function connect(fromId: string, fromPort: string, toId: string) {
+    edges.push({
+      id: nanoid(),
+      from_node: fromId,
+      from_port: fromPort,
+      to_node: toId,
+      to_port: 'input',
+    });
+  }
+
+  function flushConvergence(toId: string) {
+    for (const cid of convergenceQueue) {
+      connect(cid, 'output', toId);
+    }
+    convergenceQueue.length = 0;
+    for (const cid of conditionFallthroughs) {
+      connect(cid, 'no', toId);
+    }
+    conditionFallthroughs.length = 0;
+  }
+
+  let yOffset = 60;
+
+  function processStmts(
+    stmtList: ParsedStmt[],
+    parentId: string,
+    parentPort: string
+  ): string | null {
+    let prevId: string | null = parentId;
+    let prevPort = parentPort;
+
+    for (const stmt of stmtList) {
+      if (stmt.type === '_else') continue;
+
+      if (stmt.isBreak) {
+        const endId = createNode({ ...stmt, type: 'end', params: {} }, 60, yOffset + 120);
+        yOffset += 120;
+        if (prevId) {
+          connect(prevId, prevPort, endId);
+        }
+        return endId;
+      }
+
+      if (stmt.type === 'condition') {
+        const condId = createNode(stmt, 60, yOffset + 120);
+        yOffset += 120;
+
+        // Flush any pending convergence to the condition node
+        flushConvergence(condId);
+        if (prevId) {
+          connect(prevId, prevPort, condId);
+        }
+
+        // Split children into yes (before _else marker) and no (after _else marker)
+        const yesChildren: ParsedStmt[] = [];
+        const noChildren: ParsedStmt[] = [];
+        let inElse = false;
+        for (const child of stmt.children) {
+          if (child.type === '_else') { inElse = true; continue; }
+          if (inElse) noChildren.push(child);
+          else yesChildren.push(child);
+        }
+
+        let lastYesId: string | null = null;
+        let lastNoId: string | null = null;
+
+        if (yesChildren.length > 0) {
+          lastYesId = processStmts(yesChildren, condId, 'yes');
+        }
+        if (noChildren.length > 0) {
+          lastNoId = processStmts(noChildren, condId, 'no');
+        }
+
+        // If a branch has no children, create an end node
+        if (yesChildren.length === 0) {
+          const endId = createNode({ ...stmt, type: 'end', params: {} }, 60, yOffset + 120);
+          yOffset += 120;
+          connect(condId, 'yes', endId);
+          lastYesId = endId;
+        }
+        if (noChildren.length === 0 && stmt.isElse) {
+          const endId = createNode({ ...stmt, type: 'end', params: {} }, 60, yOffset + 120);
+          yOffset += 120;
+          connect(condId, 'no', endId);
+          lastNoId = endId;
+        }
+
+        // Convergence: both branches lead to the next sibling
+        if (lastYesId && lastNoId) {
+          convergenceQueue.push(lastYesId);
+          convergenceQueue.push(lastNoId);
+          prevId = null;
+          prevPort = 'output';
+        } else if (lastYesId) {
+          // No else: yes-branch converges with cond-no fallthrough
+          convergenceQueue.push(lastYesId);
+          conditionFallthroughs.push(condId);
+          prevId = null;
+          prevPort = 'output';
+        } else if (lastNoId) {
+          convergenceQueue.push(lastNoId);
+          conditionFallthroughs.push(condId);
+          prevId = null;
+          prevPort = 'output';
+        } else {
+          prevId = condId;
+          prevPort = 'output';
+        }
+        continue;
+      }
+
+      if (stmt.type === 'loop') {
+        const loopId = createNode(stmt, 60, yOffset + 120);
+        yOffset += 120;
+
+        flushConvergence(loopId);
+        if (prevId) {
+          connect(prevId, prevPort, loopId);
+        }
+
+        // Process loop body
+        if (stmt.children.length > 0) {
+          processStmts(stmt.children, loopId, 'loop_body');
+        }
+
+        prevId = loopId;
+        prevPort = 'loop_end';
+        continue;
+      }
+
+      // Linear node
+      const nodeId = createNode(stmt, 60, yOffset + 120);
+      yOffset += 120;
+
+      flushConvergence(nodeId);
+      if (prevId) {
+        connect(prevId, prevPort, nodeId);
+      }
+
+      prevId = nodeId;
+      prevPort = 'output';
+    }
+
+    return prevId;
+  }
+
+  const lastId = processStmts(stmts, startId, 'output');
+
+  // Create end node
+  const endId = nanoid();
+  nodes.push({
+    id: endId,
+    type: 'end',
+    x: 60,
+    y: yOffset + 120,
+    params: {},
+  });
+
+  // Connect last main-flow node to end. Convergence queue handles branches.
+  if (convergenceQueue.length > 0) {
+    flushConvergence(endId);
+  } else if (lastId) {
+    connect(lastId, 'output', endId);
+  }
+
+  return { nodes, edges };
+ }
+
+// ─── Public API ───
+
+export function parsePseudoToFlow(pseudo: string): FlowScript {
+  const lines = parseIndentation(pseudo);
+  const stmts = buildTree(lines);
+  const { nodes, edges } = buildFlowScript(stmts);
+
+  return {
+    meta: {
+      id: nanoid(),
+      name: 'untitled',
+      description: '从伪代码生成',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      version: '1.0.0',
+    },
+    nodes,
+    edges,
+    variables: {},
+    settings: { ...DEFAULT_SETTINGS },
+  };
+}

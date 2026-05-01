@@ -14,6 +14,7 @@ import {
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { createFlowExecutor, ExecutionController } from './executor';
+import { generatePseudoCode } from '../utils/pseudoGenerator';
 
 const DEFAULT_SETTINGS = {
   default_delay: 0.5,
@@ -33,6 +34,7 @@ const DEFAULT_UI_STATE: UIState = {
   snap_to_grid: true,
   grid_size: 20,
   dark_mode: false,
+  viewMode: 'canvas',
 };
 
 // --- Preset Templates ---
@@ -58,9 +60,9 @@ const PRESET_TEMPLATES: ScriptTemplate[] = [
         nodes: [
           { id: ids.start, type: 'start', x: 360, y: 40, params: { label: '开始' }, status: 'idle' },
           { id: ids.loop, type: 'loop', x: 360, y: 160, params: { loop_type: 'infinite' }, status: 'idle', label: '循环检测' },
-          { id: ids.img1, type: 'image_click', x: 80, y: 340, params: { template_path: '', similarity: 85, timeout: 2, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级1' }, label: '目标图片 1', status: 'idle' },
-          { id: ids.img2, type: 'image_click', x: 320, y: 340, params: { template_path: '', similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级2' }, label: '目标图片 2', status: 'idle' },
-          { id: ids.img3, type: 'image_click', x: 560, y: 340, params: { template_path: '', similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级3' }, label: '目标图片 3', status: 'idle' },
+          { id: ids.img1, type: 'image_click', x: 80, y: 340, params: { targets: [], similarity: 85, timeout: 2, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级1' }, label: '目标图片 1', status: 'idle' },
+          { id: ids.img2, type: 'image_click', x: 320, y: 340, params: { targets: [], similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级2' }, label: '目标图片 2', status: 'idle' },
+          { id: ids.img3, type: 'image_click', x: 560, y: 340, params: { targets: [], similarity: 85, timeout: 0.5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.3, multi_scale: true, match_all: false, description: '优先级3' }, label: '目标图片 3', status: 'idle' },
         ],
         edges: [
           { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.loop, to_port: 'input' },
@@ -285,6 +287,7 @@ interface AppStore {
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
+  setViewMode: (mode: 'canvas' | 'pseudocode') => void;
   startConnecting: (nodeId: string, portId: string) => void;
   stopConnecting: () => void;
   setHoveredNode: (id?: string) => void;
@@ -365,6 +368,11 @@ export const useStore = create<AppStore>()(
       });
       const script = get().script;
       const json = JSON.stringify(script, null, 2);
+      const pseudoCode = (() => {
+        try {
+          return generatePseudoCode(script);
+        } catch { return '# 伪代码生成失败'; }
+      })();
 
       const api = (window as any).electronAPI;
       if (api?.saveFileDialog) {
@@ -373,20 +381,26 @@ export const useStore = create<AppStore>()(
           try {
             const fs = (window as any).require?.('fs');
             if (fs) {
+              const basePath = result.filePath.replace(/\.json$/, '');
               fs.writeFileSync(result.filePath, json, 'utf-8');
+              fs.writeFileSync(basePath + '.flow', pseudoCode, 'utf-8');
               return;
             }
           } catch {}
         }
       }
-      // Browser fallback
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${script.meta.name}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      // Browser fallback — trigger sequential downloads
+      const dl = (content: string, name: string, type: string) => {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      dl(json, `${script.meta.name}.json`, 'application/json');
+      dl(pseudoCode, `${script.meta.name}.flow`, 'text/plain');
     },
 
     setScriptName: (name) => {
@@ -776,6 +790,10 @@ export const useStore = create<AppStore>()(
       set((state) => { Object.assign(state.ui, updates); });
     },
 
+    setViewMode: (mode) => {
+      set((state) => { state.ui.viewMode = mode; });
+    },
+
     startConnecting: (nodeId, portId) => {
       console.log('[CONNECT] startConnecting', nodeId, portId);
       set((state) => {
@@ -916,6 +934,9 @@ if (_api) {
           s.execution.status = msg.status || 'completed';
           s.execution.finished_at = new Date().toISOString();
           s._executor = null;
+          s.script.nodes.forEach((n) => {
+            if (n.status === 'running') n.status = 'idle';
+          });
         });
         break;
       case 'status_report':
