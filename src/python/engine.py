@@ -314,7 +314,16 @@ class ExecutionEngine:
             pyautogui.press('backspace')
             time.sleep(0.1)
 
-        pyautogui.write(text, interval=0.02)
+        # Use clipboard + Ctrl+V to bypass Chinese IME
+        import subprocess, base64
+        encoded = base64.b64encode(text.encode('utf-16-le')).decode()
+        ps_script = '[System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String(\"{}\")) | Set-Clipboard'.format(encoded)
+        subprocess.run(['powershell', '-NoProfile', '-Command', ps_script],
+                       shell=False, capture_output=True, timeout=5)
+        time.sleep(0.05)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.1)
+
         delay = params.get('delay_after', 0.3)
         if delay > 0:
             time.sleep(delay)
@@ -751,6 +760,8 @@ class ExecutionEngine:
 def _stdin_reader(queue):
     """Read lines from stdin in a background thread."""
     try:
+        if hasattr(sys.stdin, 'reconfigure'):
+            sys.stdin.reconfigure(encoding='utf-8')
         for line in sys.stdin:
             line = line.strip()
             if line:

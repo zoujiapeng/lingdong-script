@@ -22,16 +22,18 @@ function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
   return <Icon size={size} />;
 }
 
-export function PropertyPanel() {
+export function PropertyPanel({ forcedVisible = false }: { forcedVisible?: boolean }) {
   const { script, ui, updateNode, updateNodeParams } = useStore();
   const [activeTab, setActiveTab] = useState<'params' | 'advanced'>('params');
 
   const selectedNodeId = ui.selection.nodes[0];
   const node = selectedNodeId ? script.nodes.find((n) => n.id === selectedNodeId) : null;
 
+  const panelClass = `property-panel${forcedVisible ? ' forced-visible' : ''}`;
+
   if (!node) {
     return (
-      <div className="property-panel">
+      <div className={panelClass}>
         <div className="property-empty" style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
           <div className="property-empty-icon">
             <MousePointer2 size={22} />
@@ -55,7 +57,7 @@ export function PropertyPanel() {
   const def = NODE_DEFINITIONS[node.type];
 
   return (
-    <div className="property-panel">
+    <div className={panelClass}>
       {/* Header */}
       <div className="property-panel-header">
         <div className="property-panel-icon" style={{ background: def.color }}>

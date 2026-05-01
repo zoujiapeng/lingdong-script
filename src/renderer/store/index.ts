@@ -35,9 +35,9 @@ const DEFAULT_UI_STATE: UIState = {
   grid_size: 20,
   dark_mode: false,
   viewMode: 'canvas',
-  show_node_library: true,
-  show_property_panel: true,
-  show_log_panel: true,
+  show_node_library: false,
+  show_property_panel: false,
+  show_log_panel: false,
 };
 
 // --- Preset Templates ---
@@ -338,6 +338,7 @@ export const useStore = create<AppStore>()(
         state.ui.selection = { nodes: [], edges: [] };
         state.execution = { status: 'idle', variables: {}, log: [] };
       });
+      if (s.nodes.length > 0) get().fitToScreen();
     },
 
     loadTemplate: (templateId) => {
@@ -351,6 +352,7 @@ export const useStore = create<AppStore>()(
         state.ui.selection = { nodes: [], edges: [] };
         state.execution = { status: 'idle', variables: {}, log: [] };
       });
+      if (s.nodes.length > 0) get().fitToScreen();
     },
 
     loadScript: (script) => {
@@ -362,6 +364,7 @@ export const useStore = create<AppStore>()(
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
       });
+      if (script.nodes.length > 0) get().fitToScreen();
     },
 
     saveScript: async () => {

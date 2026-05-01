@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback, useState, useRef } from 'react';
 import { NodeLibrary } from './components/NodeLibrary/NodeLibrary';
 import { FlowCanvas } from './components/Canvas/FlowCanvas';
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
@@ -6,7 +6,7 @@ import { TopBar } from './components/common/TopBar';
 import { StatusBar } from './components/common/StatusBar';
 import { LogPanel } from './components/common/LogPanel';
 import { PseudoPanel } from './components/PseudoPanel';
-import { AIAssistant } from './components/AIAssistant';
+import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
 import './styles/globals.css';
@@ -14,11 +14,62 @@ import './styles/globals.css';
 export default function App() {
   const { ui, setUI, setViewMode } = useStore();
   const { viewMode, dark_mode } = ui;
+  const [proximity, setProximity] = useState({ top: false, bottom: false, left: false, right: false });
+  const proxTimer = useRef<ReturnType<typeof setTimeout>>();
+  const hoveredRef = useRef({ top: false, bottom: false, left: false, right: false });
+  const [showAIDialog, setShowAIDialog] = useState(false);
+
+  // Mouse proximity tracking — shows hidden panels when mouse nears viewport edges
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    const { clientX: x, clientY: y } = e;
+    const { innerWidth: w, innerHeight: h } = window;
+    const hov = hoveredRef.current;
+    const zone = {
+      top: y < 36 || hov.top,
+      bottom: y > h - 36 || hov.bottom,
+      left: x < 36 || hov.left,
+      right: x > w - 100 || hov.right,
+    };
+    setProximity(zone);
+    clearTimeout(proxTimer.current);
+    // Only auto-hide when mouse leaves all edge zones AND is not hovering over any panel
+    if (!zone.top && !zone.bottom && !zone.left && !zone.right) {
+      proxTimer.current = setTimeout(() => {
+        const h = hoveredRef.current;
+        if (!h.top && !h.bottom && !h.left && !h.right) {
+          setProximity({ top: false, bottom: false, left: false, right: false });
+        }
+      }, 3000);
+    }
+  }, []);
+
+  // Panel hover tracking — keeps panel visible while mouse is over it
+  const handlePanelEnter = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
+    hoveredRef.current[dir] = true;
+    setProximity(prev => ({ ...prev, [dir]: true }));
+    clearTimeout(proxTimer.current);
+  }, []);
+
+  const handlePanelLeave = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
+    hoveredRef.current[dir] = false;
+  }, []);
+
+  useEffect(() => {
+    return () => clearTimeout(proxTimer.current);
+  }, []);
 
   // Apply dark mode class
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark_mode);
   }, [dark_mode]);
+
+  // Center flowchart on initial mount
+  useEffect(() => {
+    const { script, fitToScreen } = useStore.getState();
+    if (script.nodes.length > 0) {
+      requestAnimationFrame(() => fitToScreen());
+    }
+  }, []);
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback(
@@ -57,11 +108,13 @@ export default function App() {
   }, [handleKeyDown]);
 
   return (
-    <div className="app-root">
-      <TopBar />
-
-      {/* View mode tabs */}
-      <div className="view-tabs">
+    <div
+      className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${proximity.top ? ' proximity-top' : ''}${proximity.bottom ? ' proximity-bottom' : ''}${proximity.left ? ' proximity-left' : ''}${proximity.right ? ' proximity-right' : ''}`}
+      onMouseMove={viewMode === 'canvas' ? handleMouseMove : undefined}
+    >
+      <div className="top-wrapper" onMouseEnter={() => handlePanelEnter('top')} onMouseLeave={() => handlePanelLeave('top')}>
+        <TopBar />
+        <div className="view-tabs">
         <button
           className={`view-tab ${viewMode === 'canvas' ? 'active' : ''}`}
           onClick={() => setViewMode('canvas')}
@@ -85,8 +138,8 @@ export default function App() {
           伪代码
         </button>
         <button
-          className={`view-tab ${viewMode === 'ai' ? 'active' : ''}`}
-          onClick={() => setViewMode('ai')}
+          className={`view-tab ${showAIDialog ? 'active' : ''}`}
+          onClick={() => setShowAIDialog(prev => !prev)}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
             <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
@@ -107,30 +160,39 @@ export default function App() {
           设置
         </button>
       </div>
+      </div>
 
-      <div className="app-body">
+      <div className={`app-body${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
         {viewMode === 'settings' ? (
           <SettingsPanel />
-        ) : viewMode === 'ai' ? (
+        ) : viewMode === 'pseudocode' ? (
           <div className="canvas-area">
-            <AIAssistant />
+            <PseudoPanel />
           </div>
         ) : (
           <>
-            {ui.show_node_library && <NodeLibrary />}
-            <div className={`canvas-area${!ui.show_node_library ? ' canvas-area-max-left' : ''}${!ui.show_property_panel ? ' canvas-area-max-right' : ''}`}>
-              {viewMode === 'canvas' ? (
-                <FlowCanvas />
-              ) : (
-                <PseudoPanel />
-              )}
-              {ui.show_log_panel && <LogPanel />}
+            <div onMouseEnter={() => handlePanelEnter('left')} onMouseLeave={() => handlePanelLeave('left')}>
+              <NodeLibrary forcedVisible={ui.show_node_library} />
             </div>
-            {ui.show_property_panel && <PropertyPanel />}
+            <div className="canvas-area">
+              <FlowCanvas />
+            </div>
+            <div onMouseEnter={() => handlePanelEnter('right')} onMouseLeave={() => handlePanelLeave('right')}>
+              <PropertyPanel forcedVisible={ui.show_property_panel} />
+            </div>
+            {showAIDialog && (
+              <div className="ai-dialog-backdrop" onClick={() => setShowAIDialog(false)}>
+                <div className="ai-dialog" onClick={e => e.stopPropagation()}>
+                  <AIAssistantDialog onClose={() => setShowAIDialog(false)} />
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
-      <StatusBar />
+      <div className="bottom-wrapper" onMouseEnter={() => handlePanelEnter('bottom')} onMouseLeave={() => handlePanelLeave('bottom')}>
+        <StatusBar />
+      </div>
     </div>
   );
 }

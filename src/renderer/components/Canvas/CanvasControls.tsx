@@ -1,6 +1,6 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useRef, useEffect } from 'react';
 import {
-  ZoomIn, ZoomOut, Maximize2, LayoutGrid, Grid, Magnet,
+  Maximize2, LayoutGrid, Grid, Magnet,
   Copy, Clipboard, Scissors, Trash2, Lock, Unlock
 } from 'lucide-react';
 import { useStore } from '../../store';
@@ -9,21 +9,11 @@ import { useStore } from '../../store';
 // CANVAS CONTROLS
 // ============================================================
 export function CanvasControls() {
-  const { ui, setUI, zoomIn, zoomOut, resetZoom, fitToScreen } = useStore();
-  const { canvas_transform, show_grid, snap_to_grid } = ui;
+  const { ui, setUI, fitToScreen } = useStore();
+  const { show_grid, snap_to_grid } = ui;
 
   return (
     <div className="canvas-controls">
-      <div className="canvas-controls-group">
-        <button className="canvas-btn" onClick={zoomIn} title="放大">
-          <ZoomIn size={14} />
-        </button>
-        <div className="canvas-zoom-label">{Math.round(canvas_transform.scale * 100)}%</div>
-        <button className="canvas-btn" onClick={zoomOut} title="缩小">
-          <ZoomOut size={14} />
-        </button>
-      </div>
-
       <div className="canvas-controls-group">
         <button className="canvas-btn" onClick={fitToScreen} title="适应屏幕">
           <Maximize2 size={14} />
@@ -55,7 +45,31 @@ export function CanvasControls() {
 export function MiniMap() {
   const { script, ui, setCanvasTransform } = useStore();
   const { nodes } = script;
-  const { canvas_transform } = ui;
+  const { canvas_transform, dragging_node } = ui;
+  const [visible, setVisible] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  // Show when dragging a node OR mouse near bottom-right corner
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const handleMove = (e: MouseEvent) => {
+      const nearCorner =
+        e.clientX > window.innerWidth - 180 &&
+        e.clientY > window.innerHeight - 120;
+      if (nearCorner || dragging_node) {
+        setVisible(true);
+        clearTimeout(hideTimer.current);
+      } else if (!dragging_node) {
+        clearTimeout(hideTimer.current);
+        hideTimer.current = setTimeout(() => setVisible(false), 600);
+      }
+    };
+    window.addEventListener('mousemove', handleMove);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      clearTimeout(hideTimer.current);
+    };
+  }, [nodes.length, dragging_node]);
 
   if (nodes.length === 0) return null;
 
@@ -90,7 +104,7 @@ export function MiniMap() {
   };
 
   return (
-    <div className="minimap">
+    <div className={`minimap ${visible ? 'minimap-visible' : ''}`}>
       <svg width={MINIMAP_W} height={MINIMAP_H}>
         {nodes.map((n) => {
           const isStartEnd = n.type === 'start' || n.type === 'end';

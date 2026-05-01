@@ -20,7 +20,7 @@ function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
   return <Icon size={size} />;
 }
 
-export function NodeLibrary() {
+export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean }) {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const { addNode, ui } = useStore();
@@ -55,7 +55,7 @@ export function NodeLibrary() {
   };
 
   return (
-    <div className="node-library">
+    <div className={`node-library${forcedVisible ? ' forced-visible' : ''}`}>
       {/* Header */}
       <div className="node-library-header">
         <div style={{ marginBottom: 10 }}>
