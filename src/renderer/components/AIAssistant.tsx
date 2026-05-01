@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useStore } from '../store';
 import { parsePseudoToFlow } from '../utils/pseudoParser';
 import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings } from 'lucide-react';
@@ -40,9 +40,15 @@ export function AIAssistant() {
   const [result, setResult] = useState<{ explanation: string; pseudocode: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [execStatus, setExecStatus] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const handleGenerate = useCallback(async () => {
-    if (!input.trim()) return;
+  // Auto-focus textarea
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
+  const doGenerate = useCallback(async (text: string) => {
+    if (!text.trim()) return;
 
     let apiKey = (window as any).__DEEPSEEK_KEY__;
     if (!apiKey) {
@@ -60,7 +66,7 @@ export function AIAssistant() {
 
     const messages = [
       { role: 'system' as const, content: SYSTEM_PROMPT },
-      { role: 'user' as const, content: input },
+      { role: 'user' as const, content: text },
     ];
 
     try {
@@ -68,11 +74,9 @@ export function AIAssistant() {
       let data: any;
 
       if (api?.aiGenerate) {
-        // Use Electron IPC (main process fetch — no CORS issues)
         data = await api.aiGenerate({ apiKey, messages });
         if (data.error) throw new Error(data.error);
       } else {
-        // Browser fallback (direct fetch — may have CORS issues)
         const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -87,7 +91,6 @@ export function AIAssistant() {
             max_tokens: 2048,
           }),
         });
-
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`API 错误 (${response.status}): ${text}`);
@@ -101,16 +104,35 @@ export function AIAssistant() {
       const parsed = JSON.parse(content);
       if (!parsed.pseudocode) throw new Error('未能生成伪代码');
 
+      // Show result
       setResult({
         explanation: parsed.explanation || '',
         pseudocode: parsed.pseudocode,
       });
+
+      // Auto-load into flowchart
+      try {
+        const script = parsePseudoToFlow(parsed.pseudocode);
+        script.meta = {
+          ...script.meta,
+          id: useStore.getState().script.meta.id,
+          name: useStore.getState().script.meta.name + ' (AI)',
+        };
+        useStore.getState().loadScript(script);
+      } catch {}
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [input]);
+  }, []);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      doGenerate(input);
+    }
+  }, [input, doGenerate]);
 
   const handleExecute = useCallback(() => {
     if (!result?.pseudocode) return;
@@ -159,15 +181,17 @@ export function AIAssistant() {
         {/* Input section - takes full space when no results, half when results */}
         <div className={`ai-input-section${result ? ' ai-input-section-split' : ''}`}>
           <textarea
+            ref={textareaRef}
             className="ai-textarea"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="用自然语言描述你要自动化的操作，例如：&#10;打开记事本，输入 hello world，然后截图保存"
+            onKeyDown={handleKeyDown}
+            placeholder="输入需求后按 Enter 生成脚本&#10;Shift+Enter 换行&#10;例如：打开记事本，输入 hello world，然后截图保存"
           />
           <div className="ai-input-actions">
             <button
               className="btn btn-primary ai-generate-btn"
-              onClick={handleGenerate}
+              onClick={() => doGenerate(input)}
               disabled={loading || !input.trim()}
             >
               {loading ? (
@@ -221,13 +245,9 @@ export function AIAssistant() {
                 <Play size={14} fill="white" />
                 执行
               </button>
-              <button className="btn btn-ghost" onClick={handleViewCode} style={{ gap: 6 }}>
+              <button className="btn btn-ghost" onClick={() => useStore.getState().setViewMode('canvas')} style={{ gap: 6 }}>
                 <Eye size={14} />
                 查看流程图
-              </button>
-              <button className="btn btn-ghost" onClick={() => { setInput(result.pseudocode); setResult(null); }} style={{ gap: 6 }}>
-                <Settings size={14} />
-                继续编辑
               </button>
             </div>
 

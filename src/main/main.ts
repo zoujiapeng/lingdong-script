@@ -1,6 +1,7 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer } from 'electron';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
+import * as https from 'https';
 
 let mainWindow: BrowserWindow | null = null;
 let pythonProcess: ChildProcess | null = null;
@@ -163,28 +164,47 @@ ipcMain.handle('engine:status', () => {
   return { success: true };
 });
 
-ipcMain.handle('ai:generate', async (_, params: { apiKey: string; messages: { role: string; content: string }[] }) => {
-  try {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: string; content: string }[] }) => {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model: 'deepseek-chat',
+      messages: params.messages,
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      max_tokens: 2048,
+    });
+    const u = new URL('https://api.deepseek.com/v1/chat/completions');
+    const req = https.request({
+      hostname: u.hostname,
+      path: u.pathname,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${params.apiKey}`,
+        'Content-Length': Buffer.byteLength(body),
       },
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        messages: params.messages,
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-        max_tokens: 2048,
-      }),
+      timeout: 30000,
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (res.statusCode && res.statusCode >= 400) {
+            resolve({ error: `API 错误 (${res.statusCode}): ${data}` });
+          } else {
+            resolve(parsed);
+          }
+        } catch {
+          resolve({ error: `响应解析失败: ${data.slice(0, 200)}` });
+        }
+      });
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(`API 错误 (${response.status}): ${JSON.stringify(data)}`);
-    return data;
-  } catch (e: any) {
-    return { error: e.message };
-  }
+    req.on('error', (e) => resolve({ error: `网络错误: ${e.message}` }));
+    req.on('timeout', () => { req.destroy(); resolve({ error: '请求超时' }); });
+    req.write(body);
+    req.end();
+  });
 });
 
 ipcMain.handle('screenshot:capture', async () => {
