@@ -2,15 +2,23 @@ import React, { useState } from 'react';
 import { useStore } from '../store';
 import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText } from 'lucide-react';
 
+const KEY_STORAGE = 'lingdong-deepseek-key';
+
+function getStoredKey(): string {
+  try { return localStorage.getItem(KEY_STORAGE) || ''; } catch { return ''; }
+}
+
+function storeKey(key: string) {
+  try { localStorage.setItem(KEY_STORAGE, key); } catch {}
+}
+
 export function SettingsPanel() {
   const { script, ui, setUI } = useStore();
-  const [apiKey, setApiKey] = useState(() => {
-    // Try to get from env (Electron) or stored value
-    return (window as any).__DEEPSEEK_KEY__ || '';
-  });
+  const [apiKey, setApiKey] = useState(() => getStoredKey());
   const [apiKeySaved, setApiKeySaved] = useState(false);
 
   const handleSaveApiKey = () => {
+    storeKey(apiKey);
     (window as any).__DEEPSEEK_KEY__ = apiKey;
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);

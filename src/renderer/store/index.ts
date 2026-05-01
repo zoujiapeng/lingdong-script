@@ -35,6 +35,9 @@ const DEFAULT_UI_STATE: UIState = {
   grid_size: 20,
   dark_mode: false,
   viewMode: 'canvas',
+  show_node_library: true,
+  show_property_panel: true,
+  show_log_panel: true,
 };
 
 // --- Preset Templates ---

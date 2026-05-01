@@ -114,20 +114,20 @@ export default function App() {
         ) : viewMode === 'ai' ? (
           <div className="canvas-area">
             <AIAssistant />
-            <LogPanel />
+            {ui.show_log_panel && <LogPanel />}
           </div>
         ) : (
           <>
-            <NodeLibrary />
-            <div className="canvas-area">
+            {ui.show_node_library && <NodeLibrary />}
+            <div className={`canvas-area${!ui.show_node_library ? ' canvas-area-max-left' : ''}${!ui.show_property_panel ? ' canvas-area-max-right' : ''}`}>
               {viewMode === 'canvas' ? (
                 <FlowCanvas />
               ) : (
                 <PseudoPanel />
               )}
-              <LogPanel />
+              {ui.show_log_panel && <LogPanel />}
             </div>
-            <PropertyPanel />
+            {ui.show_property_panel && <PropertyPanel />}
           </>
         )}
       </div>

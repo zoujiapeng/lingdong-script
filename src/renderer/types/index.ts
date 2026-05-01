@@ -275,6 +275,9 @@ export interface UIState {
   grid_size: number;
   dark_mode: boolean;
   viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
+  show_node_library: boolean;
+  show_property_panel: boolean;
+  show_log_panel: boolean;
 }
 
 // --- Node Library Definition ---

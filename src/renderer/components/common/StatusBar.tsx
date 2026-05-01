@@ -1,8 +1,9 @@
 import React from 'react';
 import { useStore } from '../../store';
+import { PanelRightClose, PanelRightOpen, PanelBottomClose, PanelBottomOpen, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export function StatusBar() {
-  const { script, execution, ui } = useStore();
+  const { script, execution, ui, setUI } = useStore();
 
   const statusDot = {
     idle: 'idle',
@@ -34,12 +35,37 @@ export function StatusBar() {
       <div className="status-item">
         连接: {script.edges.length}
       </div>
-      <div className="status-item" style={{ marginLeft: 'auto' }}>
+      <div className="status-spacer" />
+      <div className="status-item">
         缩放: {Math.round(ui.canvas_transform.scale * 100)}%
       </div>
       <div className="status-item">
         {ui.snap_to_grid ? '吸附: ' + ui.grid_size + 'px' : '吸附: 关'}
       </div>
+
+      {/* Panel toggle buttons */}
+      <div className="status-bar-divider" />
+      <button
+        className="status-bar-btn"
+        onClick={() => setUI({ show_node_library: !ui.show_node_library })}
+        title={ui.show_node_library ? '隐藏左侧面板' : '显示左侧面板'}
+      >
+        {ui.show_node_library ? <PanelLeftClose size={13} /> : <PanelLeftOpen size={13} />}
+      </button>
+      <button
+        className="status-bar-btn"
+        onClick={() => setUI({ show_property_panel: !ui.show_property_panel })}
+        title={ui.show_property_panel ? '隐藏右侧面板' : '显示右侧面板'}
+      >
+        {ui.show_property_panel ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
+      </button>
+      <button
+        className="status-bar-btn"
+        onClick={() => setUI({ show_log_panel: !ui.show_log_panel })}
+        title={ui.show_log_panel ? '隐藏日志面板' : '显示日志面板'}
+      >
+        {ui.show_log_panel ? <PanelBottomClose size={13} /> : <PanelBottomOpen size={13} />}
+      </button>
     </div>
   );
 }

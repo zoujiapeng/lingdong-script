@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useStore } from '../store';
 import { parsePseudoToFlow } from '../utils/pseudoParser';
-import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye } from 'lucide-react';
+import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings, ExternalLink } from 'lucide-react';
 
 export function AIAssistant() {
   const [input, setInput] = useState('');
@@ -13,7 +13,11 @@ export function AIAssistant() {
   const handleGenerate = useCallback(async () => {
     if (!input.trim()) return;
 
-    const apiKey = (window as any).__DEEPSEEK_KEY__;
+    // Read key from localStorage (set by SettingsPanel) or window
+    let apiKey = (window as any).__DEEPSEEK_KEY__;
+    if (!apiKey) {
+      try { apiKey = localStorage.getItem('lingdong-deepseek-key') || ''; } catch {}
+    }
     if (!apiKey) {
       setError('请先在设置页面配置 DeepSeek API 密钥');
       return;
@@ -147,7 +151,17 @@ export function AIAssistant() {
         {error && (
           <div className="ai-error">
             <AlertTriangle size={14} />
-            <span>{error}</span>
+            <span style={{ flex: 1 }}>{error}</span>
+            {error.includes('API 密钥') && (
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '3px 8px', fontSize: 12, flexShrink: 0 }}
+                onClick={() => useStore.getState().setViewMode('settings')}
+              >
+                <Settings size={12} />
+                去设置
+              </button>
+            )}
           </div>
         )}
 
