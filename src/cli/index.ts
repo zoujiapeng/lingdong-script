@@ -5,6 +5,7 @@
  * Usage:
  *   lingdong run <file>          Execute .flow/.json script
  *   lingdong run -c <code>       Execute inline pseudocode
+ *   lingdong ask <描述>          自然语言 → AI生成伪代码 → 执行
  *   lingdong list [dir]          List available scripts
  *   lingdong serve [--port N]    Start HTTP API server
  *   lingdong --help              Show help
@@ -16,6 +17,7 @@ import { runCommand, runCommandInline } from './commands/run';
 import { listCommand } from './commands/list';
 import { serveCommand } from './commands/serve';
 import { createCommand } from './commands/create';
+import { askCommand } from './commands/ask';
 
 const args = process.argv.slice(2);
 const pretty = args.includes('--pretty');
@@ -29,6 +31,8 @@ lingdong v1.0.0 — AI 自动化脚本工具
 用法:
   lingdong run <file>             执行 .flow 或 .json 脚本
   lingdong run -c <伪代码>        执行内联伪代码（AI 推荐用法）
+  lingdong ask <描述>             用自然语言描述 → AI生成并执行
+  lingdong ask --dry <描述>       仅生成伪代码，不执行
   lingdong create <名> [伪代码]   创建 .flow 脚本（内容可从 stdin 管道输入）
   lingdong list [目录]            列出可用脚本
   lingdong serve [--port N]       启动 HTTP API 服务
@@ -46,14 +50,17 @@ lingdong v1.0.0 — AI 自动化脚本工具
 
 示例:
   lingdong run -c "click (500, 400)"
-  lingdong run -c 'click (500, 400)
-    wait 1
-    type "hello"'
+  lingdong run -c "loop 5: screenshot; wait 2"
+  lingdong ask "打开记事本输入hello"
+  lingdong ask --dry "截图10次"
   lingdong create login.flow "click (500, 400)"
   echo "click (500, 400)" | lingdong create login.flow
   lingdong run login.flow
   lingdong list
   lingdong serve --port 3456
+
+环境变量:
+  DEEPSEEK_API_KEY     lingdong ask 需要 DeepSeek API 密钥
 `);
   process.exit(0);
 }
@@ -91,6 +98,15 @@ async function main() {
         if (!name) { console.error(JSON.stringify({ type: 'error', message: '请指定文件名' })); process.exit(1); }
         const inlineCode = nonFlagArgs.slice(1).join(' ') || undefined;
         await createCommand(name, inlineCode);
+        break;
+      }
+
+      case 'ask': {
+        const dry = args.includes('--dry');
+        const nonFlagArgs = args.slice(1).filter(a => !a.startsWith('--') && !a.startsWith('-'));
+        const text = nonFlagArgs.join(' ');
+        if (!text) { console.error(JSON.stringify({ type: 'error', message: '请输入自然语言描述' })); process.exit(1); }
+        await askCommand(text, { dry });
         break;
       }
 
