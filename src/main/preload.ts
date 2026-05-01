@@ -24,4 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
+
+  // AI generation (via main process to avoid CORS)
+  aiGenerate: (params: { apiKey: string; messages: { role: string; content: string }[] }) =>
+    ipcRenderer.invoke('ai:generate', params),
 });

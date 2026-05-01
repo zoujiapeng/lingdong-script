@@ -3,43 +3,7 @@ import { useStore } from '../store';
 import { parsePseudoToFlow } from '../utils/pseudoParser';
 import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings } from 'lucide-react';
 
-export function AIAssistant() {
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ explanation: string; pseudocode: string } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [execStatus, setExecStatus] = useState<string | null>(null);
-
-  const handleGenerate = useCallback(async () => {
-    if (!input.trim()) return;
-
-    let apiKey = (window as any).__DEEPSEEK_KEY__;
-    if (!apiKey) {
-      try { apiKey = localStorage.getItem('lingdong-deepseek-key') || ''; } catch {}
-    }
-    if (!apiKey) {
-      setError('请先在设置页面配置 DeepSeek API 密钥');
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    setExecStatus(null);
-
-    try {
-      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [
-            {
-              role: 'system',
-              content: `你是一个桌面自动化脚本生成器。
+const SYSTEM_PROMPT = `你是一个桌面自动化脚本生成器。
 将用户需求转换为灵动脚本伪代码，返回JSON格式：{"pseudocode":"...","explanation":"..."}
 
 ## 关键词（必须使用中文关键词）
@@ -68,22 +32,69 @@ $变量名="值" — 设置变量
 变量等于 变量名 "值" — 变量比较
 
 ## 示例
-{"pseudocode":"按键 win+r\\n等待 0.5\\n输入 \\"notepad\\"\\n按键 enter\\n等待 1\\n输入 \\"hello\\"","explanation":"打开运行→启动记事本→输入文本"}`,
-            },
-            { role: 'user', content: input },
-          ],
-          response_format: { type: 'json_object' },
-          temperature: 0.1,
-          max_tokens: 2048,
-        }),
-      });
+{"pseudocode":"按键 win+r\\n等待 0.5\\n输入 \\"notepad\\"\\n按键 enter\\n等待 1\\n输入 \\"hello\\"","explanation":"打开运行→启动记事本→输入文本"}`;
 
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`API 错误 (${response.status}): ${text}`);
+export function AIAssistant() {
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{ explanation: string; pseudocode: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [execStatus, setExecStatus] = useState<string | null>(null);
+
+  const handleGenerate = useCallback(async () => {
+    if (!input.trim()) return;
+
+    let apiKey = (window as any).__DEEPSEEK_KEY__;
+    if (!apiKey) {
+      try { apiKey = localStorage.getItem('lingdong-deepseek-key') || ''; } catch {}
+    }
+    if (!apiKey) {
+      setError('请先在设置页面配置 DeepSeek API 密钥');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setExecStatus(null);
+
+    const messages = [
+      { role: 'system' as const, content: SYSTEM_PROMPT },
+      { role: 'user' as const, content: input },
+    ];
+
+    try {
+      const api = (window as any).electronAPI;
+      let data: any;
+
+      if (api?.aiGenerate) {
+        // Use Electron IPC (main process fetch — no CORS issues)
+        data = await api.aiGenerate({ apiKey, messages });
+        if (data.error) throw new Error(data.error);
+      } else {
+        // Browser fallback (direct fetch — may have CORS issues)
+        const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages,
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+            max_tokens: 2048,
+          }),
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`API 错误 (${response.status}): ${text}`);
+        }
+        data = await response.json();
       }
 
-      const data = await response.json();
       const content = data.choices?.[0]?.message?.content;
       if (!content) throw new Error('API 返回为空');
 
