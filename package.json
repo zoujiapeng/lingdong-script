@@ -14,7 +14,12 @@
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.main.json",
     "build:cli": "tsc -p tsconfig.cli.json",
+    "build:ai": "tsc -p tsconfig.ai.json",
+    "build:all": "npm run build:cli && npm run build:ai",
     "cli": "node dist/cli/cli/index.js",
+    "ai": "node dist/ai-interface/index.js",
+    "ai:mcp": "node dist/ai-interface/index.js --mode mcp",
+    "ai:http": "node dist/ai-interface/index.js --mode http",
     "start": "electron ."
   },
   "dependencies": {
