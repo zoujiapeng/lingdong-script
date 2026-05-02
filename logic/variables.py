@@ -116,7 +116,7 @@ class VariableSystem:
 
         return re.sub(r'\{\{(.+?)\}\}', _replace, text)
 
-    def evaluate_condition(self, left: str, operator: str, right: str) -> bool:
+    def evaluate_condition(self, left: str, operator: str, right: str = '') -> bool:
         """Evaluate a condition expression.
 
         Args:
