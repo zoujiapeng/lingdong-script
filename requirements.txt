@@ -1,0 +1,30 @@
+# Core
+pyautogui>=0.9.54
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# System
+PyGetWindow>=0.0.9
+psutil>=5.9.0
+
+# Windows-specific (optional, for advanced window management)
+pywin32>=306
+
+# OCR (at least one recommended)
+# PaddleOCR (best for Chinese):
+# paddlepaddle>=2.5.0
+# paddleocr>=2.7.0
+#
+# EasyOCR (good fallback):
+# easyocr>=1.7.0
+#
+# Tesseract (lightweight):
+# pytesseract>=0.3.10
+
+# Scene recognition (optional)
+# torch>=2.0.0
+# transformers>=4.30.0
+
+# Development
+# pytest>=7.0.0
