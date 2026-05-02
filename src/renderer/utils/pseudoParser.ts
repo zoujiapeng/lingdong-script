@@ -38,7 +38,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   if (line.startsWith('#')) return null;
 
   // Break / 跳出
-  if (/^(?:break|跳出)\b/i.test(line)) return { type: 'break', params: {}, isBreak: true };
+  if (/^(?:break|跳出)(?:\b|$)/i.test(line)) return { type: 'break', params: {}, isBreak: true };
 
   // click image "path1" "path2" ... / 点击图片 "path1" ...
   const imgClickRe = /^(?:click\s+image|点击图片)\s+(.+)/i;
@@ -52,10 +52,10 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
       if (m[1]) targets.push({ path: m[1] });
     }
     // Parse options — support both English and Chinese keys
-    const simMatch = rest.match(/\b(?:similarity|相似度)[=:](\d+)/i);
-    const timeoutMatch = rest.match(/\b(?:timeout|超时)[=:](\d+(\.\d+)?)/i);
-    const offsetMatch = rest.match(/\b(?:offset|偏移)\((-?\d+),(-?\d+)\)/i);
-    const methodMatch = rest.match(/\b(single|double|right|middle|单击|双击|右击|中键)\b/i);
+    const simMatch = rest.match(/(?:\b|(?<=\s))(?:similarity|相似度)[=:](\d+)/i);
+    const timeoutMatch = rest.match(/(?:\b|(?<=\s))(?:timeout|超时)[=:](\d+(\.\d+)?)/i);
+    const offsetMatch = rest.match(/(?:\b|(?<=\s))(?:offset|偏移)\((-?\d+),(-?\d+)\)/i);
+    const methodMatch = rest.match(/(?:\b|(?<=\s))(single|double|right|middle|单击|双击|右击|中键)(?:\b|(?=\s|$))/i);
 
     const params: any = {
       targets,
@@ -74,10 +74,10 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
 
   // click (x, y) [method] / 点击 (x, y) [method]
   // Also handle "点击图片" already caught above, so "点击" alone is click coordinate
-  const clickRe = /^(?:click|点击)\s+\((\d+)\s*,\s*(\d+)\)\s*(single|double|right|middle|单击|双击|右击|中键)?\s*(.*)?/i;
+  const clickRe = /^(?:click|点击)\s+\((-?\d+)\s*,\s*(-?\d+)\)\s*(single|double|right|middle|单击|双击|右击|中键)?\s*(.*)?/i;
   const clickMatch = line.match(clickRe);
   if (clickMatch) {
-    const delayMatch = line.match(/\b(?:delay|延迟)[=:](\d+(\.\d+)?)/i);
+    const delayMatch = line.match(/(?:\b|(?<=\s|^))(?:delay|延迟)[=:](\d+(\.\d+)?)/i);
     const m = (clickMatch[3] || 'single').toLowerCase();
     return {
       type: 'click',
@@ -94,7 +94,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   const inputRe = /^(?:type|输入)\s+"([^"]*)"(?:\s+(?:at|位置)\s+\((\d+)\s*,\s*(\d+)\))?\s*(.*)?/i;
   const inputMatch = line.match(inputRe);
   if (inputMatch) {
-    const clearMatch = line.match(/\b(?:clear|不清空)[=:](True|False|true|false)/i);
+    const clearMatch = line.match(/(?:\b|(?<=\s|^))(?:clear|不清空)[=:](True|False|true|false)/i);
     const clearVal = clearMatch ? clearMatch[1].toLowerCase() === 'true' : true;
     return {
       type: 'input_text',
@@ -166,10 +166,10 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   }
 
   // swipe (x1,y1) to (x2,y2) / 滑动 (x1,y1) 到 (x2,y2)
-  const swipeRe = /^(?:swipe|滑动)\s+\((\d+)\s*,\s*(\d+)\)\s+(?:to|到)\s+\((\d+)\s*,\s*(\d+)\)\s*(.*)?/i;
+  const swipeRe = /^(?:swipe|滑动)\s+\((-?\d+)\s*,\s*(-?\d+)\)\s+(?:to|到)\s+\((-?\d+)\s*,\s*(-?\d+)\)\s*(.*)?/i;
   const swipeMatch = line.match(swipeRe);
   if (swipeMatch) {
-    const durMatch = line.match(/\b(?:duration|时长)[=:](\d+(\.\d+)?)/i);
+    const durMatch = line.match(/(?:\b|(?<=\s|^))(?:duration|时长)[=:](\d+(\.\d+)?)/i);
     return {
       type: 'swipe',
       params: {
@@ -184,7 +184,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   }
 
   // screenshot / 截图
-  if (/^(?:screenshot|截图)\b/i.test(line)) {
+  if (/^(?:screenshot|截图)(?:\b|$)/i.test(line)) {
     return { type: 'screenshot', params: {} };
   }
 

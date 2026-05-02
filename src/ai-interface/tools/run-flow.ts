@@ -37,9 +37,15 @@ function executeScript(script: any): Promise<{ stdout: string; stderr: string; e
     const proc = cp.spawn('python', [enginePath], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let flowDone = false;
 
     proc.stdout!.on('data', (data: Buffer) => {
       stdout += data.toString();
+      // 检测到 execution_done 后关闭 stdin，让引擎优雅退出
+      if (!flowDone && stdout.includes('"execution_done"')) {
+        flowDone = true;
+        setTimeout(() => proc.stdin!.end(), 200);
+      }
     });
 
     proc.stderr!.on('data', (data: Buffer) => {

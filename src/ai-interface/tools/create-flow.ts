@@ -60,8 +60,10 @@ export const createFlowTool = createTool(
     try {
       const { parsePseudoToFlow } = require('../../renderer/utils/pseudoParser');
       const script = parsePseudoToFlow(content);
-      if (!script.nodes || script.nodes.length === 0) {
-        return { success: false, error: '伪代码解析结果为空，请检查语法' };
+      // Filter out start/end nodes, check for actionable nodes
+      const actionableNodes = (script.nodes || []).filter((n: any) => n.type !== 'start' && n.type !== 'end');
+      if (actionableNodes.length === 0) {
+        return { success: false, error: '伪代码解析结果为空或没有可执行的指令，请检查语法' };
       }
     } catch (e: any) {
       return { success: false, error: `伪代码解析失败: ${e.message}` };
