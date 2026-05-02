@@ -97,6 +97,52 @@ export function createFlowExecutor(
           break;
         }
 
+        case 'click_text': {
+          log('info', `OCR点击文本: "${(params.text || '').substring(0, 30)}"`, nodeId);
+          await delay(300);
+          await delay((params.delay_after || 0.5) * 1000);
+          result = 'output';
+          break;
+        }
+
+        case 'popup_close': {
+          log('info', `关闭弹窗 (策略: ${params.strategies?.[0] || 'auto'})`, nodeId);
+          await delay(500);
+          await delay((params.delay_after || 0.3) * 1000);
+          result = 'output';
+          break;
+        }
+
+        case 'color_check': {
+          log('info', `检测颜色: ${params.expected_color || '未设置'}`, nodeId);
+          await delay(200);
+          // Simulate: always matches for demo
+          result = 'output';
+          break;
+        }
+
+        case 'progress_wait': {
+          log('info', `等待进度条 (${params.wait_type || 'fill'})`, nodeId);
+          await delay(500);
+          result = 'output';
+          break;
+        }
+
+        case 'region_wait': {
+          log('info', `等待区域${params.region_type === 'stable' ? '稳定' : '变化'}`, nodeId);
+          await delay(500);
+          result = 'output';
+          break;
+        }
+
+        case 'scene_condition': {
+          const sceneName = params.scene_name || '未知';
+          log('info', `场景识别: "${sceneName}"（模拟: 不匹配）`, nodeId);
+          await delay(300);
+          result = 'no';
+          break;
+        }
+
         case 'image_click': {
           const target = (params.targets || [])[0];
           const fname = target ? target.path.split(/[\\/]/).pop() : '未知';

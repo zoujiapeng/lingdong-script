@@ -7,6 +7,7 @@ export type NodeType =
   | 'end'
   | 'click'
   | 'image_click'
+  | 'click_text'
   | 'wait'
   | 'input_text'
   | 'keyboard'
@@ -16,7 +17,12 @@ export type NodeType =
   | 'sub_script'
   | 'screenshot'
   | 'variable_set'
-  | 'variable_get';
+  | 'variable_get'
+  | 'popup_close'
+  | 'color_check'
+  | 'progress_wait'
+  | 'region_wait'
+  | 'scene_condition';
 
 export type ConditionType =
   | 'image_exists'
@@ -24,6 +30,8 @@ export type ConditionType =
   | 'variable_equals'
   | 'variable_greater'
   | 'variable_less'
+  | 'color_match'
+  | 'scene_match'
   | 'always_true';
 
 export type ClickMethod = 'single' | 'double' | 'right' | 'middle';
@@ -116,6 +124,15 @@ export interface ConditionNodeParams {
   window_title?: string;
   variable_name?: string;
   variable_value?: string;
+  // color_match
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  expected_color?: string;
+  tolerance?: number;
+  // scene_match
+  scene_name?: string;
   description?: string;
 }
 
@@ -138,11 +155,65 @@ export interface VariableSetNodeParams {
   description?: string;
 }
 
+export interface ClickTextNodeParams {
+  text: string;
+  similarity: number;
+  method: ClickMethod;
+  offset_x: number;
+  offset_y: number;
+  timeout: number;
+  delay_after: number;
+  description?: string;
+}
+
+export interface PopupCloseNodeParams {
+  strategies: string[];   // auto, close_btn, ocr_close, esc, click_away
+  timeout: number;
+  delay_after: number;
+  description?: string;
+}
+
+export interface ColorCheckNodeParams {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  expected_color: string;  // hex or HSV
+  tolerance: number;
+  description?: string;
+}
+
+export interface ProgressWaitNodeParams {
+  wait_type: 'fill' | 'empty' | 'change';
+  timeout: number;
+  region: { x: number; y: number; w: number; h: number };
+  poll_interval: number;
+  description?: string;
+}
+
+export interface RegionWaitNodeParams {
+  region_type: 'stable' | 'change';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  timeout: number;
+  poll_interval: number;
+  description?: string;
+}
+
+export interface SceneConditionNodeParams {
+  scene_name: string;
+  similarity: number;
+  description?: string;
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
   | ClickNodeParams
   | ImageClickNodeParams
+  | ClickTextNodeParams
   | WaitNodeParams
   | InputTextNodeParams
   | KeyboardNodeParams
@@ -150,7 +221,12 @@ export type NodeParams =
   | ConditionNodeParams
   | LoopNodeParams
   | SubScriptNodeParams
-  | VariableSetNodeParams;
+  | VariableSetNodeParams
+  | PopupCloseNodeParams
+  | ColorCheckNodeParams
+  | ProgressWaitNodeParams
+  | RegionWaitNodeParams
+  | SceneConditionNodeParams;
 
 // --- Flow Node & Edge ---
 

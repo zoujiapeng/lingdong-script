@@ -73,6 +73,30 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       ],
     },
   },
+  click_text: {
+    type: 'click_text',
+    label: '点击文本',
+    description: '用 OCR 识别文字并点击',
+    icon: 'Search',
+    category: 'image',
+    color: '#a855f7',
+    defaultParams: {
+      text: '',
+      similarity: 80,
+      method: 'single',
+      offset_x: 0,
+      offset_y: 0,
+      timeout: 5,
+      delay_after: 0.5,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: '成功', type: 'flow' },
+        { id: 'fail', label: '未找到', type: 'flow' },
+      ],
+    },
+  },
   wait: {
     type: 'wait',
     label: '等待',
@@ -211,6 +235,98 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
+  popup_close: {
+    type: 'popup_close',
+    label: '关闭弹窗',
+    description: '自动检测并关闭弹窗对话框',
+    icon: 'XCircle',
+    category: 'image',
+    color: '#ef4444',
+    defaultParams: {
+      strategies: ['auto'],
+      timeout: 5,
+      delay_after: 0.3,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
+  color_check: {
+    type: 'color_check',
+    label: '颜色检测',
+    description: '检测指定区域的颜色值',
+    icon: 'Palette',
+    category: 'image',
+    color: '#f43f5e',
+    defaultParams: {
+      x: 0, y: 0, w: 100, h: 100,
+      expected_color: '',
+      tolerance: 30,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: '匹配', type: 'flow' },
+        { id: 'fail', label: '不匹配', type: 'flow' },
+      ],
+    },
+  },
+  progress_wait: {
+    type: 'progress_wait',
+    label: '等待进度',
+    description: '等待进度条完成或变化',
+    icon: 'Percent',
+    category: 'device',
+    color: '#14b8a6',
+    defaultParams: {
+      wait_type: 'fill',
+      timeout: 30,
+      region: { x: 0, y: 0, w: 200, h: 20 },
+      poll_interval: 0.5,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
+  region_wait: {
+    type: 'region_wait',
+    label: '等待区域变化',
+    description: '等待屏幕区域稳定或发生变化',
+    icon: 'Scan',
+    category: 'device',
+    color: '#06b6d4',
+    defaultParams: {
+      region_type: 'stable',
+      x: 0, y: 0, w: 200, h: 200,
+      timeout: 10,
+      poll_interval: 0.3,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
+  scene_condition: {
+    type: 'scene_condition',
+    label: '场景识别',
+    description: '通过 AI 识别当前屏幕场景',
+    icon: 'ScanLine',
+    category: 'control',
+    color: '#8b5cf6',
+    defaultParams: {
+      scene_name: '',
+      similarity: 70,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'yes', label: '匹配', type: 'flow' },
+        { id: 'no', label: '不匹配', type: 'flow' },
+      ],
     },
   },
   variable_set: {

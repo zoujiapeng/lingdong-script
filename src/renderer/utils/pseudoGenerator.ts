@@ -70,6 +70,56 @@ function genClickNode(params: any): string {
   return line;
 }
 
+function genClickTextNode(params: any): string {
+  const text = params.text ?? '';
+  let line = `点击文本 "${text}"`;
+  const parts: string[] = [];
+  if (params.similarity && params.similarity !== 80) {
+    parts.push(`相似度=${params.similarity}`);
+  }
+  if (params.offset_x || params.offset_y) {
+    parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
+  }
+  if (params.method && params.method !== 'single') {
+    const methodMap: Record<string, string> = { 'double': '双击', 'right': '右击', 'middle': '中键' };
+    parts.push(methodMap[params.method] || params.method);
+  }
+  if (parts.length > 0) line += ' ' + parts.join(' ');
+  return line;
+}
+
+function genPopupCloseNode(params: any): string {
+  let line = '关闭弹窗';
+  if (params.strategies?.[0] && params.strategies[0] !== 'auto') {
+    line += ` 策略=${params.strategies[0]}`;
+  }
+  return line;
+}
+
+function genColorCheckNode(params: any): string {
+  const x = params.x ?? 0, y = params.y ?? 0, w = params.w ?? 100, h = params.h ?? 100;
+  let line = `检测颜色 (${x},${y},${w}x${h})`;
+  if (params.expected_color) line += ` 期望="${params.expected_color}"`;
+  if (params.tolerance && params.tolerance !== 30) line += ` 容差=${params.tolerance}`;
+  return line;
+}
+
+function genProgressWaitNode(params: any): string {
+  const wt = params.wait_type ?? 'fill';
+  const typeMap: Record<string, string> = { fill: '填满', empty: '清空', change: '变化' };
+  let line = `等待进度 ${typeMap[wt] || wt}`;
+  if (params.timeout && params.timeout !== 30) line += ` 超时=${params.timeout}`;
+  return line;
+}
+
+function genRegionWaitNode(params: any): string {
+  const rt = params.region_type ?? 'stable';
+  const typeMap: Record<string, string> = { stable: '稳定', change: '变化' };
+  let line = `等待区域 ${typeMap[rt] || rt}`;
+  if (params.x != null) line += ` (${params.x},${params.y},${params.w}x${params.h})`;
+  return line;
+}
+
 function genImageClickNode(params: any): string {
   const targets = params.targets ?? [];
   let line = '点击图片';
@@ -163,6 +213,13 @@ function genConditionExpr(params: any): string {
   }
   if (ct === 'variable_less') {
     return `变量小于 ${params.variable_name ?? ''} ${params.variable_value ?? ''}`;
+  }
+  if (ct === 'color_match') {
+    const region = params.x != null ? ` (${params.x},${params.y},${params.w}x${params.h})` : '';
+    return `颜色匹配${region} "${params.expected_color ?? ''}"`;
+  }
+  if (ct === 'scene_match') {
+    return `场景匹配 "${params.scene_name ?? ''}"`;
   }
   return '真';
 }
@@ -326,6 +383,43 @@ function generateNode(
       if (endEdge) {
         forward(nodeId, 'loop_end', state, convergence);
       }
+      break;
+    }
+
+
+    case 'click_text': {
+      emit(state, genClickTextNode(params));
+      forward(nodeId, 'output', state, convergence);
+      break;
+    }
+
+    case 'popup_close': {
+      emit(state, genPopupCloseNode(params));
+      forward(nodeId, 'output', state, convergence);
+      break;
+    }
+
+    case 'color_check': {
+      emit(state, genColorCheckNode(params));
+      forward(nodeId, 'output', state, convergence);
+      break;
+    }
+
+    case 'progress_wait': {
+      emit(state, genProgressWaitNode(params));
+      forward(nodeId, 'output', state, convergence);
+      break;
+    }
+
+    case 'region_wait': {
+      emit(state, genRegionWaitNode(params));
+      forward(nodeId, 'output', state, convergence);
+      break;
+    }
+
+    case 'scene_condition': {
+      emit(state, `场景判断 "${params.scene_name || ''}"`);
+      forward(nodeId, 'yes', state, convergence);
       break;
     }
 

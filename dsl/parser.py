@@ -94,11 +94,15 @@ class DSLParser:
                 )
 
             # Parse the statement
+            saved_pos = self._pos
             node = self._parse_statement(stripped)
             if node:
                 nodes.append(node)
 
-            self._pos += 1
+            # Block statements (if/loop/while/until) manage pos internally;
+            # only advance if the statement didn't advance it.
+            if self._pos == saved_pos:
+                self._pos += 1
 
         return nodes
 

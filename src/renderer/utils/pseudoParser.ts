@@ -322,6 +322,32 @@ function parseConditionExpr(expr: string): any {
     };
   }
 
+  // color_match (H,S,V) / 颜色匹配 (H,S,V)
+  const colorCondRe = /^(?:color_match|颜色匹配)\s+\((\d+),(\d+),(\d+)x(\d+)\)\s+"([^"]*)"(?:\s+(?:tolerance|容差)[=:](\d+))?\s*$/i;
+  const colorCondMatch = expr.match(colorCondRe);
+  if (colorCondMatch) {
+    return {
+      condition_type: 'color_match',
+      x: parseInt(colorCondMatch[1]),
+      y: parseInt(colorCondMatch[2]),
+      w: parseInt(colorCondMatch[3]),
+      h: parseInt(colorCondMatch[4]),
+      expected_color: colorCondMatch[5],
+      tolerance: colorCondMatch[6] ? parseInt(colorCondMatch[6]) : 30,
+    };
+  }
+
+  // scene_match "name" / 场景匹配 "name"
+  const sceneCondRe = /^(?:scene_match|场景匹配)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?\s*$/i;
+  const sceneCondMatch = expr.match(sceneCondRe);
+  if (sceneCondMatch) {
+    return {
+      condition_type: 'scene_match',
+      scene_name: sceneCondMatch[1],
+      similarity: sceneCondMatch[2] ? parseInt(sceneCondMatch[2]) : 70,
+    };
+  }
+
   // Fallback
   return { condition_type: 'always_true' };
 }
@@ -374,7 +400,7 @@ function buildTree(lines: ParseLine[]): ParsedStmt[] {
 
     // Pop stack until we find a parent at our indent level
     while (stack.length > 0 && stack[stack.length - 1].indent >= line.indent) {
-      if (stack[stack.length - 1].stmt.type === 'condition') {
+      if (stack[stack.length - 1].stmt.type === 'condition' || stack[stack.length - 1].stmt.type === 'scene_condition') {
         lastIfStmt = null;
       }
       stack.pop();
@@ -387,9 +413,9 @@ function buildTree(lines: ParseLine[]): ParsedStmt[] {
     }
 
     // Push control flow statements onto the stack
-    if (stmt.type === 'condition' || stmt.type === 'loop') {
+    if (stmt.type === 'condition' || stmt.type === 'scene_condition' || stmt.type === 'loop') {
       stack.push({ indent: line.indent, stmt });
-      if (stmt.type === 'condition') {
+      if (stmt.type === 'condition' || stmt.type === 'scene_condition') {
         lastIfStmt = stmt;
       }
     }
@@ -412,6 +438,7 @@ function getDefaultParams(type: string): any {
   switch (type) {
     case 'click': return { x: 0, y: 0, method: 'single', delay_after: 0.5 };
     case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.5, multi_scale: false, match_all: false };
+    case 'click_text': return { text: '', similarity: 80, method: 'single', offset_x: 0, offset_y: 0, timeout: 5, delay_after: 0.5 };
     case 'wait': return { wait_type: 'time', duration: 1 };
     case 'input_text': return { text: '', click_before: false, clear_before: true, delay_after: 0.3 };
     case 'keyboard': return { keys: [], modifiers: [], delay_after: 0.2 };
@@ -422,6 +449,11 @@ function getDefaultParams(type: string): any {
     case 'sub_script': return { script_id: '', script_name: '' };
     case 'variable_set': return { name: '', value: '' };
     case 'variable_get': return { name: '' };
+    case 'popup_close': return { strategies: ['auto'], timeout: 5, delay_after: 0.3 };
+    case 'color_check': return { x: 0, y: 0, w: 100, h: 100, expected_color: '', tolerance: 30 };
+    case 'progress_wait': return { wait_type: 'fill', timeout: 30, region: { x: 0, y: 0, w: 200, h: 20 }, poll_interval: 0.5 };
+    case 'region_wait': return { region_type: 'stable', x: 0, y: 0, w: 200, h: 200, timeout: 10, poll_interval: 0.3 };
+    case 'scene_condition': return { scene_name: '', similarity: 70 };
     default: return {};
   }
 }
@@ -505,7 +537,7 @@ function buildFlowScript(stmts: ParsedStmt[]): { nodes: FlowNode[]; edges: FlowE
         return endId;
       }
 
-      if (stmt.type === 'condition') {
+      if (stmt.type === 'condition' || stmt.type === 'scene_condition') {
         const condId = createNode(stmt, 60, yOffset + 120);
         yOffset += 120;
 

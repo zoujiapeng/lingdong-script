@@ -6,6 +6,7 @@ import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 import { FlowNode } from '../../types';
 import { ClickParams } from './params/ClickParams';
 import { ImageClickParams } from './params/ImageClickParams';
+import { ClickTextParams } from './params/ClickTextParams';
 import { WaitParams } from './params/WaitParams';
 import { InputTextParams } from './params/InputTextParams';
 import { KeyboardParams } from './params/KeyboardParams';
@@ -14,6 +15,11 @@ import { ConditionParams } from './params/ConditionParams';
 import { LoopParams } from './params/LoopParams';
 import { SubScriptParams } from './params/SubScriptParams';
 import { VariableParams } from './params/VariableParams';
+import { PopupCloseParams } from './params/PopupCloseParams';
+import { ColorCheckParams } from './params/ColorCheckParams';
+import { ProgressWaitParams } from './params/ProgressWaitParams';
+import { RegionWaitParams } from './params/RegionWaitParams';
+import { SceneConditionParams } from './params/SceneConditionParams';
 import { CommonNodeSettings } from './params/CommonNodeSettings';
 
 function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
@@ -111,6 +117,7 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
   switch (node.type) {
     case 'click': return <ClickParams params={node.params as any} onChange={updateParams} />;
     case 'image_click': return <ImageClickParams params={node.params as any} onChange={updateParams} />;
+    case 'click_text': return <ClickTextParams params={node.params as any} onChange={updateParams} />;
     case 'wait': return <WaitParams params={node.params as any} onChange={updateParams} />;
     case 'input_text': return <InputTextParams params={node.params as any} onChange={updateParams} />;
     case 'keyboard': return <KeyboardParams params={node.params as any} onChange={updateParams} />;
@@ -120,6 +127,11 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'sub_script': return <SubScriptParams params={node.params as any} onChange={updateParams} />;
     case 'variable_set': return <VariableParams params={node.params as any} onChange={updateParams} mode="set" />;
     case 'variable_get': return <VariableParams params={node.params as any} onChange={updateParams} mode="get" />;
+    case 'popup_close': return <PopupCloseParams params={node.params as any} onChange={updateParams} />;
+    case 'color_check': return <ColorCheckParams params={node.params as any} onChange={updateParams} />;
+    case 'progress_wait': return <ProgressWaitParams params={node.params as any} onChange={updateParams} />;
+    case 'region_wait': return <RegionWaitParams params={node.params as any} onChange={updateParams} />;
+    case 'scene_condition': return <SceneConditionParams params={node.params as any} onChange={updateParams} />;
     case 'start':
     case 'end': return (
       <div className="form-group">

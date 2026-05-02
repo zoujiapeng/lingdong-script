@@ -394,32 +394,47 @@ ipcMain.on('menu-action', (_, action: string) => {
   mainWindow?.webContents.send('menu-action', action);
 });
 
-// --- App Lifecycle ---
+// --- Single Instance Lock ---
 
-app.whenReady().then(() => {
-  buildAppMenu();
-  createWindow();
-
-  // 全局 F9 热键 — 在主进程直接控制引擎启停
-  globalShortcut.register('F9', () => {
-    if (!mainWindow) return;
-    if (_engineRunning) {
-      stopPythonEngine();
-      mainWindow.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
-      mainWindow.webContents.send('engine-log', { level: 'info', message: '⏹️ 脚本已停止 (全局F9)' });
-    } else if (_lastScript) {
-      startPythonEngine(_lastScript);
-      mainWindow.webContents.send('engine-message', { type: 'status_report', status: 'running' });
-      mainWindow.webContents.send('engine-log', { level: 'info', message: '🔄 脚本开始执行 (全局F9)' });
-    } else {
-      mainWindow.webContents.send('engine-log', { level: 'warn', message: '没有可执行的脚本，请先在编辑器中打开或创建脚本' });
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // Another instance was launched — focus the existing window
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  // --- App Lifecycle ---
+
+  app.whenReady().then(() => {
+    buildAppMenu();
+    createWindow();
+
+    // 全局 F9 热键 — 在主进程直接控制引擎启停
+    globalShortcut.register('F9', () => {
+      if (!mainWindow) return;
+      if (_engineRunning) {
+        stopPythonEngine();
+        mainWindow.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
+        mainWindow.webContents.send('engine-log', { level: 'info', message: '⏹️ 脚本已停止 (全局F9)' });
+      } else if (_lastScript) {
+        startPythonEngine(_lastScript);
+        mainWindow.webContents.send('engine-message', { type: 'status_report', status: 'running' });
+        mainWindow.webContents.send('engine-log', { level: 'info', message: '🔄 脚本开始执行 (全局F9)' });
+      } else {
+        mainWindow.webContents.send('engine-log', { level: 'warn', message: '没有可执行的脚本，请先在编辑器中打开或创建脚本' });
+      }
+    });
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
+}
 
 app.on('window-all-closed', () => {
   stopPythonEngine();

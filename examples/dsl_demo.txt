@@ -36,9 +36,10 @@ LOOP 5:
     wait 0.5
     set counter = {{counter}} + 1
 
-# LOOP WHILE 条件循环
+# === LOOP WHILE 条件循环（注意：以下循环会一直等 loading.png 出现才结束）
+# 如果没有 loading.png 图片，请改成 LOOP 3: 避免无限循环
 LOOP WHILE img:loading.png:
-    wait 0.5
+    wait 0.3
 
 # === 条件分支 ===
 IF text:领取:

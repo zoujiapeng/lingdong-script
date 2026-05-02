@@ -12,6 +12,8 @@ const CONDITION_OPTIONS: { value: ConditionType; label: string }[] = [
   { value: 'variable_equals', label: '变量等于' },
   { value: 'variable_greater', label: '变量大于' },
   { value: 'variable_less', label: '变量小于' },
+  { value: 'color_match', label: '颜色匹配' },
+  { value: 'scene_match', label: '场景匹配' },
   { value: 'always_true', label: '始终为真' },
 ];
 
@@ -63,6 +65,50 @@ export function ConditionParams({ params, onChange }: Props) {
             <input className="form-input" value={params.variable_value || ''} onChange={(e) => onChange({ variable_value: e.target.value })} placeholder="比较值" />
           </div>
         </>
+      )}
+
+      {params.condition_type === 'color_match' && (
+        <>
+          <div className="form-group">
+            <label className="form-label">检测区域</label>
+            <div className="form-row">
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>X</label>
+                <input className="form-input" type="number" value={(params as any).x || 0} onChange={(e) => onChange({ x: +e.target.value })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>Y</label>
+                <input className="form-input" type="number" value={(params as any).y || 0} onChange={(e) => onChange({ y: +e.target.value })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>宽度</label>
+                <input className="form-input" type="number" value={(params as any).w || 100} onChange={(e) => onChange({ w: +e.target.value })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}>
+                <label className="form-label" style={{ fontSize: 11 }}>高度</label>
+                <input className="form-input" type="number" value={(params as any).h || 100} onChange={(e) => onChange({ h: +e.target.value })} />
+              </div>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">期望颜色 (HSV)</label>
+            <input className="form-input" value={(params as any).expected_color || ''} onChange={(e) => onChange({ expected_color: e.target.value })} placeholder="H,S,V 例如: 30,200,200" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">容差</label>
+            <div className="slider-group">
+              <input type="range" min="0" max="100" value={(params as any).tolerance || 30} onChange={(e) => onChange({ tolerance: +e.target.value })} />
+              <span className="slider-value">{(params as any).tolerance || 30}</span>
+            </div>
+          </div>
+        </>
+      )}
+
+      {params.condition_type === 'scene_match' && (
+        <div className="form-group">
+          <label className="form-label">场景名称</label>
+          <input className="form-input" value={(params as any).scene_name || ''} onChange={(e) => onChange({ scene_name: e.target.value })} placeholder="例如: 主界面, 战斗" />
+        </div>
       )}
 
       <div className="form-group">
