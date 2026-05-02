@@ -235,16 +235,18 @@ ipcMain.handle('engine:status', () => {
   return { success: true };
 });
 
-ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: string; content: string }[] }) => {
+ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
   return new Promise((resolve) => {
+    const apiBase = (params.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+    const model = params.model || process.env.LLM_MODEL || 'deepseek-chat';
     const body = JSON.stringify({
-      model: 'deepseek-chat',
+      model,
       messages: params.messages,
       response_format: { type: 'json_object' },
       temperature: 0.1,
       max_tokens: 2048,
     });
-    const u = new URL('https://api.deepseek.com/v1/chat/completions');
+    const u = new URL(`${apiBase}/chat/completions`);
     const req = https.request({
       hostname: u.hostname,
       path: u.pathname,

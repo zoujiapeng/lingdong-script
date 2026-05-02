@@ -3,25 +3,45 @@ import { useStore } from '../store';
 import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2 } from 'lucide-react';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
+const BASE_STORAGE = 'lingdong-llm-base';
+const MODEL_STORAGE = 'lingdong-llm-model';
 
 function getStoredKey(): string {
   try { return localStorage.getItem(KEY_STORAGE) || ''; } catch { return ''; }
+}
+function getStoredBase(): string {
+  try { return localStorage.getItem(BASE_STORAGE) || 'https://api.deepseek.com/v1'; } catch { return 'https://api.deepseek.com/v1'; }
+}
+function getStoredModel(): string {
+  try { return localStorage.getItem(MODEL_STORAGE) || 'deepseek-chat'; } catch { return 'deepseek-chat'; }
 }
 
 function storeKey(key: string) {
   try { localStorage.setItem(KEY_STORAGE, key); } catch {}
 }
+function storeBase(base: string) {
+  try { localStorage.setItem(BASE_STORAGE, base); } catch {}
+}
+function storeModel(model: string) {
+  try { localStorage.setItem(MODEL_STORAGE, model); } catch {}
+}
 
 export function SettingsPanel() {
   const { script, ui, setUI } = useStore();
   const [apiKey, setApiKey] = useState(() => getStoredKey());
+  const [apiBase, setApiBase] = useState(() => getStoredBase());
+  const [model, setModel] = useState(() => getStoredModel());
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
 
   const handleSaveApiKey = () => {
     storeKey(apiKey);
+    storeBase(apiBase);
+    storeModel(model);
     (window as any).__DEEPSEEK_KEY__ = apiKey;
+    (window as any).__LLM_API_BASE__ = apiBase;
+    (window as any).__LLM_MODEL__ = model;
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);
   };
@@ -36,6 +56,8 @@ export function SettingsPanel() {
       if (api?.aiGenerate) {
         data = await api.aiGenerate({
           apiKey: apiKey.trim(),
+          apiBase: apiBase.trim(),
+          model: model.trim(),
           messages: [
             { role: 'system', content: '你是一个助手。请用JSON回答。' },
             { role: 'user', content: '回复一句"连接成功"' },
@@ -43,14 +65,15 @@ export function SettingsPanel() {
         });
         if (data.error) throw new Error(data.error);
       } else {
-        const res = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        const base = apiBase.trim().replace(/\/+$/, '');
+        const res = await fetch(`${base}/chat/completions`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey.trim()}`,
           },
           body: JSON.stringify({
-            model: 'deepseek-chat',
+            model: model.trim(),
             messages: [{ role: 'user', content: '回复"连接成功"' }],
             max_tokens: 20,
           }),
@@ -135,15 +158,39 @@ export function SettingsPanel() {
           </div>
         </section>
 
-        {/* DeepSeek API */}
+        {/* LLM API 配置 */}
         <section className="settings-section">
           <h3 className="settings-section-title">
             <Key size={15} style={{ marginRight: 6, verticalAlign: 'middle' }} />
-            DeepSeek API
+            LLM API 配置
           </h3>
           <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
             <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              API 密钥（用于 AI 助手功能）
+              API 地址（支持 DeepSeek / 硅基流动 / 任意 OpenAI 兼容 API）
+            </label>
+            <input
+              className="settings-input"
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+              placeholder="https://api.deepseek.com/v1"
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              模型名（硅基流动用 deepseek-ai/DeepSeek-V3 等）
+            </label>
+            <input
+              className="settings-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="deepseek-chat"
+              style={{ width: '100%' }}
+            />
+          </div>
+          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+            <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              API 密钥
             </label>
             <div style={{ display: 'flex', gap: 8 }}>
               <input

@@ -1,5 +1,10 @@
-const DEEPSEEK_API = 'https://api.deepseek.com/v1/chat/completions';
-const MODEL = 'deepseek-chat';
+// 通过环境变量配置，支持任意 OpenAI 兼容 API
+// LLM_API_BASE — API 地址 (默认 https://api.deepseek.com/v1)
+// LLM_MODEL    — 模型名   (默认 deepseek-chat)
+// LLM_API_KEY  — API 密钥 (备选 DEEPSEEK_API_KEY)
+const API_BASE = (process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+const MODEL = process.env.LLM_MODEL || 'deepseek-chat';
+const API_PATH = '/chat/completions';
 
 const SYSTEM_PROMPT = `你是一个桌面自动化脚本生成器。将用户的自然语言需求转换为灵动脚本(lingdong)伪代码。
 
@@ -74,12 +79,12 @@ export interface DeepSeekResult {
 }
 
 export async function callDeepSeek(userMessage: string): Promise<DeepSeekResult> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    throw new Error('请设置 DEEPSEEK_API_KEY 环境变量');
+    throw new Error('请设置 LLM_API_KEY 或 DEEPSEEK_API_KEY 环境变量');
   }
 
-  const response = await fetch(DEEPSEEK_API, {
+  const response = await fetch(`${API_BASE}${API_PATH}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

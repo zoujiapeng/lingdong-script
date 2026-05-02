@@ -60,7 +60,10 @@ lingdong v1.0.0 — AI 自动化脚本工具
   lingdong serve --port 3456
 
 环境变量:
-  DEEPSEEK_API_KEY     lingdong ask 需要 DeepSeek API 密钥
+  LLM_API_BASE          API 地址（默认 https://api.deepseek.com/v1）
+  LLM_MODEL             模型名（默认 deepseek-chat）
+  LLM_API_KEY           API 密钥（推荐）
+  DEEPSEEK_API_KEY      旧版 API 密钥（备用）
 `);
   process.exit(0);
 }

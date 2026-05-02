@@ -71,20 +71,22 @@ export function AIAssistant() {
 
     try {
       const api = (window as any).electronAPI;
+      const apiBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+      const model = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || 'deepseek-chat';
       let data: any;
 
       if (api?.aiGenerate) {
-        data = await api.aiGenerate({ apiKey, messages });
+        data = await api.aiGenerate({ apiKey, messages, apiBase, model });
         if (data.error) throw new Error(data.error);
       } else {
-        const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        const response = await fetch(`${apiBase}/chat/completions`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            model: 'deepseek-chat',
+            model,
             messages,
             response_format: { type: 'json_object' },
             temperature: 0.1,
