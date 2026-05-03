@@ -1,8 +1,12 @@
 import React from 'react';
 import { useStore } from '../../store';
-import { PanelRightClose, PanelRightOpen, PanelBottomClose, PanelBottomOpen, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { PanelRightClose, PanelRightOpen, PanelBottomClose, PanelBottomOpen, PanelLeftClose, PanelLeftOpen, Minimize2 } from 'lucide-react';
 
-export function StatusBar() {
+interface StatusBarProps {
+  onHidePanels?: () => void;
+}
+
+export function StatusBar({ onHidePanels }: StatusBarProps) {
   const { script, execution, ui, setUI } = useStore();
 
   const statusDot = {
@@ -65,6 +69,14 @@ export function StatusBar() {
         title={ui.show_log_panel ? '隐藏日志面板' : '显示日志面板'}
       >
         {ui.show_log_panel ? <PanelBottomClose size={13} /> : <PanelBottomOpen size={13} />}
+      </button>
+      <div className="status-bar-divider" />
+      <button
+        className="status-bar-btn"
+        onClick={onHidePanels}
+        title="收起所有面板"
+      >
+        <Minimize2 size={13} />
       </button>
     </div>
   );

@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFileDialog: (defaultName?: string) =>
     ipcRenderer.invoke('dialog:saveFile', defaultName),
 
+  // File read/write (via main process, bypasses nodeIntegration restriction)
+  readFile: (filePath: string) => ipcRenderer.invoke('file:read', filePath),
+  writeFile: (filePath: string, content: string) => ipcRenderer.invoke('file:write', filePath, content),
+
   // Engine control
   engineStart: (scriptJson: string) => ipcRenderer.invoke('engine:start', scriptJson),
   engineStop: () => ipcRenderer.invoke('engine:stop'),
@@ -24,6 +28,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
+  selectRegion: () => ipcRenderer.invoke('screenshot:selectRegion'),
+  ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) =>
+    ipcRenderer.invoke('ocr:recognizeRegion', region),
 
   // AI generation (via main process to avoid CORS)
   aiGenerate: (params: { apiKey: string; messages: { role: string; content: string }[] }) =>

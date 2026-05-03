@@ -15,6 +15,7 @@ interface ExecCallbacks {
   onLog: (entry: Omit<LogEntry, 'timestamp'>) => void;
   onDone: (status: 'completed' | 'stopped' | 'error') => void;
   onCurrentNode: (nodeId: string | undefined) => void;
+  onIteration?: (current: number, total: number, nodeId: string) => void;
 }
 
 export function createFlowExecutor(
@@ -237,6 +238,7 @@ export function createFlowExecutor(
             if (loopType === 'count' && iter >= count) break;
             await checkPauseStop();
             iter++;
+            callbacks.onIteration?.(iter, count, nodeId);
             log('info', `循环第 ${iter} 次`, nodeId);
 
             if (bodyEdges.length > 0) {
@@ -310,7 +312,17 @@ export function createFlowExecutor(
         nextEdges = getOutputEdges(current, 'output');
       }
       if (nextEdges.length === 0) break;
-      current = nextEdges[0].to_node;
+
+      // Fan-out: if multiple edges from same port, execute all branches
+      if (nextEdges.length === 1) {
+        current = nextEdges[0].to_node;
+      } else {
+        // Run branches sequentially (user can add parallel=true later)
+        for (const edge of nextEdges) {
+          await followFlow(edge.to_node);
+        }
+        break;
+      }
     }
   }
 

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { InputTextNodeParams } from '../../../types';
+import { Crosshair } from 'lucide-react';
 
 interface Props {
   params: InputTextNodeParams;
@@ -7,6 +8,25 @@ interface Props {
 }
 
 export function InputTextParams({ params, onChange }: Props) {
+  const [selecting, setSelecting] = useState(false);
+
+  const handleSelectRegion = async () => {
+    try {
+      setSelecting(true);
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ x: result.x, y: result.y });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
   return (
     <div>
       <div className="form-group">
@@ -21,13 +41,21 @@ export function InputTextParams({ params, onChange }: Props) {
       </div>
 
       <div className="form-row">
-        <div className="form-group">
-          <label className="form-label">X 坐标 (可选)</label>
-          <input className="form-input" type="number" value={params.x ?? ''} onChange={(e) => onChange({ x: e.target.value ? +e.target.value : undefined })} placeholder="选填" />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Y 坐标 (可选)</label>
-          <input className="form-input" type="number" value={params.y ?? ''} onChange={(e) => onChange({ y: e.target.value ? +e.target.value : undefined })} placeholder="选填" />
+        <div className="form-group" style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <label className="form-label" style={{ margin: 0, fontSize: 11 }}>点击位置 (可选)</label>
+            <button className="btn btn-ghost btn-icon" onClick={handleSelectRegion} disabled={selecting} title="框选点击位置" style={{ width: 24, height: 24 }}>
+              <Crosshair size={12} />
+            </button>
+          </div>
+          <div className="form-row" style={{ marginTop: 2 }}>
+            <div className="form-group">
+              <input className="form-input" type="number" value={params.x ?? ''} onChange={(e) => onChange({ x: e.target.value ? +e.target.value : undefined })} placeholder="X" />
+            </div>
+            <div className="form-group">
+              <input className="form-input" type="number" value={params.y ?? ''} onChange={(e) => onChange({ y: e.target.value ? +e.target.value : undefined })} placeholder="Y" />
+            </div>
+          </div>
         </div>
       </div>
 

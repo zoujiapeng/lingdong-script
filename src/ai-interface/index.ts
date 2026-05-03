@@ -17,6 +17,7 @@ import { runFlowTool } from './tools/run-flow';
 import { listFlowsTool } from './tools/list-flows';
 import { createFlowTool } from './tools/create-flow';
 import { askAITool } from './tools/ask-ai';
+import { screenCaptureTool } from './tools/screen-capture';
 import { startMCPServer } from './server/mcp';
 import { startHTTPServer } from './server/http';
 import { ServerMode } from './tools/types';
@@ -26,6 +27,7 @@ toolRegistry.register(runFlowTool);
 toolRegistry.register(listFlowsTool);
 toolRegistry.register(createFlowTool);
 toolRegistry.register(askAITool);
+toolRegistry.register(screenCaptureTool);
 
 function parseArgs(): { mode: ServerMode; port: number } {
   const args = process.argv.slice(2);

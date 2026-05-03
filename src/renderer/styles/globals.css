@@ -1849,6 +1849,12 @@ textarea.form-input {
   left: 0;
   right: 0;
   z-index: 100;
+  pointer-events: none;
+}
+
+.canvas-view .top-wrapper .topbar,
+.canvas-view .top-wrapper .view-tabs {
+  pointer-events: auto;
 }
 
 .canvas-view .bottom-wrapper {

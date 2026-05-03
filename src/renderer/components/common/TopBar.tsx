@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
   Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus
@@ -12,6 +12,11 @@ const PRESET_LIST = [
   { id: 'form-filler', name: '表单填写器', desc: '循环填写表单数据' },
   { id: 'app-launcher', name: '应用启动器', desc: '启动应用并执行操作' },
   { id: 'screenshot-logger', name: '定时截图记录', desc: '每隔30秒自动截图' },
+  // 复杂自动化模板
+  { id: 'complex-image-pipeline', name: '多目标智能检测流水线', desc: '多目标图片检测 + OCR验证 + 失败重试' },
+  { id: 'complex-web-scraper', name: '网页数据采集与监控', desc: '自动滚动→截图→翻页→循环采集多页' },
+  { id: 'complex-form-submit', name: '智能表单提交流程', desc: '多字段表单→OCR验证→颜色检测→重试' },
+  { id: 'complex-batch-process', name: '批量文件处理监控', desc: '批量循环→弹窗关闭→进度等待→截图' },
 ];
 
 export function TopBar() {
@@ -21,6 +26,7 @@ export function TopBar() {
     undo, redo,
     startExecution, pauseExecution, resumeExecution, stopExecution,
     ui, setUI, autoLayout, fitToScreen,
+    newScript,
   } = useStore();
 
   const [editingTitle, setEditingTitle] = useState(false);
@@ -29,6 +35,19 @@ export function TopBar() {
   const [templateName, setTemplateName] = useState('');
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Handle native menu actions (Ctrl+N/O/S from menu bar)
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (!api?.onMenuAction) return;
+    api.onMenuAction((action: string) => {
+      switch (action) {
+        case 'new': newScript(); break;
+        case 'open': handleLoad(); break;
+        case 'save': saveScript(); break;
+      }
+    });
+  }, []);
 
   const handleTitleClick = () => {
     setEditingTitle(true);
@@ -47,21 +66,15 @@ export function TopBar() {
       const result = await api.openFileDialog();
       if (!result.canceled && result.filePaths?.[0]) {
         try {
-          const fs = (window as any).require?.('fs');
-          const content = fs?.readFileSync(result.filePaths[0], 'utf-8');
-          if (content) {
-            const script = JSON.parse(content);
-            loadScript(script);
+          const resp = await api.readFile(result.filePaths[0]);
+          if (resp.content) {
+            loadScript(JSON.parse(resp.content));
             return;
           }
-        } catch {}
-        // Fallback: try fetch
-        try {
-          const resp = await fetch('file://' + result.filePaths[0]);
-          const text = await resp.text();
-          loadScript(JSON.parse(text));
-          return;
-        } catch {}
+          if (resp.error) throw new Error(resp.error);
+        } catch (e) {
+          console.error('Load failed:', e);
+        }
       }
     }
     // Browser fallback

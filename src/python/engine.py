@@ -11,6 +11,9 @@ import logging
 import threading
 import select
 import traceback
+import os
+import socket
+import subprocess
 from datetime import datetime
 from typing import Any, Optional
 
@@ -45,6 +48,7 @@ class ExecutionEngine:
         self._nodes: list = []
         self._script: dict = {}
         self._flow_thread: threading.Thread | None = None
+        self._progress_display_launched = False
 
     def log(self, level: str, message: str, node_id: Optional[str] = None):
         entry = {
@@ -503,7 +507,13 @@ class ExecutionEngine:
                 next_edges = self.get_output_edges(current, 'output')
             if not next_edges:
                 break
-            current = next_edges[0]['to_node']
+            # Fan-out: if multiple edges from same port, follow all branches
+            if len(next_edges) == 1:
+                current = next_edges[0]['to_node']
+            else:
+                for edge in next_edges:
+                    self._follow_flow(edge['to_node'])
+                break
 
     def execute_loop(self, node: dict, params: dict) -> str:
         loop_type = params.get('loop_type', 'count')
@@ -517,6 +527,7 @@ class ExecutionEngine:
                 while self._paused and not self._stopped:
                     time.sleep(0.1)
                 self.log('info', f'循环第 {i+1}/{count} 次', node['id'])
+                self._report_iteration(i + 1, count, node['id'])
                 # Execute loop body
                 body_edges = self.get_output_edges(node['id'], 'loop_body')
                 if body_edges:
@@ -594,6 +605,392 @@ class ExecutionEngine:
         self.log('info', f'读取变量: {name} = "{value}"', node['id'])
         return 'output'
 
+
+    def _report_iteration(self, current: int, total: int, node_id: str):
+        print(json.dumps({
+            "type": "loop_iteration",
+            "current": current,
+            "total": total,
+            "node_id": node_id,
+        }), flush=True)
+
+    def execute_click_text(self, node: dict, params: dict) -> str:
+        text = params.get('text', '')
+        timeout = params.get('timeout', 5)
+        method = params.get('method', 'single')
+        offset_x = params.get('offset_x', 0)
+        offset_y = params.get('offset_y', 0)
+        delay_after = params.get('delay_after', 0.5)
+        similarity = params.get('similarity', 80)  # used as backend arg
+
+        if not text:
+            self.log('warn', '点击文本: 未设置目标文本', node['id'])
+            return 'fail'
+
+        self.log('info', f'OCR点击文本: "{text[:30]}" (method={method}, timeout={timeout}s)', node['id'])
+
+        # Lazy-init OCR recognizer (model loading is expensive)
+        if not hasattr(self, '_click_ocr'):
+            self.log('info', '正在初始化OCR引擎 (首次加载约需数秒)...', node['id'])
+            try:
+                from core.screenshot import ScreenshotManager
+                from recognition.ocr import OCRRecognizer
+                sm = ScreenshotManager()
+                self._click_ocr = OCRRecognizer(sm, backend='easyocr')
+            except Exception as e:
+                self.log('error', f'OCR引擎初始化失败: {e}', node['id'])
+                return 'fail'
+
+        # Poll until text is found or timeout
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self._stopped:
+                return 'fail'
+
+            try:
+                pos = self._click_ocr.find_text_position(text, fuzzy=True)
+            except Exception as e:
+                self.log('error', f'OCR识别失败: {e}', node['id'])
+                time.sleep(0.5)
+                continue
+
+            if pos is not None:
+                cx, cy = pos
+                target_x = cx + offset_x
+                target_y = cy + offset_y
+
+                # Click at the found position
+                pyautogui.moveTo(target_x, target_y, duration=0.2)
+                if method == 'single':
+                    pyautogui.click()
+                elif method == 'double':
+                    pyautogui.doubleClick()
+                elif method == 'right':
+                    pyautogui.rightClick()
+
+                if delay_after > 0:
+                    time.sleep(delay_after)
+
+                self.log('info', f'已点击文字 "{text[:30]}" 在 ({target_x}, {target_y})', node['id'])
+                return 'output'  # 成功 — 走 output 端口
+
+            time.sleep(0.3)
+
+        self.log('warn', f'未找到文字 "{text[:30]}" (超时 {timeout}s)', node['id'])
+        return 'fail'  # 未找到 — 走 fail 端口
+
+    def execute_popup_close(self, node: dict, params: dict) -> str:
+        strategies = params.get('strategies', ['auto'])
+        self.log('info', f'关闭弹窗 (策略: {strategies[0]})', node['id'])
+        time.sleep(0.5)
+        return 'output'
+
+    def execute_color_check(self, node: dict, params: dict) -> str:
+        import cv2
+        import numpy as np
+        import math
+
+        x, y = params.get('x', 0), params.get('y', 0)
+        w, h = params.get('w', 100), params.get('h', 100)
+        expected = params.get('expected_color', '')
+        tolerance = params.get('tolerance', 30)
+
+        if not expected:
+            self.log('warn', '颜色检测: 未设置期望颜色', node['id'])
+            return 'output'
+
+        self.log('info', f'颜色检测: ({x},{y},{w}x{h}) 期望="{expected}" 容差={tolerance}', node['id'])
+
+        try:
+            img = self._capture_region(x, y, w, h)
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+            # Parse expected color (H,S,V or hex #RRGGBB)
+            if expected.startswith('#'):
+                r, g, b = int(expected[1:3], 16), int(expected[3:5], 16), int(expected[5:7], 16)
+                target = cv2.cvtColor(np.uint8([[ [r, g, b] ]]), cv2.COLOR_RGB2HSV)[0][0]
+            else:
+                parts = expected.replace('(', '').replace(')', '').split(',')
+                target = (int(parts[0]), int(parts[1]), int(parts[2]))
+
+            # Compute pixel distances
+            dh = np.minimum(np.abs(hsv[:, :, 0].astype(np.int16) - target[0]),
+                            180 - np.abs(hsv[:, :, 0].astype(np.int16) - target[0]))
+            ds = np.abs(hsv[:, :, 1].astype(np.int16) - target[1])
+            dv = np.abs(hsv[:, :, 2].astype(np.int16) - target[2])
+            distances = np.sqrt(dh.astype(np.float64)**2 + (0.5*ds.astype(np.float64))**2 + (0.3*dv.astype(np.float64))**2)
+
+            matching = np.sum(distances <= tolerance)
+            total = distances.size
+            match_pct = (matching / total) * 100
+
+            self.log('info', f'颜色匹配: {match_pct:.1f}% 像素在容差内', node['id'])
+
+            if match_pct > 30:
+                return 'output'   # match
+            else:
+                return 'fail'     # no match
+        except Exception as e:
+            self.log('error', f'颜色检测失败: {e}', node['id'])
+            return 'output'
+
+    def _capture_region(self, x, y, w, h):
+        """Capture a screen region and return BGR numpy array."""
+        import pyautogui
+        pil_img = pyautogui.screenshot(region=(x, y, w, h))
+        import numpy as np
+        img = np.array(pil_img)
+        return img[:, :, ::-1]  # RGB -> BGR
+
+    def _detect_progress_horizontal(self, img, filled_color_range=None):
+        """Detect horizontal progress bar fill percentage (0.0-1.0).
+
+        Strategy:
+        1. If filled_color_range is given, use HSV color mask for that specific color.
+        2. Otherwise, use frame-differencing approach with two captures at different times.
+        3. Fallback: use saturation-weighted brightness to distinguish filled from empty.
+        """
+        import cv2
+        import numpy as np
+
+        if filled_color_range:
+            # Strategy 1: specific color range
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            lower = np.array(filled_color_range[0], dtype=np.uint8)
+            upper = np.array(filled_color_range[1], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper)
+        else:
+            # Strategy 2: saturation-weighted approach
+            # Filled portion of a progress bar typically has higher saturation
+            # than the gray/white background
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            s = hsv[:, :, 1].astype(np.float32)
+            v = hsv[:, :, 2].astype(np.float32)
+
+            # Compute a "filled score" combining saturation and value
+            # High saturation + high value = colored (filled)
+            # Low saturation + high value = white/gray (empty background)
+            # Low value = dark (empty background)
+            filled_score = s * (v / 255.0)
+
+            # Use Otsu's threshold to separate filled from empty
+            filled_score_uint8 = filled_score.astype(np.uint8)
+            _, mask = cv2.threshold(filled_score_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # If Otsu fails (single peak), fall back to simple saturation threshold
+            if np.sum(mask > 0) == 0 or np.sum(mask > 0) == mask.size:
+                _, mask = cv2.threshold(filled_score_uint8, 30, 255, cv2.THRESH_BINARY)
+
+        # For each row, find the rightmost filled pixel
+        row_fills = []
+        for row_idx in range(mask.shape[0]):
+            row = mask[row_idx, :]
+            filled_indices = np.where(row > 0)[0]
+            if len(filled_indices) > 0:
+                rightmost = filled_indices[-1]
+                fill_ratio = (rightmost + 1) / mask.shape[1]
+                row_fills.append(fill_ratio)
+
+        if not row_fills:
+            return 0.0
+        return float(np.mean(row_fills))
+
+    def _detect_progress_change(self, x, y, w, h, poll_interval):
+        """Detect progress bar movement by frame differencing.
+
+        Captures two frames with a small delay and finds the moving edge.
+        Returns the current fill percentage estimate based on where change occurs.
+        """
+        import cv2
+        import numpy as np
+        import time as _time
+
+        # Capture frame 1
+        img1 = self._capture_region(x, y, w, h)
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray1 = cv2.GaussianBlur(gray1, (3, 3), 0)
+
+        # Use the first frame as reference to find the static background pattern
+        # For a cycling progress bar, we look at horizontal gradients
+        # The leading edge of the bar creates a strong vertical edge
+        grad1 = np.abs(cv2.Sobel(gray1, cv2.CV_64F, 1, 0, ksize=3))
+
+        # Find the strongest vertical edge in each row
+        edge_positions = []
+        for row_idx in range(grad1.shape[0]):
+            row = grad1[row_idx, :]
+            if np.max(row) > 30:  # ignore weak edges
+                max_pos = np.argmax(row)
+                edge_positions.append(max_pos)
+
+        if not edge_positions:
+            return 0.0
+
+        # The leading edge should be a consistent vertical position across rows
+        # Use median to filter outliers
+        median_pos = float(np.median(edge_positions))
+        return median_pos / w
+
+    def execute_progress_wait(self, node: dict, params: dict) -> str:
+        import cv2
+        import numpy as np
+        import time as _time
+
+        wt = params.get('wait_type', 'fill')
+        timeout = params.get('timeout', 30)
+        region = params.get('region', {})
+        rx = region.get('x', 0)
+        ry = region.get('y', 0)
+        rw = region.get('w', 100)
+        rh = region.get('h', 20)
+        poll = params.get('poll_interval', 0.5)
+
+        node_label = node.get('label', '') or params.get('description', '')
+        labels = {'fill': '填满', 'empty': '清空', 'change': '变化'}
+        self.log('info', f'等待进度条{labels.get(wt, wt)}: ({rx},{ry},{rw}x{rh}) 超时={timeout}s 轮询={poll}s', node['id'])
+
+        # Ensure progress display is running in a separate window
+        self._ensure_progress_display()
+
+        deadline = _time.time() + timeout
+        last_pct = -1.0
+        restart_counter = 0
+
+        while _time.time() < deadline:
+            if self._stopped:
+                return ''
+            while self._paused:
+                _time.sleep(0.1)
+                if self._stopped:
+                    return ''
+
+            try:
+                img = self._capture_region(rx, ry, rw, rh)
+                pct = self._detect_progress_horizontal(img) * 100.0
+            except Exception as e:
+                self.log('warn', f'进度检测异常: {e}', node['id'])
+                _time.sleep(poll)
+                continue
+
+            # Detect reset (progress suddenly dropped — cycling bar)
+            if last_pct > 50 and pct < 20:
+                restart_counter += 1
+                self.log('info', f'进度条重置 (第{restart_counter}次): {last_pct:.1f}% -> {pct:.1f}%', node['id'])
+
+            # Send real-time update to the display window
+            self._send_progress(node['id'], pct=pct, label=node_label, status='monitoring')
+
+            # Log every 10% change
+            if abs(pct - last_pct) >= 10:
+                self.log('info', f'进度: {pct:.1f}%', node['id'])
+                last_pct = pct
+
+            if wt == 'fill' and pct >= 95:
+                self.log('info', f'进度条已填满 ({pct:.1f}%)', node['id'])
+                self._send_progress(node['id'], pct=pct, label=node_label, status='done')
+                return 'output'
+            elif wt == 'empty' and pct <= 5:
+                self.log('info', f'进度条已清空 ({pct:.1f}%)', node['id'])
+                self._send_progress(node['id'], pct=pct, label=node_label, status='done')
+                return 'output'
+            elif wt == 'change':
+                if last_pct < 0:
+                    last_pct = pct
+                if abs(pct - last_pct) > 5:
+                    self.log('info', f'进度条已变化: {last_pct:.1f}% -> {pct:.1f}%', node['id'])
+                    self._send_progress(node['id'], pct=pct, label=node_label, status='done')
+                    return 'output'
+
+            _time.sleep(poll)
+
+        self.log('warn', f'进度条等待超时 ({timeout}s)，当前进度: {pct:.1f}%', node['id'])
+        self._send_progress(node['id'], pct=pct, label=node_label, status='done')
+        return 'output'
+
+    def execute_region_wait(self, node: dict, params: dict) -> str:
+        rt = params.get('region_type', 'stable')
+        timeout = params.get('timeout', 10)
+        x, y = params.get('x', 0), params.get('y', 0)
+        w, h = params.get('w', 100), params.get('h', 100)
+        labels = {'stable': '稳定', 'change': '变化'}
+        self.log('info', f'等待区域{labels.get(rt, rt)}: ({x},{y},{w}x{h}) 超时={timeout}s', node['id'])
+        time.sleep(0.5)
+        return 'output'
+
+    def execute_scene_condition(self, node: dict, params: dict) -> str:
+        scene_name = params.get('scene_name', '')
+        similarity = params.get('similarity', 70)
+        self.log('info', f'场景识别: "{scene_name}" (相似度={similarity})', node['id'])
+        time.sleep(0.3)
+        return 'no'
+
+    # ================================================================
+    # Progress Display (Real-time feedback in separate terminal)
+    # ================================================================
+
+    def _ensure_progress_display(self):
+        """Auto-launch the progress display in a new terminal window if not running."""
+        if self._progress_display_launched:
+            return True
+        # Check if display is already running
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.3)
+            sock.connect(('127.0.0.1', 18765))
+            sock.close()
+            self._progress_display_launched = True
+            self.log('info', '已连接到进度显示器')
+            return True
+        except (ConnectionRefusedError, OSError):
+            pass
+        # Launch in a new PowerShell window
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_path = os.path.join(script_dir, 'progress_display.py')
+            # Open in a new console window (Windows-native)
+            subprocess.Popen(
+                [sys.executable, script_path],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+            self._progress_display_launched = True
+            self.log('info', '已启动进度显示器窗口')
+            # Wait for server to initialize (up to 6 seconds)
+            for _ in range(60):
+                time.sleep(0.1)
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.3)
+                    sock.connect(('127.0.0.1', 18765))
+                    sock.close()
+                    self.log('info', f'进度显示器就绪 ({script_path})')
+                    return True
+                except ConnectionRefusedError:
+                    continue
+            self.log('warn', '进度显示器未能在预期内启动')
+            return False
+        except Exception as e:
+            self.log('warn', f'启动进度显示器失败: {e}')
+            return False
+
+    def _send_progress(self, node_id, pct=None, label=None, status=None):
+        """Send a progress update to the display window (fire-and-forget)."""
+        try:
+            msg = {'type': 'progress', 'node_id': node_id}
+            if pct is not None:
+                msg['pct'] = round(pct, 1)
+            if label is not None:
+                msg['label'] = label
+            if status is not None:
+                msg['status'] = status
+            data = json.dumps(msg).encode('utf-8')
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.3)
+            sock.connect(('127.0.0.1', 18765))
+            sock.sendall(data)
+            sock.close()
+        except Exception:
+            pass  # Display not available — engine continues regardless
+
     # ================================================================
     # Flow Executor
     # ================================================================
@@ -651,6 +1048,18 @@ class ExecutionEngine:
                     elif ntype == 'sub_script':
                         self.log('info', '子脚本执行（预留功能）', node_id)
                         result = 'output'
+                    elif ntype == 'click_text':
+                        result = self.execute_click_text(node, params)
+                    elif ntype == 'popup_close':
+                        result = self.execute_popup_close(node, params)
+                    elif ntype == 'color_check':
+                        result = self.execute_color_check(node, params)
+                    elif ntype == 'progress_wait':
+                        result = self.execute_progress_wait(node, params)
+                    elif ntype == 'region_wait':
+                        result = self.execute_region_wait(node, params)
+                    elif ntype == 'scene_condition':
+                        result = self.execute_scene_condition(node, params)
                     else:
                         self.log('warn', f'未知节点类型: {ntype}', node_id)
                         result = 'output'

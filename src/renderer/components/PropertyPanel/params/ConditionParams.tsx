@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ConditionNodeParams, ConditionType } from '../../../types';
+import { Crosshair } from 'lucide-react';
 
 interface Props {
   params: ConditionNodeParams;
@@ -18,6 +19,25 @@ const CONDITION_OPTIONS: { value: ConditionType; label: string }[] = [
 ];
 
 export function ConditionParams({ params, onChange }: Props) {
+  const [selecting, setSelecting] = useState(false);
+
+  const handleSelectRegion = async () => {
+    try {
+      setSelecting(true);
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ x: result.x, y: result.y, w: result.w, h: result.h });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
   return (
     <div>
       <div className="form-group">
@@ -70,7 +90,12 @@ export function ConditionParams({ params, onChange }: Props) {
       {params.condition_type === 'color_match' && (
         <>
           <div className="form-group">
-            <label className="form-label">检测区域</label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <label className="form-label" style={{ margin: 0 }}>检测区域</label>
+              <button className="btn btn-ghost btn-icon" onClick={handleSelectRegion} disabled={selecting} title="框选检测区域" style={{ width: 28, height: 28 }}>
+                <Crosshair size={14} />
+              </button>
+            </div>
             <div className="form-row">
               <div className="form-group" style={{ flex: 1 }}>
                 <label className="form-label" style={{ fontSize: 11 }}>X</label>

@@ -211,6 +211,242 @@ const PRESET_TEMPLATES: ScriptTemplate[] = [
       };
     },
   },
+  // ======== 复杂自动化模板 1: 多目标智能检测 ========
+  {
+    id: 'complex-image-pipeline',
+    name: '多目标智能检测流水线',
+    category: 'image',
+    description: '多目标图片检测 + 条件分支 + OCR验证 + 失败重试 + 截图留证',
+    createScript: () => {
+      const ids: Record<string, string> = {};
+      const id = (key: string) => { ids[key] = nanoid(); return ids[key]; };
+      id('start'); id('loop'); id('cond_screen');
+      id('img1'); id('img2'); id('img3'); id('img4'); id('img5');
+      id('ocr_verify'); id('cond_ocr'); id('click_target');
+      id('screenshot'); id('wait_after'); id('retry_check');
+      id('end_succ'); id('end_fail');
+      const N = (key: string, type: string, x: number, y: number, params: any, label?: string): FlowNode =>
+        ({ id: ids[key], type: type as any, x, y, params, status: 'idle' as const, ...(label ? { label } : {}) });
+      const E = (from: string, port: string, to: string) =>
+        ({ id: nanoid(), from_node: ids[from], from_port: port, to_node: ids[to], to_port: 'input' });
+      return {
+        meta: { id: nanoid(), name: '多目标智能检测流水线', description: '5优先级图片检测→OCR验证→点击→截图留证', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          N('start','start',520,20,{label:'开始'}),
+          N('loop','loop',520,140,{loop_type:'infinite'},'无限循环检测'),
+          N('img1','image_click',40,320,{targets:[],similarity:90,timeout:2,method:'single',offset_x:0,offset_y:0,delay_after:0.3,multi_scale:true,match_all:false},'VIP图标'),
+          N('img2','image_click',240,320,{targets:[],similarity:88,timeout:1.5,method:'single',offset_x:0,offset_y:0,delay_after:0.3,multi_scale:true,match_all:false},'高优图标'),
+          N('img3','image_click',440,320,{targets:[],similarity:85,timeout:1,method:'single',offset_x:0,offset_y:0,delay_after:0.3},'中优图标'),
+          N('img4','image_click',640,320,{targets:[],similarity:82,timeout:0.8,method:'single',offset_x:0,offset_y:0,delay_after:0.3},'普通图标'),
+          N('img5','image_click',840,320,{targets:[],similarity:80,timeout:0.5,method:'single',offset_x:0,offset_y:0,delay_after:0.3},'兜底图标'),
+          N('ocr_verify','click_text',520,460,{text:'确认|确定|完成|OK',timeout:3,single_match:true,method:'single',offset_x:0,offset_y:0},'OCR验证弹窗'),
+          N('cond_ocr','condition',520,580,{condition_type:'always_true'},'验证是否通过'),
+          N('click_target','click',240,700,{x:500,y:400,method:'single',delay_after:0.5},'点击目标区域'),
+          N('screenshot','screenshot',520,700,{},'截图留证'),
+          N('wait_after','wait',520,820,{wait_type:'time',duration:2},'等待2秒'),
+          N('retry_check','condition',800,700,{condition_type:'always_true'},'检查重试次数'),
+          N('end_succ','end',240,900,{label:'执行成功'}),
+          N('end_fail','end',800,900,{label:'失败退出'}),
+        ],
+        edges: [
+          E('start','output','loop'),
+          E('loop','loop_body','img1'),
+          E('img1','fail','img2'), E('img1','output','ocr_verify'),
+          E('img2','fail','img3'), E('img2','output','ocr_verify'),
+          E('img3','fail','img4'), E('img3','output','ocr_verify'),
+          E('img4','fail','img5'), E('img4','output','ocr_verify'),
+          E('img5','fail','retry_check'), E('img5','output','ocr_verify'),
+          E('ocr_verify','output','cond_ocr'),
+          E('cond_ocr','yes','click_target'), E('cond_ocr','no','retry_check'),
+          E('click_target','output','screenshot'),
+          E('screenshot','output','wait_after'),
+          E('wait_after','output','loop'),
+          E('loop','loop_end','end_succ'),
+          { id: nanoid(), from_node: ids.retry_check, from_port: 'yes', to_node: ids.end_succ, to_port: 'input' },
+          { id: nanoid(), from_node: ids.retry_check, from_port: 'no', to_node: ids.end_fail, to_port: 'input' },
+        ],
+        variables: { retry_count: '0' },
+        settings: { default_delay: 0.5, error_handling: 'continue', max_retries: 3, retry_delay: 1, log_level: 'info' },
+      };
+    },
+  },
+
+  // ======== 复杂自动化模板 2: 网页数据采集 ========
+  {
+    id: 'complex-web-scraper',
+    name: '网页数据采集与监控',
+    category: 'app',
+    description: '多轮页面数据采集 + 条件判断 + 截图保存 + 循环滚动 + 数据验证',
+    createScript: () => {
+      const ids: Record<string, string> = {};
+      const id = (key: string) => { ids[key] = nanoid(); return ids[key]; };
+      id('start'); id('loop_scroll'); id('scroll_down');
+      id('wait_load'); id('screenshot_page');
+      id('cond_has_data'); id('click_next'); id('wait_transition');
+      id('collect_done'); id('end');
+      const N = (key: string, type: string, x: number, y: number, params: any, label?: string): FlowNode =>
+        ({ id: ids[key], type: type as any, x, y, params, status: 'idle' as const, ...(label ? { label } : {}) });
+      const E = (from: string, port: string, to: string) =>
+        ({ id: nanoid(), from_node: ids[from], from_port: port, to_node: ids[to], to_port: 'input' });
+      return {
+        meta: { id: nanoid(), name: '网页数据采集与监控', description: '自动滚动页面→截图保存→翻页→循环采集多页数据', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          N('start','start',360,20,{label:'开始采集'}),
+          N('loop_scroll','loop',360,140,{loop_type:'count',count:5,description:'滚动采集5次'},'滚动采集循环'),
+          N('scroll_down','swipe',120,280,{start_x:500,start_y:600,end_x:500,end_y:200,duration:0.5,delay_after:0.5},'向下滑动'),
+          N('wait_load','wait',360,280,{wait_type:'time',duration:2,description:'等待内容加载'},'等待加载'),
+          N('screenshot_page','screenshot',360,400,{description:'采集结果截图'},'截图保存'),
+          N('cond_has_data','condition',120,520,{condition_type:'always_true'},'检查是否有下一页'),
+          N('click_next','click',120,640,{x:700,y:750,method:'single',delay_after:1.5,description:'点击下一页按钮'},'点击下一页'),
+          N('wait_transition','wait',360,640,{wait_type:'time',duration:3,description:'等待页面切换'},'等待翻页'),
+          N('collect_done','screenshot',360,760,{description:'最终结果截图'},'最终截图'),
+          N('end','end',360,880,{label:'采集完成'}),
+        ],
+        edges: [
+          E('start','output','loop_scroll'),
+          E('loop_scroll','loop_body','scroll_down'),
+          E('scroll_down','output','wait_load'),
+          E('wait_load','output','screenshot_page'),
+          E('screenshot_page','output','cond_has_data'),
+          E('cond_has_data','yes','click_next'),
+          E('cond_has_data','no','loop_scroll'),
+          E('click_next','output','wait_transition'),
+          E('wait_transition','output','loop_scroll'),
+          E('loop_scroll','loop_end','collect_done'),
+          E('collect_done','output','end'),
+        ],
+        variables: {},
+        settings: { default_delay: 1, error_handling: 'continue', max_retries: 2, retry_delay: 1, log_level: 'info' },
+      };
+    },
+  },
+
+  // ======== 复杂自动化模板 3: 智能表单提交流程 ========
+  {
+    id: 'complex-form-submit',
+    name: '智能表单提交流程',
+    category: 'app',
+    description: '多步骤表单填写 + 实时OCR验证 + 失败重试 + 颜色状态检测 + 截图日志',
+    createScript: () => {
+      const ids: Record<string, string> = {};
+      const id = (key: string) => { ids[key] = nanoid(); return ids[key]; };
+      id('start'); id('open_page'); id('wait_form');
+      id('input_name'); id('input_phone'); id('input_email');
+      id('click_submit'); id('cond_validate');
+      id('ocr_check'); id('cond_ocr_ok');
+      id('screenshot_result'); id('color_status');
+      id('retry_loop'); id('end_succ'); id('end_fail');
+      const N = (key: string, type: string, x: number, y: number, params: any, label?: string): FlowNode =>
+        ({ id: ids[key], type: type as any, x, y, params, status: 'idle' as const, ...(label ? { label } : {}) });
+      const E = (from: string, port: string, to: string) =>
+        ({ id: nanoid(), from_node: ids[from], from_port: port, to_node: ids[to], to_port: 'input' });
+      return {
+        meta: { id: nanoid(), name: '智能表单提交流程', description: '多字段表单→OCR验证→颜色状态检测→失败重试→截图', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          N('start','start',360,20,{label:'开始提交'}),
+          N('open_page','click',360,120,{x:400,y:300,method:'double',delay_after:2,description:'双击打开表单页面'},'打开表单'),
+          N('wait_form','wait',360,220,{wait_type:'time',duration:3,description:'等待表单加载完成'},'等待表单'),
+          N('input_name','input_text',80,340,{text:'张三',click_before:true,clear_before:true,delay_after:0.5},'输入姓名'),
+          N('input_phone','input_text',360,340,{text:'13800138000',click_before:true,clear_before:true,delay_after:0.5},'输入电话'),
+          N('input_email','input_text',640,340,{text:'zhangsan@test.com',click_before:true,clear_before:true,delay_after:0.5},'输入邮箱'),
+          N('click_submit','click',360,460,{x:500,y:600,method:'single',delay_after:1,description:'点击提交按钮'},'点击提交'),
+          N('cond_validate','condition',360,580,{condition_type:'always_true'},'基本验证'),
+          N('ocr_check','click_text',80,700,{text:'提交成功|成功提交|谢谢|感谢',timeout:5,single_match:true,method:'single',offset_x:0,offset_y:0},'OCR验证结果'),
+          N('cond_ocr_ok','condition',360,820,{condition_type:'always_true'},'OCR验证判断'),
+          N('screenshot_result','screenshot',80,940,{},'截图结果'),
+          N('color_status','color_check',640,700,{x:400,y:400,w:60,h:40,expected_color:'30,200,200',tolerance:50,description:'检测提交按钮颜色变化'},'颜色状态检测'),
+          N('retry_loop','loop',640,820,{loop_type:'count',count:3,description:'失败重试3次'},'重试循环'),
+          N('end_succ','end',80,1060,{label:'提交成功'}),
+          N('end_fail','end',640,1060,{label:'提交失败'}),
+        ],
+        edges: [
+          E('start','output','open_page'),
+          E('open_page','output','wait_form'),
+          E('wait_form','output','input_name'),
+          E('input_name','output','input_phone'),
+          E('input_phone','output','input_email'),
+          E('input_email','output','click_submit'),
+          E('click_submit','output','cond_validate'),
+          E('cond_validate','yes','ocr_check'),
+          E('cond_validate','no','retry_loop'),
+          E('ocr_check','output','cond_ocr_ok'),
+          E('ocr_check','fail','retry_loop'),
+          E('cond_ocr_ok','yes','color_status'),
+          E('cond_ocr_ok','no','retry_loop'),
+          E('color_status','output','screenshot_result'),
+          E('screenshot_result','output','end_succ'),
+          E('retry_loop','loop_body','click_submit'),
+          E('retry_loop','loop_end','end_fail'),
+        ],
+        variables: { retry_count: '0' },
+        settings: { default_delay: 0.5, error_handling: 'retry', max_retries: 3, retry_delay: 1, log_level: 'info' },
+      };
+    },
+  },
+
+  // ======== 复杂自动化模板 4: 批量文件处理 + 弹窗监控 ========
+  {
+    id: 'complex-batch-process',
+    name: '批量文件处理监控',
+    category: 'system',
+    description: '批量处理多个项目 + 弹窗自动关闭 + 进度等待 + 颜色检测 + 并行分支截图',
+    createScript: () => {
+      const ids: Record<string, string> = {};
+      const id = (key: string) => { ids[key] = nanoid(); return ids[key]; };
+      id('start'); id('main_loop'); id('open_file');
+      id('popup_monitor'); id('cond_popup');
+      id('close_popup'); id('progress_wait');
+      id('cond_progress'); id('process_action');
+      id('color_check'); id('screenshot_a');
+      id('screenshot_b'); id('wait_step');
+      id('end');
+      const N = (key: string, type: string, x: number, y: number, params: any, label?: string): FlowNode =>
+        ({ id: ids[key], type: type as any, x, y, params, status: 'idle' as const, ...(label ? { label } : {}) });
+      const E = (from: string, port: string, to: string) =>
+        ({ id: nanoid(), from_node: ids[from], from_port: port, to_node: ids[to], to_port: 'input' });
+      return {
+        meta: { id: nanoid(), name: '批量文件处理监控', description: '10次循环处理→弹窗自动关闭→进度监控→颜色检测→并行截图', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          N('start','start',400,20,{label:'开始批量处理'}),
+          N('main_loop','loop',400,140,{loop_type:'count',count:10,description:'批量处理10个项目'},'主循环 ×10'),
+          N('open_file','click',400,260,{x:300,y:400,method:'double',delay_after:1,description:'双击打开项目文件'},'打开项目文件'),
+          N('popup_monitor','region_wait',80,400,{region_type:'change',x:200,y:100,w:400,h:300,timeout:5,poll_interval:0.5},'监控弹窗出现'),
+          N('cond_popup','condition',400,400,{condition_type:'window_exists'},'检查是否有弹窗'),
+          N('close_popup','popup_close',80,540,{strategies:['close_button','enter','esc'],delay_after:0.5},'关闭弹窗'),
+          N('progress_wait','progress_wait',400,540,{wait_type:'fill',region:{x:300,y:500,w:400,h:20},timeout:60,poll_interval:0.5,description:'等待进度条满'},'等待进度完成'),
+          N('cond_progress','condition',400,660,{condition_type:'always_true'},'进度结果判断'),
+          N('process_action','click',200,780,{x:500,y:550,method:'single',delay_after:0.5,description:'点击下一步处理'},'执行处理操作'),
+          N('color_check','color_check',600,780,{x:350,y:450,w:40,h:30,expected_color:'120,200,100',tolerance:60},'处理状态灯检测'),
+          N('screenshot_a','screenshot',200,900,{},'结果截图A'),
+          N('screenshot_b','screenshot',600,900,{},'结果截图B'),
+          N('wait_step','wait',400,1020,{wait_type:'time',duration:1,description:'处理间隔'},'间隔等待'),
+          N('end','end',400,1140,{label:'批量处理完成'}),
+        ],
+        edges: [
+          E('start','output','main_loop'),
+          E('main_loop','loop_body','open_file'),
+          E('open_file','output','popup_monitor'),
+          E('popup_monitor','output','cond_popup'),
+          E('cond_popup','yes','close_popup'),
+          E('cond_popup','no','progress_wait'),
+          E('close_popup','output','progress_wait'),
+          E('progress_wait','output','cond_progress'),
+          E('cond_progress','yes','process_action'),
+          E('cond_progress','no','main_loop'),
+          E('process_action','output','color_check'),
+          // Parallel branches: both screenshot A and B execute
+          { id: nanoid(), from_node: ids.color_check, from_port: 'output', to_node: ids.screenshot_a, to_port: 'input' },
+          { id: nanoid(), from_node: ids.color_check, from_port: 'output', to_node: ids.screenshot_b, to_port: 'input' },
+          E('screenshot_a','output','wait_step'),
+          E('screenshot_b','output','wait_step'),
+          E('wait_step','output','main_loop'),
+          E('main_loop','loop_end','end'),
+        ],
+        variables: { processed: '0', failed: '0' },
+        settings: { default_delay: 0.5, error_handling: 'continue', max_retries: 2, retry_delay: 1, log_level: 'info' },
+      };
+    },
+  },
 ];
 
 function createTemplateScript(templateId: string): FlowScript {
@@ -385,14 +621,13 @@ export const useStore = create<AppStore>()(
         const result = await api.saveFileDialog(`${script.meta.name}.json`);
         if (!result.canceled && result.filePath) {
           try {
-            const fs = (window as any).require?.('fs');
-            if (fs) {
-              const basePath = result.filePath.replace(/\.json$/, '');
-              fs.writeFileSync(result.filePath, json, 'utf-8');
-              fs.writeFileSync(basePath + '.flow', pseudoCode, 'utf-8');
-              return;
-            }
-          } catch {}
+            const basePath = result.filePath.replace(/\.json$/, '');
+            await api.writeFile(result.filePath, json);
+            await api.writeFile(basePath + '.flow', pseudoCode);
+            return;
+          } catch (e) {
+            console.error('Save failed:', e);
+          }
         }
       }
       // Browser fallback — trigger sequential downloads
@@ -525,11 +760,8 @@ export const useStore = create<AppStore>()(
         (e) => e.from_node === edge.from_node && e.from_port === edge.from_port && e.to_node === edge.to_node
       );
       if (exists) return;
-      // Remove existing edge from same port
+      // Allow multiple edges from the same output port (fan-out / parallel execution)
       set((state) => {
-        state.script.edges = state.script.edges.filter(
-          (e) => !(e.from_node === edge.from_node && e.from_port === edge.from_port)
-        );
         state.script.edges.push({ ...edge, id: nanoid() });
         state.isDirty = true;
       });
@@ -728,11 +960,15 @@ export const useStore = create<AppStore>()(
             set((s) => {
               s.execution.status = status;
               s.execution.finished_at = new Date().toISOString();
+              s.execution.loop_iteration = null;
               s._executor = null;
             });
           },
           onCurrentNode: (nodeId) => {
             set((s) => { s.execution.current_node_id = nodeId; });
+          },
+          onIteration: (current, total, nodeId) => {
+            set((s) => { s.execution.loop_iteration = { current, total, node_id: nodeId }; });
           },
         });
         set((s) => { s._executor = ctrl; });
@@ -939,6 +1175,7 @@ if (_api) {
         useStore.setState((s) => {
           s.execution.status = msg.status || 'completed';
           s.execution.finished_at = new Date().toISOString();
+          s.execution.loop_iteration = null;
           s._executor = null;
           s.script.nodes.forEach((n) => {
             if (n.status === 'running') n.status = 'idle';
@@ -948,6 +1185,11 @@ if (_api) {
       case 'status_report':
         useStore.setState((s) => { s.execution.status = msg.status; });
         break;
+      case 'loop_iteration':
+        useStore.setState((s) => {
+          s.execution.loop_iteration = { current: msg.current, total: msg.total, node_id: msg.node_id };
+        });
+        break;
     }
   });
 
@@ -955,3 +1197,4 @@ if (_api) {
     useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
   });
 }
+// hmr-trigger

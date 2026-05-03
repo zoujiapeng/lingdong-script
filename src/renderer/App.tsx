@@ -15,31 +15,32 @@ export default function App() {
   const { ui, setUI, setViewMode } = useStore();
   const { viewMode, dark_mode } = ui;
   const [proximity, setProximity] = useState({ top: false, bottom: false, left: false, right: false });
-  const proxTimer = useRef<ReturnType<typeof setTimeout>>();
   const hoveredRef = useRef({ top: false, bottom: false, left: false, right: false });
   const [showAIDialog, setShowAIDialog] = useState(false);
 
-  // Mouse proximity tracking — shows hidden panels when mouse nears viewport edges
+  // Mouse proximity tracking — shows panels when mouse nears viewport edges
+  // Once shown, panels stay visible until manually hidden via status bar ("收起所有面板")
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const { clientX: x, clientY: y } = e;
     const { innerWidth: w, innerHeight: h } = window;
     const hov = hoveredRef.current;
-    const zone = {
-      top: y < 36 || hov.top,
-      bottom: y > h - 36 || hov.bottom,
-      left: x < 36 || hov.left,
-      right: x > w - 100 || hov.right,
-    };
-    setProximity(zone);
-    clearTimeout(proxTimer.current);
-    // Only auto-hide when mouse leaves all edge zones AND is not hovering over any panel
-    if (!zone.top && !zone.bottom && !zone.left && !zone.right) {
-      proxTimer.current = setTimeout(() => {
-        const h = hoveredRef.current;
-        if (!h.top && !h.bottom && !h.left && !h.right) {
-          setProximity({ top: false, bottom: false, left: false, right: false });
-        }
-      }, 3000);
+    const inCenterTop = y < 36 && x > 260 && x < w - 320;
+    const inTopBarHover = y < 90 && hov.top;
+
+    // Manage hover state
+    if (inCenterTop || inTopBarHover) hov.top = true;
+    if (!inCenterTop && y > 90) hov.top = false;
+
+    // Latching: only set proximity to true, never false.
+    // Panels stay visible once triggered until manually dismissed.
+    const newProx: typeof proximity = {};
+    if (inCenterTop || inTopBarHover) newProx.top = true;
+    if (y > h - 36 || hov.bottom) newProx.bottom = true;
+    if (x < 36 || hov.left) newProx.left = true;
+    if (x > w - 100 || hov.right) newProx.right = true;
+
+    if (newProx.top || newProx.bottom || newProx.left || newProx.right) {
+      setProximity(prev => ({ ...prev, ...newProx }));
     }
   }, []);
 
@@ -47,16 +48,18 @@ export default function App() {
   const handlePanelEnter = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
     hoveredRef.current[dir] = true;
     setProximity(prev => ({ ...prev, [dir]: true }));
-    clearTimeout(proxTimer.current);
   }, []);
 
   const handlePanelLeave = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
     hoveredRef.current[dir] = false;
   }, []);
 
-  useEffect(() => {
-    return () => clearTimeout(proxTimer.current);
-  }, []);
+  // Manual hide all panels — called from status bar
+  const hideAllPanels = useCallback(() => {
+    setProximity({ top: false, bottom: false, left: false, right: false });
+    hoveredRef.current = { top: false, bottom: false, left: false, right: false };
+    setUI({ show_node_library: false, show_property_panel: false, show_log_panel: false });
+  }, [setUI]);
 
   // Apply dark mode class
   useEffect(() => {
@@ -112,7 +115,7 @@ export default function App() {
       className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${proximity.top ? ' proximity-top' : ''}${proximity.bottom ? ' proximity-bottom' : ''}${proximity.left ? ' proximity-left' : ''}${proximity.right ? ' proximity-right' : ''}`}
       onMouseMove={viewMode === 'canvas' ? handleMouseMove : undefined}
     >
-      <div className="top-wrapper" onMouseEnter={() => handlePanelEnter('top')} onMouseLeave={() => handlePanelLeave('top')}>
+      <div className="top-wrapper">
         <TopBar />
         <div className="view-tabs">
         <button
@@ -191,7 +194,7 @@ export default function App() {
         )}
       </div>
       <div className="bottom-wrapper" onMouseEnter={() => handlePanelEnter('bottom')} onMouseLeave={() => handlePanelLeave('bottom')}>
-        <StatusBar />
+        <StatusBar onHidePanels={hideAllPanels} />
       </div>
     </div>
   );

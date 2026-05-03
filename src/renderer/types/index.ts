@@ -297,6 +297,7 @@ export interface ExecutionState {
   started_at?: string;
   finished_at?: string;
   error?: string;
+  loop_iteration?: { current: number; total: number; node_id: string } | null;
 }
 
 export interface LogEntry {

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
 import * as path from 'path';
+import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import * as https from 'https';
 
@@ -148,10 +149,12 @@ function startPythonEngine(scriptJson: string) {
 
   _engineRunning = true;
 
+  const proc = pythonProcess; // capture reference for close handler
+
   // Send script data
   pythonProcess.stdin!.write(JSON.stringify({ type: 'execute', payload: { script: JSON.parse(scriptJson) } }) + '\n');
 
-  pythonProcess.stdout!.on('data', (data: Buffer) => {
+  proc.stdout!.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
       try {
@@ -163,26 +166,33 @@ function startPythonEngine(scriptJson: string) {
     }
   });
 
-  pythonProcess.stderr!.on('data', (data: Buffer) => {
+  proc.stderr!.on('data', (data: Buffer) => {
     mainWindow?.webContents.send('engine-log', { level: 'error', message: data.toString() });
   });
 
-  pythonProcess.on('close', (code) => {
+  proc.on('close', (code) => {
     _engineRunning = false;
-    pythonProcess = null;
+    if (pythonProcess === proc) {
+      pythonProcess = null;
+    }
     mainWindow?.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
     mainWindow?.webContents.send('engine-log', { level: 'info', message: `引擎进程退出 (代码: ${code})` });
   });
 }
 
 function stopPythonEngine() {
+  _engineRunning = false;
   if (pythonProcess) {
-    pythonProcess.kill('SIGTERM');
-    // Force immediate cleanup — on Windows SIGTERM is TerminateProcess
-    pythonProcess = null;
-    _engineRunning = false;
-  } else {
-    _engineRunning = false;
+    // Step 1: Send graceful stop message via stdin
+    try { sendToEngine({ type: 'stop' }); } catch {}
+
+    // Step 2: If process doesn't exit gracefully within 2s, force kill
+    const timer = setTimeout(() => {
+      if (pythonProcess) {
+        pythonProcess.kill('SIGTERM');
+      }
+    }, 2000);
+    timer.unref();
   }
 }
 
@@ -208,6 +218,23 @@ ipcMain.handle('dialog:saveFile', async (_, defaultName?: string) => {
     filters: [{ name: '脚本文件', extensions: ['json'] }],
   });
   return result;
+});
+
+ipcMain.handle('file:read', async (_, filePath: string) => {
+  try {
+    return { content: fs.readFileSync(filePath, 'utf-8') };
+  } catch (e: any) {
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle('file:write', async (_, filePath: string, content: string) => {
+  try {
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return { success: true };
+  } catch (e: any) {
+    return { error: e.message };
+  }
 });
 
 ipcMain.handle('engine:start', (_, scriptJson: string) => {
@@ -387,6 +414,134 @@ function confirm(){
     mainWindow.restore();
     return { error: e.message };
   }
+});
+
+ipcMain.handle('screenshot:selectRegion', async () => {
+  if (!mainWindow) return { error: 'no window' };
+  mainWindow.minimize();
+  await new Promise((r) => setTimeout(r, 500));
+
+  try {
+    const { screen } = require('electron');
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width: sw, height: sh } = primaryDisplay.size;
+
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: sw, height: sh },
+    });
+    if (sources.length === 0) { mainWindow.restore(); return { error: 'no sources' }; }
+
+    const fullDataURL = sources[0].thumbnail.toDataURL();
+
+    const selWin = new BrowserWindow({
+      width: sw, height: sh,
+      fullscreen: true, frame: false, alwaysOnTop: true,
+      resizable: false, show: false,
+      webPreferences: { contextIsolation: false, nodeIntegration: true },
+    });
+
+    const selHTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;cursor:crosshair;user-select:none}
+#canvas{display:block;width:100%;height:100%}
+#bar{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+  background:rgba(0,0,0,0.75);color:#fff;padding:8px 18px;border-radius:8px;
+  font:14px system-ui;display:flex;align-items:center;gap:14px;pointer-events:none;z-index:10}
+#bar kbd{background:rgba(255,255,255,0.15);padding:2px 7px;border-radius:4px;font:11px system-ui}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="bar"><span>拖拽选择监控区域</span><kbd>Enter</kbd> 确认 <kbd>Esc</kbd> 取消</div>
+<script>
+const{ipcRenderer}=require("electron");
+const c=document.getElementById("c"),ctx=c.getContext("2d");
+const img=new Image();
+img.onload=()=>{c.width=img.width;c.height=img.height;ctx.drawImage(img,0,0);init()};
+img.src='${fullDataURL}';
+let sx,sy,ex,ey,drg=false;
+function init(){
+  c.onmousedown=e=>{sx=e.offsetX;sy=e.offsetY;drg=true};
+  c.onmousemove=e=>{if(!drg)return;ex=e.offsetX;ey=e.offsetY;draw()};
+  c.onmouseup=()=>{drg=false};
+  c.ondblclick=confirm;
+  onkeydown=e=>{if(e.key==="Enter")confirm();if(e.key==="Escape")ipcRenderer.send("ss:cancel")};
+}
+function draw(){
+  ctx.drawImage(img,0,0);
+  const x=Math.min(sx,ex),y=Math.min(sy,ey),w=Math.abs(ex-sx),h=Math.abs(ey-sy);
+  ctx.fillStyle="rgba(0,0,0,0.5)";ctx.fillRect(0,0,c.width,y);
+  ctx.fillRect(0,y,x,h);ctx.fillRect(x+w,y,c.width-x-w,h);ctx.fillRect(0,y+h,c.width,c.height-y-h);
+  ctx.strokeStyle="#3b82f6";ctx.lineWidth=3;ctx.setLineDash([6,4]);
+  ctx.strokeRect(x,y,w,h);ctx.setLineDash([]);
+  ctx.fillStyle="rgba(59,130,246,0.9)";ctx.fillRect(x,y-24,Math.min(w+10,100),20);
+  ctx.fillStyle="#fff";ctx.font="12px system-ui";ctx.textAlign="center";
+  ctx.fillText(w+"×"+h,x+Math.min(w,95)/2,y-8);
+}
+function confirm(){
+  if(sx===void 0||ex===void 0)return;
+  const x=Math.round(Math.min(sx,ex)),y=Math.round(Math.min(sy,ey)),w=Math.round(Math.abs(ex-sx)),h=Math.round(Math.abs(ey-sy));
+  if(w<5||h<5)return;
+  ipcRenderer.send("ss:done",{x,y,w,h});
+}
+<\/script>
+</body>
+</html>`;
+
+    selWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(selHTML));
+    selWin.once('ready-to-show', () => selWin.show());
+
+    // Wait for selection result, return coordinates directly (no cropping)
+    const result = await new Promise<{ x: number; y: number; w: number; h: number } | null>((resolve) => {
+      ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
+        resolve(rect);
+      });
+      ipcMain.once('ss:cancel', () => { resolve(null); });
+    });
+
+    selWin.close();
+    mainWindow.restore();
+    mainWindow.focus();
+    if (result) return { x: result.x, y: result.y, w: result.w, h: result.h };
+    return { error: 'cancelled' };
+
+  } catch (e: any) {
+    mainWindow.restore();
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; w: number; h: number }) => {
+  return new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    const scriptPath = path.join(__dirname, '../../tools/ocr_region.py');
+    const proc = spawn('python', [scriptPath], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve([]); }
+      } else {
+        resolve([]);
+      }
+    });
+    proc.on('error', () => resolve([]));
+
+    proc.stdin!.write(JSON.stringify(region) + '\n');
+    proc.stdin!.end();
+  });
 });
 
 // --- Menu Action IPC ---

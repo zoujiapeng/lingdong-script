@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ProgressWaitNodeParams } from '../../../types';
+import { Crosshair } from 'lucide-react';
 
 interface Props {
   params: ProgressWaitNodeParams;
@@ -7,6 +8,25 @@ interface Props {
 }
 
 export function ProgressWaitParams({ params, onChange }: Props) {
+  const [selecting, setSelecting] = useState(false);
+
+  const handleSelectRegion = async () => {
+    try {
+      setSelecting(true);
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ region: { x: result.x, y: result.y, w: result.w, h: result.h } });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setSelecting(false);
+    }
+  };
+
   return (
     <div>
       <div className="form-group">
@@ -18,7 +38,12 @@ export function ProgressWaitParams({ params, onChange }: Props) {
         </select>
       </div>
       <div className="form-group">
-        <label className="form-label">进度条区域</label>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <label className="form-label" style={{ margin: 0 }}>进度条区域</label>
+          <button className="btn btn-ghost btn-icon" onClick={handleSelectRegion} disabled={selecting} title="框选监控区域" style={{ width: 28, height: 28 }}>
+            <Crosshair size={14} />
+          </button>
+        </div>
         <div className="form-row">
           <div className="form-group" style={{ flex: 1 }}>
             <label className="form-label" style={{ fontSize: 11 }}>X</label>

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { SwipeNodeParams } from '../../../types';
+import { Crosshair } from 'lucide-react';
 
 interface Props {
   params: SwipeNodeParams;
@@ -7,10 +8,51 @@ interface Props {
 }
 
 export function SwipeParams({ params, onChange }: Props) {
+  const [selecting, setSelecting] = useState<'start' | 'end' | null>(null);
+
+  const handleSelectStart = async () => {
+    try {
+      setSelecting('start');
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ start_x: result.x, start_y: result.y });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setSelecting(null);
+    }
+  };
+
+  const handleSelectEnd = async () => {
+    try {
+      setSelecting('end');
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ end_x: result.x, end_y: result.y });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setSelecting(null);
+    }
+  };
+
   return (
     <div>
       <div className="form-group">
-        <label className="form-label">起点坐标</label>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <label className="form-label" style={{ margin: 0 }}>起点坐标</label>
+          <button className="btn btn-ghost btn-icon" onClick={handleSelectStart} disabled={selecting !== null} title="框选起点" style={{ width: 28, height: 28 }}>
+            <Crosshair size={14} />
+          </button>
+        </div>
         <div className="form-row">
           <div>
             <label className="form-label" style={{ fontSize: 11, marginBottom: 2 }}>X</label>
@@ -24,7 +66,12 @@ export function SwipeParams({ params, onChange }: Props) {
       </div>
 
       <div className="form-group">
-        <label className="form-label">终点坐标</label>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <label className="form-label" style={{ margin: 0 }}>终点坐标</label>
+          <button className="btn btn-ghost btn-icon" onClick={handleSelectEnd} disabled={selecting !== null} title="框选终点" style={{ width: 28, height: 28 }}>
+            <Crosshair size={14} />
+          </button>
+        </div>
         <div className="form-row">
           <div>
             <label className="form-label" style={{ fontSize: 11, marginBottom: 2 }}>X</label>

@@ -288,6 +288,27 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
           </div>
         )}
 
+        {/* Loop iteration counter (shown during execution) */}
+        {node.type === 'loop' && (() => {
+          const li = useStore.getState().execution.loop_iteration;
+          if (!li || li.node_id !== node.id) return null;
+          const remaining = li.total > 0 ? li.total - li.current : 0;
+          return (
+            <div style={{
+              padding: '4px 10px 6px',
+              fontSize: 12,
+              color: '#3b82f6',
+              background: 'rgba(59,130,246,0.08)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}>
+              <span style={{ fontWeight: 600 }}>第 {li.current}/{li.total} 次</span>
+              <span style={{ opacity: 0.6 }}>剩余 {remaining} 次</span>
+            </div>
+          );
+        })()}
+
         {/* Status bar */}
         <div className="flow-node-status-bar" style={{ background: statusColor }} />
       </div>

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { ImageClickNodeParams, ClickMethod, ImageTarget } from '../../../types';
-import { Camera, ChevronUp, ChevronDown, Trash2 } from 'lucide-react';
+import { Camera, ChevronUp, ChevronDown, Trash2, Crosshair } from 'lucide-react';
 
 interface Props {
   params: ImageClickNodeParams;
@@ -90,6 +90,23 @@ export function ImageClickParams({ params, onChange }: Props) {
       reader.readAsDataURL(file);
     };
     input.click();
+  };
+
+  const handleSelectRegion = async () => {
+    try {
+      setCapturing(true);
+      const api = (window as any).electronAPI;
+      if (api?.selectRegion) {
+        const result = await api.selectRegion();
+        if (result && typeof result.x === 'number') {
+          onChange({ region: { x: result.x, y: result.y, w: result.w, h: result.h } });
+        }
+      }
+    } catch (err: any) {
+      console.error('选区失败:', err);
+    } finally {
+      setCapturing(false);
+    }
   };
 
   return (
@@ -232,7 +249,12 @@ export function ImageClickParams({ params, onChange }: Props) {
 
       <hr className="section-divider" />
       <div className="form-group">
-        <label className="form-label">区域限制 (可选)</label>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <label className="form-label" style={{ margin: 0 }}>区域限制 (可选)</label>
+          <button className="btn btn-ghost btn-icon" onClick={handleSelectRegion} disabled={capturing} title="框选搜索区域" style={{ width: 28, height: 28 }}>
+            <Crosshair size={14} />
+          </button>
+        </div>
         <div className="form-row">
           <div className="form-group">
             <label className="form-label" style={{ fontSize: 11 }}>X</label>

@@ -100,6 +100,10 @@ export function FlowCanvas() {
   // Delete/Backspace key to delete selected nodes and edges
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input field
+      const target = e.target as HTMLElement;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) return;
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const st = useStore.getState();
         if (st.ui.selection.nodes.length > 0) {
