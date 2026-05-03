@@ -144,9 +144,16 @@ claude/
 - [ ] 创建 MERGE_PLAN.md（本文档）
 - [ ] 保存记忆
 
-### Phase 1：Python 基础架构合并 — 引擎层
+### Phase 1：Python 基础架构合并 — 引擎层 ✅ DONE
 
 **目标**：以 claude1 的 `python/engine/` 为基础，融入当前项目的 DSL 解析能力。
+
+| 任务 | 状态 |
+|------|------|
+| 1.1 复制 claude1 引擎 | ✅ |
+| 1.2 合并 DSL 解析器 (大小写/缩进/SWIPE/SCROLL/DELAY/WHILE/UNTIL) | ✅ |
+| 1.3 合并 DSL 条件解析 | ⏭️ 延后到 Phase 2/3 (由 features 系统处理) |
+| 1.4 适配执行器 (WHILE/UNTIL 语义+SWIPE/SCROLL/DELAY 动作) | ✅ |
 
 | 任务 | 文件 | 操作 | 预估复杂度 |
 |------|------|------|-----------|
