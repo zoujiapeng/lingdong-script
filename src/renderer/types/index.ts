@@ -208,6 +208,13 @@ export interface SceneConditionNodeParams {
   description?: string;
 }
 
+export interface ScreenshotNodeParams {
+  region?: { x: number; y: number; w: number; h: number };
+  save_path?: string;
+  format?: 'png' | 'jpg';
+  description?: string;
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
@@ -226,7 +233,8 @@ export type NodeParams =
   | ColorCheckNodeParams
   | ProgressWaitNodeParams
   | RegionWaitNodeParams
-  | SceneConditionNodeParams;
+  | SceneConditionNodeParams
+  | ScreenshotNodeParams;
 
 // --- Flow Node & Edge ---
 
@@ -351,7 +359,7 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
-  viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
+  viewMode: 'canvas' | 'pseudocode' | 'dsl' | 'ai' | 'settings';
   show_node_library: boolean;
   show_property_panel: boolean;
   show_log_panel: boolean;

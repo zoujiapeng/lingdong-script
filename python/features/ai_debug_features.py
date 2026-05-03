@@ -86,126 +86,109 @@ def ai_generate_dsl(task: str, api_key: str = "", context: str = "") -> dict:
 @feature(
     name="dsl_to_graph",
     display_name="DSL转流程图",
-    description="【可视化】将 DSL 文本转换为 React Flow 格式的节点/边 JSON。用于展示 DSL 流程图或在 UI 中编辑",
+    description="【可视化】将 DSL 文本转换为前端 Canvas FlowScript JSON 格式。AI 生成 DSL 后调用此工具可自动获得流程图",
     category=F.AI,
     params=[
         P("dsl", "str", "DSL文本", example="CLICK 开始\nWAIT 加载"),
         P("layout", "str", "布局: vertical|horizontal|auto", required=False, default="vertical"),
     ],
-    returns="dict{nodes, edges}",
+    returns="dict{meta, nodes, edges, variables, settings} — FlowScript 可直接加载到前端 Canvas",
     test_cases=[
         TC("simple_dsl", {"dsl": "CLICK 开始\nWAIT 完成"}, "non_null",
            validator=lambda r: r["success"] and len(r["result"]["nodes"]) >= 2),
     ],
 )
 def dsl_to_graph(dsl: str, layout: str = "vertical") -> dict:
-    from engine.dsl_parser import DSLParser, ASTNode, NodeType
-
-    try:
-        ast = DSLParser.from_string(dsl)
-    except Exception as e:
-        return {"nodes": [], "edges": [], "error": str(e)}
-
-    nodes, edges = [], []
-    x_base = 300
-    y_step = 90 if layout != "horizontal" else 0
-    COLOR_MAP = {
-        "CLICK": "#3b82f6", "WAIT": "#f59e0b", "LOOP": "#8b5cf6",
-        "IF": "#ec4899", "RUN": "#ef4444", "SEQUENCE": "#22c55e",
-    }
-    counter = [0]
-
-    def nid():
-        counter[0] += 1
-        return f"n_{counter[0]}"
-
-    def add_node(nt, label, args, x, y):
-        uid = nid()
-        nodes.append({
-            "id": uid, "type": "lobsterNode",
-            "position": {"x": x, "y": y},
-            "data": {"label": label, "nodeType": nt, "args": args,
-                     "color": COLOR_MAP.get(nt, "#6b7280")},
-        })
-        return uid
-
-    def add_edge(src, tgt, label="", animated=False):
-        edges.append({
-            "id": f"e_{src}_{tgt}", "source": src, "target": tgt,
-            "label": label, "type": "smoothstep", "animated": animated,
-        })
-
-    start_id = add_node("START", "开始", "", x_base, 0)
-
-    def walk(node: ASTNode, prev: str, y: int, x: int):
-        if getattr(node.type, 'value', None) == 'SEQUENCE' or node.type == NodeType.SEQUENCE:
-            last = prev
-            for child in node.children:
-                last, y = walk(child, last, y, x)
-            return last, y
-
-        y += y_step
-        uid = add_node(str(node.type.value if hasattr(node.type, 'value') else node.type),
-                       str(node.type.value if hasattr(node.type, 'value') else node.type),
-                       node.args, x, y)
-        add_edge(prev, uid, animated=(getattr(node.type, 'value', None) == 'LOOP'))
-
-        if getattr(node.type, 'value', None) in ('LOOP', 'IF') and node.children:
-            last_child, child_y = uid, y
-            for child in node.children:
-                last_child, child_y = walk(child, last_child, child_y, x + 60)
-            if getattr(node.type, 'value', None) == 'IF' and node.else_children:
-                else_last = uid
-                else_y = y
-                for child in node.else_children:
-                    else_last, else_y = walk(child, else_last, else_y, x + 200)
-            if getattr(node.type, 'value', None) == 'LOOP':
-                add_edge(last_child, uid, label="loop", animated=True)
-            return uid, max(child_y, y)
-        return uid, y
-
-    walk(ast, start_id, 0, x_base)
-    return {"nodes": nodes, "edges": edges}
+    """新版：使用 DSL→FlowScript 双向转换器，输出前端 FlowCanvas 兼容格式。"""
+    from engine.dsl_flow_converter import dsl_to_flow
+    return dsl_to_flow(dsl, layout)
 
 
 @feature(
     name="graph_to_dsl",
     display_name="流程图转DSL",
-    description="【可视化·反向】将 React Flow 节点/边 JSON 转换回 DSL 文本。在图编辑器中编辑流程后转回 DSL 执行",
+    description="【可视化·反向】将前端 Canvas FlowScript JSON（nodes+edges）转换回 DSL 文本。编辑流程图后调用此工具获得可执行的 DSL",
     category=F.AI,
     params=[
-        P("nodes", "string", "JSON字符串：节点数组"),
-        P("edges", "string", "JSON字符串：边数组"),
+        P("script", "string", "FlowScript JSON 字符串（含 nodes/edges）"),
     ],
     returns="str - DSL文本",
     test_cases=[
         TC("simple",
-           {"nodes": '[{"id":"n1","data":{"nodeType":"CLICK","args":"开始"},"position":{"x":0,"y":0}}]',
-            "edges": "[]"},
+           {"script": '{"nodes":[{"id":"n1","type":"click","params":{"x":100,"y":200}},{"id":"n2","type":"wait","params":{"duration":2}}],"edges":[{"id":"e1","from_node":"n1","from_port":"output","to_node":"n2","to_port":"input"}],"meta":{"name":"test"},"variables":{},"settings":{}}'},
            "non_null", validator=lambda r: "CLICK" in str(r.get("result", ""))),
     ],
 )
-def graph_to_dsl(nodes: str, edges: str) -> str:
+def graph_to_dsl(script: str) -> str:
+    """新版：使用 DSL→FlowScript 双向转换器，从前端 Canvas FlowScript 格式生成 DSL。"""
+    from engine.dsl_flow_converter import flow_to_dsl
     try:
-        nodes_data = json.loads(nodes) if isinstance(nodes, str) else nodes
+        script_data = json.loads(script) if isinstance(script, str) else script
     except Exception as e:
         return f"# 解析错误: {e}"
+    return flow_to_dsl(script_data)
 
-    valid = [n for n in nodes_data if n.get("data", {}).get("nodeType") not in ("START", "END", None)]
-    valid.sort(key=lambda n: n.get("position", {}).get("y", 0))
 
-    lines = ["# 由流程图生成的 DSL"]
-    for n in valid:
-        d = n.get("data", {})
-        nt = d.get("nodeType", "")
-        args = d.get("args", "").strip()
-        if nt == "CONDITION":
-            nt = "IF"
-        elif nt == "MACRO":
-            nt = "RUN"
-        if nt in ("CLICK", "WAIT", "LOOP", "IF", "RUN", "SCROLL", "TYPE", "DRAG", "HOTKEY"):
-            lines.append(f"{nt} {args}".strip())
-    return "\n".join(lines)
+# ═══════════════════════════════════════════════════════════════
+# DSL↔FlowScript 转换工具（供 MCP / AI 直接调用）
+# ═══════════════════════════════════════════════════════════════
+@feature(
+    name="dsl_to_flow",
+    display_name="DSL转FlowScript",
+    description="【双向转换】将 DSL 文本转换为前端 Canvas 可直接加载的 FlowScript JSON 格式。AI 生成 DSL 后调用此工具可获得流程图",
+    category=F.AI,
+    params=[
+        P("dsl", "str", "DSL文本", example="CLICK 开始\nWAIT 加载"),
+        P("layout", "str", "布局: vertical|horizontal", required=False, default="vertical"),
+    ],
+    returns="dict{meta, nodes, edges, variables, settings}",
+)
+def dsl_to_flow_feature(dsl: str, layout: str = "vertical") -> dict:
+    from engine.dsl_flow_converter import dsl_to_flow
+    return dsl_to_flow(dsl, layout)
+
+
+@feature(
+    name="flow_to_dsl",
+    display_name="FlowScript转DSL",
+    description="【双向转换】将前端 Canvas FlowScript JSON 转换回 DSL 文本。编辑流程图后调用此工具可得到可执行的 DSL",
+    category=F.AI,
+    params=[
+        P("script", "string", "FlowScript JSON 字符串"),
+    ],
+    returns="str - DSL文本",
+)
+def flow_to_dsl_feature(script: str) -> str:
+    from engine.dsl_flow_converter import flow_to_dsl
+    try:
+        data = json.loads(script) if isinstance(script, str) else script
+    except Exception as e:
+        return f"# 解析错误: {e}"
+    return flow_to_dsl(data)
+
+
+@feature(
+    name="create_flow_from_dsl",
+    display_name="从DSL创建流程",
+    description="【AI→流程】将 DSL 文本转换为完整的流程图工作流并保存到文件。AI 生成 DSL 后调用此工具可直接创建可执行的流程文件",
+    category=F.AI,
+    params=[
+        P("dsl", "str", "DSL文本", example="CLICK 开始\nWAIT 加载"),
+        P("name", "str", "流程名称", required=False, default="未命名流程"),
+    ],
+    returns="dict{saved_to, flow}",
+)
+def create_flow_from_dsl(dsl: str, name: str = "未命名流程") -> dict:
+    from engine.dsl_flow_converter import dsl_to_flow
+    flow = dsl_to_flow(dsl)
+    flow["meta"]["name"] = name
+    flow["meta"]["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    flow["meta"]["updated_at"] = flow["meta"]["created_at"]
+    filename = f"{name}.flow"
+    with open(filename, "w", encoding="utf-8") as f:
+        import json as j
+        j.dump(flow, f, ensure_ascii=False, indent=2)
+    return {"success": True, "saved_to": filename, "flow": flow}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -368,6 +351,61 @@ def debug_generate_test_flow(scenario: str, api_key: str = "") -> dict:
         "description": f"测试场景: {scenario}",
         "tokens_used": dsl_result.get("input_tokens", 0) + dsl_result.get("output_tokens", 0),
     }
+
+
+# ── 模板管理 ──────────────────────────────────────────────────────
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'templates')
+
+
+@feature(
+    name="list_templates",
+    display_name="列出工作流模板",
+    description="列出 templates/ 目录下的所有 DSL 工作流模板文件，返回模板名称和描述",
+    category=F.DEBUG,
+    params=[],
+    returns="list[dict{name, description}]",
+)
+def list_templates() -> list:
+    """列出所有可用的工作流模板。"""
+    if not os.path.isdir(TEMPLATES_DIR):
+        return []
+    templates = []
+    for f in sorted(os.listdir(TEMPLATES_DIR)):
+        if f.endswith('.dsl'):
+            path = os.path.join(TEMPLATES_DIR, f)
+            desc = ""
+            with open(path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    if line.startswith('# '):
+                        desc = line.strip('# \n')
+                        break
+            templates.append({
+                "name": f.replace('.dsl', ''),
+                "filename": f,
+                "description": desc,
+            })
+    return templates
+
+
+@feature(
+    name="load_template",
+    display_name="加载工作流模板",
+    description="加载 templates/ 目录下的 DSL 模板文件内容，返回 DSL 文本和名称",
+    category=F.DEBUG,
+    params=[
+        P("name", "str", "模板名称（不含 .dsl 后缀）", example="screenshot-workflow"),
+    ],
+    returns="dict{name, dsl, exists}",
+)
+def load_template(name: str) -> dict:
+    """加载指定名称的 DSL 模板文件内容。"""
+    path = os.path.join(TEMPLATES_DIR, f"{name}.dsl")
+    if not os.path.isfile(path):
+        return {"name": name, "dsl": "", "exists": False, "error": f"模板 '{name}' 未找到"}
+    with open(path, 'r', encoding='utf-8') as f:
+        dsl = f.read()
+    return {"name": name, "dsl": dsl, "exists": True}
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────

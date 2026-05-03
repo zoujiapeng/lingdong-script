@@ -153,6 +153,10 @@ class DSLExecutor:
             if not self._stop_flag.is_set():
                 self._set_state(ExecutorState.FINISHED)
             return {"success": True, "state": self._state.value}
+        except ReturnSignal:
+            if not self._stop_flag.is_set():
+                self._set_state(ExecutorState.FINISHED)
+            return {"success": True, "state": self._state.value}
         except Exception as e:
             self._set_state(ExecutorState.ERROR)
             return {"success": False, "error": str(e)}
@@ -269,6 +273,9 @@ class DSLExecutor:
         elif node.type == NodeType.DELAY:
             self._exec_delay(node, ctx)
 
+        elif node.type == NodeType.WAIT_RANDOM:
+            self._exec_wait_random(node, ctx)
+
         elif node.type == NodeType.RUN:
             self._exec_run(node, ctx)
 
@@ -336,6 +343,15 @@ class DSLExecutor:
         elif node.type == NodeType.PROGRESS_RELOCATE:
             self._exec_progress_relocate(node, ctx)
 
+        elif node.type == NodeType.POPUP_CLOSE:
+            self._exec_popup_close(node, ctx)
+        elif node.type == NodeType.COLOR_CHECK:
+            self._exec_color_check(node, ctx)
+        elif node.type == NodeType.REGION_WAIT:
+            self._exec_region_wait(node, ctx)
+        elif node.type == NodeType.SCENE_CONDITION:
+            self._exec_scene_condition(node, ctx)
+
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
     # ── 指令执行 ─────────────────────────────────────────────────
@@ -384,9 +400,10 @@ class DSLExecutor:
         self._emit("node_done", node_type="WAIT", args=condition, line=node.line)
 
     def _exec_swipe(self, node: ASTNode, ctx: ExecutionContext):
-        """SWIPE x1 y1 x2 y2 — 滑动"""
+        """SWIPE x1 y1 x2 y2 — 滑动（兼容空格和逗号分隔）"""
         args = self._interpolate(node.args)
-        parts = args.split()
+        import re
+        parts = re.split(r"[\s,]+", args.strip())
         self._emit("node_start", node_type="SWIPE", args=args, line=node.line)
         self._log(f"SWIPE: {args}")
         if len(parts) >= 4:
@@ -419,6 +436,26 @@ class DSLExecutor:
             pass
         self._emit("node_done", node_type="DELAY", args=args, line=node.line)
 
+    def _exec_wait_random(self, node: ASTNode, ctx: ExecutionContext):
+        """WAIT_RANDOM min max — 随机等待 min~max 秒"""
+        import random
+        args = self._interpolate(node.args)
+        self._emit("node_start", node_type="WAIT_RANDOM", args=args, line=node.line)
+        self._log(f"WAIT_RANDOM: {args}")
+        parts = args.split()
+        try:
+            min_s = float(parts[0]) if len(parts) > 0 else 0
+            max_s = float(parts[1]) if len(parts) > 1 else min_s
+            if min_s > max_s:
+                min_s, max_s = max_s, min_s
+            duration = random.uniform(min_s, max_s)
+            self._log(f"  随机等待 {duration:.1f}s ({min_s}-{max_s})")
+            time.sleep(duration)
+        except ValueError:
+            self._log(f"  无法解析 '{args}'，默认等待 1s")
+            time.sleep(1)
+        self._emit("node_done", node_type="WAIT_RANDOM", args=args, line=node.line)
+
     def _exec_loop(self, node: ASTNode, ctx: ExecutionContext):
         raw = node.args or ""
         tag = raw
@@ -430,7 +467,8 @@ class DSLExecutor:
             self._log(f"WHILE: {raw}")
             while not self._stop_flag.is_set():
                 self._check_control()
-                result = self._resolve_condition(raw, ctx)
+                cond = self._interpolate(raw)
+                result = self._resolve_condition(cond, ctx)
                 if not result:
                     break
                 for child in node.children:
@@ -446,7 +484,8 @@ class DSLExecutor:
                 self._check_control()
                 for child in node.children:
                     self._execute_node(child, ctx)
-                result = self._resolve_condition(raw, ctx)
+                cond = self._interpolate(raw)
+                result = self._resolve_condition(cond, ctx)
                 if result:
                     break
             self._emit("node_done", node_type="LOOP", args=f"UNTIL {raw}", line=node.line)
@@ -813,6 +852,56 @@ class DSLExecutor:
             self._emit("node_done", node_type="PROGRESS_RELOCATE",
                        args="failed", line=node.line)
 
+    def _exec_popup_close(self, node: ASTNode, ctx: ExecutionContext):
+        """POPUP_CLOSE [策略] — 关闭弹窗"""
+        args = self._interpolate(node.args)
+        self._emit("node_start", node_type="POPUP_CLOSE", args=args, line=node.line)
+        self._log(f"POPUP_CLOSE: {args or 'auto'}")
+        self._call_action("popup_close", strategy=args or "auto", ctx=ctx)
+        self._emit("node_done", node_type="POPUP_CLOSE", args=args, line=node.line)
+
+    def _exec_color_check(self, node: ASTNode, ctx: ExecutionContext):
+        """COLOR_CHECK x y w h color [tolerance] — 检查区域颜色"""
+        args = self._interpolate(node.args)
+        parts = args.split()
+        self._emit("node_start", node_type="COLOR_CHECK", args=args, line=node.line)
+        self._log(f"COLOR_CHECK: {args}")
+        if len(parts) >= 5:
+            self._call_action("color_check",
+                x=int(parts[0]), y=int(parts[1]),
+                w=int(parts[2]), h=int(parts[3]),
+                expected_color=parts[4],
+                tolerance=int(parts[5]) if len(parts) > 5 else 30,
+                ctx=ctx)
+        self._emit("node_done", node_type="COLOR_CHECK", args=args, line=node.line)
+
+    def _exec_region_wait(self, node: ASTNode, ctx: ExecutionContext):
+        """REGION_WAIT x,y,w,h type timeout — 等待区域稳定/变化"""
+        args = self._interpolate(node.args)
+        parts = re.split(r"[\s,]+", args.strip())
+        self._emit("node_start", node_type="REGION_WAIT", args=args, line=node.line)
+        self._log(f"REGION_WAIT: {args}")
+        if len(parts) >= 4:
+            region_type = parts[4] if len(parts) > 4 else "stable"
+            timeout = float(parts[5]) if len(parts) > 5 else 30.0
+            self._call_action("region_wait",
+                x=int(parts[0]), y=int(parts[1]),
+                w=int(parts[2]), h=int(parts[3]),
+                region_type=region_type, timeout=timeout, ctx=ctx)
+        self._emit("node_done", node_type="REGION_WAIT", args=args, line=node.line)
+
+    def _exec_scene_condition(self, node: ASTNode, ctx: ExecutionContext):
+        """SCENE_CONDITION scene_name [similarity] — 场景识别条件"""
+        args = self._interpolate(node.args)
+        parts = args.rsplit(None, 1)
+        scene_name = parts[0] if parts else args
+        similarity = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 70
+        self._emit("node_start", node_type="SCENE_CONDITION", args=args, line=node.line)
+        self._log(f"SCENE_CONDITION: {scene_name} (相似度={similarity})")
+        result = self._call_action("check_condition",
+            condition=f"scene:{scene_name}", similarity=similarity, ctx=ctx)
+        self._emit("node_done", node_type="SCENE_CONDITION", args=args, line=node.line)
+
     # ── 层次化 DSL 执行 ──────────────────────────────────────────
     def _exec_call(self, node: ASTNode, ctx: ExecutionContext):
         name = node.args
@@ -948,12 +1037,29 @@ class DSLExecutor:
 
     # ── 条件解析 ─────────────────────────────────────────────────
     def _resolve_condition(self, condition: str, ctx: ExecutionContext) -> bool:
-        """解析条件表达式为布尔值。处理字面量，其余委托给 action_handler。"""
-        c = condition.strip().lower()
-        if c == "true":
+        """解析条件表达式为布尔值。
+        支持:
+          - 字面量 true/false
+          - ${var} 变量引用
+          - text:"..." / img:"..." / color:"..." / var:"name" 前缀条件
+          其余委托给 action_handler。"""
+        c = condition.strip()
+        cl = c.lower()
+        if cl == "true":
             return True
-        if c == "false":
+        if cl == "false":
             return False
+
+        # ${var} 变量引用
+        if c.startswith("${") and c.endswith("}"):
+            var_name = c[2:-1]
+            val = self._resolve_var(var_name)
+            return bool(val)
+
+        # 前缀条件直接委托给 action_handler
+        if any(c.startswith(p) for p in ("text:", "img:", "color:", "var:")):
+            return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
+
         # 委托给 action_handler
         return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
 

@@ -29,8 +29,34 @@ function getNodeSummary(node: FlowNodeType): string {
     case 'condition': return `判断: ${conditionLabel(p.condition_type)}`;
     case 'loop': return p.loop_type === 'count' ? `循环 ${p.count} 次` : p.loop_type === 'infinite' ? '无限循环' : '条件循环';
     case 'sub_script': return `脚本: ${p.script_name || '未选择'}`;
-    case 'variable_set': return `${p.name} = "${p.value}"`;
-    default: return '';
+    case 'click_text': {
+      const txt = p.text || '未设置';
+      const methodLabel = p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击';
+      return `OCR「${txt.substring(0, 16)}${txt.length > 16 ? '…' : ''}」 ${methodLabel}`;
+    }
+    case 'screenshot':
+      return `保存截图`;
+    case 'popup_close': {
+      const s = (p.strategies || ['auto'])[0];
+      const strategyLabel: Record<string, string> = { auto: '自动', esc: 'Esc', close_btn: '关闭按钮', click_away: '空白区域', ocr_close: 'OCR查找', all: '全部尝试' };
+      return `弹窗关闭 (${strategyLabel[s] || s})`;
+    }
+    case 'color_check':
+      return `颜色检测 (${p.x},${p.y},${p.w}x${p.h}) ${p.expected_color || '未设'} 容差=${p.tolerance}`;
+    case 'progress_wait': {
+      const typeLabel: Record<string, string> = { fill: '填满', empty: '清空', change: '变化' };
+      const r = p.region || {};
+      return `等待进度条${typeLabel[p.wait_type] || p.wait_type} (${r.x||0},${r.y||0},${r.w||200}x${r.h||20})`;
+    }
+    case 'region_wait': {
+      const rLabel = p.region_type === 'stable' ? '稳定' : '变化';
+      return `等待区域${rLabel} (${p.x},${p.y},${p.w}x${p.h})`;
+    }
+    case 'scene_condition':
+      return `场景识别: 「${p.scene_name || '未设置'}」 (相似度≥${p.similarity}%)`;
+    case 'variable_get':
+      return `读取变量: ${p.name || '未设置'}`;
+    default: return `(${node.type})`;
   }
 }
 

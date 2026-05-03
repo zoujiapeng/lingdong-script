@@ -49,6 +49,11 @@ class NodeType(str, Enum):
     SCROLL = "SCROLL"
     DELAY = "DELAY"
     WAIT_RANDOM = "WAIT_RANDOM"
+    # 前端节点类型映射（补充）
+    POPUP_CLOSE = "POPUP_CLOSE"
+    COLOR_CHECK = "COLOR_CHECK"
+    REGION_WAIT = "REGION_WAIT"
+    SCENE_CONDITION = "SCENE_CONDITION"
 
 
 @dataclass
@@ -79,6 +84,8 @@ class ASTNode:
         if self.event_key:
             d["event_key"] = self.event_key
             d["config"] = self.args
+        if self.loop_type:
+            d["loop_type"] = self.loop_type
         return d
 
 
@@ -110,7 +117,8 @@ class DSLParser:
                 "HOTKEY", "FOCUS", "SET", "OCR_FIND", "OCR_EXTRACT",
                 "REGION_SELECT", "IMAGE_FIND", "TEMPLATE_CAPTURE",
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
-                "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF"}
+                "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
+                "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION"}
     # 小写 → 大写映射（兼容灵动脚本的伪代码格式）
     LOWERCASE_MAP = {kw.lower(): kw for kw in KEYWORDS}
 
@@ -183,11 +191,16 @@ class DSLParser:
                 continue
             indent = len(line) - len(line.lstrip())
             upper = stripped.upper().lstrip()
-            # ELSE/ELIF 属于上面的 IF，不触发弹出
-            if upper in ("ELSE",) or upper.startswith("ELSE ") or upper.startswith("ELIF ") or upper.startswith("ELSEIF "):
+            # ELSE/ELIF：只弹出比当前缩进深的级别（闭合上级块），不弹同级（自身 IF 块）
+            is_else = upper in ("ELSE",) or upper.startswith(("ELSE ", "ELIF ", "ELSEIF "))
+            if is_else:
+                while indent_stack and indent < indent_stack[-1][0]:
+                    if indent_stack[-1][1]:
+                        result.append("END")
+                    indent_stack.pop()
                 result.append(stripped)
                 continue
-            # 弹出所有比当前缩进大的栈顶（闭合块）
+            # 弹出所有比当前缩进大或相等的栈顶（闭合块）
             while indent_stack and indent <= indent_stack[-1][0]:
                 if indent_stack[-1][1]:  # needs_end
                     result.append("END")
@@ -297,11 +310,34 @@ class DSLParser:
             elif keyword == "WAIT":
                 nodes.append(ASTNode(NodeType.WAIT, args, line=lineno))
 
+            elif keyword == "WAIT_RANDOM":
+                nodes.append(ASTNode(NodeType.WAIT_RANDOM, args, line=lineno))
+
+            elif keyword == "POPUP_CLOSE":
+                nodes.append(ASTNode(NodeType.POPUP_CLOSE, args, line=lineno))
+
+            elif keyword == "COLOR_CHECK":
+                nodes.append(ASTNode(NodeType.COLOR_CHECK, args, line=lineno))
+
+            elif keyword == "REGION_WAIT":
+                nodes.append(ASTNode(NodeType.REGION_WAIT, args, line=lineno))
+
+            elif keyword == "SCENE_CONDITION":
+                nodes.append(ASTNode(NodeType.SCENE_CONDITION, args, line=lineno))
+
             elif keyword == "RUN":
                 nodes.append(ASTNode(NodeType.RUN, args, line=lineno))
 
             elif keyword == "LOOP":
                 node = ASTNode(NodeType.LOOP, args, line=lineno)
+                # 支持 LOOP WHILE condition / LOOP UNTIL condition 语法
+                args_lower = args.strip().lower()
+                if args_lower.startswith("while "):
+                    node.args = args[6:].strip()
+                    node.loop_type = "while"
+                elif args_lower.startswith("until "):
+                    node.args = args[6:].strip()
+                    node.loop_type = "until"
                 node.children = self._parse_block({"END"})
                 self._expect("END", lineno)
                 nodes.append(node)

@@ -6,6 +6,7 @@ import { TopBar } from './components/common/TopBar';
 import { StatusBar } from './components/common/StatusBar';
 import { LogPanel } from './components/common/LogPanel';
 import { PseudoPanel } from './components/PseudoPanel';
+import { DSLPanel } from './components/Canvas/DSLPanel';
 import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
@@ -141,6 +142,16 @@ export default function App() {
           伪代码
         </button>
         <button
+          className={`view-tab ${viewMode === 'dsl' ? 'active' : ''}`}
+          onClick={() => setViewMode('dsl')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
+          DSL
+        </button>
+        <button
           className={`view-tab ${showAIDialog ? 'active' : ''}`}
           onClick={() => setShowAIDialog(prev => !prev)}
         >
@@ -171,6 +182,10 @@ export default function App() {
         ) : viewMode === 'pseudocode' ? (
           <div className="canvas-area">
             <PseudoPanel />
+          </div>
+        ) : viewMode === 'dsl' ? (
+          <div className="canvas-area">
+            <DSLPanel />
           </div>
         ) : (
           <>

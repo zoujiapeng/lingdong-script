@@ -681,8 +681,36 @@ class ExecutionEngine:
 
     def execute_popup_close(self, node: dict, params: dict) -> str:
         strategies = params.get('strategies', ['auto'])
-        self.log('info', f'关闭弹窗 (策略: {strategies[0]})', node['id'])
-        time.sleep(0.5)
+        strategy = strategies[0] if strategies else 'auto'
+        self.log('info', f'关闭弹窗 (策略: {strategy})', node['id'])
+        try:
+            import pyautogui
+            sc, sw, sh = pyautogui.size()
+            if strategy in ('auto', 'esc', 'all'):
+                pyautogui.press('esc'); time.sleep(0.3)
+            if strategy in ('auto', 'close_btn', 'all'):
+                pyautogui.click(sw - 15, 15); time.sleep(0.3)
+            if strategy in ('auto', 'click_away', 'all'):
+                pyautogui.click(sw // 2, int(sh * 0.65)); time.sleep(0.3)
+            if strategy in ('auto', 'ocr_close', 'all'):
+                try:
+                    import pytesseract
+                    screenshot = pyautogui.screenshot()
+                    img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                    h, w = img.shape[:2]
+                    data = pytesseract.image_to_data(img, lang='chi_sim+eng',
+                        output_type=pytesseract.Output.DICT)
+                    for i, text in enumerate(data['text']):
+                        if text and any(kw in text for kw in ['关闭','取消','Close','Cancel','确定','OK']):
+                            cx = data['left'][i] + data['width'][i] // 2
+                            cy = data['top'][i] + data['height'][i] // 2
+                            pyautogui.click(cx, cy); time.sleep(0.3)
+                            break
+                except ImportError:
+                    pass
+            self.log('info', f'弹窗关闭完成', node['id'])
+        except Exception as e:
+            self.log('warn', f'弹窗关闭出错: {e}', node['id'])
         return 'output'
 
     def execute_color_check(self, node: dict, params: dict) -> str:
@@ -912,16 +940,196 @@ class ExecutionEngine:
         timeout = params.get('timeout', 10)
         x, y = params.get('x', 0), params.get('y', 0)
         w, h = params.get('w', 100), params.get('h', 100)
+        poll = params.get('poll_interval', 0.3)
         labels = {'stable': '稳定', 'change': '变化'}
         self.log('info', f'等待区域{labels.get(rt, rt)}: ({x},{y},{w}x{h}) 超时={timeout}s', node['id'])
-        time.sleep(0.5)
+        if cv2 is None:
+            self.log('warn', 'OpenCV 不可用，跳过区域检测', node['id'])
+            time.sleep(0.5)
+            return 'output'
+        import numpy as np
+        start = time.time()
+        prev_img = None
+        while time.time() - start < timeout:
+            try:
+                import pyautogui
+                region_img = pyautogui.screenshot(region=(x, y, w, h))
+                current = cv2.cvtColor(np.array(region_img), cv2.COLOR_RGB2GRAY)
+                if prev_img is not None:
+                    diff = cv2.absdiff(prev_img, current)
+                    changed_pixels = np.count_nonzero(diff > 30)
+                    total_pixels = w * h
+                    change_ratio = changed_pixels / total_pixels if total_pixels > 0 else 0
+                    if rt == 'change' and change_ratio > 0.02:
+                        self.log('info', f'区域变化检测到: {change_ratio:.1%}', node['id'])
+                        return 'output'
+                    if rt == 'stable' and change_ratio < 0.005:
+                        self.log('info', f'区域已稳定: {change_ratio:.1%}', node['id'])
+                        return 'output'
+                prev_img = current
+            except Exception as e:
+                self.log('warn', f'区域检测出错: {e}', node['id'])
+            time.sleep(poll)
+        self.log('warn', f'区域等待超时 ({timeout}s)', node['id'])
         return 'output'
+
+    def execute_sub_script(self, node: dict, params: dict) -> str:
+        script_name = params.get('script_name', '') or params.get('script_id', '')
+        if not script_name:
+            self.log('error', '子脚本: 未指定 script_name', node['id'])
+            return ''
+
+        self.log('info', f'执行子脚本: "{script_name}"', node['id'])
+
+        # 搜索路径：当前目录、flows/、脚本所在目录
+        script_dir = os.path.dirname(self._script.get('_file_path', ''))
+        search_dirs = [
+            os.getcwd(),
+            os.path.join(os.getcwd(), 'flows'),
+            script_dir if script_dir else '',
+        ]
+        # 如果 script_name 本身是路径，直接尝试
+        if os.path.isfile(script_name):
+            search_dirs.insert(0, os.path.dirname(script_name))
+
+        sub_data = None
+        for d in search_dirs:
+            if not d:
+                continue
+            candidate = os.path.join(d, script_name)
+            if not candidate.endswith('.flow') and not candidate.endswith('.json'):
+                candidate_flow = candidate + '.flow'
+                candidate_json = candidate + '.json'
+            else:
+                candidate_flow = candidate
+                candidate_json = candidate
+
+            for path in (candidate, candidate_flow, candidate_json):
+                if os.path.isfile(path):
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            raw = f.read().strip()
+                        # 先尝试 JSON 解析
+                        if path.endswith('.json') or raw.startswith('{'):
+                            try:
+                                sub_data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                pass
+                        if sub_data is None:
+                            # 尝试 DSL 解析
+                            try:
+                                from engine.dsl_flow_converter import dsl_to_flow
+                                sub_data = dsl_to_flow(raw)
+                            except Exception:
+                                pass
+                        if sub_data is not None:
+                            self.log('info', f'已加载子脚本: {path}', node['id'])
+                            break
+                    except Exception as e:
+                        self.log('warn', f'加载子脚本失败 {path}: {e}', node['id'])
+            if sub_data is not None:
+                break
+
+        if sub_data is None:
+            self.log('error', f'子脚本文件未找到: "{script_name}"', node['id'])
+            return 'fail'
+
+        # 保存当前状态
+        old_nodes = self._nodes[:]
+        old_edges = self._edges[:]
+        old_map = dict(self._node_map)
+        old_vars = dict(self.variables)
+
+        try:
+            sub_nodes = sub_data.get('nodes', [])
+            sub_edges = sub_data.get('edges', [])
+            # 参数透传
+            sub_vars = dict(sub_data.get('variables', {}))
+            sub_vars.update(self.variables)
+
+            self._nodes = sub_nodes
+            self._edges = sub_edges
+            self._node_map = {n['id']: n for n in sub_nodes}
+            self.variables = sub_vars
+
+            start_nodes = [n for n in sub_nodes if n['type'] == 'start']
+            if not start_nodes:
+                self.log('error', '子脚本无开始节点', node['id'])
+                return 'fail'
+
+            self._follow_flow(start_nodes[0]['id'])
+            self.log('info', f'子脚本 "{script_name}" 执行完成', node['id'])
+            return 'output'
+        except Exception as e:
+            self.log('error', f'子脚本执行失败: {e}', node['id'])
+            return 'fail'
+        finally:
+            # 恢复状态
+            self._nodes = old_nodes
+            self._edges = old_edges
+            self._node_map = old_map
+            self.variables = old_vars
 
     def execute_scene_condition(self, node: dict, params: dict) -> str:
         scene_name = params.get('scene_name', '')
         similarity = params.get('similarity', 70)
+        template_path = params.get('template_path', '')
+        template_b64 = params.get('template_base64', '')
+        region = params.get('region', {})
         self.log('info', f'场景识别: "{scene_name}" (相似度={similarity})', node['id'])
-        time.sleep(0.3)
+
+        # Strategy 1: 如果有模板图片 → 模板匹配
+        if template_path or template_b64:
+            if cv2 is None:
+                self.log('warn', 'OpenCV 不可用，跳过模板匹配', node['id'])
+            else:
+                try:
+                    if template_b64:
+                        import base64
+                        img_data = base64.b64decode(template_b64.split(',')[1] if ',' in template_b64 else template_b64)
+                        nparr = np.frombuffer(img_data, np.uint8)
+                        template = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    else:
+                        template = cv2.imread(template_path)
+
+                    if template is not None:
+                        # Capture screen or region
+                        if region:
+                            rx, ry, rw, rh = region.get('x',0), region.get('y',0), region.get('w',0), region.get('h',0)
+                            screen = pyautogui.screenshot(region=(rx, ry, rw, rh))
+                        else:
+                            screen = pyautogui.screenshot()
+                        haystack = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
+                        haystack_gray = cv2.cvtColor(haystack, cv2.COLOR_BGR2GRAY)
+                        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+
+                        result = cv2.matchTemplate(haystack_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, _ = cv2.minMaxLoc(result)
+                        sim_threshold = similarity / 100.0
+                        matched = max_val >= sim_threshold
+                        self.log('info', f'场景模板匹配: {"是" if matched else "否"} (相似度: {max_val:.2%}, 阈值: {sim_threshold:.0%})', node['id'])
+                        if matched:
+                            return 'yes'
+                except Exception as e:
+                    self.log('warn', f'模板匹配失败: {e}', node['id'])
+
+        # Strategy 2: 尝试 OCR 查找场景名称文字
+        if scene_name:
+            try:
+                import pytesseract
+                screen = pyautogui.screenshot()
+                img = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
+                data = pytesseract.image_to_data(img, lang='chi_sim+eng', output_type=pytesseract.Output.DICT)
+                for i, text in enumerate(data['text']):
+                    if text and scene_name in text:
+                        self.log('info', f'场景文字匹配: 找到 "{text}"', node['id'])
+                        return 'yes'
+            except ImportError:
+                self.log('warn', 'pytesseract 未安装，跳过 OCR 场景匹配', node['id'])
+            except Exception as e:
+                self.log('warn', f'OCR 场景匹配失败: {e}', node['id'])
+
+        self.log('info', f'场景 "{scene_name}" 未匹配', node['id'])
         return 'no'
 
     # ================================================================
@@ -1046,8 +1254,8 @@ class ExecutionEngine:
                     elif ntype == 'variable_get':
                         result = self.execute_variable_get(node, params)
                     elif ntype == 'sub_script':
-                        self.log('info', '子脚本执行（预留功能）', node_id)
-                        result = 'output'
+                        self.log('info', f'执行子脚本: {params.get("script_name", "")}', node_id)
+                        result = self.execute_sub_script(node, params)
                     elif ntype == 'click_text':
                         result = self.execute_click_text(node, params)
                     elif ntype == 'popup_close':

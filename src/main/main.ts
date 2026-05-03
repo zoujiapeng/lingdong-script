@@ -516,6 +516,32 @@ function confirm(){
   }
 });
 
+// --- Interaction Tools IPC ---
+ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }) => {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, '../../python/interaction/wheel_selector.py');
+    const proc = spawn('python', [scriptPath, '--ipc'], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', (code) => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON parse error', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || 'wheel select failed' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+    proc.stdin!.write(JSON.stringify(params) + '\n');
+    proc.stdin!.end();
+  });
+});
+
 ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; w: number; h: number }) => {
   return new Promise((resolve) => {
     const { spawn } = require('child_process');
@@ -540,6 +566,32 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; 
     proc.on('error', () => resolve([]));
 
     proc.stdin!.write(JSON.stringify(region) + '\n');
+    proc.stdin!.end();
+  });
+});
+
+// --- DSL Conversion IPC ---
+ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+    const proc = spawn('python', [scriptPath], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', (code) => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || '转换失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+    proc.stdin!.write(dslText + '\n');
     proc.stdin!.end();
   });
 });

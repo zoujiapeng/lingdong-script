@@ -231,7 +231,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Camera',
     category: 'image',
     color: '#64748b',
-    defaultParams: {},
+    defaultParams: { format: 'png' },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [{ id: 'output', type: 'flow' }],

@@ -19,6 +19,7 @@ import features._all  # noqa
 from features.registry import registry
 from engine.dsl_parser import DSLParser
 from engine.executor import DSLExecutor, ExecutionContext
+from engine.dsl_flow_converter import dsl_to_flow, flow_to_dsl
 
 BACKEND_URL = os.getenv("LOBSTER_URL", "http://localhost:7788")
 HAS_REQUESTS = True
@@ -53,11 +54,19 @@ def handle_tool_call(name: str, arguments: dict) -> str:
     if feature_name == "run_dsl_sync":
         return _exec_run_dsl_sync(arguments)
 
+    # ── DSL↔FlowScript 转换（本地，不依赖后端） ──
+    if feature_name == "dsl_to_flow":
+        return _exec_dsl_to_flow(arguments)
+    if feature_name == "flow_to_dsl":
+        return _exec_flow_to_dsl(arguments)
+    if feature_name == "create_flow_from_dsl":
+        return _exec_create_flow_from_dsl(arguments)
+
     # ── 本地可执行的功能（不依赖后端） ──
     local_features = {
         "debug_list_features", "debug_validate_dsl", "debug_system_info",
         "debug_run_tests", "debug_get_logs", "debug_generate_test_flow",
-        "dsl_to_graph", "graph_to_dsl", "parse_dsl",
+        "dsl_to_graph", "graph_to_dsl",
         # 感知 + 操作类（无需后端）
         "find_image", "region_select", "screenshot",
         "detect_color", "color_check", "detect_progress",
@@ -114,6 +123,58 @@ def _exec_run_dsl_sync(args: dict) -> str:
         return json.dumps({
             "success": False, "error": str(e), "elapsed": elapsed,
         }, ensure_ascii=False)
+
+
+def _exec_dsl_to_flow(args: dict) -> str:
+    """DSL 文本 → FlowScript JSON"""
+    dsl = args.get("dsl", "")
+    layout = args.get("layout", "vertical")
+    if not dsl.strip():
+        return "错误: DSL 内容为空"
+    try:
+        result = dsl_to_flow(dsl, layout)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _exec_flow_to_dsl(args: dict) -> str:
+    """FlowScript JSON → DSL 文本"""
+    script = args.get("script", "")
+    if isinstance(script, str):
+        try:
+            script = json.loads(script)
+        except json.JSONDecodeError as e:
+            return f"# 解析错误: {e}"
+    try:
+        return flow_to_dsl(script)
+    except Exception as e:
+        return f"# 转换错误: {e}"
+
+
+def _exec_create_flow_from_dsl(args: dict) -> str:
+    """DSL → 保存 .flow 文件 + 返回 FlowScript JSON"""
+    dsl = args.get("dsl", "")
+    name = args.get("name", "未命名流程")
+    if not dsl.strip():
+        return "错误: DSL 内容为空"
+    try:
+        flow = dsl_to_flow(dsl)
+        flow["meta"]["name"] = name
+        flow["meta"]["description"] = args.get("description", f"从 DSL 导入: {name}")
+        flow["meta"]["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        flow["meta"]["updated_at"] = flow["meta"]["created_at"]
+        # 保存到工作目录
+        filename = f"{name}.flow"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(dsl)
+        return json.dumps({
+            "success": True,
+            "saved_to": filename,
+            "flow": flow,
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
 def _format_result(result: dict) -> str:
