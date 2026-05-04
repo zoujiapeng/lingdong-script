@@ -1220,6 +1220,18 @@ useStore.subscribe((state) => {
 // --- Register persistent IPC listeners for engine messages ---
 // This ensures global F9 (from main process) can control engine and update store
 const _api = (window as any).electronAPI;
+
+// Expose store state for HTTP API bridge (/api/get-state)
+(window as any).__bridge_getState = () => {
+  const s = useStore.getState();
+  return {
+    nodes: s.script.nodes,
+    edges: s.script.edges,
+    meta: s.script.meta,
+    selection: s.ui.selection,
+    viewMode: s.ui.viewMode,
+  };
+};
 if (_api) {
   _api.onEngineMessage((msg: any) => {
     if (!msg || !msg.type) return;
@@ -1280,6 +1292,21 @@ if (_api) {
         break;
       case 'autoLayout':
         store.autoLayout();
+        break;
+      case 'updateNodeParams':
+        if (payload?.id && payload?.params) store.updateNodeParams(payload.id, payload.params);
+        break;
+      case 'deleteEdges':
+        if (payload?.ids) store.deleteEdges(payload.ids);
+        break;
+      case 'newScript':
+        store.newScript();
+        break;
+      case 'setViewMode':
+        if (payload?.mode) store.setViewMode(payload.mode);
+        break;
+      case 'fitScreen':
+        store.fitToScreen();
         break;
       default:
         console.warn('[API] Unknown action:', action);

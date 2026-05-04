@@ -239,6 +239,55 @@ function startApiServer() {
           send(200, { ok: true });
           break;
 
+        case '/api/update-node-params':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'updateNodeParams',
+            payload: { id: payload.id, params: payload.params },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/delete-edges':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'deleteEdges',
+            payload: { ids: payload.ids },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/new-script':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'newScript' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/set-view-mode':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'setViewMode',
+            payload: { mode: payload.mode },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/fit-screen':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'fitScreen' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/get-state':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.executeJavaScript(
+            'JSON.stringify({ nodes: window.__bridge_getState ? window.__bridge_getState() : null })'
+          ).then((result: string) => {
+            try { send(200, { ok: true, state: JSON.parse(result) }); }
+            catch { send(500, { error: '状态解析失败' }); }
+          }).catch((err: Error) => send(500, { error: err.message }));
+          break;
+
         default:
           send(404, { error: '未知端点' });
       }
