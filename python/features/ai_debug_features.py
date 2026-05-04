@@ -85,14 +85,15 @@ def ai_generate_dsl(task: str, api_key: str = "", context: str = "") -> dict:
 # ═══════════════════════════════════════════════════════════════
 @feature(
     name="dsl_to_graph",
-    display_name="DSL转流程图",
-    description="【可视化】将 DSL 文本转换为前端 Canvas FlowScript JSON 格式。AI 生成 DSL 后调用此工具可自动获得流程图",
+    display_name="DSL转流程图（已废弃）",
+    description="【已废弃】请使用 dsl_to_flow 替代。将 DSL 文本转换为前端 Canvas FlowScript JSON 格式",
     category=F.AI,
     params=[
         P("dsl", "str", "DSL文本", example="CLICK 开始\nWAIT 加载"),
         P("layout", "str", "布局: vertical|horizontal|auto", required=False, default="vertical"),
     ],
-    returns="dict{meta, nodes, edges, variables, settings} — FlowScript 可直接加载到前端 Canvas",
+    returns="dict{meta, nodes, edges, variables, settings}",
+    deprecated=True,
     test_cases=[
         TC("simple_dsl", {"dsl": "CLICK 开始\nWAIT 完成"}, "non_null",
            validator=lambda r: r["success"] and len(r["result"]["nodes"]) >= 2),
@@ -135,7 +136,7 @@ def graph_to_dsl(script: str) -> str:
 @feature(
     name="dsl_to_flow",
     display_name="DSL转FlowScript",
-    description="【双向转换】将 DSL 文本转换为前端 Canvas 可直接加载的 FlowScript JSON 格式。AI 生成 DSL 后调用此工具可获得流程图",
+    description="【双向转换·推荐】将 DSL 文本转换为前端 Canvas FlowScript JSON 格式（含 nodes/edges/布局）。替代已废弃的 dsl_to_graph。AI 生成 DSL 后调用此工具可自动获得流程图",
     category=F.AI,
     params=[
         P("dsl", "str", "DSL文本", example="CLICK 开始\nWAIT 加载"),

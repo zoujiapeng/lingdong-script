@@ -145,7 +145,7 @@ def timer_wait_time(target: str) -> dict:
 @feature(
     name="wait_action",
     display_name="等待（秒数）",
-    description="【DSL·控制】阻塞等待指定的秒数。用于固定时长等待，等效于 sleep。适用于等待加载完成、延时操作等场景",
+    description="【DSL·控制·推荐】阻塞等待指定的秒数（等效 sleep）。用于固定时长等待，适用于等待加载完成、延时操作等场景。组合使用可实现定时任务，如 WAIT 7200 + 关机",
     category=F.CONTROL,
     params=[
         P("duration", "number", "等待秒数", required=False, default=1, example=3),
@@ -168,14 +168,15 @@ def wait_action(duration: float = 1) -> bool:
 
 @feature(
     name="timer_countdown",
-    display_name="倒计时",
-    description="【定时条件】阻塞等待指定的秒数。等效于 sleep，但支持中途取消检查",
+    display_name="倒计时（已废弃）",
+    description="【已废弃】请使用 wait_action 替代。阻塞等待指定的秒数",
     category=F.CONTROL,
     params=[
         P("seconds", "number", "等待秒数", example=5),
     ],
-    returns="bool - 是否完整等待完毕（False 表示被取消）",
+    returns="bool - 是否完整等待完毕",
     tags=["timer", "control"],
+    deprecated=True,
 )
 def timer_countdown(seconds: float) -> dict:
     import threading

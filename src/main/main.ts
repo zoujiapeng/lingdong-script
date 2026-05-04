@@ -420,6 +420,8 @@ from features.registry import registry
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 features = []
 for f in registry.all():
+    if f.hidden or f.deprecated:
+        continue
     features.append({
         "name": f.name,
         "display_name": f.display_name,
@@ -1012,6 +1014,8 @@ from features.registry import registry
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 features = []
 for f in registry.all():
+    if f.hidden or f.deprecated:
+        continue
     features.append({
         "name": f.name,
         "display_name": f.display_name,

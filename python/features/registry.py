@@ -317,7 +317,7 @@ class FeatureRegistry:
         return self.execute(feature_name, **kwargs)
 
     def export_mcp_tools(self) -> List[dict]:
-        return [f.to_mcp_schema() for f in self.all() if not f.deprecated]
+        return [f.to_mcp_schema() for f in self.all() if not f.deprecated and not f.hidden]
 
     def export_openapi(self) -> dict:
         paths = {}

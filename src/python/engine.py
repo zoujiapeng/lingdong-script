@@ -1174,7 +1174,11 @@ class ExecutionEngine:
         self.log('info', f'tool_call: {spec.display_name}({json.dumps(resolved, ensure_ascii=False)})', node['id'])
 
         start = time.time()
-        result = _feature_registry.execute(feature_name, **resolved)
+        try:
+            result = _feature_registry.execute(feature_name, **resolved)
+        except Exception as e:
+            self.log('error', f'tool_call 异常: {e}', node['id'])
+            return 'output'
         elapsed = round((time.time() - start) * 1000, 1)
 
         if result.get('success'):

@@ -399,7 +399,7 @@ def popup_close(text: str = "", timeout: float = 5) -> bool:
     DSL 语法: PROGRESS_WAIT x,y,w,h threshold [timeout]
     示例:
       PROGRESS_WAIT 100,200,300,20 0.8 30
-      PROGRESS_WAIT {progress_area} 0.8
+      PROGRESS_WAIT {progress_area} 0.9 60
 
     参数说明:
       region: 进度条区域 x,y,w,h（必填）
@@ -412,6 +412,7 @@ def popup_close(text: str = "", timeout: float = 5) -> bool:
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_WAIT",
     dsl_template="PROGRESS_WAIT {region} {threshold} [timeout]",
+    hidden=True,
     examples=[
         "PROGRESS_WAIT 100,200,300,20 0.8",
         "PROGRESS_WAIT {progress_area} 0.9 60",
@@ -438,6 +439,7 @@ def progress_wait():
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_INIT",
     dsl_template="PROGRESS_INIT {var_name}",
+    hidden=True,
     examples=[
         "PROGRESS_INIT progress_area",
     ],
@@ -462,6 +464,7 @@ def progress_init():
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_RELOCATE",
     dsl_template="PROGRESS_RELOCATE {var_name}",
+    hidden=True,
     examples=[
         "PROGRESS_RELOCATE progress_area",
     ],

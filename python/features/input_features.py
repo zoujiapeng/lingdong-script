@@ -93,19 +93,22 @@ def hover(target: str, duration: float = 0.5) -> bool:
 @feature(
     name="mouse_move",
     display_name="鼠标移动",
-    description="【鼠标】将鼠标移动到绝对坐标位置。用于精确控制鼠标位置",
+    description="【鼠标】将鼠标移动到语义目标或绝对坐标。支持文字/坐标定位，推荐用 target 参数代替手动输入坐标",
     category=F.ACTION,
     params=[
-        P("x", "int", "目标 X 坐标"),
-        P("y", "int", "目标 Y 坐标"),
+        P("target", "str", "目标：文字 / 坐标 / 图像模板名（优先）", required=False, default="", example="确认按钮"),
+        P("x", "int", "目标 X 坐标（target 为空时使用）", required=False, default=0),
+        P("y", "int", "目标 Y 坐标（target 为空时使用）", required=False, default=0),
         P("human_like", "boolean", "是否模拟人类移动轨迹", required=False, default=True),
     ],
     returns="bool - 是否成功",
     tags=["mouse"],
 )
-def mouse_move(x: int, y: int, human_like: bool = True) -> bool:
+def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = "") -> bool:
     try:
         import pyautogui
+        if target:
+            x, y = _find_target_coords(target)
         if human_like:
             import random
             duration = random.uniform(0.1, 0.4)

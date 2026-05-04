@@ -1,79 +1,85 @@
 """
 无障碍树功能
-Windows Accessibility Tree 获取和操作 — 基于 UIA (win32com)
+Windows Accessibility Tree 获取和操作 — 基于 uiautomation 库
 """
 from features.registry import feature, P, TC, FeatureCategory as F
 
 
-def _get_uia():
-    """初始化 UIA 自动化客户端"""
+def _get_fg_control():
+    """获取前台窗口对应的 uiautomation Control"""
+    import win32gui
+    import uiautomation as auto
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return None
+    root = auto.GetRootControl()
+    for child in root.GetChildren():
+        try:
+            if child.NativeWindowHandle == hwnd:
+                return child
+        except Exception:
+            pass
+    return root
+
+
+def _get_name(ctrl) -> str:
     try:
-        from win32com.client import Dispatch
-        from win32com.client import GetObject
+        return ctrl.Name or ""
+    except Exception:
+        return ""
+
+
+def _get_role(ctrl) -> str:
+    try:
+        return ctrl.ControlTypeName or ""
+    except Exception:
+        return ""
+
+
+def _get_bounds(ctrl):
+    try:
+        r = ctrl.BoundingRectangle
+        if r and hasattr(r, 'left'):
+            return {"left": r.left, "top": r.top,
+                    "width": r.right - r.left, "height": r.bottom - r.top}
+    except Exception:
+        pass
+    return None
+
+
+def _is_visible(ctrl) -> bool:
+    try:
+        return not ctrl.IsOffscreen
+    except Exception:
         return True
-    except ImportError:
-        return False
 
 
-def _walk_tree(element, depth: int, max_depth: int, filter_visible: bool) -> dict:
+def _walk_tree(ctrl, depth: int, max_depth: int, filter_visible: bool):
     """递归遍历无障碍树"""
     if depth > max_depth:
         return None
     try:
-        name = element.CurrentName
-        role = element.CurrentAutomationId  # 后备
-        try:
-            role = element.CurrentLocalizedControlType
-        except Exception:
-            pass
-        ctrl_type = ""
-        try:
-            ctrl_type = element.CurrentControlType
-        except Exception:
-            pass
-
-        is_visible = True
-        try:
-            is_visible = element.CurrentIsOffscreen == 0
-        except Exception:
-            pass
-
-        if filter_visible and is_visible is False:
+        if filter_visible and not _is_visible(ctrl):
             return None
 
         node = {
-            "name": name or "",
-            "role": role or "",
-            "control_type": str(ctrl_type) if ctrl_type else "",
+            "name": _get_name(ctrl),
+            "role": _get_role(ctrl),
             "children": [],
         }
-
         try:
-            enabled = element.CurrentIsEnabled
-            node["enabled"] = enabled
+            node["enabled"] = ctrl.IsEnabled
         except Exception:
             pass
-
-        try:
-            bb = element.CurrentBoundingRectangle
-            if bb and bb.left != 0 or bb.top != 0:
-                node["bounds"] = {"left": bb.left, "top": bb.top,
-                                  "width": bb.right - bb.left, "height": bb.bottom - bb.top}
-        except Exception:
-            pass
+        bounds = _get_bounds(ctrl)
+        if bounds:
+            node["bounds"] = bounds
 
         if depth < max_depth:
-            try:
-                from win32com.client import Dispatch
-                uia = Dispatch("UIAutomation.Core.UIAutomation", dynamic=True)
-                condition = uia.CreateTrueCondition()
-                children = element.FindAll(0, condition)  # TreeScope_Children
-                for child in children:
-                    child_node = _walk_tree(child, depth + 1, max_depth, filter_visible)
-                    if child_node:
-                        node["children"].append(child_node)
-            except Exception:
-                pass
+            for child in ctrl.GetChildren():
+                child_node = _walk_tree(child, depth + 1, max_depth, filter_visible)
+                if child_node:
+                    node["children"].append(child_node)
 
         return node
     except Exception:
@@ -94,63 +100,48 @@ def _walk_tree(element, depth: int, max_depth: int, filter_visible: bool) -> dic
 )
 def a11y_get_tree(max_depth: int = 5, filter_visible: bool = True) -> dict:
     try:
-        import win32gui
-        from win32com.client import Dispatch
-        # 获取前台窗口
-        hwnd = win32gui.GetForegroundWindow()
-        if not hwnd:
+        import uiautomation as auto
+        fg = _get_fg_control()
+        if not fg:
             return {"success": False, "error": "无前台窗口"}
-        # 使用 UIA 获取元素树
-        uia = Dispatch("UIAutomation.Core.UIAutomation", dynamic=True)
-        element = uia.ElementFromHandle(hwnd)
-        tree = _walk_tree(element, 1, max_depth, filter_visible) or {}
+        tree = _walk_tree(fg, 1, max_depth, filter_visible) or {}
         return {"success": True, "result": tree}
     except ImportError:
-        return {"success": False, "error": "需要 pywin32: pip install pywin32"}
+        return {"success": False, "error": "需要 uiautomation: pip install uiautomation"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-def _find_elements(element, name: str, role: str, control_type: str, results: list, max_results: int = 20):
-    """递归查找匹配元素"""
+def _find_controls(ctrl, name: str, role: str, control_type: str, results: list, max_results: int = 20):
+    """递归查找匹配的 uiautomation Control 对象"""
     if len(results) >= max_results:
         return
     try:
-        el_name = element.CurrentName or ""
-        el_role = ""
-        try:
-            el_role = element.CurrentLocalizedControlType or ""
-        except Exception:
-            pass
-        # 匹配条件
+        el_name = _get_name(ctrl)
+        el_role = _get_role(ctrl)
+        el_type = ctrl.ControlTypeName or ""
         name_match = not name or name.lower() in el_name.lower()
         role_match = not role or role.lower() in el_role.lower()
-        if name_match and role_match:
-            entry = {"name": el_name, "role": el_role}
-            try:
-                bb = element.CurrentBoundingRectangle
-                entry["bounds"] = {"left": bb.left, "top": bb.top,
-                                   "width": bb.right - bb.left, "height": bb.bottom - bb.top}
-            except Exception:
-                pass
-            try:
-                entry["enabled"] = element.CurrentIsEnabled
-            except Exception:
-                pass
-            results.append(entry)
+        type_match = not control_type or control_type.lower() in el_type.lower()
+        if name_match and role_match and type_match:
+            results.append(ctrl)
+        for child in ctrl.GetChildren():
+            _find_controls(child, name, role, control_type, results, max_results)
     except Exception:
         pass
 
-    # 递归子节点
+
+def _control_to_dict(ctrl) -> dict:
+    """将 uiautomation Control 转为可序列化的 dict"""
+    entry = {"name": _get_name(ctrl), "role": _get_role(ctrl)}
+    bounds = _get_bounds(ctrl)
+    if bounds:
+        entry["bounds"] = bounds
     try:
-        children = element.FindAll(
-            0,  # TreeScope_Children
-            __import__("win32com.client").gencache.EnsureDispatch("IUIAutomation").CreateTrueCondition()
-        )
-        for child in children:
-            _find_elements(child, name, role, control_type, results, max_results)
+        entry["enabled"] = ctrl.IsEnabled
     except Exception:
         pass
+    return entry
 
 
 @feature(
@@ -168,18 +159,14 @@ def _find_elements(element, name: str, role: str, control_type: str, results: li
 )
 def a11y_find_element(name: str, role: str = "", control_type: str = "") -> dict:
     try:
-        import win32gui
-        from win32com.client import Dispatch
-        hwnd = win32gui.GetForegroundWindow()
-        if not hwnd:
-            return {"success": False, "error": "无前台窗口"}
-        uia = Dispatch("UIAutomation.Core.UIAutomation", dynamic=True)
-        root = uia.ElementFromHandle(hwnd)
-        results = []
-        _find_elements(root, name, role, control_type, results)
+        import uiautomation as auto
+        root = auto.GetRootControl()
+        controls = []
+        _find_controls(root, name, role, control_type, controls)
+        results = [_control_to_dict(c) for c in controls]
         return {"success": True, "result": results}
     except ImportError:
-        return {"success": False, "error": "需要 pywin32: pip install pywin32"}
+        return {"success": False, "error": "需要 uiautomation: pip install uiautomation"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -198,26 +185,18 @@ def a11y_find_element(name: str, role: str = "", control_type: str = "") -> dict
 )
 def a11y_click_element(name: str, role: str = "") -> dict:
     try:
-        import win32gui
-        from win32com.client import Dispatch
-        hwnd = win32gui.GetForegroundWindow()
-        if not hwnd:
-            return {"success": False, "error": "无前台窗口"}
-        uia = Dispatch("UIAutomation.Core.UIAutomation", dynamic=True)
-        root = uia.ElementFromHandle(hwnd)
-        results = []
-        _find_elements(root, name, role, "", results, max_results=5)
-        for el_info in results:
-            # 找到匹配元素后通过坐标点击（win32 API 方式）
-            bounds = el_info.get("bounds")
-            if bounds:
-                import pyautogui
-                cx = bounds["left"] + bounds["width"] // 2
-                cy = bounds["top"] + bounds["height"] // 2
-                pyautogui.click(cx, cy)
+        import uiautomation as auto
+        root = auto.GetRootControl()
+        controls = []
+        _find_controls(root, name, role, "", controls, max_results=5)
+        for ctrl in controls:
+            try:
+                ctrl.Click()
                 return {"success": True, "result": True}
+            except Exception:
+                continue
         return {"success": False, "error": f"未找到元素 '{name}'"}
     except ImportError:
-        return {"success": False, "error": "需要 pywin32: pip install pywin32"}
+        return {"success": False, "error": "需要 uiautomation: pip install uiautomation"}
     except Exception as e:
         return {"success": False, "error": str(e)}

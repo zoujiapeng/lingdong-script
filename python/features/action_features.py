@@ -6,6 +6,7 @@ import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
 from features._utils import parse_region, resolve_coord, sim_delay
+from features.input_features import _find_target_coords
 
 
 @feature(
@@ -81,8 +82,9 @@ def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool
     params=[
         P("direction", "str", "方向: up | down | left | right", example="down"),
         P("amount", "number", "滚动量（单位：格）", required=False, default=3),
-        P("x", "number", "X坐标（不填则当前位置）", required=False, default=-1),
-        P("y", "number", "Y坐标（不填则当前位置）", required=False, default=-1),
+        P("target", "str", "滚动位置：文字 / 坐标 / 图像模板名（可选，不填则在当前位置滚动）", required=False, default="", example="确认按钮"),
+        P("x", "number", "X坐标（不填则当前位置，target 优先）", required=False, default=-1),
+        P("y", "number", "Y坐标（不填则当前位置，target 优先）", required=False, default=-1),
     ],
     returns="bool - 是否成功",
     dsl_keyword="SCROLL",
@@ -92,10 +94,12 @@ def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool
         TC("scroll_down", {"direction": "down"}, "bool_true", skip_in_ci=True),
     ],
 )
-def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1) -> bool:
+def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1, target: str = "") -> bool:
     try:
         import pyautogui
         clicks = amount if direction in ("down", "right") else -amount
+        if target:
+            x, y = _find_target_coords(target)
         kwargs = {}
         if x >= 0 and y >= 0:
             kwargs = {"x": x, "y": y}
@@ -108,7 +112,7 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1) -> bool:
 @feature(
     name="swipe_action",
     display_name="滑动/拖拽",
-    description="【DSL·交互】在屏幕上从起点滑动到终点，支持设置滑动时长。适用于滑动翻页、拖拽元素、滚动列表",
+    description="【已废弃】请使用 drag 替代（支持语义目标定位）。在屏幕上从起点滑动到终点",
     category=F.ACTION,
     params=[
         P("start_x", "number", "起点 X 坐标", example=400),
@@ -125,6 +129,7 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1) -> bool:
         TC("short_swipe", {"start_x": 0, "start_y": 0, "end_x": 10, "end_y": 10}, "bool_true", skip_in_ci=True),
     ],
     tags=["action", "dsl"],
+    deprecated=True,
 )
 def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> bool:
     try:
@@ -156,8 +161,8 @@ def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: f
 def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
     try:
         from interaction.actions import HumanMouse
-        x1, y1 = resolve_coord(from_target)
-        x2, y2 = resolve_coord(to_target)
+        x1, y1 = _find_target_coords(from_target)
+        x2, y2 = _find_target_coords(to_target)
         HumanMouse.drag(x1, y1, x2, y2, duration=duration)
         return True
     except Exception:

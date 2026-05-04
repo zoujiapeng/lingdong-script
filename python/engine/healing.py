@@ -156,8 +156,8 @@ class HealingPipeline:
         try:
             # 尝试通过无障碍树查找
             if self._action_handler:
-                # a11y_click 通过无障碍接口直接点击
-                result = self._action_handler("a11y_click", target=target)
+                # a11y_click_element 通过无障碍接口直接点击
+                result = self._action_handler("a11y_click_element", target=target)
                 if result:
                     return {"strategy": "a11y", "result": result}
         except Exception:
