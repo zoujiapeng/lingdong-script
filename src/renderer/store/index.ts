@@ -13,6 +13,9 @@ import {
   LogEntry,
   FeatureDefinition,
   ToolCallEntry,
+  MacroEvent,
+  MacroInfo,
+  RecordingState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { createFlowExecutor, ExecutionController } from './executor';
@@ -479,6 +482,10 @@ interface AppStore {
   featureList: FeatureDefinition[];
   toolCallLog: ToolCallEntry[];
 
+  // Macro recording
+  recording: RecordingState;
+  macroList: MacroInfo[];
+
   // Actions - Script
   newScript: () => void;
   loadScript: (script: FlowScript) => void;
@@ -547,6 +554,14 @@ interface AppStore {
 
   // Auto layout
   autoLayout: () => void;
+
+  // Macro recording actions
+  startRecording: (name?: string) => Promise<void>;
+  stopRecording: () => Promise<void>;
+  listMacros: () => Promise<void>;
+  playMacro: (name: string) => Promise<void>;
+  deleteMacro: (name: string) => Promise<void>;
+  convertMacroToFlow: (name: string) => Promise<void>;
 }
 
 // History for undo/redo
@@ -576,6 +591,8 @@ export const useStore = create<AppStore>()(
     _executor: null,
     featureList: [],
     toolCallLog: [],
+    recording: { active: false, macroName: '' },
+    macroList: [],
 
     newScript: () => {
       const s = createTemplateScript('desktop-monitor');
@@ -1164,6 +1181,90 @@ export const useStore = create<AppStore>()(
       });
       pushHistory(get().script.nodes, get().script.edges);
     },
+
+    // --- Macro Recording Actions ---
+
+    startRecording: async (name?: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroStart) return;
+      const macroName = name || `录制_${new Date().toLocaleString('zh-CN').replace(/[/:]/g, '-')}`;
+      set((s) => { s.recording = { active: true, macroName }; });
+      get().addLog({ level: 'info', message: `🔴 开始录制宏: ${macroName}` });
+      const result = await api.macroStart({ name: macroName });
+      if (!result?.success) {
+        set((s) => { s.recording = { active: false, macroName: '' }; });
+        get().addLog({ level: 'error', message: `录制启动失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    stopRecording: async () => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroStop) return;
+      set((s) => { s.recording.active = false; });
+      get().addLog({ level: 'info', message: '⏹️ 停止录制...' });
+      const result = await api.macroStop();
+      if (result?.success) {
+        get().addLog({ level: 'info', message: `✅ 宏录制完成: ${result.events} 个事件` });
+        await get().listMacros();
+      } else {
+        get().addLog({ level: 'error', message: `录制停止失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    listMacros: async () => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroList) return;
+      try {
+        const result = await api.macroList();
+        if (result?.success) {
+          set((s) => { s.macroList = result.result || []; });
+        }
+      } catch { /* ignore */ }
+    },
+
+    playMacro: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroPlay) return;
+      get().addLog({ level: 'info', message: `▶️ 播放宏: ${name}` });
+      const result = await api.macroPlay(name);
+      if (result?.success) {
+        get().addLog({ level: 'info', message: '✅ 宏播放完成' });
+      } else {
+        get().addLog({ level: 'error', message: `宏播放失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    deleteMacro: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroDelete) return;
+      const result = await api.macroDelete(name);
+      if (result?.success) {
+        get().addLog({ level: 'info', message: `🗑️ 已删除宏: ${name}` });
+        await get().listMacros();
+      } else {
+        get().addLog({ level: 'error', message: `删除失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    convertMacroToFlow: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroGetEvents) return;
+      get().addLog({ level: 'info', message: `🔄 转换宏 "${name}" 为流程图...` });
+      const result = await api.macroGetEvents(name);
+      if (!result?.success || !result?.result?.events) {
+        get().addLog({ level: 'error', message: `读取宏失败: ${result?.error || '未知错误'}` });
+        return;
+      }
+      try {
+        const { macroEventsToFlow } = await import('../utils/macroConverter');
+        const events: MacroEvent[] = result.result.events;
+        const script = macroEventsToFlow(events, name);
+        get().loadScript(script);
+        get().addLog({ level: 'info', message: `✅ 宏 "${name}" 已转换为 ${script.nodes.length - 2} 个操作节点的流程图` });
+      } catch (e: any) {
+        get().addLog({ level: 'error', message: `转换失败: ${e.message}` });
+      }
+    },
   }))
 );
 
@@ -1308,9 +1409,29 @@ if (_api) {
       case 'fitScreen':
         store.fitToScreen();
         break;
+      case 'getState':
+        _api.pushState({
+          nodes: store.script.nodes,
+          edges: store.script.edges,
+          meta: store.script.meta,
+          selection: store.ui.selection,
+          viewMode: store.ui.viewMode,
+        });
+        break;
       default:
         console.warn('[API] Unknown action:', action);
     }
   });
+
+  // 初始化时推送状态到主进程
+  setTimeout(() => {
+    const s = useStore.getState();
+    _api.pushState({
+      nodes: s.script.nodes,
+      edges: s.script.edges,
+      meta: s.script.meta,
+      selection: s.ui.selection,
+      viewMode: s.ui.viewMode,
+    });
+  }, 100);
 }
-// hmr-trigger

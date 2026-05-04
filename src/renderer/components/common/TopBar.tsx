@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus, Circle
 } from 'lucide-react';
 import { useStore, loadCustomTemplates, saveCustomTemplates } from '../../store';
+import { MacroPanel } from './MacroPanel';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
@@ -27,12 +28,14 @@ export function TopBar() {
     startExecution, pauseExecution, resumeExecution, stopExecution,
     ui, setUI, autoLayout, fitToScreen,
     newScript,
+    recording, stopRecording, startRecording,
   } = useStore();
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [savingName, setSavingName] = useState(false);
   const [templateName, setTemplateName] = useState('');
+  const [showMacroPanel, setShowMacroPanel] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -47,6 +50,24 @@ export function TopBar() {
         case 'save': saveScript(); break;
       }
     });
+  }, []);
+
+  // Listen for macro status messages (F6 toggle from external process)
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (!api?.onMacroMessage) return;
+    api.onMacroMessage((msg: any) => {
+      if (msg.type === 'status') {
+        // Update recording state and refresh list when stopped
+        useStore.setState({ recording: { active: msg.recording, macroName: msg.recording ? '录制中...' : '' } });
+        if (!msg.recording) {
+          // Recording stopped via F6 — refresh list
+          setTimeout(() => useStore.getState().listMacros(), 200);
+        }
+      }
+    });
+    // Load macro list on mount
+    useStore.getState().listMacros();
   }, []);
 
   const handleTitleClick = () => {
@@ -309,6 +330,23 @@ export function TopBar() {
           </>
         )}
 
+        <span style={{ width: 1, height: 20, background: 'var(--border-primary)' }} />
+
+        {/* Macro Recording Button */}
+        <button
+          className={`btn btn-ghost btn-icon ${recording.active ? 'recording-active' : ''}`}
+          onClick={() => {
+            setShowMacroPanel(!showMacroPanel);
+            if (recording.active) {
+              stopRecording();
+            }
+          }}
+          title={recording.active ? '停止录制 (F6)' : '宏录制'}
+          style={{ position: 'relative' }}
+        >
+          <Circle size={14} style={{ color: recording.active ? '#ef4444' : 'var(--text-muted)' }} />
+          {recording.active && <span className="recording-dot-pulse" />}
+        </button>
         <button
           className="btn btn-ghost btn-icon"
           onClick={() => setUI({ dark_mode: !ui.dark_mode })}
@@ -317,6 +355,9 @@ export function TopBar() {
           {ui.dark_mode ? <Sun size={15} /> : <Moon size={15} />}
         </button>
       </div>
+
+      {/* Macro Panel */}
+      {(showMacroPanel || recording.active) && <MacroPanel />}
     </div>
   );
 }

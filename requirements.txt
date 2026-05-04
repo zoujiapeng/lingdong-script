@@ -7,6 +7,7 @@ Pillow>=10.0.0
 # System
 PyGetWindow>=0.0.9
 psutil>=5.9.0
+pynput>=1.7.6
 
 # Windows-specific (optional, for advanced window management)
 pywin32>=306

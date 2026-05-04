@@ -183,7 +183,7 @@ def macro_playback(name: str, speed: float = 1.0, loop: int = 0) -> dict:
                     special_keys = {"enter": "enter", "tab": "tab", "space": "space",
                                     "backspace": "backspace", "esc": "escape",
                                     "shift": "shift", "ctrl": "ctrl", "alt": "alt"}
-                    special_keys.get(key.lower(), key)
+                    key = special_keys.get(key.lower(), key)
                 try:
                     pyautogui.write(key, interval=0.01)
                 except Exception:

@@ -454,3 +454,28 @@ export interface ToolCallEntry {
   timestamp: string;
   source: 'flow' | 'direct';
 }
+
+// --- Macro Recording ---
+
+export interface MacroEvent {
+  type: 'click' | 'move' | 'key';
+  time: number;
+  x?: number;
+  y?: number;
+  button?: string;
+  pressed?: boolean;
+  key?: string;
+}
+
+export interface MacroInfo {
+  name: string;
+  file: string;
+  events: number;
+  duration: number;
+  created: string;
+}
+
+export interface RecordingState {
+  active: boolean;
+  macroName: string;
+}

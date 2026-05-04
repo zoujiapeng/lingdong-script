@@ -1300,6 +1300,28 @@ textarea.form-input {
   50% { opacity: 0.3; }
 }
 
+@keyframes recording-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.recording-active {
+  animation: recording-pulse 1.5s ease-in-out infinite;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+}
+
+.recording-dot-pulse {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  animation: recording-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
 /* ============================================================
    CONNECTING TEMP EDGE
    ============================================================ */

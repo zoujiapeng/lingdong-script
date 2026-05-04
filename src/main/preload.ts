@@ -57,4 +57,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onApiCommand: (callback: (action: string, payload: any) => void) => {
     ipcRenderer.on('api-command', (_, msg) => callback(msg.action, msg.payload));
   },
+
+  // Push renderer state to main process (for HTTP API /api/get-state)
+  pushState: (state: any) => {
+    ipcRenderer.send('state:response', state);
+  },
+
+  // Macro recording API
+  macroStart: (params?: { name?: string; include_mouse?: boolean; include_keys?: boolean }) =>
+    ipcRenderer.invoke('macro:start', params || {}),
+  macroStop: () =>
+    ipcRenderer.invoke('macro:stop'),
+  macroList: () =>
+    ipcRenderer.invoke('macro:list'),
+  macroPlay: (name: string) =>
+    ipcRenderer.invoke('macro:play', name),
+  macroDelete: (name: string) =>
+    ipcRenderer.invoke('macro:delete', name),
+  macroGetEvents: (name: string) =>
+    ipcRenderer.invoke('macro:get-events', name),
+  macroRecordingStatus: () =>
+    ipcRenderer.invoke('macro:recording-status'),
+
+  // Macro messages (from main process)
+  onMacroMessage: (callback: (msg: any) => void) => {
+    ipcRenderer.on('macro-message', (_, msg) => callback(msg));
+  },
 });
