@@ -409,6 +409,88 @@ sys.stdout.flush()
           }).then(r => send(200, r));
           break;
 
+        // --- Feature Registry HTTP API ---
+        case '/api/features/list':
+          new Promise((resolve) => {
+            const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+features = []
+for f in registry.all():
+    features.append({
+        "name": f.name,
+        "display_name": f.display_name,
+        "description": f.description,
+        "category": f.category.value,
+        "params": [{"name": p.name, "type": p.type, "description": p.description,
+                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
+        "returns": f.returns,
+        "deprecated": f.deprecated,
+        "tags": f.tags,
+    })
+print(json.dumps(features, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+              cwd: path.join(__dirname, '../..'),
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            proc.on('close', () => {
+              if (stdout.trim()) {
+                try { resolve(JSON.parse(stdout)); }
+                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+              } else {
+                resolve({ success: false, error: stderr.trim() || '获取功能列表失败' });
+              }
+            });
+            proc.on('error', (err) => resolve({ error: err.message }));
+          }).then(r => send(200, r));
+          break;
+
+        case '/api/features/call':
+          new Promise((resolve) => {
+            const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+try:
+    raw = sys.stdin.read()
+    data = json.loads(raw)
+    result = registry.execute(data["name"], **data.get("params", {}))
+    print(json.dumps(result, ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+              cwd: path.join(__dirname, '../..'),
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            proc.on('close', () => {
+              if (stdout.trim()) {
+                try { resolve(JSON.parse(stdout)); }
+                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+              } else {
+                resolve({ success: false, error: stderr.trim() || '调用失败' });
+              }
+            });
+            proc.on('error', (err) => resolve({ success: false, error: err.message }));
+            proc.stdin!.write(JSON.stringify({ name: payload.name, params: payload.params || {} }) + '\n');
+            proc.stdin!.end();
+          }).then(r => send(200, r));
+          break;
+
         default:
           send(404, { error: '未知端点' });
       }
@@ -914,6 +996,89 @@ ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
     });
     proc.on('error', (err) => resolve({ error: err.message }));
     proc.stdin!.write(dslText + '\n');
+    proc.stdin!.end();
+  });
+});
+
+// --- Feature Registry IPC ---
+
+ipcMain.handle('features:list', async () => {
+  return new Promise((resolve) => {
+    const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+features = []
+for f in registry.all():
+    features.append({
+        "name": f.name,
+        "display_name": f.display_name,
+        "description": f.description,
+        "category": f.category.value,
+        "params": [{"name": p.name, "type": p.type, "description": p.description,
+                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
+        "returns": f.returns,
+        "deprecated": f.deprecated,
+        "tags": f.tags,
+    })
+print(json.dumps(features, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || '获取功能列表失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+  });
+});
+
+ipcMain.handle('feature:call', async (_, featureName: string, params: Record<string, any>) => {
+  return new Promise((resolve) => {
+    const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+try:
+    raw = sys.stdin.read()
+    data = json.loads(raw)
+    result = registry.execute(data["name"], **data.get("params", {}))
+    print(json.dumps(result, ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ success: false, error: stderr.trim() || '调用失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ success: false, error: err.message }));
+    proc.stdin!.write(JSON.stringify({ name: featureName, params }) + '\n');
     proc.stdin!.end();
   });
 });
