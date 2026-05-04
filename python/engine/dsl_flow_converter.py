@@ -71,6 +71,8 @@ def get_dsl_to_flow_type() -> dict[str, str]:
             "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
             "PROGRESS_INIT": "progress_wait", "PROGRESS_RELOCATE": "progress_wait",
             "REGION_SELECT": "screenshot",
+            "FINDCANVAS": "condition",
+            "DRAG": "click",
         })
         # 从 registry 补充（覆盖已有映射）
         try:
@@ -538,6 +540,8 @@ def _dsl_label(ntype: str, args: str) -> str:
         "WAITSCREEN": f"等待画面变化",
         "SCREENSTABLE": f"等待画面稳定",
         "IMAGE_FIND": f"查找图片",
+        "FINDCANVAS": "检测画布",
+        "DRAG": "拖拽",
         "BREAK": "跳出循环",
     }
     return labels.get(ntype, "")

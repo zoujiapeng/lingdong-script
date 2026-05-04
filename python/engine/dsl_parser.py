@@ -55,7 +55,8 @@ class NodeType(str, Enum):
     REGION_WAIT = "REGION_WAIT"
     SCENE_CONDITION = "SCENE_CONDITION"
     VLM_CONDITION = "VLM_CONDITION"
-
+    FINDCANVAS = "FINDCANVAS"
+    DRAG = "DRAG"
 
 @dataclass
 class ASTNode:
@@ -350,6 +351,12 @@ class DSLParser:
 
             elif keyword == "VLM_CONDITION":
                 nodes.append(ASTNode(NodeType.VLM_CONDITION, args, line=lineno))
+
+            elif keyword == "FINDCANVAS":
+                nodes.append(ASTNode(NodeType.FINDCANVAS, args, line=lineno))
+
+            elif keyword == "DRAG":
+                nodes.append(ASTNode(NodeType.DRAG, args, line=lineno))
 
             elif keyword == "RUN":
                 nodes.append(ASTNode(NodeType.RUN, args, line=lineno))

@@ -351,6 +351,11 @@ class DSLExecutor:
             self._exec_region_wait(node, ctx)
         elif node.type == NodeType.SCENE_CONDITION:
             self._exec_scene_condition(node, ctx)
+        elif node.type == NodeType.FINDCANVAS:
+            self._exec_findcanvas(node, ctx)
+
+        elif node.type == NodeType.DRAG:
+            self._exec_drag(node, ctx)
 
         elif node.type == NodeType.VLM_CONDITION:
             self._exec_vlm_condition(node, ctx)
@@ -372,6 +377,32 @@ class DSLExecutor:
         self._log(f"CLICK ({button}): {target}")
         self._call_action("click", target=target, button=button, ctx=ctx)
         self._emit("node_done", node_type="CLICK", args=target, line=node.line)
+
+    def _exec_drag(self, node: ASTNode, ctx: ExecutionContext):
+        """DRAG from_x from_y TO to_x to_y — 从起点拖拽到终点"""
+        raw = self._interpolate(node.args)
+        # 支持 "x1 y1 TO x2 y2" 和 "x1,y1 TO x2,y2"
+        import re
+        parts = re.split(r"[\s,]+", raw.strip())
+        self._emit("node_start", node_type="DRAG", args=raw, line=node.line)
+        self._log(f"DRAG: {raw}")
+        # 查找 TO 分隔
+        try:
+            to_idx = None
+            for i, p in enumerate(parts):
+                if p.upper() == "TO":
+                    to_idx = i
+                    break
+            if to_idx and to_idx >= 2 and len(parts) > to_idx + 2:
+                x1, y1 = int(parts[0]), int(parts[1])
+                x2, y2 = int(parts[to_idx+1]), int(parts[to_idx+2])
+                self._call_action("drag", from_target=f"{x1},{y1}",
+                    to_target=f"{x2},{y2}", ctx=ctx)
+            else:
+                self._log(f"  DRAG 格式错误: {raw}")
+        except (ValueError, IndexError):
+            self._log(f"  DRAG 格式错误: {raw}")
+        self._emit("node_done", node_type="DRAG", args=raw, line=node.line)
 
     def _exec_type(self, node: ASTNode, ctx: ExecutionContext):
         text = self._interpolate(node.args)
@@ -904,6 +935,48 @@ class DSLExecutor:
         result = self._call_action("check_condition",
             condition=f"scene:{scene_name}", similarity=similarity, ctx=ctx)
         self._emit("node_done", node_type="SCENE_CONDITION", args=args, line=node.line)
+
+    def _exec_findcanvas(self, node: ASTNode, ctx: ExecutionContext):
+        """FINDCANVAS [tolerance=N] [region=x,y,w,h] — 检测白色画布区域"""
+        args = self._interpolate(node.args)
+        # 解析 key=value 参数
+        kwargs = {}
+        for part in args.split():
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip().lower()
+                if k == "tolerance":
+                    kwargs["color_tolerance"] = float(v)
+                elif k == "region":
+                    kwargs["region"] = v
+        self._emit("node_start", node_type="FINDCANVAS", args=args, line=node.line)
+        self._log(f"FINDCANVAS: 检测画布区域 (tolerance={kwargs.get('color_tolerance', 30)})")
+        result = self._call_action("find_canvas", **kwargs, ctx=ctx)
+        if isinstance(result, dict) and result.get("success"):
+            c = result["canvas"]
+            center = result["center"]
+            self._set_var("canvas_x", c["x"])
+            self._set_var("canvas_y", c["y"])
+            self._set_var("canvas_w", c["w"])
+            self._set_var("canvas_h", c["h"])
+            self._set_var("canvas_left", c["x"])
+            self._set_var("canvas_top", c["y"])
+            self._set_var("canvas_right", c["x"] + c["w"])
+            self._set_var("canvas_bottom", c["y"] + c["h"])
+            self._set_var("canvas_center_x", center["x"])
+            self._set_var("canvas_center_y", center["y"])
+            # 预计算 1/4 和 3/4 位置（方便相对定位）
+            self._set_var("canvas_x1", c["x"] + c["w"] // 4)
+            self._set_var("canvas_x2", c["x"] + c["w"] // 2)
+            self._set_var("canvas_x3", c["x"] + c["w"] * 3 // 4)
+            self._set_var("canvas_y1", c["y"] + c["h"] // 4)
+            self._set_var("canvas_y2", c["y"] + c["h"] // 2)
+            self._set_var("canvas_y3", c["y"] + c["h"] * 3 // 4)
+            self._log(f"  画布: ({c['x']},{c['y']}) {c['w']}x{c['h']} 中心=({center['x']},{center['y']})")
+        else:
+            err = result.get("error", "检测失败") if isinstance(result, dict) else "未知错误"
+            self._log(f"  FINDCANVAS 失败: {err}")
+        self._emit("node_done", node_type="FINDCANVAS", args=args, line=node.line)
 
     def _exec_vlm_condition(self, node: ASTNode, ctx: ExecutionContext):
         """VLM_CONDITION 描述 — 用VLM视觉模型判断画面是否符合描述。
