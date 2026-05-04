@@ -17,6 +17,7 @@ from features._utils import parse_region
     returns="dict{x, y, w, h} - 选中区域的坐标和尺寸",
     dsl_keyword="REGION_SELECT",
     dsl_template="REGION_SELECT var {message}",
+    flow_type="screenshot",
 )
 def region_select(message: str = "请拖拽选择屏幕区域") -> dict:
     try:
@@ -194,6 +195,7 @@ def capture_multi(prefix: str = "capture_", similarity: float = 0.9,
     returns="dict{found, text, x, y, w, h, confidence}",
     dsl_keyword="OCR_FIND",
     dsl_template="OCR_FIND {query}",
+    flow_type="click_text",
     test_cases=[
         TC("empty_query", {"query": ""}, "success",
            validator=lambda r: r.get("success") is True),
@@ -226,6 +228,7 @@ def ocr_find_text(query: str, region: str = "", fuzzy_threshold: float = 0.7):
     returns="list[dict{text, x, y, confidence}]",
     dsl_keyword="OCR_EXTRACT",
     dsl_template="OCR_EXTRACT",
+    flow_type="screenshot",
 )
 def ocr_extract_all(region: str = ""):
     try:
@@ -253,6 +256,7 @@ def ocr_extract_all(region: str = ""):
     returns="dict{found, x, y, confidence} or list",
     dsl_keyword="IMAGE_FIND",
     dsl_template="IMAGE_FIND {template_name}",
+    flow_type="condition",
     test_cases=[
         TC("nonexistent", {"template_name": "__nonexistent__"}, "success",
            validator=lambda r: r.get("success") and not r["result"]["found"]),
@@ -334,6 +338,7 @@ def detect_progress(region: str, direction: str = "auto") -> float:
     returns="dict{base64, width, height, format}",
     dsl_keyword="SCREENSHOT",
     dsl_template="SCREENSHOT",
+    flow_type="screenshot",
     test_cases=[
         TC("fullscreen", {}, "non_null", skip_in_ci=True),
     ],
@@ -367,6 +372,7 @@ def screenshot(region: str = "", format: str = "jpeg", quality: int = 70):
     returns="bool - 是否关闭了弹窗",
     dsl_keyword="POPUP_CLOSE",
     dsl_template="POPUP_CLOSE {text}",
+    flow_type="popup_close",
     test_cases=[
         TC("auto_close", {"text": "", "timeout": 2}, "success",
            validator=lambda r: r.get("success") is True, skip_in_ci=True),
@@ -412,6 +418,7 @@ def popup_close(text: str = "", timeout: float = 5) -> bool:
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_WAIT",
     dsl_template="PROGRESS_WAIT {region} {threshold} [timeout]",
+    flow_type="progress_wait",
     hidden=True,
     examples=[
         "PROGRESS_WAIT 100,200,300,20 0.8",
@@ -439,6 +446,7 @@ def progress_wait():
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_INIT",
     dsl_template="PROGRESS_INIT {var_name}",
+    flow_type="progress_wait",
     hidden=True,
     examples=[
         "PROGRESS_INIT progress_area",
@@ -464,6 +472,7 @@ def progress_init():
     returns="None（DSL 内嵌指令）",
     dsl_keyword="PROGRESS_RELOCATE",
     dsl_template="PROGRESS_RELOCATE {var_name}",
+    flow_type="progress_wait",
     hidden=True,
     examples=[
         "PROGRESS_RELOCATE progress_area",
@@ -489,6 +498,7 @@ def progress_relocate():
     returns="dict{match, ratio} - 是否匹配及颜色占比",
     dsl_keyword="COLOR_CHECK",
     dsl_template="COLOR_CHECK {region} {h} {s} {v}",
+    flow_type="color_check",
     test_cases=[
         TC("basic", {"h": 0, "s": 0, "v": 0, "region": "0,0,100,100"}, "success"),
     ],
@@ -571,6 +581,7 @@ def wheel_select(options: str, values: str = "", title: str = "请选择",
     returns="dict{matched, elapsed} - 检测结果",
     dsl_keyword="REGION_WAIT",
     dsl_template="REGION_WAIT {region} {region_type} {timeout}",
+    flow_type="region_wait",
     examples=[
         "REGION_WAIT 100,200,300,400 stable",
         "REGION_WAIT 200,100,400,30 change 15",
@@ -612,6 +623,100 @@ def wait_region(region: str, region_type: str = "stable",
 
 
 @feature(
+    name="wait_screen_change",
+    display_name="等待屏幕变化",
+    description="""【DSL·感知】阻塞等待屏幕画面发生变化（全屏）。
+    通过定时截图比对像素差异，检测到变化时立即返回。
+    适用于等待弹窗出现、页面切换等场景。替代固定 WAIT，让流程继续得更快。""",
+    category=F.PERCEPTION,
+    params=[
+        P("timeout", "number", "超时秒数", required=False, default=30),
+        P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
+        P("threshold", "number", "变化判定阈值（像素差异比例 0-1）", required=False, default=0.02),
+    ],
+    returns="dict{matched, elapsed} - 是否检测到变化",
+    dsl_keyword="WAITSCREEN",
+    dsl_template="WAITSCREEN {timeout}",
+    flow_type="region_wait",
+    examples=["WAITSCREEN 30", "WAITSCREEN"],
+    tags=["perception", "dsl", "wait"],
+)
+def wait_screen_change(timeout: float = 30, poll_interval: float = 0.5,
+                        threshold: float = 0.02) -> dict:
+    """等待全屏画面发生变化"""
+    import time
+    try:
+        import mss
+        import numpy as np
+        with mss.mss() as sct:
+            mon = sct.monitors[1]
+            prev = np.array(sct.grab(mon))
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(poll_interval)
+                current = np.array(sct.grab(mon))
+                diff = np.abs(current.astype(np.int16) - prev.astype(np.int16))
+                change_ratio = np.count_nonzero(diff > 30) / diff.size
+                if change_ratio > threshold:
+                    return {"matched": True, "elapsed": round(time.time() - (deadline - timeout), 2)}
+                prev = current
+            return {"matched": False, "elapsed": round(timeout, 2), "error": "超时"}
+    except ImportError:
+        # 降级：直接 sleep timeout
+        time.sleep(min(timeout, 10))
+        return {"matched": True, "elapsed": timeout, "note": "mss不可用，降级sleep"}
+
+
+@feature(
+    name="wait_screen_stable",
+    display_name="等待屏幕静止",
+    description="""【DSL·感知】阻塞等待屏幕画面停止变化（全屏）。
+    通过定时截图比对像素差异，直到画面连续稳定才返回。
+    适用于等待加载完成、动画结束等场景。替代固定 WAIT，让流程继续得更快。""",
+    category=F.PERCEPTION,
+    params=[
+        P("timeout", "number", "超时秒数", required=False, default=30),
+        P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
+        P("stability_threshold", "number", "稳定判定阈值（像素差异比例 0-1）", required=False, default=0.01),
+        P("stable_rounds", "number", "连续稳定次数", required=False, default=2),
+    ],
+    returns="dict{matched, elapsed} - 是否已稳定",
+    dsl_keyword="SCREENSTABLE",
+    dsl_template="SCREENSTABLE {timeout}",
+    flow_type="region_wait",
+    examples=["SCREENSTABLE 30", "SCREENSTABLE"],
+    tags=["perception", "dsl", "wait"],
+)
+def wait_screen_stable(timeout: float = 30, poll_interval: float = 0.5,
+                        stability_threshold: float = 0.01, stable_rounds: int = 2) -> dict:
+    """等待全屏画面静止"""
+    import time
+    try:
+        import mss
+        import numpy as np
+        with mss.mss() as sct:
+            mon = sct.monitors[1]
+            prev = np.array(sct.grab(mon))
+            stable_count = 0
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(poll_interval)
+                current = np.array(sct.grab(mon))
+                diff = np.abs(current.astype(np.int16) - prev.astype(np.int16))
+                change_ratio = np.count_nonzero(diff > 30) / diff.size
+                if change_ratio < stability_threshold:
+                    stable_count += 1
+                    if stable_count >= stable_rounds:
+                        return {"matched": True, "elapsed": round(time.time() - (deadline - timeout), 2)}
+                else:
+                    stable_count = 0
+                prev = current
+            return {"matched": False, "elapsed": round(timeout, 2), "error": "超时"}
+    except ImportError:
+        time.sleep(min(timeout, 10))
+        return {"matched": True, "elapsed": timeout, "note": "mss不可用，降级sleep"}
+
+@feature(
     name="scene_match",
     display_name="场景识别",
     description="""【DSL·感知】识别当前屏幕是否匹配指定场景。
@@ -628,6 +733,7 @@ def wait_region(region: str, region_type: str = "stable",
     returns="dict{match, confidence} - 匹配结果",
     dsl_keyword="SCENE_CONDITION",
     dsl_template="SCENE_CONDITION {scene_name} {similarity}",
+    flow_type="scene_condition",
     examples=[
         "SCENE_CONDITION battle_scene 80",
         "SCENE_CONDITION main_menu",

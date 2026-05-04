@@ -54,6 +54,7 @@ from features._utils import parse_region
     returns="dict{success, target, x, y, confidence} - 点击结果",
     dsl_keyword="IMAGE_CLICK",
     dsl_template="IMAGE_CLICK {targets}",
+    flow_type="image_click",
     examples=[
         "IMAGE_CLICK attack_btn",
         "IMAGE_CLICK icon_a.png, icon_b.png",

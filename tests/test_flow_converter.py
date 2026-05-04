@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 import pytest
 from engine.dsl_flow_converter import dsl_to_flow, flow_to_dsl, roundtrip_verify
 
+# 加载完整 registry，使 @feature 的 dsl_keyword/flow_type 生效
+try:
+    import features._all  # noqa: F401
+except ImportError:
+    pass
+
 
 class TestDSLtoFlow:
     """DSL → FlowScript 转换测试"""
@@ -172,3 +178,61 @@ class TestFlowtoDSL:
         assert "LOOP 5" in dsl
         assert "CLICK 50 60" in dsl
         assert "RETURN" in dsl
+
+
+class TestRegistryFlowTypes:
+    """验证完整 registry 加载后 DSL → Flow 类型映射正确"""
+
+    def test_all_dsl_keywords_map_to_valid_flow_types(self):
+        """每个有 dsl_keyword 的 @feature 都映射到正确的 flow node type。"""
+        from features.registry import registry
+        from engine.dsl_flow_converter import get_dsl_to_flow_type
+
+        mapping = get_dsl_to_flow_type()
+
+        for f in registry.all():
+            if not f.dsl_keyword or f.deprecated:
+                continue
+            kw = f.dsl_keyword.upper()
+            assert kw in mapping, f"{f.name}: dsl_keyword={kw} 不在 mapping 中"
+            if f.flow_type:
+                assert mapping[kw] == f.flow_type, (
+                    f"{f.name}: mapping[{kw}] = {mapping[kw]}, 期望 {f.flow_type}"
+                )
+
+    def test_dsl_to_flow_produces_correct_types(self):
+        """实际解析 DSL 并验证节点类型正确。"""
+        cases = [
+            ("CLICK 100 200", "click"),
+            ("WAIT 2", "wait"),
+            ('TYPE "hello"', "input_text"),
+            ("HOTKEY ctrl+c", "keyboard"),
+            ("SWIPE 0 0 100 100", "swipe"),
+            ("SCROLL down", "swipe"),
+            ("SCREENSHOT", "screenshot"),
+            ("FOCUS Paint", "click"),
+            ('IMAGE_CLICK "test.png"', "image_click"),
+            ('OCR_FIND "text"', "click_text"),
+            ("WAITSCREEN", "region_wait"),
+            ("SCREENSTABLE", "region_wait"),
+            ("FINDCANVAS", "condition"),
+            ('SET x "1"', "variable_set"),
+            ("POPUP_CLOSE", "popup_close"),
+            ("COLOR_CHECK 0 0 100 100 255 0 0 30", "color_check"),
+            ("PROGRESS_WAIT 0,0,100,20 0.8", "progress_wait"),
+            ("REGION_WAIT 0,0,100,20 stable", "region_wait"),
+            ("SCENE_CONDITION scene 80", "scene_condition"),
+            ('IMAGE_FIND "test.png"', "condition"),
+            ("CALL test", "sub_script"),
+        ]
+        for dsl_text, expected_type in cases:
+            flow = dsl_to_flow(dsl_text)
+            content_nodes = [n for n in flow["nodes"]
+                             if n["type"] not in ("start", "end")]
+            assert len(content_nodes) >= 1, (
+                f"dsl_to_flow({dsl_text!r}) 未生成内容节点"
+            )
+            actual = content_nodes[0]["type"]
+            assert actual == expected_type, (
+                f"dsl_to_flow({dsl_text!r}): 期望 {expected_type}, 得到 {actual}"
+            )

@@ -120,7 +120,8 @@ class DSLParser:
                 "REGION_SELECT", "IMAGE_FIND", "TEMPLATE_CAPTURE",
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
-                "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION"}
+                "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION",
+                "FINDCANVAS", "DRAG", "VLM_ANALYZE"}
     _registry_loaded = False
 
     @classmethod
@@ -130,6 +131,7 @@ class DSLParser:
             return
         cls._registry_loaded = True
         try:
+            import features._all  # 触发 @feature 装饰器，填充 registry
             from features.registry import registry
             for f in registry.all():
                 if f.dsl_keyword and not f.deprecated:
@@ -349,7 +351,7 @@ class DSLParser:
             elif keyword == "SCENE_CONDITION":
                 nodes.append(ASTNode(NodeType.SCENE_CONDITION, args, line=lineno))
 
-            elif keyword == "VLM_CONDITION":
+            elif keyword in ("VLM_CONDITION", "VLM_ANALYZE"):
                 nodes.append(ASTNode(NodeType.VLM_CONDITION, args, line=lineno))
 
             elif keyword == "FINDCANVAS":
@@ -516,14 +518,17 @@ class DSLParser:
         return name, params
 
     def _parse_call_expr(self, text: str, lineno: int):
-        """CALL name(arg1, arg2) → ('name', ['arg1', 'arg2'])"""
+        """CALL name(arg1, arg2) → ('name', ['arg1', 'arg2'])
+        也支持 CALL name（无参数时）"""
         m = re.match(r"^(\w+)\s*\((.*)\)\s*$", text)
-        if not m:
-            raise DSLParseError(f"CALL 格式错误: '{text}'，应为 name(arg1, arg2)", lineno)
-        name = m.group(1)
-        raw = m.group(2).strip()
-        args = [a.strip().strip("\"'") for a in raw.split(",") if a.strip()] if raw else []
-        return name, args
+        if m:
+            name = m.group(1)
+            raw = m.group(2).strip()
+            args = [a.strip().strip("\"'") for a in raw.split(",") if a.strip()] if raw else []
+            return name, args
+        # 兼容 CALL name（无括号）
+        name = text.strip().split()[0] if text.strip() else text.strip()
+        return name, []
 
     # ── utility ───────────────────────────────────────────────────
     @staticmethod

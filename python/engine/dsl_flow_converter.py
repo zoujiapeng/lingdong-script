@@ -74,14 +74,16 @@ def get_dsl_to_flow_type() -> dict[str, str]:
             "FINDCANVAS": "condition",
             "DRAG": "click",
         })
-        # 从 registry 补充（覆盖已有映射）
+        # 从 registry 补充（flow_type 优先于硬编码映射）
         try:
             from features.registry import registry
             for f in registry.all():
                 if f.dsl_keyword and not f.deprecated:
                     kw = f.dsl_keyword.upper()
-                    if kw not in _BASE_DSL_TO_FLOW:  # 不覆盖结构关键字
-                        mapping[kw] = "tool_call"
+                    if f.flow_type:
+                        mapping[kw] = f.flow_type  # flow_type 是权威来源
+                    elif kw not in mapping:
+                        mapping[kw] = "tool_call"  # 无映射的 DSL 关键字走通用 tool_call
         except ImportError:
             pass
         _dsl_to_flow_cache = mapping

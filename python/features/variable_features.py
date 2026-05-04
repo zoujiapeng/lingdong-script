@@ -17,6 +17,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
     returns="dict{name, value, previous} - 变量名、新值、旧值",
     dsl_keyword="SET",
     dsl_template="SET {name} {value}",
+    flow_type="variable_set",
     examples=["SET user_name admin", "SET retry_count 3"],
     test_cases=[
         TC("set_and_get", {"name": "test_var", "value": "hello"}, "success",

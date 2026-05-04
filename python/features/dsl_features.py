@@ -77,6 +77,7 @@ def run_dsl_sync(dsl: str, max_loops: int = 10, retry_limit: int = 1, timeout: f
     returns="bool - 是否成功调用",
     dsl_keyword="CALL",
     dsl_template="CALL {name}",
+    flow_type="sub_script",
     examples=["CALL login_flow", "CALL check_update"],
     tags=["dsl", "control"],
 )

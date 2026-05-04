@@ -153,6 +153,7 @@ def timer_wait_time(target: str) -> dict:
     returns="bool - 是否完整等待完毕",
     dsl_keyword="WAIT",
     dsl_template="WAIT {duration}",
+    flow_type="wait",
     examples=["WAIT 2", "WAIT 0.5"],
     test_cases=[
         TC("short_wait", {"duration": 0.1}, "bool_true",

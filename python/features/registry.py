@@ -79,6 +79,7 @@ class FeatureSpec:
     returns: str
     dsl_keyword: Optional[str] = None
     dsl_template: Optional[str] = None
+    flow_type: Optional[str] = None  # FlowScript node type (click, wait, screenshot, etc.)
     examples: List[str] = field(default_factory=list)
     test_cases: List[TestCase] = field(default_factory=list)
     version: str = "1.0.0"
@@ -141,6 +142,7 @@ class FeatureSpec:
             "returns": self.returns,
             "dsl_keyword": self.dsl_keyword,
             "dsl_template": self.dsl_template,
+            "flow_type": self.flow_type,
             "examples": self.examples,
             "mcp_tool_name": self.mcp_tool_name,
             "cli_command": self.cli_command,
@@ -448,7 +450,7 @@ registry = FeatureRegistry()
 
 
 def feature(name, display_name, description, category, params, returns,
-            dsl_keyword=None, dsl_template=None, examples=None,
+            dsl_keyword=None, dsl_template=None, flow_type=None, examples=None,
             test_cases=None, tags=None, version="1.0.0",
             visual=None, hidden=False, deprecated=False):
     """功能注册装饰器"""
@@ -457,6 +459,7 @@ def feature(name, display_name, description, category, params, returns,
             name=name, display_name=display_name, description=description,
             category=category, handler=fn, params=params, returns=returns,
             dsl_keyword=dsl_keyword, dsl_template=dsl_template,
+            flow_type=flow_type,
             examples=examples or [], test_cases=test_cases or [],
             tags=tags or [], version=version,
             visual=visual or VisualMeta(), hidden=hidden, deprecated=deprecated,

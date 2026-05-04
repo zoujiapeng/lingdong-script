@@ -24,6 +24,7 @@ from features.input_features import _find_target_coords
     returns="bool - 点击是否成功",
     dsl_keyword="CLICK",
     dsl_template="CLICK {target}",
+    flow_type="click",
     examples=["CLICK 开始游戏", "CLICK 确认"],
     test_cases=[
         TC("no_target", {"target": ""}, "success",
@@ -55,6 +56,7 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     returns="bool - 是否成功",
     dsl_keyword="TYPE",
     dsl_template="TYPE {text}",
+    flow_type="input_text",
     examples=["TYPE 搜索关键词", "TYPE 用户名"],
     test_cases=[
         TC("basic_type", {"text": "test"}, "bool_true", skip_in_ci=True),
@@ -89,6 +91,7 @@ def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool
     returns="bool - 是否成功",
     dsl_keyword="SCROLL",
     dsl_template="SCROLL {direction}",
+    flow_type="swipe",
     examples=["SCROLL down", "SCROLL up"],
     test_cases=[
         TC("scroll_down", {"direction": "down"}, "bool_true", skip_in_ci=True),
@@ -124,6 +127,7 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1, target: st
     returns="bool - 是否成功",
     dsl_keyword="SWIPE",
     dsl_template="SWIPE {start_x} {start_y} {end_x} {end_y}",
+    flow_type="swipe",
     examples=["SWIPE 400 300 800 300", "SWIPE 500 500 500 200"],
     test_cases=[
         TC("short_swipe", {"start_x": 0, "start_y": 0, "end_x": 10, "end_y": 10}, "bool_true", skip_in_ci=True),
@@ -156,14 +160,16 @@ def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: f
     returns="bool - 是否成功",
     dsl_keyword="DRAG",
     dsl_template="DRAG {from_target} TO {to_target}",
+    flow_type="click",
     examples=["DRAG 文件图标 TO 目标文件夹"],
 )
 def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
     try:
-        from interaction.actions import HumanMouse
+        import pyautogui
         x1, y1 = _find_target_coords(from_target)
         x2, y2 = _find_target_coords(to_target)
-        HumanMouse.drag(x1, y1, x2, y2, duration=duration)
+        pyautogui.moveTo(x1, y1, duration=0.1)
+        pyautogui.drag(x2 - x1, y2 - y1, duration=duration, button='left')
         return True
     except Exception:
         return False
@@ -180,6 +186,7 @@ def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
     returns="bool - 是否成功",
     dsl_keyword="HOTKEY",
     dsl_template="HOTKEY {keys}",
+    flow_type="keyboard",
     examples=["HOTKEY ctrl+c", "HOTKEY alt+F4"],
     test_cases=[
         TC("ctrl_c", {"keys": "ctrl+c"}, "bool_true", skip_in_ci=True),
@@ -206,6 +213,7 @@ def hotkey(keys: str) -> bool:
     returns="bool - 是否成功",
     dsl_keyword="TYPE_CLIP",
     dsl_template="TYPE_CLIP {text}",
+    flow_type="input_text",
     examples=["TYPE_CLIP 你好世界"],
     test_cases=[
         TC("basic", {"text": "test"}, "bool_true", skip_in_ci=True),

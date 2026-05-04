@@ -106,14 +106,22 @@ class DSLExecutor:
             self._ctx.variables[name] = value
 
     def _interpolate(self, text: str) -> str:
-        """替换 {var} 为变量值"""
+        """替换 {var} 为变量值，支持 {var + N} {var - N} 等内联算术"""
         def replacer(m):
             var_name = m.group(1)
             val = self._resolve_var(var_name)
             if val is not None:
+                # 处理内联算术: {var + 10} 或 {var - 5}
+                if m.lastindex and m.lastindex >= 2 and m.group(2) and m.group(3):
+                    num = int(m.group(3))
+                    ival = int(val)
+                    return str(ival + num if m.group(2) == "+" else ival - num)
                 return str(val)
             return m.group(0)  # 保留未解析的占位符
-        return re.sub(r"\{(\w+)\}", replacer, text)
+        # 先匹配带算术的 {var + N} / {var - N}，再匹配简单 {var}
+        result = re.sub(r"\{(\w+)\s*([\+\-])\s*(\d+)\}", replacer, text)
+        result = re.sub(r"\{(\w+)\}", replacer, result)
+        return result
 
     # ── 公开控制 API ─────────────────────────────────────────────
     def run_dsl(self, source: str, ctx: Optional[ExecutionContext] = None):
@@ -1221,8 +1229,6 @@ class DSLExecutor:
             last_err = None
             for attempt in range(1, retry_limit + 1):
                 try:
-                    if ctx is not None:
-                        kwargs["ctx"] = ctx
                     return self._action_handler(action, **kwargs)
                 except Exception as e:
                     last_err = e

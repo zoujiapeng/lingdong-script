@@ -86,6 +86,7 @@ def _find_white_rect(img, tolerance: float = 30) -> dict:
     returns="dict{success, canvas: {x, y, w, h}, center: {x, y}, area_pct}",
     dsl_keyword="FINDCANVAS",
     dsl_template="FINDCANVAS tolerance={color_tolerance}",
+    flow_type="condition",
     tags=["canvas", "perception", "region"],
 )
 def find_canvas(region: str = "", color_tolerance: float = 30) -> dict:
