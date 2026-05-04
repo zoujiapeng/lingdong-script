@@ -281,9 +281,9 @@ function startApiServer() {
         case '/api/get-state':
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
           mainWindow.webContents.executeJavaScript(
-            'JSON.stringify({ nodes: window.__bridge_getState ? window.__bridge_getState() : null })'
+            'JSON.stringify(window.__bridge_getState ? window.__bridge_getState() : null)'
           ).then((result: string) => {
-            try { send(200, { ok: true, state: JSON.parse(result) }); }
+            try { send(200, JSON.parse(result)); }
             catch { send(500, { error: '状态解析失败' }); }
           }).catch((err: Error) => send(500, { error: err.message }));
           break;
