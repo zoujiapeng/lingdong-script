@@ -57,6 +57,44 @@ class NodeType(str, Enum):
     VLM_CONDITION = "VLM_CONDITION"
     FINDCANVAS = "FINDCANVAS"
     DRAG = "DRAG"
+    # Registry 关键字回退（无对应枚举成员时）
+    REGISTRY_FEATURE = "REGISTRY_FEATURE"
+
+
+# 字典派发：简单关键字 → NodeType（替代 ~30 个 elif 分支）
+_SIMPLE_NODE_TYPES: dict[str, NodeType] = {
+    "CLICK": NodeType.CLICK,
+    "TYPE": NodeType.TYPE,
+    "LAUNCH": NodeType.LAUNCH,
+    "BREAK": NodeType.BREAK,
+    "SCREENSHOT": NodeType.SCREENSHOT,
+    "WAITSCREEN": NodeType.WAITSCREEN,
+    "SCREENSTABLE": NodeType.SCREENSTABLE,
+    "HOTKEY": NodeType.HOTKEY,
+    "FOCUS": NodeType.FOCUS,
+    "SET": NodeType.SET,
+    "OCR_FIND": NodeType.OCR_FIND,
+    "OCR_EXTRACT": NodeType.OCR_EXTRACT,
+    "REGION_SELECT": NodeType.REGION_SELECT,
+    "IMAGE_FIND": NodeType.IMAGE_FIND,
+    "TEMPLATE_CAPTURE": NodeType.TEMPLATE_CAPTURE,
+    "PROGRESS_WAIT": NodeType.PROGRESS_WAIT,
+    "PROGRESS_INIT": NodeType.PROGRESS_INIT,
+    "PROGRESS_RELOCATE": NodeType.PROGRESS_RELOCATE,
+    "IMAGE_CLICK": NodeType.IMAGE_CLICK,
+    "SWIPE": NodeType.SWIPE,
+    "SCROLL": NodeType.SCROLL,
+    "DELAY": NodeType.DELAY,
+    "WAIT": NodeType.WAIT,
+    "WAIT_RANDOM": NodeType.WAIT_RANDOM,
+    "POPUP_CLOSE": NodeType.POPUP_CLOSE,
+    "COLOR_CHECK": NodeType.COLOR_CHECK,
+    "REGION_WAIT": NodeType.REGION_WAIT,
+    "SCENE_CONDITION": NodeType.SCENE_CONDITION,
+    "FINDCANVAS": NodeType.FINDCANVAS,
+    "DRAG": NodeType.DRAG,
+    "RUN": NodeType.RUN,
+}
 
 @dataclass
 class ASTNode:
@@ -269,101 +307,16 @@ class DSLParser:
                 break
             self._consume()
 
-            if keyword == "CLICK":
-                nodes.append(ASTNode(NodeType.CLICK, args, line=lineno))
-
-            elif keyword == "TYPE":
-                nodes.append(ASTNode(NodeType.TYPE, args, line=lineno))
-
-            elif keyword == "LAUNCH":
-                nodes.append(ASTNode(NodeType.LAUNCH, args, line=lineno))
-
-            elif keyword == "BREAK":
-                nodes.append(ASTNode(NodeType.BREAK, "", line=lineno))
-
-            elif keyword == "SCREENSHOT":
-                nodes.append(ASTNode(NodeType.SCREENSHOT, args, line=lineno))
-
-            elif keyword == "WAITSCREEN":
-                nodes.append(ASTNode(NodeType.WAITSCREEN, args, line=lineno))
-
-            elif keyword == "SCREENSTABLE":
-                nodes.append(ASTNode(NodeType.SCREENSTABLE, args, line=lineno))
-
-            elif keyword == "HOTKEY":
-                nodes.append(ASTNode(NodeType.HOTKEY, args, line=lineno))
-
-            elif keyword == "FOCUS":
-                nodes.append(ASTNode(NodeType.FOCUS, args, line=lineno))
-
-            elif keyword == "SET":
-                nodes.append(ASTNode(NodeType.SET, args, line=lineno))
-
-            elif keyword == "OCR_FIND":
-                nodes.append(ASTNode(NodeType.OCR_FIND, args, line=lineno))
-
-            elif keyword == "OCR_EXTRACT":
-                nodes.append(ASTNode(NodeType.OCR_EXTRACT, args, line=lineno))
-
-            elif keyword == "REGION_SELECT":
-                nodes.append(ASTNode(NodeType.REGION_SELECT, args, line=lineno))
-
-            elif keyword == "IMAGE_FIND":
-                nodes.append(ASTNode(NodeType.IMAGE_FIND, args, line=lineno))
-
-            elif keyword == "TEMPLATE_CAPTURE":
-                nodes.append(ASTNode(NodeType.TEMPLATE_CAPTURE, args, line=lineno))
-
-            elif keyword == "PROGRESS_WAIT":
-                nodes.append(ASTNode(NodeType.PROGRESS_WAIT, args, line=lineno))
-            elif keyword == "PROGRESS_INIT":
-                nodes.append(ASTNode(NodeType.PROGRESS_INIT, args, line=lineno))
-            elif keyword == "PROGRESS_RELOCATE":
-                nodes.append(ASTNode(NodeType.PROGRESS_RELOCATE, args, line=lineno))
-
-            elif keyword == "IMAGE_CLICK":
-                nodes.append(ASTNode(NodeType.IMAGE_CLICK, args, line=lineno))
-
-            elif keyword == "SWIPE":
-                nodes.append(ASTNode(NodeType.SWIPE, args, line=lineno))
-
-            elif keyword == "SCROLL":
-                nodes.append(ASTNode(NodeType.SCROLL, args, line=lineno))
-
-            elif keyword == "DELAY":
-                nodes.append(ASTNode(NodeType.DELAY, args, line=lineno))
-
-            elif keyword == "WAIT":
-                nodes.append(ASTNode(NodeType.WAIT, args, line=lineno))
-
-            elif keyword == "WAIT_RANDOM":
-                nodes.append(ASTNode(NodeType.WAIT_RANDOM, args, line=lineno))
-
-            elif keyword == "POPUP_CLOSE":
-                nodes.append(ASTNode(NodeType.POPUP_CLOSE, args, line=lineno))
-
-            elif keyword == "COLOR_CHECK":
-                nodes.append(ASTNode(NodeType.COLOR_CHECK, args, line=lineno))
-
-            elif keyword == "REGION_WAIT":
-                nodes.append(ASTNode(NodeType.REGION_WAIT, args, line=lineno))
-
-            elif keyword == "SCENE_CONDITION":
-                nodes.append(ASTNode(NodeType.SCENE_CONDITION, args, line=lineno))
+            # ── 字典派发：简单关键字 → 直接构建 ASTNode ──
+            if keyword in _SIMPLE_NODE_TYPES:
+                nargs = "" if keyword == "BREAK" else args
+                nodes.append(ASTNode(_SIMPLE_NODE_TYPES[keyword], nargs, line=lineno))
 
             elif keyword in ("VLM_CONDITION", "VLM_ANALYZE"):
                 nodes.append(ASTNode(NodeType.VLM_CONDITION, args, line=lineno))
 
-            elif keyword == "FINDCANVAS":
-                nodes.append(ASTNode(NodeType.FINDCANVAS, args, line=lineno))
-
-            elif keyword == "DRAG":
-                nodes.append(ASTNode(NodeType.DRAG, args, line=lineno))
-
-            elif keyword == "RUN":
-                nodes.append(ASTNode(NodeType.RUN, args, line=lineno))
-
-            elif keyword == "LOOP":
+            # ── 复杂结构关键字（含嵌套块解析）──
+            elif keyword in ("LOOP", "WHILE", "UNTIL"):
                 node = ASTNode(NodeType.LOOP, args, line=lineno)
                 # 支持 LOOP WHILE condition / LOOP UNTIL condition 语法
                 args_lower = args.strip().lower()
@@ -423,21 +376,6 @@ class DSLParser:
             elif keyword == "RETURN":
                 nodes.append(ASTNode(NodeType.RETURN, args.strip(), line=lineno))
 
-            elif keyword == "WHILE":
-                node = ASTNode(NodeType.LOOP, args, line=lineno)
-                node.children = self._parse_block({"END"})
-                self._expect("END", lineno)
-                # 标记为条件循环，执行器将按 while 语义执行
-                node.loop_type = "while"
-                nodes.append(node)
-
-            elif keyword == "UNTIL":
-                node = ASTNode(NodeType.LOOP, args, line=lineno)
-                node.children = self._parse_block({"END"})
-                self._expect("END", lineno)
-                node.loop_type = "until"
-                nodes.append(node)
-
             elif keyword == "WHEN":
                 event_key, config_str = self._parse_when_header(args, lineno)
                 node = ASTNode(NodeType.WHEN, config_str, line=lineno)
@@ -457,6 +395,11 @@ class DSLParser:
                 # 专用分支解析：WITH 在此处是分支分隔符，不是块语句
                 self._parse_parallel_branches(node, lineno)
                 nodes.append(node)
+
+            else:
+                # Registry 回退：带 dsl_keyword 的 @feature 自动处理
+                nt = getattr(NodeType, keyword, NodeType.REGISTRY_FEATURE)
+                nodes.append(ASTNode(nt, args, line=lineno))
 
         return nodes
 

@@ -28,7 +28,8 @@ from engine.dsl_parser import DSLParser, ASTNode, NodeType
 # 动态 DSL ↔ Flow 映射（从 Feature Registry 构建）
 # ═══════════════════════════════════════════════════════════════
 
-# 硬编码的结构关键字（无对应 @feature）
+# 结构关键字映射（无对应 @feature，由 flow converter 内部处理）
+# 这些关键字不在 registry 中，必须硬编码
 _BASE_DSL_TO_FLOW = {
     "LOOP": "loop",
     "IF": "condition",
@@ -49,31 +50,38 @@ _BASE_DSL_TO_FLOW = {
     "TEMPLATE_CAPTURE": "screenshot",
 }
 
+# 用于 @feature 关键字的兼容降级映射（registry flow_type 优先）
+# 所有带 dsl_keyword 的 @feature 都已声明 flow_type，此处仅作兜底
+_BASIC_DSL_TO_FLOW = {
+    "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
+    "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
+    "SET": "variable_set", "IMAGE_CLICK": "image_click",
+    "PROGRESS_WAIT": "progress_wait", "OCR_FIND": "click_text",
+    "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
+    "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
+    "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
+    "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
+    "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
+    "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
+    "PROGRESS_INIT": "progress_wait", "PROGRESS_RELOCATE": "progress_wait",
+    "REGION_SELECT": "screenshot",
+    "FINDCANVAS": "condition",
+    "DRAG": "click",
+}
+
 _dsl_to_flow_cache: dict[str, str] | None = None
 _flow_to_dsl_cache: dict[str, str] | None = None
 
 
 def get_dsl_to_flow_type() -> dict[str, str]:
-    """获取 DSL 关键字 → Flow 节点类型的完整映射。"""
+    """获取 DSL 关键字 → Flow 节点类型的完整映射。
+
+    优先级：registry.flow_type > _BASIC_DSL_TO_FLOW > _BASE_DSL_TO_FLOW
+    """
     global _dsl_to_flow_cache
     if _dsl_to_flow_cache is None:
         mapping = dict(_BASE_DSL_TO_FLOW)
-        mapping.update({
-            "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
-            "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
-            "SET": "variable_set", "IMAGE_CLICK": "image_click",
-            "PROGRESS_WAIT": "progress_wait", "OCR_FIND": "click_text",
-            "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
-            "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
-            "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
-            "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
-            "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
-            "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
-            "PROGRESS_INIT": "progress_wait", "PROGRESS_RELOCATE": "progress_wait",
-            "REGION_SELECT": "screenshot",
-            "FINDCANVAS": "condition",
-            "DRAG": "click",
-        })
+        mapping.update(_BASIC_DSL_TO_FLOW)
         # 从 registry 补充（flow_type 优先于硬编码映射）
         try:
             from features.registry import registry

@@ -236,3 +236,42 @@ class TestRegistryFlowTypes:
             assert actual == expected_type, (
                 f"dsl_to_flow({dsl_text!r}): 期望 {expected_type}, 得到 {actual}"
             )
+
+    def test_all_registry_keywords_parse_without_error(self):
+        """每个有 dsl_keyword 的 @feature 都能被 DSLParser 正常解析。"""
+        from features.registry import registry
+        from engine.dsl_parser import DSLParser
+
+        for f in registry.all():
+            if not f.dsl_keyword or f.deprecated:
+                continue
+            try:
+                ast = DSLParser.from_string(f"{f.dsl_keyword} test")
+                assert len(ast.children) > 0
+            except Exception as e:
+                raise AssertionError(
+                    f"{f.name}: DSLParser 无法解析关键字 '{f.dsl_keyword}': {e}"
+                )
+
+    def test_simple_node_types_no_conflict(self):
+        """_SIMPLE_NODE_TYPES 关键字不应与 registry 关键字冲突。"""
+        from features.registry import registry
+        from engine.dsl_parser import _SIMPLE_NODE_TYPES
+
+        registry_kws = {
+            f.dsl_keyword.upper()
+            for f in registry.all()
+            if f.dsl_keyword and not f.deprecated
+        }
+        simple_kws = set(_SIMPLE_NODE_TYPES.keys())
+
+        # 关键字分类：_SIMPLE_NODE_TYPES / 复杂分支 / registry 回退
+        complex_kws = {"VLM_ANALYZE", "LOOP", "IF", "SUBROUTINE", "CALL",
+                       "IMPORT", "RETURN", "WHEN", "WITH", "PARALLEL",
+                       "WHILE", "UNTIL"}
+        # 由 _parse_block else 回退处理的 registry-only 关键字
+        registry_fallback_kws = {"TYPE_CLIP"}
+        unexpected = registry_kws - simple_kws - complex_kws - registry_fallback_kws
+        assert not unexpected, (
+            f"registry 关键字 {unexpected} 不在 _SIMPLE_NODE_TYPES 也不在复杂分支/回退中"
+        )
