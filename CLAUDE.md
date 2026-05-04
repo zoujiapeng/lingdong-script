@@ -41,6 +41,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── registry.py #   - 装饰器, 自动生成 MCP/CLI/HTTP
 │   │   └── _all.py     #   - 导入所有 feature 模块
 │   ├── mcp/server.py   # Python MCP 服务器 (stdio 协议)
+│   ├── macros/         # 宏录制保存目录 (.json 事件文件)
 │   ├── interaction/    # 交互工具
 │   │   ├── wheel_selector.py # - 全屏滚轮选择器
 │   │   └── region_picker.py  # - 全屏区域选择器 (tkinter)
@@ -71,6 +72,10 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 | `POST /api/set-view-mode` | 切换视图 | `{ mode: 'canvas'\|'pseudocode'\|'settings' }` |
 | `POST /api/fit-screen` | 自适应缩放 | — |
 | `POST /api/get-state` | 读取当前状态 | — |
+| `POST /api/macro/start-recording` | 开始宏录制（F6 热键） | `{ name?, include_mouse?, include_keys? }` |
+| `POST /api/macro/stop-recording` | 停止录制并保存 | — |
+| `POST /api/macro/list` | 列出已录制宏 | — |
+| `POST /api/macro/play` | 播放宏 | `{ name }` |
 
 ## MCP 工具
 
@@ -103,6 +108,58 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 启动: `npm run ai:mcp`
 
 5 个工具用于前端集成和文件管理。
+
+## 宏录制功能
+
+Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能过滤（<10px 跳过）、一键转换为流程图。
+
+### 录制方式
+
+| 方式 | 操作 |
+|---|---|
+| **F6 热键** | 按 F6 开始/停止录制（独立进程，不阻塞 UI） |
+| **TopBar 按钮** | 点击录制按钮（红点动画），再点或按 F6 停止 |
+| **MCP 工具** | `lobster_macro_start_recording` / `lobster_macro_stop_recording` |
+| **HTTP API** | `POST /api/macro/start-recording` / `POST /api/macro/stop-recording` |
+| **CLI** | `python tools/macro_recorder.py`（独立进程 stdin/stdout） |
+
+### MacroPanel 管理面板
+
+- 录制后自动弹出宏列表
+- 每个宏显示：事件数、时长、创建时间
+- 操作按钮：播放、删除、**转换为流程图**
+- 转换后生成 CLICK / INPUT_TEXT / KEYBOARD / WAIT 节点
+
+### @feature MCP 工具
+
+| 工具名 | 用途 |
+|---|---|
+| `lobster_macro_start_recording` | 启动独立录制器（F6 热键，非阻塞） |
+| `lobster_macro_stop_recording` | 停止录制，返回事件统计和文件路径 |
+| `lobster_macro_list` | 列出所有已保存宏 |
+| `lobster_macro_playback` | 回放宏（支持 speed/loop 参数） |
+| `lobster_macro_delete` | 删除宏文件 |
+| `lobster_macro_get_events` | 读取原始事件数据 |
+| `lobster_macro_convert_to_flow` | 宏事件 → FlowScript 流程图 |
+| `lobster_macro_record` | **（已废弃）** 旧版阻塞式录制 |
+
+### 录制文件格式
+
+保存在 `python/macros/{name}.json`，格式：
+```json
+{
+  "name": "登录流程",
+  "events": [
+    {"type": "click", "time": 0.5, "x": 100, "y": 200, "button": "Button.left", "pressed": true},
+    {"type": "key",   "time": 1.2, "key": "hello", "pressed": true},
+    {"type": "key",   "time": 1.8, "key": "Key.enter", "pressed": true}
+  ],
+  "duration": 2.5,
+  "created": "2026-05-04T20:30:00",
+  "include_mouse": true,
+  "include_keys": true
+}
+```
 
 ## 工作流
 
