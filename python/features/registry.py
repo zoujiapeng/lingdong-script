@@ -450,7 +450,7 @@ registry = FeatureRegistry()
 def feature(name, display_name, description, category, params, returns,
             dsl_keyword=None, dsl_template=None, examples=None,
             test_cases=None, tags=None, version="1.0.0",
-            visual=None, hidden=False):
+            visual=None, hidden=False, deprecated=False):
     """功能注册装饰器"""
     def decorator(fn):
         spec = FeatureSpec(
@@ -459,7 +459,7 @@ def feature(name, display_name, description, category, params, returns,
             dsl_keyword=dsl_keyword, dsl_template=dsl_template,
             examples=examples or [], test_cases=test_cases or [],
             tags=tags or [], version=version,
-            visual=visual or VisualMeta(), hidden=hidden,
+            visual=visual or VisualMeta(), hidden=hidden, deprecated=deprecated,
         )
         registry.register(spec)
         fn._lobster_spec = spec
