@@ -13,30 +13,31 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
 | `node cli/lobster.js run-flow <file.flow>` | CLI 执行流程 |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
+| `curl -X POST http://127.0.0.1:5577/api/ping` | 检查 HTTP API 桥接 |
 
 ## 目录结构
 
 ```
 ├── src/
 │   ├── main/           # Electron 主进程 (IPC handlers, 窗口管理)
-│   │   ├── main.ts     #   - 引擎管理, IPC handlers
+│   │   ├── main.ts     #   - 引擎管理, IPC handlers, HTTP API :5577
 │   │   └── preload.ts  #   - contextBridge API 暴露
 │   └── renderer/       # React 前端 (Vite)
 │       ├── App.tsx     #   - 根组件, 布局, 快捷键
 │       ├── store/      #   - Zustand + immer 状态管理
 │       ├── types/      #   - FlowNode, FlowEdge, NodeParams 类型
 │       ├── components/
-│       │   ├── Canvas/ #   - FlowCanvas, FlowNode, DSLPanel
+│       │   ├── Canvas/ #   - FlowCanvas, FlowNode
 │       │   ├── PropertyPanel/ # - 节点参数编辑器 (16+ 种)
-│       │   ├── NodeLibrary/   # - 节点库面板
-│       │   └── common/ #   - TopBar, StatusBar, LogPanel
-│       └── utils/      #   - dslGenerator, pseudoGenerator, nodeDefinitions
+│       │   ├── NodeLibrary/   # - 节点库面板 (127 个节点)
+│       │   └── common/ #   - TopBar, StatusBar, LogPanel, ToolCallPanel
+│       └── utils/      #   - textGenerator, featureRegistry, nodeDefinitions
 ├── python/
 │   ├── engine/         # Python 自动化引擎
 │   │   ├── executor.py #   - DSL 执行器 (核心)
 │   │   ├── dsl_parser.py #  - DSL 解析器
 │   │   └── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
-│   ├── features/       # @feature 注册表 (~85 功能)
+│   ├── features/       # @feature 注册表 (~120 功能)
 │   │   ├── registry.py #   - 装饰器, 自动生成 MCP/CLI/HTTP
 │   │   └── _all.py     #   - 导入所有 feature 模块
 │   ├── mcp/server.py   # Python MCP 服务器 (stdio 协议)
@@ -50,6 +51,27 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 └── tests/              # Python 测试套件
 ```
 
+## HTTP API 桥接 (Claude Code 远程控制)
+
+Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost），Claude Code 可通过 curl 实时控制前端。
+
+| 端点 | 用途 | 关键参数 |
+|---|---|---|
+| `POST /api/ping` | 健康检查 | — |
+| `POST /api/load-script` | 加载完整流程图 | `{ script: FlowScript }` |
+| `POST /api/run-dsl` | DSL 文本→流程图 | `{ dsl: string }` |
+| `POST /api/add-node` | 添加节点 | `{ type, x, y, params? }` |
+| `POST /api/update-node` | 更新节点属性 | `{ id, updates }` |
+| `POST /api/update-node-params` | 更新节点参数 | `{ id, params }` |
+| `POST /api/delete-nodes` | 删除节点 | `{ ids: string[] }` |
+| `POST /api/add-edge` | 添加连线 | `{ from_node, to_node, from_port?, to_port? }` |
+| `POST /api/delete-edges` | 删除连线 | `{ ids: string[] }` |
+| `POST /api/auto-layout` | 自动排列节点 | — |
+| `POST /api/new-script` | 新建空白脚本 | — |
+| `POST /api/set-view-mode` | 切换视图 | `{ mode: 'canvas'\|'pseudocode'\|'settings' }` |
+| `POST /api/fit-screen` | 自适应缩放 | — |
+| `POST /api/get-state` | 读取当前状态 | — |
+
 ## MCP 工具
 
 提供 **两个 MCP 服务器**：
@@ -58,7 +80,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 ~85 工具，覆盖：
+通过 `@feature` 注册表动态生成 ~120 工具，覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
@@ -88,7 +110,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 1. 在画布拖拽节点编排流程
 2. 节点类型: 点击、输入、截图、OCR、条件、循环、等待
 3. 属性面板编辑参数 (支持区域拾取、策略选择)
-4. DSL 面板实时同步显示对应 DSL 文本
+4. 文本视图可切换中文伪代码 / 英文 DSL 模式
 5. 保存为 .flow 文件, 或导出 DSL
 
 ### 调试执行
@@ -108,11 +130,13 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 
 - **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `engine.py` (execute_*)
 - **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册
+- **新增 API 端点**: 在 `src/main/main.ts` 的 `startApiServer()` switch 中添加 case
 - **状态管理**: Zustand + immer，`useStore` hook
 - **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
 - **Python 协议**: `engine.py` 通过 stdin/stdout JSON 与 Electron 通信
 - **测试**: `pytest tests/` 88 tests, `npm test` 前端测试
+- **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 
 ## 节点类型速查
 
@@ -135,6 +159,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | scene_condition | 场景识别 | scene_name, similarity |
 | sub_script | 子流程 | script_id |
 | variable_set/get | 变量操作 | name, value |
+| tool_call | 任意 @feature 工具 | feature_name, params |
 
 ## 常见任务
 
@@ -153,4 +178,10 @@ python -c "from features._all import *; from features.registry import registry; 
 
 # 启动滚轮选择器（独立测试）
 python python/interaction/wheel_selector.py
+
+# 通过 HTTP API 控制前端
+curl -X POST http://127.0.0.1:5577/api/ping
+
+# DSL → 流程图 → 加载到前端（一键）
+curl -X POST http://127.0.0.1:5577/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
 ```
