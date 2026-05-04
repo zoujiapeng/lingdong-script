@@ -25,43 +25,78 @@ from engine.dsl_parser import DSLParser, ASTNode, NodeType
 
 
 # ═══════════════════════════════════════════════════════════════
-# DSL → FlowScript
+# 动态 DSL ↔ Flow 映射（从 Feature Registry 构建）
 # ═══════════════════════════════════════════════════════════════
 
-# DSL NodeType → FlowNode type 映射
-DSL_TO_FLOW_TYPE = {
-    "CLICK": "click",
-    "WAIT": "wait",
+# 硬编码的结构关键字（无对应 @feature）
+_BASE_DSL_TO_FLOW = {
     "LOOP": "loop",
     "IF": "condition",
-    "TYPE": "input_text",
-    "SWIPE": "swipe",
-    "SCROLL": "swipe",       # 前端用 swipe 表示滚动
-    "HOTKEY": "keyboard",
-    "SCREENSHOT": "screenshot",
-    "SET": "variable_set",
-    "IMAGE_CLICK": "image_click",
-    "PROGRESS_WAIT": "progress_wait",
-    "OCR_FIND": "click_text",
-    "DELAY": "wait",          # 带延迟标记的 wait
-    "WAIT_RANDOM": "wait",    # 随机延时 wait
-    "FOCUS": "click",
-    "RUN": "sub_script",
-    "CALL": "sub_script",
-    "RETURN": "end",
+    "ELSE": "condition",
+    "END": "end",
     "BREAK": "break",
-    "WAITSCREEN": "region_wait",
-    "SCREENSTABLE": "region_wait",
-    "IMAGE_FIND": "condition",
-    "OCR_EXTRACT": "screenshot",
-    "PROGRESS_INIT": "progress_wait",
-    "PROGRESS_RELOCATE": "progress_wait",
-    "REGION_SELECT": "screenshot",
-    "POPUP_CLOSE": "popup_close",
-    "COLOR_CHECK": "color_check",
-    "REGION_WAIT": "region_wait",
-    "SCENE_CONDITION": "scene_condition",
+    "RETURN": "end",
+    "SUBROUTINE": "sub_script",
+    "IMPORT": "import",
+    "WHEN": "when",
+    "PARALLEL": "parallel",
+    "WITH": "with",
+    "WHILE": "loop",
+    "UNTIL": "loop",
+    "ELIF": "condition",
+    "ELSEIF": "condition",
+    "SEQUENCE": "sequence",
+    "TEMPLATE_CAPTURE": "screenshot",
 }
+
+_dsl_to_flow_cache: dict[str, str] | None = None
+_flow_to_dsl_cache: dict[str, str] | None = None
+
+
+def get_dsl_to_flow_type() -> dict[str, str]:
+    """获取 DSL 关键字 → Flow 节点类型的完整映射。"""
+    global _dsl_to_flow_cache
+    if _dsl_to_flow_cache is None:
+        mapping = dict(_BASE_DSL_TO_FLOW)
+        mapping.update({
+            "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
+            "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
+            "SET": "variable_set", "IMAGE_CLICK": "image_click",
+            "PROGRESS_WAIT": "progress_wait", "OCR_FIND": "click_text",
+            "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
+            "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
+            "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
+            "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
+            "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
+            "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
+            "PROGRESS_INIT": "progress_wait", "PROGRESS_RELOCATE": "progress_wait",
+            "REGION_SELECT": "screenshot",
+        })
+        # 从 registry 补充（覆盖已有映射）
+        try:
+            from features.registry import registry
+            for f in registry.all():
+                if f.dsl_keyword and not f.deprecated:
+                    kw = f.dsl_keyword.upper()
+                    if kw not in _BASE_DSL_TO_FLOW:  # 不覆盖结构关键字
+                        mapping[kw] = "tool_call"
+        except ImportError:
+            pass
+        _dsl_to_flow_cache = mapping
+    return _dsl_to_flow_cache
+
+
+def get_flow_to_dsl_type() -> dict[str, str]:
+    """获取 Flow 节点类型 → DSL 关键字的映射。"""
+    global _flow_to_dsl_cache
+    if _flow_to_dsl_cache is None:
+        dsl_to_flow = get_dsl_to_flow_type()
+        flow_to_dsl = {}
+        for kw, ftype in dsl_to_flow.items():
+            if ftype not in flow_to_dsl:
+                flow_to_dsl[ftype] = kw
+        _flow_to_dsl_cache = flow_to_dsl
+    return _flow_to_dsl_cache
 
 # 需要分支端口（yes/no）的节点
 BRANCH_TYPES = {"IF", "IMAGE_FIND", "SCENE_CONDITION"}
@@ -107,7 +142,7 @@ def dsl_to_flow(dsl_text: str, layout: str = "vertical") -> dict:
     def _add_node(ntype: str, x: int, y: int, args: str,
                   parent_ast: Optional[ASTNode] = None) -> str:
         uid = _nid()
-        flow_type = DSL_TO_FLOW_TYPE.get(ntype, "click")
+        flow_type = get_dsl_to_flow_type().get(ntype, "tool_call")
         params = _dsl_args_to_params(ntype, args, parent_ast)
         label = _dsl_label(ntype, args)
 
@@ -541,27 +576,8 @@ def _error_flow_script(error_msg: str) -> dict:
 # FlowScript → DSL
 # ═══════════════════════════════════════════════════════════════
 
-# FlowNode type → DSL 关键字映射
-FLOW_TO_DSL_TYPE = {
-    "click": "CLICK",
-    "image_click": "IMAGE_CLICK",
-    "click_text": "OCR_FIND",
-    "wait": "WAIT",
-    "input_text": "TYPE",
-    "keyboard": "HOTKEY",
-    "swipe": "SWIPE",
-    "condition": "IF",
-    "loop": "LOOP",
-    "sub_script": "CALL",
-    "screenshot": "SCREENSHOT",
-    "variable_set": "SET",
-    "variable_get": "SET",
-    "popup_close": "POPUP_CLOSE",
-    "color_check": "COLOR_CHECK",
-    "progress_wait": "PROGRESS_WAIT",
-    "region_wait": "REGION_WAIT",
-    "scene_condition": "SCENE_CONDITION",
-}
+# FlowNode type → DSL 关键字映射（动态构建）
+# 使用 get_flow_to_dsl_type() 获取
 
 # DSL 中需要 END 的块语句
 BLOCK_KEYWORDS = {"LOOP", "IF", "WHILE", "UNTIL", "SUBROUTINE", "WHEN"}

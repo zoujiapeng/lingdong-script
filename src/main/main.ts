@@ -1,7 +1,8 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+import * as http from 'http';
 import * as https from 'https';
 
 let mainWindow: BrowserWindow | null = null;
@@ -10,6 +11,14 @@ let _lastScript: string | null = null;
 let _engineRunning = false;
 
 const isDev = !app.isPackaged;
+
+/** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
+function spawnPython(args: string[], options?: SpawnOptions) {
+  return spawn('python', args, {
+    ...options,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -114,6 +123,140 @@ function buildAppMenu() {
   Menu.setApplicationMenu(menu);
 }
 
+// ── Local HTTP API (for Claude Code MCP bridge) ──
+const API_PORT = 5577;
+let apiServer: http.Server | null = null;
+
+function startApiServer() {
+  apiServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url || '/', `http://localhost:${API_PORT}`);
+    const send = (code: number, data: any) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'POST') {
+      send(405, { error: 'Method not allowed' });
+      return;
+    }
+
+    let body = '';
+    req.on('data', (chunk) => body += chunk);
+    req.on('end', () => {
+      let payload: any = {};
+      try { payload = JSON.parse(body); } catch {}
+
+      switch (url.pathname) {
+        case '/api/ping':
+          send(200, { ok: true });
+          break;
+
+        case '/api/load-script':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'loadScript', payload: payload.script });
+          send(200, { ok: true });
+          break;
+
+        case '/api/add-node':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'addNode',
+            payload: { type: payload.type, x: payload.x, y: payload.y, params: payload.params },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/update-node':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'updateNode',
+            payload: { id: payload.id, updates: payload.updates },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/delete-nodes':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'deleteNodes',
+            payload: { ids: payload.ids },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/add-edge':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'addEdge',
+            payload: { from_node: payload.from_node, from_port: payload.from_port || 'output', to_node: payload.to_node, to_port: payload.to_port || 'input', label: payload.label },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/run-dsl': {
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+          const dslProc = spawnPython([scriptPath], {
+            cwd: path.join(__dirname, '../..'),
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          let dslStdout = '';
+          let dslStderr = '';
+          dslProc.stdout!.on('data', (chunk: Buffer) => dslStdout += chunk.toString());
+          dslProc.stderr!.on('data', (chunk: Buffer) => dslStderr += chunk.toString());
+          dslProc.on('close', (code: number) => {
+            if (dslStdout.trim()) {
+              try {
+                const flow = JSON.parse(dslStdout);
+                mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
+                send(200, { ok: true, flow });
+              } catch {
+                send(500, { error: 'DSL 转换失败', raw: dslStdout });
+              }
+            } else {
+              send(500, { error: dslStderr.trim() || 'DSL 转换失败' });
+            }
+          });
+          dslProc.on('error', (err: Error) => send(500, { error: err.message }));
+          dslProc.stdin!.write(payload.dsl + '\n');
+          dslProc.stdin!.end();
+          break;
+        }
+
+        case '/api/auto-layout':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'autoLayout' });
+          send(200, { ok: true });
+          break;
+
+        default:
+          send(404, { error: '未知端点' });
+      }
+    });
+  });
+
+  apiServer.listen(API_PORT, '127.0.0.1', () => {
+    console.log(`[API] HTTP server listening on http://127.0.0.1:${API_PORT}`);
+  });
+}
+
+function stopApiServer() {
+  if (apiServer) {
+    apiServer.close();
+    apiServer = null;
+  }
+}
+
 // --- Python Engine Process Management ---
 
 function getPythonPath(): string {
@@ -141,6 +284,7 @@ function startPythonEngine(scriptJson: string) {
   try {
     pythonProcess = spawn(pythonPath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
   } catch (e) {
     mainWindow?.webContents.send('engine-log', { level: 'error', message: `启动引擎失败: ${e}` });
@@ -520,14 +664,14 @@ function confirm(){
 ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }) => {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, '../../python/interaction/wheel_selector.py');
-    const proc = spawn('python', [scriptPath, '--ipc'], {
+    const proc = spawnPython([scriptPath, '--ipc'], {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
     proc.on('close', (code) => {
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
@@ -544,17 +688,16 @@ ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[];
 
 ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; w: number; h: number }) => {
   return new Promise((resolve) => {
-    const { spawn } = require('child_process');
     const scriptPath = path.join(__dirname, '../../tools/ocr_region.py');
-    const proc = spawn('python', [scriptPath], {
+    const proc = spawnPython([scriptPath], {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
     proc.on('close', () => {
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
@@ -574,14 +717,14 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; 
 ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
-    const proc = spawn('python', [scriptPath], {
+    const proc = spawnPython([scriptPath], {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
     proc.on('close', (code) => {
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
@@ -620,6 +763,7 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     buildAppMenu();
     createWindow();
+    startApiServer();
 
     // 全局 F9 热键 — 在主进程直接控制引擎启停
     globalShortcut.register('F9', () => {
@@ -645,6 +789,7 @@ if (!gotTheLock) {
 
 app.on('window-all-closed', () => {
   stopPythonEngine();
+  stopApiServer();
   if (process.platform !== 'darwin') app.quit();
 });
 

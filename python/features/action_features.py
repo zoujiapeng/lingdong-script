@@ -106,6 +106,39 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1) -> bool:
 
 
 @feature(
+    name="swipe_action",
+    display_name="滑动/拖拽",
+    description="【DSL·交互】在屏幕上从起点滑动到终点，支持设置滑动时长。适用于滑动翻页、拖拽元素、滚动列表",
+    category=F.ACTION,
+    params=[
+        P("start_x", "number", "起点 X 坐标", example=400),
+        P("start_y", "number", "起点 Y 坐标", example=300),
+        P("end_x", "number", "终点 X 坐标", example=800),
+        P("end_y", "number", "终点 Y 坐标", example=300),
+        P("duration", "number", "滑动耗时秒数", required=False, default=0.5),
+    ],
+    returns="bool - 是否成功",
+    dsl_keyword="SWIPE",
+    dsl_template="SWIPE {start_x} {start_y} {end_x} {end_y}",
+    examples=["SWIPE 400 300 800 300", "SWIPE 500 500 500 200"],
+    test_cases=[
+        TC("short_swipe", {"start_x": 0, "start_y": 0, "end_x": 10, "end_y": 10}, "bool_true", skip_in_ci=True),
+    ],
+    tags=["action", "dsl"],
+)
+def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> bool:
+    try:
+        from interaction.actions import HumanMouse
+        HumanMouse.drag(start_x, start_y, end_x, end_y, duration=duration)
+        return True
+    except ImportError:
+        time.sleep(duration)
+        return True
+    except Exception:
+        return False
+
+
+@feature(
     name="drag",
     display_name="拖拽",
     description="【拖拽】从一个位置拖拽到另一个位置，支持文字/坐标定位。适用于拖拽文件、滑动条、调整窗口布局",

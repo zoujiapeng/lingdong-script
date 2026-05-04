@@ -16,6 +16,20 @@ import socket
 import subprocess
 from datetime import datetime
 from typing import Any, Optional
+from pathlib import Path
+
+# Import feature registry for tool_call node support
+_HAS_FEATURES = False
+_feature_registry = None
+try:
+    _FEATURES_PATH = str(Path(__file__).resolve().parent.parent.parent / 'python')
+    if _FEATURES_PATH not in sys.path:
+        sys.path.insert(0, _FEATURES_PATH)
+    import features._all  # noqa
+    from features.registry import registry as _feature_registry
+    _HAS_FEATURES = True
+except ImportError as e:
+    pass  # Feature registry not available – tool_call nodes will log a warning
 
 try:
     import pyautogui
@@ -1132,6 +1146,57 @@ class ExecutionEngine:
         self.log('info', f'场景 "{scene_name}" 未匹配', node['id'])
         return 'no'
 
+    def execute_tool_call(self, node: dict, params: dict) -> str:
+        feature_name = params.get('feature_name', '')
+        feature_params = params.get('params', {})
+
+        if not feature_name:
+            self.log('warn', 'tool_call: 未指定功能名称', node['id'])
+            return 'output'
+
+        if not _HAS_FEATURES or _feature_registry is None:
+            self.log('error', 'tool_call: 功能注册表不可用，无法调用', node['id'])
+            return 'output'
+
+        spec = _feature_registry.get(feature_name)
+        if spec is None:
+            self.log('error', f'tool_call: 功能 "{feature_name}" 不存在', node['id'])
+            return 'output'
+
+        # Interpolate variables into string params
+        resolved = {}
+        for key, value in feature_params.items():
+            if isinstance(value, str):
+                resolved[key] = self._interpolate_tool_value(value)
+            else:
+                resolved[key] = value
+
+        self.log('info', f'tool_call: {spec.display_name}({json.dumps(resolved, ensure_ascii=False)})', node['id'])
+
+        start = time.time()
+        result = _feature_registry.execute(feature_name, **resolved)
+        elapsed = round((time.time() - start) * 1000, 1)
+
+        if result.get('success'):
+            self.log('info', f'tool_call 成功 ({elapsed}ms)', node['id'])
+        else:
+            self.log('warn', f'tool_call 失败: {result.get("error", "未知")} ({elapsed}ms)', node['id'])
+
+        # Store results in variables for downstream nodes
+        self.variables[f'_{feature_name}_success'] = str(result.get('success', False))
+        self.variables[f'_{feature_name}_result'] = str(result.get('result', ''))
+        self.variables['_last_tool_result'] = json.dumps(result, ensure_ascii=False)
+
+        return 'output'
+
+    def _interpolate_tool_value(self, value: str) -> str:
+        """Replace {varName} with variable values."""
+        import re
+        def repl(m):
+            var_name = m.group(1)
+            return str(self.variables.get(var_name, m.group(0)))
+        return re.sub(r'\{(\w+)\}', repl, value)
+
     # ================================================================
     # Progress Display (Real-time feedback in separate terminal)
     # ================================================================
@@ -1268,6 +1333,8 @@ class ExecutionEngine:
                         result = self.execute_region_wait(node, params)
                     elif ntype == 'scene_condition':
                         result = self.execute_scene_condition(node, params)
+                    elif ntype == 'tool_call':
+                        result = self.execute_tool_call(node, params)
                     else:
                         self.log('warn', f'未知节点类型: {ntype}', node_id)
                         result = 'output'

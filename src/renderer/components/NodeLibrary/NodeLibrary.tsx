@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { Search, Zap, Image, GitBranch, Monitor, Database, Settings, FileText, Clock } from 'lucide-react';
+import { Search, Zap, Image, GitBranch, Monitor, Database, Settings, Wrench } from 'lucide-react';
 import { NodeType } from '../../types';
 import { NODE_DEFINITIONS, NODE_CATEGORIES } from '../../utils/nodeDefinitions';
 import { useStore } from '../../store';
+import { getLibraryFeatures, FeatureNodeItem, getFeatureCategoryLabel } from '../../utils/featureRegistry';
 import * as LucideIcons from 'lucide-react';
 
 const CategoryIcons: Record<string, React.FC<any>> = {
@@ -12,6 +13,7 @@ const CategoryIcons: Record<string, React.FC<any>> = {
   device: Monitor,
   data: Database,
   system: Settings,
+  tools: Wrench,
 };
 
 function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
@@ -20,38 +22,83 @@ function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
   return <Icon size={size} />;
 }
 
+/** Merge node categories with feature-only categories */
+function getAllCategories() {
+  const cats = [...NODE_CATEGORIES];
+  // Add tools category if not present
+  if (!cats.find((c) => c.id === 'tools')) {
+    cats.push({ id: 'tools', label: '工具', icon: 'Wrench' });
+  }
+  return cats;
+}
+
+const ALL_CATEGORIES = getAllCategories();
+
 export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean }) {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
-  const { addNode, ui } = useStore();
+  const { addNode, updateNodeParams, ui, featureList } = useStore();
 
-  const nodes = useMemo(() => {
-    return Object.values(NODE_DEFINITIONS).filter((def) => {
-      if (def.type === 'start' || def.type === 'end') return false;
+  // Build merged list: native nodes + feature-derived items
+  const allItems = useMemo(() => {
+    const items: Array<{ kind: 'node'; def: (typeof NODE_DEFINITIONS)[NodeType] } | { kind: 'feature'; item: FeatureNodeItem }> = [];
+
+    // Native node definitions (exclude start/end from library)
+    for (const def of Object.values(NODE_DEFINITIONS)) {
+      if (def.type === 'start' || def.type === 'end') continue;
+      items.push({ kind: 'node', def });
+    }
+
+    // Feature-derived items
+    const features = getLibraryFeatures(featureList);
+    for (const f of features) {
+      items.push({ kind: 'feature', item: f });
+    }
+
+    return items;
+  }, [featureList]);
+
+  const filtered = useMemo(() => {
+    return allItems.filter((item) => {
+      const label = item.kind === 'node' ? item.def.label : item.item.label;
+      const desc = item.kind === 'node' ? item.def.description : item.item.description;
+      const typeName = item.kind === 'node' ? item.def.type : item.item.feature_name;
+      const cat = item.kind === 'node' ? item.def.category : item.item.category;
+
       const matchSearch =
         !search ||
-        def.label.includes(search) ||
-        def.description.includes(search) ||
-        def.type.includes(search.toLowerCase());
-      const matchCat = activeCategory === 'all' || def.category === activeCategory;
+        label.includes(search) ||
+        desc.includes(search) ||
+        typeName.includes(search.toLowerCase());
+      const matchCat = activeCategory === 'all' || cat === activeCategory;
       return matchSearch && matchCat;
     });
-  }, [search, activeCategory]);
+  }, [allItems, search, activeCategory]);
 
-  const handleDragStart = (e: React.DragEvent, type: NodeType) => {
-    e.dataTransfer.setData('node-type', type);
+  const handleDragStart = (e: React.DragEvent, item: typeof allItems[0]) => {
+    if (item.kind === 'node') {
+      e.dataTransfer.setData('node-type', item.def.type);
+    } else {
+      e.dataTransfer.setData('node-type', 'tool_call');
+      e.dataTransfer.setData('feature-name', item.item.feature_name);
+    }
     e.dataTransfer.effectAllowed = 'copy';
   };
 
-  const handleDoubleClick = (type: NodeType) => {
-    // Add node to center of canvas
+  const handleDoubleClick = (item: typeof allItems[0]) => {
     const { canvas_transform } = ui;
     const canvasEl = document.querySelector('.flow-canvas-wrapper') as HTMLElement;
     if (!canvasEl) return;
     const rect = canvasEl.getBoundingClientRect();
     const x = (rect.width / 2 - canvas_transform.x) / canvas_transform.scale - 110;
     const y = (rect.height / 2 - canvas_transform.y) / canvas_transform.scale - 40;
-    addNode(type, Math.max(0, x), Math.max(0, y));
+
+    if (item.kind === 'node') {
+      addNode(item.def.type, Math.max(0, x), Math.max(0, y));
+    } else {
+      const id = addNode('tool_call', Math.max(0, x), Math.max(0, y));
+      updateNodeParams(id, { feature_name: item.item.feature_name, params: {} });
+    }
   };
 
   return (
@@ -61,6 +108,9 @@ export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.1em', marginBottom: 8, textTransform: 'uppercase' }}>
             指令库
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+            {featureList.length > 0 ? `${allItems.length} 个指令可用` : '加载中...'}
           </div>
         </div>
         <div className="search-box">
@@ -81,7 +131,7 @@ export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean
         >
           全部
         </button>
-        {NODE_CATEGORIES.map((cat) => (
+        {ALL_CATEGORIES.map((cat) => (
           <button
             key={cat.id}
             className={`tab-btn ${activeCategory === cat.id ? 'active' : ''}`}
@@ -92,37 +142,45 @@ export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean
         ))}
       </div>
 
-      {/* Node List */}
+      {/* Item List */}
       <div className="node-library-body">
-        {nodes.length === 0 && (
+        {filtered.length === 0 && (
           <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)', fontSize: 13 }}>
             未找到匹配的指令
           </div>
         )}
-        {nodes.map((def) => (
-          <div
-            key={def.type}
-            className="node-item"
-            draggable
-            onDragStart={(e) => handleDragStart(e, def.type)}
-            onDoubleClick={() => handleDoubleClick(def.type)}
-            title={`拖拽到画布 或 双击添加\n${def.description}`}
-          >
+        {filtered.map((item) => {
+          const label = item.kind === 'node' ? item.def.label : item.item.label;
+          const desc = item.kind === 'node' ? item.def.description : item.item.description;
+          const icon = item.kind === 'node' ? item.def.icon : item.item.icon;
+          const color = item.kind === 'node' ? item.def.color : item.item.color;
+          const key = item.kind === 'node' ? `node-${item.def.type}` : `feature-${item.item.feature_name}`;
+
+          return (
             <div
-              className="node-item-icon"
-              style={{ background: def.color }}
+              key={key}
+              className="node-item"
+              draggable
+              onDragStart={(e) => handleDragStart(e, item)}
+              onDoubleClick={() => handleDoubleClick(item)}
+              title={`拖拽到画布 或 双击添加\n${desc}`}
             >
-              <NodeIcon name={def.icon} size={15} />
+              <div
+                className="node-item-icon"
+                style={{ background: color }}
+              >
+                <NodeIcon name={icon} size={15} />
+              </div>
+              <div className="node-item-info">
+                <div className="node-item-name">{label}</div>
+                <div className="node-item-desc">{desc.slice(0, 60)}</div>
+              </div>
             </div>
-            <div className="node-item-info">
-              <div className="node-item-name">{def.label}</div>
-              <div className="node-item-desc">{def.description}</div>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* Footer section - quick templates */}
+      {/* Footer - recent / feature count */}
       <div style={{
         padding: '10px 12px',
         borderTop: '1px solid var(--border-primary)',
@@ -134,14 +192,18 @@ export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {['image_click', 'wait', 'condition'].map((type) => {
             const def = NODE_DEFINITIONS[type as NodeType];
+            if (!def) return null;
             return (
               <div
                 key={type}
                 className="node-item"
                 style={{ padding: '5px 8px' }}
                 draggable
-                onDragStart={(e) => handleDragStart(e, type as NodeType)}
-                onDoubleClick={() => handleDoubleClick(type as NodeType)}
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('node-type', type);
+                  e.dataTransfer.effectAllowed = 'copy';
+                }}
+                onDoubleClick={() => handleDoubleClick({ kind: 'node', def })}
               >
                 <div className="node-item-icon" style={{ background: def.color, width: 24, height: 24 }}>
                   <NodeIcon name={def.icon} size={12} />

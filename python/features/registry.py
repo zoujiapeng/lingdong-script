@@ -45,6 +45,21 @@ class ParamSpec:
 
 
 @dataclass
+class PortDef:
+    id: str
+    label: str = ""
+    type: str = "flow"
+
+
+@dataclass
+class VisualMeta:
+    icon: str = "Zap"
+    color: str = "#6366f1"
+    ports_in: List[PortDef] = field(default_factory=lambda: [PortDef("input")])
+    ports_out: List[PortDef] = field(default_factory=lambda: [PortDef("output")])
+
+
+@dataclass
 class TestCase:
     name: str
     params: dict
@@ -69,6 +84,8 @@ class FeatureSpec:
     version: str = "1.0.0"
     deprecated: bool = False
     tags: List[str] = field(default_factory=list)
+    visual: VisualMeta = field(default_factory=VisualMeta)
+    hidden: bool = False
 
     # 自动生成的字段
     mcp_tool_name: str = ""
@@ -131,6 +148,8 @@ class FeatureSpec:
             "version": self.version,
             "deprecated": self.deprecated,
             "tags": self.tags,
+            "visual": asdict(self.visual),
+            "hidden": self.hidden,
         }
 
 
@@ -430,7 +449,8 @@ registry = FeatureRegistry()
 
 def feature(name, display_name, description, category, params, returns,
             dsl_keyword=None, dsl_template=None, examples=None,
-            test_cases=None, tags=None, version="1.0.0"):
+            test_cases=None, tags=None, version="1.0.0",
+            visual=None, hidden=False):
     """功能注册装饰器"""
     def decorator(fn):
         spec = FeatureSpec(
@@ -439,6 +459,7 @@ def feature(name, display_name, description, category, params, returns,
             dsl_keyword=dsl_keyword, dsl_template=dsl_template,
             examples=examples or [], test_cases=test_cases or [],
             tags=tags or [], version=version,
+            visual=visual or VisualMeta(), hidden=hidden,
         )
         registry.register(spec)
         fn._lobster_spec = spec

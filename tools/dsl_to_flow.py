@@ -1,4 +1,5 @@
-"""DSL → FlowScript 转换桥接器（被 Electron IPC 调用）
+# -*- coding: utf-8 -*-
+"""DSL -> FlowScript 转换桥接器（被 Electron IPC 调用）
 
 用法：
   echo 'CLICK 100 200' | python tools/dsl_to_flow.py
@@ -8,6 +9,11 @@
 import sys
 import os
 import json
+
+# 强制 UTF-8 输出，防止 Windows GBK 编码导致中文乱码
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 from engine.dsl_flow_converter import dsl_to_flow  # noqa: E402

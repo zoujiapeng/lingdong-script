@@ -70,6 +70,16 @@ export function StatusBar({ onHidePanels }: StatusBarProps) {
       >
         {ui.show_log_panel ? <PanelBottomClose size={13} /> : <PanelBottomOpen size={13} />}
       </button>
+      <button
+        className="status-bar-btn"
+        onClick={() => setUI({ show_tool_call_panel: !ui.show_tool_call_panel })}
+        title={ui.show_tool_call_panel ? '隐藏工具调用面板' : '显示工具调用面板'}
+      >
+        {React.createElement(
+          ui.show_tool_call_panel ? PanelBottomClose : PanelBottomOpen,
+          { size: 13 }
+        )}
+      </button>
       <div className="status-bar-divider" />
       <button
         className="status-bar-btn"

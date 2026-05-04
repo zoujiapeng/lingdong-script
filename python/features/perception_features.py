@@ -365,6 +365,8 @@ def screenshot(region: str = "", format: str = "jpeg", quality: int = 70):
         P("timeout", "number", "超时秒数", required=False, default=5),
     ],
     returns="bool - 是否关闭了弹窗",
+    dsl_keyword="POPUP_CLOSE",
+    dsl_template="POPUP_CLOSE {text}",
     test_cases=[
         TC("auto_close", {"text": "", "timeout": 2}, "success",
            validator=lambda r: r.get("success") is True, skip_in_ci=True),
@@ -482,6 +484,8 @@ def progress_relocate():
         P("min_ratio", "number", "最小占比 0-1", required=False, default=0.1),
     ],
     returns="dict{match, ratio} - 是否匹配及颜色占比",
+    dsl_keyword="COLOR_CHECK",
+    dsl_template="COLOR_CHECK {region} {h} {s} {v}",
     test_cases=[
         TC("basic", {"h": 0, "s": 0, "v": 0, "region": "0,0,100,100"}, "success"),
     ],
@@ -542,3 +546,102 @@ def wheel_select(options: str, values: str = "", title: str = "请选择",
         return {"selected": result, "success": result is not None}
     except ImportError:
         return {"selected": None, "success": False, "error": "wheel_selector 模块不可用"}
+
+
+@feature(
+    name="wait_region",
+    display_name="等待区域变化/稳定",
+    description="""【DSL·感知】阻塞等待屏幕指定区域发生稳定或变化。
+
+    **stable**: 等待区域画面不再变化（适用于等待加载完成、动画结束）
+    **change**: 等待区域画面发生变化（适用于等待弹窗出现、页面切换）
+
+    通过定时截图比较像素差异来判断状态。
+    用于替代固定 WAIT 秒数，让流程继续得更快。""",
+    category=F.PERCEPTION,
+    params=[
+        P("region", "str", "监控区域 'x,y,w,h'", example="100,200,300,400"),
+        P("region_type", "str", "类型: stable|change", required=False, default="stable"),
+        P("timeout", "number", "超时秒数", required=False, default=30),
+        P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
+    ],
+    returns="dict{matched, elapsed} - 检测结果",
+    dsl_keyword="REGION_WAIT",
+    dsl_template="REGION_WAIT {region} {region_type} {timeout}",
+    examples=[
+        "REGION_WAIT 100,200,300,400 stable",
+        "REGION_WAIT 200,100,400,30 change 15",
+    ],
+    tags=["perception", "dsl", "wait"],
+)
+def wait_region(region: str, region_type: str = "stable",
+                timeout: float = 30, poll_interval: float = 0.5) -> dict:
+    try:
+        from features._utils import parse_region
+        from perception.vision import ScreenCapture
+        import time, cv2, numpy as np
+
+        reg = parse_region(region)
+        if reg is None:
+            return {"matched": False, "elapsed": 0, "error": "无效区域"}
+
+        deadline = time.time() + timeout
+        prev = ScreenCapture.capture(reg)
+
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+            current = ScreenCapture.capture(reg)
+            if current is None or prev is None:
+                continue
+            diff = cv2.absdiff(prev, current)
+            change_ratio = np.count_nonzero(diff > 30) / diff.size
+
+            if region_type == "stable" and change_ratio < 0.01:
+                return {"matched": True, "elapsed": round(time.time() - (deadline - timeout), 2)}
+            elif region_type == "change" and change_ratio > 0.02:
+                return {"matched": True, "elapsed": round(time.time() - (deadline - timeout), 2)}
+
+            prev = current
+
+        return {"matched": False, "elapsed": round(timeout, 2), "error": "超时"}
+    except ImportError:
+        return {"matched": False, "elapsed": 0, "error": "视觉模块不可用"}
+
+
+@feature(
+    name="scene_match",
+    display_name="场景识别",
+    description="""【DSL·感知】识别当前屏幕是否匹配指定场景。
+
+    通过 AI 或图像特征匹配判断当前画面是否为目标场景。
+    适用于条件分支中的场景判断：如在游戏中判断是否在战斗/菜单/设置界面。
+
+    **注意**: 需要预训练场景模型或配置场景模板。无模型时默认返回模拟匹配。""",
+    category=F.PERCEPTION,
+    params=[
+        P("scene_name", "str", "场景名称", example="battle_scene"),
+        P("similarity", "number", "相似度阈值 0-100", required=False, default=70),
+    ],
+    returns="dict{match, confidence} - 匹配结果",
+    dsl_keyword="SCENE_CONDITION",
+    dsl_template="SCENE_CONDITION {scene_name} {similarity}",
+    examples=[
+        "SCENE_CONDITION battle_scene 80",
+        "SCENE_CONDITION main_menu",
+    ],
+    tags=["perception", "dsl", "condition"],
+)
+def scene_match(scene_name: str, similarity: int = 70) -> dict:
+    """场景识别，默认返回模拟结果（未匹配）。
+    实际使用时需集成场景分类模型或模板匹配。"""
+    try:
+        # 尝试用图像模板匹配场景
+        from perception.vision import TemplateMatcher
+        matcher = TemplateMatcher()
+        result = matcher.find(scene_name, threshold=similarity / 100.0)
+        if result:
+            (x, y), conf = result
+            return {"match": True, "confidence": round(conf * 100, 1)}
+        return {"match": False, "confidence": 0}
+    except ImportError:
+        return {"match": False, "confidence": 0, "error": "视觉模块不可用"}

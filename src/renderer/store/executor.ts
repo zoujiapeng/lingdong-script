@@ -280,6 +280,25 @@ export function createFlowExecutor(
           result = 'output';
           break;
 
+        case 'tool_call': {
+          const featureName = params.feature_name || 'unknown';
+          log('info', `调用工具: ${featureName}`, nodeId);
+          const win = window as any;
+          if (win.electronAPI?.callFeature) {
+            try {
+              const res = await win.electronAPI.callFeature(featureName, params.params || {});
+              log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) {
+              log('error', `工具调用失败: ${e.message}`, nodeId);
+            }
+          } else {
+            log('warn', `工具调用模拟: ${featureName}`, nodeId);
+            await delay(300);
+          }
+          result = 'output';
+          break;
+        }
+
         default:
           log('warn', `未知节点类型: ${node.type}`, nodeId);
           result = 'output';

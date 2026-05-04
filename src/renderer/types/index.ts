@@ -22,7 +22,8 @@ export type NodeType =
   | 'color_check'
   | 'progress_wait'
   | 'region_wait'
-  | 'scene_condition';
+  | 'scene_condition'
+  | 'tool_call';
 
 export type ConditionType =
   | 'image_exists'
@@ -208,6 +209,12 @@ export interface SceneConditionNodeParams {
   description?: string;
 }
 
+export interface ToolCallNodeParams {
+  feature_name: string;
+  params: Record<string, any>;
+  description?: string;
+}
+
 export interface ScreenshotNodeParams {
   region?: { x: number; y: number; w: number; h: number };
   save_path?: string;
@@ -234,7 +241,8 @@ export type NodeParams =
   | ProgressWaitNodeParams
   | RegionWaitNodeParams
   | SceneConditionNodeParams
-  | ScreenshotNodeParams;
+  | ScreenshotNodeParams
+  | ToolCallNodeParams;
 
 // --- Flow Node & Edge ---
 
@@ -359,10 +367,11 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
-  viewMode: 'canvas' | 'pseudocode' | 'dsl' | 'ai' | 'settings';
+  viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
   show_node_library: boolean;
   show_property_panel: boolean;
   show_log_panel: boolean;
+  show_tool_call_panel: boolean;
 }
 
 // --- Node Library Definition ---
@@ -372,7 +381,7 @@ export interface NodeDefinition {
   label: string;
   description: string;
   icon: string;
-  category: 'basic' | 'image' | 'control' | 'device' | 'data' | 'system';
+  category: 'basic' | 'image' | 'control' | 'device' | 'data' | 'system' | 'tools';
   color: string;
   defaultParams: NodeParams;
   ports: {
@@ -396,4 +405,52 @@ export interface ScriptTemplate {
   category: string;
   thumbnail?: string;
   script: FlowScript;
+}
+
+// --- Feature Registry (MCP tools) ---
+
+export interface FeatureParam {
+  name: string;
+  type: string;
+  description: string;
+  required: boolean;
+  default: any;
+  example: any;
+}
+
+export interface FeatureDefinition {
+  name: string;
+  display_name: string;
+  description: string;
+  category: string;
+  params: FeatureParam[];
+  returns: string;
+  dsl_keyword?: string;
+  dsl_template?: string;
+  examples?: string[];
+  mcp_tool_name: string;
+  cli_command: string;
+  http_endpoint?: string;
+  version: string;
+  deprecated: boolean;
+  tags: string[];
+  visual?: {
+    icon: string;
+    color: string;
+    ports_in: { id: string; label?: string; type: string }[];
+    ports_out: { id: string; label?: string; type: string }[];
+  };
+  hidden?: boolean;
+}
+
+export interface ToolCallEntry {
+  id: string;
+  feature_name: string;
+  display_name: string;
+  params: Record<string, any>;
+  result: any;
+  success: boolean;
+  elapsed_ms: number;
+  timestamp: string;
+  source: 'flow' | 'direct';
 }

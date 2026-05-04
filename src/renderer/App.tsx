@@ -5,8 +5,8 @@ import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
 import { TopBar } from './components/common/TopBar';
 import { StatusBar } from './components/common/StatusBar';
 import { LogPanel } from './components/common/LogPanel';
+import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { PseudoPanel } from './components/PseudoPanel';
-import { DSLPanel } from './components/Canvas/DSLPanel';
 import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
@@ -34,7 +34,7 @@ export default function App() {
 
     // Latching: only set proximity to true, never false.
     // Panels stay visible once triggered until manually dismissed.
-    const newProx: typeof proximity = {};
+    const newProx: typeof proximity = { top: false, bottom: false, left: false, right: false };
     if (inCenterTop || inTopBarHover) newProx.top = true;
     if (y > h - 36 || hov.bottom) newProx.bottom = true;
     if (x < 36 || hov.left) newProx.left = true;
@@ -73,6 +73,11 @@ export default function App() {
     if (script.nodes.length > 0) {
       requestAnimationFrame(() => fitToScreen());
     }
+  }, []);
+
+  // Load feature registry on mount
+  useEffect(() => {
+    useStore.getState().fetchFeatures();
   }, []);
 
   // Keyboard shortcuts
@@ -142,16 +147,6 @@ export default function App() {
           伪代码
         </button>
         <button
-          className={`view-tab ${viewMode === 'dsl' ? 'active' : ''}`}
-          onClick={() => setViewMode('dsl')}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <polyline points="4 17 10 11 4 5" />
-            <line x1="12" y1="19" x2="20" y2="19" />
-          </svg>
-          DSL
-        </button>
-        <button
           className={`view-tab ${showAIDialog ? 'active' : ''}`}
           onClick={() => setShowAIDialog(prev => !prev)}
         >
@@ -210,6 +205,7 @@ export default function App() {
       </div>
       <div className="bottom-wrapper" onMouseEnter={() => handlePanelEnter('bottom')} onMouseLeave={() => handlePanelLeave('bottom')}>
         <StatusBar onHidePanels={hideAllPanels} />
+        {ui.show_tool_call_panel && <ToolCallPanel />}
       </div>
     </div>
   );

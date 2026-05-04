@@ -66,6 +66,27 @@ def run_dsl_sync(dsl: str, max_loops: int = 10, retry_limit: int = 1, timeout: f
 
 
 @feature(
+    name="run_script",
+    display_name="运行子脚本",
+    description="【DSL·调用】在 DSL 中调用另一个已注册的子流程/子脚本。需要引擎上下文支持，MCP 直接调用将返回模拟成功",
+    category=F.CONTROL,
+    params=[
+        P("name", "str", "子脚本名称", example="login_flow"),
+        P("args", "str", "传递给子脚本的参数（可选）", required=False, default=""),
+    ],
+    returns="bool - 是否成功调用",
+    dsl_keyword="CALL",
+    dsl_template="CALL {name}",
+    examples=["CALL login_flow", "CALL check_update"],
+    tags=["dsl", "control"],
+)
+def run_script(name: str, args: str = "") -> bool:
+    """子脚本调用需要 DSLExecutor 上下文。
+    直接通过 MCP 调用会返回模拟成功，实际执行请通过 DSL。"""
+    return True
+
+
+@feature(
     name="dsl_optimize_analyze",
     display_name="DSL 优化分析",
     description="【Telemetry 驱动】分析功能调用 telemetry 数据，自动给出优化建议（超时调整、替代功能、失败模式）。适用于：性能调优和可靠性改进",

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ListChoice } from 'lucide-react';
+import { List } from 'lucide-react';
 
 interface Option {
   label: string;
@@ -68,7 +68,7 @@ export function WheelSelectControl({ options, value, onChange, label = '选择',
           title="全屏滚轮选择"
           style={{ width: 32, height: 32, flexShrink: 0 }}
         >
-          <ListChoice size={14} />
+          <List size={14} />
         </button>
       </div>
     </div>

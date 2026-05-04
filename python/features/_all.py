@@ -28,3 +28,4 @@ import features.browser_features
 import features.state
 import features.image_click_features
 import features.image_search_features
+import features.variable_features

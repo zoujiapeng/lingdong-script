@@ -39,6 +39,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // DSL conversion
   dslToFlow: (dslText: string) => ipcRenderer.invoke('dsl:toFlow', dslText),
 
+  // Feature registry (MCP tools)
+  featuresList: () => ipcRenderer.invoke('features:list'),
+  callFeature: (name: string, params: Record<string, any>) =>
+    ipcRenderer.invoke('feature:call', name, params),
+
   // Wheel selector (tkinter overlay)
   wheelSelect: (params: { options: string[]; values?: string[]; title?: string; message?: string }) =>
     ipcRenderer.invoke('interaction:wheelSelect', params),
@@ -46,5 +51,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Menu actions (from native menu bar)
   onMenuAction: (callback: (action: string) => void) => {
     ipcRenderer.on('menu-action', (_, action) => callback(action));
+  },
+
+  // API commands (from local HTTP bridge)
+  onApiCommand: (callback: (action: string, payload: any) => void) => {
+    ipcRenderer.on('api-command', (_, msg) => callback(msg.action, msg.payload));
   },
 });

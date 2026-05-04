@@ -119,8 +119,28 @@ class DSLParser:
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
                 "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION"}
+    _registry_loaded = False
+
+    @classmethod
+    def _load_registry_keywords(cls):
+        """从 Feature Registry 动态加载 DSL 关键字。"""
+        if cls._registry_loaded:
+            return
+        cls._registry_loaded = True
+        try:
+            from features.registry import registry
+            for f in registry.all():
+                if f.dsl_keyword and not f.deprecated:
+                    kw = f.dsl_keyword.upper()
+                    cls.KEYWORDS.add(kw)
+        except ImportError:
+            pass
     # 小写 → 大写映射（兼容灵动脚本的伪代码格式）
     LOWERCASE_MAP = {kw.lower(): kw for kw in KEYWORDS}
+
+    @classmethod
+    def _rebuild_lowercase_map(cls):
+        cls.LOWERCASE_MAP = {kw.lower(): kw for kw in cls.KEYWORDS}
 
     def __init__(self):
         self._tokens: List[tuple[int, str, str]] = []
@@ -128,6 +148,8 @@ class DSLParser:
         self.subroutines: dict[str, ASTNode] = {}
 
     def parse(self, source: str) -> ASTNode:
+        self._load_registry_keywords()
+        self._rebuild_lowercase_map()
         self._tokens = self._tokenize(source)
         self._pos = 0
         self.subroutines = {}

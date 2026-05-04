@@ -143,6 +143,30 @@ def timer_wait_time(target: str) -> dict:
 
 
 @feature(
+    name="wait_action",
+    display_name="等待（秒数）",
+    description="【DSL·控制】阻塞等待指定的秒数。用于固定时长等待，等效于 sleep。适用于等待加载完成、延时操作等场景",
+    category=F.CONTROL,
+    params=[
+        P("duration", "number", "等待秒数", required=False, default=1, example=3),
+    ],
+    returns="bool - 是否完整等待完毕",
+    dsl_keyword="WAIT",
+    dsl_template="WAIT {duration}",
+    examples=["WAIT 2", "WAIT 0.5"],
+    test_cases=[
+        TC("short_wait", {"duration": 0.1}, "bool_true",
+           validator=lambda r: r.get("success") is True),
+    ],
+    tags=["timer", "control", "dsl"],
+)
+def wait_action(duration: float = 1) -> bool:
+    import time
+    time.sleep(max(0, duration))
+    return True
+
+
+@feature(
     name="timer_countdown",
     display_name="倒计时",
     description="【定时条件】阻塞等待指定的秒数。等效于 sleep，但支持中途取消检查",
