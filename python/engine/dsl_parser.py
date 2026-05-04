@@ -54,6 +54,7 @@ class NodeType(str, Enum):
     COLOR_CHECK = "COLOR_CHECK"
     REGION_WAIT = "REGION_WAIT"
     SCENE_CONDITION = "SCENE_CONDITION"
+    VLM_CONDITION = "VLM_CONDITION"
 
 
 @dataclass
@@ -118,7 +119,7 @@ class DSLParser:
                 "REGION_SELECT", "IMAGE_FIND", "TEMPLATE_CAPTURE",
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
-                "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION"}
+                "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION"}
     _registry_loaded = False
 
     @classmethod
@@ -346,6 +347,9 @@ class DSLParser:
 
             elif keyword == "SCENE_CONDITION":
                 nodes.append(ASTNode(NodeType.SCENE_CONDITION, args, line=lineno))
+
+            elif keyword == "VLM_CONDITION":
+                nodes.append(ASTNode(NodeType.VLM_CONDITION, args, line=lineno))
 
             elif keyword == "RUN":
                 nodes.append(ASTNode(NodeType.RUN, args, line=lineno))

@@ -352,6 +352,9 @@ class DSLExecutor:
         elif node.type == NodeType.SCENE_CONDITION:
             self._exec_scene_condition(node, ctx)
 
+        elif node.type == NodeType.VLM_CONDITION:
+            self._exec_vlm_condition(node, ctx)
+
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
     # ── 指令执行 ─────────────────────────────────────────────────
@@ -902,6 +905,47 @@ class DSLExecutor:
             condition=f"scene:{scene_name}", similarity=similarity, ctx=ctx)
         self._emit("node_done", node_type="SCENE_CONDITION", args=args, line=node.line)
 
+    def _exec_vlm_condition(self, node: ASTNode, ctx: ExecutionContext):
+        """VLM_CONDITION 描述 — 用VLM视觉模型判断画面是否符合描述。
+        截图 → 调用 Qwen2.5-VL → 解析 → 设置 _vlm_matched, _vlm_reason"""
+        description = self._interpolate(node.args)
+        self._emit("node_start", node_type="VLM_CONDITION", args=description, line=node.line)
+        self._log(f"VLM_CONDITION: {description}")
+
+        # 模拟模式（无 action_handler）时跳过实际 VLM 调用
+        if self._action_handler is None:
+            self._log(f"  模拟: VLM_CONDITION({description}) → false")
+            self._set_var("_vlm_matched", False)
+            self._set_var("_vlm_reason", "模拟模式")
+            self._set_var("_vlm_description", "")
+            self._emit("node_done", node_type="VLM_CONDITION", args=description, line=node.line)
+            return
+
+        try:
+            from features.vlm_features import _screenshot_base64, _call_vlm
+            image_b64 = _screenshot_base64()
+            prompt = (
+                "请判断当前画面是否符合以下描述。只回答[是]或[否]，然后简要说明理由。\n"
+                f"描述: {description}"
+            )
+            result = _call_vlm("qwen2.5-vl:3b", prompt, image_b64,
+                               temperature=0.05, max_tokens=128)
+            content = result.get("content", "")
+            is_match = content.startswith("是") or "符合" in content[:10]
+
+            self._set_var("_vlm_matched", is_match)
+            self._set_var("_vlm_reason", content)
+            self._set_var("_vlm_description", content)
+
+            self._log(f"  VLM 判断: {'匹配 ✓' if is_match else '不匹配 ✗'}")
+            self._log(f"  VLM 理由: {content[:120]}")
+        except Exception as e:
+            self._set_var("_vlm_matched", False)
+            self._set_var("_vlm_reason", f"VLM 调用失败: {e}")
+            self._log(f"  VLM 调用失败: {e}")
+
+        self._emit("node_done", node_type="VLM_CONDITION", args=description, line=node.line)
+
     # ── 层次化 DSL 执行 ──────────────────────────────────────────
     def _exec_call(self, node: ASTNode, ctx: ExecutionContext):
         name = node.args
@@ -1060,8 +1104,37 @@ class DSLExecutor:
         if any(c.startswith(p) for p in ("text:", "img:", "color:", "var:")):
             return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
 
+        # vlm:"描述" — 内联 VLM 条件判断
+        if c.startswith("vlm:"):
+            desc = c[4:].strip().strip('"').strip("'")
+            return self._eval_vlm_condition(desc)
+
         # 委托给 action_handler
         return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
+
+    def _eval_vlm_condition(self, description: str) -> bool:
+        """截图 + VLM 判断画面是否符合描述，返回布尔值"""
+        # 模拟模式（无 action_handler）时跳过实际 VLM 调用
+        if self._action_handler is None:
+            self._log(f"  模拟: VLM条件({description}) → false")
+            return False
+        try:
+            from features.vlm_features import _screenshot_base64, _call_vlm
+            self._log(f"  VLM 条件: {description}")
+            image_b64 = _screenshot_base64()
+            prompt = (
+                "请判断当前画面是否符合以下描述。只回答[是]或[否]，然后简要说明理由。\n"
+                f"描述: {description}"
+            )
+            result = _call_vlm("qwen2.5-vl:3b", prompt, image_b64,
+                               temperature=0.05, max_tokens=128)
+            content = result.get("content", "")
+            is_match = content.startswith("是") or "符合" in content[:10]
+            self._log(f"  VLM 判断: {'匹配 ✓' if is_match else '不匹配 ✗'} — {content[:80]}")
+            return is_match
+        except Exception as e:
+            self._log(f"  VLM 内联条件失败: {e}")
+            return False
 
     # ── 动作调用 ─────────────────────────────────────────────────
     def _call_action(self, action: str, **kwargs) -> Any:
