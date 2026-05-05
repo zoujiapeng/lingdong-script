@@ -34,10 +34,11 @@ function getAllCategories() {
 
 const ALL_CATEGORIES = getAllCategories();
 
-export function NodeLibrary({ forcedVisible = false }: { forcedVisible?: boolean }) {
+export function NodeLibrary() {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const { addNode, updateNodeParams, ui, featureList } = useStore();
+  const forcedVisible = ui.show_node_library || ui.panels_visible;
 
   // Build merged list: native nodes + feature-derived items
   const allItems = useMemo(() => {

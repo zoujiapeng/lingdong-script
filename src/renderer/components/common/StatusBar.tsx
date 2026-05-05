@@ -2,11 +2,7 @@ import React from 'react';
 import { useStore } from '../../store';
 import { PanelRightClose, PanelRightOpen, PanelBottomClose, PanelBottomOpen, PanelLeftClose, PanelLeftOpen, Minimize2 } from 'lucide-react';
 
-interface StatusBarProps {
-  onHidePanels?: () => void;
-}
-
-export function StatusBar({ onHidePanels }: StatusBarProps) {
+export function StatusBar() {
   const { script, execution, ui, setUI } = useStore();
 
   const statusDot = {
@@ -83,8 +79,8 @@ export function StatusBar({ onHidePanels }: StatusBarProps) {
       <div className="status-bar-divider" />
       <button
         className="status-bar-btn"
-        onClick={onHidePanels}
-        title="收起所有面板"
+        onClick={() => setUI({ panels_visible: !ui.panels_visible })}
+        title="切换所有面板"
       >
         <Minimize2 size={13} />
       </button>

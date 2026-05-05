@@ -368,6 +368,7 @@ export interface UIState {
   grid_size: number;
   dark_mode: boolean;
   viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
+  panels_visible: boolean;
   show_node_library: boolean;
   show_property_panel: boolean;
   show_log_panel: boolean;

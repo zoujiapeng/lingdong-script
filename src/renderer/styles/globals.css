@@ -1892,12 +1892,8 @@ textarea.form-input {
   height: 100vh;
 }
 
-/* In canvas view, topbar/view-tabs/status-bar hide off-screen */
-.canvas-view .topbar {
-  transform: translateY(-100%);
-  opacity: 0;
-}
-
+/* In canvas view, all panels are hidden by default */
+.canvas-view .topbar,
 .canvas-view .view-tabs {
   transform: translateY(-100%);
   opacity: 0;
@@ -1906,6 +1902,18 @@ textarea.form-input {
 .canvas-view .status-bar {
   transform: translateY(100%);
   opacity: 0;
+}
+
+/* Panel visibility: Tab key shows all panels */
+.canvas-view.panels-visible .topbar,
+.canvas-view.panels-visible .view-tabs {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.canvas-view.panels-visible .status-bar {
+  transform: translateY(0);
+  opacity: 1;
 }
 
 .canvas-view-layout .node-library {
@@ -1920,7 +1928,6 @@ textarea.form-input {
   opacity: 0;
 }
 
-.proximity-left .canvas-view-layout .node-library,
 .canvas-view-layout .node-library.forced-visible {
   transform: translateX(0);
   opacity: 1;
@@ -1938,7 +1945,6 @@ textarea.form-input {
   opacity: 0;
 }
 
-.proximity-right .canvas-view-layout .property-panel,
 .canvas-view-layout .property-panel.forced-visible {
   transform: translateX(0);
   opacity: 1;
@@ -1950,25 +1956,11 @@ textarea.form-input {
   transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
-.proximity-top .topbar,
-.proximity-top .view-tabs {
-  transform: translateY(0) !important;
-  opacity: 1 !important;
-}
-
-.proximity-top .view-tabs {
-  transition-delay: 0.03s;
-}
-
 /* StatusBar: slide up from bottom */
 .status-bar {
   transition: transform 0.25s ease, opacity 0.25s ease;
 }
 
-.proximity-bottom .status-bar {
-  transform: translateY(0) !important;
-  opacity: 1 !important;
-}
 
 /* ============================================================
    AI DIALOG

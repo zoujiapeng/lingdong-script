@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useState, useRef } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { NodeLibrary } from './components/NodeLibrary/NodeLibrary';
 import { FlowCanvas } from './components/Canvas/FlowCanvas';
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
@@ -14,52 +14,7 @@ import './styles/globals.css';
 
 export default function App() {
   const { ui, setUI, setViewMode } = useStore();
-  const { viewMode, dark_mode, show_ai_dialog: showAIDialog } = ui;
-  const [proximity, setProximity] = useState({ top: false, bottom: false, left: false, right: false });
-  const hoveredRef = useRef({ top: false, bottom: false, left: false, right: false });
-
-  // Mouse proximity tracking — shows panels when mouse nears viewport edges
-  // Once shown, panels stay visible until manually hidden via status bar ("收起所有面板")
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    const { clientX: x, clientY: y } = e;
-    const { innerWidth: w, innerHeight: h } = window;
-    const hov = hoveredRef.current;
-    const inCenterTop = y < 36 && x > 260 && x < w - 320;
-    const inTopBarHover = y < 90 && hov.top;
-
-    // Manage hover state
-    if (inCenterTop || inTopBarHover) hov.top = true;
-    if (!inCenterTop && y > 90) hov.top = false;
-
-    // Latching: only set proximity to true, never false.
-    // Panels stay visible once triggered until manually dismissed.
-    const newProx: typeof proximity = { top: false, bottom: false, left: false, right: false };
-    if (inCenterTop || inTopBarHover) newProx.top = true;
-    if (y > h - 36 || hov.bottom) newProx.bottom = true;
-    if (x < 36 || hov.left) newProx.left = true;
-    if (x > w - 100 || hov.right) newProx.right = true;
-
-    if (newProx.top || newProx.bottom || newProx.left || newProx.right) {
-      setProximity(prev => ({ ...prev, ...newProx }));
-    }
-  }, []);
-
-  // Panel hover tracking — keeps panel visible while mouse is over it
-  const handlePanelEnter = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
-    hoveredRef.current[dir] = true;
-    setProximity(prev => ({ ...prev, [dir]: true }));
-  }, []);
-
-  const handlePanelLeave = useCallback((dir: 'top' | 'bottom' | 'left' | 'right') => {
-    hoveredRef.current[dir] = false;
-  }, []);
-
-  // Manual hide all panels — called from status bar
-  const hideAllPanels = useCallback(() => {
-    setProximity({ top: false, bottom: false, left: false, right: false });
-    hoveredRef.current = { top: false, bottom: false, left: false, right: false };
-    setUI({ show_node_library: false, show_property_panel: false, show_log_panel: false });
-  }, [setUI]);
+  const { viewMode, dark_mode, show_ai_dialog: showAIDialog, panels_visible } = ui;
 
   // Apply dark mode class
   useEffect(() => {
@@ -84,6 +39,18 @@ export default function App() {
     (e: KeyboardEvent) => {
       const store = useStore.getState();
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const next = !store.ui.panels_visible;
+        if (!next) {
+          // 隐藏时同时关闭所有独立面板
+          store.setUI({ panels_visible: false, show_node_library: false, show_property_panel: false, show_log_panel: false, show_tool_call_panel: false });
+        } else {
+          store.setUI({ panels_visible: true });
+        }
+        return;
+      }
 
       if (e.ctrlKey || e.metaKey) {
         switch (e.key.toLowerCase()) {
@@ -116,10 +83,7 @@ export default function App() {
   }, [handleKeyDown]);
 
   return (
-    <div
-      className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${proximity.top ? ' proximity-top' : ''}${proximity.bottom ? ' proximity-bottom' : ''}${proximity.left ? ' proximity-left' : ''}${proximity.right ? ' proximity-right' : ''}`}
-      onMouseMove={viewMode === 'canvas' ? handleMouseMove : undefined}
-    >
+    <div className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${panels_visible ? ' panels-visible' : ''}`}>
       <div className="top-wrapper">
         <TopBar />
         <div className="view-tabs">
@@ -179,15 +143,11 @@ export default function App() {
           </div>
         ) : (
           <>
-            <div onMouseEnter={() => handlePanelEnter('left')} onMouseLeave={() => handlePanelLeave('left')}>
-              <NodeLibrary forcedVisible={ui.show_node_library} />
-            </div>
+            <NodeLibrary />
             <div className="canvas-area">
               <FlowCanvas />
             </div>
-            <div onMouseEnter={() => handlePanelEnter('right')} onMouseLeave={() => handlePanelLeave('right')}>
-              <PropertyPanel forcedVisible={ui.show_property_panel} />
-            </div>
+            <PropertyPanel />
             {showAIDialog && (
               <div className="ai-dialog-backdrop" onClick={() => setUI({ show_ai_dialog: false })}>
                 <div className="ai-dialog" onClick={e => e.stopPropagation()}>
@@ -198,8 +158,8 @@ export default function App() {
           </>
         )}
       </div>
-      <div className="bottom-wrapper" onMouseEnter={() => handlePanelEnter('bottom')} onMouseLeave={() => handlePanelLeave('bottom')}>
-        <StatusBar onHidePanels={hideAllPanels} />
+      <div className="bottom-wrapper">
+        <StatusBar />
         {ui.show_tool_call_panel && <ToolCallPanel />}
       </div>
     </div>

@@ -40,6 +40,7 @@ const DEFAULT_UI_STATE: UIState = {
   grid_size: 20,
   dark_mode: false,
   viewMode: 'canvas',
+  panels_visible: false,
   show_node_library: false,
   show_property_panel: false,
   show_log_panel: false,

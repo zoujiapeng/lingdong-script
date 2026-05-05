@@ -30,12 +30,13 @@ function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
   return <Icon size={size} />;
 }
 
-export function PropertyPanel({ forcedVisible = false }: { forcedVisible?: boolean }) {
+export function PropertyPanel() {
   const { script, ui, updateNode, updateNodeParams } = useStore();
   const [activeTab, setActiveTab] = useState<'params' | 'advanced'>('params');
 
   const selectedNodeId = ui.selection.nodes[0];
   const node = selectedNodeId ? script.nodes.find((n) => n.id === selectedNodeId) : null;
+  const forcedVisible = ui.show_property_panel || ui.panels_visible;
 
   const panelClass = `property-panel${forcedVisible ? ' forced-visible' : ''}`;
 
