@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🦞 灵动脚本 (Lingdong Script)
+# 🦞 灵动脚本
 
-**可视化桌面自动化流程编辑器**
+**可视化桌面自动化流程编辑器 — 拖拽编排，万物可控**
 
 [![Electron](https://img.shields.io/badge/Electron-31-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
@@ -10,15 +10,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python)](https://www.python.org/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev/)
 
-[English](#english) · [中文](#中文)
-
 </div>
-
----
-
-## 中文
-
-### 📖 简介
 
 灵动脚本是一款**可视化桌面自动化流程编辑器**，通过拖拽节点编排流程图来创建自动化脚本。无需编程经验，即可完成屏幕点击、文字输入、OCR 识别、图片检测、条件分支、循环等桌面自动化操作。
 
