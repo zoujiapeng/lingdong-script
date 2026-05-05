@@ -63,6 +63,8 @@ _BASIC_DSL_TO_FLOW = {
     "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
     "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
     "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
+    "SHUTDOWN": "shutdown", "REBOOT": "reboot",
+    "LOGOFF": "logoff", "HIBERNATE": "hibernate",
     "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
     "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
     "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
@@ -478,6 +480,13 @@ def _dsl_args_to_params(ntype: str, args: str,
             "tolerance": int(nums[5]) if len(nums) > 5 else 30,
         }
 
+    elif ntype in ("SHUTDOWN", "REBOOT", "LOGOFF", "HIBERNATE"):
+        nums = re.findall(r"\d+", args)
+        params = {
+            "delay_seconds": int(nums[0]) if nums else 0,
+            "confirm": True,
+        }
+
     elif ntype == "REGION_WAIT":
         nums = re.findall(r"-?\d+", args)
         parts = args.split()
@@ -590,6 +599,10 @@ def _dsl_label(ntype: str, args: str) -> str:
         "FINDCANVAS": "检测画布",
         "DRAG": "拖拽",
         "BREAK": "跳出循环",
+        "SHUTDOWN": "关机" + (f" ({args}s)" if args.strip() else ""),
+        "REBOOT": "重启" + (f" ({args}s)" if args.strip() else ""),
+        "LOGOFF": "注销" + (f" ({args}s)" if args.strip() else ""),
+        "HIBERNATE": "休眠" + (f" ({args}s)" if args.strip() else ""),
     }
     return labels.get(ntype, "")
 
@@ -764,6 +777,11 @@ def flow_to_dsl(script: dict) -> str:
             scene = p.get("scene_name", "")
             sim = p.get("similarity", 70)
             return f"SCENE_CONDITION {scene} {sim}"
+
+        if ntype in ("shutdown", "reboot", "logoff", "hibernate"):
+            delay = p.get("delay_seconds", 0)
+            kw = {"shutdown": "SHUTDOWN", "reboot": "REBOOT", "logoff": "LOGOFF", "hibernate": "HIBERNATE"}
+            return f"{kw[ntype]} {delay}" if delay else kw[ntype]
 
         if ntype == "condition":
             ct = p.get("condition_type", "always_true")

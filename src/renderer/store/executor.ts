@@ -280,6 +280,20 @@ export function createFlowExecutor(
           result = 'output';
           break;
 
+        case 'shutdown':
+        case 'reboot':
+        case 'logoff':
+        case 'hibernate': {
+          const cmdLabels: Record<string, string> = {
+            shutdown: '关机', reboot: '重启', logoff: '注销', hibernate: '休眠',
+          };
+          const delay = params.delay_seconds ?? 0;
+          log('info', `${cmdLabels[node.type]}` + (delay > 0 ? ` (${delay}秒后)` : ''), nodeId);
+          await delay(100);
+          result = 'output';
+          break;
+        }
+
         case 'tool_call': {
           const featureName = params.feature_name || 'unknown';
           log('info', `调用工具: ${featureName}`, nodeId);

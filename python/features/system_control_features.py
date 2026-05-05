@@ -206,3 +206,97 @@ def empty_recycle_bin(confirm: bool = True) -> bool:
             return True
         except Exception:
             return False
+
+
+@feature(
+    name="shutdown",
+    display_name="关机",
+    description="【系统控制】关闭计算机。可设置延迟秒数，支持执行前确认",
+    category=F.SYSTEM,
+    params=[
+        P("delay_seconds", "int", "延迟关机秒数（0=立即）", required=False, default=0),
+        P("confirm", "boolean", "执行前确认", required=False, default=True),
+    ],
+    returns="bool - 关机指令是否已发出",
+    dsl_keyword="SHUTDOWN",
+    dsl_template="SHUTDOWN {delay_seconds}",
+    flow_type="shutdown",
+    examples=["SHUTDOWN", "SHUTDOWN 30"],
+    tags=["system", "power"],
+)
+def shutdown_fn(delay_seconds: int = 0, confirm: bool = True) -> bool:
+    if confirm:
+        return {"success": False, "error": "请设置 confirm=False 以确认关机（防误触保护）"}
+    import subprocess
+    subprocess.run(["shutdown", "/s", "/t", str(delay_seconds)], shell=False)
+    return True
+
+
+@feature(
+    name="reboot",
+    display_name="重启",
+    description="【系统控制】重新启动计算机。可设置延迟秒数，支持执行前确认",
+    category=F.SYSTEM,
+    params=[
+        P("delay_seconds", "int", "延迟重启秒数（0=立即）", required=False, default=0),
+        P("confirm", "boolean", "执行前确认", required=False, default=True),
+    ],
+    returns="bool - 重启指令是否已发出",
+    dsl_keyword="REBOOT",
+    dsl_template="REBOOT {delay_seconds}",
+    flow_type="reboot",
+    examples=["REBOOT", "REBOOT 60"],
+    tags=["system", "power"],
+)
+def reboot_fn(delay_seconds: int = 0, confirm: bool = True) -> bool:
+    if confirm:
+        return {"success": False, "error": "请设置 confirm=False 以确认重启（防误触保护）"}
+    import subprocess
+    subprocess.run(["shutdown", "/r", "/t", str(delay_seconds)], shell=False)
+    return True
+
+
+@feature(
+    name="logoff",
+    display_name="注销",
+    description="【系统控制】注销当前用户",
+    category=F.SYSTEM,
+    params=[
+        P("confirm", "boolean", "执行前确认", required=False, default=True),
+    ],
+    returns="bool - 注销指令是否已发出",
+    dsl_keyword="LOGOFF",
+    dsl_template="LOGOFF",
+    flow_type="logoff",
+    examples=["LOGOFF"],
+    tags=["system", "power"],
+)
+def logoff_fn(confirm: bool = True) -> bool:
+    if confirm:
+        return {"success": False, "error": "请设置 confirm=False 以确认注销（防误触保护）"}
+    import subprocess
+    subprocess.run(["shutdown", "/l"], shell=False)
+    return True
+
+
+@feature(
+    name="hibernate",
+    display_name="休眠",
+    description="【系统控制】使计算机进入休眠状态",
+    category=F.SYSTEM,
+    params=[
+        P("confirm", "boolean", "执行前确认", required=False, default=True),
+    ],
+    returns="bool - 休眠指令是否已发出",
+    dsl_keyword="HIBERNATE",
+    dsl_template="HIBERNATE",
+    flow_type="hibernate",
+    examples=["HIBERNATE"],
+    tags=["system", "power"],
+)
+def hibernate_fn(confirm: bool = True) -> bool:
+    if confirm:
+        return {"success": False, "error": "请设置 confirm=False 以确认休眠（防误触保护）"}
+    import subprocess
+    subprocess.run(["shutdown", "/h"], shell=False)
+    return True

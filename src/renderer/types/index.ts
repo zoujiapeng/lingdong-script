@@ -23,7 +23,11 @@ export type NodeType =
   | 'progress_wait'
   | 'region_wait'
   | 'scene_condition'
-  | 'tool_call';
+  | 'tool_call'
+  | 'shutdown'
+  | 'reboot'
+  | 'logoff'
+  | 'hibernate';
 
 export type ConditionType =
   | 'image_exists'
@@ -215,6 +219,12 @@ export interface ToolCallNodeParams {
   description?: string;
 }
 
+export interface SystemCommandParams {
+  delay_seconds: number;
+  confirm: boolean;
+  description?: string;
+}
+
 export interface ScreenshotNodeParams {
   region?: { x: number; y: number; w: number; h: number };
   save_path?: string;
@@ -242,7 +252,8 @@ export type NodeParams =
   | RegionWaitNodeParams
   | SceneConditionNodeParams
   | ScreenshotNodeParams
-  | ToolCallNodeParams;
+  | ToolCallNodeParams
+  | SystemCommandParams;
 
 // --- Flow Node & Edge ---
 

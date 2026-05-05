@@ -368,6 +368,15 @@ class DSLExecutor:
         elif node.type == NodeType.VLM_CONDITION:
             self._exec_vlm_condition(node, ctx)
 
+        elif node.type == NodeType.SHUTDOWN:
+            self._exec_shutdown(node, ctx)
+        elif node.type == NodeType.REBOOT:
+            self._exec_reboot(node, ctx)
+        elif node.type == NodeType.LOGOFF:
+            self._exec_logoff(node, ctx)
+        elif node.type == NodeType.HIBERNATE:
+            self._exec_hibernate(node, ctx)
+
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
     # ── 指令执行 ─────────────────────────────────────────────────
@@ -1026,6 +1035,51 @@ class DSLExecutor:
             self._log(f"  VLM 调用失败: {e}")
 
         self._emit("node_done", node_type="VLM_CONDITION", args=description, line=node.line)
+
+    # ── 系统指令执行 ─────────────────────────────────────────────
+    def _exec_shutdown(self, node: ASTNode, ctx: ExecutionContext):
+        """SHUTDOWN [delay_seconds] — 关闭计算机"""
+        args = self._interpolate(node.args)
+        delay = 0
+        try:
+            delay = int(args)
+        except ValueError:
+            pass
+        self._emit("node_start", node_type="SHUTDOWN", args=str(delay), line=node.line)
+        self._log(f"SHUTDOWN: {delay}s 后关机")
+        import subprocess
+        subprocess.run(["shutdown", "/s", "/t", str(delay)], shell=False)
+        self._emit("node_done", node_type="SHUTDOWN", args=str(delay), line=node.line)
+
+    def _exec_reboot(self, node: ASTNode, ctx: ExecutionContext):
+        """REBOOT [delay_seconds] — 重启计算机"""
+        args = self._interpolate(node.args)
+        delay = 0
+        try:
+            delay = int(args)
+        except ValueError:
+            pass
+        self._emit("node_start", node_type="REBOOT", args=str(delay), line=node.line)
+        self._log(f"REBOOT: {delay}s 后重启")
+        import subprocess
+        subprocess.run(["shutdown", "/r", "/t", str(delay)], shell=False)
+        self._emit("node_done", node_type="REBOOT", args=str(delay), line=node.line)
+
+    def _exec_logoff(self, node: ASTNode, ctx: ExecutionContext):
+        """LOGOFF — 注销当前用户"""
+        self._emit("node_start", node_type="LOGOFF", args="", line=node.line)
+        self._log("LOGOFF: 注销当前用户")
+        import subprocess
+        subprocess.run(["shutdown", "/l"], shell=False)
+        self._emit("node_done", node_type="LOGOFF", args="", line=node.line)
+
+    def _exec_hibernate(self, node: ASTNode, ctx: ExecutionContext):
+        """HIBERNATE — 休眠"""
+        self._emit("node_start", node_type="HIBERNATE", args="", line=node.line)
+        self._log("HIBERNATE: 计算机进入休眠")
+        import subprocess
+        subprocess.run(["shutdown", "/h"], shell=False)
+        self._emit("node_done", node_type="HIBERNATE", args="", line=node.line)
 
     # ── 层次化 DSL 执行 ──────────────────────────────────────────
     def _exec_call(self, node: ASTNode, ctx: ExecutionContext):

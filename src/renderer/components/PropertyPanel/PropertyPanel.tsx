@@ -137,6 +137,53 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'scene_condition': return <SceneConditionParams params={node.params as any} onChange={updateParams} />;
     case 'screenshot': return <ScreenshotParams params={node.params as any} onChange={updateParams} />;
     case 'tool_call': return <ToolCallParams params={node.params as any} onChange={updateParams} />;
+    case 'shutdown':
+    case 'reboot':
+    case 'logoff':
+    case 'hibernate': {
+      const p = node.params as any;
+      const labels: Record<string, string> = {
+        shutdown: '关机', reboot: '重启', logoff: '注销', hibernate: '休眠',
+      };
+      return (
+        <div>
+          <div className="form-group">
+            <label className="form-label">{labels[node.type]}操作</label>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+              {node.type === 'shutdown' ? '关闭计算机' :
+               node.type === 'reboot' ? '重新启动计算机' :
+               node.type === 'logoff' ? '注销当前用户' : '使计算机进入休眠状态'}
+            </div>
+          </div>
+          {node.type !== 'logoff' && node.type !== 'hibernate' && (
+            <div className="form-group">
+              <label className="form-label">延迟（秒）</label>
+              <input
+                className="form-input"
+                type="number"
+                min={0}
+                value={p.delay_seconds ?? 0}
+                onChange={(e) => updateParams({ ...p, delay_seconds: parseInt(e.target.value) || 0 })}
+              />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                0 表示立即{labels[node.type]}
+              </div>
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-checkbox-label">
+              <input
+                type="checkbox"
+                checked={p.confirm !== false}
+                onChange={(e) => updateParams({ ...p, confirm: e.target.checked })}
+                style={{ marginRight: 6 }}
+              />
+              执行前确认
+            </label>
+          </div>
+        </div>
+      );
+    }
     case 'start':
     case 'end': return (
       <div className="form-group">

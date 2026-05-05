@@ -521,6 +521,27 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       break;
     }
 
+    case 'shutdown':
+    case 'reboot':
+    case 'logoff':
+    case 'hibernate': {
+      const cmdLabels: Record<string, { dsl: string; pseudo: string }> = {
+        shutdown: { dsl: 'SHUTDOWN', pseudo: '关机' },
+        reboot: { dsl: 'REBOOT', pseudo: '重启' },
+        logoff: { dsl: 'LOGOFF', pseudo: '注销' },
+        hibernate: { dsl: 'HIBERNATE', pseudo: '休眠' },
+      };
+      const labels = cmdLabels[node.type];
+      const delay = p.delay_seconds ?? 0;
+      if (gens.ifKeyword === 'IF') {
+        emit(state, delay > 0 ? `${labels.dsl} ${delay}` : labels.dsl);
+      } else {
+        emit(state, delay > 0 ? `${labels.pseudo} (${delay}秒后)` : labels.pseudo);
+      }
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+
     default:
       emit(state, `# UNKNOWN: ${node.type}`);
       forward(nodeId, 'output', state, gens, convergence);

@@ -8,5 +8,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 screenshot_*.png
+assets/
 *.js.map
 *.js

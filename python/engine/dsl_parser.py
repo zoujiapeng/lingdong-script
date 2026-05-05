@@ -60,6 +60,11 @@ class NodeType(str, Enum):
     VLM_CONDITION = "VLM_CONDITION"
     FINDCANVAS = "FINDCANVAS"
     DRAG = "DRAG"
+    # 系统指令
+    SHUTDOWN = "SHUTDOWN"
+    REBOOT = "REBOOT"
+    LOGOFF = "LOGOFF"
+    HIBERNATE = "HIBERNATE"
     # Registry 关键字回退（无对应枚举成员时）
     REGISTRY_FEATURE = "REGISTRY_FEATURE"
 
@@ -99,6 +104,10 @@ _SIMPLE_NODE_TYPES: dict[str, NodeType] = {
     "SCENE_CONDITION": NodeType.SCENE_CONDITION,
     "FINDCANVAS": NodeType.FINDCANVAS,
     "DRAG": NodeType.DRAG,
+    "SHUTDOWN": NodeType.SHUTDOWN,
+    "REBOOT": NodeType.REBOOT,
+    "LOGOFF": NodeType.LOGOFF,
+    "HIBERNATE": NodeType.HIBERNATE,
     "RUN": NodeType.RUN,
 }
 
@@ -165,7 +174,7 @@ class DSLParser:
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
                 "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION",
-                "FINDCANVAS", "DRAG", "VLM_ANALYZE", "INPUT_TEXT", "CLICK_IMAGE", "CLICK_TEXT"}
+                "FINDCANVAS", "DRAG", "VLM_ANALYZE", "INPUT_TEXT", "CLICK_IMAGE", "CLICK_TEXT", "SHUTDOWN", "REBOOT", "LOGOFF", "HIBERNATE"}
     _registry_loaded = False
 
     @classmethod
