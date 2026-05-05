@@ -332,11 +332,11 @@ export function FlowCanvas() {
     <svg className="canvas-grid" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       <defs>
         <pattern id="smallGrid" width={grid_size} height={grid_size} patternUnits="userSpaceOnUse">
-          <path d={`M ${grid_size} 0 L 0 0 0 ${grid_size}`} fill="none" stroke="rgba(148,163,184,0.18)" strokeWidth="0.7" />
+          <path d={`M ${grid_size} 0 L 0 0 0 ${grid_size}`} fill="none" stroke="rgba(148,163,184,0.35)" strokeWidth="0.7" />
         </pattern>
         <pattern id="bigGrid" width={grid_size * 5} height={grid_size * 5} patternUnits="userSpaceOnUse">
           <rect width={grid_size * 5} height={grid_size * 5} fill="url(#smallGrid)" />
-          <path d={`M ${grid_size * 5} 0 L 0 0 0 ${grid_size * 5}`} fill="none" stroke="rgba(148,163,184,0.3)" strokeWidth="1" />
+          <path d={`M ${grid_size * 5} 0 L 0 0 0 ${grid_size * 5}`} fill="none" stroke="rgba(148,163,184,0.55)" strokeWidth="1.2" />
         </pattern>
       </defs>
       <rect width="100%" height="100%" fill="url(#bigGrid)" />

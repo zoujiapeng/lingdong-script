@@ -699,11 +699,13 @@ export const useStore = create<AppStore>()(
     addNode: (type, x, y, params, providedId?) => {
       const def = NODE_DEFINITIONS[type];
       const id = providedId || nanoid();
+      const { snap_to_grid, grid_size } = get().ui;
+      const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
       const node: FlowNode = {
         id,
         type,
-        x,
-        y,
+        x: snap(x),
+        y: snap(y),
         params: params ? { ...def.defaultParams, ...params } : { ...def.defaultParams },
         status: 'idle',
       };
@@ -776,10 +778,12 @@ export const useStore = create<AppStore>()(
     },
 
     moveNodes: (ids, dx, dy) => {
+      const { snap_to_grid, grid_size } = get().ui;
+      const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
       set((state) => {
         ids.forEach((id) => {
           const n = state.script.nodes.find((n) => n.id === id);
-          if (n) { n.x += dx; n.y += dy; }
+          if (n) { n.x = snap(n.x + dx); n.y = snap(n.y + dy); }
         });
         state.isDirty = true;
       });
@@ -1166,6 +1170,8 @@ export const useStore = create<AppStore>()(
         queue = next;
       }
       const NODE_W = 220, NODE_H = 80, GAP_X = 60, GAP_Y = 40;
+      const { snap_to_grid, grid_size } = get().ui;
+      const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
       set((state) => {
         layers.forEach((layer, li) => {
           const totalH = layer.length * NODE_H + (layer.length - 1) * GAP_Y;
@@ -1173,8 +1179,8 @@ export const useStore = create<AppStore>()(
           layer.forEach((id, ni) => {
             const n = state.script.nodes.find((n) => n.id === id);
             if (n) {
-              n.x = li * (NODE_W + GAP_X) + 60;
-              n.y = startY + ni * (NODE_H + GAP_Y);
+              n.x = snap(li * (NODE_W + GAP_X) + 60);
+              n.y = snap(startY + ni * (NODE_H + GAP_Y));
             }
           });
         });
