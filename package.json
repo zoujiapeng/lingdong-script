@@ -55,8 +55,11 @@
       "src/python/**/*"
     ],
     "win": {
-      "target": "nsis",
+      "target": ["nsis", "portable"],
       "icon": "assets/icon.png"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
     }
   }
 }
