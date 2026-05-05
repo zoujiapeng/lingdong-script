@@ -55,7 +55,10 @@ _BASE_DSL_TO_FLOW = {
 _BASIC_DSL_TO_FLOW = {
     "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
     "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
-    "SET": "variable_set", "IMAGE_CLICK": "image_click",
+    "SET": "variable_set", "INPUT_TEXT": "input_text",
+    "CLICK_IMAGE": "image_click",
+    "CLICK_TEXT": "click_text",
+    "IMAGE_CLICK": "image_click",
     "PROGRESS_WAIT": "progress_wait", "OCR_FIND": "click_text",
     "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
     "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
@@ -149,6 +152,7 @@ def dsl_to_flow(dsl_text: str, layout: str = "vertical") -> dict:
         return f"n_{counter[0]}"
 
     def _eid() -> str:
+        counter[0] += 1
         return f"e_{counter[0]}"
 
     def _add_node(ntype: str, x: int, y: int, args: str,
@@ -215,7 +219,7 @@ def dsl_to_flow(dsl_text: str, layout: str = "vertical") -> dict:
             # true 分支
             if node.children:
                 first_child_id = None
-                last_id = uid
+                last_id = None
                 for child in node.children:
                     last_id, cy = _walk_ast(child, last_id, x + step_x, cy)
                     if first_child_id is None:
@@ -227,7 +231,7 @@ def dsl_to_flow(dsl_text: str, layout: str = "vertical") -> dict:
             # false 分支 (else_children)
             if node.else_children:
                 else_first = None
-                else_last = uid
+                else_last = None
                 else_y = y + step_y
                 for child in node.else_children:
                     else_last, else_y = _walk_ast(child, else_last,
@@ -244,7 +248,7 @@ def dsl_to_flow(dsl_text: str, layout: str = "vertical") -> dict:
         if nt in LOOP_TYPES:
             if node.children:
                 body_first = None
-                body_last = uid
+                body_last = None
                 for child in node.children:
                     body_last, cy = _walk_ast(child, body_last,
                                               x + step_x, cy)
@@ -349,6 +353,31 @@ def _dsl_args_to_params(ntype: str, args: str,
             "delay_after": 0.5,
         }
 
+    elif ntype == "INPUT_TEXT":
+        # INPUT_TEXT x y "text"
+        nums = re.findall(r"-?\d+", args)
+        text_match = re.search(r"\"([^\"]*)\"", args)
+        params = {
+            "text": text_match.group(1) if text_match else args.strip().strip("\"'"),
+            "x": int(nums[0]) if len(nums) > 0 else 0,
+            "y": int(nums[1]) if len(nums) > 1 else 0,
+            "click_before": True,
+            "clear_before": False,
+            "delay_after": 0.5,
+        }
+
+    elif ntype == "CLICK_TEXT":
+        text = args.strip().strip("\"'")
+        params = {
+            "text": text,
+            "similarity": 80,
+            "method": "single",
+            "offset_x": 0,
+            "offset_y": 0,
+            "timeout": 5,
+            "delay_after": 0.5,
+        }
+
     elif ntype == "HOTKEY":
         keys_parts = re.split(r"[\s+]", args.strip())
         mods = {"ctrl", "alt", "shift", "win"}
@@ -387,7 +416,7 @@ def _dsl_args_to_params(ntype: str, args: str,
         value = parts[1].strip().strip("\"'") if len(parts) > 1 else ""
         params = {"name": name, "value": value}
 
-    elif ntype == "IMAGE_CLICK":
+    elif ntype in ("IMAGE_CLICK", "CLICK_IMAGE"):
         paths = re.findall(r'"([^"]*)"', args)
         params = {
             "targets": [{"path": p} for p in paths],
@@ -399,18 +428,20 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype == "PROGRESS_WAIT":
         parts = args.split()
         params = {
-            "wait_type": parts[-1] if parts else "fill",
+            "wait_type": parts[0] if parts else "fill",
             "timeout": 30, "poll_interval": 0.5,
         }
-        # 尝试解析区域
-        region_match = re.match(r"(\d+),(\d+),(\d+),(\d+)", args)
-        if region_match:
-            params["region"] = {
-                "x": int(region_match.group(1)),
-                "y": int(region_match.group(2)),
-                "w": int(region_match.group(3)),
-                "h": int(region_match.group(4)),
-            }
+        # 解析空格分隔的坐标: fill x y w h [timeout]
+        if len(parts) >= 5:
+            try:
+                params["region"] = {
+                    "x": int(parts[1]), "y": int(parts[2]),
+                    "w": int(parts[3]), "h": int(parts[4]),
+                }
+                if len(parts) > 5:
+                    params["timeout"] = int(parts[5])
+            except ValueError:
+                pass
 
     elif ntype == "OCR_FIND":
         text = args.strip().strip("\"'")
@@ -451,17 +482,20 @@ def _dsl_args_to_params(ntype: str, args: str,
         nums = re.findall(r"-?\d+", args)
         parts = args.split()
         region_type = "stable"
-        if any(t in args.lower() for t in ("change", "稳定", "变化")):
-            region_type = "change" if "change" in args.lower() else "stable"
+        if any(t in args.lower() for t in ("change",)):
+            region_type = "change"
         params = {
             "region_type": region_type,
             "x": int(nums[0]) if len(nums) > 0 else 0,
             "y": int(nums[1]) if len(nums) > 1 else 0,
             "w": int(nums[2]) if len(nums) > 2 else 100,
             "h": int(nums[3]) if len(nums) > 3 else 100,
-            "timeout": float(parts[-1]) if parts[-1].replace(".", "").isdigit() else 30,
+            "timeout": int(nums[4]) if len(nums) > 4 else 30,
             "poll_interval": 0.5,
         }
+        # region 整合
+        if len(nums) >= 4:
+            params["region"] = {"x": params["x"], "y": params["y"], "w": params["w"], "h": params["h"]}
 
     elif ntype == "SCENE_CONDITION":
         parts = args.rsplit(None, 1)
@@ -538,6 +572,9 @@ def _dsl_label(ntype: str, args: str) -> str:
         "HOTKEY": f"按键 {args}",
         "SCREENSHOT": "截图",
         "SET": f"变量设置",
+        "INPUT_TEXT": "输入文本",
+        "CLICK_IMAGE": "点击图片",
+        "CLICK_TEXT": "点击文本",
         "IMAGE_CLICK": "点击图片",
         "PROGRESS_WAIT": "等待进度",
         "OCR_FIND": f"点击文本",
@@ -709,15 +746,19 @@ def flow_to_dsl(script: dict) -> str:
         if ntype == "progress_wait":
             region = p.get("region", {})
             wt = p.get("wait_type", "fill")
-            r_str = f"{region.get('x', 0)},{region.get('y', 0)},{region.get('w', 100)},{region.get('h', 100)}"
-            return f"PROGRESS_WAIT {r_str} {wt}"
+            x, y = region.get("x", 0), region.get("y", 0)
+            w, h = region.get("w", 100), region.get("h", 100)
+            return f"PROGRESS_WAIT {wt} {x} {y} {w} {h}"
 
         if ntype == "region_wait":
             rt = p.get("region_type", "stable")
-            x = p.get("x", 0); y = p.get("y", 0)
-            w = p.get("w", 100); h = p.get("h", 100)
+            region = p.get("region", {})
+            x = region.get("x", p.get("x", 0))
+            y = region.get("y", p.get("y", 0))
+            w = region.get("w", p.get("w", 100))
+            h = region.get("h", p.get("h", 100))
             timeout = p.get("timeout", 30)
-            return f"REGION_WAIT {x},{y},{w},{h} {rt} {timeout}"
+            return f"REGION_WAIT {x} {y} {w} {h} {rt} {timeout}"
 
         if ntype == "scene_condition":
             scene = p.get("scene_name", "")

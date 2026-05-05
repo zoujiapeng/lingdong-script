@@ -3,7 +3,8 @@ import { useStore } from '../../store';
 import { FlowNode } from '../../types';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 
-function getPortScreenPos(node: FlowNode, portId: string, tx: { x: number; y: number; scale: number }): { x: number; y: number } | null {
+/** Get port position in canvas space (no screen transform). */
+function getPortNodePos(node: FlowNode, portId: string): { x: number; y: number } {
   const isStartEnd = node.type === 'start' || node.type === 'end';
   const NW = isStartEnd ? 160 : 220;
   const NH = isStartEnd ? 56 : 80;
@@ -23,10 +24,7 @@ function getPortScreenPos(node: FlowNode, portId: string, tx: { x: number; y: nu
     py = node.y + NH;
   }
 
-  return {
-    x: px * tx.scale + tx.x,
-    y: py * tx.scale + tx.y,
-  };
+  return { x: px, y: py };
 }
 
 function bezierPath(fx: number, fy: number, tx: number, ty: number): string {
@@ -73,14 +71,17 @@ export function EdgeLayer() {
       style={{
         position: 'absolute',
         top: 0,
-        right: 0,
-        bottom: 0,
         left: 0,
+        width: '100%',
+        height: '100%',
         overflow: 'visible',
+        pointerEvents: 'none',
+        transform: `translate(${canvas_transform.x}px, ${canvas_transform.y}px) scale(${canvas_transform.scale})`,
+        transformOrigin: '0 0',
       }}
     >
       <defs>
-        {['#94a3b8', '#22c55e', '#ef4444', '#f59e0b', '#6366f1', '#3b82f6', '#6366f1'].map((color) => (
+        {['#94a3b8', '#22c55e', '#ef4444', '#f59e0b', '#6366f1', '#3b82f6'].map((color) => (
           <marker
             key={color}
             id={`arrow-${color.replace('#', '')}`}
@@ -103,9 +104,8 @@ export function EdgeLayer() {
         const toNode = nodeMap[edge.to_node];
         if (!fromNode || !toNode) return null;
 
-        const from = getPortScreenPos(fromNode, edge.from_port, canvas_transform);
-        const to = getPortScreenPos(toNode, edge.to_port, canvas_transform);
-        if (!from || !to) return null;
+        const from = getPortNodePos(fromNode, edge.from_port);
+        const to = getPortNodePos(toNode, edge.to_port);
         const path = bezierPath(from.x, from.y, to.x, to.y);
 
         const isSelected = selection.edges.includes(edge.id);
@@ -115,13 +115,11 @@ export function EdgeLayer() {
         const strokeColor = isSelected ? 'var(--accent)' : isAnimated ? '#3b82f6' : baseColor;
         const markerId = isSelected ? 'accent' : isAnimated ? '3b82f6' : baseColor.replace('#', '');
 
-        // Mid-point for label (screen coords)
         const midX = (from.x + to.x) / 2;
         const midY = (from.y + to.y) / 2;
 
         return (
           <g key={edge.id}>
-            {/* Invisible hit area */}
             <path
               d={path}
               fill="none"
@@ -131,7 +129,6 @@ export function EdgeLayer() {
               onClick={(e) => handleEdgeClick(e, edge.id)}
               onDoubleClick={(e) => handleEdgeDoubleClick(e, edge.id)}
             />
-            {/* Visible edge */}
             <path
               d={path}
               fill="none"
@@ -145,7 +142,6 @@ export function EdgeLayer() {
                 animation: isAnimated ? 'flow-dash 0.6s linear infinite' : undefined,
               }}
             />
-            {/* Port label */}
             {edge.label && (
               <g>
                 <rect

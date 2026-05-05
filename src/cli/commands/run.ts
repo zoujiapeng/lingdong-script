@@ -56,11 +56,12 @@ async function spawnEngine(script: any): Promise<void> {
 
   const proc = cp.spawn('python', [enginePath], {
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   });
 
   // Forward stdout as JSON lines
   proc.stdout!.on('data', (data: Buffer) => {
-    const text = data.toString();
+    const text = data.toString('utf8');
     for (const line of text.split('\n').filter(Boolean)) {
       try {
         const parsed = JSON.parse(line);
@@ -73,7 +74,7 @@ async function spawnEngine(script: any): Promise<void> {
 
   // Forward stderr
   proc.stderr!.on('data', (data: Buffer) => {
-    console.error(JSON.stringify({ type: 'log', level: 'error', message: data.toString().trim() }));
+    console.error(JSON.stringify({ type: 'log', level: 'error', message: data.toString('utf8').trim() }));
   });
 
   proc.on('close', (code) => {

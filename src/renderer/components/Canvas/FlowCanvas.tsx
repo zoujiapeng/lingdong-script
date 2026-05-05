@@ -416,7 +416,7 @@ export function FlowCanvas() {
         )}
       </div>
 
-      {/* Edges (screen space) */}
+      {/* Edges (screen space, same CSS transform as nodes) */}
       <EdgeLayer />
 
       {/* Connecting line (screen space) */}

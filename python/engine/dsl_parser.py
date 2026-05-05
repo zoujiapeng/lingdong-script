@@ -44,6 +44,9 @@ class NodeType(str, Enum):
     PROGRESS_INIT = "PROGRESS_INIT"
     PROGRESS_RELOCATE = "PROGRESS_RELOCATE"
     IMAGE_CLICK = "IMAGE_CLICK"
+    INPUT_TEXT = "INPUT_TEXT"
+    CLICK_IMAGE = "CLICK_IMAGE"
+    CLICK_TEXT = "CLICK_TEXT"
     # 合并自灵动脚本的额外指令
     SWIPE = "SWIPE"
     SCROLL = "SCROLL"
@@ -82,6 +85,9 @@ _SIMPLE_NODE_TYPES: dict[str, NodeType] = {
     "PROGRESS_INIT": NodeType.PROGRESS_INIT,
     "PROGRESS_RELOCATE": NodeType.PROGRESS_RELOCATE,
     "IMAGE_CLICK": NodeType.IMAGE_CLICK,
+    "INPUT_TEXT": NodeType.INPUT_TEXT,
+    "CLICK_IMAGE": NodeType.CLICK_IMAGE,
+    "CLICK_TEXT": NodeType.CLICK_TEXT,
     "SWIPE": NodeType.SWIPE,
     "SCROLL": NodeType.SCROLL,
     "DELAY": NodeType.DELAY,
@@ -159,7 +165,7 @@ class DSLParser:
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
                 "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION",
-                "FINDCANVAS", "DRAG", "VLM_ANALYZE"}
+                "FINDCANVAS", "DRAG", "VLM_ANALYZE", "INPUT_TEXT", "CLICK_IMAGE", "CLICK_TEXT"}
     _registry_loaded = False
 
     @classmethod

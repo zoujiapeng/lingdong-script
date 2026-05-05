@@ -372,6 +372,7 @@ export interface UIState {
   show_property_panel: boolean;
   show_log_panel: boolean;
   show_tool_call_panel: boolean;
+  show_ai_dialog: boolean;
 }
 
 // --- Node Library Definition ---

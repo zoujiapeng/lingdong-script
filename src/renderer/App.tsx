@@ -14,10 +14,9 @@ import './styles/globals.css';
 
 export default function App() {
   const { ui, setUI, setViewMode } = useStore();
-  const { viewMode, dark_mode } = ui;
+  const { viewMode, dark_mode, show_ai_dialog: showAIDialog } = ui;
   const [proximity, setProximity] = useState({ top: false, bottom: false, left: false, right: false });
   const hoveredRef = useRef({ top: false, bottom: false, left: false, right: false });
-  const [showAIDialog, setShowAIDialog] = useState(false);
 
   // Mouse proximity tracking — shows panels when mouse nears viewport edges
   // Once shown, panels stay visible until manually hidden via status bar ("收起所有面板")
@@ -148,7 +147,7 @@ export default function App() {
         </button>
         <button
           className={`view-tab ${showAIDialog ? 'active' : ''}`}
-          onClick={() => setShowAIDialog(prev => !prev)}
+          onClick={() => setUI({ show_ai_dialog: !showAIDialog })}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
             <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
@@ -178,10 +177,6 @@ export default function App() {
           <div className="canvas-area">
             <PseudoPanel />
           </div>
-        ) : viewMode === 'dsl' ? (
-          <div className="canvas-area">
-            <DSLPanel />
-          </div>
         ) : (
           <>
             <div onMouseEnter={() => handlePanelEnter('left')} onMouseLeave={() => handlePanelLeave('left')}>
@@ -194,9 +189,9 @@ export default function App() {
               <PropertyPanel forcedVisible={ui.show_property_panel} />
             </div>
             {showAIDialog && (
-              <div className="ai-dialog-backdrop" onClick={() => setShowAIDialog(false)}>
+              <div className="ai-dialog-backdrop" onClick={() => setUI({ show_ai_dialog: false })}>
                 <div className="ai-dialog" onClick={e => e.stopPropagation()}>
-                  <AIAssistantDialog onClose={() => setShowAIDialog(false)} />
+                  <AIAssistantDialog onClose={() => setUI({ show_ai_dialog: false })} />
                 </div>
               </div>
             )}

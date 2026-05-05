@@ -54,7 +54,7 @@ function readStdin(): Promise<string> {
     const stdin = process.stdin;
     stdin.setEncoding('utf-8');
     stdin.on('data', (chunk: string | Buffer) => chunks.push(Buffer.from(chunk)));
-    stdin.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     if (stdin.isTTY) resolve('');
   });
 }

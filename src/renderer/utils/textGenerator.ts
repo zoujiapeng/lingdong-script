@@ -388,6 +388,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
     case 'image_click':
       emit(state, gens.genImageClick(p));
       forward(nodeId, 'output', state, gens, convergence);
+      forward(nodeId, 'fail', state, gens, convergence);
       break;
 
     case 'screenshot':
@@ -408,6 +409,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
     case 'click_text':
       emit(state, gens.genClickText(p));
       forward(nodeId, 'output', state, gens, convergence);
+      forward(nodeId, 'fail', state, gens, convergence);
       break;
 
     case 'popup_close':
@@ -418,6 +420,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
     case 'color_check':
       emit(state, gens.genColorCheck(p));
       forward(nodeId, 'output', state, gens, convergence);
+      forward(nodeId, 'fail', state, gens, convergence);
       break;
 
     case 'progress_wait':
@@ -430,10 +433,29 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       forward(nodeId, 'output', state, gens, convergence);
       break;
 
-    case 'scene_condition':
-      emit(state, gens.genSceneCondition(p));
-      forward(nodeId, 'yes', state, gens, convergence);
+    case 'scene_condition': {
+      const sYesEdge = getEdge(state.outgoing, nodeId, 'yes');
+      const sNoEdge = getEdge(state.outgoing, nodeId, 'no');
+      if (sYesEdge && sNoEdge) {
+        emit(state, `${gens.ifKeyword} ${gens.genSceneCondition(p)}:`);
+        state.indent++;
+        generateLinear(sYesEdge.to_node, state, gens, undefined);
+        state.indent--;
+        emit(state, `${gens.elseKeyword}:`);
+        state.indent++;
+        generateLinear(sNoEdge.to_node, state, gens, undefined);
+        state.indent--;
+      } else if (sYesEdge) {
+        emit(state, `${gens.ifKeyword} ${gens.genSceneCondition(p)}:`);
+        state.indent++;
+        generateLinear(sYesEdge.to_node, state, gens, undefined);
+        state.indent--;
+      } else {
+        emit(state, gens.genSceneCondition(p));
+        forward(nodeId, 'yes', state, gens, convergence);
+      }
       break;
+    }
 
     case 'sub_script':
       emit(state, gens.genSubScript(p));
@@ -469,10 +491,8 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
         state.indent++;
         generateLinear(yesEdge.to_node, state, gens, undefined);
         state.indent--;
-        forward(nodeId, 'output', state, gens, convergence);
       } else {
         emit(state, `# ${gens.ifKeyword} ${cond}: (no branch)`);
-        forward(nodeId, 'output', state, gens, convergence);
       }
       break;
     }
@@ -516,9 +536,8 @@ function generateLinear(startId: string, state: GenState, gens: GenFunctions, co
     if (node.type === 'loop' && state.visited.has(current)) break;
     generateNode(current, state, gens, convergence);
     if (node.type === 'condition') {
-      const edge = getEdge(state.outgoing, current, 'output');
-      if (edge && !state.visited.has(edge.to_node)) current = edge.to_node;
-      else break;
+      // Condition handler in generateNode manages own continuation (branches + convergence)
+      break;
     } else {
       const next = getNextNodeId(current, state);
       if (!next || state.visited.has(next)) break;

@@ -52,10 +52,13 @@ export async function serveCommand(port: number): Promise<void> {
         });
 
         const enginePath = findEngine();
-        const proc = cp.spawn('python', [enginePath], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const proc = cp.spawn('python', [enginePath], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+        });
 
         proc.stdout!.on('data', (data: Buffer) => {
-          for (const line of data.toString().split('\n').filter(Boolean)) {
+          for (const line of data.toString('utf8').split('\n').filter(Boolean)) {
             try {
               res.write(JSON.stringify(JSON.parse(line)) + '\n');
             } catch {
@@ -65,7 +68,7 @@ export async function serveCommand(port: number): Promise<void> {
         });
 
         proc.stderr!.on('data', (data: Buffer) => {
-          res.write(JSON.stringify({ type: 'log', level: 'error', message: data.toString().trim() }) + '\n');
+          res.write(JSON.stringify({ type: 'log', level: 'error', message: data.toString('utf8').trim() }) + '\n');
         });
 
         proc.on('close', (code) => {
@@ -132,7 +135,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
 }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
+﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
@@ -24,10 +24,32 @@ function spawnPython(args: string[], options?: SpawnOptions) {
   });
 }
 
+/** 安全累积子进程 stdout/stderr，避免 chunk 边界截断 UTF-8 多字节字符 */
+function runPythonCollect(args: string[], options?: SpawnOptions, input?: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const proc = spawnPython(args, options);
+    const outBufs: Buffer[] = [];
+    const errBufs: Buffer[] = [];
+    proc.stdout!.on('data', (c: Buffer) => outBufs.push(c));
+    proc.stderr!.on('data', (c: Buffer) => errBufs.push(c));
+    proc.on('close', () => resolve({
+      stdout: Buffer.concat(outBufs).toString('utf8'),
+      stderr: Buffer.concat(errBufs).toString('utf8'),
+    }));
+    proc.on('error', (e) => resolve({ stdout: '', stderr: e.message }));
+    if (input !== undefined) {
+      proc.stdin!.write(input);
+      proc.stdin!.end();
+    }
+  });
+}
+
 function createWindow() {
+  const startNormal = process.argv.includes('--normal');
+
   mainWindow = new BrowserWindow({
-    width: 1100,
-    height: 700,
+    width: 900,
+    height: 580,
     minWidth: 800,
     minHeight: 500,
     center: true,
@@ -49,12 +71,26 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    if (!startNormal) {
+      mainWindow?.minimize();
+    }
     _rendererReady = true;
   });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  /** 开发模式下 Vite 断开时自动重载，防止白屏 */
+  if (isDev) {
+    mainWindow.webContents.on('did-fail-load', () => {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.webContents.isLoading()) {
+          mainWindow.webContents.reload();
+        }
+      }, 1000);
+    });
+  }
 }
 
 function buildAppMenu() {
@@ -117,7 +153,31 @@ function buildAppMenu() {
             type: 'info',
             title: '关于灵动脚本',
             message: '灵动脚本 v1.0.0',
-            detail: '高级可视化自动化脚本编辑器\n\n可视化编排桌面自动化流程\n支持图片识别、条件分支、循环、变量等功能',
+            detail: [
+              '高级可视化桌面自动化脚本编辑器',
+              '',
+              '开发者：邹嘉鹏',
+              '技术栈：Electron + React + Python',
+              '',
+              '功能特性：',
+              '• 可视化流程图编排自动化流程',
+              '• 127+ 节点类型（点击、输入、OCR、条件、循环等）',
+              '• DSL 脚本语言，可文本编辑和 AI 生成',
+              '• 宏录制（F6 热键），一键转流程图',
+              '• 图片识别、颜色检测、进度条监控',
+              '• @feature 工具注册表（120+ 工具）',
+              '• MCP 协议支持（Python + TypeScript 双服务器）',
+              '• CLI 命令行工具（run/ask/create/serve）',
+              '• HTTP API 桥接（127.0.0.1:5577）',
+              '• 区域选择 / 滚轮选择器 / OCR 识别',
+              '',
+              '目录结构：',
+              '  src/main/     Electron 主进程',
+              '  src/renderer/ React 前端',
+              '  python/       自动化引擎 + 工具',
+              '  cli/          CLI 命令行',
+              '  tests/        Python 测试',
+            ].join('\n'),
           });
         }},
       ],
@@ -146,7 +206,7 @@ function startApiServer() {
 
     const url = new URL(req.url || '/', `http://localhost:${API_PORT}`);
     const send = (code: number, data: any) => {
-      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
     };
 
@@ -155,9 +215,10 @@ function startApiServer() {
       return;
     }
 
-    let body = '';
-    req.on('data', (chunk) => body += chunk);
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
       let payload: any = {};
       try { payload = JSON.parse(body); } catch {}
 
@@ -175,11 +236,13 @@ function startApiServer() {
 
         case '/api/add-node':
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.type) { send(400, { error: '缺少 type' }); return; }
+          const nodeId = 'n_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
           mainWindow.webContents.send('api-command', {
             action: 'addNode',
-            payload: { type: payload.type, x: payload.x, y: payload.y, params: payload.params },
+            payload: { type: payload.type, x: payload.x, y: payload.y, params: payload.params, id: nodeId },
           });
-          send(200, { ok: true });
+          send(200, { ok: true, id: nodeId });
           break;
 
         case '/api/update-node':
@@ -202,6 +265,7 @@ function startApiServer() {
 
         case '/api/add-edge':
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.from_node || !payload.to_node) { send(400, { error: '缺少 from_node 或 to_node' }); return; }
           mainWindow.webContents.send('api-command', {
             action: 'addEdge',
             payload: { from_node: payload.from_node, from_port: payload.from_port || 'output', to_node: payload.to_node, to_port: payload.to_port || 'input', label: payload.label },
@@ -216,11 +280,12 @@ function startApiServer() {
             cwd: path.join(__dirname, '../..'),
             stdio: ['pipe', 'pipe', 'pipe'],
           });
-          let dslStdout = '';
-          let dslStderr = '';
-          dslProc.stdout!.on('data', (chunk: Buffer) => dslStdout += chunk.toString());
-          dslProc.stderr!.on('data', (chunk: Buffer) => dslStderr += chunk.toString());
+          const _dslOut: Buffer[] = [];
+          const _dslErr: Buffer[] = [];
+          dslProc.stdout!.on('data', (chunk: Buffer) => _dslOut.push(chunk));
+          dslProc.stderr!.on('data', (chunk: Buffer) => _dslErr.push(chunk));
           dslProc.on('close', (code: number) => {
+            const dslStdout = Buffer.concat(_dslOut).toString('utf8');
             if (dslStdout.trim()) {
               try {
                 const flow = JSON.parse(dslStdout);
@@ -230,16 +295,178 @@ function startApiServer() {
                 send(500, { error: 'DSL 转换失败', raw: dslStdout });
               }
             } else {
+              const dslStderr = Buffer.concat(_dslErr).toString('utf8');
               send(500, { error: dslStderr.trim() || 'DSL 转换失败' });
             }
           });
-          dslProc.on('error', (err: Error) => send(500, { error: err.message }));
-          dslProc.stdin!.write(payload.dsl + '\n');
+          if (payload.dsl) {
+            dslProc.stdin!.write(payload.dsl);
+          }
           dslProc.stdin!.end();
-          break;
         }
 
-        case '/api/auto-layout':
+
+        break;
+
+        case '/api/generate-dsl':
+          if (!payload.description) { send(400, { error: '缺少 description' }); return; }
+          (async () => {
+            try {
+              const apiKey = payload.apiKey || process.env.DEEPSEEK_KEY || '';
+              if (!apiKey) { send(400, { error: '需要 apiKey' }); return; }
+              const result = await callLLM({
+                apiKey,
+                messages: [
+                  { role: 'system', content: 'You are a DSL generator for desktop automation. Generate ONLY raw DSL code, no markdown, no explanations.\n\nKeywords:\nCLICK x y [single|double|right|middle]\nINPUT_TEXT x y "text"\nKEYBOARD key1 [key2 ...]\nWAIT seconds\nSCREENSHOT\nLOOP count|INFINITE ... END\nIF condition ... ELSE ... END\nCLICK_IMAGE "path" [similarity]\nCLICK_TEXT "text" [similarity]\nSWIPE x1 y1 x2 y2 [duration]\nPOPUP_CLOSE [strategy]\nCOLOR_CHECK x y w h color [tolerance]\nPROGRESS_WAIT fill|empty|change x y w h [timeout]\nREGION_WAIT stable|change x y w h [timeout]\n\nGenerate appropriate coordinates, paths and parameters. Include WAIT steps between actions.' },
+                  { role: 'user', content: payload.description },
+                ],
+                max_tokens: 4096,
+              });
+              if (result.error) { send(500, { error: result.error }); return; }
+              let dsl = (result.choices?.[0]?.message?.content || '').trim();
+              dsl = dsl.replace(/^`{3}[a-z]*\n?/i, '').replace(/\n?`{3}$/i, '');
+              send(200, { ok: true, dsl });
+            } catch (e: any) { send(500, { error: e.message }); }
+          })();
+          break;
+
+        case '/api/create-flow':
+          if (!payload.description && !payload.dsl) { send(400, { error: '缺少 description 或 dsl' }); return; }
+          (async () => {
+            try {
+              let dsl = payload.dsl;
+              if (!dsl) {
+                const apiKey = payload.apiKey || process.env.DEEPSEEK_KEY || '';
+                if (!apiKey) { send(400, { error: '需要 apiKey' }); return; }
+                const result = await callLLM({
+                  apiKey,
+                  messages: [
+                    { role: 'system', content: 'You are a DSL generator for desktop automation. Generate ONLY raw DSL code, no markdown, no explanations.\n\nKeywords:\nCLICK x y [single|double|right|middle]\nINPUT_TEXT x y "text"\nKEYBOARD key1 [key2 ...]\nWAIT seconds\nSCREENSHOT\nLOOP count|INFINITE ... END\nIF condition ... ELSE ... END\nCLICK_IMAGE "path" [similarity]\nCLICK_TEXT "text" [similarity]\nSWIPE x1 y1 x2 y2 [duration]\nPOPUP_CLOSE [strategy]\nCOLOR_CHECK x y w h color [tolerance]\nPROGRESS_WAIT fill|empty|change x y w h [timeout]\nREGION_WAIT stable|change x y w h [timeout]\n\nGenerate appropriate coordinates, paths and parameters. Include WAIT steps between actions.' },
+                    { role: 'user', content: payload.description },
+                  ],
+                  max_tokens: 4096,
+                });
+                if (result.error) { send(500, { error: result.error }); return; }
+                dsl = (result.choices?.[0]?.message?.content || '').trim();
+                dsl = dsl.replace(/^`{3}[a-z]*\n?/i, '').replace(/\n?`{3}$/i, '');
+              }
+              if (!dsl) { send(500, { error: 'DSL 生成为空' }); return; }
+              const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+              const proc = spawnPython([scriptPath], {
+                cwd: path.join(__dirname, '../..'),
+                stdio: ['pipe', 'pipe', 'pipe'],
+              });
+              const _out: Buffer[] = [];
+              const _err: Buffer[] = [];
+              proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+              proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+              proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
+                try {
+                  if (!stdout.trim()) { send(500, { error: stderr.trim() || 'DSL 转换失败' }); return; }
+                  const flow = JSON.parse(stdout);
+                  if (mainWindow) {
+                    mainWindow.webContents.send('api-command', { action: 'loadScript', payload: flow });
+                  }
+                  const pending_params = findIncompleteParams(flow.nodes || []);
+                  send(200, { ok: true, flow, dsl, pending_params });
+                } catch (e: any) { send(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
+              });
+              proc.on('error', (err: Error) => send(500, { error: err.message }));
+              proc.stdin!.write(dsl + '\n');
+              proc.stdin!.end();
+            } catch (e: any) { send(500, { error: e.message }); }
+          })();
+          break;
+
+        case '/api/check-params':
+          if (!payload.nodes) { send(400, { error: '缺少 nodes' }); return; }
+          const pending = findIncompleteParams(payload.nodes);
+          send(200, { ok: true, pending_params: pending, count: pending.length });
+          break;
+
+        case '/api/resolve-param':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.node_id || !payload.param) { send(400, { error: '缺少 node_id 或 param' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'updateNodeParams',
+            payload: { id: payload.node_id, params: { [payload.param]: payload.value } },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/interactive-fill':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.node_id || !payload.param) { send(400, { error: '缺少 node_id 或 param' }); return; }
+          (async () => {
+            try {
+              const tool = payload.tool || 'region_picker';
+              const imgDir = path.join(__dirname, '../../assets/screenshots');
+              switch (tool) {
+                case 'region_picker': {
+                  const result = await mainWindow!.webContents.executeJavaScript('window.electronAPI.selectRegion()', true);
+                  if (result.error) { send(400, { error: result.error }); return; }
+                  const { x, y, w, h } = result;
+                  mainWindow!.webContents.send('api-command', {
+                    action: 'updateNodeParams',
+                    payload: { id: payload.node_id, params: { [payload.param]: { x, y, w, h } } },
+                  });
+                  send(200, { ok: true, value: { x, y, w, h } });
+                  return;
+                }
+                case 'screenshot': {
+                  const result2 = await mainWindow!.webContents.executeJavaScript('window.electronAPI.captureScreenshot()', true);
+                  if (result2.error) { send(400, { error: result2.error }); return; }
+                  if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+                  const fileName = `img_${payload.node_id}_${Date.now()}.png`;
+                  const filePath = path.join(imgDir, fileName);
+                  const base64 = result2.dataURL.replace(/^data:image\/png;base64,/, '');
+                  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+                  const relativePath = `assets/screenshots/${fileName}`;
+                  mainWindow!.webContents.send('api-command', {
+                    action: 'updateNodeParams',
+                    payload: { id: payload.node_id, params: { [payload.param]: [{ path: relativePath }] } },
+                  });
+                  send(200, { ok: true, value: [{ path: relativePath }] });
+                  return;
+                }
+                case 'wheel_select': {
+                  const options = payload.options || ['是', '否'];
+                  const wResult = await mainWindow!.webContents.executeJavaScript(
+                    `window.electronAPI.wheelSelect({options: ${JSON.stringify(options)}, title: ${JSON.stringify(payload.hint || '请选择')}})`, true);
+                  if (wResult.error) { send(400, { error: wResult.error }); return; }
+                  const wValue = wResult.value || wResult.selected || options[0];
+                  mainWindow!.webContents.send('api-command', {
+                    action: 'updateNodeParams',
+                    payload: { id: payload.node_id, params: { [payload.param]: wValue } },
+                  });
+                  send(200, { ok: true, value: wValue });
+                  return;
+                }
+                case 'text_input':
+                  send(200, { ok: true, message: '请通过 /api/resolve-param 提供 value 参数', needs_value: true });
+                  return;
+                case 'coordinate_picker': {
+                  const coordResult = await mainWindow!.webContents.executeJavaScript('window.electronAPI.selectRegion()', true);
+                  if (coordResult.error) { send(400, { error: coordResult.error }); return; }
+                  const cx = Math.round(coordResult.x + coordResult.w / 2);
+                  const cy = Math.round(coordResult.y + coordResult.h / 2);
+                  mainWindow!.webContents.send('api-command', {
+                    action: 'updateNodeParams',
+                    payload: { id: payload.node_id, params: { x: cx, y: cy } },
+                  });
+                  send(200, { ok: true, value: { x: cx, y: cy } });
+                  return;
+                }
+                default:
+                  send(400, { error: '未知交互工具: ' + tool });
+              }
+            } catch (e: any) { send(500, { error: e.message }); }
+          })();
+          break;
+
+case '/api/auto-layout':
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
           mainWindow.webContents.send('api-command', { action: 'autoLayout' });
           send(200, { ok: true });
@@ -286,24 +513,28 @@ function startApiServer() {
 
         case '/api/get-state':
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          // 利用 pushState 缓存的实时状态（每次 mutation 后自动推送）
           if (_cachedRendererState !== null) {
             send(200, _cachedRendererState);
-          } else {
-            // 尚未收到渲染器状态推送，请求一次并等待（最多 5s）
+            // 后台异步刷新缓存，确保下次请求最新
             if (_rendererReady) {
               mainWindow.webContents.send('api-command', { action: 'getState' });
             }
-            (async () => {
-              for (let i = 0; i < 5; i++) {
-                await new Promise(r => setTimeout(r, 1000));
-                if (_cachedRendererState !== null) {
-                  send(200, _cachedRendererState);
-                  return;
-                }
-              }
-              send(503, { error: '渲染器未就绪' });
-            })();
+            return;
           }
+          if (_rendererReady) {
+            mainWindow.webContents.send('api-command', { action: 'getState' });
+          }
+          (async () => {
+            for (let i = 0; i < 5; i++) {
+              await new Promise(r => setTimeout(r, 1000));
+              if (_cachedRendererState !== null) {
+                send(200, _cachedRendererState);
+                return;
+              }
+            }
+            send(503, { error: '渲染器未就绪' });
+          })();
           break;
 
         case '/api/run-flow':
@@ -328,6 +559,16 @@ function startApiServer() {
             process_alive: pythonProcess !== null && !pythonProcess.killed,
             has_script: _lastScript !== null,
           });
+          break;
+
+        case '/api/engine/pause':
+          sendToEngine({ type: 'pause' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/engine/resume':
+          sendToEngine({ type: 'resume' });
+          send(200, { ok: true });
           break;
 
         // --- Macro Recording HTTP API ---
@@ -397,11 +638,13 @@ sys.stdout.flush()
               cwd: path.join(__dirname, '../..'),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
-            let stdout = '';
-            let stderr = '';
-            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            const _out: Buffer[] = [];
+            const _err: Buffer[] = [];
+            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
             proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
               if (stdout.trim()) { try { resolve(JSON.parse(stdout)); } catch { resolve({ success: false, error: '解析失败' }); } }
               else { resolve({ success: false, error: stderr.trim() || '播放失败' }); }
             });
@@ -439,11 +682,13 @@ sys.stdout.flush()
               cwd: path.join(__dirname, '../..'),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
-            let stdout = '';
-            let stderr = '';
-            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            const _out: Buffer[] = [];
+            const _err: Buffer[] = [];
+            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
             proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
               if (stdout.trim()) {
                 try { resolve(JSON.parse(stdout)); }
                 catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
@@ -475,11 +720,13 @@ sys.stdout.flush()
               cwd: path.join(__dirname, '../..'),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
-            let stdout = '';
-            let stderr = '';
-            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            const _out: Buffer[] = [];
+            const _err: Buffer[] = [];
+            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
             proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
               if (stdout.trim()) {
                 try { resolve(JSON.parse(stdout)); }
                 catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
@@ -491,6 +738,207 @@ sys.stdout.flush()
             proc.stdin!.write(JSON.stringify({ name: payload.name, params: payload.params || {} }) + '\n');
             proc.stdin!.end();
           }).then(r => send(200, r));
+          break;
+
+        case '/api/ai/generate':
+          if (!payload.apiKey || !payload.messages) { send(400, { error: '缺少 apiKey 或 messages' }); return; }
+          callLLM({
+            apiKey: payload.apiKey,
+            messages: payload.messages,
+            apiBase: payload.apiBase,
+            model: payload.model,
+            response_format: payload.response_format as 'json' | 'text' | undefined,
+            max_tokens: payload.max_tokens,
+          }).then(r => send(200, r));
+          break;
+
+        case '/api/screenshot/capture':
+          _captureScreenshot().then(r => send(200, r));
+          break;
+
+        case '/api/screenshot/select-region':
+          _selectRegion().then(r => send(200, r));
+          break;
+
+        case '/api/ocr/region':
+          if (typeof payload.x !== 'number' || typeof payload.y !== 'number' || typeof payload.w !== 'number' || typeof payload.h !== 'number') {
+            send(400, { error: '缺少 region 参数 (x,y,w,h)' }); return;
+          }
+          _ocrRegion({ x: payload.x, y: payload.y, w: payload.w, h: payload.h }).then(r => send(200, r));
+          break;
+
+        case '/api/wheel-select':
+          if (!payload.options || !Array.isArray(payload.options)) { send(400, { error: '缺少 options 数组' }); return; }
+          _wheelSelect({
+            options: payload.options,
+            values: payload.values,
+            title: payload.title,
+            message: payload.message,
+            default: payload.default,
+          }).then(r => send(200, r));
+          break;
+
+        case '/api/macro/delete':
+          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
+          {
+            const macrosDir = path.join(__dirname, '../../python/macros');
+            const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
+            try {
+              fs.unlinkSync(filePath);
+              send(200, { ok: true });
+            } catch {
+              send(404, { error: '文件不存在' });
+            }
+          }
+          break;
+
+        case '/api/macro/get-events':
+          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
+          {
+            const macrosDir = path.join(__dirname, '../../python/macros');
+            const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
+            try {
+              const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              send(200, { ok: true, result: content });
+            } catch {
+              send(404, { error: '读取失败' });
+            }
+          }
+          break;
+
+        case '/api/macro/recording-status':
+          send(200, {
+            recording: _macroRecording,
+            process_alive: macroRecorderProcess !== null && !macroRecorderProcess.killed,
+          });
+          break;
+
+        case '/api/save-script':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'saveScript' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/set-script-name':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'setScriptName', payload: { name: payload.name } });
+          send(200, { ok: true });
+          break;
+
+        case '/api/save-template':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
+          // Save to filesystem (consistent with list-templates) with proper UTF-8 encoding
+          try {
+            const templatesDir = path.join(__dirname, '../../templates');
+            if (!fs.existsSync(templatesDir)) fs.mkdirSync(templatesDir, { recursive: true });
+            const safeName = payload.name.replace(/[\\/:*?"<>|]/g, '_');
+            const filePath = path.join(templatesDir, safeName + '.flow');
+            const scriptState = _cachedRendererState?.script || null;
+            const flowContent = JSON.stringify({
+              name: payload.name,
+              description: payload.description || '',
+              script: scriptState,
+              created_at: new Date().toISOString(),
+            }, null, 2);
+            fs.writeFileSync(filePath, flowContent, 'utf-8');
+          } catch (e: any) {
+            console.error('[API] save-template write error:', e.message);
+          }
+          // Also notify renderer for localStorage consistency
+          mainWindow.webContents.send('api-command', { action: 'saveTemplate', payload: { name: payload.name, description: payload.description } });
+          send(200, { ok: true });
+          break;
+
+        case '/api/list-templates':
+          {
+            const templatesDir = path.join(__dirname, '../../templates');
+            fs.readdir(templatesDir, (err, files) => {
+              if (err) { send(500, { error: '读取模板目录失败' }); return; }
+              const templates = files.filter(f => f.endsWith('.flow')).map(f => {
+                const filePath = path.join(templatesDir, f);
+                let displayName = f.replace(/\.flow$/, '');
+                try {
+                  const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                  if (content.name) displayName = content.name;
+                } catch {}
+                return { name: displayName, path: filePath };
+              });
+              send(200, { ok: true, templates });
+            });
+          }
+          break;
+
+        case '/api/set-ui':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!payload.updates) { send(400, { error: '缺少 updates' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'setUI', payload: payload.updates });
+          send(200, { ok: true });
+          break;
+
+        case '/api/command':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!Array.isArray(payload.commands)) { send(400, { error: '缺少 commands 数组' }); return; }
+          (async () => {
+            for (const cmd of payload.commands) {
+              if (cmd.delay) await new Promise(r => setTimeout(r, cmd.delay));
+              mainWindow!.webContents.send('api-command', {
+                action: cmd.action,
+                payload: cmd.payload || {},
+              });
+            }
+            send(200, { ok: true });
+          })();
+          break;
+
+        case '/api/undo':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'undo' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/redo':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'redo' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/copy-selected':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'copySelected' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/cut-selected':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'cutSelected' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/paste':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'paste' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/select-all':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'selectAll' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/clear-selection':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'clearSelection' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/duplicate-nodes':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (!Array.isArray(payload.ids)) { send(400, { error: '缺少 ids 数组' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'duplicateNodes', payload: { ids: payload.ids } });
+          send(200, { ok: true });
           break;
 
         default:
@@ -557,7 +1005,7 @@ function startPythonEngine(scriptJson: string) {
   const scriptPayload = JSON.stringify({ type: 'execute', payload: { script: JSON.parse(scriptJson) } });
 
   proc.stdout!.on('data', (data: Buffer) => {
-    const lines = data.toString().split('\n').filter(Boolean);
+    const lines = data.toString('utf8').split('\n').filter(Boolean);
     for (const line of lines) {
       try {
         const msg = JSON.parse(line);
@@ -572,7 +1020,7 @@ function startPythonEngine(scriptJson: string) {
   });
 
   proc.stderr!.on('data', (data: Buffer) => {
-    mainWindow?.webContents.send('engine-log', { level: 'error', message: data.toString() });
+    mainWindow?.webContents.send('engine-log', { level: 'error', message: data.toString('utf8') });
   });
 
   proc.on('exit', () => { _engineRunning = false; });
@@ -606,6 +1054,109 @@ function sendToEngine(message: any) {
 // --- IPC Handlers ---
 
 // 渲染器推送状态更新（替代 executeJavaScript）
+
+/** Call LLM API (DeepSeek-compatible) */
+async function callLLM(opts: {
+  apiKey: string;
+  messages: { role: string; content: string }[];
+  apiBase?: string;
+  model?: string;
+  response_format?: 'json' | 'text';
+  max_tokens?: number;
+}): Promise<any> {
+  return new Promise((resolve) => {
+    const apiBase = (opts.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+    const model = opts.model || process.env.LLM_MODEL || 'deepseek-chat';
+    const body: any = {
+      model,
+      messages: opts.messages,
+      temperature: 0.1,
+      max_tokens: opts.max_tokens || 2048,
+    };
+    if (opts.response_format === 'json') {
+      body.response_format = { type: 'json_object' };
+    }
+    const postData = JSON.stringify(body);
+    const urlObj = new URL(apiBase + '/chat/completions');
+    const httpMod = urlObj.protocol === 'https:' ? require('https') : require('http');
+    const req = httpMod.request(urlObj, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + opts.apiKey,
+      },
+    }, (res: any) => {
+      const _httpBuf: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => _httpBuf.push(chunk));
+      res.on('end', () => {
+        const data = Buffer.concat(_httpBuf).toString('utf8');
+        try { resolve(JSON.parse(data)); }
+        catch { resolve({ error: 'JSON parse error', raw: data.slice(0, 500) }); }
+      });
+    });
+    req.on('error', (err: Error) => resolve({ error: err.message }));
+    req.write(postData);
+    req.end();
+  });
+}
+
+interface IncompleteParam {
+  node_id: string;
+  node_type: string;
+  node_label: string;
+  param: string;
+  param_label: string;
+  hint: string;
+  tool: 'region_picker' | 'screenshot' | 'file_picker' | 'text_input' | 'coordinate_picker' | 'wheel_select' | 'none';
+}
+
+function findIncompleteParams(nodes: any[]): IncompleteParam[] {
+  const results: IncompleteParam[] = [];
+  for (const node of nodes) {
+    const p = node.params || {};
+    switch (node.type) {
+      case 'image_click':
+        if (!p.targets || p.targets.length === 0 || (typeof p.targets === 'string' && p.targets === '') || (Array.isArray(p.targets) && p.targets.every((t: any) => !t?.path)))
+          results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'targets', param_label: '目标图片', hint: '请截取屏幕区域来选择目标图片(会弹出全屏截图工具,拖拽选择包含目标图片的区域)', tool: 'screenshot' });
+        break;
+      case 'click_text':
+        if (!p.text) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'text', param_label: '识别文字', hint: '请输入屏幕上要识别的文字内容,程序会自动找到匹配的文字并点击(例如:确定、提交、下一步、关闭等)', tool: 'text_input' });
+        break;
+      case 'input_text':
+        if (!p.text) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'text', param_label: '输入文字', hint: '请输入要在输入框中填写的文本内容(例如用户名、密码、搜索关键词、文件路径等)', tool: 'text_input' });
+        break;
+      case 'click':
+        if ((!p.x || p.x === 0) && (!p.y || p.y === 0)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'x', param_label: '点击坐标', hint: '请输入点击的坐标值(x,y)或使用坐标拾取工具在屏幕上选择点击位置(会弹出选框,选择后自动取选框中心点)', tool: 'coordinate_picker' });
+        break;
+      case 'color_check':
+        if (!p.expected_color) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'expected_color', param_label: '检测颜色', hint: '请输入要检测的颜色值(支持格式:#FF0000、rgb(255,0,0)、或颜色名称如red,green,blue等)', tool: 'text_input' });
+        break;
+      case 'progress_wait':
+        if (!p.region || (!p.region.x && p.region.w === undefined)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'region', param_label: '进度条区域', hint: '请在屏幕上框选进度条所在的矩形区域(会弹出全屏选框工具,拖拽选择进度条范围,程序会监控该区域的颜色填充变化来检测进度完成)', tool: 'region_picker' });
+        break;
+      case 'region_wait':
+        if (!p.region || (!p.region.x && p.region.w === undefined)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'region', param_label: '监控区域', hint: '请在屏幕上框选要持续监控的矩形区域(会弹出全屏选框工具,拖拽选择监控范围,程序会检测该区域的画面变化或稳定性)', tool: 'region_picker' });
+        break;
+      case 'scene_condition':
+        if (!p.scene_name) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'scene_name', param_label: '场景名称', hint: '请输入要识别的场景名称,程序会通过OCR或图像匹配判断当前屏幕是否属于该场景(例如:登录界面、主界面、设置页面等)', tool: 'text_input' });
+        break;
+      case 'tool_call':
+        if (!p.feature_name) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'feature_name', param_label: '工具名称', hint: '请从滚轮列表中选择要调用的功能工具(转动滚轮找到目标选项,按下确认即可)', tool: 'wheel_select' });
+        break;
+      case 'popup_close':
+        if (!p.strategies || p.strategies.length === 0) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'strategies', param_label: '关闭策略', hint: '请从滚轮列表中选择弹窗关闭策略(例如:点击确定、点击取消、按Esc、点击关闭按钮、按回车等)', tool: 'wheel_select' });
+        break;
+      case 'wait':
+        if (p.wait_type === 'image' && (!p.template_path && !p.template_base64)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'template_path', param_label: '等待图片', hint: '请选择要等待在屏幕上出现的图片文件,程序会持续检测直到图片出现或超时。可以使用截图工具截取或文件选择器选取目标图片', tool: 'file_picker' });
+        break;
+      case 'condition':
+        if (p.condition_type === 'image_exists' && (!p.template_path && !p.template_base64)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'template_path', param_label: '条件图片', hint: '请选择用于判断条件的参考图片,程序会检测该图片是否出现在当前屏幕上。可以使用截图工具截取或文件选择器选取参考图片', tool: 'file_picker' });
+        break;
+    }
+  }
+  return results;
+}
+
 ipcMain.on('state:response', (_, state) => {
   _cachedRendererState = state;
   _rendererReady = true;
@@ -692,18 +1243,19 @@ ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: st
       },
       timeout: 30000,
     }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      const _http2Buf: Buffer[] = [];
+      res.on('data', (chunk) => { _http2Buf.push(chunk) });
       res.on('end', () => {
+        const d = Buffer.concat(_http2Buf).toString('utf8');
         try {
-          const parsed = JSON.parse(data);
+          const parsed = JSON.parse(d);
           if (res.statusCode && res.statusCode >= 400) {
-            resolve({ error: `API 错误 (${res.statusCode}): ${data}` });
+            resolve({ error: `API 错误 (${res.statusCode}): ${d}` });
           } else {
             resolve(parsed);
           }
         } catch {
-          resolve({ error: `响应解析失败: ${data.slice(0, 200)}` });
+          resolve({ error: `响应解析失败: ${d.slice(0, 200)}` });
         }
       });
     });
@@ -714,7 +1266,8 @@ ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: st
   });
 });
 
-ipcMain.handle('screenshot:capture', async () => {
+/** Capture full-screen screenshot with region selection overlay */
+async function _captureScreenshot(): Promise<any> {
   if (!mainWindow) return { error: 'no window' };
   mainWindow.minimize();
   await new Promise((r) => setTimeout(r, 500));
@@ -736,8 +1289,7 @@ ipcMain.handle('screenshot:capture', async () => {
     // Create selection overlay window (needs nodeIntegration for data URL page)
     const selWin = new BrowserWindow({
       width: sw, height: sh,
-      fullscreen: true, frame: false, alwaysOnTop: true,
-      resizable: false, show: false,
+      frame: false, resizable: false, show: false,
       webPreferences: { contextIsolation: false, nodeIntegration: true },
     });
 
@@ -821,9 +1373,11 @@ function confirm(){
     mainWindow.restore();
     return { error: e.message };
   }
-});
+}
 
-ipcMain.handle('screenshot:selectRegion', async () => {
+ipcMain.handle('screenshot:capture', async () => _captureScreenshot());
+
+async function _selectRegion(): Promise<any> {
   if (!mainWindow) return { error: 'no window' };
   mainWindow.minimize();
   await new Promise((r) => setTimeout(r, 500));
@@ -843,8 +1397,7 @@ ipcMain.handle('screenshot:selectRegion', async () => {
 
     const selWin = new BrowserWindow({
       width: sw, height: sh,
-      fullscreen: true, frame: false, alwaysOnTop: true,
-      resizable: false, show: false,
+      frame: false, resizable: false, show: false,
       webPreferences: { contextIsolation: false, nodeIntegration: true },
     });
 
@@ -921,21 +1474,25 @@ function confirm(){
     mainWindow.restore();
     return { error: e.message };
   }
-});
+}
+
+ipcMain.handle('screenshot:selectRegion', async () => _selectRegion());
 
 // --- Interaction Tools IPC ---
-ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }) => {
+async function _wheelSelect(params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }): Promise<any> {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, '../../python/interaction/wheel_selector.py');
     const proc = spawnPython([scriptPath, '--ipc'], {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', (code) => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ error: 'JSON parse error', raw: stdout }); }
@@ -947,9 +1504,11 @@ ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[];
     proc.stdin!.write(JSON.stringify(params) + '\n');
     proc.stdin!.end();
   });
-});
+}
 
-ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; w: number; h: number }) => {
+ipcMain.handle('interaction:wheelSelect', async (_, params) => _wheelSelect(params));
+
+async function _ocrRegion(region: { x: number; y: number; w: number; h: number }): Promise<any> {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, '../../tools/ocr_region.py');
     const proc = spawnPython([scriptPath], {
@@ -957,11 +1516,13 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; 
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve([]); }
@@ -974,7 +1535,9 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; 
     proc.stdin!.write(JSON.stringify(region) + '\n');
     proc.stdin!.end();
   });
-});
+}
+
+ipcMain.handle('ocr:recognizeRegion', async (_, region) => _ocrRegion(region));
 
 // --- DSL Conversion IPC ---
 ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
@@ -984,11 +1547,13 @@ ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', (code) => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
@@ -1033,11 +1598,13 @@ sys.stdout.flush()
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
@@ -1069,11 +1636,13 @@ sys.stdout.flush()
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
@@ -1111,7 +1680,7 @@ function _ensureMacroRecorder(): ChildProcess | null {
     _macroStdoutBuffer = '';
 
     macroRecorderProcess.stdout!.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
+      const text = chunk.toString('utf8');
       _macroStdoutBuffer += text;
       // Process complete lines
       const lines = _macroStdoutBuffer.split('\n');
@@ -1133,7 +1702,7 @@ function _ensureMacroRecorder(): ChildProcess | null {
     });
 
     macroRecorderProcess.stderr!.on('data', (chunk: Buffer) => {
-      mainWindow?.webContents.send('engine-log', { level: 'error', message: `[Macro] ${chunk.toString()}` });
+      mainWindow?.webContents.send('engine-log', { level: 'error', message: `[Macro] ${chunk.toString('utf8')}` });
     });
 
     macroRecorderProcess.on('exit', () => {
@@ -1231,11 +1800,13 @@ sys.stdout.flush()
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    const _out: Buffer[] = [];
+    const _err: Buffer[] = [];
+    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
+          const stdout = Buffer.concat(_out).toString('utf8');
+          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve({ success: false, error: '解析失败', raw: stdout }); }

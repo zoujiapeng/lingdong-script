@@ -44,6 +44,7 @@ const DEFAULT_UI_STATE: UIState = {
   show_property_panel: false,
   show_log_panel: false,
   show_tool_call_panel: false,
+  show_ai_dialog: false,
 };
 
 // --- Preset Templates ---
@@ -495,7 +496,7 @@ interface AppStore {
   saveAsTemplate: (name: string, description?: string) => void;
 
   // Actions - Nodes
-  addNode: (type: NodeType, x: number, y: number, params?: any) => string;
+  addNode: (type: NodeType, x: number, y: number, params?: any, providedId?: string) => string;
   updateNode: (id: string, updates: Partial<FlowNode>) => void;
   updateNodeParams: (id: string, params: any) => void;
   deleteNodes: (ids: string[]) => void;
@@ -695,9 +696,9 @@ export const useStore = create<AppStore>()(
       saveCustomTemplates(templates);
     },
 
-    addNode: (type, x, y, params) => {
+    addNode: (type, x, y, params, providedId?) => {
       const def = NODE_DEFINITIONS[type];
-      const id = nanoid();
+      const id = providedId || nanoid();
       const node: FlowNode = {
         id,
         type,
@@ -1375,36 +1376,48 @@ if (_api) {
   // API command bridge (from local HTTP server, controlled by Claude Code)
   _api.onApiCommand((action: string, payload: any) => {
     const store = useStore.getState();
+    // 推送状态到主进程（用于 get-state 缓存更新）
+    const pushState = () => {
+      const s = useStore.getState();
+      _api.pushState({
+        nodes: s.script.nodes,
+        edges: s.script.edges,
+        meta: s.script.meta,
+        selection: s.ui.selection,
+        viewMode: s.ui.viewMode,
+        ui: s.ui,
+      });
+    };
     switch (action) {
       case 'loadScript':
-        if (payload?.nodes) store.loadScript(payload);
+        if (payload?.nodes) { store.loadScript(payload); pushState(); }
         break;
       case 'addNode':
-        if (payload?.type) store.addNode(payload.type, payload.x || 0, payload.y || 0, payload.params);
+        if (payload?.type) { store.addNode(payload.type, payload.x || 0, payload.y || 0, payload.params, payload.id); pushState(); }
         break;
       case 'updateNode':
-        if (payload?.id && payload?.updates) store.updateNode(payload.id, payload.updates);
+        if (payload?.id && payload?.updates) { store.updateNode(payload.id, payload.updates); pushState(); }
         break;
       case 'deleteNodes':
-        if (payload?.ids) store.deleteNodes(payload.ids);
+        if (payload?.ids) { store.deleteNodes(payload.ids); pushState(); }
         break;
       case 'addEdge':
-        if (payload?.from_node && payload?.to_node) store.addEdge(payload);
+        if (payload?.from_node && payload?.to_node) { store.addEdge(payload); pushState(); }
         break;
       case 'autoLayout':
-        store.autoLayout();
+        store.autoLayout(); pushState();
         break;
       case 'updateNodeParams':
-        if (payload?.id && payload?.params) store.updateNodeParams(payload.id, payload.params);
+        if (payload?.id && payload?.params) { store.updateNodeParams(payload.id, payload.params); pushState(); }
         break;
       case 'deleteEdges':
-        if (payload?.ids) store.deleteEdges(payload.ids);
+        if (payload?.ids) { store.deleteEdges(payload.ids); pushState(); }
         break;
       case 'newScript':
-        store.newScript();
+        store.newScript(); pushState();
         break;
       case 'setViewMode':
-        if (payload?.mode) store.setViewMode(payload.mode);
+        if (payload?.mode) { store.setViewMode(payload.mode); pushState(); }
         break;
       case 'fitScreen':
         store.fitToScreen();
@@ -1416,7 +1429,44 @@ if (_api) {
           meta: store.script.meta,
           selection: store.ui.selection,
           viewMode: store.ui.viewMode,
+          ui: store.ui,
         });
+        break;
+      case 'undo':
+        store.undo();
+        break;
+      case 'redo':
+        store.redo();
+        break;
+      case 'saveScript':
+        store.saveScript();
+        break;
+      case 'setScriptName':
+        if (payload?.name) store.setScriptName(payload.name);
+        break;
+      case 'saveTemplate':
+        if (payload?.name) store.saveAsTemplate(payload.name, payload.description);
+        break;
+      case 'setUI':
+        if (payload) store.setUI(payload);
+        break;
+      case 'copySelected':
+        store.copySelected();
+        break;
+      case 'cutSelected':
+        store.cutSelected();
+        break;
+      case 'paste':
+        store.paste();
+        break;
+      case 'selectAll':
+        store.selectAll();
+        break;
+      case 'clearSelection':
+        store.clearSelection();
+        break;
+      case 'duplicateNodes':
+        if (payload?.ids) store.duplicateNodes(payload.ids);
         break;
       default:
         console.warn('[API] Unknown action:', action);

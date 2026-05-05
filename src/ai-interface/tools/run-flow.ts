@@ -34,26 +34,35 @@ function parsePseudoToFlow(pseudo: string): any {
 function executeScript(script: any): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     const enginePath = findEngine();
-    const proc = cp.spawn('python', [enginePath], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+    const proc = cp.spawn('python', [enginePath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+    const _outBufs: Buffer[] = [];
+    const _errBufs: Buffer[] = [];
+    let _stdoutStr = '';
     let flowDone = false;
 
     proc.stdout!.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      _outBufs.push(data);
+      _stdoutStr += data.toString('utf8');
       // 检测到 execution_done 后关闭 stdin，让引擎优雅退出
-      if (!flowDone && stdout.includes('"execution_done"')) {
+      if (!flowDone && _stdoutStr.includes('"execution_done"')) {
         flowDone = true;
         setTimeout(() => proc.stdin!.end(), 200);
       }
     });
 
     proc.stderr!.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      _errBufs.push(data);
     });
 
     proc.on('close', (code) => {
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
+      resolve({
+        stdout: Buffer.concat(_outBufs).toString('utf8'),
+        stderr: Buffer.concat(_errBufs).toString('utf8'),
+        exitCode: code ?? 1,
+      });
     });
 
     proc.on('error', (err) => {

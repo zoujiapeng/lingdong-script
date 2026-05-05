@@ -68,6 +68,11 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 | `POST /api/add-edge` | 添加连线 | `{ from_node, to_node, from_port?, to_port? }` |
 | `POST /api/delete-edges` | 删除连线 | `{ ids: string[] }` |
 | `POST /api/auto-layout` | 自动排列节点 | — |
+| `POST /api/generate-dsl` | 自然语言→DSL（调用LLM） | `{ description, apiKey? }` |
+| `POST /api/create-flow` | DSL/描述→流程图（含参数检查） | `{ description?, dsl?, apiKey? }` |
+| `POST /api/check-params` | 检查节点缺失参数 | `{ nodes[] }` |
+| `POST /api/resolve-param` | 设置节点参数值 | `{ node_id, param, value }` |
+| `POST /api/interactive-fill` | 人机交互补全参数（框选/截图等） | `{ node_id, param, tool, options?, hint? }` |
 | `POST /api/new-script` | 新建空白脚本 | — |
 | `POST /api/set-view-mode` | 切换视图 | `{ mode: 'canvas'\|'pseudocode'\|'settings' }` |
 | `POST /api/fit-screen` | 自适应缩放 | — |
@@ -76,6 +81,30 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 | `POST /api/macro/stop-recording` | 停止录制并保存 | — |
 | `POST /api/macro/list` | 列出已录制宏 | — |
 | `POST /api/macro/play` | 播放宏 | `{ name }` |
+| `POST /api/macro/delete` | 删除宏 | `{ name }` |
+| `POST /api/macro/get-events` | 读取宏原始事件 | `{ name }` |
+| `POST /api/macro/recording-status` | 录制器状态 | — |
+| `POST /api/engine/pause` | 暂停引擎 | — |
+| `POST /api/engine/resume` | 继续引擎 | — |
+| `POST /api/ai/generate` | 调用 LLM（DeepSeek） | `{ apiKey, messages[], apiBase?, model? }` |
+| `POST /api/screenshot/capture` | 全屏截图（交互框选） | — |
+| `POST /api/screenshot/select-region` | 框选屏幕区域 | — |
+| `POST /api/ocr/region` | OCR 识别区域文字 | `{ x, y, w, h }` |
+| `POST /api/wheel-select` | 滚轮选择器 | `{ options[], values?, title?, message? }` |
+| `POST /api/undo` | 撤销 | — |
+| `POST /api/redo` | 重做 | — |
+| `POST /api/save-script` | 保存脚本 | — |
+| `POST /api/set-script-name` | 重命名脚本 | `{ name }` |
+| `POST /api/save-template` | 保存为模板 | `{ name, description? }` |
+| `POST /api/list-templates` | 列出模板 | — |
+| `POST /api/set-ui` | 更新 UI 状态（含 show_ai_dialog） | `{ updates: { dark_mode?, show_grid?, show_ai_dialog?, ... } }` |
+| `POST /api/command` | 批量执行命令 | `{ commands: [{ action, payload?, delay? }] }` |
+| `POST /api/copy-selected` | 复制选中节点 | — |
+| `POST /api/cut-selected` | 剪切选中节点 | — |
+| `POST /api/paste` | 粘贴 | — |
+| `POST /api/select-all` | 全选节点 | — |
+| `POST /api/clear-selection` | 清空选择 | — |
+| `POST /api/duplicate-nodes` | 复制节点 | `{ ids: string[] }` |
 
 ## MCP 工具
 

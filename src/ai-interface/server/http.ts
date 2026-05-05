@@ -35,7 +35,7 @@ function parseBody(req: http.IncomingMessage): Promise<any> {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString();
+      const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw));
