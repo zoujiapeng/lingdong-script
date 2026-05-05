@@ -208,6 +208,7 @@ React 18 · TypeScript · Zustand · React Flow · Vite 5 · Electron 31 · Pyth
 
 <div align="center">
   <p>Made with ❤️ by 邹嘉鹏</p>
+  <p>邮箱：<a href="mailto:1724856284@qq.com">1724856284@qq.com</a> · 欢迎交流</p>
   <p>
     <a href="https://github.com/zoujiapeng/lingdong-script/issues">报告问题</a>
     ·
