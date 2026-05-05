@@ -14,7 +14,7 @@ let _engineRunning = false;
 let _cachedRendererState: any = null;
 let _rendererReady = false;
 
-const isDev = !app.isPackaged;
+const isDev = !app.isPackaged && !process.argv.includes('--prod');
 
 /** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
 function spawnPython(args: string[], options?: SpawnOptions) {
@@ -22,6 +22,11 @@ function spawnPython(args: string[], options?: SpawnOptions) {
     ...options,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   });
+}
+
+/** 生产环境下 Python 子进程的基目录（对应 extraResources 输出的位置） */
+function getBaseDir(): string {
+  return isDev ? path.join(__dirname, '../..') : process.resourcesPath;
 }
 
 /** 安全累积子进程 stdout/stderr，避免 chunk 边界截断 UTF-8 多字节字符 */
@@ -45,7 +50,7 @@ function runPythonCollect(args: string[], options?: SpawnOptions, input?: string
 }
 
 function createWindow() {
-  const startNormal = process.argv.includes('--normal');
+  const startMinimized = process.argv.includes('--minimized');
 
   mainWindow = new BrowserWindow({
     width: 900,
@@ -71,7 +76,7 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
-    if (!startNormal) {
+    if (startMinimized) {
       mainWindow?.minimize();
     }
     _rendererReady = true;
@@ -275,9 +280,9 @@ function startApiServer() {
 
         case '/api/run-dsl': {
           if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+          const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
           const dslProc = spawnPython([scriptPath], {
-            cwd: path.join(__dirname, '../..'),
+            cwd: getBaseDir(),
             stdio: ['pipe', 'pipe', 'pipe'],
           });
           const _dslOut: Buffer[] = [];
@@ -351,9 +356,9 @@ function startApiServer() {
                 dsl = dsl.replace(/^`{3}[a-z]*\n?/i, '').replace(/\n?`{3}$/i, '');
               }
               if (!dsl) { send(500, { error: 'DSL 生成为空' }); return; }
-              const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+              const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
               const proc = spawnPython([scriptPath], {
-                cwd: path.join(__dirname, '../..'),
+                cwd: getBaseDir(),
                 stdio: ['pipe', 'pipe', 'pipe'],
               });
               const _out: Buffer[] = [];
@@ -601,7 +606,7 @@ case '/api/auto-layout':
           break;
 
         case '/api/macro/list': {
-          const macrosDir = path.join(__dirname, '../../python/macros');
+          const macrosDir = path.join(getBaseDir(), 'python', 'macros');
           try {
             const files = fs.readdirSync(macrosDir);
             const macros = [];
@@ -635,7 +640,7 @@ result = macro_playback("${(payload.name || '').replace(/"/g, '\\"')}")
 print(json.dumps(result))
 sys.stdout.flush()
 `], {
-              cwd: path.join(__dirname, '../..'),
+              cwd: getBaseDir(),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
             const _out: Buffer[] = [];
@@ -679,7 +684,7 @@ for f in registry.all():
 print(json.dumps(features, ensure_ascii=False))
 sys.stdout.flush()
 `], {
-              cwd: path.join(__dirname, '../..'),
+              cwd: getBaseDir(),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
             const _out: Buffer[] = [];
@@ -717,7 +722,7 @@ except Exception as e:
     print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
 sys.stdout.flush()
 `], {
-              cwd: path.join(__dirname, '../..'),
+              cwd: getBaseDir(),
               stdio: ['pipe', 'pipe', 'pipe'],
             });
             const _out: Buffer[] = [];
@@ -781,7 +786,7 @@ sys.stdout.flush()
         case '/api/macro/delete':
           if (!payload.name) { send(400, { error: '缺少 name' }); return; }
           {
-            const macrosDir = path.join(__dirname, '../../python/macros');
+            const macrosDir = path.join(getBaseDir(), 'python', 'macros');
             const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
             try {
               fs.unlinkSync(filePath);
@@ -795,7 +800,7 @@ sys.stdout.flush()
         case '/api/macro/get-events':
           if (!payload.name) { send(400, { error: '缺少 name' }); return; }
           {
-            const macrosDir = path.join(__dirname, '../../python/macros');
+            const macrosDir = path.join(getBaseDir(), 'python', 'macros');
             const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
             try {
               const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -1481,9 +1486,9 @@ ipcMain.handle('screenshot:selectRegion', async () => _selectRegion());
 // --- Interaction Tools IPC ---
 async function _wheelSelect(params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }): Promise<any> {
   return new Promise((resolve) => {
-    const scriptPath = path.join(__dirname, '../../python/interaction/wheel_selector.py');
+    const scriptPath = path.join(getBaseDir(), 'python', 'interaction', 'wheel_selector.py');
     const proc = spawnPython([scriptPath, '--ipc'], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const _out: Buffer[] = [];
@@ -1510,9 +1515,9 @@ ipcMain.handle('interaction:wheelSelect', async (_, params) => _wheelSelect(para
 
 async function _ocrRegion(region: { x: number; y: number; w: number; h: number }): Promise<any> {
   return new Promise((resolve) => {
-    const scriptPath = path.join(__dirname, '../../tools/ocr_region.py');
+    const scriptPath = path.join(getBaseDir(), 'tools', 'ocr_region.py');
     const proc = spawnPython([scriptPath], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -1542,9 +1547,9 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region) => _ocrRegion(region));
 // --- DSL Conversion IPC ---
 ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
   return new Promise((resolve) => {
-    const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+    const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
     const proc = spawnPython([scriptPath], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const _out: Buffer[] = [];
@@ -1595,7 +1600,7 @@ for f in registry.all():
 print(json.dumps(features, ensure_ascii=False))
 sys.stdout.flush()
 `], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const _out: Buffer[] = [];
@@ -1633,7 +1638,7 @@ except Exception as e:
     print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
 sys.stdout.flush()
 `], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const _out: Buffer[] = [];
@@ -1664,7 +1669,7 @@ let _macroResultResolve: ((result: any) => void) | null = null;
 let _macroStdoutBuffer = '';
 
 function getMacroRecorderScriptPath(): string {
-  return path.join(__dirname, '../../python/tools/macro_recorder.py');
+  return path.join(getBaseDir(), 'python', 'tools', 'macro_recorder.py');
 }
 
 function _ensureMacroRecorder(): ChildProcess | null {
@@ -1674,7 +1679,7 @@ function _ensureMacroRecorder(): ChildProcess | null {
   const scriptPath = getMacroRecorderScriptPath();
   try {
     macroRecorderProcess = spawnPython([scriptPath], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     _macroStdoutBuffer = '';
@@ -1760,7 +1765,7 @@ ipcMain.handle('macro:stop', async () => {
 });
 
 ipcMain.handle('macro:list', async () => {
-  const macrosDir = path.join(__dirname, '../../python/macros');
+  const macrosDir = path.join(getBaseDir(), 'python', 'macros');
   try {
     const files = fs.readdirSync(macrosDir);
     const macros = [];
@@ -1787,7 +1792,7 @@ ipcMain.handle('macro:list', async () => {
 
 ipcMain.handle('macro:play', async (_, name: string) => {
   return new Promise((resolve) => {
-    const scriptPath = path.join(__dirname, '../../python/interaction/play_macro.py');
+    const scriptPath = path.join(getBaseDir(), 'python', 'interaction', 'play_macro.py');
     // Run macro playback via the existing feature system
     const proc = spawnPython(['-c', `
 import json, sys, time
@@ -1797,7 +1802,7 @@ result = macro_playback("${name.replace(/"/g, '\\"')}")
 print(json.dumps(result))
 sys.stdout.flush()
 `], {
-      cwd: path.join(__dirname, '../..'),
+      cwd: getBaseDir(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const _out: Buffer[] = [];
@@ -1819,7 +1824,7 @@ sys.stdout.flush()
 });
 
 ipcMain.handle('macro:delete', async (_, name: string) => {
-  const macrosDir = path.join(__dirname, '../../python/macros');
+  const macrosDir = path.join(getBaseDir(), 'python', 'macros');
   // Try .json file
   const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
   try {
@@ -1831,7 +1836,7 @@ ipcMain.handle('macro:delete', async (_, name: string) => {
 });
 
 ipcMain.handle('macro:get-events', async (_, name: string) => {
-  const macrosDir = path.join(__dirname, '../../python/macros');
+  const macrosDir = path.join(getBaseDir(), 'python', 'macros');
   const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
   try {
     const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));

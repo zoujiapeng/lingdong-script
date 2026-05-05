@@ -7,7 +7,9 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | 命令 | 用途 |
 |---|---|
 | `npm run dev` | 启动开发环境 (Vite + Electron) |
-| `npm run build` | 构建 |
+| `npm run build` | 构建 renderer + main |
+| `npx electron-builder --win portable` | 构建免安装便携版 |
+| `npx electron . --prod` | 测试生产模式 (file:// 加载) |
 | `python -m pytest tests/` | 运行 Python 测试 (88 test) |
 | `python python/mcp/server.py` | 启动 Python MCP 服务器 |
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
@@ -271,3 +273,30 @@ curl -X POST http://127.0.0.1:5577/api/ping
 # DSL → 流程图 → 加载到前端（一键）
 curl -X POST http://127.0.0.1:5577/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
 ```
+
+## 构建与部署
+
+```bash
+# 完整构建
+npm run build                    # 构建 renderer (Vite) + main (tsc)
+
+# 构建便携版
+npx electron-builder --win portable   # 输出到 release/灵动脚本-*-portable.exe
+
+# 测试生产模式 (file:// 加载)
+npx electron . --prod            # 强制生产模式，不加 --prod 则为 dev 模式
+npx electron . --prod --minimized  # 启动后最小化到任务栏
+
+# 发布到 GitHub Release
+gh release create v1.0.1 "release/灵动脚本-1.0.0-portable.exe" --generate-notes
+```
+
+### 生产模式注意事项
+
+- **CSP**：生产模式下从 `file://` 加载，已移除 CSP 头防止阻塞模块脚本
+- **`--prod` 标志**：在 `npx electron .` 时强制使用 `loadFile`（生产模式路径），用于测试
+- **`--minimized` 标志**：默认窗口正常显示，加此标志则启动后最小化
+- **`getBaseDir()`**：所有 Python 子进程的 `cwd` 通过此函数统一解析，开发时指向项目根目录，生产时指向 `process.resourcesPath`
+- **`extraResources`**：`python/`、`src/python/`、`tools/` 目录通过 `extraResources` 复制到 asar 外部，Python 子进程可直接访问
+- **Python 路径**：生产模式下 Python 脚本位于 `resources/python/`，通过 `getEngineScriptPath()` 统一解析
+

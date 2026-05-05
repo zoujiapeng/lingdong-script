@@ -51,8 +51,24 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
-      "src/python/**/*"
+      "dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "python",
+        "to": "python",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "src/python",
+        "to": "python",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "tools",
+        "to": "tools",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": ["nsis", "portable"],
