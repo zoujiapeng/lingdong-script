@@ -1,5 +1,6 @@
 import React from 'react';
 import { PopupCloseNodeParams } from '../../../types';
+import { WheelSelectControl } from '../controls/WheelSelectControl';
 
 interface Props {
   params: PopupCloseNodeParams;
@@ -17,14 +18,13 @@ const STRATEGY_OPTIONS = [
 export function PopupCloseParams({ params, onChange }: Props) {
   return (
     <div>
-      <div className="form-group">
-        <label className="form-label">关闭策略</label>
-        <select className="form-input form-select" value={params.strategies?.[0] || 'auto'} onChange={(e) => onChange({ strategies: [e.target.value] })}>
-          {STRATEGY_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
-      </div>
+      <WheelSelectControl
+        label="关闭策略"
+        options={STRATEGY_OPTIONS}
+        value={params.strategies?.[0] || 'auto'}
+        onChange={(v) => onChange({ strategies: [v] })}
+        title="选择关闭策略"
+      />
       <div className="form-group">
         <label className="form-label">超时 (秒)</label>
         <div className="slider-group">

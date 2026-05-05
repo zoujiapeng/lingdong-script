@@ -20,6 +20,8 @@ import { ColorCheckParams } from './params/ColorCheckParams';
 import { ProgressWaitParams } from './params/ProgressWaitParams';
 import { RegionWaitParams } from './params/RegionWaitParams';
 import { SceneConditionParams } from './params/SceneConditionParams';
+import { ScreenshotParams } from './params/ScreenshotParams';
+import { ToolCallParams } from './params/ToolCallParams';
 import { CommonNodeSettings } from './params/CommonNodeSettings';
 
 function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
@@ -132,6 +134,8 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'progress_wait': return <ProgressWaitParams params={node.params as any} onChange={updateParams} />;
     case 'region_wait': return <RegionWaitParams params={node.params as any} onChange={updateParams} />;
     case 'scene_condition': return <SceneConditionParams params={node.params as any} onChange={updateParams} />;
+    case 'screenshot': return <ScreenshotParams params={node.params as any} onChange={updateParams} />;
+    case 'tool_call': return <ToolCallParams params={node.params as any} onChange={updateParams} />;
     case 'start':
     case 'end': return (
       <div className="form-group">

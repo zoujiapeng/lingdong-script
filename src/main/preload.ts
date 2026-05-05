@@ -36,8 +36,51 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiGenerate: (params: { apiKey: string; messages: { role: string; content: string }[] }) =>
     ipcRenderer.invoke('ai:generate', params),
 
+  // DSL conversion
+  dslToFlow: (dslText: string) => ipcRenderer.invoke('dsl:toFlow', dslText),
+
+  // Feature registry (MCP tools)
+  featuresList: () => ipcRenderer.invoke('features:list'),
+  callFeature: (name: string, params: Record<string, any>) =>
+    ipcRenderer.invoke('feature:call', name, params),
+
+  // Wheel selector (tkinter overlay)
+  wheelSelect: (params: { options: string[]; values?: string[]; title?: string; message?: string }) =>
+    ipcRenderer.invoke('interaction:wheelSelect', params),
+
   // Menu actions (from native menu bar)
   onMenuAction: (callback: (action: string) => void) => {
     ipcRenderer.on('menu-action', (_, action) => callback(action));
+  },
+
+  // API commands (from local HTTP bridge)
+  onApiCommand: (callback: (action: string, payload: any) => void) => {
+    ipcRenderer.on('api-command', (_, msg) => callback(msg.action, msg.payload));
+  },
+
+  // Push renderer state to main process (for HTTP API /api/get-state)
+  pushState: (state: any) => {
+    ipcRenderer.send('state:response', state);
+  },
+
+  // Macro recording API
+  macroStart: (params?: { name?: string; include_mouse?: boolean; include_keys?: boolean }) =>
+    ipcRenderer.invoke('macro:start', params || {}),
+  macroStop: () =>
+    ipcRenderer.invoke('macro:stop'),
+  macroList: () =>
+    ipcRenderer.invoke('macro:list'),
+  macroPlay: (name: string) =>
+    ipcRenderer.invoke('macro:play', name),
+  macroDelete: (name: string) =>
+    ipcRenderer.invoke('macro:delete', name),
+  macroGetEvents: (name: string) =>
+    ipcRenderer.invoke('macro:get-events', name),
+  macroRecordingStatus: () =>
+    ipcRenderer.invoke('macro:recording-status'),
+
+  // Macro messages (from main process)
+  onMacroMessage: (callback: (msg: any) => void) => {
+    ipcRenderer.on('macro-message', (_, msg) => callback(msg));
   },
 });

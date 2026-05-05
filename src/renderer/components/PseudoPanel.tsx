@@ -1,8 +1,7 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { generatePseudoCode } from '../utils/pseudoGenerator';
-import { parsePseudoToFlow } from '../utils/pseudoParser';
-import { Copy, Download, Edit3, AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
+import { generateText, TextMode } from '../utils/textGenerator';
+import { Copy, Download, Edit3, AlertTriangle, CheckCircle, XCircle, Languages } from 'lucide-react';
 
 export function PseudoPanel() {
   const { script } = useStore();
@@ -11,18 +10,18 @@ export function PseudoPanel() {
   const [isEditing, setIsEditing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
+  const [textMode, setTextMode] = useState<TextMode>('pseudocode');
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasPendingCanvasUpdate = useRef(false);
   const editRef = useRef<HTMLTextAreaElement>(null);
 
-  // Generate pseudocode from current script
+  // Generate text from current script (both modes)
   const generatedCode = useMemo(() => {
     try {
-      return generatePseudoCode(script);
+      return generateText(script, textMode);
     } catch (e: any) {
-      return `# 伪代码生成失败: ${e.message}`;
+      return `# 生成失败: ${e.message}`;
     }
-  }, [script]);
+  }, [script, textMode]);
 
   // Initialize display
   useEffect(() => {
@@ -35,63 +34,65 @@ export function PseudoPanel() {
   // Sync from store to display when not editing
   useEffect(() => {
     if (initialized && !isEditing) {
-      if (hasPendingCanvasUpdate.current) {
-        hasPendingCanvasUpdate.current = false;
-      }
       setDisplayCode(generatedCode);
       setErrorMessage(null);
     }
   }, [generatedCode, initialized, isEditing]);
 
-  // Auto-sync from textarea edits (debounced)
-  const handleAutoSync = useCallback((code: string) => {
-    if (!code.trim()) return;
-
-    const trimmed = code.trim();
-    // Skip if it looks like just comments or empty
-    if (trimmed.startsWith('#') || trimmed === '') return;
-
-    try {
-      const newScript = parsePseudoToFlow(code);
-      newScript.meta = {
-        ...newScript.meta,
-        id: script.meta.id,
-        name: script.meta.name,
-        description: script.meta.description,
-      };
-      // Only update if parse is successful
-      useStore.getState().loadScript(newScript);
-      setDisplayCode(code);
-      setErrorMessage(null);
-    } catch (e: any) {
-      setErrorMessage(e.message);
-    }
-  }, [script.meta.id, script.meta.name, script.meta.description]);
-
-  const debouncedSync = useCallback((code: string) => {
-    if (syncTimerRef.current) {
-      clearTimeout(syncTimerRef.current);
-    }
-    syncTimerRef.current = setTimeout(() => {
-      handleAutoSync(code);
-    }, 300);
-  }, [handleAutoSync]);
-
-  // Cleanup timer on unmount
-  useEffect(() => {
-    return () => {
-      if (syncTimerRef.current) {
-        clearTimeout(syncTimerRef.current);
-      }
-    };
+  // Toggle mode
+  const handleToggleMode = useCallback(() => {
+    setTextMode((prev) => (prev === 'pseudocode' ? 'dsl' : 'pseudocode'));
   }, []);
 
+  // Start editing
   const handleStartEditing = useCallback(() => {
     setDraftCode(displayCode);
     setIsEditing(true);
     setErrorMessage(null);
-    hasPendingCanvasUpdate.current = false;
   }, [displayCode]);
+
+  // Cancel editing
+  const handleCancelEdit = useCallback(() => {
+    setIsEditing(false);
+    setErrorMessage(null);
+    setDraftCode('');
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+  }, []);
+
+  // Auto-sync from textarea edits (debounced) — only for pseudocode mode
+  const handleAutoSync = useCallback((code: string) => {
+    if (!code.trim()) return;
+    if (textMode !== 'pseudocode') return;
+    const trimmed = code.trim();
+    if (trimmed.startsWith('#') || trimmed === '') return;
+
+    try {
+      // Dynamic import to avoid circular deps
+      import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
+        const newScript = parsePseudoToFlow(code);
+        newScript.meta = {
+          ...newScript.meta,
+          id: script.meta.id,
+          name: script.meta.name,
+          description: script.meta.description,
+        };
+        useStore.getState().loadScript(newScript);
+        setDisplayCode(code);
+        setErrorMessage(null);
+      }).catch(() => {});
+    } catch (e: any) {
+      setErrorMessage(e.message);
+    }
+  }, [script.meta.id, script.meta.name, script.meta.description, textMode]);
+
+  const debouncedSync = useCallback((code: string) => {
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => handleAutoSync(code), 300);
+  }, [handleAutoSync]);
+
+  useEffect(() => {
+    return () => { if (syncTimerRef.current) clearTimeout(syncTimerRef.current); };
+  }, []);
 
   const handleCodeChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newCode = e.target.value;
@@ -99,28 +100,19 @@ export function PseudoPanel() {
     debouncedSync(newCode);
   }, [debouncedSync]);
 
-  const handleCancelEdit = useCallback(() => {
-    setIsEditing(false);
-    setErrorMessage(null);
-    setDraftCode('');
-    if (syncTimerRef.current) {
-      clearTimeout(syncTimerRef.current);
-    }
-  }, []);
-
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(displayCode);
   }, [displayCode]);
 
-  const handleDownloadFlow = useCallback(() => {
-    const blob = new Blob([displayCode], { type: 'text/plain' });
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([displayCode], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${script.meta.name}.flow`;
+    a.download = `${script.meta.name}.${textMode === 'dsl' ? 'dsl' : 'flow'}`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [displayCode, script.meta.name]);
+  }, [displayCode, script.meta.name, textMode]);
 
   const handleExportJSON = useCallback(() => {
     const json = JSON.stringify(script, null, 2);
@@ -133,56 +125,56 @@ export function PseudoPanel() {
     URL.revokeObjectURL(url);
   }, [script]);
 
-  // Pseudocode syntax highlighting
-  const highlighted = useMemo(() => {
-    return highlightPseudo(displayCode);
-  }, [displayCode]);
+  // Syntax highlighting
+  const highlighted = useMemo(() => highlightText(displayCode, textMode), [displayCode, textMode]);
 
   return (
-    <div className="code-panel">
+    <div className="code-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Toolbar */}
       <div className="code-panel-toolbar">
         <div className="code-panel-toolbar-left">
           <button className="btn btn-ghost" onClick={handleCopy} style={{ gap: 4 }}>
-            <Copy size={13} />
-            复制
+            <Copy size={13} /> 复制
           </button>
-          <button className="btn btn-ghost" onClick={handleDownloadFlow} style={{ gap: 4 }}>
-            <Download size={13} />
-            下载 .flow
+          <button className="btn btn-ghost" onClick={handleDownload} style={{ gap: 4 }}>
+            <Download size={13} /> 下载
           </button>
           <button className="btn btn-ghost" onClick={handleExportJSON} style={{ gap: 4 }}>
-            <Download size={13} />
-            导出 JSON
+            <Download size={13} /> 导出 JSON
           </button>
           {!isEditing ? (
             <button className="btn btn-primary" onClick={handleStartEditing} style={{ gap: 4, fontSize: 12 }}>
-              <Edit3 size={13} />
-              编辑伪代码
+              <Edit3 size={13} /> 编辑
             </button>
           ) : (
             <button className="btn btn-ghost" onClick={handleCancelEdit} style={{ gap: 4 }}>
-              <XCircle size={13} />
-              取消
+              <XCircle size={13} /> 取消
             </button>
           )}
         </div>
         <div className="code-panel-toolbar-right">
-          <span className="code-panel-status">
+          {/* Mode toggle */}
+          <button
+            className="btn btn-ghost"
+            onClick={handleToggleMode}
+            style={{ gap: 4, fontSize: 12, fontWeight: 600 }}
+            title={textMode === 'pseudocode' ? '切换到 DSL (英文关键词)' : '切换到伪代码 (中文关键词)'}
+          >
+            <Languages size={13} />
+            {textMode === 'pseudocode' ? '伪代码' : 'DSL'}
+          </button>
+          <span className="code-panel-status" style={{ marginLeft: 8 }}>
             {isEditing ? (
               <span style={{ color: '#818cf6' }}>
-                <Edit3 size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                编辑模式
+                <Edit3 size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> 编辑模式
               </span>
             ) : errorMessage ? (
               <span style={{ color: '#ef4444' }}>
-                <AlertTriangle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                同步错误
+                <AlertTriangle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> 同步错误
               </span>
             ) : (
               <span style={{ color: '#34d399' }}>
-                <CheckCircle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-                已同步
+                <CheckCircle size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> 已同步
               </span>
             )}
           </span>
@@ -191,17 +183,14 @@ export function PseudoPanel() {
 
       {/* Error banner */}
       {errorMessage && isEditing && (
-        <div style={{
-          background: '#fbbf24', color: '#1a1b26', padding: '8px 16px',
-          fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
-        }}>
+        <div style={{ background: '#fbbf24', color: '#1a1b26', padding: '8px 16px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
           <AlertTriangle size={14} />
-          <span>解析错误: {errorMessage} — 流程图将保持上个有效状态</span>
+          <span>解析错误: {errorMessage}</span>
         </div>
       )}
 
       {/* Code area */}
-      <div className="code-panel-editor">
+      <div className="code-panel-editor" style={{ flex: 1 }}>
         {isEditing ? (
           <textarea
             ref={editRef}
@@ -218,65 +207,46 @@ export function PseudoPanel() {
           />
         )}
       </div>
+
+      {/* Status bar */}
+      <div className="code-panel-status" style={{ padding: '6px 12px', borderTop: '1px solid var(--border-primary)', justifyContent: 'space-between', display: 'flex' }}>
+        <span>{textMode === 'dsl' ? 'DSL' : '伪代码'} · {displayCode.split('\n').length} 行</span>
+        <span>{script.nodes.length} 节点 · {script.edges.length} 边</span>
+      </div>
     </div>
   );
 }
 
-// ─── Pseudocode syntax highlighting ───
+// ─── Syntax highlighting ───
 
-function highlightPseudo(code: string): string {
-  const escaped = code
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
+function highlightText(code: string, mode: TextMode): string {
+  const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const lines = escaped.split('\n');
-  return lines
-    .map((line) => {
-      // Comments
-      if (/^\s*#/.test(line)) {
-        return `<span class="hl-comment">${line}</span>`;
-      }
+  return lines.map((line) => {
+    if (/^\s*#/.test(line)) return `<span class="hl-comment">${line}</span>`;
+    let h = line;
+    h = h.replace(/("(?:[^"\\]|\\.)*")/g, '<span class="hl-string">$1</span>');
+    h = h.replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-number">$1</span>');
 
-      let h = line;
-
-      // Strings
+    if (mode === 'dsl') {
+      // DSL keywords
       h = h.replace(
-        /("(?:[^"\\]|\\.)*")/g,
-        '<span class="hl-string">$1</span>'
-      );
-
-      // Numbers
-      h = h.replace(
-        /\b(\d+\.?\d*)\b/g,
-        '<span class="hl-number">$1</span>'
-      );
-
-      // Keywords: if, else, loop, break, and/or 中文关键词
-      h = h.replace(
-        /\b(如果|否则|循环|无限循环|条件循环|跳出|if|else|loop|infinite|while|break|and|or|not)\b/g,
+        /\b(IF|ELSE|END|LOOP|WAIT|CLICK|TYPE|HOTKEY|SWIPE|SCREENSHOT|RETURN|BREAK|CALL|SET|REGION_SELECT|REGION_WAIT|SCENE_CONDITION|PROGRESS_WAIT|POPUP_CLOSE|COLOR_CHECK|OCR_FIND|OCR_EXTRACT|IMAGE_CLICK|IMAGE_FIND|WAITSCREEN|TOOL)\b/g,
         '<span class="hl-keyword">$1</span>'
       );
-
-      // Operations: click, type, press, wait, swipe, screenshot, run / 中文操作
+    } else {
+      // Pseudocode keywords
       h = h.replace(
-        /\b(点击图片|点击|输入|按键|等待图片|等待窗口|等待|滑动|截图|运行|click|image|type|press|wait|swipe|screenshot|run)\b/g,
+        /\b(如果|否则|循环|无限循环|结束|跳出|真|假|click|image|type|press|wait|swipe|screenshot|run)\b/g,
+        '<span class="hl-keyword">$1</span>'
+      );
+      h = h.replace(
+        /\b(点击图片|点击|输入|按键|等待图片|等待窗口|等待|滑动|截图|运行|关闭弹窗|检测颜色|等待进度|等待区域|场景判断|检测|调用)\b/g,
         '<span class="hl-module">$1</span>'
       );
+    }
 
-      // Conditions: image_exists, window_exists, var_eq, var_gt, var_lt / 中文条件
-      h = h.replace(
-        /\b(图片存在|窗口存在|变量等于|变量大于|变量小于|image_exists|window_exists|var_eq|var_gt|var_lt|真|true)\b/g,
-        '<span class="hl-annotation">$1</span>'
-      );
-
-      // Variables: $name
-      h = h.replace(
-        /(\$\w+)/g,
-        '<span class="hl-annotation">$1</span>'
-      );
-
-      return h;
-    })
-    .join('\n');
+    h = h.replace(/(\$[\w.]+)/g, '<span class="hl-annotation">$1</span>');
+    return h;
+  }).join('\n');
 }

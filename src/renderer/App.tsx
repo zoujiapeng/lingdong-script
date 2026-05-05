@@ -5,6 +5,7 @@ import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
 import { TopBar } from './components/common/TopBar';
 import { StatusBar } from './components/common/StatusBar';
 import { LogPanel } from './components/common/LogPanel';
+import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { PseudoPanel } from './components/PseudoPanel';
 import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -33,7 +34,7 @@ export default function App() {
 
     // Latching: only set proximity to true, never false.
     // Panels stay visible once triggered until manually dismissed.
-    const newProx: typeof proximity = {};
+    const newProx: typeof proximity = { top: false, bottom: false, left: false, right: false };
     if (inCenterTop || inTopBarHover) newProx.top = true;
     if (y > h - 36 || hov.bottom) newProx.bottom = true;
     if (x < 36 || hov.left) newProx.left = true;
@@ -72,6 +73,11 @@ export default function App() {
     if (script.nodes.length > 0) {
       requestAnimationFrame(() => fitToScreen());
     }
+  }, []);
+
+  // Load feature registry on mount
+  useEffect(() => {
+    useStore.getState().fetchFeatures();
   }, []);
 
   // Keyboard shortcuts
@@ -172,6 +178,10 @@ export default function App() {
           <div className="canvas-area">
             <PseudoPanel />
           </div>
+        ) : viewMode === 'dsl' ? (
+          <div className="canvas-area">
+            <DSLPanel />
+          </div>
         ) : (
           <>
             <div onMouseEnter={() => handlePanelEnter('left')} onMouseLeave={() => handlePanelLeave('left')}>
@@ -195,6 +205,7 @@ export default function App() {
       </div>
       <div className="bottom-wrapper" onMouseEnter={() => handlePanelEnter('bottom')} onMouseLeave={() => handlePanelLeave('bottom')}>
         <StatusBar onHidePanels={hideAllPanels} />
+        {ui.show_tool_call_panel && <ToolCallPanel />}
       </div>
     </div>
   );

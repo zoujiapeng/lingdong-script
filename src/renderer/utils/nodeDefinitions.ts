@@ -231,7 +231,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'Camera',
     category: 'image',
     color: '#64748b',
-    defaultParams: {},
+    defaultParams: { format: 'png' },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [{ id: 'output', type: 'flow' }],
@@ -361,6 +361,22 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       outputs: [{ id: 'output', type: 'flow' }],
     },
   },
+  tool_call: {
+    type: 'tool_call',
+    label: '调用工具',
+    description: '调用注册表中的自动化功能（120+ 工具）',
+    icon: 'Wrench',
+    category: 'tools',
+    color: '#8b5cf6',
+    defaultParams: {
+      feature_name: '',
+      params: {},
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
 };
 
 export const NODE_CATEGORIES = [
@@ -370,6 +386,7 @@ export const NODE_CATEGORIES = [
   { id: 'device', label: '设备', icon: 'Monitor' },
   { id: 'data', label: '数据', icon: 'Database' },
   { id: 'system', label: '系统', icon: 'Settings' },
+  { id: 'tools', label: '工具', icon: 'Wrench' },
 ] as const;
 
 export function getNodeDefinition(type: NodeType): NodeDefinition {

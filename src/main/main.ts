@@ -1,7 +1,8 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+import * as http from 'http';
 import * as https from 'https';
 
 let mainWindow: BrowserWindow | null = null;
@@ -9,14 +10,27 @@ let pythonProcess: ChildProcess | null = null;
 let _lastScript: string | null = null;
 let _engineRunning = false;
 
+// 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
+let _cachedRendererState: any = null;
+let _rendererReady = false;
+
 const isDev = !app.isPackaged;
+
+/** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
+function spawnPython(args: string[], options?: SpawnOptions) {
+  return spawn('python', args, {
+    ...options,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 1000,
-    minHeight: 700,
+    width: 1100,
+    height: 700,
+    minWidth: 800,
+    minHeight: 500,
+    center: true,
     title: '灵动脚本',
     backgroundColor: '#eef2f8',
     webPreferences: {
@@ -29,13 +43,13 @@ function createWindow() {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
+    _rendererReady = true;
   });
 
   mainWindow.on('closed', () => {
@@ -114,6 +128,393 @@ function buildAppMenu() {
   Menu.setApplicationMenu(menu);
 }
 
+// ── Local HTTP API (for Claude Code MCP bridge) ──
+const API_PORT = 5577;
+let apiServer: http.Server | null = null;
+
+function startApiServer() {
+  apiServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url || '/', `http://localhost:${API_PORT}`);
+    const send = (code: number, data: any) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+
+    if (req.method !== 'POST') {
+      send(405, { error: 'Method not allowed' });
+      return;
+    }
+
+    let body = '';
+    req.on('data', (chunk) => body += chunk);
+    req.on('end', () => {
+      let payload: any = {};
+      try { payload = JSON.parse(body); } catch {}
+
+      try {
+      switch (url.pathname) {
+        case '/api/ping':
+          send(200, { ok: true });
+          break;
+
+        case '/api/load-script':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'loadScript', payload: payload.script });
+          send(200, { ok: true });
+          break;
+
+        case '/api/add-node':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'addNode',
+            payload: { type: payload.type, x: payload.x, y: payload.y, params: payload.params },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/update-node':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'updateNode',
+            payload: { id: payload.id, updates: payload.updates },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/delete-nodes':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'deleteNodes',
+            payload: { ids: payload.ids },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/add-edge':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'addEdge',
+            payload: { from_node: payload.from_node, from_port: payload.from_port || 'output', to_node: payload.to_node, to_port: payload.to_port || 'input', label: payload.label },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/run-dsl': {
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+          const dslProc = spawnPython([scriptPath], {
+            cwd: path.join(__dirname, '../..'),
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          let dslStdout = '';
+          let dslStderr = '';
+          dslProc.stdout!.on('data', (chunk: Buffer) => dslStdout += chunk.toString());
+          dslProc.stderr!.on('data', (chunk: Buffer) => dslStderr += chunk.toString());
+          dslProc.on('close', (code: number) => {
+            if (dslStdout.trim()) {
+              try {
+                const flow = JSON.parse(dslStdout);
+                mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
+                send(200, { ok: true, flow });
+              } catch {
+                send(500, { error: 'DSL 转换失败', raw: dslStdout });
+              }
+            } else {
+              send(500, { error: dslStderr.trim() || 'DSL 转换失败' });
+            }
+          });
+          dslProc.on('error', (err: Error) => send(500, { error: err.message }));
+          dslProc.stdin!.write(payload.dsl + '\n');
+          dslProc.stdin!.end();
+          break;
+        }
+
+        case '/api/auto-layout':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'autoLayout' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/update-node-params':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'updateNodeParams',
+            payload: { id: payload.id, params: payload.params },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/delete-edges':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'deleteEdges',
+            payload: { ids: payload.ids },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/new-script':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'newScript' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/set-view-mode':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', {
+            action: 'setViewMode',
+            payload: { mode: payload.mode },
+          });
+          send(200, { ok: true });
+          break;
+
+        case '/api/fit-screen':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          mainWindow.webContents.send('api-command', { action: 'fitScreen' });
+          send(200, { ok: true });
+          break;
+
+        case '/api/get-state':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          if (_cachedRendererState !== null) {
+            send(200, _cachedRendererState);
+          } else {
+            // 尚未收到渲染器状态推送，请求一次并等待（最多 5s）
+            if (_rendererReady) {
+              mainWindow.webContents.send('api-command', { action: 'getState' });
+            }
+            (async () => {
+              for (let i = 0; i < 5; i++) {
+                await new Promise(r => setTimeout(r, 1000));
+                if (_cachedRendererState !== null) {
+                  send(200, _cachedRendererState);
+                  return;
+                }
+              }
+              send(503, { error: '渲染器未就绪' });
+            })();
+          }
+          break;
+
+        case '/api/run-flow':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          try {
+            const scriptJson = JSON.stringify(payload.script || {});
+            startPythonEngine(scriptJson);
+            send(200, { ok: true });
+          } catch (e: any) {
+            send(500, { error: e.message });
+          }
+          break;
+
+        case '/api/stop-flow':
+          stopPythonEngine();
+          send(200, { ok: true });
+          break;
+
+        case '/api/engine-status':
+          send(200, {
+            running: _engineRunning,
+            process_alive: pythonProcess !== null && !pythonProcess.killed,
+            has_script: _lastScript !== null,
+          });
+          break;
+
+        // --- Macro Recording HTTP API ---
+        case '/api/macro/start-recording':
+          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+          // Fire and forget — respond immediately (status polling via /api/macro/list)
+          _ensureMacroRecorder();
+          try {
+            if (macroRecorderProcess?.stdin) {
+              macroRecorderProcess.stdin.write(JSON.stringify({
+                type: 'start',
+                name: payload.name || `recording_${Date.now()}`,
+                include_mouse: payload.include_mouse ?? true,
+                include_keys: payload.include_keys ?? true,
+              }) + '\n');
+            }
+          } catch {}
+          _macroRecording = true;
+          send(200, { success: true });
+          break;
+
+        case '/api/macro/stop-recording':
+          try {
+            if (macroRecorderProcess?.stdin) {
+              macroRecorderProcess.stdin.write(JSON.stringify({ type: 'stop' }) + '\n');
+            }
+          } catch {}
+          _macroRecording = false;
+          send(200, { success: true });
+          break;
+
+        case '/api/macro/list': {
+          const macrosDir = path.join(__dirname, '../../python/macros');
+          try {
+            const files = fs.readdirSync(macrosDir);
+            const macros = [];
+            for (const file of files) {
+              if (!file.endsWith('.json')) continue;
+              try {
+                const content = JSON.parse(fs.readFileSync(path.join(macrosDir, file), 'utf-8'));
+                macros.push({
+                  name: content.name || file.replace('.json', ''),
+                  file: file,
+                  events: content.events?.length || 0,
+                  duration: content.duration || 0,
+                  created: content.created || '',
+                });
+              } catch {
+                macros.push({ name: file.replace('.json', ''), file, events: 0, duration: 0, created: '' });
+              }
+            }
+            send(200, { success: true, result: macros.sort((a, b) => b.created.localeCompare(a.created)) });
+          } catch { send(200, { success: true, result: [] }); }
+          break;
+        }
+
+        case '/api/macro/play':
+          new Promise((resolve) => {
+            const proc = spawnPython(['-c', `
+import json, sys, time
+sys.path.insert(0, '.')
+from features.macro_features import macro_playback
+result = macro_playback("${(payload.name || '').replace(/"/g, '\\"')}")
+print(json.dumps(result))
+sys.stdout.flush()
+`], {
+              cwd: path.join(__dirname, '../..'),
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            proc.on('close', () => {
+              if (stdout.trim()) { try { resolve(JSON.parse(stdout)); } catch { resolve({ success: false, error: '解析失败' }); } }
+              else { resolve({ success: false, error: stderr.trim() || '播放失败' }); }
+            });
+            proc.on('error', (err) => resolve({ success: false, error: err.message }));
+          }).then(r => send(200, r));
+          break;
+
+        // --- Feature Registry HTTP API ---
+        case '/api/features/list':
+          new Promise((resolve) => {
+            const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+features = []
+for f in registry.all():
+    if f.hidden or f.deprecated:
+        continue
+    features.append({
+        "name": f.name,
+        "display_name": f.display_name,
+        "description": f.description,
+        "category": f.category.value,
+        "params": [{"name": p.name, "type": p.type, "description": p.description,
+                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
+        "returns": f.returns,
+        "deprecated": f.deprecated,
+        "tags": f.tags,
+    })
+print(json.dumps(features, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+              cwd: path.join(__dirname, '../..'),
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            proc.on('close', () => {
+              if (stdout.trim()) {
+                try { resolve(JSON.parse(stdout)); }
+                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+              } else {
+                resolve({ success: false, error: stderr.trim() || '获取功能列表失败' });
+              }
+            });
+            proc.on('error', (err) => resolve({ error: err.message }));
+          }).then(r => send(200, r));
+          break;
+
+        case '/api/features/call':
+          new Promise((resolve) => {
+            const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+try:
+    raw = sys.stdin.read()
+    data = json.loads(raw)
+    result = registry.execute(data["name"], **data.get("params", {}))
+    print(json.dumps(result, ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+              cwd: path.join(__dirname, '../..'),
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+            proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+            proc.on('close', () => {
+              if (stdout.trim()) {
+                try { resolve(JSON.parse(stdout)); }
+                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+              } else {
+                resolve({ success: false, error: stderr.trim() || '调用失败' });
+              }
+            });
+            proc.on('error', (err) => resolve({ success: false, error: err.message }));
+            proc.stdin!.write(JSON.stringify({ name: payload.name, params: payload.params || {} }) + '\n');
+            proc.stdin!.end();
+          }).then(r => send(200, r));
+          break;
+
+        default:
+          send(404, { error: '未知端点' });
+      }
+      } catch (e: any) {
+        console.error('[API] Handler error:', e);
+        send(500, { error: 'Internal error: ' + (e.message || e) });
+      }
+    });
+  });
+
+  apiServer.listen(API_PORT, '127.0.0.1', () => {
+    console.log(`[API] HTTP server listening on http://127.0.0.1:${API_PORT}`);
+  });
+}
+
+function stopApiServer() {
+  if (apiServer) {
+    apiServer.close();
+    apiServer = null;
+  }
+}
+
 // --- Python Engine Process Management ---
 
 function getPythonPath(): string {
@@ -141,6 +542,7 @@ function startPythonEngine(scriptJson: string) {
   try {
     pythonProcess = spawn(pythonPath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
   } catch (e) {
     mainWindow?.webContents.send('engine-log', { level: 'error', message: `启动引擎失败: ${e}` });
@@ -151,14 +553,17 @@ function startPythonEngine(scriptJson: string) {
 
   const proc = pythonProcess; // capture reference for close handler
 
-  // Send script data
-  pythonProcess.stdin!.write(JSON.stringify({ type: 'execute', payload: { script: JSON.parse(scriptJson) } }) + '\n');
+  // Send script data AFTER setting up stdout handler to avoid race
+  const scriptPayload = JSON.stringify({ type: 'execute', payload: { script: JSON.parse(scriptJson) } });
 
   proc.stdout!.on('data', (data: Buffer) => {
     const lines = data.toString().split('\n').filter(Boolean);
     for (const line of lines) {
       try {
         const msg = JSON.parse(line);
+        if (msg.type === 'execution_done') {
+          _engineRunning = false;
+        }
         mainWindow?.webContents.send('engine-message', msg);
       } catch {
         mainWindow?.webContents.send('engine-log', { level: 'info', message: line });
@@ -170,27 +575,23 @@ function startPythonEngine(scriptJson: string) {
     mainWindow?.webContents.send('engine-log', { level: 'error', message: data.toString() });
   });
 
-  proc.on('close', (code) => {
-    _engineRunning = false;
-    if (pythonProcess === proc) {
-      pythonProcess = null;
-    }
-    mainWindow?.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
-    mainWindow?.webContents.send('engine-log', { level: 'info', message: `引擎进程退出 (代码: ${code})` });
-  });
+  proc.on('exit', () => { _engineRunning = false; });
+
+  // Send stdin LAST (after all handlers are registered)
+  proc.stdin!.write(scriptPayload + '\n');
 }
 
 function stopPythonEngine() {
   _engineRunning = false;
-  if (pythonProcess) {
+  const proc = pythonProcess;
+  pythonProcess = null;
+  if (proc) {
     // Step 1: Send graceful stop message via stdin
-    try { sendToEngine({ type: 'stop' }); } catch {}
+    try { if (proc.stdin) proc.stdin.write(JSON.stringify({ type: 'stop' }) + '\n'); } catch {}
 
     // Step 2: If process doesn't exit gracefully within 2s, force kill
     const timer = setTimeout(() => {
-      if (pythonProcess) {
-        pythonProcess.kill('SIGTERM');
-      }
+      try { if (!proc.killed) proc.kill('SIGTERM'); } catch {}
     }, 2000);
     timer.unref();
   }
@@ -203,6 +604,12 @@ function sendToEngine(message: any) {
 }
 
 // --- IPC Handlers ---
+
+// 渲染器推送状态更新（替代 executeJavaScript）
+ipcMain.on('state:response', (_, state) => {
+  _cachedRendererState = state;
+  _rendererReady = true;
+});
 
 ipcMain.handle('dialog:openFile', async (_, filters?: { name: string; extensions: string[] }[]) => {
   const result = await dialog.showOpenDialog(mainWindow!, {
@@ -516,19 +923,44 @@ function confirm(){
   }
 });
 
+// --- Interaction Tools IPC ---
+ipcMain.handle('interaction:wheelSelect', async (_, params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }) => {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, '../../python/interaction/wheel_selector.py');
+    const proc = spawnPython([scriptPath, '--ipc'], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', (code) => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON parse error', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || 'wheel select failed' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+    proc.stdin!.write(JSON.stringify(params) + '\n');
+    proc.stdin!.end();
+  });
+});
+
 ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; w: number; h: number }) => {
   return new Promise((resolve) => {
-    const { spawn } = require('child_process');
     const scriptPath = path.join(__dirname, '../../tools/ocr_region.py');
-    const proc = spawn('python', [scriptPath], {
+    const proc = spawnPython([scriptPath], {
       cwd: path.join(__dirname, '../..'),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (chunk: Buffer) => stdout += chunk.toString());
-    proc.stderr.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
     proc.on('close', () => {
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
@@ -542,6 +974,304 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region: { x: number; y: number; 
     proc.stdin!.write(JSON.stringify(region) + '\n');
     proc.stdin!.end();
   });
+});
+
+// --- DSL Conversion IPC ---
+ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, '../../tools/dsl_to_flow.py');
+    const proc = spawnPython([scriptPath], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', (code) => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || '转换失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+    proc.stdin!.write(dslText + '\n');
+    proc.stdin!.end();
+  });
+});
+
+// --- Feature Registry IPC ---
+
+ipcMain.handle('features:list', async () => {
+  return new Promise((resolve) => {
+    const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+features = []
+for f in registry.all():
+    if f.hidden or f.deprecated:
+        continue
+    features.append({
+        "name": f.name,
+        "display_name": f.display_name,
+        "description": f.description,
+        "category": f.category.value,
+        "params": [{"name": p.name, "type": p.type, "description": p.description,
+                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
+        "returns": f.returns,
+        "deprecated": f.deprecated,
+        "tags": f.tags,
+    })
+print(json.dumps(features, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ error: stderr.trim() || '获取功能列表失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ error: err.message }));
+  });
+});
+
+ipcMain.handle('feature:call', async (_, featureName: string, params: Record<string, any>) => {
+  return new Promise((resolve) => {
+    const proc = spawnPython(['-c', `
+import sys, json
+sys.path.insert(0, 'python')
+from features._all import *
+from features.registry import registry
+sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+try:
+    raw = sys.stdin.read()
+    data = json.loads(raw)
+    result = registry.execute(data["name"], **data.get("params", {}))
+    print(json.dumps(result, ensure_ascii=False))
+except Exception as e:
+    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+sys.stdout.flush()
+`], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
+      } else {
+        resolve({ success: false, error: stderr.trim() || '调用失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ success: false, error: err.message }));
+    proc.stdin!.write(JSON.stringify({ name: featureName, params }) + '\n');
+    proc.stdin!.end();
+  });
+});
+
+// --- Macro Recording IPC ---
+
+let macroRecorderProcess: ChildProcess | null = null;
+let _macroRecording = false;
+let _macroResultResolve: ((result: any) => void) | null = null;
+let _macroStdoutBuffer = '';
+
+function getMacroRecorderScriptPath(): string {
+  return path.join(__dirname, '../../python/tools/macro_recorder.py');
+}
+
+function _ensureMacroRecorder(): ChildProcess | null {
+  if (macroRecorderProcess && !macroRecorderProcess.killed) {
+    return macroRecorderProcess;
+  }
+  const scriptPath = getMacroRecorderScriptPath();
+  try {
+    macroRecorderProcess = spawnPython([scriptPath], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    _macroStdoutBuffer = '';
+
+    macroRecorderProcess.stdout!.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      _macroStdoutBuffer += text;
+      // Process complete lines
+      const lines = _macroStdoutBuffer.split('\n');
+      _macroStdoutBuffer = lines.pop() || ''; // keep incomplete line
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === 'result' && _macroResultResolve) {
+            _macroResultResolve(msg);
+            _macroResultResolve = null;
+          }
+          // Forward status updates to renderer
+          if (msg.type === 'status' || msg.type === 'ready' || msg.type === 'pong' || msg.type === 'error') {
+            mainWindow?.webContents.send('macro-message', msg);
+          }
+        } catch { /* ignore non-JSON stdout lines */ }
+      }
+    });
+
+    macroRecorderProcess.stderr!.on('data', (chunk: Buffer) => {
+      mainWindow?.webContents.send('engine-log', { level: 'error', message: `[Macro] ${chunk.toString()}` });
+    });
+
+    macroRecorderProcess.on('exit', () => {
+      macroRecorderProcess = null;
+      _macroRecording = false;
+    });
+
+    // Wait for ready signal
+    return macroRecorderProcess;
+  } catch (e: any) {
+    mainWindow?.webContents.send('engine-log', { level: 'error', message: `启动宏录制器失败: ${e.message}` });
+    return null;
+  }
+}
+
+function _sendToMacroProcess(msg: any): Promise<any> {
+  return new Promise((resolve) => {
+    const proc = _ensureMacroRecorder();
+    if (!proc) {
+      resolve({ success: false, error: '宏录制器不可用' });
+      return;
+    }
+    _macroResultResolve = resolve;
+    try {
+      proc.stdin!.write(JSON.stringify(msg) + '\n');
+    } catch (e: any) {
+      _macroResultResolve = null;
+      resolve({ success: false, error: e.message });
+    }
+    // Timeout after 30s
+    setTimeout(() => {
+      if (_macroResultResolve) {
+        _macroResultResolve = null;
+        resolve({ success: false, error: '宏录制超时' });
+      }
+    }, 30000);
+  });
+}
+
+ipcMain.handle('macro:start', async (_, params: { name?: string; include_mouse?: boolean; include_keys?: boolean }) => {
+  const result = await _sendToMacroProcess({
+    type: 'start',
+    name: params.name || `recording_${Date.now()}`,
+    include_mouse: params.include_mouse ?? true,
+    include_keys: params.include_keys ?? true,
+  });
+  if (result?.success) _macroRecording = true;
+  return result;
+});
+
+ipcMain.handle('macro:stop', async () => {
+  const result = await _sendToMacroProcess({ type: 'stop' });
+  _macroRecording = false;
+  return result;
+});
+
+ipcMain.handle('macro:list', async () => {
+  const macrosDir = path.join(__dirname, '../../python/macros');
+  try {
+    const files = fs.readdirSync(macrosDir);
+    const macros = [];
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const content = JSON.parse(fs.readFileSync(path.join(macrosDir, file), 'utf-8'));
+        macros.push({
+          name: content.name || file.replace('.json', ''),
+          file: file,
+          events: content.events?.length || 0,
+          duration: content.duration || 0,
+          created: content.created || '',
+        });
+      } catch {
+        macros.push({ name: file.replace('.json', ''), file, events: 0, duration: 0, created: '' });
+      }
+    }
+    return { success: true, result: macros.sort((a, b) => b.created.localeCompare(a.created)) };
+  } catch {
+    return { success: true, result: [] };
+  }
+});
+
+ipcMain.handle('macro:play', async (_, name: string) => {
+  return new Promise((resolve) => {
+    const scriptPath = path.join(__dirname, '../../python/interaction/play_macro.py');
+    // Run macro playback via the existing feature system
+    const proc = spawnPython(['-c', `
+import json, sys, time
+sys.path.insert(0, '.')
+from features.macro_features import macro_playback
+result = macro_playback("${name.replace(/"/g, '\\"')}")
+print(json.dumps(result))
+sys.stdout.flush()
+`], {
+      cwd: path.join(__dirname, '../..'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout!.on('data', (chunk: Buffer) => stdout += chunk.toString());
+    proc.stderr!.on('data', (chunk: Buffer) => stderr += chunk.toString());
+    proc.on('close', () => {
+      if (stdout.trim()) {
+        try { resolve(JSON.parse(stdout)); }
+        catch { resolve({ success: false, error: '解析失败', raw: stdout }); }
+      } else {
+        resolve({ success: false, error: stderr.trim() || '播放失败' });
+      }
+    });
+    proc.on('error', (err) => resolve({ success: false, error: err.message }));
+  });
+});
+
+ipcMain.handle('macro:delete', async (_, name: string) => {
+  const macrosDir = path.join(__dirname, '../../python/macros');
+  // Try .json file
+  const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
+  try {
+    fs.unlinkSync(filePath);
+    return { success: true };
+  } catch {
+    return { success: false, error: '文件不存在' };
+  }
+});
+
+ipcMain.handle('macro:get-events', async (_, name: string) => {
+  const macrosDir = path.join(__dirname, '../../python/macros');
+  const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
+  try {
+    const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return { success: true, result: content };
+  } catch {
+    return { success: false, error: '读取失败' };
+  }
+});
+
+ipcMain.handle('macro:recording-status', () => {
+  return { recording: _macroRecording, process_alive: macroRecorderProcess !== null && !macroRecorderProcess.killed };
 });
 
 // --- Menu Action IPC ---
@@ -568,6 +1298,7 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     buildAppMenu();
     createWindow();
+    startApiServer();
 
     // 全局 F9 热键 — 在主进程直接控制引擎启停
     globalShortcut.register('F9', () => {
@@ -593,6 +1324,7 @@ if (!gotTheLock) {
 
 app.on('window-all-closed', () => {
   stopPythonEngine();
+  stopApiServer();
   if (process.platform !== 'darwin') app.quit();
 });
 

@@ -11,10 +11,15 @@ import {
   CanvasTransform,
   ScriptMeta,
   LogEntry,
+  FeatureDefinition,
+  ToolCallEntry,
+  MacroEvent,
+  MacroInfo,
+  RecordingState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { createFlowExecutor, ExecutionController } from './executor';
-import { generatePseudoCode } from '../utils/pseudoGenerator';
+import { generateText } from '../utils/textGenerator';
 
 const DEFAULT_SETTINGS = {
   default_delay: 0.5,
@@ -38,6 +43,7 @@ const DEFAULT_UI_STATE: UIState = {
   show_node_library: false,
   show_property_panel: false,
   show_log_panel: false,
+  show_tool_call_panel: false,
 };
 
 // --- Preset Templates ---
@@ -472,6 +478,14 @@ interface AppStore {
   // Internal executor controller
   _executor: ExecutionController | null;
 
+  // Feature registry (MCP tools)
+  featureList: FeatureDefinition[];
+  toolCallLog: ToolCallEntry[];
+
+  // Macro recording
+  recording: RecordingState;
+  macroList: MacroInfo[];
+
   // Actions - Script
   newScript: () => void;
   loadScript: (script: FlowScript) => void;
@@ -481,7 +495,7 @@ interface AppStore {
   saveAsTemplate: (name: string, description?: string) => void;
 
   // Actions - Nodes
-  addNode: (type: NodeType, x: number, y: number) => string;
+  addNode: (type: NodeType, x: number, y: number, params?: any) => string;
   updateNode: (id: string, updates: Partial<FlowNode>) => void;
   updateNodeParams: (id: string, params: any) => void;
   deleteNodes: (ids: string[]) => void;
@@ -523,6 +537,11 @@ interface AppStore {
   updateNodeStatus: (nodeId: string, status: FlowNode['status'], error?: string) => void;
   addLog: (entry: Omit<LogEntry, 'timestamp'>) => void;
   clearLog: () => void;
+  // Feature registry
+  fetchFeatures: () => Promise<void>;
+  callFeatureDirect: (featureName: string, displayName: string, params: Record<string, any>) => Promise<any>;
+  addToolCallEntry: (entry: Omit<ToolCallEntry, 'id' | 'timestamp'>) => void;
+  clearToolCallLog: () => void;
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
@@ -535,6 +554,14 @@ interface AppStore {
 
   // Auto layout
   autoLayout: () => void;
+
+  // Macro recording actions
+  startRecording: (name?: string) => Promise<void>;
+  stopRecording: () => Promise<void>;
+  listMacros: () => Promise<void>;
+  playMacro: (name: string) => Promise<void>;
+  deleteMacro: (name: string) => Promise<void>;
+  convertMacroToFlow: (name: string) => Promise<void>;
 }
 
 // History for undo/redo
@@ -562,6 +589,10 @@ export const useStore = create<AppStore>()(
     },
     clipboard: null,
     _executor: null,
+    featureList: [],
+    toolCallLog: [],
+    recording: { active: false, macroName: '' },
+    macroList: [],
 
     newScript: () => {
       const s = createTemplateScript('desktop-monitor');
@@ -612,7 +643,7 @@ export const useStore = create<AppStore>()(
       const json = JSON.stringify(script, null, 2);
       const pseudoCode = (() => {
         try {
-          return generatePseudoCode(script);
+          return generateText(script, 'pseudocode');
         } catch { return '# 伪代码生成失败'; }
       })();
 
@@ -664,7 +695,7 @@ export const useStore = create<AppStore>()(
       saveCustomTemplates(templates);
     },
 
-    addNode: (type, x, y) => {
+    addNode: (type, x, y, params) => {
       const def = NODE_DEFINITIONS[type];
       const id = nanoid();
       const node: FlowNode = {
@@ -672,7 +703,7 @@ export const useStore = create<AppStore>()(
         type,
         x,
         y,
-        params: { ...def.defaultParams },
+        params: params ? { ...def.defaultParams, ...params } : { ...def.defaultParams },
         status: 'idle',
       };
       set((state) => {
@@ -1028,6 +1059,54 @@ export const useStore = create<AppStore>()(
       set((state) => { state.execution.log = []; });
     },
 
+    fetchFeatures: async () => {
+      const api = (window as any).electronAPI;
+      if (api?.featuresList) {
+        try {
+          const features = await api.featuresList();
+          set((state) => { state.featureList = features; });
+        } catch { /* ignore */ }
+      }
+    },
+
+    callFeatureDirect: async (featureName, displayName, params) => {
+      const api = (window as any).electronAPI;
+      if (!api?.callFeature) {
+        get().addToolCallEntry({ feature_name: featureName, display_name: displayName, params, result: null, success: false, elapsed_ms: 0, source: 'direct' });
+        return { success: false };
+      }
+      const start = Date.now();
+      const result = await api.callFeature(featureName, params);
+      const elapsed = Date.now() - start;
+      get().addToolCallEntry({
+        feature_name: featureName,
+        display_name: displayName,
+        params,
+        result,
+        success: result?.success ?? false,
+        elapsed_ms: elapsed,
+        source: 'direct',
+      });
+      return result;
+    },
+
+    addToolCallEntry: (entry) => {
+      set((state) => {
+        state.toolCallLog.push({
+          ...entry,
+          id: nanoid(),
+          timestamp: new Date().toISOString(),
+        });
+        if (state.toolCallLog.length > 200) {
+          state.toolCallLog = state.toolCallLog.slice(-200);
+        }
+      });
+    },
+
+    clearToolCallLog: () => {
+      set((state) => { state.toolCallLog = []; });
+    },
+
     setUI: (updates) => {
       set((state) => { Object.assign(state.ui, updates); });
     },
@@ -1102,6 +1181,90 @@ export const useStore = create<AppStore>()(
       });
       pushHistory(get().script.nodes, get().script.edges);
     },
+
+    // --- Macro Recording Actions ---
+
+    startRecording: async (name?: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroStart) return;
+      const macroName = name || `录制_${new Date().toLocaleString('zh-CN').replace(/[/:]/g, '-')}`;
+      set((s) => { s.recording = { active: true, macroName }; });
+      get().addLog({ level: 'info', message: `🔴 开始录制宏: ${macroName}` });
+      const result = await api.macroStart({ name: macroName });
+      if (!result?.success) {
+        set((s) => { s.recording = { active: false, macroName: '' }; });
+        get().addLog({ level: 'error', message: `录制启动失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    stopRecording: async () => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroStop) return;
+      set((s) => { s.recording.active = false; });
+      get().addLog({ level: 'info', message: '⏹️ 停止录制...' });
+      const result = await api.macroStop();
+      if (result?.success) {
+        get().addLog({ level: 'info', message: `✅ 宏录制完成: ${result.events} 个事件` });
+        await get().listMacros();
+      } else {
+        get().addLog({ level: 'error', message: `录制停止失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    listMacros: async () => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroList) return;
+      try {
+        const result = await api.macroList();
+        if (result?.success) {
+          set((s) => { s.macroList = result.result || []; });
+        }
+      } catch { /* ignore */ }
+    },
+
+    playMacro: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroPlay) return;
+      get().addLog({ level: 'info', message: `▶️ 播放宏: ${name}` });
+      const result = await api.macroPlay(name);
+      if (result?.success) {
+        get().addLog({ level: 'info', message: '✅ 宏播放完成' });
+      } else {
+        get().addLog({ level: 'error', message: `宏播放失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    deleteMacro: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroDelete) return;
+      const result = await api.macroDelete(name);
+      if (result?.success) {
+        get().addLog({ level: 'info', message: `🗑️ 已删除宏: ${name}` });
+        await get().listMacros();
+      } else {
+        get().addLog({ level: 'error', message: `删除失败: ${result?.error || '未知错误'}` });
+      }
+    },
+
+    convertMacroToFlow: async (name: string) => {
+      const api = (window as any).electronAPI;
+      if (!api?.macroGetEvents) return;
+      get().addLog({ level: 'info', message: `🔄 转换宏 "${name}" 为流程图...` });
+      const result = await api.macroGetEvents(name);
+      if (!result?.success || !result?.result?.events) {
+        get().addLog({ level: 'error', message: `读取宏失败: ${result?.error || '未知错误'}` });
+        return;
+      }
+      try {
+        const { macroEventsToFlow } = await import('../utils/macroConverter');
+        const events: MacroEvent[] = result.result.events;
+        const script = macroEventsToFlow(events, name);
+        get().loadScript(script);
+        get().addLog({ level: 'info', message: `✅ 宏 "${name}" 已转换为 ${script.nodes.length - 2} 个操作节点的流程图` });
+      } catch (e: any) {
+        get().addLog({ level: 'error', message: `转换失败: ${e.message}` });
+      }
+    },
   }))
 );
 
@@ -1158,6 +1321,18 @@ useStore.subscribe((state) => {
 // --- Register persistent IPC listeners for engine messages ---
 // This ensures global F9 (from main process) can control engine and update store
 const _api = (window as any).electronAPI;
+
+// Expose store state for HTTP API bridge (/api/get-state)
+(window as any).__bridge_getState = () => {
+  const s = useStore.getState();
+  return {
+    nodes: s.script.nodes,
+    edges: s.script.edges,
+    meta: s.script.meta,
+    selection: s.ui.selection,
+    viewMode: s.ui.viewMode,
+  };
+};
 if (_api) {
   _api.onEngineMessage((msg: any) => {
     if (!msg || !msg.type) return;
@@ -1196,5 +1371,67 @@ if (_api) {
   _api.onEngineLog((msg: any) => {
     useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
   });
+
+  // API command bridge (from local HTTP server, controlled by Claude Code)
+  _api.onApiCommand((action: string, payload: any) => {
+    const store = useStore.getState();
+    switch (action) {
+      case 'loadScript':
+        if (payload?.nodes) store.loadScript(payload);
+        break;
+      case 'addNode':
+        if (payload?.type) store.addNode(payload.type, payload.x || 0, payload.y || 0, payload.params);
+        break;
+      case 'updateNode':
+        if (payload?.id && payload?.updates) store.updateNode(payload.id, payload.updates);
+        break;
+      case 'deleteNodes':
+        if (payload?.ids) store.deleteNodes(payload.ids);
+        break;
+      case 'addEdge':
+        if (payload?.from_node && payload?.to_node) store.addEdge(payload);
+        break;
+      case 'autoLayout':
+        store.autoLayout();
+        break;
+      case 'updateNodeParams':
+        if (payload?.id && payload?.params) store.updateNodeParams(payload.id, payload.params);
+        break;
+      case 'deleteEdges':
+        if (payload?.ids) store.deleteEdges(payload.ids);
+        break;
+      case 'newScript':
+        store.newScript();
+        break;
+      case 'setViewMode':
+        if (payload?.mode) store.setViewMode(payload.mode);
+        break;
+      case 'fitScreen':
+        store.fitToScreen();
+        break;
+      case 'getState':
+        _api.pushState({
+          nodes: store.script.nodes,
+          edges: store.script.edges,
+          meta: store.script.meta,
+          selection: store.ui.selection,
+          viewMode: store.ui.viewMode,
+        });
+        break;
+      default:
+        console.warn('[API] Unknown action:', action);
+    }
+  });
+
+  // 初始化时推送状态到主进程
+  setTimeout(() => {
+    const s = useStore.getState();
+    _api.pushState({
+      nodes: s.script.nodes,
+      edges: s.script.edges,
+      meta: s.script.meta,
+      selection: s.ui.selection,
+      viewMode: s.ui.viewMode,
+    });
+  }, 100);
 }
-// hmr-trigger
