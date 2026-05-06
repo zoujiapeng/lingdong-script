@@ -68,6 +68,11 @@
         "from": "tools",
         "to": "tools",
         "filter": ["**/*"]
+      },
+      {
+        "from": "templates",
+        "to": "templates",
+        "filter": ["**/*"]
       }
     ],
     "win": {

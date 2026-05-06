@@ -1361,6 +1361,16 @@ if (!gotTheLock) {
   });
 }
 
+// ── 全局未捕获异常处理 ──
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] uncaughtException:', error);
+  // 不退出进程，尽量保持 Electron 运行
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+});
+
 app.on('window-all-closed', () => {
   stopPythonEngine();
   apiServer?.close();

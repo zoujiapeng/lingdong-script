@@ -1,0 +1,163 @@
+{
+  "nodes": [
+    {
+      "id": "n_1",
+      "type": "start",
+      "x": 300,
+      "y": 0,
+      "params": {
+        "label": "开始"
+      },
+      "status": "idle"
+    },
+    {
+      "id": "n_2",
+      "type": "click",
+      "x": 300,
+      "y": 0,
+      "params": {
+        "x": 300,
+        "y": 400,
+        "method": "single",
+        "delay_after": 0.5
+      },
+      "status": "idle",
+      "label": "点击 300 400"
+    },
+    {
+      "id": "n_4",
+      "type": "wait",
+      "x": 300,
+      "y": 80,
+      "params": {
+        "wait_type": "time",
+        "duration": 2
+      },
+      "status": "idle",
+      "label": "等待 2"
+    },
+    {
+      "id": "n_6",
+      "type": "input_text",
+      "x": 300,
+      "y": 160,
+      "params": {
+        "text": "hello 500 600",
+        "x": 500,
+        "y": 600,
+        "click_before": true,
+        "clear_before": false,
+        "delay_after": 0.5
+      },
+      "status": "idle",
+      "label": "输入文本"
+    },
+    {
+      "id": "n_8",
+      "type": "screenshot",
+      "x": 300,
+      "y": 240,
+      "params": {},
+      "status": "idle",
+      "label": "截图"
+    },
+    {
+      "id": "n_10",
+      "type": "end",
+      "x": 300,
+      "y": 320,
+      "params": {
+        "label": "结束"
+      },
+      "status": "idle"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_3",
+      "from_node": "n_1",
+      "from_port": "output",
+      "to_node": "n_2",
+      "to_port": "input",
+      "label": "",
+      "animated": false
+    },
+    {
+      "id": "e_5",
+      "from_node": "n_2",
+      "from_port": "output",
+      "to_node": "n_4",
+      "to_port": "input",
+      "label": "",
+      "animated": false
+    },
+    {
+      "id": "e_7",
+      "from_node": "n_4",
+      "from_port": "output",
+      "to_node": "n_6",
+      "to_port": "input",
+      "label": "",
+      "animated": false
+    },
+    {
+      "id": "e_9",
+      "from_node": "n_6",
+      "from_port": "output",
+      "to_node": "n_8",
+      "to_port": "input",
+      "label": "",
+      "animated": false
+    },
+    {
+      "id": "e_11",
+      "from_node": "n_8",
+      "from_port": "output",
+      "to_node": "n_10",
+      "to_port": "input",
+      "label": "",
+      "animated": false
+    }
+  ],
+  "meta": {
+    "id": "738pplrBfw17-AjoYN3e9",
+    "name": "从 DSL 导入",
+    "description": "由 DSL 文本自动生成的流程图",
+    "created_at": "",
+    "updated_at": "",
+    "version": "1.0",
+    "author": "dsl_flow_converter"
+  },
+  "selection": {
+    "nodes": [],
+    "edges": []
+  },
+  "viewMode": "canvas",
+  "ui": {
+    "canvas_transform": {
+      "x": 66,
+      "y": 39.5,
+      "scale": 0.79
+    },
+    "selection": {
+      "nodes": [],
+      "edges": []
+    },
+    "connecting": {
+      "active": false
+    },
+    "sidebar_width": 260,
+    "property_width": 320,
+    "show_grid": true,
+    "snap_to_grid": true,
+    "grid_size": 20,
+    "dark_mode": false,
+    "viewMode": "canvas",
+    "panels_visible": false,
+    "show_node_library": false,
+    "show_property_panel": false,
+    "show_log_panel": false,
+    "show_tool_call_panel": false,
+    "show_ai_dialog": false
+  }
+}

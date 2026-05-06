@@ -24,6 +24,14 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'icons': ['lucide-react'],
+        },
+      },
+    },
   },
   server: {
     port: 5173,

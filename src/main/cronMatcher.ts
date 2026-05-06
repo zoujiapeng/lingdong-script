@@ -43,7 +43,7 @@ function matchField(value: number, pattern: string): boolean {
   return parseInt(pattern) === value;
 }
 
-export function matchCron(cronExpr: string, date: Date = new Date()): boolean {
+function matchCron(cronExpr: string, date: Date = new Date()): boolean {
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
 

@@ -76,6 +76,13 @@ export function startApiServer(deps: ApiDeps): http.Server {
             send(200, { ok: true });
             break;
 
+          case '/api/update-node-params':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            if (!payload.id || !payload.params) { send(400, { error: '缺少 id 或 params' }); return; }
+            deps.mainWindow.webContents.send('api-command', { action: 'updateNodeParams', payload: { id: payload.id, params: payload.params } });
+            send(200, { ok: true });
+            break;
+
           case '/api/delete-nodes':
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             deps.mainWindow.webContents.send('api-command', { action: 'deleteNodes', payload: { ids: payload.ids } });
@@ -92,6 +99,35 @@ export function startApiServer(deps: ApiDeps): http.Server {
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             deps.mainWindow.webContents.send('api-command', { action: 'deleteEdges', payload: { ids: payload.ids } });
             send(200, { ok: true });
+            break;
+
+          case '/api/check-params':
+            if (!payload.nodes) { send(400, { error: '缺少 nodes' }); return; }
+            try {
+              const results: any[] = payload.nodes.map((n: any) => {
+                const required: Record<string, string[]> = {
+                  click: ['x', 'y'],
+                  input_text: ['text'],
+                  wait: ['time'],
+                  image_click: ['targets'],
+                  click_text: ['text'],
+                  keyboard: ['keys'],
+                  swipe: ['start_x', 'start_y', 'end_x', 'end_y'],
+                  color_check: ['region', 'expected_color'],
+                  region_wait: ['region'],
+                  progress_wait: ['region'],
+                  variable_set: ['name', 'value'],
+                  tool_call: ['feature_name'],
+                  sub_script: ['script_id'],
+                };
+                const missing = (required[n.type] || []).filter((p: string) =>
+                  n.params?.[p] === undefined || n.params[p] === null || n.params[p] === '' ||
+                  (Array.isArray(n.params[p]) && n.params[p].length === 0)
+                );
+                return { id: n.id, type: n.type, missing, ok: missing.length === 0 };
+              });
+              send(200, { ok: true, results });
+            } catch (e: any) { send(500, { error: e.message }); }
             break;
 
           case '/api/auto-layout':
@@ -147,7 +183,21 @@ export function startApiServer(deps: ApiDeps): http.Server {
           case '/api/create-flow': {
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             (async () => {
-              if (payload.dsl) {
+              let dslText = payload.dsl;
+              if (!dslText && payload.description) {
+                const llmResult = await callLLM({
+                  apiKey: payload.apiKey || '',
+                  messages: [
+                    { role: 'system', content: '你是一个桌面自动化脚本生成器。根据用户描述生成 DSL 脚本。只输出 DSL，不要解释。' },
+                    { role: 'user', content: payload.description },
+                  ],
+                  apiBase: payload.apiBase,
+                  model: payload.model,
+                });
+                dslText = llmResult.choices?.[0]?.message?.content?.trim();
+                if (!dslText) { send(500, { error: 'DSL 生成为空' }); return; }
+              }
+              if (dslText) {
                 const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
                 const proc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
                 const out: Buffer[] = [];
@@ -161,7 +211,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
                   } catch (e: any) { send(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
                 });
                 proc.on('error', (e: Error) => send(500, { error: e.message }));
-                proc.stdin!.write(payload.dsl);
+                proc.stdin!.write(dslText);
                 proc.stdin!.end();
               } else {
                 send(400, { error: '需要 dsl 或 description' });
@@ -400,8 +450,9 @@ export function startApiServer(deps: ApiDeps): http.Server {
 
           case '/api/list-templates': {
             const templatesDir = path.join(getBaseDir(), 'templates');
+            if (!fs.existsSync(templatesDir)) { send(200, { ok: true, templates: [] }); return; }
             fs.readdir(templatesDir, (err: any, files: string[]) => {
-              if (err) { send(500, { error: '读取模板目录失败' }); return; }
+              if (err) { send(200, { ok: true, templates: [] }); return; }
               const templates = files.filter(f => f.endsWith('.flow')).map(f => {
                 const filePath = path.join(templatesDir, f);
                 let displayName = f.replace(/\.flow$/, '');
