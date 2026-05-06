@@ -31,6 +31,7 @@ except ImportError:
     HAS_REQUESTS = False
 
 BACKEND_URL = os.getenv("LOBSTER_URL", "http://localhost:7788")
+FRONTEND_URL = os.getenv("LINGDONG_URL", "http://127.0.0.1:5577")
 
 def _url(): return os.environ.get("LOBSTER_URL", BACKEND_URL)
 
@@ -270,6 +271,116 @@ def cmd_region_select(args):
         print(json.dumps({"cancelled": True}))
 
 
+def cmd_match(args):
+    """搜索前端模板（匹配前端 HTN 注册表 + 语义匹配）
+
+    调用 Electron 前端 :5577 的模板搜索引擎，返回结构化候选列表。
+    用法: lobster match <自然语言查询>
+
+    示例:
+      lobster match 打开记事本
+      lobster match 截图保存
+    """
+    query = " ".join(args) if args else ""
+    if not query:
+        print("用法: lobster match <自然语言查询>", file=sys.stderr)
+        sys.exit(1)
+    if not HAS_REQUESTS:
+        print("需要安装 requests 库: pip install requests", file=sys.stderr)
+        sys.exit(1)
+    try:
+        r = requests.post(f"{FRONTEND_URL}/api/search-templates",
+                          json={"query": query, "maxResults": 5}, timeout=10)
+        data = r.json()
+    except requests.exceptions.ConnectionError:
+        print(f"无法连接前端 ({FRONTEND_URL})。请确保灵动脚本已启动。", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"请求失败: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if data.get("error"):
+        print(f"错误: {data['error']}")
+        sys.exit(1)
+
+    auto = data.get("autoSelect")
+    htn = data.get("htn", [])
+    flat = data.get("flat", [])
+
+    if auto and flat:
+        best = flat[0]
+        print(f"⟐ 自动选择: {best.get('name', '?')} (评分: {best.get('score', '?')})")
+        print(f"   {best.get('description', '')}\n")
+
+    if htn:
+        print(f"📋 HTN 复合模板 ({len(htn)}):")
+        for t in htn:
+            print(f"  [{t['name']}]({t.get('score','?')}) {t.get('description','')}")
+            if t.get('steps'):
+                steps = ' → '.join(s.get('description','')[:40] for s in t['steps'][:4])
+                print(f"    ├ 步骤: {steps}{'…' if len(t['steps'])>4 else ''}")
+    else:
+        print("📋 HTN 复合模板: (无)")
+
+    if flat:
+        print(f"\n🏷️  语义匹配 ({len(flat)}):")
+        for t in flat:
+            print(f"  [{t['name']}]({t.get('score','?')}) {t.get('description','')}")
+    else:
+        print("\n🏷️  语义匹配: (无)")
+
+    if not htn and not flat and not auto:
+        print("未匹配到任何模板。尝试用 AI 生成新流程。")
+        sys.exit(1)
+
+
+def cmd_delegate(args):
+    """委托另一个 Claude Code 实例处理任务
+
+    打开新终端窗口启动另一个 Claude Code，向其发送任务并执行。
+    用法: lobster delegate <任务描述>
+
+    示例:
+      lobster delegate 分析当前项目结构
+      lobster delegate --model opus 检查所有测试用例
+    """
+    model = ""
+    rest = list(args)
+    if rest and rest[0] == "--model" and len(rest) >= 2:
+        model = rest[1]
+        rest = rest[2:]
+    prompt = " ".join(rest) if rest else ""
+    if not prompt:
+        print("用法: lobster delegate [--model <模型>] <任务描述>", file=sys.stderr)
+        sys.exit(1)
+
+    # Use the feature via direct call
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+    try:
+        from features.claude_code_features import claude_code_delegate
+        result = claude_code_delegate(prompt=prompt, model=model, wait=False)
+        if result.get("success"):
+            print(f"✓ {result['message']}")
+        else:
+            print(f"✗ {result.get('error', '未知错误')}", file=sys.stderr)
+            sys.exit(1)
+    except ImportError:
+        # Fallback: use subprocess directly
+        import subprocess, tempfile
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+        tmp.write(prompt)
+        tmp.close()
+        claude = "npx.cmd claude" if sys.platform == "win32" else "npx claude"
+        shell_cmd = f'type "{tmp.name}" | {claude}'
+        if model:
+            shell_cmd += f" --model {model}"
+        subprocess.Popen(
+            ["cmd", "/k", shell_cmd] if sys.platform == "win32" else ["sh", "-c", shell_cmd],
+            creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+        )
+        print(f"✓ 已启动 Claude Code 新实例")
+
+
 def cmd_exec(args):
     """直接执行 DSL (无需后端, 直接调用执行引擎)
 
@@ -327,6 +438,8 @@ COMMANDS = {
     "run": cmd_run, "run-file": cmd_run_file, "run-sync": cmd_run_sync,
     "exec": cmd_exec,
     "parse": cmd_parse, "health": cmd_health, "status": cmd_status,
+    "match": cmd_match,
+    "delegate": cmd_delegate,
     "pause": cmd_pause, "resume": cmd_resume, "stop": cmd_stop,
     "logs": cmd_logs, "restart": cmd_restart,
     "call": cmd_call, "list": cmd_list, "info": cmd_info, "test": cmd_test,
@@ -354,6 +467,13 @@ HELP = """Lobster CLI v2 - 低Token AI自动化执行系统
   status                    查看执行器状态
   pause / resume / stop     控制执行器
   logs [n]                  查看执行日志
+
+模板:
+  match <query>             搜索前端模板（HTN + 语义匹配）
+
+高级:
+  delegate <prompt>         打开新终端启动另一个 Claude Code 实例
+  delegate --model opus <p> 指定模型启动委托实例
 
 功能:
   call <name> [key=val...]  调用注册功能

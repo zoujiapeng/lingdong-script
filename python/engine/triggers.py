@@ -49,6 +49,8 @@ class TriggerInstance:
     created_at: float = 0.0
     last_fired: float = 0.0
     recurring: bool = False  # 触发后是否重新布防（用于定时器）
+    guard_conditions: list = field(default_factory=list)  # 守卫条件规则列表
+    guard_operator: str = "AND"  # AND | OR
     _thread: Optional[threading.Thread] = None
     _stop_event: threading.Event = field(default_factory=threading.Event)
 
@@ -110,7 +112,9 @@ class TriggerEngine:
 
     def register(self, spec_name: str, config: dict,
                  handler_actions: list,
-                 recurring: bool = False) -> TriggerInstance:
+                 recurring: bool = False,
+                 guard_conditions: list = None,
+                 guard_operator: str = "AND") -> TriggerInstance:
         """注册一个触发器实例并启动监控"""
         spec = _TRIGGER_TYPES.get(spec_name)
         if not spec:
@@ -124,6 +128,8 @@ class TriggerEngine:
             handler_actions=handler_actions,
             created_at=time.time(),
             recurring=recurring,
+            guard_conditions=guard_conditions or [],
+            guard_operator=guard_operator,
         )
         inst._stop_event = threading.Event()
 
@@ -152,6 +158,18 @@ class TriggerEngine:
             try:
                 fired = watcher_fn(inst.config, inst._stop_event)
                 if fired:
+                    # 检查守卫条件
+                    if inst.guard_conditions:
+                        try:
+                            from engine.condition_evaluator import evaluate
+                            if not evaluate(inst.guard_conditions, inst.guard_operator):
+                                logger.info(f"[trigger] {inst.id} 守卫条件未通过，跳过执行")
+                                if inst.recurring:
+                                    continue
+                                inst.status = "stopped"
+                                break
+                        except Exception as e:
+                            logger.warning(f"[trigger] 守卫条件评估失败: {e}，按通过处理")
                     inst.fired_count += 1
                     inst.last_fired = time.time()
                     inst.status = "fired"
@@ -291,7 +309,7 @@ def _watch_process_exit(config: dict, stop: threading.Event) -> bool:
         import subprocess
         while not stop.is_set():
             try:
-                out = subprocess.check_output(f"tasklist /fi \"IMAGENAME eq {name}\"", shell=True, text=True)
+                out = subprocess.check_output(["tasklist", "/fi", f"IMAGENAME eq {name}"], shell=False, text=True)
                 if name not in out or "No tasks" in out:
                     return True
             except Exception:
@@ -319,7 +337,7 @@ def _watch_process_start(config: dict, stop: threading.Event) -> bool:
         while not stop.is_set():
             import subprocess
             try:
-                out = subprocess.check_output(f"tasklist /fi \"IMAGENAME eq {name}\"", shell=True, text=True)
+                out = subprocess.check_output(["tasklist", "/fi", f"IMAGENAME eq {name}"], shell=False, text=True)
                 if name in out and "No tasks" not in out:
                     return True
             except Exception:

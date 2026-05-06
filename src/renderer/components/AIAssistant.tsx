@@ -1,38 +1,14 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useStore } from '../store';
 import { parsePseudoToFlow } from '../utils/pseudoParser';
-import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings } from 'lucide-react';
-
-const SYSTEM_PROMPT = `你是一个桌面自动化脚本生成器。
-将用户需求转换为灵动脚本伪代码，返回JSON格式：{"pseudocode":"...","explanation":"..."}
-
-## 关键词（必须使用中文关键词）
-点击 (x,y) [双击|右击|中键] — 鼠标点击
-点击图片 "路径" [相似度=N] [超时=N] — 图片识别点击
-输入 "文本" [位置 (x,y)] — 输入文本
-按键 键1+键2 — 键盘操作
-等待 秒数 — 等待时间
-等待图片 "路径" [超时=N] — 等待图片出现
-等待窗口 "标题" [超时=N] — 等待窗口出现
-滑动 (x1,y1) 到 (x2,y2) — 滑动操作
-截图 — 全屏截图
-$变量名="值" — 设置变量
-运行 "脚本名" — 调用子脚本
-
-## 控制流
-如果 条件: ... 否则: ... — 条件分支
-循环 N: — 计数循环
-无限循环: — 无限循环
-跳出 — 跳出循环
-
-## 条件
-真 — 始终为真
-图片存在 "路径" [相似度=N] — 检测图片
-窗口存在 "标题" — 检测窗口
-变量等于 变量名 "值" — 变量比较
-
-## 示例
-{"pseudocode":"按键 win+r\\n等待 0.5\\n输入 \\"notepad\\"\\n按键 enter\\n等待 1\\n输入 \\"hello\\"","explanation":"打开运行→启动记事本→输入文本"}`;
+import { ScoredResult } from '../utils/templateRegistry';
+import { matchSemantic, SemanticMatchResult } from '../utils/semanticMatcher';
+import { htnPlanner } from '../utils/htnPlanner';
+import { htnRegistry } from '../utils/htnRegistry';
+import { promptBuilder } from '../utils/promptBuilder';
+import { TemplateSelector } from './common/TemplateSelector';
+import { Sparkles, Play, AlertTriangle, CheckCircle, Loader2, Eye, Settings, Clock } from 'lucide-react';
+import { isScheduleIntent, parseQuickSchedule } from '../utils/quickScheduleParser';
 
 export function AIAssistant() {
   const [input, setInput] = useState('');
@@ -40,6 +16,8 @@ export function AIAssistant() {
   const [result, setResult] = useState<{ explanation: string; pseudocode: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [execStatus, setExecStatus] = useState<string | null>(null);
+  const [showTemplateSelector, setShowTemplateSelector] = useState(false);
+  const [templateCandidates, setTemplateCandidates] = useState<SemanticMatchResult | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-focus textarea
@@ -47,25 +25,164 @@ export function AIAssistant() {
     textareaRef.current?.focus();
   }, []);
 
-  const doGenerate = useCallback(async (text: string) => {
+  const doGenerate = useCallback(async (text: string, skipOffline?: boolean) => {
     if (!text.trim()) return;
 
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setExecStatus(null);
+    setShowTemplateSelector(false);
+    setTemplateCandidates(null);
+
+    // ── Phase 0: Quick Schedule (offline, no LLM) ──
+    if (isScheduleIntent(text)) {
+      const parsed = parseQuickSchedule(text);
+      if (parsed.confidence >= 70 && parsed.triggers.length > 0) {
+        try {
+          const entry: any = {
+            name: parsed.name,
+            triggers: parsed.triggers,
+            template_id: parsed.template_id || '__quick_schedule__',
+            template_name: '',
+            enabled: true,
+          };
+          if (parsed.notify_message) entry.notify_message = parsed.notify_message;
+          if (parsed.launch_target) entry.launch_target = parsed.launch_target;
+
+          await (window as any).electronAPI?.scheduleCreate(entry);
+
+          setResult({
+            explanation: `已创建定时任务「${parsed.name}」`,
+            pseudocode: `定时: ${parsed.triggers.map((t: any) => t.cron_expr || `每${t.interval_seconds}s`).join(', ')}` +
+              (parsed.notify_message ? `\n提醒: ${parsed.notify_message}` : '') +
+              (parsed.launch_target ? `\n打开: ${parsed.launch_target}` : ''),
+          });
+          setExecStatus(`✅ 已创建定时任务: ${parsed.name}`);
+          setLoading(false);
+          return;
+        } catch (e: any) {
+          setError(`创建调度失败: ${e.message}`);
+          setLoading(false);
+          return;
+        }
+      }
+      if (parsed.confidence >= 50 && parsed.triggers.length > 0) {
+        // 低置信度 — 仍然创建但提示用户确认
+        try {
+          const entry: any = {
+            name: parsed.name,
+            triggers: parsed.triggers,
+            template_id: parsed.template_id || '__quick_schedule__',
+            template_name: '', enabled: true,
+          };
+          if (parsed.notify_message) entry.notify_message = parsed.notify_message;
+          if (parsed.launch_target) entry.launch_target = parsed.launch_target;
+          await (window as any).electronAPI?.scheduleCreate(entry);
+        } catch {}
+        setResult({
+          explanation: `已创建定时，建议到设置里检查时间是否正确（置信度 ${parsed.confidence}%）`,
+          pseudocode: `定时: ${parsed.triggers.map((t: any) => t.cron_expr || `每${t.interval_seconds}s`).join(', ')}` +
+            (parsed.notify_message ? `\n提醒: ${parsed.notify_message}` : '') +
+            (parsed.launch_target ? `\n打开: ${parsed.launch_target}` : ''),
+        });
+        setExecStatus(`⚠️ 已创建: ${parsed.name}（请在设置中确认时间）`);
+        setLoading(false);
+        return;
+      }
+      // 置信度过低，回退正常流程
+    }
+
+    // ── Phase 1: HTN Planner (offline, structured decomposition) ──
+    if (!skipOffline) {
+      const planResult = htnPlanner.plan(text);
+      if (planResult && planResult.score >= 90) {
+      try {
+        const script = parsePseudoToFlow(planResult.pseudocode);
+        if (script && script.nodes && script.nodes.length > 0) {
+          script.meta = {
+            ...script.meta,
+            id: useStore.getState().script.meta.id,
+            name: planResult.rootName,
+          };
+          useStore.getState().loadScript(script);
+          setExecStatus(`已匹配模板: ${planResult.rootName}（离线匹配）`);
+        }
+      } catch {}
+      setResult({
+        explanation: planResult.explanation,
+        pseudocode: planResult.pseudocode,
+      });
+      setLoading(false);
+      return;
+    }
+
+    if (planResult && planResult.score >= 50) {
+      try {
+        const script = parsePseudoToFlow(planResult.pseudocode);
+        if (script && script.nodes && script.nodes.length > 0) {
+          script.meta = {
+            ...script.meta,
+            id: useStore.getState().script.meta.id,
+            name: planResult.rootName,
+          };
+          useStore.getState().loadScript(script);
+          setExecStatus(`推荐模板: ${planResult.rootName}（匹配度 ${Math.round(planResult.score)}%）`);
+        }
+      } catch {}
+      setResult({
+        explanation: planResult.explanation,
+        pseudocode: planResult.pseudocode,
+      });
+      setLoading(false);
+      return;
+    }
+    } // end Phase 1 skipOffline
+
+    // ── Phase 2: Template Registry Matching (offline, flat) ──
+    if (!skipOffline) {
+      const matchResult = matchSemantic(text);
+      if (matchResult.autoSelect && matchResult.best) {
+      const entry = matchResult.best.template;
+      if (entry.flowScript) {
+        useStore.getState().loadScript(entry.flowScript);
+        setExecStatus(`已自动匹配模板: ${entry.name}`);
+      }
+      setResult({
+        explanation: `匹配到模板: ${entry.name}`,
+        pseudocode: `调用模板: ${entry.name}`,
+      });
+      setLoading(false);
+      return;
+    }
+
+    if (matchResult.candidates.length > 0) {
+      setTemplateCandidates(matchResult);
+      setShowTemplateSelector(true);
+      setLoading(false);
+      return;
+    }
+    } // end Phase 2 skipOffline
+
+    // ── Phase 3: AI Generation (online) ──
     let apiKey = (window as any).__DEEPSEEK_KEY__;
     if (!apiKey) {
       try { apiKey = localStorage.getItem('lingdong-deepseek-key') || ''; } catch {}
     }
     if (!apiKey) {
       setError('请先在设置页面配置 DeepSeek API 密钥');
+      setLoading(false);
       return;
     }
 
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    setExecStatus(null);
-
+    const systemPrompt = promptBuilder.build({
+      language: 'chinese',
+      query: text,
+      maxTemplates: 8,
+      maxExamples: 3,
+    });
     const messages = [
-      { role: 'system' as const, content: SYSTEM_PROMPT },
+      { role: 'system' as const, content: systemPrompt },
       { role: 'user' as const, content: text },
     ];
 
@@ -106,7 +223,6 @@ export function AIAssistant() {
       const parsed = JSON.parse(content);
       if (!parsed.pseudocode) throw new Error('未能生成伪代码');
 
-      // Show result
       setResult({
         explanation: parsed.explanation || '',
         pseudocode: parsed.pseudocode,
@@ -122,12 +238,60 @@ export function AIAssistant() {
         };
         useStore.getState().loadScript(script);
       } catch {}
+
+      // Post-generation template check
+      const postMatch = matchSemantic(text);
+      if (postMatch.autoSelect && postMatch.best) {
+        const entry = postMatch.best.template;
+        if (entry.flowScript) {
+          useStore.getState().loadScript(entry.flowScript);
+          setExecStatus(`已自动匹配模板: ${entry.name}`);
+        }
+      } else if (postMatch.candidates.length > 0 && !postMatch.autoSelect) {
+        setTemplateCandidates(postMatch);
+        setShowTemplateSelector(true);
+      } else {
+        // ── Auto-register new pattern ──
+        // AI generated a flow that no existing template covers
+        try {
+          const script = parsePseudoToFlow(parsed.pseudocode);
+          if (script?.nodes) {
+            const nodeId = htnRegistry.registerFromFlowNodes(text, script.nodes);
+            if (nodeId) {
+              setExecStatus(`已记录新流程模式（可在类似需求时自动匹配）`);
+            }
+          }
+        } catch {}
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const handleTemplateSelect = useCallback((result: ScoredResult) => {
+    setShowTemplateSelector(false);
+    setTemplateCandidates(null);
+    const entry = result.template;
+    if (entry.flowScript) {
+      useStore.getState().loadScript(entry.flowScript);
+      setExecStatus(`已加载模板: ${entry.name}`);
+      setTimeout(() => {
+        useStore.getState().startExecution();
+        setExecStatus(`正在执行: ${entry.name}`);
+      }, 300);
+    }
+  }, []);
+
+  const handleGenerateNew = useCallback(() => {
+    setShowTemplateSelector(false);
+    setTemplateCandidates(null);
+    // Skip offline matching, go directly to AI generation
+    if (input.trim()) {
+      doGenerate(input, true);
+    }
+  }, [input, doGenerate]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -262,6 +426,18 @@ export function AIAssistant() {
           </div>
         )}
       </div>
+
+      {/* Template Selector Dialog */}
+      {showTemplateSelector && templateCandidates && (
+        <TemplateSelector
+          query={templateCandidates.query}
+          candidates={templateCandidates.candidates}
+          loading={false}
+          onSelect={handleTemplateSelect}
+          onGenerate={handleGenerateNew}
+          onCancel={() => setShowTemplateSelector(false)}
+        />
+      )}
     </div>
   );
 }

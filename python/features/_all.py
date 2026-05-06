@@ -1,33 +1,40 @@
 """
-单一入口：导入所有功能模块（触发 @feature() 装饰器注册）。
-所有需要全量注册的文件（server.py / mcp/server.py / tests）应仅引用此模块，
-避免同样 20+ 行 import 在 4 个文件中重复。
+单一入口：声明所有功能模块（但延迟加载）。
+导入此模块不会阻塞 2-8 秒 — 模块在首次访问 FeatureRegistry 时按需加载。
+所有需要全量注册的文件应仅引用此模块。
 """
-import features.action_features
-import features.perception_features
-import features.ai_debug_features
-import features.system_features
-import features.dsl_features
-import features.input_features
-import features.window_features
-import features.system_control_features
-import features.clipboard_features
-import features.network_features
-import features.timer_features
-import features.filedialog_features
-import features.a11y_features
-import features.macro_features
-import features.multimedia_features
-import features.fusion_features
-import features.persistence_features
-import features.healing_features
-import features.trigger_features
-import features.ai_plan_features
-import features.plugin_features
-import features.browser_features
-import features.state
-import features.image_click_features
-import features.image_search_features
-import features.variable_features
-import features.vlm_features
-import features.canvas_features
+from features.registry import registry
+
+_FEATURE_MODULES = [
+    "features.action_features",
+    "features.perception_features",
+    "features.ai_debug_features",
+    "features.system_features",
+    "features.dsl_features",
+    "features.input_features",
+    "features.window_features",
+    "features.system_control_features",
+    "features.clipboard_features",
+    "features.network_features",
+    "features.timer_features",
+    "features.filedialog_features",
+    "features.a11y_features",
+    "features.macro_features",
+    "features.multimedia_features",
+    "features.fusion_features",
+    "features.persistence_features",
+    "features.healing_features",
+    "features.trigger_features",
+    "features.ai_plan_features",
+    "features.plugin_features",
+    "features.browser_features",
+    "features.state",
+    "features.image_click_features",
+    "features.image_search_features",
+    "features.variable_features",
+    "features.vlm_features",
+    "features.canvas_features",
+    "features.claude_code_features",
+    "features.scheduler_features",
+]
+registry.set_lazy_modules(_FEATURE_MODULES)

@@ -1,12 +1,11 @@
-# 画板绘画工作流 v3
-# 用途: 打开 Windows 画图 → 最大化 → 检测画布 → 画横线 → 截图验证
-# 全部使用 Lobster 内置 DSL 能力
-#
-# 改进点:
-#   - WAITSCREEN/SCREENSTABLE 替代硬编码 WAIT
-#   - FOCUS 确保画板在前台
-#   - DRAG 坐标内联算术 ({canvas_y2 - 50})
-#   - SCREENSHOT 执行后截图验证
+# ---
+# name: 画板绘画
+# aliases: ["画图", "绘画", "paint", "mspaint"]
+# tags: ["system", "drawing", "canvas"]
+# keywords: ["画图", "画板", "绘画", "画布", "横线", "mspaint"]
+# category: system
+# ---
+# 打开 Windows 画图 → 最大化 → 检测画布 → 画横线 → 截图验证
 
 LAUNCH mspaint.exe
 WAIT 1

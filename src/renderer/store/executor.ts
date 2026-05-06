@@ -20,16 +20,19 @@ interface ExecCallbacks {
 
 export function createFlowExecutor(
   script: FlowScript,
-  callbacks: ExecCallbacks
+  callbacks: ExecCallbacks,
+  scripts?: Record<string, FlowScript>
 ): ExecutionController {
   let _paused = false;
   let _stopped = false;
   let resumeResolve: (() => void) | null = null;
+  let _subFlowDepth = 0;
+  const MAX_SUB_FLOW_DEPTH = 10;
 
-  const nodeMap = new Map<string, FlowNode>();
+  let nodeMap = new Map<string, FlowNode>();
   script.nodes.forEach((n) => nodeMap.set(n.id, n));
 
-  const edgesByFrom = new Map<string, FlowEdge[]>();
+  let edgesByFrom = new Map<string, FlowEdge[]>();
   script.edges.forEach((e) => {
     const arr = edgesByFrom.get(e.from_node) || [];
     arr.push(e);
@@ -256,11 +259,73 @@ export function createFlowExecutor(
           break;
         }
 
-        case 'sub_script':
-          log('info', `调用子脚本: ${params.script_name || '未设置'}`, nodeId);
-          await delay(200);
+        case 'sub_script': {
+          const subId = params.script_id;
+          const subName = params.script_name || '未设置';
+          log('info', `调用子脚本: ${subName}`, nodeId);
+
+          if (subId && scripts && scripts[subId]) {
+            if (_subFlowDepth >= MAX_SUB_FLOW_DEPTH) {
+              log('error', `子脚本调用深度超过限制 (${MAX_SUB_FLOW_DEPTH})`, nodeId);
+              result = 'output';
+              break;
+            }
+
+            _subFlowDepth++;
+            try {
+              const subScript = scripts[subId];
+              const subNodeMap = new Map<string, FlowNode>();
+              subScript.nodes.forEach((n) => subNodeMap.set(n.id, n));
+
+              const subEdgesByFrom = new Map<string, FlowEdge[]>();
+              subScript.edges.forEach((e) => {
+                const arr = subEdgesByFrom.get(e.from_node) || [];
+                arr.push(e);
+                subEdgesByFrom.set(e.from_node, arr);
+              });
+
+              const subStartNodes = subScript.nodes.filter((n) => n.type === 'start');
+              if (subStartNodes.length > 0) {
+                // Follow sub-flow's edges using the parent's flow control
+                let subCurrent = subStartNodes[0].id;
+                while (subCurrent && !_stopped) {
+                  await checkPauseStop();
+                  // Temporarily swap nodeMap and edgesByFrom for sub-flow execution
+                  const origNodeMap = nodeMap;
+                  const origEdgesByFrom = edgesByFrom;
+                  nodeMap = subNodeMap;
+                  edgesByFrom = subEdgesByFrom;
+
+                  const subOutputPort = await executeNode(subCurrent);
+
+                  // Restore parent maps
+                  nodeMap = origNodeMap;
+                  edgesByFrom = origEdgesByFrom;
+
+                  if (!subOutputPort) break;
+                  let nextEdges = subEdgesByFrom.get(subCurrent)?.filter(
+                    (e) => e.from_port === subOutputPort || (subOutputPort === 'output' && !e.from_port)
+                  ) || [];
+                  if (nextEdges.length === 0) {
+                    nextEdges = subEdgesByFrom.get(subCurrent)?.filter(
+                      (e) => e.from_port === 'output' || !e.from_port
+                    ) || [];
+                  }
+                  if (nextEdges.length === 0) break;
+                  subCurrent = nextEdges[0].to_node;
+                }
+              }
+            } finally {
+              _subFlowDepth--;
+            }
+            log('info', `子脚本执行完毕: ${subName}`, nodeId);
+          } else {
+            log('warn', `子脚本未找到: ${subName} (${subId || '无ID'})`, nodeId);
+            await delay(200);
+          }
           result = 'output';
           break;
+        }
 
         case 'screenshot':
           log('info', '截图（模拟: 已保存）', nodeId);

@@ -34,11 +34,16 @@ function getAllCategories() {
 
 const ALL_CATEGORIES = getAllCategories();
 
-export function NodeLibrary() {
+export const NodeLibrary = React.memo(function NodeLibrary() {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('all');
-  const { addNode, updateNodeParams, ui, featureList } = useStore();
-  const forcedVisible = ui.show_node_library || ui.panels_visible;
+  const addNode = useStore(s => s.addNode);
+  const updateNodeParams = useStore(s => s.updateNodeParams);
+  const featureList = useStore(s => s.featureList);
+  const showNodeLibrary = useStore(s => s.ui.show_node_library);
+  const panelsVisible = useStore(s => s.ui.panels_visible);
+  const canvas_transform = useStore(s => s.ui.canvas_transform);
+  const forcedVisible = showNodeLibrary || panelsVisible;
 
   // Build merged list: native nodes + feature-derived items
   const allItems = useMemo(() => {
@@ -87,7 +92,6 @@ export function NodeLibrary() {
   };
 
   const handleDoubleClick = (item: typeof allItems[0]) => {
-    const { canvas_transform } = ui;
     const canvasEl = document.querySelector('.flow-canvas-wrapper') as HTMLElement;
     if (!canvasEl) return;
     const rect = canvasEl.getBoundingClientRect();
@@ -217,4 +221,4 @@ export function NodeLibrary() {
       </div>
     </div>
   );
-}
+});

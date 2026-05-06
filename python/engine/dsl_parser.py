@@ -65,6 +65,26 @@ class NodeType(str, Enum):
     REBOOT = "REBOOT"
     LOGOFF = "LOGOFF"
     HIBERNATE = "HIBERNATE"
+    # 扩展系统指令
+    LOCK = "LOCK"
+    VOLUME = "VOLUME"
+    MUTE = "MUTE"
+    KILL = "KILL"
+    WAIT_PROCESS = "WAIT_PROCESS"
+    WAIT_EXIT = "WAIT_EXIT"
+    WALLPAPER = "WALLPAPER"
+    DISPLAY_OFF = "DISPLAY_OFF"
+    SLEEP = "SLEEP"
+    DESKTOP = "DESKTOP"
+    BATTERY = "BATTERY"
+    EMPTY_BIN = "EMPTY_BIN"
+    BRIGHTNESS = "BRIGHTNESS"
+    CLIPBOARD_SET = "CLIPBOARD_SET"
+    CLIPBOARD_GET = "CLIPBOARD_GET"
+    MINIMIZE = "MINIMIZE"
+    MAXIMIZE = "MAXIMIZE"
+    CLOSE_WINDOW = "CLOSE_WINDOW"
+    RESIZE_WINDOW = "RESIZE_WINDOW"
     # Registry 关键字回退（无对应枚举成员时）
     REGISTRY_FEATURE = "REGISTRY_FEATURE"
 
@@ -109,6 +129,26 @@ _SIMPLE_NODE_TYPES: dict[str, NodeType] = {
     "LOGOFF": NodeType.LOGOFF,
     "HIBERNATE": NodeType.HIBERNATE,
     "RUN": NodeType.RUN,
+    # 扩展系统指令
+    "LOCK": NodeType.LOCK,
+    "VOLUME": NodeType.VOLUME,
+    "MUTE": NodeType.MUTE,
+    "KILL": NodeType.KILL,
+    "WAIT_PROCESS": NodeType.WAIT_PROCESS,
+    "WAIT_EXIT": NodeType.WAIT_EXIT,
+    "WALLPAPER": NodeType.WALLPAPER,
+    "DISPLAY_OFF": NodeType.DISPLAY_OFF,
+    "SLEEP": NodeType.SLEEP,
+    "DESKTOP": NodeType.DESKTOP,
+    "BATTERY": NodeType.BATTERY,
+    "EMPTY_BIN": NodeType.EMPTY_BIN,
+    "BRIGHTNESS": NodeType.BRIGHTNESS,
+    "CLIPBOARD_SET": NodeType.CLIPBOARD_SET,
+    "CLIPBOARD_GET": NodeType.CLIPBOARD_GET,
+    "MINIMIZE": NodeType.MINIMIZE,
+    "MAXIMIZE": NodeType.MAXIMIZE,
+    "CLOSE_WINDOW": NodeType.CLOSE_WINDOW,
+    "RESIZE_WINDOW": NodeType.RESIZE_WINDOW,
 }
 
 @dataclass
@@ -174,7 +214,13 @@ class DSLParser:
                 "PROGRESS_WAIT", "PROGRESS_INIT", "PROGRESS_RELOCATE", "IMAGE_CLICK",
                 "SWIPE", "SCROLL", "DELAY", "WHILE", "UNTIL", "ELIF", "ELSEIF",
                 "POPUP_CLOSE", "COLOR_CHECK", "REGION_WAIT", "SCENE_CONDITION", "VLM_CONDITION",
-                "FINDCANVAS", "DRAG", "VLM_ANALYZE", "INPUT_TEXT", "CLICK_IMAGE", "CLICK_TEXT", "SHUTDOWN", "REBOOT", "LOGOFF", "HIBERNATE"}
+                "FINDCANVAS", "DRAG", "VLM_ANALYZE", "INPUT_TEXT", "CLICK_IMAGE", "CLICK_TEXT",
+                "SHUTDOWN", "REBOOT", "LOGOFF", "HIBERNATE",
+                # 扩展系统指令
+                "LOCK", "VOLUME", "MUTE", "KILL", "WAIT_PROCESS", "WAIT_EXIT",
+                "WALLPAPER", "DISPLAY_OFF", "SLEEP", "DESKTOP", "BATTERY",
+                "EMPTY_BIN", "BRIGHTNESS", "CLIPBOARD_SET", "CLIPBOARD_GET",
+                "MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW"}
     _registry_loaded = False
 
     @classmethod

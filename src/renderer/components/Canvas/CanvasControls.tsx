@@ -4,13 +4,16 @@ import {
   Copy, Clipboard, Scissors, Trash2, Lock, Unlock
 } from 'lucide-react';
 import { useStore } from '../../store';
+import { getNodeDimensions } from '../../utils/constants';
 
 // ============================================================
 // CANVAS CONTROLS
 // ============================================================
-export function CanvasControls() {
-  const { ui, setUI, fitToScreen } = useStore();
-  const { show_grid, snap_to_grid } = ui;
+export const CanvasControls = React.memo(function CanvasControls() {
+  const showGrid = useStore(s => s.ui.show_grid);
+  const snapToGrid = useStore(s => s.ui.snap_to_grid);
+  const fitToScreen = useStore(s => s.fitToScreen);
+  const setUI = useStore(s => s.setUI);
 
   return (
     <div className="canvas-controls">
@@ -20,32 +23,33 @@ export function CanvasControls() {
         </button>
         <button
           className="canvas-btn"
-          onClick={() => setUI({ show_grid: !show_grid })}
+          onClick={() => setUI({ show_grid: !showGrid })}
           title="显示/隐藏网格"
-          style={{ color: show_grid ? 'var(--accent)' : undefined }}
+          style={{ color: showGrid ? 'var(--accent)' : undefined }}
         >
           <Grid size={14} />
         </button>
         <button
           className="canvas-btn"
-          onClick={() => setUI({ snap_to_grid: !snap_to_grid })}
+          onClick={() => setUI({ snap_to_grid: !snapToGrid })}
           title="网格吸附"
-          style={{ color: snap_to_grid ? 'var(--accent)' : undefined }}
+          style={{ color: snapToGrid ? 'var(--accent)' : undefined }}
         >
           <Magnet size={14} />
         </button>
       </div>
     </div>
   );
-}
+});
 
 // ============================================================
 // MINI MAP
 // ============================================================
-export function MiniMap() {
-  const { script, ui, setCanvasTransform } = useStore();
-  const { nodes } = script;
-  const { canvas_transform, dragging_node } = ui;
+export const MiniMap = React.memo(function MiniMap() {
+  const nodes = useStore(s => s.script.nodes);
+  const canvas_transform = useStore(s => s.ui.canvas_transform);
+  const dragging_node = useStore(s => s.ui.dragging_node);
+  const setCanvasTransform = useStore(s => s.setCanvasTransform);
   const [visible, setVisible] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -79,8 +83,8 @@ export function MiniMap() {
   // Compute bounding box of all nodes
   const minX = Math.min(...nodes.map((n) => n.x));
   const minY = Math.min(...nodes.map((n) => n.y));
-  const maxX = Math.max(...nodes.map((n) => n.x + 220));
-  const maxY = Math.max(...nodes.map((n) => n.y + 80));
+  const maxX = Math.max(...nodes.map((n) => n.x + getNodeDimensions(n.type).w));
+  const maxY = Math.max(...nodes.map((n) => n.y + getNodeDimensions(n.type).h));
   const bW = maxX - minX || 1;
   const bH = maxY - minY || 1;
 
@@ -107,9 +111,9 @@ export function MiniMap() {
     <div className={`minimap ${visible ? 'minimap-visible' : ''}`}>
       <svg width={MINIMAP_W} height={MINIMAP_H}>
         {nodes.map((n) => {
-          const isStartEnd = n.type === 'start' || n.type === 'end';
-          const nw = (isStartEnd ? 160 : 220) * scale;
-          const nh = (isStartEnd ? 56 : 80) * scale;
+          const nd = getNodeDimensions(n.type);
+          const nw = nd.w * scale;
+          const nh = nd.h * scale;
           const pos = toMini(n.x, n.y);
           const color = COLORS[n.type] || COLORS.default;
           return (
@@ -119,7 +123,7 @@ export function MiniMap() {
               y={pos.y}
               width={Math.max(nw, 4)}
               height={Math.max(nh, 3)}
-              rx={isStartEnd ? 8 : 3}
+              rx={(n.type === 'start' || n.type === 'end') ? 8 : 3}
               fill={color}
               opacity={0.7}
             />
@@ -139,7 +143,7 @@ export function MiniMap() {
       </svg>
     </div>
   );
-}
+});
 
 // ============================================================
 // CONTEXT MENU

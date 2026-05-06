@@ -377,6 +377,42 @@ class DSLExecutor:
         elif node.type == NodeType.HIBERNATE:
             self._exec_hibernate(node, ctx)
 
+        # ── 扩展系统指令 ──
+        elif node.type == NodeType.LOCK:
+            self._exec_lock(node, ctx)
+        elif node.type == NodeType.VOLUME:
+            self._exec_volume(node, ctx)
+        elif node.type == NodeType.MUTE:
+            self._exec_mute(node, ctx)
+        elif node.type == NodeType.LAUNCH:
+            self._exec_launch(node, ctx)
+        elif node.type == NodeType.KILL:
+            self._exec_kill(node, ctx)
+        elif node.type == NodeType.WAIT_PROCESS:
+            self._exec_wait_process(node, ctx)
+        elif node.type == NodeType.WAIT_EXIT:
+            self._exec_wait_exit(node, ctx)
+        elif node.type == NodeType.WALLPAPER:
+            self._exec_wallpaper(node, ctx)
+        elif node.type == NodeType.DISPLAY_OFF:
+            self._exec_display_off(node, ctx)
+        elif node.type == NodeType.SLEEP:
+            self._exec_sleep(node, ctx)
+        elif node.type == NodeType.DESKTOP:
+            self._exec_desktop(node, ctx)
+        elif node.type == NodeType.BATTERY:
+            self._exec_battery(node, ctx)
+        elif node.type == NodeType.EMPTY_BIN:
+            self._exec_empty_bin(node, ctx)
+        elif node.type == NodeType.BRIGHTNESS:
+            self._exec_brightness(node, ctx)
+        elif node.type == NodeType.CLIPBOARD_SET:
+            self._exec_clipboard_set(node, ctx)
+        elif node.type == NodeType.CLIPBOARD_GET:
+            self._exec_clipboard_get(node, ctx)
+        elif node.type in (NodeType.MINIMIZE, NodeType.MAXIMIZE, NodeType.CLOSE_WINDOW, NodeType.RESIZE_WINDOW):
+            self._exec_window_control(node, ctx)
+
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
     # ── 指令执行 ─────────────────────────────────────────────────
@@ -1080,6 +1116,236 @@ class DSLExecutor:
         import subprocess
         subprocess.run(["shutdown", "/h"], shell=False)
         self._emit("node_done", node_type="HIBERNATE", args="", line=node.line)
+
+    # ── 扩展系统指令执行 ─────────────────────────────────────────
+    def _exec_lock(self, node: ASTNode, ctx: ExecutionContext):
+        """LOCK — 锁定工作站"""
+        self._emit("node_start", node_type="LOCK", args="", line=node.line)
+        self._log("LOCK: 锁定工作站")
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
+        self._emit("node_done", node_type="LOCK", args="", line=node.line)
+
+    def _exec_volume(self, node: ASTNode, ctx: ExecutionContext):
+        """VOLUME level — 设置音量"""
+        args = self._interpolate(node.args)
+        self._emit("node_start", node_type="VOLUME", args=args, line=node.line)
+        self._log(f"VOLUME: {args}%")
+        try:
+            level = int(args) if args.strip() else 50
+            level = max(0, min(100, level))
+            from features.system_control_features import volume_set
+            volume_set(level)
+        except Exception:
+            pass
+        self._emit("node_done", node_type="VOLUME", args=args, line=node.line)
+
+    def _exec_mute(self, node: ASTNode, ctx: ExecutionContext):
+        """MUTE [ON|OFF] — 静音切换"""
+        args = self._interpolate(node.args).strip().lower()
+        self._emit("node_start", node_type="MUTE", args=args, line=node.line)
+        self._log(f"MUTE: {args or 'toggle'}")
+        from features.system_control_features import volume_mute
+        if args in ("on", "true", "1"):
+            volume_mute(mute=True)
+        elif args in ("off", "false", "0"):
+            volume_mute(mute=False)
+        else:
+            volume_mute(mute=None)
+        self._emit("node_done", node_type="MUTE", args=args, line=node.line)
+
+    def _exec_launch(self, node: ASTNode, ctx: ExecutionContext):
+        """LAUNCH target — 启动程序"""
+        args = self._interpolate(node.args)
+        target = args.strip()
+        self._emit("node_start", node_type="LAUNCH", args=target, line=node.line)
+        self._log(f"LAUNCH: {target}")
+        try:
+            from features.system_features import launch_program
+            launch_program(target, "", False)
+        except Exception:
+            import os
+            os.startfile(target)
+        self._emit("node_done", node_type="LAUNCH", args=target, line=node.line)
+
+    def _exec_kill(self, node: ASTNode, ctx: ExecutionContext):
+        """KILL name — 终止进程"""
+        args = self._interpolate(node.args)
+        parts = args.split()
+        name = parts[0] if parts else args
+        force = "force" in args.lower() or "-f" in args
+        self._emit("node_start", node_type="KILL", args=name, line=node.line)
+        self._log(f"KILL: {name} {'(force)' if force else ''}")
+        import subprocess
+        flags = ["/f"] if force else []
+        subprocess.run(["taskkill"] + flags + ["/im", name], capture_output=True, timeout=10)
+        self._emit("node_done", node_type="KILL", args=name, line=node.line)
+
+    def _exec_wait_process(self, node: ASTNode, ctx: ExecutionContext):
+        """WAIT_PROCESS name timeout — 等待进程启动"""
+        args = self._interpolate(node.args)
+        parts = args.split()
+        name = parts[0] if parts else args
+        timeout = 30
+        if len(parts) > 1 and parts[1].isdigit():
+            timeout = int(parts[1])
+        self._emit("node_start", node_type="WAIT_PROCESS", args=name, line=node.line)
+        self._log(f"WAIT_PROCESS: {name} (timeout={timeout}s)")
+        from features.system_control_features import wait_process_start
+        wait_process_start(name, timeout)
+        self._emit("node_done", node_type="WAIT_PROCESS", args=name, line=node.line)
+
+    def _exec_wait_exit(self, node: ASTNode, ctx: ExecutionContext):
+        """WAIT_EXIT name timeout — 等待进程退出"""
+        args = self._interpolate(node.args)
+        parts = args.split()
+        name = parts[0] if parts else args
+        timeout = 60
+        if len(parts) > 1 and parts[1].isdigit():
+            timeout = int(parts[1])
+        self._emit("node_start", node_type="WAIT_EXIT", args=name, line=node.line)
+        self._log(f"WAIT_EXIT: {name} (timeout={timeout}s)")
+        from features.system_control_features import wait_process_exit
+        wait_process_exit(name, timeout)
+        self._emit("node_done", node_type="WAIT_EXIT", args=name, line=node.line)
+
+    def _exec_wallpaper(self, node: ASTNode, ctx: ExecutionContext):
+        """WALLPAPER path — 设置壁纸"""
+        args = self._interpolate(node.args)
+        path = args.strip()
+        self._emit("node_start", node_type="WALLPAPER", args=path, line=node.line)
+        self._log(f"WALLPAPER: {path}")
+        from features.system_control_features import set_wallpaper
+        set_wallpaper(path)
+        self._emit("node_done", node_type="WALLPAPER", args=path, line=node.line)
+
+    def _exec_display_off(self, node: ASTNode, ctx: ExecutionContext):
+        """DISPLAY_OFF — 关闭显示器"""
+        self._emit("node_start", node_type="DISPLAY_OFF", args="", line=node.line)
+        self._log("DISPLAY_OFF: 关闭显示器")
+        import ctypes
+        HWND_BROADCAST = 0xFFFF
+        WM_SYSCOMMAND = 0x0112
+        SC_MONITORPOWER = 0xF170
+        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+        self._emit("node_done", node_type="DISPLAY_OFF", args="", line=node.line)
+
+    def _exec_sleep(self, node: ASTNode, ctx: ExecutionContext):
+        """SLEEP — 睡眠"""
+        self._emit("node_start", node_type="SLEEP", args="", line=node.line)
+        self._log("SLEEP: 计算机进入睡眠")
+        import ctypes
+        ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
+        self._emit("node_done", node_type="SLEEP", args="", line=node.line)
+
+    def _exec_desktop(self, node: ASTNode, ctx: ExecutionContext):
+        """DESKTOP — 显示桌面"""
+        self._emit("node_start", node_type="DESKTOP", args="", line=node.line)
+        self._log("DESKTOP: 显示桌面")
+        import ctypes
+        ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0)  # Win key down
+        ctypes.windll.user32.keybd_event(0x44, 0, 0, 0)  # D key down
+        ctypes.windll.user32.keybd_event(0x44, 0, 2, 0)  # D key up
+        ctypes.windll.user32.keybd_event(0x5B, 0, 2, 0)  # Win key up
+        self._emit("node_done", node_type="DESKTOP", args="", line=node.line)
+
+    def _exec_battery(self, node: ASTNode, ctx: ExecutionContext):
+        """BATTERY — 获取电池状态"""
+        self._emit("node_start", node_type="BATTERY", args="", line=node.line)
+        self._log("BATTERY: 获取电池状态")
+        from features.system_control_features import battery_status
+        result = battery_status()
+        self._emit("node_done", node_type="BATTERY", args=str(result), line=node.line)
+
+    def _exec_empty_bin(self, node: ASTNode, ctx: ExecutionContext):
+        """EMPTY_BIN — 清空回收站"""
+        self._emit("node_start", node_type="EMPTY_BIN", args="", line=node.line)
+        self._log("EMPTY_BIN: 清空回收站")
+        import ctypes
+        ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0)
+        self._emit("node_done", node_type="EMPTY_BIN", args="", line=node.line)
+
+    def _exec_brightness(self, node: ASTNode, ctx: ExecutionContext):
+        """BRIGHTNESS level — 设置亮度"""
+        args = self._interpolate(node.args)
+        self._emit("node_start", node_type="BRIGHTNESS", args=args, line=node.line)
+        self._log(f"BRIGHTNESS: {args}%")
+        try:
+            level = int(args) if args.strip() else 80
+            from features.system_control_features import display_brightness
+            display_brightness(level)
+        except Exception:
+            pass
+        self._emit("node_done", node_type="BRIGHTNESS", args=args, line=node.line)
+
+    def _exec_clipboard_set(self, node: ASTNode, ctx: ExecutionContext):
+        """CLIPBOARD_SET text — 设置剪贴板"""
+        text = self._interpolate(node.args)
+        self._emit("node_start", node_type="CLIPBOARD_SET", args=text, line=node.line)
+        self._log(f"CLIPBOARD_SET: 写入 {len(text)} 字符")
+        from features.clipboard_features import clipboard_set_text
+        clipboard_set_text(text)
+        self._emit("node_done", node_type="CLIPBOARD_SET", args=text, line=node.line)
+
+    def _exec_clipboard_get(self, node: ASTNode, ctx: ExecutionContext):
+        """CLIPBOARD_GET — 读取剪贴板"""
+        self._emit("node_start", node_type="CLIPBOARD_GET", args="", line=node.line)
+        self._log("CLIPBOARD_GET: 读取剪贴板")
+        from features.clipboard_features import clipboard_get_text
+        result = clipboard_get_text()
+        self._emit("node_done", node_type="CLIPBOARD_GET", args=str(result), line=node.line)
+
+    def _exec_window_control(self, node: ASTNode, ctx: ExecutionContext):
+        """MINIMIZE|MAXIMIZE|CLOSE_WINDOW|RESIZE_WINDOW — 窗口操作"""
+        ntype = node.type.value
+        args = self._interpolate(node.args)
+        self._emit("node_start", node_type=ntype, args=args, line=node.line)
+        self._log(f"{ntype}: {args}")
+        try:
+            import win32gui, win32con
+            title = args
+            width, height = 800, 600
+            if ntype == "RESIZE_WINDOW":
+                nums = re.findall(r"\d+", args)
+                if len(nums) >= 2:
+                    width, height = int(nums[0]), int(nums[1])
+                    rest = args
+                    for n in nums[:2]:
+                        rest = rest.replace(str(n), "", 1)
+                    title = rest.strip()
+
+            # 查找窗口
+            hwnd = None
+            if title:
+                def cb(h, ctx):
+                    if title.lower() in win32gui.GetWindowText(h).lower():
+                        ctx.append(h)
+                handles = []
+                win32gui.EnumWindows(cb, handles)
+                hwnd = handles[0] if handles else None
+            else:
+                hwnd = win32gui.GetForegroundWindow()
+
+            if hwnd:
+                cmd_map = {
+                    "MINIMIZE": win32con.SW_MINIMIZE,
+                    "MAXIMIZE": win32con.SW_MAXIMIZE,
+                    "CLOSE_WINDOW": win32con.SW_CLOSE if hasattr(win32con, "SW_CLOSE") else 0,
+                }
+                if ntype == "MINIMIZE":
+                    win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                elif ntype == "MAXIMIZE":
+                    win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+                elif ntype == "CLOSE_WINDOW":
+                    win32gui.SendMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                elif ntype == "RESIZE_WINDOW":
+                    rect = win32gui.GetWindowRect(hwnd)
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    time.sleep(0.05)
+                    win32gui.MoveWindow(hwnd, rect[0], rect[1], width, height, True)
+        except ImportError:
+            pass
+        self._emit("node_done", node_type=ntype, args=args, line=node.line)
 
     # ── 层次化 DSL 执行 ──────────────────────────────────────────
     def _exec_call(self, node: ASTNode, ctx: ExecutionContext):

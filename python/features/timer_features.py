@@ -76,7 +76,7 @@ def timer_wait_process(name: str, timeout: float = 60, wait_exit: bool = False) 
             import subprocess
             try:
                 output = subprocess.check_output(
-                    f"tasklist /fi \"IMAGENAME eq {name}\"", shell=True, timeout=5
+                    ["tasklist", "/fi", f"IMAGENAME eq {name}"], shell=False, timeout=5
                 ).decode("utf-8", errors="replace")
                 return name.lower() in output.lower()
             except Exception:

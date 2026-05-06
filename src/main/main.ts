@@ -1,58 +1,350 @@
-﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu } from 'electron';
+﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+const fsp = fs.promises;
+import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
 import * as https from 'https';
-
-let mainWindow: BrowserWindow | null = null;
-let pythonProcess: ChildProcess | null = null;
-let _lastScript: string | null = null;
-let _engineRunning = false;
+import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './schedulerBridge';
+import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPythonEngine, stopPythonEngine } from './engine';
+import { getBaseDir, isDev } from './env';
+import { startApiServer, ApiDeps } from './api';
+import {
+  mainWindow, setMainWindow,
+  pythonProcess,
+  engineRunning, setEngineRunning,
+  lastScript, setLastScript,
+} from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
 let _cachedRendererState: any = null;
 let _rendererReady = false;
+let apiServer: http.Server | null = null;
 
-const isDev = !app.isPackaged && !process.argv.includes('--prod');
+// ── 模板上下文（供 AI 提示词参考）──
+let _cachedTemplateContext: string = '';
 
-/** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
-function spawnPython(args: string[], options?: SpawnOptions) {
-  return spawn('python', args, {
-    ...options,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-  });
-}
-
-/** 生产环境下 Python 子进程的基目录（对应 extraResources 输出的位置） */
-function getBaseDir(): string {
-  return isDev ? path.join(__dirname, '../..') : process.resourcesPath;
-}
-
-/** 安全累积子进程 stdout/stderr，避免 chunk 边界截断 UTF-8 多字节字符 */
-function runPythonCollect(args: string[], options?: SpawnOptions, input?: string): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const proc = spawnPython(args, options);
-    const outBufs: Buffer[] = [];
-    const errBufs: Buffer[] = [];
-    proc.stdout!.on('data', (c: Buffer) => outBufs.push(c));
-    proc.stderr!.on('data', (c: Buffer) => errBufs.push(c));
-    proc.on('close', () => resolve({
-      stdout: Buffer.concat(outBufs).toString('utf8'),
-      stderr: Buffer.concat(errBufs).toString('utf8'),
-    }));
-    proc.on('error', (e) => resolve({ stdout: '', stderr: e.message }));
-    if (input !== undefined) {
-      proc.stdin!.write(input);
-      proc.stdin!.end();
+function refreshTemplateContext(): void {
+  try {
+    const templatesDir = getTemplatesDir();
+    if (!fs.existsSync(templatesDir)) { _cachedTemplateContext = ''; return; }
+    const files = fs.readdirSync(templatesDir).filter(f => f.endsWith('.dsl'));
+    if (files.length === 0) { _cachedTemplateContext = ''; return; }
+    let ctx = '\n\n## 可用 DSL 模板\n如果用户描述的流程与以下某个已存在模板匹配，直接使用 CALL 引用该模板，不要重新生成：\n';
+    for (const f of files) {
+      const filePath = path.join(templatesDir, f);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const lines = content.split('\n');
+        let name = f.replace('.dsl', '');
+        const aliases: string[] = [];
+        const tags: string[] = [];
+        let desc = '';
+        let stepLines: string[] = [];
+        let inSteps = false;
+        for (const line of lines) {
+          const s = line.trim();
+          if (s.startsWith('# name:')) { name = s.replace('# name:', '').trim(); continue; }
+          if (s.startsWith('# aliases:')) {
+            try { aliases.push(...JSON.parse(s.replace('# aliases:', '').trim())); } catch (e) { console.debug('[templates] parse aliases error:', e); }
+            continue;
+          }
+          if (s.startsWith('# tags:')) {
+            try { tags.push(...JSON.parse(s.replace('# tags:', '').trim())); } catch (e) { console.debug('[templates] parse tags error:', e); }
+            continue;
+          }
+          if (s.startsWith('# ---')) { inSteps = true; continue; }
+          if (s.startsWith('#') && !inSteps) {
+            desc = s.replace('#', '').trim();
+            continue;
+          }
+          if (inSteps && s && !s.startsWith('#')) {
+            stepLines.push(s.length > 80 ? s.slice(0, 77) + '...' : s);
+          }
+        }
+        ctx += `### ${name} (${f})\n`;
+        if (aliases.length) ctx += `  别名: ${aliases.join(', ')}\n`;
+        if (tags.length) ctx += `  标签: ${tags.join(', ')}\n`;
+        ctx += `  用途: ${desc}\n`;
+        if (stepLines.length > 0) {
+          ctx += `  步骤:\n`;
+          for (const sl of stepLines.slice(0, 8)) {
+            ctx += `    ${sl}\n`;
+          }
+          if (stepLines.length > 8) ctx += `    ...（共 ${stepLines.length} 行）\n`;
+        }
+        ctx += `  → 引用: CALL ${name}\n\n`;
+      } catch (e) { console.debug('[templates] load error:', e); }
     }
-  });
+    _cachedTemplateContext = ctx;
+  } catch (e) { console.debug('[templates] build context error:', e); _cachedTemplateContext = ''; }
+}
+
+// ── 调度上下文（供 AI 提示词参考）──
+let _cachedScheduleContext: string = '';
+
+function refreshScheduleContext(): void {
+  try {
+    const sp = path.join(app.getPath('userData'), 'schedules.json');
+    let schedules: any[] = [];
+    try { if (fs.existsSync(sp)) schedules = JSON.parse(fs.readFileSync(sp, 'utf-8')); } catch (e) { console.debug('[schedules] parse error:', e); }
+    if (!Array.isArray(schedules)) schedules = [];
+    if (schedules.length === 0) { _cachedScheduleContext = ''; return; }
+    const active = schedules.filter(s => s.enabled);
+    const ctxParts: string[] = ['\n\n## 当前定时调度'];
+
+    if (active.length > 0) {
+      ctxParts.push(`（${active.length}/${schedules.length} 个启用）\n`);
+      for (const s of active) {
+        const t = s.triggers?.[0] || {};
+        const triggerDesc = t.type === 'cron' ? `Cron: ${t.cron_expr}` :
+          t.type === 'interval' ? `每 ${t.interval_seconds}s` :
+          t.type === 'startup' ? '启动时' :
+          t.type === 'event' ? `事件: ${t.event_type}` : t.type || '';
+        const condCount = s.conditions?.rules?.length || 0;
+        ctxParts.push(`- **${s.name}** (${s.template_name || s.template_id})`);
+        ctxParts.push(`  - 触发: ${triggerDesc}`);
+        if (condCount > 0) ctxParts.push(`  - 条件: ${condCount} 个 ${s.conditions?.operator || 'AND'}`);
+      }
+    } else {
+      ctxParts.push('\n暂无定时调度。用户可以创建调度来自动执行模板。\n');
+    }
+
+    ctxParts.push('\n### 创建调度的 MCP 工具');
+    ctxParts.push('通过 `lobster_scheduler_create` 创建调度，支持 ECA 模型：');
+    ctxParts.push('- 触发器: cron / interval / startup / event');
+    ctxParts.push('- 守卫条件: window_exists / process_running / is_weekday / is_weekend / day_of_week / time_between / image_exists / text_exists / color_match / scene_match');
+    ctxParts.push('  - 条件用 AND/OR 组合，语法: {"operator":"AND","rules":[{"type":"...","params":{...}}]}');
+
+    _cachedScheduleContext = ctxParts.join('\n');
+  } catch (e) { console.debug('[schedules] build context error:', e); _cachedScheduleContext = ''; }
+}
+
+/** 获取模板目录路径 */
+function getTemplatesDir(): string {
+  return path.join(getBaseDir(), 'templates');
+}
+
+// Refresh on startup
+refreshTemplateContext();
+refreshScheduleContext();
+
+/** 加载模板 DSL 内容（先查 .dsl，再查 .flow） */
+function loadTemplateContent(templateId: string): string | null {
+  const templatesDir = getTemplatesDir();
+  // Try .dsl
+  const dslPath = path.join(templatesDir, `${templateId}.dsl`);
+  if (fs.existsSync(dslPath)) {
+    return fs.readFileSync(dslPath, 'utf-8');
+  }
+  // Try .flow (JSON format — extract DSL from it if possible)
+  const flowPath = path.join(templatesDir, `${templateId}.flow`);
+  if (fs.existsSync(flowPath)) {
+    try {
+      const flow = JSON.parse(fs.readFileSync(flowPath, 'utf-8'));
+      return flow.dsl_content || null;
+    } catch { return null; }
+  }
+  return null;
+}
+
+/** 通过 spawnPython 执行 DSL */
+async function runDsl(dsl: string): Promise<{ success: boolean; error?: string }> {
+  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'run_dsl.py');
+  const result = await runPythonCollect([scriptPath], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }, dsl);
+  try {
+    return JSON.parse(result.stdout.trim());
+  } catch {
+    return { success: false, error: result.stderr?.trim() || '执行失败' };
+  }
+}
+
+// Scheduler bridge (Python daemon)
+const scheduler = new SchedulerBridge(
+  getPythonCommand(),
+  getSchedulerScriptPath(getBaseDir()),
+  getBaseDir(),
+);
+
+/** 检查是否有全屏窗口（演示/全屏视频等） */
+function isFullscreenActive(): boolean {
+  if (!mainWindow) return false;
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isFullScreen() && w.webContents?.getURL()) return true;
+  }
+  return false;
+}
+
+/** 检查系统是否空闲（用户离开）— 5分钟内无输入视为空闲 */
+let _lastUserActivity = Date.now();
+ipcMain.on('user-activity', () => { _lastUserActivity = Date.now(); });
+function isUserIdle(minutes = 5): boolean {
+  return (Date.now() - _lastUserActivity) > minutes * 60 * 1000;
+}
+
+// ── 预触发确认（高风险调度需要用户确认） ─────────────────
+scheduler.on('pre_fire', async (event: any) => {
+  const { schedule, confirm_id, risk_level } = event;
+  if (!schedule || !confirm_id) return;
+
+  try {
+    // 全屏/演示模式 → 自动推迟
+    if (isFullscreenActive()) {
+      console.debug(`[scheduler] 全屏模式，自动推迟调度: ${schedule.name}`);
+      scheduler.sendFireResponse(confirm_id, 'snooze');
+      return;
+    }
+
+    // 用户不在 → 自动取消
+    if (isUserIdle(10)) {
+      console.debug(`[scheduler] 用户不在，自动取消: ${schedule.name}`);
+      scheduler.sendFireResponse(confirm_id, 'cancel');
+      return;
+    }
+
+    // 构建详情信息
+    let detail = `时间: ${event.timestamp || '立即'}`;
+    if (schedule.triggers?.length) {
+      const t = schedule.triggers[0];
+      detail += `\n触发: ${t.cron_expr || `每${t.interval_seconds || '?'}秒`}`;
+    }
+    if (schedule.notify_message) detail += `\n通知: ${schedule.notify_message}`;
+    if (schedule.launch_target) detail += `\n启动: ${schedule.launch_target}`;
+    if (schedule.template_id) detail += `\n运行: ${schedule.template_id}`;
+
+    const warningIcon = risk_level === 'critical' ? 'warning' : 'question';
+    const buttons = risk_level === 'critical'
+      ? ['我确认要执行', '取消']  // critical: 确认按钮在前
+      : ['执行', '取消'];         // confirm: 执行在前
+
+    const result = await dialog.showMessageBox({
+      type: warningIcon,
+      title: `🚨 调度确认 — ${risk_level === 'critical' ? '高风险操作' : '确认执行'}`,
+      message: `"${schedule.name}"`,
+      detail,
+      buttons,
+      defaultId: 1,  // 默认选中"取消"（安全）
+      cancelId: 1,
+    });
+
+    const action = result.response === 0 ? 'proceed' : 'cancel';
+    scheduler.sendFireResponse(confirm_id, action);
+  } catch (e) {
+    console.error('[scheduler] pre_fire handler error:', e);
+    scheduler.sendFireResponse(confirm_id, 'cancel');
+  }
+});
+
+scheduler.on('fire', async (event: any) => {
+  const entry = event.schedule;
+  if (!entry) return;
+
+  // 上下文守卫: 全屏/空闲 时跳过有副作用的执行
+  const hasSideEffect = entry.launch_target || entry.template_id;
+  if (hasSideEffect) {
+    if (isFullscreenActive()) {
+      console.debug(`[scheduler] 全屏模式，跳过副作用操作: ${entry.name}`);
+      return;
+    }
+  }
+
+  // 1. 桌面通知
+  if (entry.notify_message) {
+    const notif = new Notification({
+      title: '灵动脚本 - 定时提醒',
+      body: entry.notify_message,
+      silent: false,
+    });
+    notif.show();
+  }
+
+  // 2. 启动软件
+  if (entry.launch_target) {
+    launchTarget(entry.launch_target);
+  }
+
+  // 3. 执行模板 DSL
+  if (entry.template_id) {
+    let dsl = loadTemplateContent(entry.template_id);
+    if (!dsl && mainWindow) {
+      try {
+        const result = await mainWindow.webContents.executeJavaScript(
+          `(function(){try{var r=window.__templateRegistry;if(!r)return null;var t=r.getById(${JSON.stringify(entry.template_id)});return t&&t.dsl_content?t.dsl_content:null;}catch(e){return null;}})()`,
+          true
+        );
+        if (typeof result === 'string') dsl = result;
+      } catch (e) { console.debug('[scheduler] load template via webContents error:', e); }
+    }
+    if (!dsl) {
+      console.error(`[scheduler-daemon] 模板 '${entry.template_id}' 未找到`);
+      return;
+    }
+    await runDsl(dsl);
+  }
+
+  // 更新 last_run
+  await updateScheduleLastRun(entry.id);
+});
+
+async function updateScheduleLastRun(id: string): Promise<void> {
+  const p = path.join(app.getPath('userData'), 'schedules.json');
+  try {
+    const raw = await fsp.readFile(p, 'utf-8');
+    const schedules = JSON.parse(raw);
+    const idx = schedules.findIndex((s: any) => s.id === id);
+    if (idx !== -1) {
+      schedules[idx].last_run = new Date().toISOString();
+      await fsp.writeFile(p, JSON.stringify(schedules, null, 2), 'utf-8');
+    }
+  } catch (e) { console.debug('[scheduler] update last_run error:', e); }
+}
+
+function runStartupSchedules(): void {
+  const p = path.join(app.getPath('userData'), 'schedules.json');
+  let schedules: any[] = [];
+  try {
+    if (fs.existsSync(p)) schedules = JSON.parse(fs.readFileSync(p, 'utf-8'));
+  } catch (e) { console.debug('[scheduler] read schedules error:', e); }
+  for (const s of schedules) {
+    if (!s.enabled) continue;
+    const hasStartup = s.triggers?.some((t: any) => t.type === 'startup');
+    if (!hasStartup) continue;
+    let dsl = loadTemplateContent(s.template_id);
+    if (!dsl && mainWindow) {
+      mainWindow.webContents.executeJavaScript(
+        `(function(){try{var r=window.__templateRegistry;if(!r)return null;var t=r.getById(${JSON.stringify(s.template_id)});return t&&t.dsl_content?t.dsl_content:null;}catch(e){return null;}})()`,
+        true
+      ).then((r: any) => {
+        if (typeof r === 'string') dsl = r;
+        if (dsl) runDsl(dsl).then(() => updateScheduleLastRun(s.id));
+      }).catch(() => {});
+    } else if (dsl) {
+      runDsl(dsl).then(() => updateScheduleLastRun(s.id));
+    }
+  }
+}
+
+/** 启动软件（通过系统关联或直接路径） */
+function launchTarget(target: string): void {
+  try {
+    const { execSync } = require('child_process');
+    execSync(`start "" "${target.replace(/"/g, '\\"')}"`, { windowsHide: true, timeout: 5000 });
+  } catch {
+    try {
+      spawn(target, [], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+    } catch (e) {
+      console.error(`[scheduler] 启动失败: ${target}`, e);
+    }
+  }
 }
 
 function createWindow() {
   const startMinimized = process.argv.includes('--minimized');
 
-  mainWindow = new BrowserWindow({
+  setMainWindow(new BrowserWindow({
     width: 900,
     height: 580,
     minWidth: 800,
@@ -66,29 +358,31 @@ function createWindow() {
       nodeIntegration: false,
     },
     show: false,
-  });
+  }));
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow!.loadURL('http://localhost:5173');
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+    mainWindow!.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
-  mainWindow.once('ready-to-show', () => {
+  mainWindow!.once('ready-to-show', () => {
     mainWindow?.show();
     if (startMinimized) {
       mainWindow?.minimize();
     }
     _rendererReady = true;
+    // 执行 startup 类型的调度
+    runStartupSchedules();
   });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  mainWindow!.on('closed', () => {
+    setMainWindow(null);
   });
 
   /** 开发模式下 Vite 断开时自动重载，防止白屏 */
   if (isDev) {
-    mainWindow.webContents.on('did-fail-load', () => {
+    mainWindow!.webContents.on('did-fail-load', () => {
       setTimeout(() => {
         if (mainWindow && !mainWindow.webContents.isLoading()) {
           mainWindow.webContents.reload();
@@ -193,917 +487,6 @@ function buildAppMenu() {
   Menu.setApplicationMenu(menu);
 }
 
-// ── Local HTTP API (for Claude Code MCP bridge) ──
-const API_PORT = 5577;
-let apiServer: http.Server | null = null;
-
-function startApiServer() {
-  apiServer = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    const url = new URL(req.url || '/', `http://localhost:${API_PORT}`);
-    const send = (code: number, data: any) => {
-      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(data));
-    };
-
-    if (req.method !== 'POST') {
-      send(405, { error: 'Method not allowed' });
-      return;
-    }
-
-    const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => {
-      const body = Buffer.concat(chunks).toString('utf8');
-      let payload: any = {};
-      try { payload = JSON.parse(body); } catch {}
-
-      try {
-      switch (url.pathname) {
-        case '/api/ping':
-          send(200, { ok: true });
-          break;
-
-        case '/api/load-script':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'loadScript', payload: payload.script });
-          send(200, { ok: true });
-          break;
-
-        case '/api/add-node':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.type) { send(400, { error: '缺少 type' }); return; }
-          const nodeId = 'n_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-          mainWindow.webContents.send('api-command', {
-            action: 'addNode',
-            payload: { type: payload.type, x: payload.x, y: payload.y, params: payload.params, id: nodeId },
-          });
-          send(200, { ok: true, id: nodeId });
-          break;
-
-        case '/api/update-node':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'updateNode',
-            payload: { id: payload.id, updates: payload.updates },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/delete-nodes':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'deleteNodes',
-            payload: { ids: payload.ids },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/add-edge':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.from_node || !payload.to_node) { send(400, { error: '缺少 from_node 或 to_node' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'addEdge',
-            payload: { from_node: payload.from_node, from_port: payload.from_port || 'output', to_node: payload.to_node, to_port: payload.to_port || 'input', label: payload.label },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/run-dsl': {
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
-          const dslProc = spawnPython([scriptPath], {
-            cwd: getBaseDir(),
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
-          const _dslOut: Buffer[] = [];
-          const _dslErr: Buffer[] = [];
-          dslProc.stdout!.on('data', (chunk: Buffer) => _dslOut.push(chunk));
-          dslProc.stderr!.on('data', (chunk: Buffer) => _dslErr.push(chunk));
-          dslProc.on('close', (code: number) => {
-            const dslStdout = Buffer.concat(_dslOut).toString('utf8');
-            if (dslStdout.trim()) {
-              try {
-                const flow = JSON.parse(dslStdout);
-                mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                send(200, { ok: true, flow });
-              } catch {
-                send(500, { error: 'DSL 转换失败', raw: dslStdout });
-              }
-            } else {
-              const dslStderr = Buffer.concat(_dslErr).toString('utf8');
-              send(500, { error: dslStderr.trim() || 'DSL 转换失败' });
-            }
-          });
-          if (payload.dsl) {
-            dslProc.stdin!.write(payload.dsl);
-          }
-          dslProc.stdin!.end();
-        }
-
-
-        break;
-
-        case '/api/generate-dsl':
-          if (!payload.description) { send(400, { error: '缺少 description' }); return; }
-          (async () => {
-            try {
-              const apiKey = payload.apiKey || process.env.DEEPSEEK_KEY || '';
-              if (!apiKey) { send(400, { error: '需要 apiKey' }); return; }
-              const result = await callLLM({
-                apiKey,
-                messages: [
-                  { role: 'system', content: 'You are a DSL generator for desktop automation. Generate ONLY raw DSL code, no markdown, no explanations.\n\nKeywords:\nCLICK x y [single|double|right|middle]\nINPUT_TEXT x y "text"\nKEYBOARD key1 [key2 ...]\nWAIT seconds\nSCREENSHOT\nLOOP count|INFINITE ... END\nIF condition ... ELSE ... END\nCLICK_IMAGE "path" [similarity]\nCLICK_TEXT "text" [similarity]\nSWIPE x1 y1 x2 y2 [duration]\nPOPUP_CLOSE [strategy]\nCOLOR_CHECK x y w h color [tolerance]\nPROGRESS_WAIT fill|empty|change x y w h [timeout]\nREGION_WAIT stable|change x y w h [timeout]\n\nGenerate appropriate coordinates, paths and parameters. Include WAIT steps between actions.' },
-                  { role: 'user', content: payload.description },
-                ],
-                max_tokens: 4096,
-              });
-              if (result.error) { send(500, { error: result.error }); return; }
-              let dsl = (result.choices?.[0]?.message?.content || '').trim();
-              dsl = dsl.replace(/^`{3}[a-z]*\n?/i, '').replace(/\n?`{3}$/i, '');
-              send(200, { ok: true, dsl });
-            } catch (e: any) { send(500, { error: e.message }); }
-          })();
-          break;
-
-        case '/api/create-flow':
-          if (!payload.description && !payload.dsl) { send(400, { error: '缺少 description 或 dsl' }); return; }
-          (async () => {
-            try {
-              let dsl = payload.dsl;
-              if (!dsl) {
-                const apiKey = payload.apiKey || process.env.DEEPSEEK_KEY || '';
-                if (!apiKey) { send(400, { error: '需要 apiKey' }); return; }
-                const result = await callLLM({
-                  apiKey,
-                  messages: [
-                    { role: 'system', content: 'You are a DSL generator for desktop automation. Generate ONLY raw DSL code, no markdown, no explanations.\n\nKeywords:\nCLICK x y [single|double|right|middle]\nINPUT_TEXT x y "text"\nKEYBOARD key1 [key2 ...]\nWAIT seconds\nSCREENSHOT\nLOOP count|INFINITE ... END\nIF condition ... ELSE ... END\nCLICK_IMAGE "path" [similarity]\nCLICK_TEXT "text" [similarity]\nSWIPE x1 y1 x2 y2 [duration]\nPOPUP_CLOSE [strategy]\nCOLOR_CHECK x y w h color [tolerance]\nPROGRESS_WAIT fill|empty|change x y w h [timeout]\nREGION_WAIT stable|change x y w h [timeout]\n\nGenerate appropriate coordinates, paths and parameters. Include WAIT steps between actions.' },
-                    { role: 'user', content: payload.description },
-                  ],
-                  max_tokens: 4096,
-                });
-                if (result.error) { send(500, { error: result.error }); return; }
-                dsl = (result.choices?.[0]?.message?.content || '').trim();
-                dsl = dsl.replace(/^`{3}[a-z]*\n?/i, '').replace(/\n?`{3}$/i, '');
-              }
-              if (!dsl) { send(500, { error: 'DSL 生成为空' }); return; }
-              const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
-              const proc = spawnPython([scriptPath], {
-                cwd: getBaseDir(),
-                stdio: ['pipe', 'pipe', 'pipe'],
-              });
-              const _out: Buffer[] = [];
-              const _err: Buffer[] = [];
-              proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-              proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-              proc.on('close', () => {
-          const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
-                try {
-                  if (!stdout.trim()) { send(500, { error: stderr.trim() || 'DSL 转换失败' }); return; }
-                  const flow = JSON.parse(stdout);
-                  if (mainWindow) {
-                    mainWindow.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                  }
-                  const pending_params = findIncompleteParams(flow.nodes || []);
-                  send(200, { ok: true, flow, dsl, pending_params });
-                } catch (e: any) { send(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
-              });
-              proc.on('error', (err: Error) => send(500, { error: err.message }));
-              proc.stdin!.write(dsl + '\n');
-              proc.stdin!.end();
-            } catch (e: any) { send(500, { error: e.message }); }
-          })();
-          break;
-
-        case '/api/check-params':
-          if (!payload.nodes) { send(400, { error: '缺少 nodes' }); return; }
-          const pending = findIncompleteParams(payload.nodes);
-          send(200, { ok: true, pending_params: pending, count: pending.length });
-          break;
-
-        case '/api/resolve-param':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.node_id || !payload.param) { send(400, { error: '缺少 node_id 或 param' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'updateNodeParams',
-            payload: { id: payload.node_id, params: { [payload.param]: payload.value } },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/interactive-fill':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.node_id || !payload.param) { send(400, { error: '缺少 node_id 或 param' }); return; }
-          (async () => {
-            try {
-              const tool = payload.tool || 'region_picker';
-              const imgDir = path.join(__dirname, '../../assets/screenshots');
-              switch (tool) {
-                case 'region_picker': {
-                  const result = await mainWindow!.webContents.executeJavaScript('window.electronAPI.selectRegion()', true);
-                  if (result.error) { send(400, { error: result.error }); return; }
-                  const { x, y, w, h } = result;
-                  mainWindow!.webContents.send('api-command', {
-                    action: 'updateNodeParams',
-                    payload: { id: payload.node_id, params: { [payload.param]: { x, y, w, h } } },
-                  });
-                  send(200, { ok: true, value: { x, y, w, h } });
-                  return;
-                }
-                case 'screenshot': {
-                  const result2 = await mainWindow!.webContents.executeJavaScript('window.electronAPI.captureScreenshot()', true);
-                  if (result2.error) { send(400, { error: result2.error }); return; }
-                  if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
-                  const fileName = `img_${payload.node_id}_${Date.now()}.png`;
-                  const filePath = path.join(imgDir, fileName);
-                  const base64 = result2.dataURL.replace(/^data:image\/png;base64,/, '');
-                  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-                  const relativePath = `assets/screenshots/${fileName}`;
-                  mainWindow!.webContents.send('api-command', {
-                    action: 'updateNodeParams',
-                    payload: { id: payload.node_id, params: { [payload.param]: [{ path: relativePath }] } },
-                  });
-                  send(200, { ok: true, value: [{ path: relativePath }] });
-                  return;
-                }
-                case 'wheel_select': {
-                  const options = payload.options || ['是', '否'];
-                  const wResult = await mainWindow!.webContents.executeJavaScript(
-                    `window.electronAPI.wheelSelect({options: ${JSON.stringify(options)}, title: ${JSON.stringify(payload.hint || '请选择')}})`, true);
-                  if (wResult.error) { send(400, { error: wResult.error }); return; }
-                  const wValue = wResult.value || wResult.selected || options[0];
-                  mainWindow!.webContents.send('api-command', {
-                    action: 'updateNodeParams',
-                    payload: { id: payload.node_id, params: { [payload.param]: wValue } },
-                  });
-                  send(200, { ok: true, value: wValue });
-                  return;
-                }
-                case 'text_input':
-                  send(200, { ok: true, message: '请通过 /api/resolve-param 提供 value 参数', needs_value: true });
-                  return;
-                case 'coordinate_picker': {
-                  const coordResult = await mainWindow!.webContents.executeJavaScript('window.electronAPI.selectRegion()', true);
-                  if (coordResult.error) { send(400, { error: coordResult.error }); return; }
-                  const cx = Math.round(coordResult.x + coordResult.w / 2);
-                  const cy = Math.round(coordResult.y + coordResult.h / 2);
-                  mainWindow!.webContents.send('api-command', {
-                    action: 'updateNodeParams',
-                    payload: { id: payload.node_id, params: { x: cx, y: cy } },
-                  });
-                  send(200, { ok: true, value: { x: cx, y: cy } });
-                  return;
-                }
-                default:
-                  send(400, { error: '未知交互工具: ' + tool });
-              }
-            } catch (e: any) { send(500, { error: e.message }); }
-          })();
-          break;
-
-case '/api/auto-layout':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'autoLayout' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/update-node-params':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'updateNodeParams',
-            payload: { id: payload.id, params: payload.params },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/delete-edges':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'deleteEdges',
-            payload: { ids: payload.ids },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/new-script':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'newScript' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/set-view-mode':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', {
-            action: 'setViewMode',
-            payload: { mode: payload.mode },
-          });
-          send(200, { ok: true });
-          break;
-
-        case '/api/fit-screen':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'fitScreen' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/get-state':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          // 利用 pushState 缓存的实时状态（每次 mutation 后自动推送）
-          if (_cachedRendererState !== null) {
-            send(200, _cachedRendererState);
-            // 后台异步刷新缓存，确保下次请求最新
-            if (_rendererReady) {
-              mainWindow.webContents.send('api-command', { action: 'getState' });
-            }
-            return;
-          }
-          if (_rendererReady) {
-            mainWindow.webContents.send('api-command', { action: 'getState' });
-          }
-          (async () => {
-            for (let i = 0; i < 5; i++) {
-              await new Promise(r => setTimeout(r, 1000));
-              if (_cachedRendererState !== null) {
-                send(200, _cachedRendererState);
-                return;
-              }
-            }
-            send(503, { error: '渲染器未就绪' });
-          })();
-          break;
-
-        case '/api/run-flow':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          try {
-            const scriptJson = JSON.stringify(payload.script || {});
-            startPythonEngine(scriptJson);
-            send(200, { ok: true });
-          } catch (e: any) {
-            send(500, { error: e.message });
-          }
-          break;
-
-        case '/api/stop-flow':
-          stopPythonEngine();
-          send(200, { ok: true });
-          break;
-
-        case '/api/engine-status':
-          send(200, {
-            running: _engineRunning,
-            process_alive: pythonProcess !== null && !pythonProcess.killed,
-            has_script: _lastScript !== null,
-          });
-          break;
-
-        case '/api/engine/pause':
-          sendToEngine({ type: 'pause' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/engine/resume':
-          sendToEngine({ type: 'resume' });
-          send(200, { ok: true });
-          break;
-
-        // --- Macro Recording HTTP API ---
-        case '/api/macro/start-recording':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          // Fire and forget — respond immediately (status polling via /api/macro/list)
-          _ensureMacroRecorder();
-          try {
-            if (macroRecorderProcess?.stdin) {
-              macroRecorderProcess.stdin.write(JSON.stringify({
-                type: 'start',
-                name: payload.name || `recording_${Date.now()}`,
-                include_mouse: payload.include_mouse ?? true,
-                include_keys: payload.include_keys ?? true,
-              }) + '\n');
-            }
-          } catch {}
-          _macroRecording = true;
-          send(200, { success: true });
-          break;
-
-        case '/api/macro/stop-recording':
-          try {
-            if (macroRecorderProcess?.stdin) {
-              macroRecorderProcess.stdin.write(JSON.stringify({ type: 'stop' }) + '\n');
-            }
-          } catch {}
-          _macroRecording = false;
-          send(200, { success: true });
-          break;
-
-        case '/api/macro/list': {
-          const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-          try {
-            const files = fs.readdirSync(macrosDir);
-            const macros = [];
-            for (const file of files) {
-              if (!file.endsWith('.json')) continue;
-              try {
-                const content = JSON.parse(fs.readFileSync(path.join(macrosDir, file), 'utf-8'));
-                macros.push({
-                  name: content.name || file.replace('.json', ''),
-                  file: file,
-                  events: content.events?.length || 0,
-                  duration: content.duration || 0,
-                  created: content.created || '',
-                });
-              } catch {
-                macros.push({ name: file.replace('.json', ''), file, events: 0, duration: 0, created: '' });
-              }
-            }
-            send(200, { success: true, result: macros.sort((a, b) => b.created.localeCompare(a.created)) });
-          } catch { send(200, { success: true, result: [] }); }
-          break;
-        }
-
-        case '/api/macro/play':
-          new Promise((resolve) => {
-            const proc = spawnPython(['-c', `
-import json, sys, time
-sys.path.insert(0, '.')
-from features.macro_features import macro_playback
-result = macro_playback("${(payload.name || '').replace(/"/g, '\\"')}")
-print(json.dumps(result))
-sys.stdout.flush()
-`], {
-              cwd: getBaseDir(),
-              stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            const _out: Buffer[] = [];
-            const _err: Buffer[] = [];
-            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-            proc.on('close', () => {
-          const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
-              if (stdout.trim()) { try { resolve(JSON.parse(stdout)); } catch { resolve({ success: false, error: '解析失败' }); } }
-              else { resolve({ success: false, error: stderr.trim() || '播放失败' }); }
-            });
-            proc.on('error', (err) => resolve({ success: false, error: err.message }));
-          }).then(r => send(200, r));
-          break;
-
-        // --- Feature Registry HTTP API ---
-        case '/api/features/list':
-          new Promise((resolve) => {
-            const proc = spawnPython(['-c', `
-import sys, json
-sys.path.insert(0, 'python')
-from features._all import *
-from features.registry import registry
-sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-features = []
-for f in registry.all():
-    if f.hidden or f.deprecated:
-        continue
-    features.append({
-        "name": f.name,
-        "display_name": f.display_name,
-        "description": f.description,
-        "category": f.category.value,
-        "params": [{"name": p.name, "type": p.type, "description": p.description,
-                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
-        "returns": f.returns,
-        "deprecated": f.deprecated,
-        "tags": f.tags,
-    })
-print(json.dumps(features, ensure_ascii=False))
-sys.stdout.flush()
-`], {
-              cwd: getBaseDir(),
-              stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            const _out: Buffer[] = [];
-            const _err: Buffer[] = [];
-            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-            proc.on('close', () => {
-          const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
-              if (stdout.trim()) {
-                try { resolve(JSON.parse(stdout)); }
-                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
-              } else {
-                resolve({ success: false, error: stderr.trim() || '获取功能列表失败' });
-              }
-            });
-            proc.on('error', (err) => resolve({ error: err.message }));
-          }).then(r => send(200, r));
-          break;
-
-        case '/api/features/call':
-          new Promise((resolve) => {
-            const proc = spawnPython(['-c', `
-import sys, json
-sys.path.insert(0, 'python')
-from features._all import *
-from features.registry import registry
-sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-try:
-    raw = sys.stdin.read()
-    data = json.loads(raw)
-    result = registry.execute(data["name"], **data.get("params", {}))
-    print(json.dumps(result, ensure_ascii=False))
-except Exception as e:
-    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
-sys.stdout.flush()
-`], {
-              cwd: getBaseDir(),
-              stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            const _out: Buffer[] = [];
-            const _err: Buffer[] = [];
-            proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-            proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-            proc.on('close', () => {
-          const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
-              if (stdout.trim()) {
-                try { resolve(JSON.parse(stdout)); }
-                catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
-              } else {
-                resolve({ success: false, error: stderr.trim() || '调用失败' });
-              }
-            });
-            proc.on('error', (err) => resolve({ success: false, error: err.message }));
-            proc.stdin!.write(JSON.stringify({ name: payload.name, params: payload.params || {} }) + '\n');
-            proc.stdin!.end();
-          }).then(r => send(200, r));
-          break;
-
-        case '/api/ai/generate':
-          if (!payload.apiKey || !payload.messages) { send(400, { error: '缺少 apiKey 或 messages' }); return; }
-          callLLM({
-            apiKey: payload.apiKey,
-            messages: payload.messages,
-            apiBase: payload.apiBase,
-            model: payload.model,
-            response_format: payload.response_format as 'json' | 'text' | undefined,
-            max_tokens: payload.max_tokens,
-          }).then(r => send(200, r));
-          break;
-
-        case '/api/screenshot/capture':
-          _captureScreenshot().then(r => send(200, r));
-          break;
-
-        case '/api/screenshot/select-region':
-          _selectRegion().then(r => send(200, r));
-          break;
-
-        case '/api/ocr/region':
-          if (typeof payload.x !== 'number' || typeof payload.y !== 'number' || typeof payload.w !== 'number' || typeof payload.h !== 'number') {
-            send(400, { error: '缺少 region 参数 (x,y,w,h)' }); return;
-          }
-          _ocrRegion({ x: payload.x, y: payload.y, w: payload.w, h: payload.h }).then(r => send(200, r));
-          break;
-
-        case '/api/wheel-select':
-          if (!payload.options || !Array.isArray(payload.options)) { send(400, { error: '缺少 options 数组' }); return; }
-          _wheelSelect({
-            options: payload.options,
-            values: payload.values,
-            title: payload.title,
-            message: payload.message,
-            default: payload.default,
-          }).then(r => send(200, r));
-          break;
-
-        case '/api/macro/delete':
-          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
-          {
-            const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-            const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
-            try {
-              fs.unlinkSync(filePath);
-              send(200, { ok: true });
-            } catch {
-              send(404, { error: '文件不存在' });
-            }
-          }
-          break;
-
-        case '/api/macro/get-events':
-          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
-          {
-            const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-            const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
-            try {
-              const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              send(200, { ok: true, result: content });
-            } catch {
-              send(404, { error: '读取失败' });
-            }
-          }
-          break;
-
-        case '/api/macro/recording-status':
-          send(200, {
-            recording: _macroRecording,
-            process_alive: macroRecorderProcess !== null && !macroRecorderProcess.killed,
-          });
-          break;
-
-        case '/api/save-script':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'saveScript' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/set-script-name':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'setScriptName', payload: { name: payload.name } });
-          send(200, { ok: true });
-          break;
-
-        case '/api/save-template':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.name) { send(400, { error: '缺少 name' }); return; }
-          // Save to filesystem (consistent with list-templates) with proper UTF-8 encoding
-          try {
-            const templatesDir = path.join(__dirname, '../../templates');
-            if (!fs.existsSync(templatesDir)) fs.mkdirSync(templatesDir, { recursive: true });
-            const safeName = payload.name.replace(/[\\/:*?"<>|]/g, '_');
-            const filePath = path.join(templatesDir, safeName + '.flow');
-            const scriptState = _cachedRendererState?.script || null;
-            const flowContent = JSON.stringify({
-              name: payload.name,
-              description: payload.description || '',
-              script: scriptState,
-              created_at: new Date().toISOString(),
-            }, null, 2);
-            fs.writeFileSync(filePath, flowContent, 'utf-8');
-          } catch (e: any) {
-            console.error('[API] save-template write error:', e.message);
-          }
-          // Also notify renderer for localStorage consistency
-          mainWindow.webContents.send('api-command', { action: 'saveTemplate', payload: { name: payload.name, description: payload.description } });
-          send(200, { ok: true });
-          break;
-
-        case '/api/list-templates':
-          {
-            const templatesDir = path.join(__dirname, '../../templates');
-            fs.readdir(templatesDir, (err, files) => {
-              if (err) { send(500, { error: '读取模板目录失败' }); return; }
-              const templates = files.filter(f => f.endsWith('.flow')).map(f => {
-                const filePath = path.join(templatesDir, f);
-                let displayName = f.replace(/\.flow$/, '');
-                try {
-                  const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                  if (content.name) displayName = content.name;
-                } catch {}
-                return { name: displayName, path: filePath };
-              });
-              send(200, { ok: true, templates });
-            });
-          }
-          break;
-
-        case '/api/set-ui':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!payload.updates) { send(400, { error: '缺少 updates' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'setUI', payload: payload.updates });
-          send(200, { ok: true });
-          break;
-
-        case '/api/command':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!Array.isArray(payload.commands)) { send(400, { error: '缺少 commands 数组' }); return; }
-          (async () => {
-            for (const cmd of payload.commands) {
-              if (cmd.delay) await new Promise(r => setTimeout(r, cmd.delay));
-              mainWindow!.webContents.send('api-command', {
-                action: cmd.action,
-                payload: cmd.payload || {},
-              });
-            }
-            send(200, { ok: true });
-          })();
-          break;
-
-        case '/api/undo':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'undo' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/redo':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'redo' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/copy-selected':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'copySelected' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/cut-selected':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'cutSelected' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/paste':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'paste' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/select-all':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'selectAll' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/clear-selection':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'clearSelection' });
-          send(200, { ok: true });
-          break;
-
-        case '/api/duplicate-nodes':
-          if (!mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-          if (!Array.isArray(payload.ids)) { send(400, { error: '缺少 ids 数组' }); return; }
-          mainWindow.webContents.send('api-command', { action: 'duplicateNodes', payload: { ids: payload.ids } });
-          send(200, { ok: true });
-          break;
-
-        default:
-          send(404, { error: '未知端点' });
-      }
-      } catch (e: any) {
-        console.error('[API] Handler error:', e);
-        send(500, { error: 'Internal error: ' + (e.message || e) });
-      }
-    });
-  });
-
-  apiServer.listen(API_PORT, '127.0.0.1', () => {
-    console.log(`[API] HTTP server listening on http://127.0.0.1:${API_PORT}`);
-  });
-}
-
-function stopApiServer() {
-  if (apiServer) {
-    apiServer.close();
-    apiServer = null;
-  }
-}
-
-// --- Python Engine Process Management ---
-
-function getPythonPath(): string {
-  return isDev
-    ? 'python'
-    : path.join(process.resourcesPath, 'python', 'python.exe');
-}
-
-function getEngineScriptPath(): string {
-  return isDev
-    ? path.join(__dirname, '../../src/python/engine.py')
-    : path.join(process.resourcesPath, 'python', 'engine.py');
-}
-
-function startPythonEngine(scriptJson: string) {
-  if (pythonProcess) {
-    stopPythonEngine();
-  }
-
-  const pythonPath = getPythonPath();
-  const scriptPath = getEngineScriptPath();
-
-  _lastScript = scriptJson;
-
-  try {
-    pythonProcess = spawn(pythonPath, [scriptPath], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    });
-  } catch (e) {
-    mainWindow?.webContents.send('engine-log', { level: 'error', message: `启动引擎失败: ${e}` });
-    return;
-  }
-
-  _engineRunning = true;
-
-  const proc = pythonProcess; // capture reference for close handler
-
-  // Send script data AFTER setting up stdout handler to avoid race
-  const scriptPayload = JSON.stringify({ type: 'execute', payload: { script: JSON.parse(scriptJson) } });
-
-  proc.stdout!.on('data', (data: Buffer) => {
-    const lines = data.toString('utf8').split('\n').filter(Boolean);
-    for (const line of lines) {
-      try {
-        const msg = JSON.parse(line);
-        if (msg.type === 'execution_done') {
-          _engineRunning = false;
-        }
-        mainWindow?.webContents.send('engine-message', msg);
-      } catch {
-        mainWindow?.webContents.send('engine-log', { level: 'info', message: line });
-      }
-    }
-  });
-
-  proc.stderr!.on('data', (data: Buffer) => {
-    mainWindow?.webContents.send('engine-log', { level: 'error', message: data.toString('utf8') });
-  });
-
-  proc.on('exit', () => { _engineRunning = false; });
-
-  // Send stdin LAST (after all handlers are registered)
-  proc.stdin!.write(scriptPayload + '\n');
-}
-
-function stopPythonEngine() {
-  _engineRunning = false;
-  const proc = pythonProcess;
-  pythonProcess = null;
-  if (proc) {
-    // Step 1: Send graceful stop message via stdin
-    try { if (proc.stdin) proc.stdin.write(JSON.stringify({ type: 'stop' }) + '\n'); } catch {}
-
-    // Step 2: If process doesn't exit gracefully within 2s, force kill
-    const timer = setTimeout(() => {
-      try { if (!proc.killed) proc.kill('SIGTERM'); } catch {}
-    }, 2000);
-    timer.unref();
-  }
-}
-
-function sendToEngine(message: any) {
-  if (pythonProcess && pythonProcess.stdin) {
-    pythonProcess.stdin.write(JSON.stringify(message) + '\n');
-  }
-}
-
-// --- IPC Handlers ---
-
-// 渲染器推送状态更新（替代 executeJavaScript）
-
-/** Call LLM API (DeepSeek-compatible) */
-async function callLLM(opts: {
-  apiKey: string;
-  messages: { role: string; content: string }[];
-  apiBase?: string;
-  model?: string;
-  response_format?: 'json' | 'text';
-  max_tokens?: number;
-}): Promise<any> {
-  return new Promise((resolve) => {
-    const apiBase = (opts.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
-    const model = opts.model || process.env.LLM_MODEL || 'deepseek-chat';
-    const body: any = {
-      model,
-      messages: opts.messages,
-      temperature: 0.1,
-      max_tokens: opts.max_tokens || 2048,
-    };
-    if (opts.response_format === 'json') {
-      body.response_format = { type: 'json_object' };
-    }
-    const postData = JSON.stringify(body);
-    const urlObj = new URL(apiBase + '/chat/completions');
-    const httpMod = urlObj.protocol === 'https:' ? require('https') : require('http');
-    const req = httpMod.request(urlObj, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + opts.apiKey,
-      },
-    }, (res: any) => {
-      const _httpBuf: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => _httpBuf.push(chunk));
-      res.on('end', () => {
-        const data = Buffer.concat(_httpBuf).toString('utf8');
-        try { resolve(JSON.parse(data)); }
-        catch { resolve({ error: 'JSON parse error', raw: data.slice(0, 500) }); }
-      });
-    });
-    req.on('error', (err: Error) => resolve({ error: err.message }));
-    req.write(postData);
-    req.end();
-  });
-}
 
 interface IncompleteParam {
   node_id: string;
@@ -1209,6 +592,12 @@ ipcMain.handle('engine:stop', () => {
   stopPythonEngine();
   return { success: true };
 });
+
+function sendToEngine(message: any) {
+  if (pythonProcess && pythonProcess.stdin) {
+    pythonProcess.stdin.write(JSON.stringify(message) + '\n');
+  }
+}
 
 ipcMain.handle('engine:pause', () => {
   sendToEngine({ type: 'pause' });
@@ -1485,16 +874,18 @@ ipcMain.handle('screenshot:selectRegion', async () => _selectRegion());
 
 // --- Interaction Tools IPC ---
 async function _wheelSelect(params: { options: string[]; values?: string[]; title?: string; message?: string; default?: number }): Promise<any> {
+  const scriptPath = path.join(getBaseDir(), 'python', 'interaction', 'wheel_selector.py');
+  const proc = await spawnPythonOneShot([scriptPath, '--ipc'], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const _out: Buffer[] = [];
+  const _err: Buffer[] = [];
+  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+  proc.stdin!.write(JSON.stringify(params) + '\n');
+  proc.stdin!.end();
   return new Promise((resolve) => {
-    const scriptPath = path.join(getBaseDir(), 'python', 'interaction', 'wheel_selector.py');
-    const proc = spawnPython([scriptPath, '--ipc'], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const _out: Buffer[] = [];
-    const _err: Buffer[] = [];
-    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', (code) => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
@@ -1506,25 +897,25 @@ async function _wheelSelect(params: { options: string[]; values?: string[]; titl
       }
     });
     proc.on('error', (err) => resolve({ error: err.message }));
-    proc.stdin!.write(JSON.stringify(params) + '\n');
-    proc.stdin!.end();
   });
 }
 
 ipcMain.handle('interaction:wheelSelect', async (_, params) => _wheelSelect(params));
 
 async function _ocrRegion(region: { x: number; y: number; w: number; h: number }): Promise<any> {
-  return new Promise((resolve) => {
-    const scriptPath = path.join(getBaseDir(), 'tools', 'ocr_region.py');
-    const proc = spawnPython([scriptPath], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+  const scriptPath = path.join(getBaseDir(), 'tools', 'ocr_region.py');
+  const proc = await spawnPythonOneShot([scriptPath], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 
-    const _out: Buffer[] = [];
-    const _err: Buffer[] = [];
-    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+  const _out: Buffer[] = [];
+  const _err: Buffer[] = [];
+  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+  proc.stdin!.write(JSON.stringify(region) + '\n');
+  proc.stdin!.end();
+  return new Promise((resolve) => {
     proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
@@ -1536,9 +927,6 @@ async function _ocrRegion(region: { x: number; y: number; w: number; h: number }
       }
     });
     proc.on('error', () => resolve([]));
-
-    proc.stdin!.write(JSON.stringify(region) + '\n');
-    proc.stdin!.end();
   });
 }
 
@@ -1546,16 +934,18 @@ ipcMain.handle('ocr:recognizeRegion', async (_, region) => _ocrRegion(region));
 
 // --- DSL Conversion IPC ---
 ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
+  const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
+  const proc = await spawnPythonOneShot([scriptPath], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const _out: Buffer[] = [];
+  const _err: Buffer[] = [];
+  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+  proc.stdin!.write(dslText + '\n');
+  proc.stdin!.end();
   return new Promise((resolve) => {
-    const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
-    const proc = spawnPython([scriptPath], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const _out: Buffer[] = [];
-    const _err: Buffer[] = [];
-    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', (code) => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
@@ -1567,46 +957,22 @@ ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
       }
     });
     proc.on('error', (err) => resolve({ error: err.message }));
-    proc.stdin!.write(dslText + '\n');
-    proc.stdin!.end();
   });
 });
 
 // --- Feature Registry IPC ---
 
 ipcMain.handle('features:list', async () => {
+  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'feature_list.py');
+  const proc = await spawnPythonOneShot([scriptPath], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const _out: Buffer[] = [];
+  const _err: Buffer[] = [];
+  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
   return new Promise((resolve) => {
-    const proc = spawnPython(['-c', `
-import sys, json
-sys.path.insert(0, 'python')
-from features._all import *
-from features.registry import registry
-sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-features = []
-for f in registry.all():
-    if f.hidden or f.deprecated:
-        continue
-    features.append({
-        "name": f.name,
-        "display_name": f.display_name,
-        "description": f.description,
-        "category": f.category.value,
-        "params": [{"name": p.name, "type": p.type, "description": p.description,
-                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
-        "returns": f.returns,
-        "deprecated": f.deprecated,
-        "tags": f.tags,
-    })
-print(json.dumps(features, ensure_ascii=False))
-sys.stdout.flush()
-`], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const _out: Buffer[] = [];
-    const _err: Buffer[] = [];
-    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
@@ -1622,29 +988,18 @@ sys.stdout.flush()
 });
 
 ipcMain.handle('feature:call', async (_, featureName: string, params: Record<string, any>) => {
+  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'feature_call.py');
+  const proc = await spawnPythonOneShot([scriptPath], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const _out: Buffer[] = [];
+  const _err: Buffer[] = [];
+  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
+  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
+  proc.stdin!.write(JSON.stringify({ name: featureName, params }) + '\n');
+  proc.stdin!.end();
   return new Promise((resolve) => {
-    const proc = spawnPython(['-c', `
-import sys, json
-sys.path.insert(0, 'python')
-from features._all import *
-from features.registry import registry
-sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-try:
-    raw = sys.stdin.read()
-    data = json.loads(raw)
-    result = registry.execute(data["name"], **data.get("params", {}))
-    print(json.dumps(result, ensure_ascii=False))
-except Exception as e:
-    print(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
-sys.stdout.flush()
-`], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const _out: Buffer[] = [];
-    const _err: Buffer[] = [];
-    proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-    proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
     proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
@@ -1656,8 +1011,6 @@ sys.stdout.flush()
       }
     });
     proc.on('error', (err) => resolve({ success: false, error: err.message }));
-    proc.stdin!.write(JSON.stringify({ name: featureName, params }) + '\n');
-    proc.stdin!.end();
   });
 });
 
@@ -1687,6 +1040,10 @@ function _ensureMacroRecorder(): ChildProcess | null {
     macroRecorderProcess.stdout!.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       _macroStdoutBuffer += text;
+      // 防止缓冲区无限增长（最大 64KB）
+      if (_macroStdoutBuffer.length > 65536) {
+        _macroStdoutBuffer = _macroStdoutBuffer.slice(-32768);
+      }
       // Process complete lines
       const lines = _macroStdoutBuffer.split('\n');
       _macroStdoutBuffer = lines.pop() || ''; // keep incomplete line
@@ -1791,20 +1148,12 @@ ipcMain.handle('macro:list', async () => {
 });
 
 ipcMain.handle('macro:play', async (_, name: string) => {
+  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'macro_play_cli.py');
+  const proc = await spawnPythonOneShot([scriptPath, name], {
+    cwd: getBaseDir(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
   return new Promise((resolve) => {
-    const scriptPath = path.join(getBaseDir(), 'python', 'interaction', 'play_macro.py');
-    // Run macro playback via the existing feature system
-    const proc = spawnPython(['-c', `
-import json, sys, time
-sys.path.insert(0, '.')
-from features.macro_features import macro_playback
-result = macro_playback("${name.replace(/"/g, '\\"')}")
-print(json.dumps(result))
-sys.stdout.flush()
-`], {
-      cwd: getBaseDir(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
     const _out: Buffer[] = [];
     const _err: Buffer[] = [];
     proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
@@ -1850,6 +1199,100 @@ ipcMain.handle('macro:recording-status', () => {
   return { recording: _macroRecording, process_alive: macroRecorderProcess !== null && !macroRecorderProcess.killed };
 });
 
+// --- Auto-start IPC ---
+ipcMain.handle('settings:get-auto-start', () => {
+  return app.getLoginItemSettings().openAtLogin;
+});
+ipcMain.handle('settings:set-auto-start', (_, enable: boolean) => {
+  app.setLoginItemSettings({ openAtLogin: enable });
+  return enable;
+});
+
+// --- Notification IPC ---
+ipcMain.handle('notification:show', (_, title: string, body: string) => {
+  try {
+    const notif = new Notification({ title: title || '灵动脚本', body: body || '', silent: false });
+    notif.show();
+    return true;
+  } catch { return false; }
+});
+
+// --- Schedule IPC ---
+const SCHEDULES_FILE = path.join(app.getPath('userData'), 'schedules.json');
+
+function migrateSchedule(entry: any): any {
+  if (entry.triggers) return entry; // already new format
+  // Old format: { type, cron_expr?, interval_seconds? } → { triggers: [{ type, cron_expr?, interval_seconds? }] }
+  const trigger: any = { type: entry.type || 'startup' };
+  if (entry.cron_expr) trigger.cron_expr = entry.cron_expr;
+  if (entry.interval_seconds) trigger.interval_seconds = entry.interval_seconds;
+  return {
+    ...entry,
+    triggers: [trigger],
+    conditions: entry.conditions || undefined,
+    type: undefined, cron_expr: undefined, interval_seconds: undefined,
+  };
+}
+
+async function readSchedules(): Promise<any[]> {
+  try {
+    try { await fsp.access(SCHEDULES_FILE); } catch { return []; }
+    const raw = await fsp.readFile(SCHEDULES_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    let changed = false;
+    const migrated = parsed.map((s: any) => {
+      const m = migrateSchedule(s);
+      if (m !== s) changed = true;
+      return m;
+    });
+    if (changed) await writeSchedules(migrated);
+    return migrated;
+  } catch { return []; }
+}
+
+async function writeSchedules(schedules: any[]): Promise<void> {
+  try {
+    await fsp.writeFile(SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('Failed to write schedules:', e);
+  }
+}
+
+ipcMain.handle('schedule:list', async () => readSchedules());
+
+ipcMain.handle('schedule:create', async (_, entry: any) => {
+  const schedules = await readSchedules();
+  const id = `sched_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const newEntry = { ...entry, id, created_at: new Date().toISOString(), last_run: null, next_run: null };
+  schedules.push(newEntry);
+  await writeSchedules(schedules);
+  scheduler.reload();
+  refreshScheduleContext();
+  return newEntry;
+});
+
+ipcMain.handle('schedule:update', async (_, id: string, updates: any) => {
+  const schedules = await readSchedules();
+  const idx = schedules.findIndex((s: any) => s.id === id);
+  if (idx === -1) return null;
+  schedules[idx] = { ...schedules[idx], ...updates };
+  await writeSchedules(schedules);
+  scheduler.reload();
+  refreshScheduleContext();
+  return schedules[idx];
+});
+
+ipcMain.handle('schedule:delete', async (_, id: string) => {
+  const schedules = await readSchedules();
+  const filtered = schedules.filter((s: any) => s.id !== id);
+  if (filtered.length === schedules.length) return false;
+  await writeSchedules(filtered);
+  scheduler.reload();
+  refreshScheduleContext();
+  return true;
+});
+
 // --- Menu Action IPC ---
 ipcMain.on('menu-action', (_, action: string) => {
   mainWindow?.webContents.send('menu-action', action);
@@ -1874,17 +1317,37 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     buildAppMenu();
     createWindow();
-    startApiServer();
+    apiServer = startApiServer({
+      mainWindow,
+      getCachedRendererState: () => _cachedRendererState,
+      macroRecording: _macroRecording,
+      macroRecorderProcess,
+      macroResultResolve: _macroResultResolve,
+      ensureMacroRecorder: _ensureMacroRecorder,
+      captureScreenshot: _captureScreenshot,
+      selectRegion: _selectRegion,
+      wheelSelect: _wheelSelect,
+      ocrRecognizeRegion: _ocrRegion,
+      dslToFlow: async (dslText: string) => {
+        const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
+        const result = await runPythonCollect([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] }, dslText);
+        try { return JSON.parse(result.stdout.trim()); }
+        catch { return { error: result.stderr?.trim() || 'DSL转换失败' }; }
+      },
+    });
+
+    // 调度引擎
+    scheduler.start(path.join(app.getPath('userData'), 'schedules.json'));
 
     // 全局 F9 热键 — 在主进程直接控制引擎启停
     globalShortcut.register('F9', () => {
       if (!mainWindow) return;
-      if (_engineRunning) {
+      if (engineRunning) {
         stopPythonEngine();
         mainWindow.webContents.send('engine-message', { type: 'execution_done', status: 'stopped' });
         mainWindow.webContents.send('engine-log', { level: 'info', message: '⏹️ 脚本已停止 (全局F9)' });
-      } else if (_lastScript) {
-        startPythonEngine(_lastScript);
+      } else if (lastScript) {
+        startPythonEngine(lastScript);
         mainWindow.webContents.send('engine-message', { type: 'status_report', status: 'running' });
         mainWindow.webContents.send('engine-log', { level: 'info', message: '🔄 脚本开始执行 (全局F9)' });
       } else {
@@ -1900,11 +1363,12 @@ if (!gotTheLock) {
 
 app.on('window-all-closed', () => {
   stopPythonEngine();
-  stopApiServer();
+  apiServer?.close();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   stopPythonEngine();
+  scheduler.stop();
 });

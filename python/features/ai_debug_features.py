@@ -359,32 +359,101 @@ def debug_generate_test_flow(scenario: str, api_key: str = "") -> dict:
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'templates')
 
 
+def _parse_template_metadata(filepath: str) -> dict:
+    """Parse YAML-style metadata block from the top of a .dsl file.
+
+    Expected format:
+        # ---
+        # name: 登录流程
+        # aliases: ["登录", "login"]
+        # tags: ["app", "login"]
+        # keywords: ["账号", "密码"]
+        # category: app
+        # ---
+    """
+    import json, re
+    meta = {"name": "", "description": "", "aliases": [], "tags": [], "keywords": [], "category": ""}
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except:
+        return meta
+
+    # Find start/end markers
+    start_idx = -1
+    for i, line in enumerate(lines):
+        if line.strip() == '# ---':
+            start_idx = i
+            break
+    if start_idx < 0:
+        # Fallback: first comment line as description
+        for line in lines:
+            if line.startswith('# ') and not line.startswith('# ---'):
+                meta["description"] = line.strip('# \n')
+                break
+        meta["name"] = os.path.splitext(os.path.basename(filepath))[0]
+        return meta
+
+    end_idx = -1
+    for i in range(start_idx + 1, len(lines)):
+        if lines[i].strip() == '# ---':
+            end_idx = i
+            break
+
+    # Parse key: value lines
+    for i in range(start_idx + 1, end_idx if end_idx > 0 else len(lines)):
+        line = lines[i].lstrip('# ').strip()
+        if ':' in line:
+            key, _, val = line.partition(':')
+            key = key.strip()
+            val = val.strip()
+            if key in ('aliases', 'tags', 'keywords'):
+                try:
+                    meta[key] = json.loads(val)
+                except:
+                    meta[key] = [v.strip().strip('"\'') for v in val.strip('[]').split(',') if v.strip()]
+            elif key == 'name':
+                meta['name'] = val
+            elif key == 'category':
+                meta['category'] = val
+            else:
+                meta[key] = val
+
+    if not meta.get("description"):
+        for line in lines:
+            if line.startswith('# ') and ':' not in line and not line.startswith('# ---'):
+                meta["description"] = line.strip('# \n')
+                break
+    if not meta.get("name"):
+        meta["name"] = os.path.splitext(os.path.basename(filepath))[0]
+    return meta
+
+
 @feature(
     name="list_templates",
     display_name="列出工作流模板",
-    description="列出 templates/ 目录下的所有 DSL 工作流模板文件，返回模板名称和描述",
+    description="列出 templates/ 目录下的所有 DSL 工作流模板文件，返回模板名称、描述、标签、别名等元数据",
     category=F.DEBUG,
     params=[],
-    returns="list[dict{name, description}]",
+    returns="list[dict{name, description, aliases, tags, keywords, category}]",
 )
 def list_templates() -> list:
-    """列出所有可用的工作流模板。"""
+    """列出所有可用的工作流模板（含元数据）。"""
     if not os.path.isdir(TEMPLATES_DIR):
         return []
     templates = []
     for f in sorted(os.listdir(TEMPLATES_DIR)):
         if f.endswith('.dsl'):
             path = os.path.join(TEMPLATES_DIR, f)
-            desc = ""
-            with open(path, 'r', encoding='utf-8') as fh:
-                for line in fh:
-                    if line.startswith('# '):
-                        desc = line.strip('# \n')
-                        break
+            meta = _parse_template_metadata(path)
             templates.append({
-                "name": f.replace('.dsl', ''),
+                "name": meta.get("name", f.replace('.dsl', '')),
                 "filename": f,
-                "description": desc,
+                "description": meta.get("description", ""),
+                "aliases": meta.get("aliases", []),
+                "tags": meta.get("tags", []),
+                "keywords": meta.get("keywords", []),
+                "category": meta.get("category", ""),
             })
     return templates
 
@@ -392,12 +461,12 @@ def list_templates() -> list:
 @feature(
     name="load_template",
     display_name="加载工作流模板",
-    description="加载 templates/ 目录下的 DSL 模板文件内容，返回 DSL 文本和名称",
+    description="加载 templates/ 目录下的 DSL 模板文件内容，返回 DSL 文本、名称和元数据",
     category=F.DEBUG,
     params=[
         P("name", "str", "模板名称（不含 .dsl 后缀）", example="screenshot-workflow"),
     ],
-    returns="dict{name, dsl, exists}",
+    returns="dict{name, dsl, exists, aliases, tags, keywords, category}",
 )
 def load_template(name: str) -> dict:
     """加载指定名称的 DSL 模板文件内容。"""
@@ -406,7 +475,103 @@ def load_template(name: str) -> dict:
         return {"name": name, "dsl": "", "exists": False, "error": f"模板 '{name}' 未找到"}
     with open(path, 'r', encoding='utf-8') as f:
         dsl = f.read()
-    return {"name": name, "dsl": dsl, "exists": True}
+    meta = _parse_template_metadata(path)
+    return {
+        "name": meta.get("name", name),
+        "dsl": dsl,
+        "exists": True,
+        "description": meta.get("description", ""),
+        "aliases": meta.get("aliases", []),
+        "tags": meta.get("tags", []),
+        "keywords": meta.get("keywords", []),
+        "category": meta.get("category", ""),
+    }
+
+
+@feature(
+    name="search_templates",
+    display_name="搜索模板",
+    description="搜索 templates/ 目录下的 DSL 工作流模板，按关键词返回匹配的模板列表",
+    category=F.DEBUG,
+    params=[
+        P("query", "str", "搜索关键词"),
+        P("limit", "int", "返回结果数量上限", required=False, default=5),
+    ],
+    returns="list[dict{name, description, aliases, tags, keywords, category, match_score}]",
+)
+def search_templates(query: str, limit: int = 5) -> list:
+    """搜索模板，按名称、描述、别名、标签、关键词匹配度排序。"""
+    if not os.path.isdir(TEMPLATES_DIR):
+        return []
+    results = []
+    q = query.lower().strip()
+    for f in sorted(os.listdir(TEMPLATES_DIR)):
+        if not f.endswith('.dsl'):
+            continue
+        path = os.path.join(TEMPLATES_DIR, f)
+        meta = _parse_template_metadata(path)
+        name = meta.get("name", "")
+        desc = meta.get("description", "")
+        aliases = meta.get("aliases", [])
+        tags = meta.get("tags", [])
+        keywords = meta.get("keywords", [])
+
+        score = 0
+        if name.lower() == q: score = 100
+        elif q in name.lower(): score = 70
+        for a in aliases:
+            if a.lower() == q: score = max(score, 95)
+            elif q in a.lower(): score = max(score, 65)
+        for k in keywords:
+            if q in k.lower() or k.lower() in q: score = max(score, 60)
+        for t_ in tags:
+            if q in t_.lower(): score = max(score, 50)
+        if q in desc.lower(): score = max(score, 40)
+
+        if score > 0:
+            results.append({
+                "name": name,
+                "filename": f,
+                "description": desc,
+                "aliases": aliases,
+                "tags": tags,
+                "keywords": keywords,
+                "category": meta.get("category", ""),
+                "match_score": score,
+            })
+    results.sort(key=lambda x: x["match_score"], reverse=True)
+    return results[:limit]
+
+
+@feature(
+    name="search_flow_templates",
+    display_name="搜索前端模板",
+    description="【模板·前端】通过 Electron HTTP API 搜索前端模板注册表（含 HTN 复合模板 + 语义匹配），返回结构化候选列表。比 filesystem search_templates 更丰富（含自动注册的动态模板和语义评分）",
+    category=F.AI,
+    params=[
+        P("query", "str", "搜索关键词（自然语言）", example="打开记事本输入文字"),
+        P("max_results", "int", "最多返回结果数", required=False, default=5),
+    ],
+    returns="dict{htn, flat, autoSelect}",
+)
+def search_flow_templates(query: str, max_results: int = 5) -> dict:
+    """搜索前端模板注册表，返回 HTN + 语义匹配结果。"""
+    import urllib.request, urllib.error
+    payload = json.dumps({"query": query, "maxResults": max_results}).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:5577/api/search-templates",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except urllib.error.URLError as e:
+        return {"error": f"无法连接前端窗口 (是否已启动?): {e.reason}", "htn": [], "flat": [], "autoSelect": None}
+    except Exception as e:
+        return {"error": str(e), "htn": [], "flat": [], "autoSelect": None}
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────

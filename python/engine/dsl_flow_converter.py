@@ -65,6 +65,16 @@ _BASIC_DSL_TO_FLOW = {
     "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
     "SHUTDOWN": "shutdown", "REBOOT": "reboot",
     "LOGOFF": "logoff", "HIBERNATE": "hibernate",
+    "LOCK": "lock_workstation", "VOLUME": "volume_set", "MUTE": "volume_mute",
+    "LAUNCH": "launch_program", "KILL": "kill_process",
+    "WAIT_PROCESS": "wait_process", "WAIT_EXIT": "wait_process",
+    "WALLPAPER": "set_wallpaper", "DISPLAY_OFF": "display_off",
+    "SLEEP": "system_sleep", "DESKTOP": "show_desktop",
+    "BATTERY": "battery_status", "EMPTY_BIN": "empty_recycle_bin",
+    "BRIGHTNESS": "display_brightness",
+    "CLIPBOARD_SET": "clipboard_set", "CLIPBOARD_GET": "clipboard_get",
+    "MINIMIZE": "window_control", "MAXIMIZE": "window_control",
+    "CLOSE_WINDOW": "window_control", "RESIZE_WINDOW": "window_control",
     "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
     "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
     "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
@@ -487,6 +497,102 @@ def _dsl_args_to_params(ntype: str, args: str,
             "confirm": True,
         }
 
+    elif ntype == "LOCK":
+        params = {"confirm": True}
+
+    elif ntype == "VOLUME":
+        nums = re.findall(r"\d+", args)
+        params = {"level": int(nums[0]) if nums else 50}
+
+    elif ntype == "MUTE":
+        a = args.strip().lower()
+        if a in ("on", "true", "1"):
+            params = {"mute": True}
+        elif a in ("off", "false", "0"):
+            params = {"mute": False}
+        else:
+            params = {"mute": None}
+
+    elif ntype == "LAUNCH":
+        params = {"target": args, "args": "", "wait": False}
+
+    elif ntype == "KILL":
+        parts = args.split()
+        params = {"name": parts[0] if parts else args, "force": "force" in args.lower() or "-f" in args}
+
+    elif ntype == "WAIT_PROCESS":
+        parts = args.split()
+        name = ""
+        timeout = 30
+        if parts:
+            name = parts[0]
+            if len(parts) > 1 and parts[1].isdigit():
+                timeout = int(parts[1])
+        params = {"name": name, "timeout": timeout, "wait_for": "start"}
+
+    elif ntype == "WAIT_EXIT":
+        parts = args.split()
+        name = ""
+        timeout = 60
+        if parts:
+            name = parts[0]
+            if len(parts) > 1 and parts[1].isdigit():
+                timeout = int(parts[1])
+        params = {"name": name, "timeout": timeout, "wait_for": "exit"}
+
+    elif ntype == "WALLPAPER":
+        parts = args.split(None, 1)
+        path = parts[0] if parts else args
+        style = "fill"
+        if len(parts) > 1:
+            s = parts[1].strip().lower()
+            if s in ("fill", "fit", "stretch", "tile", "center"):
+                style = s
+        params = {"path": path, "style": style}
+
+    elif ntype == "DISPLAY_OFF":
+        params = {"confirm": True}
+
+    elif ntype == "SLEEP":
+        params = {"confirm": True}
+
+    elif ntype == "DESKTOP":
+        params = {}
+
+    elif ntype == "BATTERY":
+        params = {}
+
+    elif ntype == "EMPTY_BIN":
+        a = args.strip().lower()
+        params = {"confirm": a not in ("no", "false", "0")}
+
+    elif ntype == "BRIGHTNESS":
+        nums = re.findall(r"\d+", args)
+        params = {"level": int(nums[0]) if nums else 80}
+
+    elif ntype == "CLIPBOARD_SET":
+        params = {"text": args}
+
+    elif ntype == "CLIPBOARD_GET":
+        params = {}
+
+    elif ntype in ("MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW"):
+        op_map = {"MINIMIZE": "minimize", "MAXIMIZE": "maximize", "CLOSE_WINDOW": "close", "RESIZE_WINDOW": "resize"}
+        title = args
+        width, height = 800, 600
+        if ntype == "RESIZE_WINDOW":
+            nums = re.findall(r"\d+", args)
+            if len(nums) >= 2:
+                width, height = int(nums[0]), int(nums[1])
+                rest = args
+                for n in nums[:2]:
+                    rest = rest.replace(str(n), "", 1)
+                title = rest.strip()
+        params = {"operation": op_map[ntype], "title": title, "width": width, "height": height}
+        if ntype != "RESIZE_WINDOW":
+            params.pop("width", None)
+            params.pop("height", None)
+
     elif ntype == "REGION_WAIT":
         nums = re.findall(r"-?\d+", args)
         parts = args.split()
@@ -782,6 +888,57 @@ def flow_to_dsl(script: dict) -> str:
             delay = p.get("delay_seconds", 0)
             kw = {"shutdown": "SHUTDOWN", "reboot": "REBOOT", "logoff": "LOGOFF", "hibernate": "HIBERNATE"}
             return f"{kw[ntype]} {delay}" if delay else kw[ntype]
+
+        # 扩展系统指令 flow→DSL
+        if ntype == "lock_workstation":
+            return "LOCK"
+        if ntype == "volume_set":
+            return f"VOLUME {p.get('level', 50)}"
+        if ntype == "volume_mute":
+            m = p.get("mute")
+            if m is None:
+                return "MUTE"
+            return f"MUTE {'ON' if m else 'OFF'}"
+        if ntype == "launch_program":
+            return f"LAUNCH {p.get('target', '')}"
+        if ntype == "kill_process":
+            return f"KILL {p.get('name', '')}"
+        if ntype == "wait_process":
+            wf = p.get("wait_for", "start")
+            name = p.get("name", "")
+            timeout = p.get("timeout", 30)
+            kw = "WAIT_PROCESS" if wf == "start" else "WAIT_EXIT"
+            return f"{kw} {name} {timeout}"
+        if ntype == "focus_window":
+            return f"FOCUS {p.get('title', '')}"
+        if ntype == "set_wallpaper":
+            return f"WALLPAPER {p.get('path', '')}"
+        if ntype == "display_off":
+            return "DISPLAY_OFF"
+        if ntype == "system_sleep":
+            return "SLEEP"
+        if ntype == "show_desktop":
+            return "DESKTOP"
+        if ntype == "battery_status":
+            return "BATTERY"
+        if ntype == "empty_recycle_bin":
+            return "EMPTY_BIN"
+        if ntype == "display_brightness":
+            return f"BRIGHTNESS {p.get('level', 80)}"
+        if ntype == "clipboard_set":
+            return f"CLIPBOARD_SET {p.get('text', '')}"
+        if ntype == "clipboard_get":
+            return "CLIPBOARD_GET"
+        if ntype == "window_control":
+            op = p.get("operation", "minimize")
+            op_map = {"minimize": "MINIMIZE", "maximize": "MAXIMIZE", "close": "CLOSE_WINDOW", "resize": "RESIZE_WINDOW"}
+            title = p.get("title", "")
+            width = p.get("width", 800)
+            height = p.get("height", 600)
+            dsl_kw = op_map.get(op, "MINIMIZE")
+            if op == "resize":
+                return f"{dsl_kw} {width} {height} {title}".strip()
+            return f"{dsl_kw} {title}".strip()
 
         if ntype == "condition":
             ct = p.get("condition_type", "always_true")

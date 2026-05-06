@@ -83,4 +83,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMacroMessage: (callback: (msg: any) => void) => {
     ipcRenderer.on('macro-message', (_, msg) => callback(msg));
   },
+
+  // Auto-start
+  getAutoStart: () => ipcRenderer.invoke('settings:get-auto-start'),
+  setAutoStart: (enable: boolean) => ipcRenderer.invoke('settings:set-auto-start', enable),
+
+  // Schedule CRUD
+  scheduleList: () => ipcRenderer.invoke('schedule:list'),
+  scheduleCreate: (entry: any) => ipcRenderer.invoke('schedule:create', entry),
+  scheduleUpdate: (id: string, updates: any) => ipcRenderer.invoke('schedule:update', id, updates),
+  scheduleDelete: (id: string) => ipcRenderer.invoke('schedule:delete', id),
+
+  // Notice: built-in actions
+  showNotification: (title: string, body: string) => ipcRenderer.invoke('notification:show', title, body),
 });

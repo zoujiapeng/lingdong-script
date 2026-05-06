@@ -3,6 +3,7 @@ import * as LucideIcons from 'lucide-react';
 import { Zap, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import { FlowNode as FlowNodeType } from '../../types';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
+import { getNodeDimensions } from '../../utils/constants';
 import { useStore } from '../../store';
 
 function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
@@ -56,6 +57,42 @@ function getNodeSummary(node: FlowNodeType): string {
       return `场景识别: 「${p.scene_name || '未设置'}」 (相似度≥${p.similarity}%)`;
     case 'variable_get':
       return `读取变量: ${p.name || '未设置'}`;
+    case 'lock_workstation':
+      return '锁定工作站';
+    case 'volume_set':
+      return `音量: ${p.level ?? 50}%`;
+    case 'volume_mute':
+      return p.mute === null ? '切换静音' : p.mute ? '静音' : '取消静音';
+    case 'launch_program':
+      return `启动: ${p.target || '未设置'}`;
+    case 'kill_process':
+      return `终止: ${p.name || '未设置'}${p.force ? ' (强制)' : ''}`;
+    case 'wait_process':
+      return `等待${p.wait_for === 'exit' ? '退出' : '启动'}: ${p.name || '未设置'} (超时${p.timeout ?? 30}s)`;
+    case 'focus_window':
+      return `激活窗口: ${p.title || '未设置'}`;
+    case 'set_wallpaper':
+      return `壁纸: ${p.path || '未设置'}`;
+    case 'display_off':
+      return '关闭显示器';
+    case 'system_sleep':
+      return '睡眠';
+    case 'show_desktop':
+      return '显示桌面';
+    case 'battery_status':
+      return '获取电池状态';
+    case 'empty_recycle_bin':
+      return '清空回收站';
+    case 'display_brightness':
+      return `亮度: ${p.level ?? 80}%`;
+    case 'clipboard_set':
+      return `剪贴板写入: "${(p.text || '').substring(0, 20)}${p.text?.length > 20 ? '…' : ''}"`;
+    case 'clipboard_get':
+      return '读取剪贴板文本';
+    case 'window_control': {
+      const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', close: '关闭', resize: '调整大小' };
+      return `窗口${opLabels[p.operation] || p.operation}${p.title ? ': ' + p.title : ''}`;
+    }
     default: return `(${node.type})`;
   }
 }
@@ -83,24 +120,25 @@ interface Props {
   onPortMouseUp: (e: React.MouseEvent, nodeId: string, portId: string) => void;
 }
 
-export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
-  const { ui, selectNodes, moveNode, moveNodes, updateNode, script } = useStore();
-  const { selection, connecting } = ui;
-  const isSelected = selection.nodes.includes(node.id);
+export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
+  const isSelected = useStore(s => s.ui.selection.nodes.includes(node.id));
+  const connectingActive = useStore(s => s.ui.connecting.active);
+  const selectNodes = useStore(s => s.selectNodes);
+  const moveNode = useStore(s => s.moveNode);
   const def = NODE_DEFINITIONS[node.type];
   const dragStartRef = useRef<{ nx: number; ny: number; mx: number; my: number } | null>(null);
   const hasDragged = useRef(false);
 
-  const isStartEnd = node.type === 'start' || node.type === 'end';
-  const nodeW = isStartEnd ? 160 : 220;
-  const nodeH = isStartEnd ? 56 : 80;
+  const dims = getNodeDimensions(node.type);
+  const nodeW = dims.w;
+  const nodeH = dims.h;
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button !== 0) return;
       e.stopPropagation();
 
-      if (connecting.active) return;
+      if (connectingActive) return;
 
       if (!isSelected) {
         selectNodes([node.id], e.shiftKey || e.ctrlKey || e.metaKey);
@@ -148,7 +186,7 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [node, isSelected, selectNodes, moveNode, connecting]
+    [node, isSelected, selectNodes, moveNode, connectingActive]
   );
 
   const handleClick = useCallback(
@@ -163,7 +201,7 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
 
   // Render ports
   const renderPorts = () => {
-    if (isStartEnd) return null;
+    if (node.type === 'start' || node.type === 'end') return null;
     const ports = def.ports;
     return (
       <>
@@ -208,7 +246,7 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
   const summary = getNodeSummary(node);
 
   // Special render for start/end
-  if (isStartEnd) {
+  if (node.type === 'start' || node.type === 'end') {
     const isStart = node.type === 'start';
     return (
       <div
@@ -299,6 +337,19 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
         {summary && (
           <div className="flow-node-body">
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>{summary}</span>
+            {node.type === 'sub_script' && (node.params as any).script_id && (
+              <span
+                className="sub-script-zoom-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const sid = (node.params as any).script_id;
+                  useStore.getState().navigateToSubFlow(sid, node.id);
+                }}
+                title="进入子流程"
+              >
+                ▶ 进入
+              </span>
+            )}
           </div>
         )}
 
@@ -345,4 +396,4 @@ export function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
-}
+});
