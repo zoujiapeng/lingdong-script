@@ -163,7 +163,21 @@ class FeatureRegistry:
             cls._instance = super().__new__(cls)
             cls._instance._features: Dict[str, FeatureSpec] = {}
             cls._instance._load_order: List[str] = []
+            cls._instance._lazy_modules: List[str] = []
         return cls._instance
+
+    def set_lazy_modules(self, module_names: List[str]):
+        """注册延迟加载的功能模块列表（由 _all.py 调用）"""
+        self._lazy_modules = module_names
+
+    def _ensure_loaded(self):
+        """首次访问时按需加载所有延迟模块"""
+        if not self._lazy_modules:
+            return
+        modules = self._lazy_modules
+        self._lazy_modules = []  # 防止递归
+        for mod_name in modules:
+            importlib.import_module(mod_name)
 
     def register(self, spec: FeatureSpec):
         if spec.name in self._features:
@@ -260,9 +274,11 @@ class FeatureRegistry:
         return True
 
     def get(self, name: str) -> Optional[FeatureSpec]:
+        self._ensure_loaded()
         return self._features.get(name)
 
     def all(self) -> List[FeatureSpec]:
+        self._ensure_loaded()
         return [self._features[n] for n in self._load_order]
 
     def by_category(self, cat: FeatureCategory) -> List[FeatureSpec]:

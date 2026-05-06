@@ -1,6 +1,11 @@
-# 监控流程: 循环监控页面变化
-# 用途: 监控某个区域直到发生变化, 然后执行操作
-# 注意: 需要先配置 REGION_WAIT 的区域参数
+# ---
+# name: 区域监控流程
+# aliases: ["监控", "monitor", "区域监控"]
+# tags: ["image", "monitor", "loop"]
+# keywords: ["监控", "区域", "变化检测", "轮询", "OCR"]
+# category: image
+# ---
+# 循环监控屏幕区域直到发生变化，OCR识别文字后执行操作
 
 LOOP 10
   REGION_WAIT change x=100 y=200 w=300 h=400 timeout=30 poll=0.5

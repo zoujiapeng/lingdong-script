@@ -2,8 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { useStore } from '../../store';
 import { Trash2, ChevronDown, ChevronRight } from 'lucide-react';
 
-export function ToolCallPanel() {
-  const { toolCallLog, clearToolCallLog } = useStore();
+export const ToolCallPanel = React.memo(function ToolCallPanel() {
+  const toolCallLog = useStore(s => s.toolCallLog);
+  const clearToolCallLog = useStore(s => s.clearToolCallLog);
   const logEndRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
 
@@ -70,4 +71,4 @@ export function ToolCallPanel() {
       </div>
     </div>
   );
-}
+});

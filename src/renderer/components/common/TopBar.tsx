@@ -20,16 +20,28 @@ const PRESET_LIST = [
   { id: 'complex-batch-process', name: '批量文件处理监控', desc: '批量循环→弹窗关闭→进度等待→截图' },
 ];
 
-export function TopBar() {
-  const {
-    script, isDirty, execution,
-    setScriptName, saveScript, loadScript, loadTemplate, saveAsTemplate,
-    undo, redo,
-    startExecution, pauseExecution, resumeExecution, stopExecution,
-    ui, setUI, autoLayout, fitToScreen,
-    newScript,
-    recording, stopRecording, startRecording,
-  } = useStore();
+export const TopBar = React.memo(function TopBar() {
+  const scriptName = useStore(s => s.script.meta.name);
+  const isDirty = useStore(s => s.isDirty);
+  const executionStatus = useStore(s => s.execution.status);
+  const darkMode = useStore(s => s.ui.dark_mode);
+  const recordingActive = useStore(s => s.recording.active);
+  const setScriptName = useStore(s => s.setScriptName);
+  const saveScript = useStore(s => s.saveScript);
+  const loadScript = useStore(s => s.loadScript);
+  const loadTemplate = useStore(s => s.loadTemplate);
+  const saveAsTemplate = useStore(s => s.saveAsTemplate);
+  const undo = useStore(s => s.undo);
+  const redo = useStore(s => s.redo);
+  const startExecution = useStore(s => s.startExecution);
+  const pauseExecution = useStore(s => s.pauseExecution);
+  const resumeExecution = useStore(s => s.resumeExecution);
+  const stopExecution = useStore(s => s.stopExecution);
+  const setUI = useStore(s => s.setUI);
+  const autoLayout = useStore(s => s.autoLayout);
+  const fitToScreen = useStore(s => s.fitToScreen);
+  const newScript = useStore(s => s.newScript);
+  const stopRecording = useStore(s => s.stopRecording);
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -153,7 +165,7 @@ export function TopBar() {
     error: { label: '出错', color: '#ef4444' },
   };
 
-  const execStatus = statusMap[execution.status] || statusMap.idle;
+  const execStatus = statusMap[executionStatus] || statusMap.idle;
 
   return (
     <div className="topbar">
@@ -182,12 +194,12 @@ export function TopBar() {
         <input
           ref={titleRef}
           className="topbar-title-input"
-          value={script.meta.name}
+          value={scriptName}
           onChange={(e) => setScriptName(e.target.value)}
           onFocus={handleTitleClick}
           onBlur={handleTitleBlur}
           onKeyDown={handleTitleKey}
-          style={{ width: Math.max(120, script.meta.name.length * 9 + 20) }}
+          style={{ width: Math.max(120, scriptName.length * 9 + 20) }}
         />
         <button className="btn btn-ghost btn-icon" style={{ width: 28, height: 28 }} onClick={handleTitleClick}>
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -282,7 +294,7 @@ export function TopBar() {
         </div>
 
         {/* Layout */}
-        <button className="btn btn-ghost btn-icon" onClick={autoLayout} title="自动布局">
+        <button className="btn btn-ghost btn-icon" onClick={() => autoLayout()} title="自动布局">
           <LayoutGrid size={15} />
         </button>
         <button className="btn btn-ghost btn-icon" onClick={fitToScreen} title="适应屏幕">
@@ -305,14 +317,14 @@ export function TopBar() {
         <span style={{ width: 1, height: 20, background: 'var(--border-primary)' }} />
 
         {/* Execution controls */}
-        {execution.status === 'idle' || execution.status === 'stopped' || execution.status === 'completed' || execution.status === 'error' ? (
+        {executionStatus === 'idle' || executionStatus === 'stopped' || executionStatus === 'completed' || executionStatus === 'error' ? (
           <button className="btn btn-success" onClick={startExecution} style={{ gap: 6 }}>
             <Play size={14} fill="white" />
             运行
           </button>
         ) : (
           <>
-            {execution.status === 'running' ? (
+            {executionStatus === 'running' ? (
               <button className="btn btn-ghost" onClick={pauseExecution} style={{ color: '#f59e0b', borderColor: 'rgba(245,158,11,0.3)' }}>
                 <Pause size={14} />
                 暂停
@@ -334,30 +346,30 @@ export function TopBar() {
 
         {/* Macro Recording Button */}
         <button
-          className={`btn btn-ghost btn-icon ${recording.active ? 'recording-active' : ''}`}
+          className={`btn btn-ghost btn-icon ${recordingActive ? 'recording-active' : ''}`}
           onClick={() => {
             setShowMacroPanel(!showMacroPanel);
-            if (recording.active) {
+            if (recordingActive) {
               stopRecording();
             }
           }}
-          title={recording.active ? '停止录制 (F6)' : '宏录制'}
+          title={recordingActive ? '停止录制 (F6)' : '宏录制'}
           style={{ position: 'relative' }}
         >
-          <Circle size={14} style={{ color: recording.active ? '#ef4444' : 'var(--text-muted)' }} />
-          {recording.active && <span className="recording-dot-pulse" />}
+          <Circle size={14} style={{ color: recordingActive ? '#ef4444' : 'var(--text-muted)' }} />
+          {recordingActive && <span className="recording-dot-pulse" />}
         </button>
         <button
           className="btn btn-ghost btn-icon"
-          onClick={() => setUI({ dark_mode: !ui.dark_mode })}
-          title={ui.dark_mode ? '亮色模式' : '深色模式'}
+          onClick={() => setUI({ dark_mode: !darkMode })}
+          title={darkMode ? '亮色模式' : '深色模式'}
         >
-          {ui.dark_mode ? <Sun size={15} /> : <Moon size={15} />}
+          {darkMode ? <Sun size={15} /> : <Moon size={15} />}
         </button>
       </div>
 
       {/* Macro Panel */}
-      {(showMacroPanel || recording.active) && <MacroPanel />}
+      {(showMacroPanel || recordingActive) && <MacroPanel />}
     </div>
   );
-}
+});

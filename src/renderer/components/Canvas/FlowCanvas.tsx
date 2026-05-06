@@ -1,20 +1,36 @@
-import React, { useRef, useCallback, useEffect, useState } from 'react';
+import React, { useRef, useCallback, useEffect, useState, useMemo } from 'react';
+import { shallow } from 'zustand/shallow';
 import { useStore } from '../../store';
 import { FlowNode as FlowNodeComp } from './FlowNode';
 import { EdgeLayer } from './EdgeLayer';
 import { CanvasControls, MiniMap, ContextMenu } from './CanvasControls';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
+import { getNodeDimensions } from '../../utils/constants';
 import { NodeType, FlowNode } from '../../types';
+import { SubFlowBreadcrumb } from './SubFlowBreadcrumb';
 
 export function FlowCanvas() {
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const {
-    script, ui,
-    setCanvasTransform, addNode,
-    clearSelection, selectNodes, deleteNodes, deleteEdges,
-    startConnecting, stopConnecting, addEdge,
-    setHoveredNode,
-  } = useStore();
+  // Targeted selectors — only subscribe to what's actually used
+  const nodes = useStore(s => s.script.nodes);
+  const edges = useStore(s => s.script.edges);
+  const canvas_transform = useStore(s => s.ui.canvas_transform);
+  const connecting = useStore(s => s.ui.connecting);
+  const selection = useStore(s => s.ui.selection, shallow);
+  const show_grid = useStore(s => s.ui.show_grid);
+  const grid_size = useStore(s => s.ui.grid_size);
+  const subFlowStackLen = useStore(s => s.subFlowNav.stack.length);
+  // Actions as stable references
+  const setCanvasTransform = useStore(s => s.setCanvasTransform);
+  const addNode = useStore(s => s.addNode);
+  const clearSelection = useStore(s => s.clearSelection);
+  const selectNodes = useStore(s => s.selectNodes);
+  const deleteNodes = useStore(s => s.deleteNodes);
+  const deleteEdges = useStore(s => s.deleteEdges);
+  const startConnecting = useStore(s => s.startConnecting);
+  const stopConnecting = useStore(s => s.stopConnecting);
+  const addEdge = useStore(s => s.addEdge);
+  const setHoveredNode = useStore(s => s.setHoveredNode);
 
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
@@ -25,8 +41,6 @@ export function FlowCanvas() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
   const [connectingEnd, setConnectingEnd] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
-
-  const { canvas_transform, connecting, selection } = ui;
 
   // Convert screen coords to canvas coords
   const screenToCanvas = useCallback(
@@ -42,11 +56,12 @@ export function FlowCanvas() {
 
   const getNodePortScreenPos = useCallback(
     (nodeId: string, portId: string) => {
-      const node = script.nodes.find((n) => n.id === nodeId);
+      const node = nodes.find((n) => n.id === nodeId);
       if (!node) return null;
       const def = NODE_DEFINITIONS[node.type];
-      const NODE_W = node.type === 'start' || node.type === 'end' ? 160 : 220;
-      const NODE_H = node.type === 'start' || node.type === 'end' ? 56 : 80;
+      const dims = getNodeDimensions(node.type);
+      const NODE_W = dims.w;
+      const NODE_H = dims.h;
 
       let px: number, py: number;
 
@@ -68,7 +83,7 @@ export function FlowCanvas() {
         y: py * canvas_transform.scale + canvas_transform.y,
       };
     },
-    [script.nodes, canvas_transform]
+    [nodes, canvas_transform]
   );
 
   // Wheel to zoom
@@ -203,7 +218,7 @@ export function FlowCanvas() {
       console.log('[CANVAS] handleMouseUp connecting:', cn.active, 'from:', cn.from_node);
       if (cn.active && cn.from_node) {
         const canvasPos = screenToCanvas(e.clientX, e.clientY);
-        const targetNode = script.nodes.find((n) => {
+        const targetNode = nodes.find((n) => {
           if (n.id === cn.from_node) return false;
           const NW = n.type === 'start' || n.type === 'end' ? 160 : 220;
           const NH = n.type === 'start' || n.type === 'end' ? 56 : 80;
@@ -229,7 +244,7 @@ export function FlowCanvas() {
 
       if (selectionStart && selectionRect && (selectionRect.w > 5 || selectionRect.h > 5)) {
         // Select nodes within rect
-        const selected = script.nodes
+        const selected = nodes
           .filter((n) => {
             const NW = n.type === 'start' || n.type === 'end' ? 160 : 220;
             const NH = n.type === 'start' || n.type === 'end' ? 56 : 80;
@@ -247,7 +262,7 @@ export function FlowCanvas() {
       setSelectionStart(null);
       setSelectionRect(null);
     },
-    [isPanning, selectionStart, selectionRect, script.nodes, selectNodes, addEdge, stopConnecting, screenToCanvas]
+    [isPanning, selectionStart, selectionRect, nodes, selectNodes, addEdge, stopConnecting, screenToCanvas]
   );
 
   const handleContextMenu = useCallback(
@@ -327,7 +342,7 @@ export function FlowCanvas() {
   );
 
   // Build grid SVG pattern
-  const { show_grid, grid_size } = ui;
+  // show_grid and grid_size are now from targeted selectors
   const gridSVG = show_grid ? (
     <svg className="canvas-grid" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       <defs>
@@ -344,7 +359,7 @@ export function FlowCanvas() {
   ) : null;
 
   // Connecting line
-  const connectingLine = connecting.active && connecting.from_node && connectingEnd ? (() => {
+  const connectingLine = useMemo(() => connecting.active && connecting.from_node && connectingEnd ? (() => {
     console.log('[CANVAS] rendering connecting line, from:', connecting.from_node, 'port:', connecting.from_port);
     const fromPos = getNodePortScreenPos(connecting.from_node!, connecting.from_port || 'output');
     if (!fromPos) return null;
@@ -368,7 +383,7 @@ export function FlowCanvas() {
         <circle cx={tx} cy={ty} r="4" fill="var(--accent)" />
       </svg>
     );
-  })() : null;
+  })() : null, [connecting.active, connecting.from_node, connecting.from_port, connectingEnd, canvas_transform]);
 
   return (
     <div
@@ -385,15 +400,18 @@ export function FlowCanvas() {
     >
       <div className="canvas-bg" />
 
+      {/* Sub-flow breadcrumb */}
+      <SubFlowBreadcrumb />
+
       {/* Main transform group */}
       <div
-        className="canvas-transform"
+        className={`canvas-transform${subFlowStackLen > 0 ? ' canvas-transform-subflow' : ''}`}
         style={{ transform: `translate(${canvas_transform.x}px, ${canvas_transform.y}px) scale(${canvas_transform.scale})` }}
       >
         {gridSVG}
 
         {/* Nodes */}
-        {script.nodes.map((node) => (
+        {nodes.map((node) => (
           <FlowNodeComp
             key={node.id}
             node={node}

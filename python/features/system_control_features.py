@@ -300,3 +300,253 @@ def hibernate_fn(confirm: bool = True) -> bool:
     import subprocess
     subprocess.run(["shutdown", "/h"], shell=False)
     return True
+
+
+@feature(
+    name="kill_process",
+    display_name="终止进程",
+    description="【系统控制】按名称终止指定进程。用于清理环境或强制关闭无响应程序",
+    category=F.SYSTEM,
+    params=[
+        P("name", "str", "进程名称（如 notepad.exe）", example="notepad.exe"),
+        P("force", "boolean", "是否强制终止", required=False, default=False),
+    ],
+    returns="dict{success, killed: bool} - 是否成功终止",
+    dsl_keyword="KILL",
+    dsl_template="KILL {name}",
+    flow_type="kill_process",
+    examples=["KILL notepad.exe"],
+    tags=["system", "process"],
+)
+def kill_process(name: str, force: bool = False) -> dict:
+    try:
+        import subprocess, signal
+        flags = ["/f"] if force else []
+        result = subprocess.run(
+            ["taskkill"] + flags + ["/im", name],
+            capture_output=True, text=True, timeout=10,
+        )
+        success = result.returncode == 0
+        return {"success": success, "result": {"killed": success, "detail": result.stdout.strip()}}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "终止进程超时"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@feature(
+    name="wait_process_start",
+    display_name="等待进程启动",
+    description="【系统控制】等待指定进程启动（轮询检测）。用于等待目标软件启动后再继续",
+    category=F.SYSTEM,
+    params=[
+        P("name", "str", "进程名称", example="notepad.exe"),
+        P("timeout", "number", "超时秒数", required=False, default=30),
+        P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
+    ],
+    returns="dict{success, elapsed} - 进程是否已启动",
+    dsl_keyword="WAIT_PROCESS",
+    dsl_template="WAIT_PROCESS {name} {timeout}",
+    flow_type="wait_process",
+    examples=["WAIT_PROCESS notepad.exe 30"],
+    tags=["system", "process"],
+)
+def wait_process_start(name: str, timeout: float = 30, poll_interval: float = 0.5) -> dict:
+    try:
+        import time, psutil
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] and name.lower() in proc.info['name'].lower():
+                    return {"success": True, "result": {"elapsed": round(timeout - (deadline - time.time()), 2)}}
+            time.sleep(poll_interval)
+        return {"success": False, "error": f"等待进程 '{name}' 启动超时 ({timeout}s)"}
+    except ImportError:
+        # fallback: 用 tasklist 轮询
+        try:
+            import subprocess, time
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                r = subprocess.run(["tasklist", "/fi", f"IMAGENAME eq {name}"],
+                                   capture_output=True, text=True, timeout=5)
+                if name.lower() in r.stdout.lower():
+                    return {"success": True, "result": {"elapsed": round(timeout - (deadline - time.time()), 2)}}
+                time.sleep(poll_interval)
+            return {"success": False, "error": f"等待进程 '{name}' 启动超时 ({timeout}s)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+@feature(
+    name="wait_process_exit",
+    display_name="等待进程退出",
+    description="【系统控制】等待指定进程退出。用于等待安装程序完成或进程自动结束",
+    category=F.SYSTEM,
+    params=[
+        P("name", "str", "进程名称", example="notepad.exe"),
+        P("timeout", "number", "超时秒数", required=False, default=60),
+        P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
+    ],
+    returns="dict{success, elapsed} - 进程是否已退出",
+    dsl_keyword="WAIT_EXIT",
+    dsl_template="WAIT_EXIT {name} {timeout}",
+    flow_type="wait_process",
+    examples=["WAIT_EXIT notepad.exe 60"],
+    tags=["system", "process"],
+)
+def wait_process_exit(name: str, timeout: float = 60, poll_interval: float = 0.5) -> dict:
+    try:
+        import time, psutil
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = False
+            for proc in psutil.process_iter(['name']):
+                if proc.info['name'] and name.lower() in proc.info['name'].lower():
+                    found = True
+                    break
+            if not found:
+                return {"success": True, "result": {"elapsed": round(timeout - (deadline - time.time()), 2)}}
+            time.sleep(poll_interval)
+        return {"success": False, "error": f"等待进程 '{name}' 退出超时 ({timeout}s)"}
+    except ImportError:
+        try:
+            import subprocess, time
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                r = subprocess.run(["tasklist", "/fi", f"IMAGENAME eq {name}"],
+                                   capture_output=True, text=True, timeout=5)
+                if name.lower() not in r.stdout.lower():
+                    return {"success": True, "result": {"elapsed": round(timeout - (deadline - time.time()), 2)}}
+                time.sleep(poll_interval)
+            return {"success": False, "error": f"等待进程 '{name}' 退出超时 ({timeout}s)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+
+@feature(
+    name="set_wallpaper",
+    display_name="设置壁纸",
+    description="【系统控制】将指定图片设为桌面壁纸。支持 bmp/jpg/png 格式",
+    category=F.SYSTEM,
+    params=[
+        P("path", "str", "图片路径", example="C:\\wallpaper.jpg"),
+        P("style", "str", "填充方式: fill|fit|stretch|tile|center", required=False, default="fill"),
+    ],
+    returns="bool - 是否成功",
+    dsl_keyword="WALLPAPER",
+    dsl_template="WALLPAPER {path}",
+    flow_type="set_wallpaper",
+    examples=["WALLPAPER C:\\wallpaper.jpg"],
+    tags=["system", "desktop"],
+)
+def set_wallpaper(path: str, style: str = "fill") -> bool:
+    try:
+        import ctypes
+        # SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE)
+        SPI_SETDESKWALLPAPER = 20
+        SPIF_UPDATEINIFILE = 0x02
+        result = ctypes.windll.user32.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE)
+        if not result:
+            return False
+        # 设置样式（注册表）
+        try:
+            import winreg
+            style_map = {"fill": 10, "fit": 6, "stretch": 2, "tile": 1, "center": 0}
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Control Panel\Desktop", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "WallpaperStyle", 0, winreg.REG_SZ, str(style_map.get(style, 10)))
+                winreg.SetValueEx(key, "TileWallpaper", 0, winreg.REG_SZ, "1" if style == "tile" else "0")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        return False
+
+
+@feature(
+    name="display_off",
+    display_name="关闭显示器",
+    description="【系统控制】关闭所有显示器（进入省电模式）。移动鼠标或按任意键恢复",
+    category=F.SYSTEM,
+    params=[],
+    returns="bool - 是否成功",
+    dsl_keyword="DISPLAY_OFF",
+    dsl_template="DISPLAY_OFF",
+    flow_type="display_off",
+    examples=["DISPLAY_OFF"],
+    tags=["system", "power"],
+)
+def display_off() -> bool:
+    try:
+        import ctypes
+        # SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+        HWND_BROADCAST = 0xFFFF
+        WM_SYSCOMMAND = 0x0112
+        SC_MONITORPOWER = 0xF170
+        MONITOR_OFF = 2
+        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF)
+        return True
+    except Exception as e:
+        return False
+
+
+@feature(
+    name="system_sleep",
+    display_name="睡眠",
+    description="【系统控制】使计算机进入睡眠（待机）状态。与休眠不同，睡眠保持内存供电",
+    category=F.SYSTEM,
+    params=[
+        P("confirm", "boolean", "执行前确认", required=False, default=True),
+    ],
+    returns="bool - 睡眠指令是否已发出",
+    dsl_keyword="SLEEP",
+    dsl_template="SLEEP",
+    flow_type="system_sleep",
+    examples=["SLEEP"],
+    tags=["system", "power"],
+)
+def system_sleep(confirm: bool = True) -> bool:
+    if confirm:
+        return {"success": False, "error": "请设置 confirm=False 以确认睡眠（防误触保护）"}
+    try:
+        import ctypes
+        # SetSuspendState(False, True, False) — 睡眠，允许唤醒事件，不强制
+        ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
+        return True
+    except Exception as e:
+        return False
+
+
+@feature(
+    name="show_desktop",
+    display_name="显示桌面",
+    description="【系统控制】最小化所有窗口，显示桌面（等效 Win+D）。用于快速回到桌面",
+    category=F.SYSTEM,
+    params=[],
+    returns="bool - 是否成功",
+    dsl_keyword="DESKTOP",
+    dsl_template="DESKTOP",
+    flow_type="show_desktop",
+    examples=["DESKTOP"],
+    tags=["system", "desktop"],
+)
+def show_desktop() -> bool:
+    try:
+        import ctypes
+        # ShellExec Windows 10/11: toggle desktop
+        ctypes.windll.user32.ShowWindow(
+            ctypes.windll.kernel32.GetConsoleWindow(), 0)
+        # 模拟 Win+D
+        import pyautogui
+        pyautogui.hotkey("win", "d")
+        return True
+    except ImportError:
+        try:
+            import ctypes
+            ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0)  # Win key down
+            ctypes.windll.user32.keybd_event(0x44, 0, 0, 0)  # D key down
+            ctypes.windll.user32.keybd_event(0x44, 0, 2, 0)  # D key up
+            ctypes.windll.user32.keybd_event(0x5B, 0, 2, 0)  # Win key up
+            return True
+        except Exception as e:
+            return False

@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2 } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2 } from 'lucide-react';
+import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
 const BASE_STORAGE = 'lingdong-llm-base';
@@ -34,6 +35,50 @@ export function SettingsPanel() {
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
+
+  const [autoStart, setAutoStart] = useState(false);
+  const [schedules, setSchedules] = useState<any[]>([]);
+  const [showScheduleDialog, setShowScheduleDialog] = useState(false);
+  const [scheduleLoading, setScheduleLoading] = useState(true);
+  const [schedulesError, setSchedulesError] = useState('');
+
+  useEffect(() => {
+    (window as any).electronAPI?.getAutoStart().then(setAutoStart).catch(() => {});
+    loadSchedules();
+  }, []);
+
+  const toggleAutoStart = () => {
+    const next = !autoStart;
+    setAutoStart(next);
+    (window as any).electronAPI?.setAutoStart(next).catch(() => setAutoStart(!next));
+  };
+
+  const loadSchedules = async () => {
+    setScheduleLoading(true);
+    setSchedulesError('');
+    try {
+      const list = await (window as any).electronAPI?.scheduleList() || [];
+      setSchedules(list);
+    } catch (e: any) {
+      setSchedulesError(e.message || '加载失败');
+    } finally {
+      setScheduleLoading(false);
+    }
+  };
+
+  const toggleSchedule = async (id: string) => {
+    const entry = schedules.find(s => s.id === id);
+    if (!entry) return;
+    const updated = await (window as any).electronAPI?.scheduleUpdate(id, { enabled: !entry.enabled });
+    if (updated) {
+      setSchedules(schedules.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+    }
+  };
+
+  const deleteSchedule = async (id: string) => {
+    const ok = await (window as any).electronAPI?.scheduleDelete(id);
+    if (ok) setSchedules(schedules.filter(s => s.id !== id));
+  };
 
   const handleSaveApiKey = () => {
     storeKey(apiKey);
@@ -109,6 +154,17 @@ export function SettingsPanel() {
             <button
               className={`toggle ${ui.dark_mode ? 'on' : ''}`}
               onClick={() => setUI({ dark_mode: !ui.dark_mode })}
+            />
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Settings size={15} />
+              <span>开机自启</span>
+            </div>
+            <button
+              className={`toggle ${autoStart ? 'on' : ''}`}
+              onClick={toggleAutoStart}
             />
           </div>
         </section>
@@ -334,7 +390,84 @@ export function SettingsPanel() {
             </select>
           </div>
         </section>
+
+        {/* 定时任务 */}
+        <section className="settings-section">
+          <h3 className="settings-section-title">
+            <Clock size={15} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+            定时任务
+          </h3>
+
+          {scheduleLoading && (
+            <div className="settings-row" style={{ justifyContent: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+              加载中...
+            </div>
+          )}
+
+          {schedulesError && (
+            <div className="settings-row" style={{ justifyContent: 'center', color: 'var(--error)', fontSize: 12 }}>
+              {schedulesError}
+            </div>
+          )}
+
+          {!scheduleLoading && !schedulesError && schedules.length === 0 && (
+            <div className="settings-row" style={{ justifyContent: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+              暂无定时任务
+            </div>
+          )}
+
+          {schedules.map((s: any) => {
+            const t = s.triggers?.[0] || {};
+            const triggerLabel = t.type === 'startup' ? '启动时执行' :
+              t.type === 'cron' ? `Cron: ${t.cron_expr}` :
+              t.type === 'interval' ? `每 ${t.interval_seconds}s` :
+              t.type === 'event' ? `${t.event_type}` : '';
+            const condCount = s.conditions?.rules?.length || 0;
+            return (
+            <div className="settings-row" key={s.id}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>{s.name}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {triggerLabel}
+                  {condCount > 0 ? ` + ${condCount}个条件` : ''}
+                  {s.template_name ? ` · ${s.template_name}` : ''}
+                </span>
+              </div>
+              <button
+                className={`toggle ${s.enabled ? 'on' : ''}`}
+                onClick={() => toggleSchedule(s.id)}
+              />
+              <button
+                className="btn btn-ghost"
+                onClick={() => deleteSchedule(s.id)}
+                style={{ padding: '4px 8px', fontSize: 12, color: 'var(--text-muted)' }}
+                title="删除"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+            );
+          })}
+
+          <div className="settings-row" style={{ justifyContent: 'center' }}>
+            <button
+              className="btn btn-primary"
+              onClick={() => setShowScheduleDialog(true)}
+              style={{ padding: '6px 16px', fontSize: 12 }}
+            >
+              <Plus size={14} style={{ marginRight: 4 }} />
+              新增定时任务
+            </button>
+          </div>
+        </section>
       </div>
+
+      {showScheduleDialog && (
+        <ScheduleDialog
+          onClose={() => setShowScheduleDialog(false)}
+          onCreated={loadSchedules}
+        />
+      )}
     </div>
   );
 }

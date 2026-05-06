@@ -10,16 +10,24 @@ import { PseudoPanel } from './components/PseudoPanel';
 import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
+import { htnRegistry } from './utils/htnRegistry';
+import { ALL_HTN_DEFS } from './utils/htnTemplateDefs';
+import { matchSemantic } from './utils/semanticMatcher';
 import './styles/globals.css';
 
 export default function App() {
-  const { ui, setUI, setViewMode } = useStore();
-  const { viewMode, dark_mode, show_ai_dialog: showAIDialog, panels_visible } = ui;
+  const viewMode = useStore(s => s.ui.viewMode);
+  const darkMode = useStore(s => s.ui.dark_mode);
+  const showAIDialog = useStore(s => s.ui.show_ai_dialog);
+  const panelsVisible = useStore(s => s.ui.panels_visible);
+  const showToolCallPanel = useStore(s => s.ui.show_tool_call_panel);
+  const setUI = useStore(s => s.setUI);
+  const setViewMode = useStore(s => s.setViewMode);
 
   // Apply dark mode class
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', dark_mode);
-  }, [dark_mode]);
+    document.documentElement.classList.toggle('dark', darkMode);
+  }, [darkMode]);
 
   // Center flowchart on initial mount
   useEffect(() => {
@@ -32,6 +40,51 @@ export default function App() {
   // Load feature registry on mount
   useEffect(() => {
     useStore.getState().fetchFeatures();
+  }, []);
+
+  // Initialize HTN registry on mount
+  useEffect(() => {
+    // Register all base primitives and composite templates
+    for (const def of ALL_HTN_DEFS) {
+      htnRegistry.registerFromYaml(def);
+    }
+    // Auto-register from existing FlowScript templates (sub_script refs)
+    htnRegistry.autoRegisterFromTemplates();
+
+    // Expose search function for main process HTTP API access
+    (window as any).__searchTemplates = (query: string, maxResults?: number) => {
+      try {
+        const semantic = matchSemantic(query);
+        const htnResults = htnRegistry.search(query);
+        const limit = maxResults || 5;
+        return JSON.stringify({
+          htn: htnResults.slice(0, limit).map((r: any) => ({
+            id: r.node.id,
+            name: r.node.name,
+            description: r.node.description,
+            score: r.score,
+            reasons: r.reasons,
+            kind: r.node.kind,
+            steps: (r.node.children || []).map((c: any) => ({
+              childId: c.childId,
+              description: c.description,
+              optional: c.optional,
+            })),
+          })),
+          flat: semantic.candidates.slice(0, limit).map((r: any) => ({
+            id: r.template.id,
+            name: r.template.name,
+            description: r.template.description,
+            score: r.score,
+            reasons: r.reasons,
+            hasScript: r.template.hasScript,
+          })),
+          autoSelect: semantic.autoSelect,
+        });
+      } catch (e: any) {
+        return JSON.stringify({ error: e.message });
+      }
+    };
   }, []);
 
   // Keyboard shortcuts
@@ -83,7 +136,7 @@ export default function App() {
   }, [handleKeyDown]);
 
   return (
-    <div className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${panels_visible ? ' panels-visible' : ''}`}>
+    <div className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${panelsVisible ? ' panels-visible' : ''}`}>
       <div className="top-wrapper">
         <TopBar />
         <div className="view-tabs">
@@ -160,7 +213,7 @@ export default function App() {
       </div>
       <div className="bottom-wrapper">
         <StatusBar />
-        {ui.show_tool_call_panel && <ToolCallPanel />}
+        {showToolCallPanel && <ToolCallPanel />}
       </div>
     </div>
   );

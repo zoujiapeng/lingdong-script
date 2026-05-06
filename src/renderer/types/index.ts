@@ -27,7 +27,25 @@ export type NodeType =
   | 'shutdown'
   | 'reboot'
   | 'logoff'
-  | 'hibernate';
+  | 'hibernate'
+  // 扩展系统指令
+  | 'lock_workstation'
+  | 'volume_set'
+  | 'volume_mute'
+  | 'launch_program'
+  | 'kill_process'
+  | 'wait_process'
+  | 'focus_window'
+  | 'set_wallpaper'
+  | 'display_off'
+  | 'system_sleep'
+  | 'show_desktop'
+  | 'battery_status'
+  | 'empty_recycle_bin'
+  | 'display_brightness'
+  | 'clipboard_set'
+  | 'clipboard_get'
+  | 'window_control';
 
 export type ConditionType =
   | 'image_exists'
@@ -232,6 +250,83 @@ export interface ScreenshotNodeParams {
   description?: string;
 }
 
+// --- 扩展系统指令参数 ---
+
+export interface LockWorkstationParams {
+  confirm: boolean;
+}
+
+export interface VolumeSetParams {
+  level: number;
+}
+
+export interface VolumeMuteParams {
+  mute: boolean | null;
+}
+
+export interface LaunchProgramParams {
+  target: string;
+  args: string;
+  wait: boolean;
+}
+
+export interface KillProcessParams {
+  name: string;
+  force: boolean;
+}
+
+export interface WaitProcessParams {
+  name: string;
+  timeout: number;
+  wait_for: 'start' | 'exit';
+}
+
+export interface FocusWindowParams {
+  title: string;
+  exact: boolean;
+}
+
+export interface WallpaperParams {
+  path: string;
+  style: string;
+}
+
+export interface DisplayOffParams {
+  confirm: boolean;
+}
+
+export interface SleepParams {
+  confirm: boolean;
+}
+
+export interface ShowDesktopParams {
+}
+
+export interface BatteryStatusParams {
+}
+
+export interface EmptyRecycleBinParams {
+  confirm: boolean;
+}
+
+export interface DisplayBrightnessParams {
+  level: number;
+}
+
+export interface ClipboardSetParams {
+  text: string;
+}
+
+export interface ClipboardGetParams {
+}
+
+export interface WindowControlParams {
+  operation: 'minimize' | 'maximize' | 'close' | 'resize';
+  title: string;
+  width?: number;
+  height?: number;
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
@@ -253,7 +348,24 @@ export type NodeParams =
   | SceneConditionNodeParams
   | ScreenshotNodeParams
   | ToolCallNodeParams
-  | SystemCommandParams;
+  | SystemCommandParams
+  | LockWorkstationParams
+  | VolumeSetParams
+  | VolumeMuteParams
+  | LaunchProgramParams
+  | KillProcessParams
+  | WaitProcessParams
+  | FocusWindowParams
+  | WallpaperParams
+  | DisplayOffParams
+  | SleepParams
+  | ShowDesktopParams
+  | BatteryStatusParams
+  | EmptyRecycleBinParams
+  | DisplayBrightnessParams
+  | ClipboardSetParams
+  | ClipboardGetParams
+  | WindowControlParams;
 
 // --- Flow Node & Edge ---
 
@@ -294,6 +406,12 @@ export interface ScriptMeta {
   version: string;
   author?: string;
   tags?: string[];
+  aliases?: string[];
+  keywords?: string[];
+  category?: string;
+  source?: 'preset' | 'custom' | 'dsl' | 'flow';
+  dsl_content?: string;
+  dsl_file?: string;
 }
 
 export interface FlowScript {
@@ -346,6 +464,19 @@ export interface NodeStatusMessage {
   status: 'running' | 'success' | 'error';
   message?: string;
   timestamp: string;
+}
+
+// --- Sub-flow Navigation ---
+
+export interface SubFlowNavEntry {
+  scriptId: string;
+  scriptName: string;
+  sourceNodeId?: string;
+  sourceNodeLabel?: string;
+}
+
+export interface SubFlowNavState {
+  stack: SubFlowNavEntry[];
 }
 
 // --- UI State ---
@@ -491,4 +622,41 @@ export interface MacroInfo {
 export interface RecordingState {
   active: boolean;
   macroName: string;
+}
+
+// --- Schedule Types ---
+
+export type TriggerType = 'cron' | 'interval' | 'startup' | 'event';
+
+export interface TriggerDef {
+  type: TriggerType;
+  cron_expr?: string;
+  interval_seconds?: number;
+  event_type?: string;     // window_open, process_start, file_created, clipboard_change, network_available
+  event_config?: Record<string, any>;
+}
+
+export type ConditionOperator = 'AND' | 'OR';
+
+export interface ConditionRule {
+  type: string;            // window_exists, process_running, is_weekday, image_exists, text_exists, etc.
+  params: Record<string, any>;
+}
+
+export interface ConditionGroup {
+  operator: ConditionOperator;
+  rules: ConditionRule[];
+}
+
+export interface ScheduleEntry {
+  id: string;
+  name: string;
+  template_id: string;
+  template_name: string;
+  triggers: TriggerDef[];
+  conditions?: ConditionGroup;
+  enabled: boolean;
+  last_run: string | null;
+  next_run: string | null;
+  created_at: string;
 }

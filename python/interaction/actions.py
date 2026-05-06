@@ -108,7 +108,16 @@ class ActionHandler:
 
     def _exec_launch(self, target="", **kw):
         import subprocess
-        subprocess.Popen(target, shell=True)
+        import shlex
+        try:
+            if not target or not isinstance(target, str):
+                return False
+            # 避免 shell injection: 用 shlex.split 解析后传 list
+            args = shlex.split(target, posix=False)
+            subprocess.Popen(args, shell=False)
+        except Exception as e:
+            logger.error("Launch failed: target=%r error=%s", target, e)
+            return False
         return True
 
     def _exec_screenshot(self, dest=None, **kw):

@@ -42,10 +42,13 @@ const EDGE_COLORS: Record<string, string> = {
   output: '#94a3b8',
 };
 
-export function EdgeLayer() {
-  const { script, ui, selectEdges, deleteEdges } = useStore();
-  const { selection } = ui;
-  const { canvas_transform } = ui;
+export const EdgeLayer = React.memo(function EdgeLayer() {
+  const edges = useStore(s => s.script.edges);
+  const nodes = useStore(s => s.script.nodes);
+  const selectionEdges = useStore(s => s.ui.selection.edges);
+  const canvas_transform = useStore(s => s.ui.canvas_transform);
+  const selectEdges = useStore(s => s.selectEdges);
+  const deleteEdges = useStore(s => s.deleteEdges);
 
   const handleEdgeClick = useCallback(
     (e: React.MouseEvent, edgeId: string) => {
@@ -63,7 +66,7 @@ export function EdgeLayer() {
     [deleteEdges]
   );
 
-  const nodeMap = Object.fromEntries(script.nodes.map((n) => [n.id, n]));
+  const nodeMap = Object.fromEntries(nodes.map((n) => [n.id, n]));
 
   return (
     <svg
@@ -99,7 +102,7 @@ export function EdgeLayer() {
         </marker>
       </defs>
 
-      {script.edges.map((edge) => {
+      {edges.map((edge) => {
         const fromNode = nodeMap[edge.from_node];
         const toNode = nodeMap[edge.to_node];
         if (!fromNode || !toNode) return null;
@@ -108,7 +111,7 @@ export function EdgeLayer() {
         const to = getPortNodePos(toNode, edge.to_port);
         const path = bezierPath(from.x, from.y, to.x, to.y);
 
-        const isSelected = selection.edges.includes(edge.id);
+        const isSelected = selectionEdges.includes(edge.id);
         const isAnimated = fromNode.status === 'running' || toNode.status === 'running';
 
         const baseColor = EDGE_COLORS[edge.from_port] || '#94a3b8';
@@ -179,4 +182,4 @@ export function EdgeLayer() {
       `}</style>
     </svg>
   );
-}
+});

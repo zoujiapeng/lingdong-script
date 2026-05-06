@@ -188,6 +188,46 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     return { type: 'screenshot', params: {} };
   }
 
+  // click_text "text" / 文字点击 "text"
+  const clickTextRe = /^(?:click_text|文字点击)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?\s*(.*)?/i;
+  const clickTextMatch = line.match(clickTextRe);
+  if (clickTextMatch) {
+    return {
+      type: 'click_text',
+      params: {
+        text: clickTextMatch[1],
+        similarity: clickTextMatch[2] ? parseInt(clickTextMatch[2]) : 85,
+        delay_after: 0.5,
+      },
+    };
+  }
+
+  // popup_close / 关闭弹窗
+  if (/^(?:popup_close|关闭弹窗)(?:\b|$)/i.test(line)) {
+    const strategyMatch = line.match(/(?:strategy|策略)[=:]\s*(\w+)/i);
+    return {
+      type: 'popup_close',
+      params: {
+        strategies: strategyMatch ? [strategyMatch[1]] : ['auto'],
+        timeout: 5,
+        delay_after: 0.3,
+      },
+    };
+  }
+
+  // scene_condition "name" / 场景匹配 "name" / 场景识别 "name"
+  const sceneCondLineRe = /^(?:scene_condition|场景匹配|场景识别)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?\s*(.*)?/i;
+  const sceneCondLineMatch = line.match(sceneCondLineRe);
+  if (sceneCondLineMatch) {
+    return {
+      type: 'scene_condition',
+      params: {
+        scene_name: sceneCondLineMatch[1],
+        similarity: sceneCondLineMatch[2] ? parseInt(sceneCondLineMatch[2]) : 70,
+      },
+    };
+  }
+
   // $name = "value" (variable_set)
   const varSetRe = /^\$(\w+)\s*=\s*"([^"]*)"/;
   const varSetMatch = line.match(varSetRe);

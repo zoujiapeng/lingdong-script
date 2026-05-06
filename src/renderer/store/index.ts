@@ -18,6 +18,10 @@ import {
   RecordingState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
+import { getNodeDimensions } from '../utils/constants';
+import { templateRegistry } from '../utils/templateRegistry';
+import { matchExact } from '../utils/templateMatcher';
+import { SubFlowNavState } from '../types';
 import { createFlowExecutor, ExecutionController } from './executor';
 import { generateText } from '../utils/textGenerator';
 
@@ -465,6 +469,8 @@ function createTemplateScript(templateId: string): FlowScript {
 interface AppStore {
   // Script state
   script: FlowScript;
+  scripts: Record<string, FlowScript>;
+  activeScriptId: string;
   recentScripts: ScriptMeta[];
   isDirty: boolean;
 
@@ -484,6 +490,9 @@ interface AppStore {
   featureList: FeatureDefinition[];
   toolCallLog: ToolCallEntry[];
 
+  // Sub-flow navigation
+  subFlowNav: SubFlowNavState;
+
   // Macro recording
   recording: RecordingState;
   macroList: MacroInfo[];
@@ -492,9 +501,15 @@ interface AppStore {
   newScript: () => void;
   loadScript: (script: FlowScript) => void;
   loadTemplate: (templateId: string) => void;
+  loadTemplateByExactMatch: (query: string) => boolean;
   saveScript: () => void;
   setScriptName: (name: string) => void;
   saveAsTemplate: (name: string, description?: string) => void;
+  registerScript: (script: FlowScript) => void;
+  loadSubScript: (scriptId: string) => void;
+  navigateToSubFlow: (scriptId: string, sourceNodeId?: string) => void;
+  navigateBackFromSubFlow: () => void;
+  canNavigateBack: boolean;
 
   // Actions - Nodes
   addNode: (type: NodeType, x: number, y: number, params?: any, providedId?: string) => string;
@@ -555,7 +570,7 @@ interface AppStore {
   setDraggingNode: (id?: string) => void;
 
   // Auto layout
-  autoLayout: () => void;
+  autoLayout: (context?: 'root' | 'sub_flow') => void;
 
   // Macro recording actions
   startRecording: (name?: string) => Promise<void>;
@@ -581,6 +596,8 @@ function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
 export const useStore = create<AppStore>()(
   immer((set, get) => ({
     script: createTemplateScript('desktop-monitor'),
+    scripts: {},
+    activeScriptId: '',
     recentScripts: [],
     isDirty: false,
     ui: DEFAULT_UI_STATE,
@@ -593,6 +610,7 @@ export const useStore = create<AppStore>()(
     _executor: null,
     featureList: [],
     toolCallLog: [],
+    subFlowNav: { stack: [] },
     recording: { active: false, macroName: '' },
     macroList: [],
 
@@ -624,12 +642,32 @@ export const useStore = create<AppStore>()(
       if (s.nodes.length > 0) get().fitToScreen();
     },
 
+    loadTemplateByExactMatch: (query) => {
+      const result = matchExact(query);
+      if (!result) return false;
+      // Load via existing loadTemplate if it's a preset
+      const entry = result.template;
+      if (entry.source === 'preset' && entry.flowScript) {
+        get().loadScript(entry.flowScript);
+        return true;
+      }
+      if (entry.flowScript) {
+        get().loadScript(entry.flowScript);
+        return true;
+      }
+      return false;
+    },
+
     loadScript: (script) => {
       history = [];
       historyIndex = -1;
       pushHistory(script.nodes, script.edges);
+      const id = script.meta.id || nanoid();
+      if (!script.meta.id) script.meta.id = id;
       set((state) => {
         state.script = script;
+        state.scripts[id] = script;
+        state.activeScriptId = id;
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
       });
@@ -696,6 +734,57 @@ export const useStore = create<AppStore>()(
       });
       saveCustomTemplates(templates);
     },
+
+    registerScript: (script) => {
+      const id = script.meta.id || nanoid();
+      if (!script.meta.id) script.meta.id = id;
+      set((state) => {
+        state.scripts[id] = script;
+      });
+    },
+
+    loadSubScript: (scriptId) => {
+      const sub = get().scripts[scriptId];
+      if (!sub) return;
+      get().loadScript(sub);
+    },
+
+    navigateToSubFlow: (scriptId, sourceNodeId) => {
+      const sub = get().scripts[scriptId];
+      if (!sub) return;
+      set((state) => {
+        state.subFlowNav.stack.push({
+          scriptId: state.activeScriptId,
+          scriptName: state.script.meta.name,
+          sourceNodeId,
+        });
+        state.activeScriptId = scriptId;
+        state.script = sub;
+        state.ui.selection = { nodes: [], edges: [] };
+      });
+      if (sub.nodes.length > 0) {
+        get().autoLayout('sub_flow');
+        get().fitToScreen();
+      }
+    },
+
+    navigateBackFromSubFlow: () => {
+      set((state) => {
+        const entry = state.subFlowNav.stack.pop();
+        if (entry) {
+          const parentScript = state.scripts[entry.scriptId];
+          if (parentScript) {
+            state.activeScriptId = entry.scriptId;
+            state.script = parentScript;
+            if (entry.sourceNodeId) {
+              state.ui.selection = { nodes: [entry.sourceNodeId], edges: [] };
+            }
+          }
+        }
+      });
+    },
+
+    get canNavigateBack() { return get().subFlowNav.stack.length > 0; },
 
     addNode: (type, x, y, params, providedId?) => {
       const def = NODE_DEFINITIONS[type];
@@ -1007,7 +1096,7 @@ export const useStore = create<AppStore>()(
           onIteration: (current, total, nodeId) => {
             set((s) => { s.execution.loop_iteration = { current, total, node_id: nodeId }; });
           },
-        });
+        }, get().scripts);
         set((s) => { s._executor = ctrl; });
       }
     },
@@ -1145,7 +1234,7 @@ export const useStore = create<AppStore>()(
       set((state) => { state.ui.dragging_node = id; });
     },
 
-    autoLayout: () => {
+    autoLayout: (context = 'root') => {
       const { nodes, edges } = get().script;
       // Topological sort + layered layout
       const adj: Record<string, string[]> = {};
@@ -1170,7 +1259,9 @@ export const useStore = create<AppStore>()(
         });
         queue = next;
       }
-      const NODE_W = 220, NODE_H = 80, GAP_X = 60, GAP_Y = 40;
+      const scale = context === 'sub_flow' ? 0.75 : 1.0;
+      const dims = getNodeDimensions('normal');
+      const NODE_W = dims.w * scale, NODE_H = dims.h * scale, GAP_X = 50 * scale, GAP_Y = 30 * scale;
       const { snap_to_grid, grid_size } = get().ui;
       const snap = (v: number) => snap_to_grid ? Math.round(v / grid_size) * grid_size : v;
       set((state) => {
@@ -1276,7 +1367,69 @@ export const useStore = create<AppStore>()(
   }))
 );
 
-// --- localStorage Persistence ---
+// ── Template Registry Initialization ───────────────────────────
+
+const PRESET_TEMPLATE_META: Array<{
+  id: string; name: string; description: string; category: string;
+  aliases: string[]; keywords: string[]; tags: string[];
+}> = [
+  { id: 'desktop-monitor', name: '桌面图标监控', description: '循环检测桌面多张目标图片，按优先级点击第一个匹配的', category: 'image',
+    aliases: ['桌面监控', '图标监控', 'monitor'], keywords: ['监控', '检测', '桌面', '图标', '图片'], tags: ['image', 'monitor', 'loop'] },
+  { id: 'login-automation', name: '登录自动化', description: '自动打开登录页，输入账号密码，点击登录，截图确认结果', category: 'app',
+    aliases: ['登录', 'login', 'signin', '登录流程', '自动登录'], keywords: ['账号', '密码', '登录', '认证', '表单'], tags: ['app', 'login', 'form'] },
+  { id: 'form-filler', name: '表单自动填写', description: '自动填写表单字段，支持文本输入和下拉选择', category: 'app',
+    aliases: ['填表', '表单', 'form', '自动填表'], keywords: ['表单', '填写', '输入', '字段'], tags: ['app', 'form', 'input'] },
+  { id: 'app-launcher', name: '应用快速启动', description: '启动应用程序并等待窗口出现', category: 'system',
+    aliases: ['启动', 'launcher', '启动应用'], keywords: ['启动', '应用', '程序', '打开'], tags: ['system', 'launch'] },
+  { id: 'screenshot-logger', name: '定时截图记录', description: '按指定时间间隔循环截图，用于监控和记录', category: 'image',
+    aliases: ['截图', '录屏', 'screenshot', '定时截图'], keywords: ['截图', '定时', '监控', '记录', '捕获'], tags: ['image', 'screenshot', 'timer'] },
+  { id: 'complex-image-pipeline', name: '多目标图像流水线', description: '多目标图像检测流水线，支持优先级、兜底、重试', category: 'image',
+    aliases: ['图像流水线', '图片流水线', 'image-pipeline'], keywords: ['图片', '图像', '检测', '流水线', '优先级', '兜底'], tags: ['image', 'detection', 'pipeline'] },
+  { id: 'complex-web-scraper', name: '网页数据采集', description: '模拟滑动和等待，采集网页动态内容', category: 'app',
+    aliases: ['采集', '爬虫', '数据采集', 'scraper', 'web'], keywords: ['网页', '采集', '数据', '滑动', '抓取'], tags: ['app', 'scraper', 'data'] },
+  { id: 'complex-form-submit', name: '智能表单提交', description: '复杂表单填写提交，含字段验证和OCR结果确认', category: 'app',
+    aliases: ['提交表单', '表单提交', 'form-submit'], keywords: ['表单', '提交', '验证', 'OCR', '字段'], tags: ['app', 'form', 'submit', 'ocr'] },
+  { id: 'complex-batch-process', name: '批量文件处理', description: '批量处理文件，含弹窗监控、颜色检测状态灯', category: 'system',
+    aliases: ['批量处理', '批处理', 'batch'], keywords: ['批量', '文件', '处理', '弹窗', '颜色检测'], tags: ['system', 'batch', 'file'] },
+];
+
+// Register preset templates
+for (const meta of PRESET_TEMPLATE_META) {
+  const preset = PRESET_TEMPLATES.find(t => t.id === meta.id);
+  templateRegistry.register({
+    id: meta.id,
+    name: meta.name,
+    description: meta.description,
+    category: meta.category,
+    aliases: meta.aliases,
+    keywords: meta.keywords,
+    tags: meta.tags,
+    source: 'preset',
+    hasScript: true,
+    flowScript: preset?.createScript(),
+  });
+}
+
+// Register custom templates from localStorage
+try {
+  const customTemplates = loadCustomTemplates();
+  for (const ct of customTemplates) {
+    templateRegistry.register({
+      id: ct.id,
+      name: ct.name,
+      description: ct.description,
+      category: ct.script.meta.category || 'custom',
+      aliases: ct.script.meta.aliases || [],
+      keywords: ct.script.meta.keywords || [],
+      tags: ct.script.meta.tags || [],
+      source: 'custom',
+      hasScript: true,
+      flowScript: ct.script,
+    });
+  }
+} catch {}
+
+// ── localStorage Persistence ---
 
 const STORAGE_KEY = 'lingdong-script-data';
 const RECENT_KEY = 'lingdong-recent';

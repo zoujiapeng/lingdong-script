@@ -2,13 +2,14 @@ import React, { useEffect, useRef } from 'react';
 import { useStore } from '../../store';
 import { Trash2 } from 'lucide-react';
 
-export function LogPanel() {
-  const { execution, addLog, clearLog } = useStore();
+export const LogPanel = React.memo(function LogPanel() {
+  const logEntries = useStore(s => s.execution.log);
+  const clearLog = useStore(s => s.clearLog);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [execution.log.length]);
+  }, [logEntries.length]);
 
   const levelClass = (level: string) => {
     switch (level) {
@@ -29,7 +30,7 @@ export function LogPanel() {
     <div className="log-panel">
       <div className="log-panel-header">
         <span className="log-panel-title">执行日志</span>
-        {execution.log.length > 0 && (
+        {logEntries.length > 0 && (
           <button
             onClick={clearLog}
             style={{
@@ -42,16 +43,16 @@ export function LogPanel() {
           </button>
         )}
         <span style={{ fontSize: 10, color: 'rgba(148,163,184,0.4)' }}>
-          {execution.log.length} 条
+          {logEntries.length} 条
         </span>
       </div>
       <div className="log-entries">
-        {execution.log.length === 0 && (
+        {logEntries.length === 0 && (
           <div style={{ color: 'rgba(148,163,184,0.3)', fontSize: 11, padding: 8, textAlign: 'center' }}>
             暂无日志，运行脚本后将在此显示
           </div>
         )}
-        {execution.log.map((entry, i) => (
+        {logEntries.map((entry, i) => (
           <div key={i} className="log-entry">
             <span className="log-time">{formatTime(entry.timestamp)}</span>
             <span className={`log-level ${levelClass(entry.level)}`}>
@@ -64,4 +65,4 @@ export function LogPanel() {
       </div>
     </div>
   );
-}
+});

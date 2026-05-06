@@ -145,3 +145,36 @@ def clipboard_clear() -> dict:
             return {"success": True, "result": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+@feature(
+    name="clipboard_set_text",
+    display_name="设置剪贴板文本",
+    description="【剪贴板】将指定文本写入系统剪贴板。用于复制数据供其他应用粘贴",
+    category=F.SYSTEM,
+    params=[
+        P("text", "str", "要写入的文本", example="Hello World"),
+    ],
+    returns="dict{success} - 是否成功",
+    dsl_keyword="CLIPBOARD_SET",
+    dsl_template="CLIPBOARD_SET {text}",
+    flow_type="clipboard_set",
+    examples=["CLIPBOARD_SET Hello World"],
+    tags=["clipboard"],
+)
+def clipboard_set_text(text: str) -> dict:
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return {"success": True}
+    except ImportError:
+        try:
+            import win32clipboard
+            import win32con
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+            win32clipboard.CloseClipboard()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
