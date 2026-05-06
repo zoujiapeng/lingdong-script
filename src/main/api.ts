@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import { ChildProcess } from 'child_process';
 import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
+import { handleMCPRequest } from './mcp-handler';
 
 export interface ApiDeps {
   mainWindow: { webContents: { send: (ch: string, ...args: any[]) => void; executeJavaScript: (script: string, hasUserGesture?: boolean) => Promise<any> } } | null;
@@ -507,6 +508,21 @@ export function startApiServer(deps: ApiDeps): http.Server {
               payload: payload.ids ? { ids: payload.ids } : {},
             });
             send(200, { ok: true });
+            break;
+
+          // ─── MCP over HTTP (Claude Code 自动注册) ───
+          case '/mcp':
+            (async () => {
+              const accept = req.headers['accept'] || '';
+              const { status, contentType, body: mcpBody } = await handleMCPRequest(body, accept);
+              if (mcpBody) {
+                res.writeHead(status, { 'Content-Type': contentType });
+                res.end(mcpBody);
+              } else {
+                res.writeHead(status);
+                res.end();
+              }
+            })();
             break;
 
           default:

@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useMemo } from 'react';
 import * as LucideIcons from 'lucide-react';
 import { Zap, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import { FlowNode as FlowNodeType } from '../../types';
@@ -129,6 +129,12 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
   const dragStartRef = useRef<{ nx: number; ny: number; mx: number; my: number } | null>(null);
   const hasDragged = useRef(false);
 
+  // Stable refs for callbacks — avoids recreating handleMouseDown on every node/connectingActive change
+  const nodeRef = useRef(node);
+  nodeRef.current = node;
+  const connectingActiveRef = useRef(connectingActive);
+  connectingActiveRef.current = connectingActive;
+
   const dims = getNodeDimensions(node.type);
   const nodeW = dims.w;
   const nodeH = dims.h;
@@ -138,13 +144,14 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
       if (e.button !== 0) return;
       e.stopPropagation();
 
-      if (connectingActive) return;
+      if (connectingActiveRef.current) return;
 
+      const n = nodeRef.current;
       if (!isSelected) {
-        selectNodes([node.id], e.shiftKey || e.ctrlKey || e.metaKey);
+        selectNodes([n.id], e.shiftKey || e.ctrlKey || e.metaKey);
       }
 
-      dragStartRef.current = { nx: node.x, ny: node.y, mx: e.clientX, my: e.clientY };
+      dragStartRef.current = { nx: n.x, ny: n.y, mx: e.clientX, my: e.clientY };
       hasDragged.current = false;
 
       const { canvas_transform } = useStore.getState().ui;
@@ -157,11 +164,10 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
           hasDragged.current = true;
           const state = useStore.getState();
           const selectedIds = state.ui.selection.nodes;
-          if (selectedIds.length > 1 && selectedIds.includes(node.id)) {
-            // Move all selected
+          if (selectedIds.length > 1 && selectedIds.includes(n.id)) {
             selectedIds.forEach((id) => {
-              const n = state.script.nodes.find((n) => n.id === id);
-              if (n) {
+              const target = state.script.nodes.find((nd) => nd.id === id);
+              if (target) {
                 const snap = state.ui.snap_to_grid;
                 const gs = state.ui.grid_size;
                 const nx = dragStartRef.current!.nx + dx;
@@ -172,7 +178,7 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
           } else {
             const newX = dragStartRef.current.nx + dx;
             const newY = dragStartRef.current.ny + dy;
-            moveNode(node.id, newX, newY);
+            moveNode(n.id, newX, newY);
           }
         }
       };
@@ -186,26 +192,25 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [node, isSelected, selectNodes, moveNode, connectingActive]
+    [isSelected, selectNodes, moveNode]
   );
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
       if (!hasDragged.current) {
-        selectNodes([node.id], e.shiftKey || e.ctrlKey || e.metaKey);
+        selectNodes([nodeRef.current.id], e.shiftKey || e.ctrlKey || e.metaKey);
       }
     },
-    [node.id, selectNodes]
+    [selectNodes]
   );
 
-  // Render ports
-  const renderPorts = () => {
+  // Memoized ports — avoids re-creating DOM on every render
+  const portsEl = useMemo(() => {
     if (node.type === 'start' || node.type === 'end') return null;
     const ports = def.ports;
     return (
       <>
-        {/* Input port */}
         {ports.inputs.map((port) => (
           <div
             key={port.id}
@@ -216,8 +221,6 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
             title="输入端口"
           />
         ))}
-
-        {/* Output ports */}
         {ports.outputs.map((port, i) => {
           const total = ports.outputs.length;
           const leftPct = total === 1 ? 50 : total === 2 ? (i === 0 ? 28 : 72) : 20 + i * 30;
@@ -240,7 +243,7 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
         })}
       </>
     );
-  };
+  }, [node.type, node.id, def, onPortMouseDown, onPortMouseUp]);
 
   const statusColor = STATUS_COLORS[node.status || 'idle'];
   const summary = getNodeSummary(node);
@@ -391,9 +394,7 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
       </div>
 
       {/* Ports */}
-      {renderPorts()}
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      {portsEl}
     </div>
   );
 });
