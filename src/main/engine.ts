@@ -75,8 +75,8 @@ export async function runPythonCollect(
   });
 }
 
-/** 通过 spawnPython 执行 DSL */
-export async function runDsl(dsl: string): Promise<{ success: boolean; error?: string }> {
+/** 通过 spawnPython 执行 DSL (main.ts 有自己的本地版本) */
+async function runDsl(dsl: string): Promise<{ success: boolean; error?: string }> {
   const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'run_dsl.py');
   const result = await runPythonCollect([scriptPath], {
     cwd: getBaseDir(),

@@ -10,10 +10,10 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run build` | 构建 renderer + main |
 | `npx electron-builder --win portable` | 构建免安装便携版 |
 | `npx electron . --prod` | 测试生产模式 (file:// 加载) |
-| `python -m pytest tests/` | 运行 Python 测试 (88 test) |
+| `python -m pytest tests/` | 运行 Python 测试 (102 tests) |
 | `python python/mcp/server.py` | 启动 Python MCP 服务器 |
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
-| `node cli/lobster.js run-flow <file.flow>` | CLI 执行流程 |
+| `python cli/lobster.py run-flow <file.flow>` | CLI 执行流程 |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
 | `curl -X POST http://127.0.0.1:5577/api/ping` | 检查 HTTP API 桥接 |
 
@@ -223,7 +223,7 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 - **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
 - **Python 协议**: `engine.py` 通过 stdin/stdout JSON 与 Electron 通信
-- **测试**: `pytest tests/` 88 tests, `npm test` 前端测试
+- **测试**: `pytest tests/` 102 tests (Python), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 
 ## 节点类型速查
