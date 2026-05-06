@@ -276,7 +276,7 @@ React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splittin
 ---
 
 <div align="center">
-  <p>Made with ❤️ by 邹嘉鹏</p>
+  <p>Made with ❤️ by 邹先生</p>
   <p>邮箱：<a href="mailto:1724856284@qq.com">1724856284@qq.com</a> · 欢迎交流</p>
   <p>
     <a href="https://github.com/zoujiapeng/lingdong-script/issues">报告问题</a>
