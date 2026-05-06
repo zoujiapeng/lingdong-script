@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { EventEmitter } from 'events';
 
 export interface SchedulerEvent {
@@ -197,7 +198,12 @@ export function getSchedulerScriptPath(baseDir: string): string {
   return path.join(baseDir, 'python', 'engine', 'scheduler_daemon.py');
 }
 
-/** 工具：获取 Python 命令 */
+/** 工具：获取 Python 命令（优先使用 bundled runtime） */
 export function getPythonCommand(): string {
+  const { isDev } = require('./env');
+  if (!isDev) {
+    const bundled = path.join(process.resourcesPath, 'python-runtime', 'python.exe');
+    if (fs.existsSync(bundled)) return bundled;
+  }
   return process.platform === 'win32' ? 'python' : 'python3';
 }

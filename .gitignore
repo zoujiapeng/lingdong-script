@@ -11,3 +11,4 @@ screenshot_*.png
 assets/
 *.js.map
 *.js
+python-runtime/

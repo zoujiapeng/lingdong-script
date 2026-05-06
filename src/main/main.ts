@@ -1,6 +1,7 @@
 ﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 const fsp = fs.promises;
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
@@ -1335,6 +1336,26 @@ if (!gotTheLock) {
         catch { return { error: result.stderr?.trim() || 'DSL转换失败' }; }
       },
     });
+
+    // ── MCP 自动注册到 Claude Code ──
+    (() => {
+      try {
+        const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+        let claudeConfig: any = {};
+        try { claudeConfig = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8')); } catch {}
+        if (!claudeConfig.mcpServers) claudeConfig.mcpServers = {};
+        if (!claudeConfig.mcpServers['lingdong-script']) {
+          claudeConfig.mcpServers['lingdong-script'] = {
+            type: 'http',
+            url: 'http://127.0.0.1:5577/mcp',
+          };
+          fs.writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2), 'utf-8');
+          console.log('[MCP] Auto-registered lingdong-script in ~/.claude.json');
+        }
+      } catch (e: any) {
+        console.error('[MCP] Auto-register failed:', e.message);
+      }
+    })();
 
     // 调度引擎
     scheduler.start(path.join(app.getPath('userData'), 'schedules.json'));

@@ -3,14 +3,24 @@
  */
 import { spawn, SpawnOptions, ChildProcess } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
 import { mainWindow, pythonProcess, setPythonProcess, setEngineRunning, setLastScript } from './state';
-import { getBaseDir } from './env';
+import { getBaseDir, isDev } from './env';
+
+/** 优先使用 bundled Python runtime，否则 fallback 到系统 python */
+function getPythonPath(): string {
+  if (!isDev) {
+    const bundled = path.join(process.resourcesPath, 'python-runtime', 'python.exe');
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  return 'python';
+}
 
 /** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
 export function spawnPython(args: string[], options?: SpawnOptions) {
-  return spawn('python', args, {
+  return spawn(getPythonPath(), args, {
     ...options,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...options?.env },
   });
@@ -36,7 +46,7 @@ export function spawnPythonOneShot(args: string[], options?: SpawnOptions): Prom
   return new Promise((resolve) => {
     const launch = () => {
       _activeOneShot++;
-      const proc = spawn('python', args, {
+      const proc = spawn(getPythonPath(), args, {
         ...options,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...options?.env },
       });

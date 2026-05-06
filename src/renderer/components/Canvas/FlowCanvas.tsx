@@ -35,7 +35,6 @@ export function FlowCanvas() {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const panRAF = useRef<number>(0);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; canvasX: number; canvasY: number } | null>(null);
@@ -86,20 +85,24 @@ export function FlowCanvas() {
     [nodes, canvas_transform]
   );
 
-  // Wheel to zoom
+  // Stable ref for wheel zoom — avoids re-registering listener on every pan/zoom
+  const canvasTransformRef = useRef(canvas_transform);
+  canvasTransformRef.current = canvas_transform;
+
   const handleWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
+      const ct = canvasTransformRef.current;
       const rect = wrapperRef.current!.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
       const delta = e.deltaY < 0 ? 1.1 : 0.9;
-      const newScale = Math.min(Math.max(canvas_transform.scale * delta, 0.15), 4);
-      const newX = cx - (cx - canvas_transform.x) * (newScale / canvas_transform.scale);
-      const newY = cy - (cy - canvas_transform.y) * (newScale / canvas_transform.scale);
+      const newScale = Math.min(Math.max(ct.scale * delta, 0.15), 4);
+      const newX = cx - (cx - ct.x) * (newScale / ct.scale);
+      const newY = cy - (cy - ct.y) * (newScale / ct.scale);
       setCanvasTransform({ x: newX, y: newY, scale: newScale });
     },
-    [canvas_transform, setCanvasTransform]
+    [setCanvasTransform]
   );
 
   useEffect(() => {
@@ -176,8 +179,6 @@ export function FlowCanvas() {
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      setMousePos({ x: e.clientX, y: e.clientY });
-
       if (isPanning) {
         cancelAnimationFrame(panRAF.current);
         const px = e.clientX, py = e.clientY;
@@ -341,9 +342,8 @@ export function FlowCanvas() {
     [addEdge, stopConnecting]
   );
 
-  // Build grid SVG pattern
-  // show_grid and grid_size are now from targeted selectors
-  const gridSVG = show_grid ? (
+  // Memoized grid SVG — stable reference prevents re-render
+  const gridSVG = useMemo(() => show_grid ? (
     <svg className="canvas-grid" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       <defs>
         <pattern id="smallGrid" width={grid_size} height={grid_size} patternUnits="userSpaceOnUse">
@@ -356,7 +356,7 @@ export function FlowCanvas() {
       </defs>
       <rect width="100%" height="100%" fill="url(#bigGrid)" />
     </svg>
-  ) : null;
+  ) : null, [show_grid, grid_size]);
 
   // Connecting line
   const connectingLine = useMemo(() => connecting.active && connecting.from_node && connectingEnd ? (() => {
