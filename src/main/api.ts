@@ -510,6 +510,20 @@ export function startApiServer(deps: ApiDeps): http.Server {
             send(200, { ok: true });
             break;
 
+          // ─── Execute JavaScript in renderer ───
+          case '/api/execute-js':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            if (!payload.code) { send(400, { error: '缺少 code' }); return; }
+            (async () => {
+              try {
+                const result = await deps.mainWindow!.webContents.executeJavaScript(payload.code, true);
+                send(200, { ok: true, result });
+              } catch (e: any) {
+                send(500, { error: e.message });
+              }
+            })();
+            break;
+
           // ─── MCP over HTTP (Claude Code 自动注册) ───
           case '/mcp':
             (async () => {

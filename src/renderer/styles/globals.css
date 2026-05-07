@@ -2250,3 +2250,49 @@ textarea.form-input {
   font-weight: 600;
   font-size: 12px;
 }
+
+.agent-btn-danger {
+  background: var(--error, #ef4444);
+  color: white;
+  border-color: var(--error, #ef4444);
+}
+.agent-btn-danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.agent-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.agent-result-explanation {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0;
+  line-height: 1.5;
+}
+.agent-result-pseudo {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: var(--text-primary);
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.agent-result-status {
+  color: var(--success, #22c55e);
+  font-size: 12px;
+  margin: 0;
+}
+.agent-result-actions {
+  display: flex;
+  gap: 6px;
+}

@@ -375,6 +375,35 @@ function createWindow() {
       mainWindow?.minimize();
     }
     _rendererReady = true;
+    // 注入 API 配置环境变量到前端（如未在 localStorage 中设置）
+    const envKey = process.env.ANTHROPIC_API_KEY || '';
+    const envBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1';
+    const envModel = process.env.LLM_MODEL || 'deepseek-chat';
+    if (envKey) {
+      mainWindow?.webContents.executeJavaScript(`
+        (function() {
+          const k = '__DEEPSEEK_KEY__'; const b = '__LLM_API_BASE__'; const m = '__LLM_MODEL__';
+          const lk = 'lingdong-deepseek-key'; const lb = 'lingdong-llm-base'; const lmd = 'lingdong-llm-model';
+          window[k] = window[k] || '${envKey.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
+          window[b] = window[b] || '${envBase.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
+          window[m] = window[m] || '${envModel.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
+          if (!localStorage.getItem(lk)) localStorage.setItem(lk, window[k]);
+          if (!localStorage.getItem(lb)) localStorage.setItem(lb, window[b]);
+          if (!localStorage.getItem(lmd)) localStorage.setItem(lmd, window[m]);
+        })();
+      `);
+    }
+    // 自动启动 Agent（如果设置了 AGENT_GOAL 环境变量）
+    const autoGoal = process.env.AGENT_GOAL || '';
+    if (autoGoal) {
+      setTimeout(() => {
+        startAgentProcess(autoGoal, {
+          api_key: envKey,
+          api_base: envBase,
+          model: envModel,
+        });
+      }, 2000);
+    }
     // 执行 startup 类型的调度
     runStartupSchedules();
   });
@@ -625,7 +654,7 @@ function sendToAgent(message: any) {
   }
 }
 
-function startAgentProcess(goal: string, config?: Record<string, string>) {
+function startAgentProcess(goal: string, config?: Record<string, string>, supervise: boolean = true) {
   // Stop existing agent if running
   if (agentProcess && !agentProcess.killed) {
     sendToAgent({ type: 'stop' });
@@ -665,11 +694,11 @@ function startAgentProcess(goal: string, config?: Record<string, string>) {
   });
 
   // Send start command
-  sendToAgent({ type: 'start', goal, config: config || {} });
+  sendToAgent({ type: 'start', goal, config: config || {}, supervise });
 }
 
-ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>) => {
-  startAgentProcess(goal, config);
+ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>, supervise?: boolean) => {
+  startAgentProcess(goal, config, supervise ?? true);
   return { success: true };
 });
 

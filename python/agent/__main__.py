@@ -86,18 +86,31 @@ def _stdin_reader(queue: Queue):
 #  Agent runner (background thread)
 # ====================================================================
 
-def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Event = None):
+def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Event = None,
+               supervise: bool = True):
     """Run the agent in a background thread, streaming events to stdout."""
     cfg = config or {}
     api_key = cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     api_base = cfg.get("api_base") or os.environ.get("LLM_API_BASE", "")
     model = cfg.get("model") or os.environ.get("LLM_MODEL", "")
 
+    # Export to env so downstream features (e.g. generate_flow_script) can read them
+    if api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+    if api_base:
+        os.environ["LLM_API_BASE"] = api_base
+    if model:
+        os.environ["LLM_MODEL"] = model
+
     controller = AgentController(api_key=api_key, api_base=api_base, model=model)
     guidance_queue: Queue = getattr(_run_agent, "_guidance_queue", Queue())
 
     # Wire event callback → stdout
     controller.set_event_callback(lambda ev, d: _emit(ev, d))
+
+    # Wire stop event (checked during both ReAct loop and supervision)
+    if stop_event:
+        controller.set_stop_event(stop_event)
 
     # Inject stop-awareness: patch _run_one_step to check stop_event between steps
     if stop_event:
@@ -135,7 +148,7 @@ def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Even
     _log("info", f"Agent started — goal: {goal[:120]}")
 
     try:
-        report = controller.run(goal)
+        report = controller.run(goal, supervise=supervise)
         status = report["status"]
         if stop_event and stop_event.is_set():
             status = "stopped"
@@ -192,6 +205,7 @@ class AgentIPC:
             return
 
         config = msg.get("config", {})
+        supervise = msg.get("supervise", True)
         self._stop_event = threading.Event()
         self._guidance_queue = Queue()
 
@@ -201,6 +215,7 @@ class AgentIPC:
         self._agent_thread = threading.Thread(
             target=_run_agent,
             args=(goal, config, self._stop_event),
+            kwargs={"supervise": supervise},
             daemon=True,
         )
         self._agent_thread.start()

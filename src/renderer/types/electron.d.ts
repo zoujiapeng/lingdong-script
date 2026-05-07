@@ -80,7 +80,7 @@ export interface ElectronAPI {
   showNotification: (title: string, body: string) => Promise<void>;
 
   // Agent control
-  agentStart: (goal: string, config?: Record<string, string>) => Promise<any>;
+  agentStart: (goal: string, config?: Record<string, string>, supervise?: boolean) => Promise<any>;
   agentStop: () => Promise<any>;
   agentGuidance: (text: string) => Promise<any>;
   agentStatus: () => Promise<any>;
