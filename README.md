@@ -1,8 +1,8 @@
 <div align="center">
 
-# 灵动脚本(开发测试中，功能不稳定)
+# 灵动脚本
 
-**可视化桌面自动化流程编辑器 — 拖拽编排，万物可控**
+**可视化桌面自动化流程编辑器 — AI Agent 监督执行 · 拖拽编排 · 万物可控**
 
 [![Electron](https://img.shields.io/badge/Electron-31-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
@@ -16,13 +16,9 @@
 
 灵动脚本是一款**可视化桌面自动化流程编辑器**，通过拖拽节点编排流程图来创建自动化脚本。无需编程经验，即可完成屏幕点击、文字输入、OCR 识别、图片检测、进度条监控、条件分支、循环等桌面自动化操作。
 
-支持 AI / MCP / HTTP API 多种接入方式，Claude Code 可实时规划操控。从自然语言描述到自动化执行，全流程闭环。
+内置 **AI Agent** 具备自主规划与监督执行能力：分析目标 → 生成流程图 → 逐步执行 → OCR 验证 → 失败恢复，全流程闭环。
 
-**三种用法：** ① 手动拖拽编排流程图 ② 内置 AI 助手自然语言生成 ③ Claude Code / MCP 远程控制
-
-问题：1打包版本未内置Python，需完整环境
-     2复杂流程没有完整实机测试，真正到可用的指令比较少
-     3界面可能闪烁待修复
+**三种用法：** ① 手动拖拽编排流程图 ② AI Agent 自然语言自动生成+监督执行 ③ Claude Code / MCP 远程控制
      
 
 
@@ -76,7 +72,12 @@
 - **一键转流程图** — 录制完成后自动转换为可视化节点
 - **回放控制** — 支持速度调节、循环播放
 
-#### AI 辅助
+#### AI Agent（核心特性）
+- **自主规划** — AI 分析目标，自动生成执行计划（流程图可视化展示）
+- **监督执行** — Agent stay alive 逐步执行，不再生成脚本后退出
+- **窗口焦点安全** — 每步执行前检查目标窗口，防止输入错窗口
+- **OCR 验证** — 执行后自动 OCR 验证结果，确保操作生效
+- **失败恢复** — LLM 决策恢复策略（重试/替代方案/跳过/终止）
 - **自然语言生成** — 用中文描述需求，AI 自动生成 DSL 并转为流程图
 - **智能补全** — AI 推荐下一步操作节点
 - **多种 LLM** — 支持 DeepSeek、OpenAI 等兼容接口
@@ -211,6 +212,12 @@ src/
     ├── components/ #   画布/节点/属性面板/库
     └── utils/      #   工具函数/节点定义
 python/
+├── agent/          # AI Agent (规划/监督执行/OCR验证/失败恢复)
+│   ├── __main__.py #   IPC 入口 (stdin/stdout JSON 协议)
+│   ├── controller.py #   ReAct 循环 + 监督执行
+│   ├── planner.py  #   LLM 决策引擎 (DeepSeek)
+│   ├── pseudocode.py #   伪代码 → 结构化步骤解析
+│   └── memory.py   #   短期/长期记忆
 ├── engine/         # 自动化执行引擎 (DSL执行/条件评估)
 ├── features/       # @feature 注册表 (~160 工具, 懒加载)
 ├── mcp/            # Python MCP 服务器
@@ -231,12 +238,13 @@ python/
 
 ### Overview
 
-**Lingdong Script** is a visual desktop automation flow editor. Create automation scripts by drag-and-drop flowchart editing — no coding required.
+**Lingdong Script** is a visual desktop automation flow editor with a built-in **AI Agent** that autonomously plans, executes, and verifies desktop automation tasks.
 
-Three ways to use: ① Manual flowchart editing ② Built-in AI assistant (natural language to DSL) ③ Claude Code / MCP remote control.
+Three ways to use: ① Manual flowchart editing ② AI Agent (natural language → supervised execution) ③ Claude Code / MCP remote control.
 
 ### Key Features
 
+- **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, and failure recovery
 - **Visual Flow Editor** — 100+ node types, 3 view modes (canvas/pseudocode/settings)
 - **Macro Recording** — F6 hotkey, smart filtering, one-click convert to flowchart
 - **AI-Powered** — Natural language to automation scripts (DeepSeek/OpenAI)
