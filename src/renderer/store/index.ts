@@ -562,7 +562,7 @@ interface AppStore {
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
-  setViewMode: (mode: 'canvas' | 'pseudocode' | 'ai' | 'settings' | 'agent') => void;
+  setViewMode: (mode: 'canvas' | 'pseudocode' | 'settings' | 'agent') => void;
   startConnecting: (nodeId: string, portId: string) => void;
   stopConnecting: () => void;
   setHoveredNode: (id?: string) => void;
@@ -1494,6 +1494,11 @@ const _api = (window as any).electronAPI;
     viewMode: s.ui.viewMode,
   };
 };
+(window as any).__bridge_loadScript = (script: any) => {
+  const s = useStore.getState();
+  s.loadScript(script);
+  s.setViewMode('canvas');
+};
 if (_api) {
   _api.onEngineMessage((msg: any) => {
     if (!msg || !msg.type) return;
@@ -1531,6 +1536,40 @@ if (_api) {
 
   _api.onEngineLog((msg: any) => {
     useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
+  });
+
+  // Global agent message handler (works even when AgentView is not mounted)
+  _api.onAgentMessage((msg: any) => {
+    if (msg.type === 'step_complete' && msg.tool === 'generate_flow_script' && msg.result?.success) {
+      const data = msg.result.data || {};
+      const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
+      if (pseudocode) {
+        import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
+          try {
+            const script = parsePseudoToFlow(pseudocode);
+            const store = useStore.getState();
+            script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
+            store.loadScript(script);
+            store.setViewMode('canvas');
+            // Agent will execute steps via supervision — no auto-engineStart
+          } catch (e) { console.error('[agent] loadScript failed:', e); }
+        });
+      }
+    }
+    // Track agent execution progress on the flowchart
+    if (msg.type === 'step_complete' && msg.tool !== 'generate_flow_script' && msg.result) {
+      const isRunning = msg.result.success === true;
+      useStore.setState((s) => {
+        s.execution.status = isRunning ? 'running' : 'error';
+        s.execution.current_node_id = msg.step_num ? `agent_step_${msg.step_num}` : undefined;
+      });
+    }
+    if (msg.type === 'agent_done') {
+      useStore.setState((s) => {
+        s.execution.status = msg.status === 'completed' ? 'completed' : 'error';
+        s.execution.current_node_id = undefined;
+      });
+    }
   });
 
   // API command bridge (from local HTTP server, controlled by Claude Code)

@@ -14,6 +14,26 @@ from typing import Optional
 
 logger = logging.getLogger("agent.planner")
 
+SUPERVISOR_PROMPT = """You are supervising execution of a pre-generated desktop automation plan.
+For each failure, you receive:
+- goal: the original objective
+- failed_step: the step that failed (type, target, raw text)
+- error: what went wrong
+- verification_details: optional details about verification failure
+
+You must decide ONE recovery action:
+1. "retry" — execute the same step again (for transient errors)
+2. "alternative" — a different approach to achieve the same goal (provide alternative_step)
+3. "skip" — skip this step, continue with the next one
+4. "fail" — the goal is impossible, stop execution
+
+Respond with ONLY JSON:
+{
+  "action": "retry|alternative|skip|fail",
+  "reasoning": "brief explanation of your decision",
+  "alternative_step": {"type": "...", ...}  // only for action="alternative"
+}"""
+
 SYSTEM_PROMPT = """You are an autonomous desktop agent using the ReAct (Reason + Act) pattern.
 
 You receive:
@@ -45,6 +65,13 @@ Strategy rules (MUST follow):
 12. For editing code or config files, use file_edit() with SEARCH/REPLACE blocks. It's safer than file_write() because it only changes the matched portion. Use file_write() only when you want to overwrite the entire file.
 13. GUI automation (click, type_text, OCR) is only for desktop applications that have no CLI interface.
 14. When a task can be done via CLI, prefer run_command() — it's faster, more reliable, and captures output automatically.
+15. **generate_flow_script(goal)** is a key tool you should use PROACTIVELY. Call it when:
+    - The goal describes a multi-step desktop automation task (opening apps, clicking, typing, etc.)
+    - The task involves conditions, loops, or waiting for events
+    - The user asks for a "script", "flowchart", "automation", "scheduled task", or "定时任务"
+    - The task has 3+ steps that would benefit from visual flow representation
+    - **When in doubt, prefer generate_flow_script over manual step-by-step execution** — it produces a reusable visual script
+    After calling generate_flow_script successfully, call complete() — the result is handled automatically.
 """
 
 
@@ -56,6 +83,40 @@ class Planner:
         self._api_base = (api_base or os.environ.get("LLM_API_BASE", "") or
                           "https://api.deepseek.com/v1").rstrip("/")
         self._model = model or os.environ.get("LLM_MODEL", "") or "deepseek-chat"
+
+    def decide_recovery(
+        self,
+        goal: str,
+        failed_step: dict,
+        error: str,
+        verification_details: dict | None = None,
+    ) -> dict:
+        """Call LLM to decide recovery strategy for a failed execution step."""
+        step_type = failed_step.get("type", "unknown")
+        step_raw = failed_step.get("raw", str(failed_step))
+
+        user_content = (
+            f"GOAL: {goal}\n\n"
+            f"FAILED STEP ({step_type}):\n  {step_raw}\n\n"
+            f"ERROR: {error}\n"
+        )
+        if verification_details:
+            user_content += f"\nVERIFICATION DETAILS:\n{json.dumps(verification_details, indent=2, default=str)}\n"
+
+        messages = [
+            {"role": "system", "content": SUPERVISOR_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+        try:
+            plan = self._call_api(messages)
+            if isinstance(plan, dict) and plan.get("action") in ("retry", "alternative", "skip", "fail"):
+                return plan
+            logger.warning("Recovery returned invalid action: %s", plan)
+            return {"action": "skip", "reasoning": f"Invalid recovery response: {plan}"}
+        except Exception as e:
+            logger.warning("Recovery API call failed: %s", e)
+            return {"action": "skip", "reasoning": f"API unavailable: {e}"}
 
     def decide(
         self,

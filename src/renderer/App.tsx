@@ -7,7 +7,6 @@ import { StatusBar } from './components/common/StatusBar';
 import { LogPanel } from './components/common/LogPanel';
 import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { PseudoPanel } from './components/PseudoPanel';
-import { AIAssistantDialog } from './components/AIAssistantDialog';
 import { AgentView } from './components/AgentView';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
@@ -19,7 +18,6 @@ import './styles/globals.css';
 export default function App() {
   const viewMode = useStore(s => s.ui.viewMode);
   const darkMode = useStore(s => s.ui.dark_mode);
-  const showAIDialog = useStore(s => s.ui.show_ai_dialog);
   const panelsVisible = useStore(s => s.ui.panels_visible);
   const showToolCallPanel = useStore(s => s.ui.show_tool_call_panel);
   const setUI = useStore(s => s.setUI);
@@ -164,16 +162,6 @@ export default function App() {
           伪代码
         </button>
         <button
-          className={`view-tab ${showAIDialog ? 'active' : ''}`}
-          onClick={() => setUI({ show_ai_dialog: !showAIDialog })}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-            <path d="M18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-          </svg>
-          AI 助手
-        </button>
-        <button
           className={`view-tab ${viewMode === 'agent' ? 'active' : ''}`}
           onClick={() => setViewMode('agent')}
         >
@@ -214,13 +202,6 @@ export default function App() {
               <FlowCanvas />
             </div>
             <PropertyPanel />
-            {showAIDialog && (
-              <div className="ai-dialog-backdrop" onClick={() => setUI({ show_ai_dialog: false })}>
-                <div className="ai-dialog" onClick={e => e.stopPropagation()}>
-                  <AIAssistantDialog onClose={() => setUI({ show_ai_dialog: false })} />
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>

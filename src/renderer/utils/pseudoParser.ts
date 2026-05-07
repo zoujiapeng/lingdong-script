@@ -17,7 +17,9 @@ function parseIndentation(code: string): ParseLine[] {
     const indent = trimmed.length - trimmed.trimStart().length;
     // Normalize: 4 spaces = 1 indent level
     const normalizedIndent = Math.round(indent / 2);
-    lines.push({ indent: normalizedIndent, text: trimmed.trim(), lineNumber: i + 1 });
+    // Strip leading numbering like "1. ", "1) ", "(1) "
+    const clean = trimmed.trim().replace(/^(?:\d+[.)]\s*|\(\d+\)\s*)+/, '');
+    lines.push({ indent: normalizedIndent, text: clean, lineNumber: i + 1 });
   }
   return lines;
 }
