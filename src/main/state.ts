@@ -19,3 +19,11 @@ export function setEngineRunning(v: boolean) { engineRunning = v; }
 /** 最近执行的脚本 JSON */
 export let lastScript: string | null = null;
 export function setLastScript(s: string | null) { lastScript = s; }
+
+/** Agent 进程 */
+export let agentProcess: ChildProcess | null = null;
+export function setAgentProcess(p: ChildProcess | null) { agentProcess = p; }
+
+/** Agent 运行状态 */
+export let agentRunning = false;
+export function setAgentRunning(v: boolean) { agentRunning = v; }

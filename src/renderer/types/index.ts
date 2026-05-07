@@ -509,7 +509,7 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
-  viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings';
+  viewMode: 'canvas' | 'pseudocode' | 'ai' | 'settings' | 'agent';
   panels_visible: boolean;
   show_node_library: boolean;
   show_property_panel: boolean;

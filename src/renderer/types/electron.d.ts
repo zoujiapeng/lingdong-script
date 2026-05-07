@@ -78,6 +78,16 @@ export interface ElectronAPI {
 
   // Notifications
   showNotification: (title: string, body: string) => Promise<void>;
+
+  // Agent control
+  agentStart: (goal: string, config?: Record<string, string>) => Promise<any>;
+  agentStop: () => Promise<any>;
+  agentGuidance: (text: string) => Promise<any>;
+  agentStatus: () => Promise<any>;
+
+  // Agent messages
+  onAgentMessage: (callback: (msg: any) => void) => void;
+  onAgentLog: (callback: (msg: any) => void) => void;
 }
 
 declare global {

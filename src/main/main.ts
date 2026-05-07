@@ -15,6 +15,8 @@ import {
   pythonProcess,
   engineRunning, setEngineRunning,
   lastScript, setLastScript,
+  agentProcess, setAgentProcess,
+  agentRunning, setAgentRunning,
 } from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
@@ -615,7 +617,85 @@ ipcMain.handle('engine:status', () => {
   return { success: true };
 });
 
-ipcMain.handle('ai:generate', (_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
+// ── Agent IPC ──────────────────────────────────────────────────
+
+function sendToAgent(message: any) {
+  if (agentProcess && agentProcess.stdin) {
+    agentProcess.stdin.write(JSON.stringify(message) + '\n');
+  }
+}
+
+function startAgentProcess(goal: string, config?: Record<string, string>) {
+  // Stop existing agent if running
+  if (agentProcess && !agentProcess.killed) {
+    sendToAgent({ type: 'stop' });
+    setTimeout(() => { if (agentProcess && !agentProcess.killed) agentProcess.kill(); }, 1000);
+  }
+
+  const agentDir = path.join(getBaseDir(), 'python');
+  const proc = spawnPython(
+    ['-u', '-m', 'agent'],
+    { cwd: agentDir, stdio: ['pipe', 'pipe', 'pipe'] }
+  );
+  setAgentProcess(proc);
+  setAgentRunning(true);
+
+  proc.stdout!.on('data', (data: Buffer) => {
+    const lines = data.toString('utf8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === 'agent_done') {
+          setAgentRunning(false);
+        }
+        mainWindow?.webContents.send('agent-message', msg);
+      } catch {
+        mainWindow?.webContents.send('agent-log', { level: 'info', message: line });
+      }
+    }
+  });
+
+  proc.stderr!.on('data', (data: Buffer) => {
+    mainWindow?.webContents.send('agent-log', { level: 'error', message: data.toString('utf8') });
+  });
+
+  proc.on('exit', () => {
+    setAgentProcess(null);
+    setAgentRunning(false);
+  });
+
+  // Send start command
+  sendToAgent({ type: 'start', goal, config: config || {} });
+}
+
+ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>) => {
+  startAgentProcess(goal, config);
+  return { success: true };
+});
+
+ipcMain.handle('agent:stop', () => {
+  sendToAgent({ type: 'stop' });
+  setAgentRunning(false);
+  setTimeout(() => {
+    if (agentProcess && !agentProcess.killed) {
+      agentProcess.kill();
+      setAgentProcess(null);
+    }
+  }, 3000);
+  return { success: true };
+});
+
+ipcMain.handle('agent:guidance', (_, text: string) => {
+  sendToAgent({ type: 'guidance', text });
+  return { success: true };
+});
+
+ipcMain.handle('agent:status', () => {
+  sendToAgent({ type: 'status' });
+  return { success: true };
+});
+
+ipcMain.handle('ai:generate',(_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
   return new Promise((resolve) => {
     const apiBase = (params.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
     const model = params.model || process.env.LLM_MODEL || 'deepseek-chat';

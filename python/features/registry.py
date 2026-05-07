@@ -179,6 +179,11 @@ class FeatureRegistry:
         for mod_name in modules:
             importlib.import_module(mod_name)
 
+    def list_features(self) -> List[FeatureSpec]:
+        """列出所有已注册的功能（按注册顺序）"""
+        self._ensure_loaded()
+        return [self._features[name] for name in self._load_order if name in self._features]
+
     def register(self, spec: FeatureSpec):
         if spec.name in self._features:
             raise ValueError(f"功能 '{spec.name}' 已注册")

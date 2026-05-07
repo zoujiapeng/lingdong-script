@@ -8,6 +8,7 @@ import { LogPanel } from './components/common/LogPanel';
 import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { PseudoPanel } from './components/PseudoPanel';
 import { AIAssistantDialog } from './components/AIAssistantDialog';
+import { AgentView } from './components/AgentView';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
 import { htnRegistry } from './utils/htnRegistry';
@@ -172,6 +173,16 @@ export default function App() {
           </svg>
           AI 助手
         </button>
+        <button
+          className={`view-tab ${viewMode === 'agent' ? 'active' : ''}`}
+          onClick={() => setViewMode('agent')}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
+            <path d="M12 2a4 4 0 014 4c0 2-2 4-4 6-2-2-4-4-4-6a4 4 0 014-4z" />
+            <path d="M12 14c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z" />
+          </svg>
+          Agent
+        </button>
         <div className="view-tabs-spacer" />
         <button
           className={`view-tab ${viewMode === 'settings' ? 'active' : ''} view-tab-settings`}
@@ -190,6 +201,8 @@ export default function App() {
       <div className={`app-body${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
         {viewMode === 'settings' ? (
           <SettingsPanel />
+        ) : viewMode === 'agent' ? (
+          <AgentView />
         ) : viewMode === 'pseudocode' ? (
           <div className="canvas-area">
             <PseudoPanel />
