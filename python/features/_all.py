@@ -36,5 +36,7 @@ _FEATURE_MODULES = [
     "features.canvas_features",
     "features.claude_code_features",
     "features.scheduler_features",
+    "features.software_features",
+    "features.file_features",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

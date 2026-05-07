@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+import base64
 import re
 import time
 from typing import List, Optional, Tuple, Dict, Any
@@ -19,6 +20,12 @@ try:
     HAS_TESSERACT = True
 except ImportError:
     HAS_TESSERACT = False
+
+try:
+    import requests as _requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 from perception.vision import ScreenCapture, BBox, Point
 
@@ -60,16 +67,92 @@ class OCRResult:
         return f"OCRResult('{self.text}', conf={self.confidence:.2f})"
 
 
+class UmiOCRBackend:
+    """Umi-OCR HTTP API 后端。中文识别质量显著优于 Tesseract。
+
+    需要先启动 Umi-OCR（https://github.com/hiroi-sora/Umi-OCR），
+    开启 HTTP 服务（默认端口 24024）。自动检测，不依赖则 fallback。
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 24024):
+        self.base_url = f"http://{host}:{port}"
+        self._available: Optional[bool] = None
+
+    def ping(self) -> bool:
+        if not HAS_REQUESTS:
+            return False
+        try:
+            resp = _requests.get(f"{self.base_url}/api/ocr/get_options", timeout=2)
+            return resp.ok
+        except Exception:
+            return False
+
+    @property
+    def available(self) -> bool:
+        if self._available is None:
+            self._available = self.ping()
+        return self._available
+
+    def extract_all(self, img: np.ndarray) -> List[OCRResult]:
+        if not HAS_REQUESTS:
+            return []
+        _, buf = cv2.imencode(".png", img)
+        b64 = base64.b64encode(buf).decode()
+
+        try:
+            resp = _requests.post(
+                f"{self.base_url}/api/ocr",
+                json={"base64": b64, "options": {"data.format": "dict"}},
+                timeout=10,
+            )
+            if not resp.ok:
+                return []
+            data = resp.json()
+        except Exception:
+            return []
+
+        if data.get("code") != 100:
+            return []
+
+        results: List[OCRResult] = []
+        for item in data.get("data", []):
+            text = item.get("text", "").strip()
+            if not text:
+                continue
+            score = item.get("score", 0)
+            box = item.get("box")
+            if box and len(box) == 4:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                x, y = min(xs), min(ys)
+                w, h = max(xs) - min(xs), max(ys) - min(ys)
+            else:
+                x, y, w, h = 0, 0, 0, 0
+            results.append(OCRResult(text=text, bbox=(int(x), int(y), int(w), int(h)), confidence=float(score)))
+
+        return results
+
+
 class OCREngine:
     """
     OCR 引擎封装
     支持: 全屏/区域 OCR, 文本定位, 模糊搜索
+    自动选择后端: Umi-OCR (HTTP) → Tesseract
     """
 
     def __init__(self, lang: str = "chi_sim+eng"):
         self.lang = lang
         self._cache: Dict[str, Tuple[float, List[OCRResult]]] = {}
         self._cache_ttl = 0.3
+        self._umi = UmiOCRBackend()
+        self._backend_name: str = ""
+
+    def _detect_backend(self) -> str:
+        if self._umi.available:
+            self._backend_name = "umi"
+            return "umi"
+        self._backend_name = "tesseract" if HAS_TESSERACT else "mock"
+        return self._backend_name
 
     # ── 主要 API ──────────────────────────────────────────────────
     def extract_all(
@@ -83,7 +166,19 @@ class OCREngine:
                 return results
 
         img = ScreenCapture.capture(region)
-        results = self._run_ocr(img, offset=region[:2] if region else (0, 0))
+
+        self._detect_backend()
+        if self._backend_name == "umi":
+            offset = region[:2] if region else (0, 0)
+            results = self._umi.extract_all(img)
+            # Apply region offset
+            if offset != (0, 0):
+                ox, oy = offset
+                for r in results:
+                    x, y, w, h = r.bbox
+                    r.bbox = (x + ox, y + oy, w, h)
+        else:
+            results = self._run_ocr(img, offset=region[:2] if region else (0, 0))
 
         if use_cache:
             self._cache[cache_key] = (time.time(), results)

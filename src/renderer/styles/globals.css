@@ -2038,3 +2038,215 @@ textarea.form-input {
 .ai-dialog .ai-input-actions {
   margin-top: 0;
 }
+
+/* ============================================================
+   AGENT VIEW
+   ============================================================ */
+.agent-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.agent-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.agent-status {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.agent-status.online {
+  color: var(--success);
+}
+
+.agent-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 20px;
+  gap: 12px;
+}
+
+.agent-goal-bar,
+.agent-guidance-bar {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.agent-input {
+  flex: 1;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.agent-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+}
+
+.agent-input:disabled {
+  opacity: 0.5;
+}
+
+.agent-btn {
+  padding: 8px 18px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.agent-btn:hover:not(:disabled) {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.agent-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.agent-btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.agent-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.agent-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  min-height: 0;
+}
+
+.agent-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.agent-msg {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.5;
+  animation: fadeIn 0.15s ease;
+}
+
+.agent-msg-system {
+  align-self: flex-start;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-msg-step {
+  align-self: flex-start;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.agent-msg-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: white;
+}
+
+.agent-msg-guidance {
+  align-self: flex-start;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.agent-msg-complete {
+  align-self: center;
+  background: rgba(34, 197, 94, 0.1);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  text-align: center;
+  font-size: 14px;
+  padding: 12px 20px;
+}
+
+.agent-msg-fail {
+  align-self: center;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  text-align: center;
+  font-size: 14px;
+  padding: 12px 20px;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.agent-step-num {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.agent-action {
+  color: #f59e0b;
+}
+
+.agent-conf {
+  color: #60a5fa;
+}
+
+.agent-thought {
+  color: var(--text-secondary);
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.agent-label {
+  font-weight: 600;
+  font-size: 12px;
+}

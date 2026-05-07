@@ -26,6 +26,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('engine-log', (_, msg) => callback(msg));
   },
 
+  // Agent control
+  agentStart: (goal: string, config?: Record<string, string>) =>
+    ipcRenderer.invoke('agent:start', goal, config),
+  agentStop: () =>
+    ipcRenderer.invoke('agent:stop'),
+  agentGuidance: (text: string) =>
+    ipcRenderer.invoke('agent:guidance', text),
+  agentStatus: () =>
+    ipcRenderer.invoke('agent:status'),
+
+  // Agent messages (from main process)
+  onAgentMessage: (callback: (msg: any) => void) => {
+    ipcRenderer.on('agent-message', (_, msg) => callback(msg));
+  },
+  onAgentLog: (callback: (msg: any) => void) => {
+    ipcRenderer.on('agent-log', (_, msg) => callback(msg));
+  },
+
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
   selectRegion: () => ipcRenderer.invoke('screenshot:selectRegion'),

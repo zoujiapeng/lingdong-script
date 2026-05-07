@@ -1,14 +1,23 @@
 """
 多媒体功能
-音频控制 / 区域实时截图 / 屏幕录制
+音频控制 / 区域实时截图 / 屏幕录制（FFmpeg gdigrab）
 """
-import base64, io, os, time, threading
+import base64, io, os, signal, subprocess, time, threading
 from datetime import datetime
 
 from features.registry import feature, P, TC, FeatureCategory as F
 
 # 全局录制状态
-_recorder = {"active": False, "thread": None, "output": "", "frames": 0, "start_time": 0}
+_recorder: dict = {"active": False, "process": None, "output": "", "start_time": 0}
+
+
+def _ffmpeg_available() -> bool:
+    """检查 FFmpeg 是否在 PATH 中"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        return True
+    except Exception:
+        return False
 
 
 @feature(
@@ -95,108 +104,122 @@ def screenshot_region_live(region: str, max_fps: float = 5, change_threshold: fl
 @feature(
     name="screen_record_start",
     display_name="开始屏幕录制",
-    description="【多媒体】开始录制屏幕到视频文件。用于录制操作过程",
+    description="【多媒体·FFmpeg】开始录制屏幕到视频文件。使用 FFmpeg gdigrab 采集，性能优于 OpenCV 逐帧编码。支持区域录制和系统音频",
     category=F.SYSTEM,
     params=[
         P("output", "str", "输出文件路径", example="C:\\录制\\demo.mp4"),
-        P("region", "str", "录制区域（可选，默认全屏）", required=False, default=""),
+        P("region", "str", "录制区域 'x,y,w,h'（可选，默认全屏）", required=False, default=""),
         P("fps", "int", "帧率", required=False, default=10),
         P("include_audio", "boolean", "是否录制系统音频", required=False, default=False),
     ],
-    returns="dict{success, file, pid} - 录制信息",
-    tags=["multimedia", "recording"],
+    returns="dict{success, file, fps, ffmpeg_cmd} - 录制信息",
+    tags=["multimedia", "recording", "ffmpeg"],
 )
 def screen_record_start(output: str, region: str = "", fps: int = 10, include_audio: bool = False) -> dict:
     global _recorder
     if _recorder["active"]:
         return {"success": False, "error": "已有录制任务在进行中，请先停止"}
 
+    if not _ffmpeg_available():
+        return {"success": False, "error": "FFmpeg 未安装。下载: https://ffmpeg.org/download.html 并加入 PATH"}
+
     try:
-        from perception.vision import ScreenCapture
-        from features._utils import parse_region
-        import cv2
-        import numpy as np
-
-        reg = parse_region(region) if region else None
-        # 获取初始帧确定尺寸
-        sample = ScreenCapture.capture(reg)
-        if sample is None:
-            return {"success": False, "error": "无法获取屏幕画面"}
-        h, w = sample.shape[:2]
-
-        # 确保输出目录存在
         os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output, fourcc, fps, (w, h))
-        if not writer.isOpened():
-            writer.release()
-            return {"success": False, "error": "无法创建视频文件"}
-
-        _recorder["active"] = True
-        _recorder["output"] = output
-        _recorder["frames"] = 0
-        _recorder["start_time"] = time.time()
-
-        def _record_loop():
-            while _recorder["active"]:
-                frame = ScreenCapture.capture(reg)
-                if frame is not None:
-                    writer.write(frame)
-                    _recorder["frames"] += 1
-                time.sleep(1.0 / fps)
-            writer.release()
-
-        _recorder["thread"] = threading.Thread(target=_record_loop, daemon=True)
-        _recorder["thread"].start()
-
-        return {"success": True, "result": {"file": output, "fps": fps, "region": region or "fullscreen"}}
-    except ImportError:
-        return {"success": False, "error": "需要 opencv-python: pip install opencv-python"}
     except Exception as e:
-        _recorder["active"] = False
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"无法创建输出目录: {e}"}
+
+    # 构建 FFmpeg gdigrab 命令
+    cmd = ["ffmpeg", "-y"]
+    grab_opts = ["-f", "gdigrab", "-framerate", str(fps)]
+    if region:
+        parts = region.replace("，", ",").split(",")
+        if len(parts) == 4:
+            try:
+                x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+                grab_opts += ["-offset_x", str(x), "-offset_y", str(y), "-video_size", f"{w}x{h}"]
+            except ValueError:
+                return {"success": False, "error": f"无效区域: {region}，需要 x,y,w,h"}
+    grab_opts += ["-i", "desktop"]
+    cmd += grab_opts
+
+    if include_audio:
+        cmd += ["-f", "dshow", "-i", "audio=(virtual-audio-capturer)", "-c:a", "aac", "-b:a", "128k"]
+
+    cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", output]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        return {"success": False, "error": f"FFmpeg 启动失败: {e}"}
+
+    _recorder["active"] = True
+    _recorder["process"] = proc
+    _recorder["output"] = output
+    _recorder["start_time"] = time.time()
+
+    return {
+        "success": True,
+        "result": {
+            "file": output, "fps": fps,
+            "region": region or "fullscreen",
+            "audio": include_audio,
+            "ffmpeg_cmd": " ".join(cmd),
+        },
+    }
 
 
 @feature(
     name="screen_record_stop",
     display_name="停止屏幕录制",
-    description="【多媒体】停止当前正在进行的屏幕录制并保存文件。用于结束录制",
+    description="【多媒体·FFmpeg】停止当前录制并保存文件。向 FFmpeg 发送 'q' 正常结束编码，确保视频文件完整",
     category=F.SYSTEM,
     params=[
         P("save", "boolean", "是否保存录制文件（False=丢弃）", required=False, default=True),
     ],
     returns="dict{success, file, duration, size} - 录制结果",
-    tags=["multimedia", "recording"],
+    tags=["multimedia", "recording", "ffmpeg"],
 )
 def screen_record_stop(save: bool = True) -> dict:
     global _recorder
-    if not _recorder["active"]:
+    if not _recorder["active"] or not _recorder["process"]:
         return {"success": False, "error": "没有正在进行的录制"}
 
-    _recorder["active"] = False
-    if _recorder["thread"]:
-        _recorder["thread"].join(timeout=5)
-
-    duration = time.time() - _recorder["start_time"]
-    frames = _recorder["frames"]
+    proc = _recorder["process"]
     output = _recorder["output"]
+    duration = time.time() - _recorder["start_time"]
+
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+    _recorder["active"] = False
+    _recorder["process"] = None
 
     if not save and os.path.exists(output):
-        os.remove(output)
-        return {"success": True, "result": {"saved": False, "frames": frames, "duration": round(duration, 1)}}
+        try:
+            os.remove(output)
+        except OSError:
+            pass
+        return {"success": True, "result": {"saved": False, "duration": round(duration, 1)}}
 
     file_size = os.path.getsize(output) if os.path.exists(output) else 0
-    _recorder["active"] = False
-    _recorder["thread"] = None
-
     return {
         "success": True,
         "result": {
-            "saved": True,
-            "file": output,
-            "frames": frames,
+            "saved": True, "file": output,
             "duration": round(duration, 1),
             "size_bytes": file_size,
-        }
+        },
     }
