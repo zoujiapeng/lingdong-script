@@ -12,10 +12,10 @@ def _netsh(cmd: str) -> str:
     try:
         result = subprocess.run(
             ["netsh"] + cmd.split(),
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=False, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
         )
-        return result.stdout
+        return result.stdout.decode("utf-8", errors="replace")
     except Exception:
         return ""
 

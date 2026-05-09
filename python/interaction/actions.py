@@ -2,6 +2,7 @@
 ActionHandler: DSL 执行器的底层动作回调。
 将 executor 派发的 action 转为实际系统操作（鼠标、键盘、截图等）。
 """
+import os
 import time
 import logging
 
@@ -112,9 +113,20 @@ class ActionHandler:
         try:
             if not target or not isinstance(target, str):
                 return False
-            # 避免 shell injection: 用 shlex.split 解析后传 list
-            args = shlex.split(target, posix=False)
+
+            # Use program registry for name resolution (PATH + App Paths + cache)
+            from features.program_registry import resolve_program
+            resolved = resolve_program(target) or target
+
+            args = shlex.split(resolved, posix=False)
             subprocess.Popen(args, shell=False)
+        except FileNotFoundError:
+            # Fallback: shell=True resolves via Windows App Paths registry
+            try:
+                subprocess.Popen(target, shell=True)
+            except Exception as e2:
+                logger.error("Launch fallback failed: target=%r error=%s", target, e2)
+                return False
         except Exception as e:
             logger.error("Launch failed: target=%r error=%s", target, e)
             return False

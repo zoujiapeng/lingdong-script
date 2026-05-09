@@ -1,4 +1,4 @@
-"""
+﻿"""
 流程图脚本生成功能
 Agent 内部调用：将自然语言目标转为可执行的流程图脚本（伪代码）
 """
@@ -61,7 +61,7 @@ def _build_structured_types_section() -> str:
     ])
 
 
-GENERATION_PROMPT = f"""You are an automation script generator. Given a user's goal, generate a step-by-step pseudocode script AND a structured steps representation.
+GENERATION_PROMPT = f"""You are an automation script generator. Given a user's goal, generate a step-by-step pseudocode script, structured steps, and LOBSTER DSL.
 
 {_build_commands_section()}
 
@@ -69,15 +69,38 @@ IMPORTANT RULES:
 1. Do NOT use `运行命令` to launch GUI apps (notepad, calc, mspaint, chrome, explorer) — use `启动` instead
 2. Use `运行命令` ONLY for CLI commands that exit after completion (git, npm, dir, echo)
 3. Do NOT use numbering (1. 2. 3.) in the pseudocode. Each step on its own line, no prefixes.
-4. After launching a GUI app, always add a `等待 1-2秒` step to let it open, then optionally `聚焦 "title"` to ensure focus.
-5. For window titles in `聚焦`, use a fuzzy keyword that works across locales. E.g. `聚焦 "记事本"` instead of `聚焦 "无标题 - 记事本"`, and `聚焦 "计算器"` instead of `聚焦 "Calculator"`.
-6. Use specific click targets that appear as visible text on screen. Never use vague descriptions like "空白处" or "当前位置" — use a concrete nearby text target instead.
-7. When using `双击` or `右键单击`, do NOT wrap the target in quotes in the pseudocode. Write `双击 回收站` not `双击 '回收站'`. (Quotes are optional in structured_steps targets.)
+4. If the user specifies explicit time delays (like "N秒后" "等N秒" "隔N秒") — strictly follow them by adding a `等待 N` step before the corresponding action
+5. After launching a GUI app, always add a `等待 1-2秒` step to let it open, then optionally `聚焦 "title"` to ensure focus.
+6. For window titles in `聚焦`, use a fuzzy keyword that works across locales. E.g. `聚焦 "记事本"` instead of `聚焦 "无标题 - 记事本"`, and `聚焦 "计算器"` instead of `聚焦 "Calculator"`.
+7. Use specific click targets that appear as visible text on screen. Never use vague descriptions like "空白处" or "当前位置" — use a concrete nearby text target instead.
+8. When using `双击` or `右键单击`, do NOT wrap the target in quotes in the pseudocode. Write `双击 回收站` not `双击 '回收站'`. (Quotes are optional in structured_steps targets.)
+9. When launching a program, you can use Chinese names directly (e.g. `启动 "微信"`, `启动 "记事本"`, `启动 "微星小飞机"`). The system will auto-resolve them to full paths. Do NOT use `运行命令 "where 程序名"` for program path lookup — just use the Chinese or common name directly.
+
+DSL SYNTAX (Lobster DSL — one line per action, indentation for blocks):
+  CLICK {{target}}           — click on text/coordinate
+  WAIT {{seconds}}           — wait for N seconds
+  TYPE {{text}}              — type text
+  LAUNCH {{program}}         — launch GUI application
+  HOTKEY {{keys}}            — e.g. HOTKEY ctrl+c
+  FOCUS {{title}}            — focus window by title
+  SCREENSHOT {{dest}}        — capture screenshot
+  SCROLL {{direction}}       — scroll up/down
+  DRAG {{x1}} {{y1}} TO {{x2}} {{y2}}  — drag from-to
+  IF {{condition}}           — conditional branch, ends with END
+    {{actions...}}
+  ELSE
+    {{actions...}}
+  END
+  LOOP {{N}}                 — repeat N times, ends with END
+    {{actions...}}
+  END
+  RUN {{macro_name}}         — run a macro
 
 Respond ONLY with a JSON object (no markdown, no extra text):
 {{
   "explanation": "brief explanation of what the script does",
   "pseudocode": "the step-by-step pseudocode (flat lines, for frontend display)",
+  "dsl": "the equivalent Lobster DSL text (one action per line)",
   "structured_steps": [
     {{
       "type": "launch",
@@ -106,6 +129,78 @@ Respond ONLY with a JSON object (no markdown, no extra text):
 }}
 
 {_build_structured_types_section()}"""
+
+
+def _steps_to_dsl(steps: list) -> str:
+    """将 structured_steps 转换为 Lobster DSL 文本。"""
+    lines = []
+
+    def _render_step(step: dict, indent: int = 0) -> list[str]:
+        prefix = "  " * indent
+        t = step.get("type", "")
+        if t == "click" or t == "text_click":
+            target = step.get("target", "")
+            return [f'{prefix}CLICK {target}'] if target else [f'{prefix}CLICK ']
+        elif t == "image_click":
+            return [f'{prefix}CLICK img:{step.get("target", "")}']
+        elif t == "type":
+            text = step.get("text", "")
+            return [f'{prefix}TYPE {text}'] if text else [f'{prefix}TYPE ']
+        elif t == "hotkey":
+            keys = step.get("keys", [])
+            if isinstance(keys, list):
+                return [f'{prefix}HOTKEY {"+".join(keys)}']
+            return [f'{prefix}HOTKEY {keys}']
+        elif t == "wait":
+            return [f'{prefix}WAIT {step.get("duration", 1)}']
+        elif t == "scroll":
+            return [f'{prefix}SCROLL {step.get("target", "down")}']
+        elif t == "launch":
+            return [f'{prefix}LAUNCH {step.get("target", "")}']
+        elif t == "focus":
+            return [f'{prefix}FOCUS {step.get("title", step.get("target", ""))}']
+        elif t == "screenshot":
+            return [f'{prefix}SCREENSHOT']
+        elif t == "run_command":
+            cmd = step.get("command", "")
+            return [f'{prefix}RUN {cmd}']
+        elif t == "mouse_move":
+            return [f'{prefix}MOVEMOUSE {step.get("x", 0)} {step.get("y", 0)}']
+        elif t == "drag":
+            src = step.get("from_target", step.get("target", ""))
+            dst = step.get("to_target", step.get("target", ""))
+            return [f'{prefix}DRAG {src} TO {dst}']
+        elif t == "condition":
+            result = [f'{prefix}IF {step.get("condition", "")}']
+            for s in step.get("true_branch", []):
+                result.extend(_render_step(s, indent + 1))
+            if step.get("false_branch"):
+                result.append(f'{prefix}ELSE')
+                for s in step["false_branch"]:
+                    result.extend(_render_step(s, indent + 1))
+            result.append(f'{prefix}END')
+            return result
+        elif t == "loop":
+            result = [f'{prefix}LOOP {step.get("count", 10)}']
+            for s in step.get("body", []):
+                result.extend(_render_step(s, indent + 1))
+            result.append(f'{prefix}END')
+            return result
+        elif t == "sub_flow":
+            return [f'{prefix}CALL {step.get("name", "")}']
+        elif t == "file_read":
+            return [f'{prefix}FILEREAD {step.get("path", "")}']
+        elif t == "file_write":
+            return [f'{prefix}FILEWRITE {step.get("path", "")} {step.get("content", "")}']
+        else:
+            # Unknown step type — use raw text or skip
+            raw = step.get("raw", "")
+            return [f'{prefix}{raw}'] if raw else []
+
+    for step in steps:
+        lines.extend(_render_step(step, 0))
+
+    return "\n".join(lines)
 
 
 @feature(
@@ -158,11 +253,14 @@ def generate_flow_script(goal: str) -> dict:
         parsed = json.loads(raw)
         pseudocode = parsed.get("pseudocode", "")
         explanation = parsed.get("explanation", "")
+        dsl_text = parsed.get("dsl", "")
         structured_steps = parsed.get("structured_steps", [])
 
         # Normalize: if LLM returned a list of lines, join them
         if isinstance(pseudocode, list):
             pseudocode = "\n".join(str(line) for line in pseudocode)
+        if isinstance(dsl_text, list):
+            dsl_text = "\n".join(str(line) for line in dsl_text)
 
         if not pseudocode:
             return {"success": False, "error": "AI 未能生成伪代码"}
@@ -172,6 +270,12 @@ def generate_flow_script(goal: str) -> dict:
             "explanation": explanation,
             "model": model,
         }
+
+        # ── DSL field (LLM-generated or fallback-converted) ──
+        if dsl_text:
+            result["dsl"] = dsl_text
+        elif isinstance(structured_steps, list) and len(structured_steps) > 0:
+            result["dsl"] = _steps_to_dsl(structured_steps)
 
         # If LLM provided structured_steps, pass them through for supervised execution
         if isinstance(structured_steps, list) and len(structured_steps) > 0:

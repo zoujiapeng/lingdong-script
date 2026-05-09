@@ -24,7 +24,8 @@ let _persistedLog: LogEntry[] = [];
 export function AgentView() {
   const [goal, setGoal] = useState('');
   const [running, setRunning] = useState(false);
-  const [log, setLog] = useState<LogEntry[]>(() => _persistedLog); // restore from module state
+  const [generatedScript, setGeneratedScript] = useState<{ pseudocode: string; explanation: string } | null>(null);
+  const [log, setLog] = useState<LogEntry[]>(() => _persistedLog);
   const [guidance, setGuidance] = useState('');
   const msgEndRef = useRef<HTMLDivElement>(null);
 
@@ -56,13 +57,11 @@ export function AgentView() {
           // If agent generated a flow script, auto-load it into the canvas
           if (msg.tool === 'generate_flow_script' && msg.result?.success) {
             const data = msg.result.data || {};
-            // Handle both pre-step path (data = inner_data with pseudocode)
-            // and ReAct loop path (data = registry wrapper with result.result.pseudocode)
             const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
             const explanation = data.explanation || data.result?.result?.explanation || data.result?.explanation || '';
             if (pseudocode) {
               addEntry({ type: 'script', pseudocode, explanation });
-              // Auto-load the script into the flowchart canvas
+              setGeneratedScript({ pseudocode, explanation });
               loadScriptToCanvas(pseudocode);
             }
           }
@@ -105,14 +104,16 @@ export function AgentView() {
     return () => { unsubMessages?.(); unsubLog?.(); };
   }, [addEntry]);
 
-  const runAgent = useCallback(async () => {
+  const runAgent = useCallback(async (supervise: boolean) => {
     if (!goal.trim()) return;
-    _hasActiveRun = false; // reset: wait for fresh agent_start
-    _persistedLog = [];
-    setLog([]);
-    addEntry({ type: 'system', text: '正在启动...' });
+    _hasActiveRun = false;
+    if (supervise) {
+      // Execute mode: clear logs for clean execution output
+      _persistedLog = [];
+      setLog([]);
+    }
+    addEntry({ type: 'system', text: supervise ? '正在启动执行...' : '正在生成流程图...' });
 
-    // Read API config from settings
     const rawKey = (window as any).__DEEPSEEK_KEY__ || localStorage.getItem('lingdong-deepseek-key') || '';
     const rawBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || '').replace(/\/+$/, '');
     const rawModel = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || '';
@@ -123,7 +124,6 @@ export function AgentView() {
     const apiBase = rawBase.trim();
     const model = rawModel.trim();
 
-    // Check API key before starting
     if (!apiKey) {
       addEntry({ type: 'system', text: '⚠️ 请先在设置页面配置 API 密钥后重试' });
       setRunning(false);
@@ -131,7 +131,7 @@ export function AgentView() {
     }
 
     try {
-      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false' }, true);
+      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false' }, supervise);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
@@ -187,16 +187,27 @@ export function AgentView() {
           <input
             className="agent-input"
             value={goal}
-            onChange={e => setGoal(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !running && runAgent()}
-            placeholder="输入目标，例如：打开记事本输入 Hello World，或：每天早上9点提醒我开会"
+            onChange={e => { setGoal(e.target.value); setGeneratedScript(null); }}
+            onKeyDown={e => e.key === 'Enter' && !running && runAgent(false)}
+            placeholder="输入需求后按 Enter 生成流程图，再按「执行」运行动作"
             disabled={running}
           />
           {running ? (
             <button className="agent-btn agent-btn-danger" onClick={stopAgent}>停止</button>
+          ) : generatedScript ? (
+            <>
+              <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)} style={{ gap: 6 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                执行
+              </button>
+              <button className="agent-btn" onClick={() => { setGeneratedScript(null); }} style={{ gap: 6 }}>
+                重新生成
+              </button>
+            </>
           ) : (
-            <button className="agent-btn agent-btn-primary" onClick={runAgent} disabled={!goal.trim()}>
-              运行
+            <button className="agent-btn agent-btn-primary" onClick={() => runAgent(false)} disabled={!goal.trim()} style={{ gap: 6 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a4 4 0 014 4c0 2-2 4-4 6-2-2-4-4-4-6a4 4 0 014-4z"/><path d="M12 14c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z"/></svg>
+              生成流程图
             </button>
           )}
         </div>

@@ -119,16 +119,43 @@ def get_active_window() -> dict:
 )
 def launch_program(target: str, args: str = "", wait: bool = False) -> dict:
     try:
-        import subprocess, os
-        full_args = [target] + (args.split() if args else [])
-        # 如果目标看起来像文件/目录/URL，用 os.startfile
-        if not any(target.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
-            os.startfile(target)
-            return {"success": True, "pid": None}
+        import subprocess, os, re
+
+        # Resolve via program registry first (PATH + App Paths + cached aliases)
+        from features.program_registry import resolve_program, get_program_registry
+        resolved = resolve_program(target) or target
+
+        # If the name wasn't resolved and looks like Chinese text, give a helpful hint
+        if resolved == target and re.search(r'[一-鿿]', target):
+            reg = get_program_registry()
+            all_items = reg.get_name_list()
+            close = [i for i in all_items if target.lower() in i["name"] or i["name"] in target.lower()][:5]
+            hint = ""
+            if close:
+                hint = f"，你是不是想启动: {' / '.join(f'『{c["name"]}』' for c in close)}"
+            return {"success": False, "error": f"未找到程序「{target}」{hint}"}
+
+        full_args = [resolved] + (args.split() if args else [])
+
+        # If resolved target looks like a non-executable file/dir/URL, use os.startfile
+        if not any(resolved.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
+            os.startfile(resolved)
+            return {"success": True, "pid": None, "resolved_path": resolved}
+
         proc = subprocess.Popen(full_args, shell=False)
         if wait:
             proc.wait()
-        return {"success": True, "pid": proc.pid}
+        return {"success": True, "pid": proc.pid, "resolved_path": resolved}
+    except FileNotFoundError:
+        # Fallback: shell=True resolves via Windows App Paths registry
+        try:
+            import subprocess
+            proc = subprocess.Popen([target] + (args.split() if args else []), shell=True)
+            if wait:
+                proc.wait()
+            return {"success": True, "pid": proc.pid, "fallback": "shell", "resolved_path": target}
+        except Exception as e2:
+            return {"success": False, "error": f"无法启动 {target}，尝试 shell fallback 失败: {e2}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

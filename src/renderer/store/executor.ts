@@ -175,7 +175,7 @@ export function createFlowExecutor(
           if (params.wait_type === 'time') {
             const dur = params.duration || 1;
             log('info', `等待 ${dur} 秒`, nodeId);
-            await delay(Math.min(dur, 2) * 1000); // cap at 2s for demo
+            await delay(Math.min(dur, 10) * 1000); // cap at 10s for demo (no cap in Python engine)
           } else {
             log('info', `等待条件（模拟跳过）`, nodeId);
             await delay(200);
@@ -379,7 +379,42 @@ export function createFlowExecutor(
         }
 
         default:
-          log('warn', `未知节点类型: ${node.type}`, nodeId);
+          // System command types → forward to @feature via callFeature
+          const FEATURE_MAP: Record<string, string> = {
+            launch_program: 'launch_program',
+            focus_window: 'focus_window',
+            kill_process: 'kill_process',
+            clipboard_set: 'clipboard_set_text',
+            clipboard_get: 'clipboard_get_text',
+            volume_set: 'volume_set',
+            volume_mute: 'volume_mute',
+            lock_workstation: 'lock_workstation',
+            system_sleep: 'system_sleep',
+            show_desktop: 'show_desktop',
+            battery_status: 'battery_status',
+            empty_recycle_bin: 'empty_recycle_bin',
+            display_brightness: 'display_brightness',
+            display_off: 'display_off',
+            set_wallpaper: 'set_wallpaper',
+          };
+          const featureName = FEATURE_MAP[node.type];
+          if (featureName) {
+            log('info', `调用系统工具: ${featureName}`, nodeId);
+            const win = window as any;
+            if (win.electronAPI?.callFeature) {
+              try {
+                const res = await win.electronAPI.callFeature(featureName, params);
+                log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+              } catch (e: any) {
+                log('error', `工具调用失败: ${e.message}`, nodeId);
+              }
+            } else {
+              log('warn', `模拟系统工具: ${featureName}`, nodeId);
+              await delay(300);
+            }
+          } else {
+            log('warn', `未知节点类型: ${node.type}`, nodeId);
+          }
           result = 'output';
       }
 
