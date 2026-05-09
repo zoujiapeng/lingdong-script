@@ -146,6 +146,11 @@ class AgentController:
                 })
 
             self._execute_steps_with_supervision(state, steps, goal)
+
+            # 执行完成后 AI 生成的 DSL 保存为模板
+            if state["status"] == "completed" and data.get("dsl"):
+                self._save_dsl_template(goal, data["dsl"], state["steps"])
+
             return self._build_report(state)
 
         if script_step["result"].get("success") and not supervise:
@@ -184,32 +189,42 @@ class AgentController:
     def _generate_local_steps(self, goal: str) -> list:
         """Generate fallback steps from goal text using keyword matching (no LLM).
 
+        Uses the program registry (Chinese aliases + scan) for name resolution.
         Processes the goal left-to-right, emitting steps in the order
         the action keywords appear.
         """
         import re
         steps = []
 
-        # Chinese app name → Windows executable mapping
-        APP_MAP = {
-            "记事本": "notepad.exe",
-            "计算器": "calc.exe",
-            "画图": "mspaint.exe",
-            "命令提示符": "cmd.exe",
-            "资源管理器": "explorer.exe",
-            "chrome": "chrome.exe",
-            "edge": "msedge.exe",
-            "word": "winword.exe",
-            "excel": "excel.exe",
-        }
+        # ── helper: extract program name after 打开/启动/运行 ──
+        # Chinese sentence-boundary chars — the program name stops here
+        _CONNECTOR = r'(?:并|且|然后|再|接着|之后|的|在|到|和|或|与|用|把|给|以及|还要|再打开|再启动|、|，|。|；|,|\.|;|!|？|\?|\n)'
 
-        # Collect all matches with their positions, then sort by position
-        # to preserve the original left-to-right order.
+        def _extract_launch_target(text: str) -> str:
+            """Extract a clean program name from text after 打开/启动/运行.
+
+            Strips trailing connector words, spaces, and non-name particles.
+            Then resolves via the program registry to verify it's valid.
+            """
+            # Take everything up to the first connector word
+            m = re.match(r'(.*?)' + _CONNECTOR, text)
+            if m:
+                name = m.group(1).strip()
+            else:
+                name = text.strip()
+            # Remove trailing whitespace/punctuation
+            name = name.rstrip(' \t（(（的于和与及 ')
+            return name
+
+        # ── scan for all action keywords ──
         matches = []
 
         # 1. "打开/启动/运行 X" → launch
-        for m in re.finditer(r'(?:打开|启动|运行)\s*([\w一-鿿]+)', goal):
-            matches.append((m.start(), "launch", m.group(1)))
+        for m in re.finditer(r'(?:打开|启动|运行)\s*([^，,。；\n]+)', goal):
+            raw = m.group(1).strip()
+            if raw:
+                name = _extract_launch_target(raw)
+                matches.append((m.start(), "launch", name))
 
         # 2. "输入/键入/写下 X" → type (match everything up to next delimiter)
         for m in re.finditer(r'(?:输入|键入|写下|写入)\s*([^，,。.;；\n]+)', goal):
@@ -226,13 +241,9 @@ class AgentController:
 
         for _, action, arg in matches:
             if action == "launch":
-                exe = APP_MAP.get(arg, arg)
-                if "." not in exe:
-                    exe += ".exe"
-                steps.append({"type": "launch", "target": exe})
+                steps.append({"type": "launch", "target": arg})
                 steps.append({"type": "wait", "duration": 2})
-                focus_title = arg
-                steps.append({"type": "focus", "title": focus_title})
+                steps.append({"type": "focus", "title": arg})
 
             elif action == "type":
                 steps.append({"type": "type", "text": arg})
@@ -604,14 +615,22 @@ class AgentController:
                             state["status"] = "failed"
                             state["context"]["fail_reason"] = action_result.get("error", "execution_failed")
                             break
-                        # else skip — continue
+                        # skip after retries
+                        self._emit("log", {"level": "warn",
+                                           "message": f"跳过步骤 {i+1}（{step_label[:40]}）: {action_result.get('error', '执行失败')}"})
+                        self._emit_step_complete(state, step, success=False,
+                                                 error=f"已跳过: {action_result.get('error', '执行失败')}")
                 elif recovery.get("action") == "fail":
                     self._emit_step_complete(state, step, success=False,
                                              error=action_result.get("error"))
                     state["status"] = "failed"
                     state["context"]["fail_reason"] = action_result.get("error", "execution_failed")
                     break
-                # else skip — continue to next step
+                else:  # skip
+                    self._emit("log", {"level": "warn",
+                                       "message": f"跳过步骤 {i+1}（{step_label[:40]}）: {error_msg}"})
+                    self._emit_step_complete(state, step, success=False,
+                                             error=f"已跳过: {error_msg}")
 
             # ── 3. Wait for screen to settle ──
             if step_type in ("click", "text_click", "hotkey", "launch", "focus", "scroll", "drag"):
@@ -663,17 +682,23 @@ class AgentController:
                                                   error=verify_result.get("error", "verify_fail"),
                                                   details=verify_result,
                                                   retry_count=retry_count)
+                step_label = (step.get("target") or step.get("text") or
+                             step.get("title") or step.get("name") or step.get("type", "?"))
                 if recovery.get("action") == "retry":
                     retry_count += 1
                     retry_result = self._execute_with_retry(step, max_retries=2)
                     if retry_result.get("success"):
                         action_result = retry_result
                     else:
+                        self._emit("log", {"level": "warn",
+                                           "message": f"验证失败，跳过步骤 {i+1}（{step_label[:40]}）: {retry_result.get('error', '执行失败')}"})
                         self._emit_step_complete(state, step, success=False,
-                                                 error=retry_result.get("error"))
+                                                 error=f"已跳过: {retry_result.get('error', '执行失败')}")
                         continue
                 elif recovery.get("action") == "alternative":
                     alt_step = recovery.get("alternative_step", step)
+                    self._emit("log", {"level": "info",
+                                       "message": f"使用替代方案执行步骤 {i+1}（{step_label[:40]}）"})
                     self._execute_step_action(alt_step)
                 elif recovery.get("action") == "fail":
                     self._emit_step_complete(state, step, success=False,
@@ -683,6 +708,11 @@ class AgentController:
                         f"verification_failed: {verify_result.get('error')}"
                     )
                     break
+                else:
+                    self._emit("log", {"level": "warn",
+                                       "message": f"验证失败，跳过步骤 {i+1}（{step_label[:40]}）: {verify_result.get('error', '验证失败')}"})
+                    self._emit_step_complete(state, step, success=False,
+                                             error=f"已跳过: {verify_result.get('error', '验证失败')}")
                 # else skip — continue without reporting success
 
             # ── 5. Report success ──
@@ -984,10 +1014,41 @@ class AgentController:
             elif step_type == "launch":
                 target = step.get("target", "")
                 self._emit("log", {"level": "info", "message": f"启动: {target}"})
-                registry.execute("launch_program", target=target)
+                result = registry.execute("launch_program", target=target)
+                # Log resolved path if available
+                if isinstance(result, dict):
+                    rpath = result.get("resolved_path")
+                    if rpath and rpath != target:
+                        self._emit("log", {"level": "info", "message": f"  已解析路径: {rpath}"})
+                # Check if launch succeeded
+                if isinstance(result, dict) and not result.get("success", True):
+                    # Try to find close matches in the program registry
+                    try:
+                        from features.program_registry import get_program_registry
+                        prog_reg = get_program_registry()
+                        all_items = prog_reg.get_name_list()
+                        # Find names that contain the target or vice versa
+                        low_target = target.lower()
+                        close = [
+                            i for i in all_items
+                            if low_target in i["name"] or i["name"] in low_target
+                        ][:5]
+                        if close:
+                            hints = ", ".join(f'"{c["name"]}"' for c in close)
+                            self._emit("log", {
+                                "level": "warn",
+                                "message": f"未找到「{target}」，你是不是想启动: {hints}",
+                            })
+                            # Auto-try the closest match
+                            step["target"] = close[0]["name"]
+                            self._emit("log", {"level": "info", "message": f"尝试启动: {close[0]['name']}"})
+                            result = registry.execute("launch_program", target=close[0]["name"])
+                    except Exception:
+                        pass
                 # Give the app a moment to appear
                 time.sleep(0.5)
-                return {"success": True, "confidence": 1.0}
+                ok = isinstance(result, dict) and result.get("success", False)
+                return {"success": ok, "confidence": 1.0, "data": result}
 
             elif step_type == "focus":
                 title = (step.get("title") or step.get("target") or step.get("name") or "")
@@ -1295,6 +1356,44 @@ class AgentController:
         except Exception as e:
             logger.warning("Planner recovery decision failed: %s", e)
             return {"action": "skip", "reasoning": f"Planner unavailable: {e}"}
+
+    @staticmethod
+    def _save_dsl_template(goal: str, dsl: str, steps: list):
+        """将 Agent 执行成功的 DSL 保存到 templates/ 目录。"""
+        import re, hashlib
+        from pathlib import Path
+
+        # 从 goal 生成文件名
+        safe = re.sub(r"[^\w一-鿿]+", "_", goal.strip())[:40]
+        if not safe:
+            safe = hashlib.md5(goal.encode()).hexdigest()[:8]
+
+        # 查找 templates 目录
+        template_dir = Path(__file__).resolve().parent.parent.parent / "templates"
+        template_dir.mkdir(parents=True, exist_ok=True)
+
+        # 添加元数据头
+        timestamp = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+        n_steps = len(steps) if steps else 0
+        header = (
+            f"# Agent 自动保存\n"
+            f"# 目标: {goal}\n"
+            f"# 时间: {timestamp}\n"
+            f"# 步骤数: {n_steps}\n\n"
+        )
+
+        # 去重：如果已有内容相同的文件则不重复保存
+        full_content = header + dsl
+        for existing in template_dir.glob("*.flow"):
+            try:
+                if existing.read_text(encoding="utf-8").strip() == full_content.strip():
+                    return  # 已存在
+            except Exception:
+                pass
+
+        save_path = template_dir / f"agent_{safe}.flow"
+        save_path.write_text(full_content, encoding="utf-8")
+        logger.info("DSL template saved: %s (%d steps)", save_path, n_steps)
 
     @staticmethod
     def _build_report(state: dict) -> dict:

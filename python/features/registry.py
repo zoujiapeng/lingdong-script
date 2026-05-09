@@ -298,8 +298,8 @@ class FeatureRegistry:
                 return f
         return None
 
-    def execute(self, feature_name: str, **kwargs) -> dict:
-        """执行功能。第一个参数用 feature_name 避免和功能参数名冲突。"""
+    def execute(self, feature_name: str, /, **kwargs) -> dict:
+        """执行功能。feature_name 为位置参数，避免与功能参数名冲突。"""
         spec = self.get(feature_name)
         if spec is None:
             return {"success": False, "error": f"未知功能: {feature_name}", "feature": feature_name}
@@ -329,7 +329,7 @@ class FeatureRegistry:
                 "elapsed_ms": round((time.time() - start) * 1000, 1),
             }
 
-    def execute_with_typed_params(self, feature_name: str, **raw_kwargs) -> dict:
+    def execute_with_typed_params(self, feature_name: str, /, **raw_kwargs) -> dict:
         """带类型转换的参数执行"""
         spec = self.get(feature_name)
         if not spec:

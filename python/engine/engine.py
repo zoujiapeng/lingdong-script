@@ -59,7 +59,7 @@ def execute_flow(script: dict) -> dict:
     try:
         result = executor.run_dsl_sync(dsl_text)
         if result.get("success"):
-            emit({"type": "execution_done", "status": "finished"})
+            emit({"type": "execution_done", "status": "completed"})
         else:
             emit({"type": "execution_done", "status": "error", "error": result.get("error")})
         return result
@@ -102,7 +102,7 @@ def main():
                     executor.on("log", lambda **kw: emit({"type": "log", **kw}))
                     try:
                         executor.run_dsl_sync(dsl_text)
-                        emit({"type": "execution_done", "status": "finished"})
+                        emit({"type": "execution_done", "status": "completed"})
                     except Exception as e:
                         emit({"type": "execution_done", "status": "error", "error": str(e)})
                 else:
@@ -118,7 +118,7 @@ def main():
         executor.on("log", lambda **kw: emit({"type": "log", **kw}))
         try:
             executor.run_dsl_sync(line)
-            emit({"type": "execution_done", "status": "finished"})
+            emit({"type": "execution_done", "status": "completed"})
         except Exception as e:
             emit({"type": "execution_done", "status": "error", "error": str(e)})
 

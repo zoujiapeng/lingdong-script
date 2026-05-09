@@ -39,5 +39,6 @@ _FEATURE_MODULES = [
     "features.software_features",
     "features.file_features",
     "features.flow_features",
+    "features.program_registry",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

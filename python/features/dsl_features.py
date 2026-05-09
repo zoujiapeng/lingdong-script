@@ -36,9 +36,16 @@ from features.registry import feature, P, TC, FeatureCategory as F
     tags=["core", "dsl", "execution"],
 )
 def run_dsl(dsl: str, task_id: str = "", max_loops: int = 100, timeout: float = 60) -> dict:
-    """由 engine/executor.py 实际执行，此函数仅占位"""
-    # 实际执行由 DSLExecutor 完成（server.py 和 mcp/server.py 各自持有 executor 实例）
-    raise RuntimeError("run_dsl 需要通过 executor 执行，不能直接调用 handler")
+    """通过 DSLExecutor 执行 DSL。
+
+    自动创建 DSLExecutor 实例并传入基于 registry.execute 的 action_handler，
+    使得 run_dsl 可通过 @feature 注册表直接执行。
+    """
+    from engine.executor import DSLExecutor, ExecutionContext
+    from features.action_map import make_action_handler
+    executor = DSLExecutor(action_handler=make_action_handler())
+    ctx = ExecutionContext(max_loops=max_loops, timeout=timeout)
+    return executor.run_dsl_sync(dsl, ctx=ctx)
 
 
 @feature(
@@ -63,8 +70,16 @@ def run_dsl(dsl: str, task_id: str = "", max_loops: int = 100, timeout: float = 
     tags=["core", "dsl", "execution"],
 )
 def run_dsl_sync(dsl: str, max_loops: int = 10, retry_limit: int = 1, timeout: float = 30) -> dict:
-    """由 engine/executor.py 实际执行，此函数仅占位"""
-    raise RuntimeError("run_dsl_sync 需要通过 executor 执行，不能直接调用 handler")
+    """同步执行 DSL。
+
+    自动创建 DSLExecutor 实例并传入基于 registry.execute 的 action_handler，
+    使得 run_dsl_sync 可通过 @feature 注册表直接执行。
+    """
+    from engine.executor import DSLExecutor, ExecutionContext
+    from features.action_map import make_action_handler
+    executor = DSLExecutor(action_handler=make_action_handler())
+    ctx = ExecutionContext(max_loops=max_loops, retry_limit=retry_limit, timeout=timeout)
+    return executor.run_dsl_sync(dsl, ctx=ctx)
 
 
 @feature(

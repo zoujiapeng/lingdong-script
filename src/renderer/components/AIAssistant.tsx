@@ -243,13 +243,25 @@ export function AIAssistant() {
       // Auto-load into flowchart
       try {
         const script = parsePseudoToFlow(parsed.pseudocode);
+        // Validate: check if result has only start+end (all lines were unrecognized)
+        const hasActionableNodes = script.nodes.some(n => n.type !== 'start' && n.type !== 'end');
+        if (!hasActionableNodes) {
+          setError('生成的伪代码格式无法识别，未能生成流程图节点。请尝试用更简单的描述重试，或在伪代码中使用支持的格式（如 点击、输入、等待 等）。');
+          setLoading(false);
+          return;
+        }
         script.meta = {
           ...script.meta,
           id: useStore.getState().script.meta.id,
           name: useStore.getState().script.meta.name + ' (AI)',
         };
         useStore.getState().loadScript(script);
-      } catch {}
+      } catch (e: any) {
+        console.warn('[AIAssistant] parsePseudoToFlow error:', e);
+        setError('流程图生成失败: ' + (e.message || '解析错误'));
+        setLoading(false);
+        return;
+      }
 
       // Post-generation template check
       const postMatch = matchSemantic(text);
@@ -289,10 +301,6 @@ export function AIAssistant() {
     if (entry.flowScript) {
       useStore.getState().loadScript(entry.flowScript);
       setExecStatus(`已加载模板: ${entry.name}`);
-      setTimeout(() => {
-        useStore.getState().startExecution();
-        setExecStatus(`正在执行: ${entry.name}`);
-      }, 300);
     }
   }, []);
 
@@ -337,6 +345,11 @@ export function AIAssistant() {
     if (!result?.pseudocode) return;
     try {
       const script = parsePseudoToFlow(result.pseudocode);
+      const hasActionableNodes = script.nodes.some(n => n.type !== 'start' && n.type !== 'end');
+      if (!hasActionableNodes) {
+        setError('伪代码格式无法识别，无法显示流程图。请尝试重新生成。');
+        return;
+      }
       script.meta = {
         ...script.meta,
         id: useStore.getState().script.meta.id,
@@ -344,7 +357,9 @@ export function AIAssistant() {
       };
       useStore.getState().loadScript(script);
       useStore.getState().setViewMode('canvas');
-    } catch {}
+    } catch (e: any) {
+      setError('查看流程图失败: ' + (e.message || '解析错误'));
+    }
   }, [result]);
 
   return (

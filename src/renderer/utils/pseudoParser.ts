@@ -1,4 +1,4 @@
-import { FlowScript, FlowNode, FlowEdge, NodeType, NodeParams } from '../types';
+﻿import { FlowScript, FlowNode, FlowEdge, NodeType, NodeParams } from '../types';
 import { nanoid } from 'nanoid';
 
 // ─── Line parsing ───
@@ -130,7 +130,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   }
 
   // wait N / 等待 N
-  const waitTimeRe = /^(?:wait|等待)\s+(\d+(\.\d+)?)\s*$/i;
+  const waitTimeRe = /^(?:wait|等待|等)\s*(\d+(?:\.\d+)?)\s*(?:秒)?/i;
   const waitTimeMatch = line.match(waitTimeRe);
   if (waitTimeMatch) {
     return {
@@ -299,6 +299,187 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
       type: 'loop',
       params: { loop_type: 'condition', condition },
     };
+  }
+
+  // ── 启动 "path" / launch "path" — launch_program feature ──
+  const launchRe = /^(?:启动|launch)\s+"([^"]*)"/i;
+  const launchMatch = line.match(launchRe);
+  if (launchMatch) {
+    return {
+      type: 'launch_program',
+      params: { target: launchMatch[1] },
+    };
+  }
+
+  // ── 激活 "title" / focus "title" — focus_window feature ──
+  const focusRe = /^(?:激活|聚焦|focus)\s+"([^"]*)"/i;
+  const focusMatch = line.match(focusRe);
+  if (focusMatch) {
+    return {
+      type: 'focus_window',
+      params: { title: focusMatch[1] },
+    };
+  }
+
+  // ── 终止 "name" / kill "name" — kill_process feature ──
+  const killRe = /^(?:终止|kill)\s+"([^"]*)"/i;
+  const killMatch = line.match(killRe);
+  if (killMatch) {
+    return {
+      type: 'kill_process',
+      params: { name: killMatch[1] },
+    };
+  }
+
+  // ── 右键点击 (x,y) / right-click (x,y) → click method=right ──
+  const rightClickRe = /^(?:右键点击|right-click)\s+\((-?\d+)\s*,\s*(-?\d+)\)/i;
+  const rightClickMatch = line.match(rightClickRe);
+  if (rightClickMatch) {
+    return {
+      type: 'click',
+      params: { x: parseInt(rightClickMatch[1]), y: parseInt(rightClickMatch[2]), method: 'right', delay_after: 0.5 },
+    };
+  }
+
+  // ── 双击 (x,y) / double-click (x,y) → click method=double ──
+  const doubleClickRe = /^(?:双击|double-click)\s+\((-?\d+)\s*,\s*(-?\d+)\)/i;
+  const doubleClickMatch = line.match(doubleClickRe);
+  if (doubleClickMatch) {
+    return {
+      type: 'click',
+      params: { x: parseInt(doubleClickMatch[1]), y: parseInt(doubleClickMatch[2]), method: 'double', delay_after: 0.5 },
+    };
+  }
+
+  // ── 等待进程 "name" [超时=N] / wait_process ──
+  const waitProcessRe = /^(?:等待进程|wait_process|wait\s+process)\s+"([^"]*)"(?:\s+(?:timeout|超时)[=:](\d+(\.\d+)?))?\s*/i;
+  const waitProcessMatch = line.match(waitProcessRe);
+  if (waitProcessMatch) {
+    return {
+      type: 'wait',
+      params: { wait_type: 'process', process_name: waitProcessMatch[1], timeout: waitProcessMatch[2] ? parseFloat(waitProcessMatch[2]) : 30 },
+    };
+  }
+
+  // ── 等待退出 "name" [超时=N] / wait_exit ──
+  const waitExitRe = /^(?:等待退出|wait_exit|wait\s+exit)\s+"([^"]*)"(?:\s+(?:timeout|超时)[=:](\d+(\.\d+)?))?\s*/i;
+  const waitExitMatch = line.match(waitExitRe);
+  if (waitExitMatch) {
+    return {
+      type: 'wait',
+      params: { wait_type: 'process_exit', process_name: waitExitMatch[1], timeout: waitExitMatch[2] ? parseFloat(waitExitMatch[2]) : 30 },
+    };
+  }
+
+  // ── 等待屏幕变化/静止 [超时=N] / wait_screen ──
+  const waitScreenRe = /^(?:等待屏幕|wait_screen)\s*(变化|change|静止|stable)?(?:\s+(?:timeout|超时)[=:](\d+(\.\d+)?))?\s*/i;
+  const waitScreenMatch = line.match(waitScreenRe);
+  if (waitScreenMatch) {
+    const screenType = (waitScreenMatch[1] || 'change').toLowerCase();
+    return {
+      type: 'wait',
+      params: { wait_type: screenType === '静止' || screenType === 'stable' ? 'screen_stable' : 'screen_change', timeout: waitScreenMatch[2] ? parseFloat(waitScreenMatch[2]) : 10 },
+    };
+  }
+
+  // ── 剪贴板写入 "text" / clipboard_set / CLIPBOARD_SET ──
+  const clipWriteRe = /^(?:剪贴板写入|clipboard_set|CLIPBOARD_SET)\s+"([^"]*)"/i;
+  const clipWriteMatch = line.match(clipWriteRe);
+  if (clipWriteMatch) {
+    return {
+      type: 'clipboard_set',
+      params: { text: clipWriteMatch[1] },
+    };
+  }
+
+  // ── 读取剪贴板 / clipboard_get / CLIPBOARD_GET ──
+  if (/^(?:读取剪贴板|clipboard_get|CLIPBOARD_GET)\s*/i.test(line)) {
+    return {
+      type: 'clipboard_get',
+      params: {},
+    };
+  }
+
+  // ── 粘贴输入 / paste_input / TYPE_CLIP → keyboard ctrl+v ──
+  if (/^(?:粘贴输入|paste_input|TYPE_CLIP)\s*/i.test(line)) {
+    return {
+      type: 'keyboard',
+      params: { keys: ['v'], modifiers: ['ctrl'], delay_after: 0.3 },
+    };
+  }
+
+  // ── 颜色检测 (x,y,w,h) 颜色 [容差] ──
+  const colorCheckRe = /^(?:颜色检测|color_check|COLOR_CHECK)\s+\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)\s+"([^"]*)"(?:\s+(?:tolerance|容差)[=:](\d+))?\s*/i;
+  const colorCheckMatch = line.match(colorCheckRe);
+  if (colorCheckMatch) {
+    return {
+      type: 'color_check',
+      params: {
+        x: parseInt(colorCheckMatch[1]), y: parseInt(colorCheckMatch[2]),
+        w: parseInt(colorCheckMatch[3]), h: parseInt(colorCheckMatch[4]),
+        expected_color: colorCheckMatch[5],
+        tolerance: colorCheckMatch[6] ? parseInt(colorCheckMatch[6]) : 30,
+      },
+    };
+  }
+
+  // ── 系统命令（通过 tool_call 转发到 @feature） ──
+  // 音量 N / volume N
+  const volRe = /^(?:音量|volume)\s+(\d+)\s*/i;
+  const volMatch = line.match(volRe);
+  if (volMatch) {
+    return { type: 'volume_set', params: { level: parseInt(volMatch[1]) } };
+  }
+
+  // 静音 [on/off] / mute
+  if (/^(?:静音|mute)\s*/i.test(line)) {
+    const muteOn = /开启|on/i.test(line);
+    const muteOff = /关闭|off/i.test(line);
+    return { type: 'volume_mute', params: { mute: muteOn ? true : muteOff ? false : undefined } };
+  }
+
+  // 锁定 / lock
+  if (/^(?:锁定|lock)\s*/i.test(line)) {
+    return { type: 'lock_workstation', params: {} };
+  }
+
+  // 睡眠 / sleep
+  if (/^(?:睡眠|sleep)\s*/i.test(line)) {
+    return { type: 'system_sleep', params: {} };
+  }
+
+  // 桌面 / desktop (Win+D)
+  if (/^(?:桌面|desktop)\s*/i.test(line)) {
+    return { type: 'show_desktop', params: {} };
+  }
+
+  // 电池 / battery
+  if (/^(?:电池|battery)\s*/i.test(line)) {
+    return { type: 'battery_status', params: {} };
+  }
+
+  // 清空回收站 / empty recycle bin
+  if (/^(?:清空回收站|empty_recycle_bin|回收站)\s*/i.test(line)) {
+    return { type: 'empty_recycle_bin', params: {} };
+  }
+
+  // 亮度 N / brightness N
+  const brightRe = /^(?:亮度|brightness)\s+(\d+)\s*/i;
+  const brightMatch = line.match(brightRe);
+  if (brightMatch) {
+    return { type: 'display_brightness', params: { level: parseInt(brightMatch[1]) } };
+  }
+
+  // 关闭显示器 / display off
+  if (/^(?:关闭显示器|display_off)\s*/i.test(line)) {
+    return { type: 'display_off', params: {} };
+  }
+
+  // 壁纸 "path" / wallpaper / set_wallpaper
+  const wallRe = /^(?:壁纸|wallpaper|set_wallpaper)\s+"([^"]*)"/i;
+  const wallMatch = line.match(wallRe);
+  if (wallMatch) {
+    return { type: 'set_wallpaper', params: { path: wallMatch[1] } };
   }
 
   return null;
@@ -496,6 +677,21 @@ function getDefaultParams(type: string): any {
     case 'progress_wait': return { wait_type: 'fill', timeout: 30, region: { x: 0, y: 0, w: 200, h: 20 }, poll_interval: 0.5 };
     case 'region_wait': return { region_type: 'stable', x: 0, y: 0, w: 200, h: 200, timeout: 10, poll_interval: 0.3 };
     case 'scene_condition': return { scene_name: '', similarity: 70 };
+    case 'launch_program': return { target: '' };
+    case 'focus_window': return { title: '' };
+    case 'kill_process': return { name: '' };
+    case 'clipboard_set': return { text: '' };
+    case 'clipboard_get': return {};
+    case 'volume_set': return { level: 50 };
+    case 'volume_mute': return {};
+    case 'lock_workstation': return {};
+    case 'system_sleep': return {};
+    case 'show_desktop': return {};
+    case 'battery_status': return {};
+    case 'empty_recycle_bin': return {};
+    case 'display_brightness': return { level: 50 };
+    case 'display_off': return {};
+    case 'set_wallpaper': return { path: '' };
     default: return {};
   }
 }

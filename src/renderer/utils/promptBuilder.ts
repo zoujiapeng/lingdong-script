@@ -1,4 +1,4 @@
-// ── Prompt Builder: Modular AI System Prompt Assembly ──
+﻿// ── Prompt Builder: Modular AI System Prompt Assembly ──
 // Assembles prompts from modules: core role, tool catalog,
 // template context, and example library.
 // Supports both Chinese (pseudocode) and English (DSL) modes.
@@ -470,9 +470,9 @@ END`,
     title: '表单填写器（循环填多个字段）',
     description: '用变量和循环在表单上自动填写多个字段。展示 变量+循环+输入 组合。',
     tags: ['表单', '填写', '变量', '循环'],
-    chinese: `$i=0
+    chinese: `$i="0"
 循环 5:
-  $i=$i+1
+  $i="1"
   输入 "字段内容" 位置 (300, 400)
   等待 0.5
 点击 (300, 700)
@@ -610,10 +610,12 @@ function buildCorePrompt(lang: PromptLanguage): string {
 ## 核心原则
 1. 如果用户需求与已有模板匹配，优先引用模板（用 \`调用 "模板名"\`），不要重新生成
 2. 坐标应合理（通常屏幕范围 0-1920 x 0-1080，点击按钮一般在 300-600, 300-800）
-3. 在操作之间加合理的等待时间（0.5-3 秒）
-4. 弹窗关闭、OCR 验证等非关键步骤标记为"（可选）"
-5. 复杂操作拆分为清晰的步骤序列
-6. 涉及视觉检测的步骤，如果不知道具体路径/文字，用合理描述占位`;
+3. 如果用户明确指定了时间间隔（如「N秒后」「等N秒」「隔N秒」「每N秒」），必须严格遵守，在对应操作前添加「等待 N」步骤
+4. 操作之间加适当的等待时间（普通步骤间 0.5-2 秒，启动应用后 1-2 秒）
+5. 弹窗关闭、OCR 验证等非关键步骤标记为"（可选）"
+6. 复杂操作拆分为清晰的步骤序列
+7. 涉及视觉检测的步骤，如果不知道具体路径/文字，用合理描述占位
+8. 启动程序时，可以用中文名称直接启动（如 \`启动 "微信"\`、\`启动 "记事本"\`、\`启动 "微星小飞机"\`），系统会自动解析路径。无需提前查找完整路径
   } else {
     return `You are a DSL generator for desktop automation named Lingdong Script.
 Generate ONLY raw DSL code, no markdown, no explanations in the DSL portion.
@@ -622,10 +624,12 @@ Return JSON: {"pseudocode":"DSL code","explanation":"brief explanation"}
 ## Core Principles
 1. If the user request matches an existing template, reference it with \`CALL "template_name"\` instead of regenerating
 2. Use reasonable coordinates (typical screen: 0-1920 x 0-1080, buttons usually at 300-600, 300-800)
-3. Include WAIT steps between actions (0.5-3 seconds)
-4. Mark non-critical steps (popup close, OCR verify) with comment "optional"
-5. Break complex tasks into clear step sequences
-6. Use placeholder paths/text when specific values are unknown`;
+3. If the user specifies explicit time delays (like "after N seconds", "wait N seconds", "every N seconds"), strictly follow them by adding a WAIT N step before the corresponding action
+4. Add reasonable WAIT steps between ordinary actions (0.5-2 seconds, 1-2 seconds after launching an app)
+5. Mark non-critical steps (popup close, OCR verify) with comment "optional"
+6. Break complex tasks into clear step sequences
+7. Use placeholder paths/text when specific values are unknown
+8. When launching a program, use the common name directly (e.g. \`启动 "微信"\`, \`启动 "记事本"\`, \`启动 "chrome"\`). The system auto-resolves them to full paths — no need to look up paths manually.
   }
 }
 
