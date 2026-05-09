@@ -38,6 +38,18 @@ except ImportError:
 
 _executor = DSLExecutor(action_handler=_action_handler)
 _has_local_executor = _action_handler is not None
+_executor_lock = threading.Lock()
+
+
+def _create_executor() -> DSLExecutor:
+    """创建独立执行器实例，避免共享状态冲突"""
+    handler = None
+    try:
+        from interaction.actions import ActionHandler
+        handler = ActionHandler()
+    except ImportError:
+        pass
+    return DSLExecutor(action_handler=handler)
 
 
 # ── 工具处理 ──────────────────────────────────────────────────────
@@ -93,7 +105,8 @@ def _exec_run_dsl(args: dict) -> str:
             max_loops=args.get("max_loops", 100),
             timeout=args.get("timeout", 60),
         )
-        _executor.run_dsl(dsl, ctx=ctx)
+        with _executor_lock:
+            _executor.run_dsl(dsl, ctx=ctx)
         return json.dumps({"success": True, "task_id": task_id, "state": "running"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
@@ -112,10 +125,11 @@ def _exec_run_dsl_sync(args: dict) -> str:
             retry_limit=args.get("retry_limit", 1),
             timeout=args.get("timeout", 30),
         )
-        _executor.run_dsl_sync(dsl, ctx=ctx)
+        executor = _create_executor()
+        executor.run_dsl_sync(dsl, ctx=ctx)
         elapsed = round(time.time() - start, 2)
         return json.dumps({
-            "success": True, "state": _executor.state.value,
+            "success": True, "state": executor.state.value,
             "elapsed": elapsed,
         }, ensure_ascii=False)
     except Exception as e:

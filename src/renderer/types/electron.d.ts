@@ -16,8 +16,8 @@ export interface ElectronAPI {
   engineStatus: () => Promise<string>;
 
   // Engine messages
-  onEngineMessage: (callback: (msg: any) => void) => void;
-  onEngineLog: (callback: (msg: any) => void) => void;
+  onEngineMessage: (callback: (msg: any) => void) => () => void;
+  onEngineLog: (callback: (msg: any) => void) => () => void;
 
   // Screenshot capture
   captureScreenshot: () => Promise<string>;
@@ -48,10 +48,10 @@ export interface ElectronAPI {
   }) => Promise<string | null>;
 
   // Menu actions
-  onMenuAction: (callback: (action: string) => void) => void;
+  onMenuAction: (callback: (action: string) => void) => () => void;
 
   // API commands
-  onApiCommand: (callback: (action: string, payload: any) => void) => void;
+  onApiCommand: (callback: (action: string, payload: any) => void) => () => void;
 
   // Renderer state
   pushState: (state: any) => void;
@@ -64,7 +64,7 @@ export interface ElectronAPI {
   macroDelete: (name: string) => Promise<{ success: boolean; error?: string }>;
   macroGetEvents: (name: string) => Promise<{ success: boolean; result?: any; error?: string }>;
   macroRecordingStatus: () => Promise<{ recording: boolean; name?: string }>;
-  onMacroMessage: (callback: (msg: any) => void) => void;
+  onMacroMessage: (callback: (msg: any) => void) => () => void;
 
   // Auto-start
   getAutoStart: () => Promise<boolean>;
@@ -86,8 +86,8 @@ export interface ElectronAPI {
   agentStatus: () => Promise<any>;
 
   // Agent messages
-  onAgentMessage: (callback: (msg: any) => void) => void;
-  onAgentLog: (callback: (msg: any) => void) => void;
+  onAgentMessage: (callback: (msg: any) => void) => () => void;
+  onAgentLog: (callback: (msg: any) => void) => () => void;
 }
 
 declare global {
@@ -99,6 +99,8 @@ declare global {
     __LLM_API_BASE__?: string;
     /** Custom LLM model name */
     __LLM_MODEL__?: string;
+    /** Multimodal (vision) support toggle */
+    __LLM_MULTIMODAL__?: boolean;
     /** Template search function exposed by App.tsx */
     __searchTemplates?: (query: string, maxResults?: number) => string;
     /** Bridge state getter exposed by store */

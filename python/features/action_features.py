@@ -5,7 +5,7 @@ CLICK / TYPE / SCROLL / DRAG / HOTKEY
 import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
-from features._utils import parse_region, resolve_coord, sim_delay
+from features._utils import parse_region, resolve_coord
 from features.input_features import _find_target_coords
 
 
@@ -39,8 +39,7 @@ def click_target(target: str, region: str = "", timeout: float = 10,
         parsed = parse_region(region)
         return handler.clicker.click(target, region=parsed, timeout=timeout, human=human_like)
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -63,17 +62,16 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     ],
 )
 def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool:
+    import pyautogui
+    if clear_first:
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.05)
     try:
         from interaction.actions import HumanKeyboard
-        import pyautogui
-        if clear_first:
-            pyautogui.hotkey("ctrl", "a")
-            time.sleep(0.05)
         HumanKeyboard.type_text(text, interval=interval if interval > 0 else None)
-        return True
     except ImportError:
-        sim_delay()
-        return True
+        pyautogui.typewrite(text, interval=interval if interval > 0 else 0.01)
+    return True
 
 
 @feature(
@@ -109,7 +107,7 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1, target: st
         pyautogui.scroll(clicks, **kwargs)
         return True
     except ImportError:
-        return True
+        return False
 
 
 @feature(
@@ -141,8 +139,7 @@ def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: f
         HumanMouse.drag(start_x, start_y, end_x, end_y, duration=duration)
         return True
     except ImportError:
-        time.sleep(duration)
-        return True
+        return False
     except Exception:
         return False
 
@@ -199,7 +196,7 @@ def hotkey(keys: str) -> bool:
         pyautogui.hotkey(*key_list)
         return True
     except ImportError:
-        return True
+        return False
 
 
 @feature(

@@ -31,7 +31,7 @@ except ImportError:
     HAS_REQUESTS = False
 
 BACKEND_URL = os.getenv("LOBSTER_URL", "http://localhost:7788")
-FRONTEND_URL = os.getenv("LINGDONG_URL", "http://127.0.0.1:5577")
+FRONTEND_URL = os.getenv("LINGDONG_URL", "http://127.0.0.1:5877")
 
 def _url(): return os.environ.get("LOBSTER_URL", BACKEND_URL)
 
@@ -274,7 +274,7 @@ def cmd_region_select(args):
 def cmd_match(args):
     """搜索前端模板（匹配前端 HTN 注册表 + 语义匹配）
 
-    调用 Electron 前端 :5577 的模板搜索引擎，返回结构化候选列表。
+    调用 Electron 前端 :5877 的模板搜索引擎，返回结构化候选列表。
     用法: lobster match <自然语言查询>
 
     示例:

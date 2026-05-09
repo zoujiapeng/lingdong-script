@@ -100,7 +100,7 @@ END
 - **160+ 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
-- **HTTP API 桥接** — `127.0.0.1:5577` 提供 45+ RESTful 端点
+- **HTTP API 桥接** — `127.0.0.1:5877` 提供 50+ RESTful 端点
 
 #### 其他功能
 - **区域选择器** — 全屏选框拾取坐标/区域
@@ -142,37 +142,45 @@ npx electron-builder --win portable
 
 ### HTTP API 桥接
 
-Electron 主进程内置 HTTP 服务器 `127.0.0.1:5577`，Claude Code 可通过 curl 实时控制前端：
+Electron 主进程内置 HTTP 服务器 `127.0.0.1:5877`，Claude Code 可通过 curl 实时控制前端：
 
 ```bash
 # 健康检查
-curl -X POST http://127.0.0.1:5577/api/ping
+curl -X POST http://127.0.0.1:5877/api/ping
 
 # DSL → 流程图 → 加载到前端
-curl -X POST http://127.0.0.1:5577/api/run-dsl \
+curl -X POST http://127.0.0.1:5877/api/run-dsl \
   -H "Content-Type: application/json" \
   -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
 
 # 添加节点
-curl -X POST http://127.0.0.1:5577/api/add-node \
+curl -X POST http://127.0.0.1:5877/api/add-node \
   -H "Content-Type: application/json" \
   -d '{"type":"click","x":200,"y":150,"params":{"x":500,"y":600}}'
 
 # 检查节点参数
-curl -X POST http://127.0.0.1:5577/api/check-params \
+curl -X POST http://127.0.0.1:5877/api/check-params \
   -H "Content-Type: application/json" \
   -d '{"nodes":[{"id":"n1","type":"click","params":{"x":100}}]}'
 
 # 获取当前状态
-curl -X POST http://127.0.0.1:5577/api/get-state
+curl -X POST http://127.0.0.1:5877/api/get-state
 
 # 开始宏录制
-curl -X POST http://127.0.0.1:5577/api/macro/start-recording \
+curl -X POST http://127.0.0.1:5877/api/macro/start-recording \
   -H "Content-Type: application/json" \
   -d '{"name":"登录流程"}'
+
+# 启动 AI Agent
+curl -X POST http://127.0.0.1:5877/api/agent-start \
+  -H "Content-Type: application/json" \
+  -d '{"goal":"打开记事本并输入 Hello"}'
+
+# 列出可用功能
+curl -X POST http://127.0.0.1:5877/api/features/list
 ```
 
-45+ API 端点覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成。详见 [CLAUDE.md](CLAUDE.md)。
+50+ API 端点覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成、Agent 执行。详见 [CLAUDE.md](CLAUDE.md)。
 
 **注意：** 如果 API 包含中文参数，建议使用 Node.js 或 Python 发送请求（Windows Git Bash curl 无法正确处理命令行中的中文 UTF-8 编码）。
 
@@ -199,7 +207,7 @@ curl -X POST http://127.0.0.1:5577/api/macro/start-recording \
 ```
 src/
 ├── main/           # Electron 主进程
-│   ├── main.ts     #   窗口管理, IPC, HTTP API :5577
+│   ├── main.ts     #   窗口管理, IPC, HTTP API :5877
 │   ├── api.ts      #   HTTP API 服务器 (45+ 端点)
 │   ├── engine.ts   #   Python 子进程管理 (队列, 并发控制)
 │   ├── schedulerBridge.ts  # Python 调度器守护进程桥接
@@ -251,7 +259,7 @@ Three ways to use: ① Manual flowchart editing ② AI Agent (natural language �
 - **DSL Scripting** — Built-in domain-specific language for text-based editing
 - **@Feature Registry** — 160+ tools, lazy-loaded (20ms cold start), auto MCP/CLI/HTTP
 - **Architecture Optimized** — Code splitting (298KB JS), Python process pool (max 3), async file I/O
-- **HTTP API Bridge** — 45+ endpoints on `127.0.0.1:5577` for remote control
+- **HTTP API Bridge** — 50+ endpoints on `127.0.0.1:5877` for remote control
 - **MCP Protocol** — Python + TypeScript dual MCP servers
 - **Timer Scheduling** — cron/interval/startup triggers with condition guards
 

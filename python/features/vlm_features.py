@@ -10,9 +10,6 @@ import time
 import urllib.request
 import urllib.error
 
-import cv2
-import numpy as np
-
 from features.registry import feature, P, TC, FeatureCategory as F
 
 VLM_HOST = os.getenv("VLM_HOST", "http://localhost:8084")
@@ -21,6 +18,7 @@ DEFAULT_MODEL = "qwen2.5-vl:3b"
 
 def _screenshot_base64() -> str:
     """截图并返回 JPEG base64 字符串"""
+    import cv2
     from perception.vision import ScreenCapture
     img = ScreenCapture.capture()
     _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -95,6 +93,11 @@ def vlm_analyze(prompt: str = "请详细描述这个画面中有什么",
                 model: str = DEFAULT_MODEL,
                 temperature: float = 0.1,
                 max_tokens: int = 512) -> dict:
+    # Check multimodal toggle — only block if explicitly disabled
+    multimodal_env = os.environ.get("LLM_MULTIMODAL", "")
+    if multimodal_env.lower() in ("false", "0", "no"):
+        return {"content": "", "error": "多模态功能已关闭。请在设置中启用「多模态（视觉能力）」开关后重试"}
+
     start = time.time()
     try:
         image_b64 = _screenshot_base64()

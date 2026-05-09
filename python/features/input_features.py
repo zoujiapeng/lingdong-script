@@ -6,7 +6,7 @@ import time
 import random
 
 from features.registry import feature, P, TC, FeatureCategory as F
-from features._utils import resolve_coord, parse_region, sim_delay
+from features._utils import resolve_coord, parse_region
 
 
 def _find_target_coords(target: str, region: str = "") -> tuple:
@@ -58,8 +58,7 @@ def right_click(target: str, region: str = "") -> bool:
             pyautogui.rightClick(x, y)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -86,8 +85,7 @@ def hover(target: str, duration: float = 0.5) -> bool:
         time.sleep(duration)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -117,8 +115,7 @@ def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = ""
             pyautogui.moveTo(x, y)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -142,8 +139,7 @@ def triple_click(target: str) -> bool:
             pyautogui.tripleClick(x, y)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -171,8 +167,7 @@ def select_text(target: str, extend_to_line: bool = False) -> bool:
             pyautogui.tripleClick(x, y)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False
 
 
 @feature(
@@ -196,5 +191,4 @@ def middle_click(target: str) -> bool:
             pyautogui.middleClick(x, y)
         return True
     except ImportError:
-        sim_delay()
-        return True
+        return False

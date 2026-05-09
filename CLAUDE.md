@@ -15,14 +15,14 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
 | `python cli/lobster.py run-flow <file.flow>` | CLI 执行流程 |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
-| `curl -X POST http://127.0.0.1:5577/api/ping` | 检查 HTTP API 桥接 |
+| `curl -X POST http://127.0.0.1:5877/api/ping` | 检查 HTTP API 桥接 |
 
 ## 目录结构
 
 ```
 ├── src/
 │   ├── main/           # Electron 主进程 (IPC handlers, 窗口管理)
-│   │   ├── main.ts     #   - 引擎管理, IPC handlers, HTTP API :5577
+│   │   ├── main.ts     #   - 引擎管理, IPC handlers, HTTP API :5877
 │   │   └── preload.ts  #   - contextBridge API 暴露
 │   └── renderer/       # React 前端 (Vite)
 │       ├── App.tsx     #   - 根组件, 布局, 快捷键
@@ -35,11 +35,17 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │       │   └── common/ #   - TopBar, StatusBar, LogPanel, ToolCallPanel
 │       └── utils/      #   - textGenerator, featureRegistry, nodeDefinitions
 ├── python/
+│   ├── agent/          # AI Agent (规划/监督执行/OCR验证/失败恢复)
+│   │   ├── __main__.py #   IPC 入口 (stdin/stdout JSON 协议)
+│   │   ├── controller.py #   ReAct 循环 + 监督执行
+│   │   ├── planner.py  #   LLM 决策引擎 (DeepSeek)
+│   │   ├── pseudocode.py #   伪代码 → 结构化步骤解析
+│   │   └── memory.py   #   短期/长期记忆
 │   ├── engine/         # Python 自动化引擎
 │   │   ├── executor.py #   - DSL 执行器 (核心)
 │   │   ├── dsl_parser.py #  - DSL 解析器
 │   │   └── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
-│   ├── features/       # @feature 注册表 (~120 功能)
+│   ├── features/       # @feature 注册表 (~160 功能)
 │   │   ├── registry.py #   - 装饰器, 自动生成 MCP/CLI/HTTP
 │   │   └── _all.py     #   - 导入所有 feature 模块
 │   ├── mcp/server.py   # Python MCP 服务器 (stdio 协议)
@@ -56,7 +62,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 
 ## HTTP API 桥接 (Claude Code 远程控制)
 
-Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost），Claude Code 可通过 curl 实时控制前端。
+Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost），Claude Code 可通过 curl 实时控制前端。
 
 | 端点 | 用途 | 关键参数 |
 |---|---|---|
@@ -107,6 +113,11 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 | `POST /api/select-all` | 全选节点 | — |
 | `POST /api/clear-selection` | 清空选择 | — |
 | `POST /api/duplicate-nodes` | 复制节点 | `{ ids: string[] }` |
+| `POST /api/agent-start` | 启动 AI Agent 监督执行 | `{ goal, config?, supervise? }` |
+| `POST /api/features/list` | 列出所有可用 @feature 工具 | — |
+| `POST /api/features/call` | 调用任意 @feature 工具 | `{ name, params }` |
+| `POST /api/search-templates` | 语义搜索模板 | `{ query, maxResults? }` |
+| `POST /api/execute-js` | 在前端执行 JS 代码 | `{ code }` |
 
 ## MCP 工具
 
@@ -116,7 +127,7 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 ~120 工具，覆盖：
+通过 `@feature` 注册表动态生成 ~160 工具，覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
@@ -124,6 +135,7 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5577`（仅 localhost�
 | 感知识别 | ~12 | find_image, OCR, color_detect, progress_detect... |
 | 控制流 | ~4 | wait, loop, condition... |
 | AI 规划 | ~8 | plan, execute_plan, debug... |
+| AI Agent | ~5 | agent_start, agent_stop, agent_status, agent_guidance... |
 | 系统功能 | ~10 | window, process, clipboard, file... |
 | 调试诊断 | ~10 | test, validate, system_info... |
 | DSL 工具 | 5 | run_dsl, dsl_to_flow, flow_to_dsl, create_flow_from_dsl |
@@ -214,15 +226,74 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 3. 或通过 Claude Code 调用 MCP 工具生成
 4. 模板文件在 `templates/` 目录
 
+### AI Agent 监督执行
+1. 点击 "AI Agent" 输入目标（自然语言）
+2. Agent 自动调用 LLM 生成流程图脚本（可视化展示）
+3. Agent 进入监督执行模式：逐步骤执行，每步包含：
+   - **窗口焦点安全** — 自动检测并聚焦目标窗口
+   - **执行动作** — 通过 feature registry 执行点击/输入/快捷键等
+   - **屏幕稳定等待** — 等待操作后的界面变化完成
+   - **OCR 验证** — 自动识别屏幕文字验证操作结果
+   - **失败恢复** — 自动重试 / 替换方案 / 跳过 / 终止
+4. 前端流程图实时高亮当前执行节点，显示成功/失败状态
+5. 执行完成或失败后汇总报告
+
+## Agent IPC 协议
+
+AI Agent 子进程通过 stdin/stdout JSON 与 Electron 主进程通信。协议设计用于实时流式展示执行进度。
+
+### IPC 命令（Electron → Agent，stdin）
+
+| 命令 | 参数 | 用途 |
+|---|---|---|
+| `{"type": "start", "goal": "...", "config": {...}, "supervise": true}` | goal: 目标描述, config: api_key/api_base/model, supervise: 是否监督执行 | 启动 Agent |
+| `{"type": "stop"}` | — | 请求优雅停止（当前步骤完成后退出） |
+| `{"type": "guidance", "text": "..."}` | text: 指引文本 | 注入用户指引 |
+| `{"type": "status"}` | — | 查询当前状态 |
+
+### IPC 事件（Agent → Electron，stdout）
+
+| 事件 | 关键字段 | 用途 |
+|---|---|---|
+| `{"type": "agent_start", "goal": "..."}` | goal | Agent 启动通知 |
+| `{"type": "step_complete", "step_num": N, "tool": "...", "result": {...}}` | step_num, result.success, result.error | 每步执行结果（前端实时更新流程图） |
+| `{"type": "agent_done", "status": "completed\|failed\|stopped", "total_steps": N}` | status, total_steps, fail_reason | Agent 结束 |
+| `{"type": "log", "level": "info\|warn\|error", "message": "..."}` | level, message | 日志事件 |
+| `{"type": "user_guidance_sent", "text": "..."}` | text | 用户指引确认 |
+| `{"type": "error", "message": "..."}` | message | 错误事件 |
+
+### 监督执行流程（supervise=true）
+
+```
+Agent Controller
+  ├─ Phase 1: generate_flow_script(goal)
+  │   └─ 生成流程图脚本 → 前端展示
+  ├─ Phase 2: parse_pseudocode(pseudocode)
+  │   └─ 解析为结构化步骤（click/type/hotkey/wait/launch...）
+  └─ Phase 3: 逐步骤监督执行
+      ├─ 窗口焦点安全 (get_active_window)
+      ├─ 执行动作 (registry.execute)
+      ├─ 等待屏幕稳定 (wait_screen_stable)
+      ├─ OCR 验证 (ocr_find_text / wait_screen_change)
+      ├─ 失败恢复 (planner.decide_recovery)
+      │   ├─ retry → 重试
+      │   ├─ alternative → 替代方案
+      │   ├─ skip → 跳过
+      │   └─ fail → 终止
+      └─ 发送 step_complete 事件 → 前端高亮节点
+```
+
 ## 关键约定
 
 - **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `engine.py` (execute_*)
 - **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册
+- **新增 Agent 能力**: 在 `python/agent/` 添加，`controller.py` 驱动 ReAct 循环，`pseudocode.py` 解析步骤，`planner.py` 决策恢复策略
 - **新增 API 端点**: 在 `src/main/main.ts` 的 `startApiServer()` switch 中添加 case
 - **状态管理**: Zustand + immer，`useStore` hook
 - **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
-- **Python 协议**: `engine.py` 通过 stdin/stdout JSON 与 Electron 通信
+- **Agent IPC 协议**: `python/agent/__main__.py` 通过 stdin/stdout JSON 与 Electron 通信（start/stop/guidance/status 命令，agent_start/step_complete/agent_done/log 事件）
+- **Python 协议**: `engine/engine.py` 通过 stdin/stdout JSON 与 Electron 通信
 - **测试**: `pytest tests/` 102 tests (Python), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 
@@ -268,10 +339,10 @@ python -c "from features._all import *; from features.registry import registry; 
 python python/interaction/wheel_selector.py
 
 # 通过 HTTP API 控制前端
-curl -X POST http://127.0.0.1:5577/api/ping
+curl -X POST http://127.0.0.1:5877/api/ping
 
 # DSL → 流程图 → 加载到前端（一键）
-curl -X POST http://127.0.0.1:5577/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
+curl -X POST http://127.0.0.1:5877/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
 ```
 
 ## 构建与部署

@@ -136,7 +136,7 @@ def launch_program(target: str, args: str = "", wait: bool = False) -> dict:
 @feature(
     name="run_command",
     display_name="运行命令",
-    description="【系统·命令】运行 shell 命令并捕获输出。用于执行系统命令、脚本和自动化操作。可组合 wait_action 实现定时执行，如 shutdown /s /t 0 立即关机",
+    description="【系统·命令】运行 shell 命令并捕获输出（通过 cmd.exe，支持管道和重定向）。用于执行系统命令、脚本和自动化操作。注意：命令通过 shell 执行，请确保输入可信",
     category=F.SYSTEM,
     params=[
         P("command", "str", "要执行的命令", example="echo hello"),

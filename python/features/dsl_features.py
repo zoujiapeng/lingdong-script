@@ -5,6 +5,8 @@ lobster_run_dsl / lobster_run_dsl_sync — 让 Claude Code 通过 MCP 直接执�
 """
 from __future__ import annotations
 import json
+import os
+from pathlib import Path
 
 from features.registry import feature, P, TC, FeatureCategory as F
 
@@ -82,9 +84,62 @@ def run_dsl_sync(dsl: str, max_loops: int = 10, retry_limit: int = 1, timeout: f
     tags=["dsl", "control"],
 )
 def run_script(name: str, args: str = "") -> bool:
-    """子脚本调用需要 DSLExecutor 上下文。
-    直接通过 MCP 调用会返回模拟成功，实际执行请通过 DSL。"""
-    return True
+    """查找并执行子流程脚本。搜索 templates/ 目录下的 .flow 文件，找到后转换为 DSL 并执行。"""
+    base_dir = Path(__file__).resolve().parent.parent.parent  # 项目根
+    search_dirs = [
+        base_dir / "templates",
+        base_dir / "flows",
+        base_dir,
+    ]
+
+    flow_path = None
+    for sd in search_dirs:
+        if not sd.exists():
+            continue
+        # Try exact match first
+        candidates = [
+            sd / f"{name}.flow",
+            sd / f"{name}.dsl",
+            sd / name,
+        ]
+        for c in candidates:
+            if c.is_file():
+                flow_path = c
+                break
+        if flow_path:
+            break
+        # Try glob match
+        for ext in ("*.flow", "*.dsl"):
+            for fp in sorted(sd.glob(ext)):
+                if name.lower() in fp.stem.lower():
+                    flow_path = fp
+                    break
+            if flow_path:
+                break
+
+    if not flow_path:
+        return False
+
+    try:
+        content = flow_path.read_text(encoding="utf-8")
+        # Try to convert flow JSON to DSL if it's a FlowScript
+        if flow_path.suffix == ".flow":
+            try:
+                from engine.dsl_flow_converter import flow_to_dsl
+                script = json.loads(content)
+                dsl = flow_to_dsl(script)
+            except (json.JSONDecodeError, ImportError, Exception):
+                # Not a valid FlowScript, treat as raw DSL
+                dsl = content
+        else:
+            dsl = content
+
+        from engine.executor import DSLExecutor
+        executor = DSLExecutor(None)
+        result = executor.run_dsl_sync(dsl)
+        return isinstance(result, dict) and result.get("success", False)
+    except Exception:
+        return False
 
 
 @feature(

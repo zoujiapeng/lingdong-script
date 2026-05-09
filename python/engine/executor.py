@@ -326,6 +326,12 @@ class DSLExecutor:
         elif node.type == NodeType.SET:
             self._exec_set(node, ctx)
 
+        elif node.type == NodeType.VARIABLE_INC:
+            self._exec_variable_inc(node, ctx)
+
+        elif node.type == NodeType.WAIT_FILE:
+            self._exec_wait_file(node, ctx)
+
         elif node.type == NodeType.OCR_FIND:
             self._exec_ocr_find(node, ctx)
 
@@ -384,8 +390,6 @@ class DSLExecutor:
             self._exec_volume(node, ctx)
         elif node.type == NodeType.MUTE:
             self._exec_mute(node, ctx)
-        elif node.type == NodeType.LAUNCH:
-            self._exec_launch(node, ctx)
         elif node.type == NodeType.KILL:
             self._exec_kill(node, ctx)
         elif node.type == NodeType.WAIT_PROCESS:
@@ -666,6 +670,46 @@ class DSLExecutor:
             value = self._interpolate(parts[1]) if len(parts) > 1 else ""
             self._set_var(name, value)
             self._log(f"SET {name} = {value}")
+
+    def _exec_variable_inc(self, node: ASTNode, ctx: ExecutionContext):
+        """VARIABLE_INC name [step=1] — 递增变量"""
+        parts = node.args.split(None, 1)
+        if parts:
+            name = parts[0]
+            step = 1
+            if len(parts) > 1:
+                try:
+                    step = int(self._interpolate(parts[1]))
+                except ValueError:
+                    step = 1
+            current = self._resolve_var(name)
+            if current is None:
+                current = 0
+            self._set_var(name, int(current) + step)
+            self._log(f"VARIABLE_INC {name} += {step} -> {self._resolve_var(name)}")
+
+    def _exec_wait_file(self, node: ASTNode, ctx: ExecutionContext):
+        """WAIT_FILE path [timeout=60] — 等待文件出现"""
+        parts = node.args.split(None, 1)
+        if not parts:
+            self._log("WAIT_FILE: 缺少路径", level="warn")
+            return
+        path = parts[0].strip('"').strip("'")
+        timeout = 60.0
+        if len(parts) > 1:
+            try:
+                timeout = float(parts[1])
+            except ValueError:
+                pass
+        deadline = time.time() + timeout
+        self._log(f"WAIT_FILE: 等待文件 '{path}' (超时 {timeout}s)")
+        while time.time() < deadline:
+            self._check_control()
+            if os.path.exists(path):
+                self._log(f"WAIT_FILE: 文件已存在 '{path}'")
+                return
+            time.sleep(0.5)
+        self._log(f"WAIT_FILE: 超时 '{path}'", level="warn")
 
     def _exec_ocr_find(self, node: ASTNode, ctx: ExecutionContext):
         query = self._interpolate(node.args)
@@ -1153,20 +1197,6 @@ class DSLExecutor:
         else:
             volume_mute(mute=None)
         self._emit("node_done", node_type="MUTE", args=args, line=node.line)
-
-    def _exec_launch(self, node: ASTNode, ctx: ExecutionContext):
-        """LAUNCH target — 启动程序"""
-        args = self._interpolate(node.args)
-        target = args.strip()
-        self._emit("node_start", node_type="LAUNCH", args=target, line=node.line)
-        self._log(f"LAUNCH: {target}")
-        try:
-            from features.system_features import launch_program
-            launch_program(target, "", False)
-        except Exception:
-            import os
-            os.startfile(target)
-        self._emit("node_done", node_type="LAUNCH", args=target, line=node.line)
 
     def _exec_kill(self, node: ASTNode, ctx: ExecutionContext):
         """KILL name — 终止进程"""

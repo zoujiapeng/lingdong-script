@@ -20,7 +20,7 @@ def _detect_claude() -> str:
                                    capture_output=True, text=True, timeout=10)
                 if r.returncode == 0:
                     return "claude" if cmd == "where" else "npx.cmd claude"
-            except:  # noqa
+            except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
         return "npx.cmd claude"
     else:
@@ -30,7 +30,7 @@ def _detect_claude() -> str:
                                    capture_output=True, text=True, timeout=10)
                 if r.returncode == 0:
                     return "claude" if cmd == "which" else "npx claude"
-            except:  # noqa
+            except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
         return "npx claude"
 

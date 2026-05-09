@@ -20,10 +20,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Engine messages (from main process)
   onEngineMessage: (callback: (msg: any) => void) => {
-    ipcRenderer.on('engine-message', (_, msg) => callback(msg));
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('engine-message', handler);
+    return () => ipcRenderer.removeListener('engine-message', handler);
   },
   onEngineLog: (callback: (msg: any) => void) => {
-    ipcRenderer.on('engine-log', (_, msg) => callback(msg));
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('engine-log', handler);
+    return () => ipcRenderer.removeListener('engine-log', handler);
   },
 
   // Agent control
@@ -38,10 +42,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
-    ipcRenderer.on('agent-message', (_, msg) => callback(msg));
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('agent-message', handler);
+    return () => ipcRenderer.removeListener('agent-message', handler);
   },
   onAgentLog: (callback: (msg: any) => void) => {
-    ipcRenderer.on('agent-log', (_, msg) => callback(msg));
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('agent-log', handler);
+    return () => ipcRenderer.removeListener('agent-log', handler);
   },
 
   // Screenshot capture
@@ -68,12 +76,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Menu actions (from native menu bar)
   onMenuAction: (callback: (action: string) => void) => {
-    ipcRenderer.on('menu-action', (_, action) => callback(action));
+    const handler = (_: any, action: string) => callback(action);
+    ipcRenderer.on('menu-action', handler);
+    return () => ipcRenderer.removeListener('menu-action', handler);
   },
 
   // API commands (from local HTTP bridge)
   onApiCommand: (callback: (action: string, payload: any) => void) => {
-    ipcRenderer.on('api-command', (_, msg) => callback(msg.action, msg.payload));
+    const handler = (_: any, msg: any) => callback(msg.action, msg.payload);
+    ipcRenderer.on('api-command', handler);
+    return () => ipcRenderer.removeListener('api-command', handler);
   },
 
   // Push renderer state to main process (for HTTP API /api/get-state)
@@ -99,7 +111,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Macro messages (from main process)
   onMacroMessage: (callback: (msg: any) => void) => {
-    ipcRenderer.on('macro-message', (_, msg) => callback(msg));
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('macro-message', handler);
+    return () => ipcRenderer.removeListener('macro-message', handler);
   },
 
   // Auto-start

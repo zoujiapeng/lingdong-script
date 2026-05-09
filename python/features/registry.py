@@ -176,7 +176,10 @@ class FeatureRegistry:
             return
         modules = self._lazy_modules
         self._lazy_modules = []  # 防止递归
+        import sys as _sys
         for mod_name in modules:
+            _sys.stderr.write(f"[registry] loading {mod_name}...\n")
+            _sys.stderr.flush()
             importlib.import_module(mod_name)
 
     def list_features(self) -> List[FeatureSpec]:

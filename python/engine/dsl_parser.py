@@ -85,6 +85,8 @@ class NodeType(str, Enum):
     MAXIMIZE = "MAXIMIZE"
     CLOSE_WINDOW = "CLOSE_WINDOW"
     RESIZE_WINDOW = "RESIZE_WINDOW"
+    WAIT_FILE = "WAIT_FILE"
+    VARIABLE_INC = "VARIABLE_INC"
     # Registry 关键字回退（无对应枚举成员时）
     REGISTRY_FEATURE = "REGISTRY_FEATURE"
 
@@ -149,6 +151,8 @@ _SIMPLE_NODE_TYPES: dict[str, NodeType] = {
     "MAXIMIZE": NodeType.MAXIMIZE,
     "CLOSE_WINDOW": NodeType.CLOSE_WINDOW,
     "RESIZE_WINDOW": NodeType.RESIZE_WINDOW,
+    "WAIT_FILE": NodeType.WAIT_FILE,
+    "VARIABLE_INC": NodeType.VARIABLE_INC,
 }
 
 @dataclass
@@ -220,7 +224,8 @@ class DSLParser:
                 "LOCK", "VOLUME", "MUTE", "KILL", "WAIT_PROCESS", "WAIT_EXIT",
                 "WALLPAPER", "DISPLAY_OFF", "SLEEP", "DESKTOP", "BATTERY",
                 "EMPTY_BIN", "BRIGHTNESS", "CLIPBOARD_SET", "CLIPBOARD_GET",
-                "MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW"}
+                "MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW",
+                "WAIT_FILE", "VARIABLE_INC"}
     _registry_loaded = False
 
     @classmethod

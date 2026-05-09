@@ -376,7 +376,7 @@ def _parse_template_metadata(filepath: str) -> dict:
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-    except:
+    except (FileNotFoundError, IOError):
         return meta
 
     # Find start/end markers
@@ -410,7 +410,7 @@ def _parse_template_metadata(filepath: str) -> dict:
             if key in ('aliases', 'tags', 'keywords'):
                 try:
                     meta[key] = json.loads(val)
-                except:
+                except (json.JSONDecodeError, ValueError):
                     meta[key] = [v.strip().strip('"\'') for v in val.strip('[]').split(',') if v.strip()]
             elif key == 'name':
                 meta['name'] = val
@@ -559,7 +559,7 @@ def search_flow_templates(query: str, max_results: int = 5) -> dict:
     import urllib.request, urllib.error
     payload = json.dumps({"query": query, "maxResults": max_results}).encode("utf-8")
     req = urllib.request.Request(
-        "http://127.0.0.1:5577/api/search-templates",
+        "http://127.0.0.1:5877/api/search-templates",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",

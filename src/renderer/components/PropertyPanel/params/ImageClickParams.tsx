@@ -136,7 +136,7 @@ export function ImageClickParams({ params, onChange }: Props) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {targets.map((t, i) => (
               <div
-                key={i}
+                key={t.path}
                 style={{
                   display: 'flex',
                   alignItems: 'center',

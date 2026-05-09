@@ -55,20 +55,21 @@ export const TopBar = React.memo(function TopBar() {
   useEffect(() => {
     const api = (window as any).electronAPI;
     if (!api?.onMenuAction) return;
-    api.onMenuAction((action: string) => {
+    const cleanup = api.onMenuAction((action: string) => {
       switch (action) {
         case 'new': newScript(); break;
         case 'open': handleLoad(); break;
         case 'save': saveScript(); break;
       }
     });
+    return cleanup;
   }, []);
 
   // Listen for macro status messages (F6 toggle from external process)
   useEffect(() => {
     const api = (window as any).electronAPI;
     if (!api?.onMacroMessage) return;
-    api.onMacroMessage((msg: any) => {
+    const cleanup = api.onMacroMessage((msg: any) => {
       if (msg.type === 'status') {
         // Update recording state and refresh list when stopped
         useStore.setState({ recording: { active: msg.recording, macroName: msg.recording ? '录制中...' : '' } });
@@ -80,6 +81,7 @@ export const TopBar = React.memo(function TopBar() {
     });
     // Load macro list on mount
     useStore.getState().listMacros();
+    return cleanup;
   }, []);
 
   const handleTitleClick = () => {

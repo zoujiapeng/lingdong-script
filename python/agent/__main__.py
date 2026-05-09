@@ -55,6 +55,15 @@ def _emit(event: str, data: dict):
     with _lock:
         sys.stdout.write(payload + "\n")
         sys.stdout.flush()
+    # Mirror to stderr for diagnostics (shown in frontend as [进程] messages)
+    msg_preview = str(data.get('message') or data.get('goal') or data.get('status') or '')[:80]
+    try:
+        sys.stderr.write(f"[agent:{event}] {msg_preview}\n")
+        sys.stderr.flush()
+    except UnicodeEncodeError:
+        ascii_safe = msg_preview.encode('ascii', errors='replace').decode('ascii')
+        sys.stderr.write(f"[agent:{event}] {ascii_safe}\n")
+        sys.stderr.flush()
 
 
 def _log(level: str, message: str):
@@ -90,9 +99,10 @@ def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Even
                supervise: bool = True):
     """Run the agent in a background thread, streaming events to stdout."""
     cfg = config or {}
-    api_key = cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
-    api_base = cfg.get("api_base") or os.environ.get("LLM_API_BASE", "")
-    model = cfg.get("model") or os.environ.get("LLM_MODEL", "")
+    api_key = (cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
+    api_base = (cfg.get("api_base") or os.environ.get("LLM_API_BASE", "")).strip()
+    model = (cfg.get("model") or os.environ.get("LLM_MODEL", "")).strip()
+    multimodal = cfg.get("multimodal") or os.environ.get("LLM_MULTIMODAL", "")
 
     # Export to env so downstream features (e.g. generate_flow_script) can read them
     if api_key:
@@ -101,48 +111,28 @@ def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Even
         os.environ["LLM_API_BASE"] = api_base
     if model:
         os.environ["LLM_MODEL"] = model
+    if multimodal:
+        os.environ["LLM_MULTIMODAL"] = multimodal
 
-    controller = AgentController(api_key=api_key, api_base=api_base, model=model)
+    # verify_enabled might be string 'true'/'false' from frontend config
+    _raw_verify = cfg.get("verify_enabled", False)
+    if isinstance(_raw_verify, str):
+        _raw_verify = _raw_verify.lower() in ("true", "1", "yes")
+    controller = AgentController(api_key=api_key, api_base=api_base, model=model,
+                                 multimodal=multimodal,
+                                 verify_enabled=_raw_verify)
+
+    # Wire guidance queue so IPC guidance() commands reach the controller
     guidance_queue: Queue = getattr(_run_agent, "_guidance_queue", Queue())
+    _run_agent._guidance_queue = guidance_queue
+    controller.set_guidance_queue(guidance_queue)
 
     # Wire event callback → stdout
     controller.set_event_callback(lambda ev, d: _emit(ev, d))
 
-    # Wire stop event (checked during both ReAct loop and supervision)
+    # Wire stop event (controller checks it natively in run() and supervision)
     if stop_event:
         controller.set_stop_event(stop_event)
-
-    # Inject stop-awareness: patch _run_one_step to check stop_event between steps
-    if stop_event:
-        original_run_one = controller._run_one_step
-
-        def _patched_run_one(state):
-            if stop_event.is_set():
-                state["status"] = "stopped"
-                return {
-                    "step_num": state["current_step"],
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "thought": "Stop requested by user",
-                    "tool": "stop",
-                    "parameters": {},
-                    "result": {"success": True, "confidence": 1.0, "data": {}},
-                }
-            # Drain guidance queue
-            msgs = []
-            while True:
-                try:
-                    msgs.append(guidance_queue.get_nowait())
-                except Empty:
-                    break
-            if msgs:
-                controller.set_user_guidance("\n".join(msgs))
-                _emit("user_guidance", {"text": "\n".join(msgs)})
-            return original_run_one(state)
-
-        controller._run_one_step = _patched_run_one
-
-    # Store guidance queue reference for external access
-    _run_agent._guidance_queue = guidance_queue
 
     _emit("agent_start", {"goal": goal})
     _log("info", f"Agent started — goal: {goal[:120]}")

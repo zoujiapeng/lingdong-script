@@ -1,5 +1,5 @@
 """
-Software control features — control 灵动脚本 via its HTTP API (127.0.0.1:5577).
+Software control features — control 灵动脚本 via its HTTP API (127.0.0.1:5877).
 
 Allows the agent to create and manipulate flowcharts programmatically,
 without needing to simulate mouse clicks on the UI.
@@ -14,7 +14,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
 
 logger = logging.getLogger(__name__)
 
-_API_BASE = "http://127.0.0.1:5577"
+_API_BASE = "http://127.0.0.1:5877"
 
 
 def _api_post(endpoint: str, body: dict = None, timeout: int = 5) -> dict:
@@ -30,7 +30,7 @@ def _api_post(endpoint: str, body: dict = None, timeout: int = 5) -> dict:
         else:
             return {"success": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
     except requests.ConnectionError:
-        return {"success": False, "error": "无法连接到灵动脚本 (127.0.0.1:5577)，请确认软件已启动"}
+        return {"success": False, "error": "无法连接到灵动脚本 (127.0.0.1:5877)，请确认软件已启动"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

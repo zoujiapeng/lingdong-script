@@ -1,5 +1,68 @@
 # 更新日志
 
+## [1.1.1] - 2026-05-09
+
+### Agent 执行稳定性修复
+
+#### Bug 修复
+- **类型处理阻塞** — `type` 步骤包装守护线程 + 8s 超时，防止 pyautogui.typewrite 在特定窗口下永久阻塞
+- **快捷键阻塞** — `hotkey` 步骤包装守护线程 + 5s 超时
+- **保存对话框阻塞** — `file_save` 步骤包装守护线程 + 12s 超时；`_auto_handle_save_dialog` 15s 超时
+- **焦点窗口处理** — `focus` 步骤增加 `target`/`name` 回退字段，聚焦后增加 sleep 等待窗口就绪
+- **Agent 安全超时** — 从 90s 提升至 180s，适配复杂多步骤流程
+
+#### 本地步骤生成优化
+- **APP_MAP 中文映射** — `记事本` → `notepad.exe`，`计算器` → `calc.exe` 等，修复未找到可执行文件错误
+- **步骤顺序保留** — 三段式 `finditer` + 位置排序，保持原始目标描述中的步骤顺序
+- **中文正则修复** — 修复贪婪匹配捕获不完整中文词组的问题
+- **类型参数修复** — `re.compile(pattern, goal)` → `re.compile(pattern)`，修复字符串被误当 flags 参数的错误
+
+#### 文档修正
+- **API 端口 5577 → 5877** — 全面更新 README.md、CLAUDE.md、cli/lobster.py 及 Python feature 中的过时端口引用（共 20+ 处）
+- **补充缺失 API 端点** — 新增 `/api/agent-start`、`/api/features/list`、`/api/features/call`、`/api/search-templates`、`/api/execute-js` 文档
+- **端点计数更新** — 45+ → 50+
+
+## [1.1.0] - 2026-05-08
+
+### AI Agent 监督执行架构
+
+#### 新增模块
+- **`python/agent/pseudocode.py`** — 伪代码解析器，将自然语言生成的脚本解析为结构化步骤（click/type/hotkey/wait/scroll/launch/focus/run_command 等 11 种类型）
+- **`python/agent/controller.py`** — ReAct 循环控制器 + 监督执行器，三阶段架构：生成脚本 → 解析步骤 → 逐步骤监督执行
+- **`python/agent/planner.py`** — LLM 决策引擎（DeepSeek），支持 `decide_recovery()` 失败恢复策略（retry/alternative/skip/fail）
+- **`python/agent/memory.py`** — 短期/长期记忆系统
+
+#### 监督执行流程
+Agent 不再生成脚本后退出，改为 stay-alive 逐步骤执行：
+1. **窗口焦点安全** — 每步执行前调用 `get_active_window` 检查目标窗口，防止误输入
+2. **动作执行** — 通过 feature registry 调用 click/type/hotkey/launch 等操作
+3. **屏幕稳定等待** — `wait_screen_stable` 确保操作后的界面变化完成
+4. **OCR 验证** — 输入后 OCR 确认文字出现，启动后检测屏幕变化，聚焦后验证窗口标题
+5. **失败恢复** — 内置规则（超时/未找到自动重试）+ planner.decide_recovery() 复杂决策
+
+#### 恢复策略
+- **retry** — 超时/未找到/启动失败等瞬时错误自动重试
+- **alternative** — LLM 提供替代方案执行
+- **skip** — 跳过当前步骤继续（如 OCR 未验证到文字但文本可能以其他形式出现）
+- **fail** — 目标不可能达成，终止执行
+
+#### IPC 协议
+- Agent 子进程 `__main__.py` 通过 stdin/stdout JSON 与 Electron 主进程通信
+- 支持 start/stop/guidance/status 命令
+- 流式输出 agent_start/step_complete/agent_done/log 事件
+- 前端实时高亮当前执行节点、显示成功/失败状态
+
+#### 前端适配
+- AgentView 传入 `supervise: true` 参数
+- store 移除 `step_complete` → 自动 `api.engineStart()` 逻辑
+- 新增 `execution.status` / `current_node_id` 状态追踪
+- `agent_done` 事件重置执行状态
+
+#### 其他变更
+- `generate_flow_script` 提示词更新：新增 `启动` 命令（GUI 非阻塞启动），`运行命令` 仅用于 CLI
+- Pseudocode 生成规则优化：启动 GUI 后自动添加等待+聚焦步骤
+- 停止按钮支持：stop_event 在线程间传递，监督循环中每步检测
+
 ## [1.0.1] - 2026-05-06
 
 ### 架构优化 (11 项)

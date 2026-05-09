@@ -19,7 +19,20 @@ For each failure, you receive:
 - goal: the original objective
 - failed_step: the step that failed (type, target, raw text)
 - error: what went wrong
-- verification_details: optional details about verification failure
+- verification_details: optional details about verification failure (includes chain_results listing each verification method tried)
+
+Available verification methods per step type:
+- click/type/text_click: ocr_text (find text on screen), screen_change
+- launch: process_running (check process exists), window_active (check window title), ocr_text, screen_change
+- focus: window_active
+- run_command: command_exitcode (check return code), file_exists
+- file_write: file_contains (check file content), file_exists
+- file_save: file_exists (check file saved on disk)
+- hotkey/scroll/drag: screen_change, ocr_text
+
+When suggesting an alternative_step, you may also suggest changing the verification strategy
+by including a "verify" field on the alternative step, e.g.:
+{"type": "launch", "target": "notepad.exe", "verify": [{"method": "process_running", "name": "notepad.exe"}]}
 
 You must decide ONE recovery action:
 1. "retry" — execute the same step again (for transient errors)
@@ -78,11 +91,18 @@ Strategy rules (MUST follow):
 class Planner:
     """LLM-powered planner."""
 
-    def __init__(self, api_key: str = "", api_base: str = "", model: str = ""):
+    def __init__(self, api_key: str = "", api_base: str = "", model: str = "",
+                 multimodal: bool | str = False):
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._api_base = (api_base or os.environ.get("LLM_API_BASE", "") or
                           "https://api.deepseek.com/v1").rstrip("/")
         self._model = model or os.environ.get("LLM_MODEL", "") or "deepseek-chat"
+        # Read multimodal flag from param or env; env might be "true"/"false"
+        if isinstance(multimodal, bool):
+            self._multimodal = multimodal
+        else:
+            env_val = multimodal or os.environ.get("LLM_MULTIMODAL", "")
+            self._multimodal = env_val.lower() in ("true", "1", "yes")
 
     def decide_recovery(
         self,
