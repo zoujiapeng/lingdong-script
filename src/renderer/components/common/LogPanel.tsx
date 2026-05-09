@@ -53,7 +53,7 @@ export const LogPanel = React.memo(function LogPanel() {
           </div>
         )}
         {logEntries.map((entry, i) => (
-          <div key={i} className="log-entry">
+          <div key={`${entry.timestamp}-${i}`} className="log-entry">
             <span className="log-time">{formatTime(entry.timestamp)}</span>
             <span className={`log-level ${levelClass(entry.level)}`}>
               {entry.level.toUpperCase()}

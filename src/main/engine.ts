@@ -50,7 +50,8 @@ export function spawnPythonOneShot(args: string[], options?: SpawnOptions): Prom
         ...options,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...options?.env },
       });
-      const dec = () => { _activeOneShot--; _drainOneShot(); };
+      let done = false;
+      const dec = () => { if (!done) { done = true; _activeOneShot--; _drainOneShot(); } };
       proc.on('exit', dec);
       proc.on('error', dec);
       resolve(proc);
@@ -85,6 +86,9 @@ export async function runPythonCollect(
   });
 }
 
+/** Buffer for partial lines across stdout chunks (engine) */
+let _engineLineBuffer = '';
+
 /** 通过 spawnPython 执行 DSL (main.ts 有自己的本地版本) */
 async function runDsl(dsl: string): Promise<{ success: boolean; error?: string }> {
   const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'run_dsl.py');
@@ -108,10 +112,14 @@ export function startPythonEngine(scriptJson: string) {
   setPythonProcess(proc);
   setEngineRunning(true);
   setLastScript(scriptJson);
+  _engineLineBuffer = '';
 
   proc.stdout!.on('data', (data: Buffer) => {
-    const lines = data.toString('utf8').split('\n').filter(Boolean);
+    _engineLineBuffer += data.toString('utf8');
+    const lines = _engineLineBuffer.split('\n');
+    _engineLineBuffer = lines.pop() || '';
     for (const line of lines) {
+      if (!line) continue;
       try {
         const msg = JSON.parse(line);
         if (msg.type === 'execution_done') {

@@ -6,6 +6,7 @@ const fsp = fs.promises;
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
 import * as https from 'https';
+import { StringDecoder } from 'string_decoder';
 import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './schedulerBridge';
 import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
@@ -17,6 +18,7 @@ import {
   lastScript, setLastScript,
   agentProcess, setAgentProcess,
   agentRunning, setAgentRunning,
+  nextAgentToken, isAgentTokenCurrent,
 } from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
@@ -333,8 +335,7 @@ function runStartupSchedules(): void {
 /** 启动软件（通过系统关联或直接路径） */
 function launchTarget(target: string): void {
   try {
-    const { execSync } = require('child_process');
-    execSync(`start "" "${target.replace(/"/g, '\\"')}"`, { windowsHide: true, timeout: 5000 });
+    spawn('cmd.exe', ['/c', 'start', '', target], { windowsHide: true, timeout: 5000 }).unref();
   } catch {
     try {
       spawn(target, [], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
@@ -379,17 +380,20 @@ function createWindow() {
     const envKey = process.env.ANTHROPIC_API_KEY || '';
     const envBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1';
     const envModel = process.env.LLM_MODEL || 'deepseek-chat';
+    const envMultimodal = process.env.LLM_MULTIMODAL === 'true';
     if (envKey) {
       mainWindow?.webContents.executeJavaScript(`
         (function() {
-          const k = '__DEEPSEEK_KEY__'; const b = '__LLM_API_BASE__'; const m = '__LLM_MODEL__';
-          const lk = 'lingdong-deepseek-key'; const lb = 'lingdong-llm-base'; const lmd = 'lingdong-llm-model';
-          window[k] = window[k] || '${envKey.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
-          window[b] = window[b] || '${envBase.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
-          window[m] = window[m] || '${envModel.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';
+          const k = '__DEEPSEEK_KEY__'; const b = '__LLM_API_BASE__'; const m = '__LLM_MODEL__'; const mm = '__LLM_MULTIMODAL__';
+          const lk = 'lingdong-deepseek-key'; const lb = 'lingdong-llm-base'; const lmd = 'lingdong-llm-model'; const lmm = 'lingdong-llm-multimodal';
+          window[k] = window[k] || ${JSON.stringify(envKey)};
+          window[b] = window[b] || ${JSON.stringify(envBase)};
+          window[m] = window[m] || ${JSON.stringify(envModel)};
+          window[mm] = window[mm] !== undefined ? window[mm] : ${JSON.stringify(envMultimodal)};
           if (!localStorage.getItem(lk)) localStorage.setItem(lk, window[k]);
           if (!localStorage.getItem(lb)) localStorage.setItem(lb, window[b]);
           if (!localStorage.getItem(lmd)) localStorage.setItem(lmd, window[m]);
+          if (!localStorage.getItem(lmm)) localStorage.setItem(lmm, window[mm] ? 'true' : 'false');
         })();
       `);
     }
@@ -401,6 +405,7 @@ function createWindow() {
           api_key: envKey,
           api_base: envBase,
           model: envModel,
+          multimodal: envMultimodal ? 'true' : 'false',
         });
       }, 2000);
     }
@@ -499,7 +504,7 @@ function buildAppMenu() {
               '• @feature 工具注册表（120+ 工具）',
               '• MCP 协议支持（Python + TypeScript 双服务器）',
               '• CLI 命令行工具（run/ask/create/serve）',
-              '• HTTP API 桥接（127.0.0.1:5577）',
+              '• HTTP API 桥接（127.0.0.1:5877）',
               '• 区域选择 / 滚轮选择器 / OCR 识别',
               '',
               '目录结构：',
@@ -654,14 +659,23 @@ function sendToAgent(message: any) {
   }
 }
 
+/** Line buffer for agent stdout */
+let _agentLineBuffer = '';
+/** UTF-8 decoder for agent stdout (handles multi-byte chars split across chunks) */
+let _agentDecoder: StringDecoder;
+
 function startAgentProcess(goal: string, config?: Record<string, string>, supervise: boolean = true) {
-  // Stop existing agent if running
+  // Stop existing agent if running — kill immediately, then wait before spawning new one
   if (agentProcess && !agentProcess.killed) {
     sendToAgent({ type: 'stop' });
-    setTimeout(() => { if (agentProcess && !agentProcess.killed) agentProcess.kill(); }, 1000);
+    agentProcess.kill();
+    setAgentProcess(null);
+    setAgentRunning(false);
   }
 
+  const token = nextAgentToken();
   const agentDir = path.join(getBaseDir(), 'python');
+
   const proc = spawnPython(
     ['-u', '-m', 'agent'],
     { cwd: agentDir, stdio: ['pipe', 'pipe', 'pipe'] }
@@ -669,11 +683,19 @@ function startAgentProcess(goal: string, config?: Record<string, string>, superv
   setAgentProcess(proc);
   setAgentRunning(true);
 
+  // Reset buffers for new process
+  _agentLineBuffer = '';
+  _agentDecoder = new StringDecoder('utf8');
+
   proc.stdout!.on('data', (data: Buffer) => {
-    const lines = data.toString('utf8').split('\n').filter(Boolean);
+    _agentLineBuffer += _agentDecoder.write(data);
+    const lines = _agentLineBuffer.split('\n');
+    _agentLineBuffer = lines.pop() || ''; // keep incomplete trailing line
     for (const line of lines) {
+      if (!line) continue;
       try {
         const msg = JSON.parse(line);
+        console.log('[agent]', msg.type, JSON.stringify(msg).slice(0, 200));
         if (msg.type === 'agent_done') {
           setAgentRunning(false);
         }
@@ -684,17 +706,34 @@ function startAgentProcess(goal: string, config?: Record<string, string>, superv
     }
   });
 
+  // Re-create decoder for stderr too (used in agent-start injection)
+  let _stderrDecoder = new StringDecoder('utf8');
   proc.stderr!.on('data', (data: Buffer) => {
-    mainWindow?.webContents.send('agent-log', { level: 'error', message: data.toString('utf8') });
+    mainWindow?.webContents.send('agent-log', { level: 'error', message: _stderrDecoder.write(data) });
   });
 
-  proc.on('exit', () => {
+  // Add a safety timeout: kill if agent runs longer than 180 seconds
+  const agentTimeout = setTimeout(() => {
+    if (!isAgentTokenCurrent(token)) return;
+    console.warn('[agent] Safety timeout — killing agent after 180s');
+    mainWindow?.webContents.send('agent-log', { level: 'error', message: 'Agent 执行超时 (180s)，已自动终止' });
+    proc.kill();
+    setAgentProcess(null);
+    setAgentRunning(false);
+  }, 180000);
+
+  proc.on('exit', (code) => {
+    clearTimeout(agentTimeout);
+    if (!isAgentTokenCurrent(token)) return;  // stale event from previous process
+    console.log('[agent] Process exited, code=' + code);
     setAgentProcess(null);
     setAgentRunning(false);
   });
 
-  // Send start command
-  sendToAgent({ type: 'start', goal, config: config || {}, supervise });
+  // Send start command (use a short delay to ensure Python process is listening)
+  setTimeout(() => {
+    sendToAgent({ type: 'start', goal, config: config || {}, supervise });
+  }, 300);
 }
 
 ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>, supervise?: boolean) => {
@@ -854,6 +893,12 @@ function confirm(){
 
     // Wait for selection result, then crop
     const result = await new Promise<string | null>((resolve) => {
+      const cleanup = () => {
+        ipcMain.removeAllListeners('ss:done');
+        ipcMain.removeAllListeners('ss:cancel');
+        ipcMain.removeAllListeners('ss:cropped');
+      };
+      const timeout = setTimeout(() => { cleanup(); selWin.close(); mainWindow!.restore(); resolve(null); }, 60000);
       ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
         const { x, y, w, h } = rect;
         const cropWin = new BrowserWindow({
@@ -862,9 +907,11 @@ function confirm(){
         });
         const cropHTML = `<script>const{ipcRenderer}=require("electron");const i=new Image();i.onload=()=>{const c=document.createElement("canvas");c.width=${w};c.height=${h};c.getContext("2d").drawImage(i,${x},${y},${w},${h},0,0,${w},${h});ipcRenderer.send("ss:cropped",c.toDataURL("image/png"))};i.src='${fullDataURL}';<\/script>`;
         cropWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(cropHTML));
-        ipcMain.once('ss:cropped', (_2: any, dataURL: string) => { cropWin.close(); resolve(dataURL); });
+        ipcMain.once('ss:cropped', (_2: any, dataURL: string) => { cropWin.close(); clearTimeout(timeout); cleanup(); resolve(dataURL); });
+        cropWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
       });
-      ipcMain.once('ss:cancel', () => { resolve(null); });
+      ipcMain.once('ss:cancel', () => { clearTimeout(timeout); cleanup(); resolve(null); });
+      selWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
     });
 
     selWin.close();
@@ -962,10 +1009,11 @@ function confirm(){
 
     // Wait for selection result, return coordinates directly (no cropping)
     const result = await new Promise<{ x: number; y: number; w: number; h: number } | null>((resolve) => {
-      ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
-        resolve(rect);
-      });
-      ipcMain.once('ss:cancel', () => { resolve(null); });
+      const cleanup = () => { ipcMain.removeAllListeners('ss:done'); ipcMain.removeAllListeners('ss:cancel'); };
+      const timeout = setTimeout(() => { cleanup(); selWin.close(); mainWindow!.restore(); resolve(null); }, 60000);
+      ipcMain.once('ss:done', (_: any, rect) => { clearTimeout(timeout); cleanup(); resolve(rect); });
+      ipcMain.once('ss:cancel', () => { clearTimeout(timeout); cleanup(); resolve(null); });
+      selWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
     });
 
     selWin.close();
@@ -1444,6 +1492,7 @@ if (!gotTheLock) {
         try { return JSON.parse(result.stdout.trim()); }
         catch { return { error: result.stderr?.trim() || 'DSL转换失败' }; }
       },
+      startAgent: startAgentProcess,
     });
 
     // ── MCP 自动注册到 Claude Code ──
@@ -1456,7 +1505,7 @@ if (!gotTheLock) {
         if (!claudeConfig.mcpServers['lingdong-script']) {
           claudeConfig.mcpServers['lingdong-script'] = {
             type: 'http',
-            url: 'http://127.0.0.1:5577/mcp',
+            url: 'http://127.0.0.1:5877/mcp',
           };
           fs.writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2), 'utf-8');
           console.log('[MCP] Auto-registered lingdong-script in ~/.claude.json');

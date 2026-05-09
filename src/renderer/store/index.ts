@@ -976,12 +976,13 @@ export const useStore = create<AppStore>()(
     },
 
     copySelected: () => {
-      const { selection, script } = get() as any;
-      const nodes = script.nodes.filter((n: FlowNode) => selection.nodes.includes(n.id));
-      const edges = script.edges.filter(
-        (e: FlowEdge) => selection.nodes.includes(e.from_node) && selection.nodes.includes(e.to_node)
+      const copyState = get();
+      const selNodes = copyState.ui.selection.nodes;
+      const nodes = copyState.script.nodes.filter((n: FlowNode) => selNodes.includes(n.id));
+      const edges = copyState.script.edges.filter(
+        (e: FlowEdge) => selNodes.includes(e.from_node) && selNodes.includes(e.to_node)
       );
-      set((state) => { state.clipboard = { nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) }; });
+      set((s) => { s.clipboard = { nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) }; });
     },
 
     cutSelected: () => {
@@ -1479,208 +1480,137 @@ useStore.subscribe((state) => {
   } catch {}
 });
 
-// --- Register persistent IPC listeners for engine messages ---
-// This ensures global F9 (from main process) can control engine and update store
+// ─── HMR-safe IPC listener registration ───
 const _api = (window as any).electronAPI;
+const _listenerCleanups: (() => void)[] = [];
 
-// Expose store state for HTTP API bridge (/api/get-state)
-(window as any).__bridge_getState = () => {
-  const s = useStore.getState();
-  return {
-    nodes: s.script.nodes,
-    edges: s.script.edges,
-    meta: s.script.meta,
-    selection: s.ui.selection,
-    viewMode: s.ui.viewMode,
+function _registerListeners() {
+  // Clean up listeners from previous HMR instance
+  for (const cleanup of _listenerCleanups) cleanup();
+  _listenerCleanups.length = 0;
+
+  // Expose store state for HTTP API bridge
+  (window as any).__bridge_getState = () => {
+    const s = useStore.getState();
+    return { nodes: s.script.nodes, edges: s.script.edges, meta: s.script.meta, selection: s.ui.selection, viewMode: s.ui.viewMode };
   };
-};
-(window as any).__bridge_loadScript = (script: any) => {
-  const s = useStore.getState();
-  s.loadScript(script);
-  s.setViewMode('canvas');
-};
-if (_api) {
-  _api.onEngineMessage((msg: any) => {
-    if (!msg || !msg.type) return;
-    switch (msg.type) {
-      case 'node_status':
-        useStore.getState().updateNodeStatus(msg.node_id, msg.status, msg.message);
-        if (msg.status === 'running') {
-          useStore.setState((s) => { s.execution.current_node_id = msg.node_id; });
-        }
-        break;
-      case 'log':
-        useStore.getState().addLog({ level: msg.level || 'info', message: msg.message, node_id: msg.node_id });
-        break;
-      case 'execution_done':
-        useStore.setState((s) => {
-          s.execution.status = msg.status || 'completed';
-          s.execution.finished_at = new Date().toISOString();
-          s.execution.loop_iteration = null;
-          s._executor = null;
-          s.script.nodes.forEach((n) => {
-            if (n.status === 'running') n.status = 'idle';
+  (window as any).__bridge_loadScript = (script: any) => {
+    const s = useStore.getState();
+    s.loadScript(script);
+    s.setViewMode('canvas');
+  };
+
+  if (_api) {
+    _listenerCleanups.push(_api.onEngineMessage((msg: any) => {
+      if (!msg || !msg.type) return;
+      switch (msg.type) {
+        case 'node_status':
+          useStore.getState().updateNodeStatus(msg.node_id, msg.status, msg.message);
+          if (msg.status === 'running') useStore.setState((s) => { s.execution.current_node_id = msg.node_id; });
+          break;
+        case 'log':
+          useStore.getState().addLog({ level: msg.level || 'info', message: msg.message, node_id: msg.node_id });
+          break;
+        case 'execution_done':
+          useStore.setState((s) => {
+            s.execution.status = msg.status || 'completed';
+            s.execution.finished_at = new Date().toISOString();
+            s.execution.loop_iteration = null;
+            s._executor = null;
+            s.script.nodes.forEach((n) => { if (n.status === 'running') n.status = 'idle'; });
           });
-        });
-        break;
-      case 'status_report':
-        useStore.setState((s) => { s.execution.status = msg.status; });
-        break;
-      case 'loop_iteration':
+          break;
+        case 'status_report':
+          useStore.setState((s) => { s.execution.status = msg.status; });
+          break;
+        case 'loop_iteration':
+          useStore.setState((s) => { s.execution.loop_iteration = { current: msg.current, total: msg.total, node_id: msg.node_id }; });
+          break;
+      }
+    }));
+
+    _listenerCleanups.push(_api.onEngineLog((msg: any) => {
+      useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
+    }));
+
+    _listenerCleanups.push(_api.onAgentMessage((msg: any) => {
+      if (msg.type === 'step_complete' && msg.tool === 'generate_flow_script' && msg.result?.success) {
+        const data = msg.result.data || {};
+        const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
+        if (pseudocode) {
+          import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
+            try {
+              const script = parsePseudoToFlow(pseudocode);
+              const store = useStore.getState();
+              script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
+              store.loadScript(script);
+              store.setViewMode('canvas');
+            } catch (e) { console.error('[agent] loadScript failed:', e); }
+          });
+        }
+      }
+      if (msg.type === 'step_complete' && msg.tool !== 'generate_flow_script' && msg.result) {
         useStore.setState((s) => {
-          s.execution.loop_iteration = { current: msg.current, total: msg.total, node_id: msg.node_id };
-        });
-        break;
-    }
-  });
-
-  _api.onEngineLog((msg: any) => {
-    useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
-  });
-
-  // Global agent message handler (works even when AgentView is not mounted)
-  _api.onAgentMessage((msg: any) => {
-    if (msg.type === 'step_complete' && msg.tool === 'generate_flow_script' && msg.result?.success) {
-      const data = msg.result.data || {};
-      const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
-      if (pseudocode) {
-        import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
-          try {
-            const script = parsePseudoToFlow(pseudocode);
-            const store = useStore.getState();
-            script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
-            store.loadScript(script);
-            store.setViewMode('canvas');
-            // Agent will execute steps via supervision — no auto-engineStart
-          } catch (e) { console.error('[agent] loadScript failed:', e); }
+          s.execution.status = msg.result.success ? 'running' : 'error';
+          s.execution.current_node_id = msg.step_num ? `agent_step_${msg.step_num}` : undefined;
         });
       }
-    }
-    // Track agent execution progress on the flowchart
-    if (msg.type === 'step_complete' && msg.tool !== 'generate_flow_script' && msg.result) {
-      const isRunning = msg.result.success === true;
-      useStore.setState((s) => {
-        s.execution.status = isRunning ? 'running' : 'error';
-        s.execution.current_node_id = msg.step_num ? `agent_step_${msg.step_num}` : undefined;
-      });
-    }
-    if (msg.type === 'agent_done') {
-      useStore.setState((s) => {
-        s.execution.status = msg.status === 'completed' ? 'completed' : 'error';
-        s.execution.current_node_id = undefined;
-      });
-    }
-  });
-
-  // API command bridge (from local HTTP server, controlled by Claude Code)
-  _api.onApiCommand((action: string, payload: any) => {
-    const store = useStore.getState();
-    // 推送状态到主进程（用于 get-state 缓存更新）
-    const pushState = () => {
-      const s = useStore.getState();
-      _api.pushState({
-        nodes: s.script.nodes,
-        edges: s.script.edges,
-        meta: s.script.meta,
-        selection: s.ui.selection,
-        viewMode: s.ui.viewMode,
-        ui: s.ui,
-      });
-    };
-    switch (action) {
-      case 'loadScript':
-        if (payload?.nodes) { store.loadScript(payload); pushState(); }
-        break;
-      case 'addNode':
-        if (payload?.type) { store.addNode(payload.type, payload.x || 0, payload.y || 0, payload.params, payload.id); pushState(); }
-        break;
-      case 'updateNode':
-        if (payload?.id && payload?.updates) { store.updateNode(payload.id, payload.updates); pushState(); }
-        break;
-      case 'deleteNodes':
-        if (payload?.ids) { store.deleteNodes(payload.ids); pushState(); }
-        break;
-      case 'addEdge':
-        if (payload?.from_node && payload?.to_node) { store.addEdge(payload); pushState(); }
-        break;
-      case 'autoLayout':
-        store.autoLayout(); pushState();
-        break;
-      case 'updateNodeParams':
-        if (payload?.id && payload?.params) { store.updateNodeParams(payload.id, payload.params); pushState(); }
-        break;
-      case 'deleteEdges':
-        if (payload?.ids) { store.deleteEdges(payload.ids); pushState(); }
-        break;
-      case 'newScript':
-        store.newScript(); pushState();
-        break;
-      case 'setViewMode':
-        if (payload?.mode) { store.setViewMode(payload.mode); pushState(); }
-        break;
-      case 'fitScreen':
-        store.fitToScreen();
-        break;
-      case 'getState':
-        _api.pushState({
-          nodes: store.script.nodes,
-          edges: store.script.edges,
-          meta: store.script.meta,
-          selection: store.ui.selection,
-          viewMode: store.ui.viewMode,
-          ui: store.ui,
+      if (msg.type === 'agent_done') {
+        useStore.setState((s) => {
+          s.execution.status = msg.status === 'completed' ? 'completed' : 'error';
+          s.execution.current_node_id = undefined;
         });
-        break;
-      case 'undo':
-        store.undo();
-        break;
-      case 'redo':
-        store.redo();
-        break;
-      case 'saveScript':
-        store.saveScript();
-        break;
-      case 'setScriptName':
-        if (payload?.name) store.setScriptName(payload.name);
-        break;
-      case 'saveTemplate':
-        if (payload?.name) store.saveAsTemplate(payload.name, payload.description);
-        break;
-      case 'setUI':
-        if (payload) store.setUI(payload);
-        break;
-      case 'copySelected':
-        store.copySelected();
-        break;
-      case 'cutSelected':
-        store.cutSelected();
-        break;
-      case 'paste':
-        store.paste();
-        break;
-      case 'selectAll':
-        store.selectAll();
-        break;
-      case 'clearSelection':
-        store.clearSelection();
-        break;
-      case 'duplicateNodes':
-        if (payload?.ids) store.duplicateNodes(payload.ids);
-        break;
-      default:
-        console.warn('[API] Unknown action:', action);
-    }
-  });
+      }
+    }));
 
-  // 初始化时推送状态到主进程
-  setTimeout(() => {
-    const s = useStore.getState();
-    _api.pushState({
-      nodes: s.script.nodes,
-      edges: s.script.edges,
-      meta: s.script.meta,
-      selection: s.ui.selection,
-      viewMode: s.ui.viewMode,
-    });
-  }, 100);
+    _listenerCleanups.push(_api.onApiCommand((action: string, payload: any) => {
+      const store = useStore.getState();
+      const pushState = () => {
+        const s = useStore.getState();
+        _api.pushState({ nodes: s.script.nodes, edges: s.script.edges, meta: s.script.meta, selection: s.ui.selection, viewMode: s.ui.viewMode, ui: s.ui });
+      };
+      switch (action) {
+        case 'loadScript': if (payload?.nodes) { store.loadScript(payload); pushState(); } break;
+        case 'addNode': if (payload?.type) { store.addNode(payload.type, payload.x || 0, payload.y || 0, payload.params, payload.id); pushState(); } break;
+        case 'updateNode': if (payload?.id && payload?.updates) { store.updateNode(payload.id, payload.updates); pushState(); } break;
+        case 'deleteNodes': if (payload?.ids) { store.deleteNodes(payload.ids); pushState(); } break;
+        case 'addEdge': if (payload?.from_node && payload?.to_node) { store.addEdge(payload); pushState(); } break;
+        case 'autoLayout': store.autoLayout(); pushState(); break;
+        case 'updateNodeParams': if (payload?.id && payload?.params) { store.updateNodeParams(payload.id, payload.params); pushState(); } break;
+        case 'deleteEdges': if (payload?.ids) { store.deleteEdges(payload.ids); pushState(); } break;
+        case 'newScript': store.newScript(); pushState(); break;
+        case 'setViewMode': if (payload?.mode) { store.setViewMode(payload.mode); pushState(); } break;
+        case 'fitScreen': store.fitToScreen(); break;
+        case 'getState': _api.pushState({ nodes: store.script.nodes, edges: store.script.edges, meta: store.script.meta, selection: store.ui.selection, viewMode: store.ui.viewMode, ui: store.ui }); break;
+        case 'undo': store.undo(); break;
+        case 'redo': store.redo(); break;
+        case 'saveScript': store.saveScript(); break;
+        case 'setScriptName': if (payload?.name) store.setScriptName(payload.name); break;
+        case 'saveTemplate': if (payload?.name) store.saveAsTemplate(payload.name, payload.description); break;
+        case 'setUI': if (payload) store.setUI(payload); break;
+        case 'copySelected': store.copySelected(); break;
+        case 'cutSelected': store.cutSelected(); break;
+        case 'paste': store.paste(); break;
+        case 'selectAll': store.selectAll(); break;
+        case 'clearSelection': store.clearSelection(); break;
+        case 'duplicateNodes': if (payload?.ids) store.duplicateNodes(payload.ids); break;
+        default: console.warn('[API] Unknown action:', action);
+      }
+    }));
+
+    // 初始化时推送状态到主进程
+    setTimeout(() => {
+      const s = useStore.getState();
+      _api.pushState({ nodes: s.script.nodes, edges: s.script.edges, meta: s.script.meta, selection: s.ui.selection, viewMode: s.ui.viewMode });
+    }, 100);
+  }
+}
+
+// Register immediately, clean up on HMR reload
+_registerListeners();
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    for (const cleanup of _listenerCleanups) cleanup();
+    _listenerCleanups.length = 0;
+  });
 }

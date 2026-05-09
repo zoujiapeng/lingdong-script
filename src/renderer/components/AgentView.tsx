@@ -9,23 +9,29 @@ interface StepData {
 }
 
 type LogEntry =
-  | { type: 'system'; text: string }
-  | { type: 'step'; data: StepData }
-  | { type: 'user'; text: string }
-  | { type: 'complete'; steps: number }
-  | { type: 'fail'; reason: string }
-  | { type: 'guidance'; text: string }
-  | { type: 'script'; pseudocode: string; explanation: string };
+  | { type: 'system'; text: string; _id?: number }
+  | { type: 'step'; data: StepData; _id?: number }
+  | { type: 'user'; text: string; _id?: number }
+  | { type: 'complete'; steps: number; _id?: number }
+  | { type: 'fail'; reason: string; _id?: number }
+  | { type: 'guidance'; text: string; _id?: number }
+  | { type: 'script'; pseudocode: string; explanation: string; _id?: number };
+
+let _logIdCounter = 0;
+let _hasActiveRun = false;
+let _persistedLog: LogEntry[] = [];
 
 export function AgentView() {
   const [goal, setGoal] = useState('');
   const [running, setRunning] = useState(false);
-  const [log, setLog] = useState<LogEntry[]>([]);
+  const [log, setLog] = useState<LogEntry[]>(() => _persistedLog); // restore from module state
   const [guidance, setGuidance] = useState('');
   const msgEndRef = useRef<HTMLDivElement>(null);
 
   const addEntry = useCallback((entry: LogEntry) => {
-    setLog(prev => [...prev, entry]);
+    const entryWithId = { ...entry, _id: ++_logIdCounter } as any;
+    _persistedLog = [..._persistedLog, entryWithId];
+    setLog(_persistedLog);
   }, []);
 
   useEffect(() => {
@@ -40,6 +46,7 @@ export function AgentView() {
     const unsubMessages = api.onAgentMessage?.((msg: any) => {
       switch (msg.type) {
         case 'agent_start':
+          _hasActiveRun = true;
           addEntry({ type: 'system', text: `正在处理：${msg.goal}` });
           setRunning(true);
           break;
@@ -71,14 +78,18 @@ export function AgentView() {
           break;
 
         case 'agent_done':
+          if (!_hasActiveRun) return;
           addEntry(msg.status === 'completed'
             ? { type: 'complete', steps: msg.total_steps }
             : { type: 'fail', reason: msg.fail_reason || '未知原因' });
           setRunning(false);
+          _hasActiveRun = false;
           break;
 
         case 'log':
           if (msg.level === 'error') addEntry({ type: 'system', text: `[错误] ${msg.message}` });
+          else if (msg.level === 'warn') addEntry({ type: 'system', text: `[警告] ${msg.message}` });
+          else addEntry({ type: 'system', text: msg.message });
           break;
 
         case 'error':
@@ -96,16 +107,31 @@ export function AgentView() {
 
   const runAgent = useCallback(async () => {
     if (!goal.trim()) return;
+    _hasActiveRun = false; // reset: wait for fresh agent_start
+    _persistedLog = [];
     setLog([]);
     addEntry({ type: 'system', text: '正在启动...' });
 
     // Read API config from settings
-    const apiKey = (window as any).__DEEPSEEK_KEY__ || localStorage.getItem('lingdong-deepseek-key') || '';
-    const apiBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || '').replace(/\/+$/, '');
-    const model = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || '';
+    const rawKey = (window as any).__DEEPSEEK_KEY__ || localStorage.getItem('lingdong-deepseek-key') || '';
+    const rawBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || '').replace(/\/+$/, '');
+    const rawModel = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || '';
+    const multimodal = (window as any).__LLM_MULTIMODAL__ !== undefined
+      ? (window as any).__LLM_MULTIMODAL__ : localStorage.getItem('lingdong-llm-multimodal') === 'true';
+    const verifyEnabled = localStorage.getItem('lingdong-verify-enabled') === 'true';
+    const apiKey = rawKey.trim();
+    const apiBase = rawBase.trim();
+    const model = rawModel.trim();
+
+    // Check API key before starting
+    if (!apiKey) {
+      addEntry({ type: 'system', text: '⚠️ 请先在设置页面配置 API 密钥后重试' });
+      setRunning(false);
+      return;
+    }
 
     try {
-      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model }, true);
+      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false' }, true);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
@@ -116,6 +142,7 @@ export function AgentView() {
       await window.electronAPI!.agentStop();
       addEntry({ type: 'system', text: '已停止' });
       setRunning(false);
+      _hasActiveRun = false;
     } catch (err: any) {
       addEntry({ type: 'system', text: `停止失败: ${err.message}` });
     }
@@ -182,17 +209,22 @@ export function AgentView() {
               简单操作直接执行，复杂任务生成可视化流程图。
             </div>
           )}
-          {log.map((entry, i) => (
-            <div key={i} className={`agent-msg agent-msg-${entry.type === 'script' ? 'system' : entry.type}`}>
+          {log.map((entry) => (
+            <div key={entry._id!} className={`agent-msg agent-msg-${entry.type === 'script' ? 'system' : entry.type}`}>
               {entry.type === 'system' && <span>{entry.text}</span>}
 
               {entry.type === 'step' && (
                 <>
                   <span className="agent-step-num">[{entry.data.step_num}]</span>{' '}
-                  <span className="agent-action">{entry.data.tool}</span>{' '}
-                  <span className="agent-conf">conf={entry.data.result.confidence.toFixed(2)}</span>
+                  <span className="agent-action">{entry.data.tool}</span>
+                  {(entry.data.step_label || entry.data.tool !== entry.data.step_type) && (
+                    <span className="agent-step-label"> — {entry.data.step_label || ''}</span>
+                  )}
+                  <span className="agent-conf"> conf={entry.data.result.confidence.toFixed(2)}</span>
                   {entry.data.result.success ? ' ✓' : ' ✗'}
-                  {entry.data.thought && <div className="agent-thought">{entry.data.thought.slice(0, 200)}</div>}
+                  {(entry.data.thought || (entry.data as any).error) && (
+                    <div className="agent-thought">{(entry.data as any).error || entry.data.thought?.slice(0, 200)}</div>
+                  )}
                 </>
               )}
 

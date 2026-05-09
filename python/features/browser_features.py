@@ -4,11 +4,13 @@
 
 安装: pip install playwright && playwright install chromium
 """
+import threading
 from features.registry import feature, P, TC, FeatureCategory as F
 
 HAS_PLAYWRIGHT = False
 _browser = None
 _page = None
+_browser_lock = threading.Lock()
 
 try:
     from playwright.sync_api import sync_playwright
@@ -18,19 +20,22 @@ except ImportError:
 
 
 def _get_page():
-    """获取或创建浏览器页面（延迟初始化）"""
+    """获取或创建浏览器页面（延迟初始化，线程安全）"""
     global _browser, _page
     if _page is not None:
         return _page
     if not HAS_PLAYWRIGHT:
         return None
-    try:
-        pw = sync_playwright().start()
-        _browser = pw.chromium.launch(headless=False)
-        _page = _browser.new_page()
-        return _page
-    except Exception:
-        return None
+    with _browser_lock:
+        if _page is not None:
+            return _page
+        try:
+            pw = sync_playwright().start()
+            _browser = pw.chromium.launch(headless=False)
+            _page = _browser.new_page()
+            return _page
+        except Exception:
+            return None
 
 
 def _not_installed_msg() -> dict:

@@ -9,6 +9,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
 
 # 全局录制状态
 _recorder: dict = {"active": False, "process": None, "output": "", "start_time": 0}
+_recorder_lock = threading.Lock()
 
 
 def _ffmpeg_available() -> bool:
@@ -117,8 +118,9 @@ def screenshot_region_live(region: str, max_fps: float = 5, change_threshold: fl
 )
 def screen_record_start(output: str, region: str = "", fps: int = 10, include_audio: bool = False) -> dict:
     global _recorder
-    if _recorder["active"]:
-        return {"success": False, "error": "已有录制任务在进行中，请先停止"}
+    with _recorder_lock:
+        if _recorder["active"]:
+            return {"success": False, "error": "已有录制任务在进行中，请先停止"}
 
     if not _ffmpeg_available():
         return {"success": False, "error": "FFmpeg 未安装。下载: https://ffmpeg.org/download.html 并加入 PATH"}
@@ -158,10 +160,11 @@ def screen_record_start(output: str, region: str = "", fps: int = 10, include_au
     except Exception as e:
         return {"success": False, "error": f"FFmpeg 启动失败: {e}"}
 
-    _recorder["active"] = True
-    _recorder["process"] = proc
-    _recorder["output"] = output
-    _recorder["start_time"] = time.time()
+    with _recorder_lock:
+        _recorder["active"] = True
+        _recorder["process"] = proc
+        _recorder["output"] = output
+        _recorder["start_time"] = time.time()
 
     return {
         "success": True,
@@ -187,12 +190,12 @@ def screen_record_start(output: str, region: str = "", fps: int = 10, include_au
 )
 def screen_record_stop(save: bool = True) -> dict:
     global _recorder
-    if not _recorder["active"] or not _recorder["process"]:
-        return {"success": False, "error": "没有正在进行的录制"}
-
-    proc = _recorder["process"]
-    output = _recorder["output"]
-    duration = time.time() - _recorder["start_time"]
+    with _recorder_lock:
+        if not _recorder["active"] or not _recorder["process"]:
+            return {"success": False, "error": "没有正在进行的录制"}
+        proc = _recorder["process"]
+        output = _recorder["output"]
+        duration = time.time() - _recorder["start_time"]
 
     try:
         if proc.stdin:
@@ -204,8 +207,9 @@ def screen_record_stop(save: bool = True) -> dict:
     except Exception:
         pass
 
-    _recorder["active"] = False
-    _recorder["process"] = None
+    with _recorder_lock:
+        _recorder["active"] = False
+        _recorder["process"] = None
 
     if not save and os.path.exists(output):
         try:

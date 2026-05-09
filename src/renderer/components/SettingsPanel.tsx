@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2 } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield } from 'lucide-react';
 import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
 const BASE_STORAGE = 'lingdong-llm-base';
 const MODEL_STORAGE = 'lingdong-llm-model';
+const MULTIMODAL_STORAGE = 'lingdong-llm-multimodal';
 
 function getStoredKey(): string {
   try { return localStorage.getItem(KEY_STORAGE) || ''; } catch { return ''; }
@@ -26,12 +27,28 @@ function storeBase(base: string) {
 function storeModel(model: string) {
   try { localStorage.setItem(MODEL_STORAGE, model); } catch {}
 }
+function getStoredMultimodal(): boolean {
+  try { return localStorage.getItem(MULTIMODAL_STORAGE) === 'true'; } catch { return false; }
+}
+function storeMultimodal(val: boolean) {
+  try { localStorage.setItem(MULTIMODAL_STORAGE, val ? 'true' : 'false'); } catch {}
+}
+
+const VERIFY_STORAGE = 'lingdong-verify-enabled';
+function getStoredVerify(): boolean {
+  try { return localStorage.getItem(VERIFY_STORAGE) === 'true'; } catch { return false; }
+}
+function storeVerify(val: boolean) {
+  try { localStorage.setItem(VERIFY_STORAGE, val ? 'true' : 'false'); } catch {}
+}
 
 export function SettingsPanel() {
   const { script, ui, setUI } = useStore();
   const [apiKey, setApiKey] = useState(() => getStoredKey());
   const [apiBase, setApiBase] = useState(() => getStoredBase());
   const [model, setModel] = useState(() => getStoredModel());
+  const [multimodal, setMultimodal] = useState(() => getStoredMultimodal());
+  const [verifyEnabled, setVerifyEnabled] = useState(() => getStoredVerify());
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
@@ -84,9 +101,11 @@ export function SettingsPanel() {
     storeKey(apiKey);
     storeBase(apiBase);
     storeModel(model);
+    storeMultimodal(multimodal);
     (window as any).__DEEPSEEK_KEY__ = apiKey;
     (window as any).__LLM_API_BASE__ = apiBase;
     (window as any).__LLM_MODEL__ = model;
+    (window as any).__LLM_MULTIMODAL__ = multimodal;
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);
   };
@@ -276,6 +295,40 @@ export function SettingsPanel() {
               </div>
             )}
           </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Eye size={15} />
+              <span>多模态（视觉能力）</span>
+            </div>
+            <button
+              className={`toggle ${multimodal ? 'on' : ''}`}
+              onClick={() => setMultimodal(!multimodal)}
+            />
+          </div>
+          {multimodal && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+              启用后 AI 助手和 Agent 可使用截图分析、图像识别等视觉能力。
+              需要模型支持多模态（如 GPT-4o、Claude 3.5+、Qwen-VL）。
+              DeepSeek 等纯文本模型不支持多模态，开启后调用会出错。
+            </div>
+          )}
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Shield size={15} />
+              <span>执行验证（Agent 模式）</span>
+            </div>
+            <button
+              className={`toggle ${verifyEnabled ? 'on' : ''}`}
+              onClick={() => { const v = !verifyEnabled; setVerifyEnabled(v); storeVerify(v); }}
+            />
+          </div>
+          {!verifyEnabled && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+              关闭后 Agent 执行步骤后跳过验证，直接继续下一步，执行更快但不检测结果是否正确。
+            </div>
+          )}
         </section>
 
         {/* 默认设置 */}

@@ -175,6 +175,20 @@ export function AIAssistant() {
       return;
     }
 
+    const apiBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+    const model = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || 'deepseek-chat';
+    const multimodal = (window as any).__LLM_MULTIMODAL__ !== undefined
+      ? (window as any).__LLM_MULTIMODAL__ : localStorage.getItem('lingdong-llm-multimodal') === 'true';
+
+    // Warn if multimodal is enabled with a likely text-only model
+    if (multimodal) {
+      const textOnlyPatterns = [/^deepseek/i, /^gpt-3\.5/i, /^gpt-4$/i, /^llama/i, /^mistral/i, /^mixtral/i, /^phi-/i];
+      const isLikelyTextOnly = textOnlyPatterns.some(pat => pat.test(model.trim()));
+      if (isLikelyTextOnly) {
+        setExecStatus(`⚠️ 当前模型「${model}」可能不支持多模态（视觉识别）。如调用出错，请到设置中关闭多模态开关，或更换为支持多模态的模型（GPT-4o、Claude 3.5+、Qwen-VL 等）。`);
+      }
+    }
+
     const systemPrompt = promptBuilder.build({
       language: 'chinese',
       query: text,
@@ -188,8 +202,6 @@ export function AIAssistant() {
 
     try {
       const api = (window as any).electronAPI;
-      const apiBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
-      const model = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || 'deepseek-chat';
       let data: any;
 
       if (api?.aiGenerate) {

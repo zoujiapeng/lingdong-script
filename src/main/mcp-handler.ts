@@ -1,5 +1,5 @@
 /**
- * MCP over HTTP — 使 :5577 API 服务器兼作 MCP HTTP 端点
+ * MCP over HTTP — 使 :5877 API 服务器兼作 MCP HTTP 端点
  *
  * 实现 Model Context Protocol (Streamable HTTP Transport)
  * 供 Claude Code 通过 HTTP 连接，无需 stdio 路径（便携版关键）

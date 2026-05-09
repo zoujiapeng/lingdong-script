@@ -27,3 +27,8 @@ export function setAgentProcess(p: ChildProcess | null) { agentProcess = p; }
 /** Agent 运行状态 */
 export let agentRunning = false;
 export function setAgentRunning(v: boolean) { agentRunning = v; }
+
+/** Agent 进程令牌，防止陈旧事件污染新进程 */
+export let agentToken = 0;
+export function nextAgentToken(): number { return ++agentToken; }
+export function isAgentTokenCurrent(token: number): boolean { return token === agentToken; }

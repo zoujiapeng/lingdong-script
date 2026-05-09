@@ -1,6 +1,6 @@
 /**
  * HTTP API 服务器（提取自 main.ts）
- * 负责 :5577 端口的 REST API，供 Claude Code 远程控制前端
+ * 负责 :5877 端口的 REST API，供 Claude Code 远程控制前端
  */
 import * as http from 'http';
 import * as path from 'path';
@@ -22,9 +22,10 @@ export interface ApiDeps {
   wheelSelect: (params: any) => Promise<any>;
   ocrRecognizeRegion: (region: any) => Promise<any>;
   dslToFlow: (dslText: string) => Promise<any>;
+  startAgent: (goal: string, config: Record<string, string>, supervise: boolean) => void;
 }
 
-const API_PORT = 5577;
+const API_PORT = 5877;
 
 export function startApiServer(deps: ApiDeps): http.Server {
   const apiServer = http.createServer((req, res) => {
@@ -145,6 +146,8 @@ export function startApiServer(deps: ApiDeps): http.Server {
               const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
               const dslProc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
               const out: Buffer[] = [];
+              let sent = false;
+              const sendOnce = (code: number, data: any) => { if (!sent) { sent = true; send(code, data); } };
               dslProc.stdout!.on('data', (c: Buffer) => out.push(c));
               dslProc.stderr!.on('data', (c: Buffer) => out.push(c));
               dslProc.on('close', () => {
@@ -152,10 +155,10 @@ export function startApiServer(deps: ApiDeps): http.Server {
                 try {
                   const flow = JSON.parse(dslStdout);
                   deps.mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                  send(200, { ok: true, flow });
-                } catch { send(500, { error: 'DSL 转换失败', raw: dslStdout }); }
+                  sendOnce(200, { ok: true, flow });
+                } catch { sendOnce(500, { error: 'DSL 转换失败', raw: dslStdout }); }
               });
-              dslProc.on('error', (e: Error) => send(500, { error: e.message }));
+              dslProc.on('error', (e: Error) => sendOnce(500, { error: e.message }));
               dslProc.stdin!.write(payload.dsl);
               dslProc.stdin!.end();
             })();
@@ -184,6 +187,8 @@ export function startApiServer(deps: ApiDeps): http.Server {
           case '/api/create-flow': {
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             (async () => {
+              let sent = false;
+              const sendOnce = (code: number, data: any) => { if (!sent) { sent = true; send(code, data); } };
               let dslText = payload.dsl;
               if (!dslText && payload.description) {
                 const llmResult = await callLLM({
@@ -196,7 +201,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
                   model: payload.model,
                 });
                 dslText = llmResult.choices?.[0]?.message?.content?.trim();
-                if (!dslText) { send(500, { error: 'DSL 生成为空' }); return; }
+                if (!dslText) { sendOnce(500, { error: 'DSL 生成为空' }); return; }
               }
               if (dslText) {
                 const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
@@ -208,14 +213,14 @@ export function startApiServer(deps: ApiDeps): http.Server {
                   try {
                     const flow = JSON.parse(stdout);
                     deps.mainWindow!.webContents.send('api-command', { action: 'loadScript', payload: flow });
-                    send(200, { ok: true, flow });
-                  } catch (e: any) { send(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
+                    sendOnce(200, { ok: true, flow });
+                  } catch (e: any) { sendOnce(500, { error: 'JSON parse: ' + e.message, raw: stdout.slice(0, 500) }); }
                 });
-                proc.on('error', (e: Error) => send(500, { error: e.message }));
+                proc.on('error', (e: Error) => sendOnce(500, { error: e.message }));
                 proc.stdin!.write(dslText);
                 proc.stdin!.end();
               } else {
-                send(400, { error: '需要 dsl 或 description' });
+                sendOnce(400, { error: '需要 dsl 或 description' });
               }
             })();
             break;
@@ -236,20 +241,20 @@ export function startApiServer(deps: ApiDeps): http.Server {
 
           // ─── Screenshot ───
           case '/api/screenshot/capture':
-            deps.captureScreenshot().then(r => send(200, r));
+            deps.captureScreenshot().then(r => send(200, r)).catch((e: any) => send(500, { error: e.message }));
             break;
 
           case '/api/screenshot/select-region':
-            deps.selectRegion().then(r => send(200, r));
+            deps.selectRegion().then(r => send(200, r)).catch((e: any) => send(500, { error: e.message }));
             break;
 
           case '/api/ocr/region':
-            deps.ocrRecognizeRegion(payload).then(r => send(200, r));
+            deps.ocrRecognizeRegion(payload).then(r => send(200, r)).catch((e: any) => send(500, { error: e.message }));
             break;
 
           // ─── Wheel Select ───
           case '/api/wheel-select':
-            deps.wheelSelect(payload).then(r => send(200, r));
+            deps.wheelSelect(payload).then(r => send(200, r)).catch((e: any) => send(500, { error: e.message }));
             break;
 
           // ─── Macro ───
@@ -382,7 +387,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
           // ─── AI ───
           case '/api/ai/generate':
             if (!payload.apiKey || !payload.messages) { send(400, { error: '缺少 apiKey 或 messages' }); return; }
-            callLLM(payload).then(r => send(200, r));
+            callLLM(payload).then(r => send(200, r)).catch((e: any) => send(500, { error: e.message }));
             break;
 
           // ─── UI ───
@@ -537,6 +542,13 @@ export function startApiServer(deps: ApiDeps): http.Server {
                 res.end();
               }
             })();
+            break;
+
+          // ─── AI Agent ───
+          case '/api/agent-start':
+            if (!payload.goal) { send(400, { error: '缺少 goal' }); return; }
+            deps.startAgent(payload.goal, payload.config || {}, payload.supervise !== false);
+            send(200, { ok: true });
             break;
 
           default:
