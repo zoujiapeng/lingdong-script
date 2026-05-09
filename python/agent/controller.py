@@ -7,6 +7,9 @@ Drives the autonomous agent loop:
 3. Observe result
 4. Update state and memory
 5. Decide termination
+
+Integrated with EventBus, ToolRegistry, and ObservationCollector
+from the typed core layer.
 """
 
 import json
@@ -22,6 +25,10 @@ from agent.memory import ShortTermMemory, LongTermMemory
 from agent.planner import Planner
 from agent.pseudocode import parse_pseudocode
 from agent.verifier import verify_step as _vrfy_step, evaluate_condition as _eval_cond
+from core.events import EventBus, global_bus, EVENT_AGENT_START, EVENT_AGENT_DONE, EVENT_LOG
+from core.interfaces import ToolResult, Observation, StepRecord, TaskState
+from tools.registry import tool_registry
+from agent.observation import ObservationCollector
 
 logger = logging.getLogger("agent.controller")
 
@@ -33,7 +40,8 @@ class AgentController:
     MAX_CONSECUTIVE_FAILURES = 3
 
     def __init__(self, api_key: str = "", api_base: str = "", model: str = "",
-                 multimodal: bool | str = False, verify_enabled: bool = False):
+                 multimodal: bool | str = False, verify_enabled: bool = False,
+                 event_bus: EventBus | None = None):
         self.planner = Planner(api_key=api_key, api_base=api_base, model=model,
                                multimodal=multimodal)
         self.short_mem = ShortTermMemory(max_items=10)
@@ -45,6 +53,9 @@ class AgentController:
         self._guidance_queue = None  # Queue drained before each step
         self._verify_enabled = verify_enabled
         self._last_launched: str = ""  # track last launched program for focus
+        # New typed subsystems
+        self._bus = event_bus or global_bus
+        self.observation_collector = ObservationCollector()
 
     def set_event_callback(self, cb):
         """Set callback for event streaming (e.g. to IPC stdout)."""
@@ -63,6 +74,16 @@ class AgentController:
 
     def _emit(self, event: str, data: dict):
         logger.debug("EVENT %s: %s", event, json.dumps(data, default=str)[:200])
+        # Route to EventBus subscribers (new typed layer)
+        if event == "agent_start":
+            self._bus.emit(EVENT_AGENT_START, data)
+        elif event == "agent_done":
+            self._bus.emit(EVENT_AGENT_DONE, data)
+        elif event == "log":
+            self._bus.emit(EVENT_LOG, data)
+        else:
+            self._bus.emit(event, data)
+        # Route to existing IPC callback (backward compat)
         if self._event_callback:
             self._event_callback(event, data)
 
@@ -305,7 +326,7 @@ class AgentController:
         }
 
     def _execute_tool(self, tool_name: str, params: dict, state: dict) -> dict:
-        """Execute a tool via the feature registry."""
+        """Execute a tool via the typed ToolRegistry (with fallback to feature registry)."""
         if tool_name in ("complete",):
             return {"success": True, "confidence": 1.0, "data": {}}
 
@@ -314,8 +335,7 @@ class AgentController:
             return {"success": False, "confidence": 0, "data": {},
                     "error": reason}
 
-        # Map agent tool names to feature registry names
-        # Unmapped names (e.g. "press") fall through to the pyautogui fallback
+        # Map agent tool names to registry names
         tool_map = {
             "click": "click_target",
             "find_image": "find_image",
@@ -324,7 +344,6 @@ class AgentController:
             "scroll": "scroll",
             "hotkey": "hotkey",
             "wait": "wait_action",
-            # CLI / file operations
             "run_command": "run_command",
             "read_file": "file_read",
             "write_file": "file_write",
@@ -335,18 +354,28 @@ class AgentController:
             "move_file": "file_move",
             "delete_file": "file_delete",
             "file_edit": "file_edit",
-            # Flow generation
             "generate_flow_script": "generate_flow_script",
         }
 
         feature_name = tool_map.get(tool_name, tool_name)
 
         try:
+            clean_params = self._normalize_params(feature_name, params)
+
+            # Try typed ToolRegistry first
+            tr = tool_registry.get(feature_name)
+            if tr is not None:
+                result = tr.execute(clean_params)
+                return {
+                    "success": result.success,
+                    "confidence": result.confidence,
+                    "data": result.data if result.data is not None else {},
+                    "error": result.error,
+                }
+
+            # Fallback: raw feature registry
             import features._all  # noqa
             from features.registry import registry
-
-            # Normalize params
-            clean_params = self._normalize_params(feature_name, params)
 
             result = registry.execute(feature_name, **clean_params)
             success = bool(result) if not isinstance(result, dict) else result.get("success", True)
@@ -356,7 +385,6 @@ class AgentController:
                 "data": {"result": result} if not isinstance(result, dict) else result,
             }
         except ImportError:
-            # Fallback: direct pyautogui
             return self._fallback_execute(tool_name, params)
         except Exception as e:
             logger.warning("Tool %s failed: %s", tool_name, e)
@@ -589,6 +617,25 @@ class AgentController:
             if step_type in ("click", "text_click", "hotkey", "launch", "focus", "scroll", "drag"):
                 self._emit("log", {"level": "info", "message": "等待屏幕稳定..."})
                 self._wait_screen_stable()
+
+            # ── 3b. Collect observation after action ──
+            try:
+                last_tool_result = ToolResult(
+                    success=action_result.get("success", False),
+                    confidence=action_result.get("confidence", 1.0),
+                    data=action_result.get("data"),
+                    error=action_result.get("error"),
+                )
+                obs = self.observation_collector.collect_after_action(last_tool_result)
+                action_result["_observation"] = self.observation_collector.summarize(obs)
+                self._bus.emit("observation:collected", {
+                    "step": state["current_step"],
+                    "window": obs.windowTitle,
+                    "apps": obs.currentApp,
+                    "text_count": len(obs.ocrText),
+                })
+            except Exception as e:
+                logger.debug("Observation collection failed: %s", e)
 
             # ── 4. Auto-handle file save dialog after hotkey ──
             if step_type == "hotkey":

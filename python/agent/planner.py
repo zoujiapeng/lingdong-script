@@ -12,6 +12,8 @@ import re
 import time
 from typing import Optional
 
+from core.interfaces import LLMProvider as LLMProviderProtocol
+
 logger = logging.getLogger("agent.planner")
 
 SUPERVISOR_PROMPT = """You are supervising execution of a pre-generated desktop automation plan.
@@ -88,21 +90,36 @@ Strategy rules (MUST follow):
 """
 
 
+
 class Planner:
-    """LLM-powered planner."""
+    """LLM-powered planner with pluggable provider backend.
+
+    Accepts either a provider instance or legacy api_key/api_base/model
+    parameters for backward compatibility.
+    """
 
     def __init__(self, api_key: str = "", api_base: str = "", model: str = "",
-                 multimodal: bool | str = False):
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        self._api_base = (api_base or os.environ.get("LLM_API_BASE", "") or
-                          "https://api.deepseek.com/v1").rstrip("/")
-        self._model = model or os.environ.get("LLM_MODEL", "") or "deepseek-chat"
-        # Read multimodal flag from param or env; env might be "true"/"false"
-        if isinstance(multimodal, bool):
-            self._multimodal = multimodal
+                 multimodal: bool | str = False,
+                 provider: LLMProviderProtocol | None = None):
+        if provider is not None:
+            self._provider = provider
+            self._multimodal = multimodal if isinstance(multimodal, bool) else False
         else:
-            env_val = multimodal or os.environ.get("LLM_MULTIMODAL", "")
-            self._multimodal = env_val.lower() in ("true", "1", "yes")
+            # Legacy initialization — create default DeepSeekProvider
+            from providers.deepseek import DeepSeekProvider
+            resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+            resolved_base = (api_base or os.environ.get("LLM_API_BASE", "") or
+                            "https://api.deepseek.com/v1").rstrip("/")
+            resolved_model = model or os.environ.get("LLM_MODEL", "") or "deepseek-chat"
+            self._provider = DeepSeekProvider(
+                api_key=resolved_key, api_base=resolved_base, model=resolved_model,
+            )
+            # Read multimodal flag from param or env
+            if isinstance(multimodal, bool):
+                self._multimodal = multimodal
+            else:
+                env_val = multimodal or os.environ.get("LLM_MULTIMODAL", "")
+                self._multimodal = env_val.lower() in ("true", "1", "yes")
 
     def decide_recovery(
         self,
@@ -199,35 +216,30 @@ class Planner:
             {"role": "user", "content": user_content},
         ]
 
-    def _call_api(self, messages: list[dict]) -> dict:
-        import requests as _req
+    @property
+    def provider(self) -> LLMProviderProtocol:
+        """Access the underlying LLM provider."""
+        return self._provider
 
-        for attempt in range(3):
-            try:
-                resp = _req.post(
-                    f"{self._api_base}/chat/completions",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self._api_key}",
-                    },
-                    json={
-                        "model": self._model,
-                        "messages": messages,
-                        "max_tokens": 1000,
-                        "temperature": 0.1,
-                    },
-                    timeout=90,
-                )
-                resp.raise_for_status()
-                raw = resp.json()["choices"][0]["message"]["content"].strip()
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                return json.loads(raw)
-            except Exception as e:
-                logger.warning("API attempt %d failed: %s", attempt + 1, e)
-                if attempt < 2:
-                    time.sleep(1.5 ** attempt)
-        return self._fallback_plan(str(messages[-1].get("content", ""))[:100])
+    def _call_api(self, messages: list[dict]) -> dict:
+        """Send messages to the LLM provider and parse the response as JSON."""
+        try:
+            response = self._provider.chat(
+                messages,
+                temperature=0.1,
+                max_tokens=1000,
+            )
+            raw = response.get("content", "")
+            if not raw:
+                logger.warning("Provider returned empty content")
+                return self._fallback_plan(str(messages[-1].get("content", ""))[:100])
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse LLM response as JSON: %s", e)
+            return self._fallback_plan(str(messages[-1].get("content", ""))[:100])
+        except Exception as e:
+            logger.warning("Provider call failed: %s", e)
+            return self._fallback_plan(str(messages[-1].get("content", ""))[:100])
 
     @staticmethod
     def _fallback_plan(state_summary: str) -> dict:
