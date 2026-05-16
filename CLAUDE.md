@@ -296,6 +296,7 @@ Agent Controller
 - **Python 协议**: `engine/engine.py` 通过 stdin/stdout JSON 与 Electron 通信
 - **测试**: `pytest tests/` 102 tests (Python), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
+- **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
 
 ## 节点类型速查
 
@@ -368,6 +369,6 @@ gh release create v1.0.1 "release/灵动脚本-1.0.0-portable.exe" --generate-no
 - **`--prod` 标志**：在 `npx electron .` 时强制使用 `loadFile`（生产模式路径），用于测试
 - **`--minimized` 标志**：默认窗口正常显示，加此标志则启动后最小化
 - **`getBaseDir()`**：所有 Python 子进程的 `cwd` 通过此函数统一解析，开发时指向项目根目录，生产时指向 `process.resourcesPath`
-- **`extraResources`**：`python/`、`src/python/`、`tools/` 目录通过 `extraResources` 复制到 asar 外部，Python 子进程可直接访问
+- **`extraResources`**：`python/`、`tools/` 目录通过 `extraResources` 复制到 asar 外部，Python 子进程可直接访问
 - **Python 路径**：生产模式下 Python 脚本位于 `resources/python/`，通过 `getEngineScriptPath()` 统一解析
 
