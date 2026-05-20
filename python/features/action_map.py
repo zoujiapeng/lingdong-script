@@ -4,11 +4,20 @@
 DSLExecutor 使用简短动作名（click/type/launch 等）调用 action_handler。
 此映射表桥接动作名与 @feature 注册表中的完整功能名称。
 同时提供 make_action_handler() 工厂函数，用 registry.execute 构建 handler。
+
+优先级链（2026-05-17 重构）:
+  RPA.Windows (desktop_actions) - 控件级别定位，最可靠
+  → uiautomation (yinkaisheng) - 按文本找控件
+  → win32api - 像素坐标操作
+  → pyautogui - 截图降级
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("action_map")
+
 # DSLExecutor 动作名 → @feature 名称
-# 不存在映射的将直接作为 feature name 使用
 ACTION_TO_FEATURE: dict[str, str] = {
     "click": "click_target",
     "type": "type_text",
@@ -20,7 +29,6 @@ ACTION_TO_FEATURE: dict[str, str] = {
     "ocr_extract": "ocr_extract_all",
     "image_find": "find_image",
     "region_wait": "wait_region",
-    # 以下名称与 feature 名称一致，无需映射
     "drag": "drag",
     "scroll": "scroll",
     "screenshot": "screenshot",
@@ -32,14 +40,22 @@ ACTION_TO_FEATURE: dict[str, str] = {
     "popup_close": "popup_close",
     "color_check": "color_check",
     "find_canvas": "find_canvas",
-    # DSL 内部动作（没有对应 feature）
-    # "delay" — time.sleep，由 handler 内联处理
-    # "check_condition" — 条件求值，由 handler 内联处理
-    # "template_capture" — 模板截图注册，无对应 feature
+}
+
+# RPA.Windows desktop_actions 方法映射（优先使用）
+_RPA_ACTION_MAP: dict[str, str] = {
+    "click": "click_coordinates",
+    "type": "type_text",
+    "launch": "launch_program",
+    "hotkey": "send_keys",
+    "scroll": "scroll",
+    "drag": "drag_and_drop",
+    "focus_window": "focus_window",
+    "screenshot": "screenshot",
+    "wait": None,  # time.sleep, no RPA equivalent
 }
 
 # Agent controller step_type → @feature 名称
-# 与 ACTION_TO_FEATURE 重叠但覆盖更多类型（file_read/run_command 等）
 STEP_TYPE_TO_FEATURE: dict[str, str | None] = {
     "click": "click_target",
     "image_click": "image_click",
@@ -53,12 +69,102 @@ STEP_TYPE_TO_FEATURE: dict[str, str | None] = {
     "file_write": "file_write",
     "mouse_move": "mouse_move",
     "hotkey": "hotkey",
-    "wait": None,       # time.sleep
-    "type": None,       # 剪贴板或键盘输入（有 fallback 逻辑）
-    "text_click": None, # OCR 查找 → pyautogui.click
-    "file_save": None,  # 保存文件对话框（有 fallback 逻辑）
-    "condition": None,  # 条件分支（内部求值）
+    "wait": None,
+    "type": None,
+    "text_click": None,
+    "file_save": None,
+    "condition": None,
 }
+
+
+def _rpa_handler(action: str, **kwargs) -> object | None:
+    """Try to handle action via RPA.Windows (desktop_actions).
+    Returns None if RPA is not available or action not supported.
+    """
+    method_name = _RPA_ACTION_MAP.get(action)
+    if method_name is None:
+        return None
+
+    try:
+        from rpa_keywords.desktop_actions import desktop_actions
+        rpa = desktop_actions()
+        method = getattr(rpa, method_name, None)
+        if method is None:
+            return None
+
+        # Map common kwargs to desktop_actions method parameters
+        if action == "click":
+            x = kwargs.get("x")
+            y = kwargs.get("y")
+            target = kwargs.get("target")
+            button = kwargs.get("button", "left")
+
+            # If x,y provided as kwargs, use directly
+            if x is not None and y is not None:
+                return rpa.click_coordinates(int(x), int(y), button)
+
+            # If target is text coordinates like "100,200"
+            if target and isinstance(target, str):
+                try:
+                    parts = target.replace(",", " ").split()
+                    if len(parts) == 2:
+                        return rpa.click_coordinates(int(parts[0]), int(parts[1]), button)
+                except (ValueError, TypeError):
+                    pass
+                # Target is text → use click_element with name locator
+                return rpa.click_element(f"name:{target}")
+
+            return None
+
+        elif action == "type":
+            text = kwargs.get("text", "")
+            if text:
+                return method(text)
+            return None
+
+        elif action == "hotkey":
+            keys = kwargs.get("keys", "")
+            if isinstance(keys, list):
+                keys = "+".join(keys)
+            if keys:
+                return rpa.send_keys(keys)
+            return None
+
+        elif action == "scroll":
+            clicks = kwargs.get("clicks", 3)
+            direction = "down" if clicks >= 0 else "up"
+            return method(direction, abs(clicks))
+
+        elif action == "launch":
+            target = kwargs.get("target", "")
+            if target:
+                return method(target)
+            return None
+
+        elif action == "focus_window":
+            title = kwargs.get("title", "")
+            if title:
+                return method(title)
+            return None
+
+        elif action == "screenshot":
+            dest = kwargs.get("dest")
+            return method(dest or "")
+
+        elif action == "drag":
+            source = kwargs.get("from_target", "")
+            target = kwargs.get("to_target", "")
+            if source and target:
+                return method(source, target)
+            return None
+
+        return None
+    except ImportError as e:
+        logger.debug("RPA.Windows not available, fallback to old path: %s", e)
+        return None
+    except Exception as e:
+        logger.debug("RPA.Windows action failed, fallback to old path: %s", e)
+        return None
 
 
 def resolve_feature(step_type: str) -> str | None:
@@ -71,12 +177,14 @@ def resolve_feature(step_type: str) -> str | None:
 def make_action_handler():
     """用 registry.execute 构建 DSLExecutor 可用的 action_handler。
 
+    优先级: RPA.Windows → registry.execute (@feature → ActionHandler)
+
     返回: (action: str, **kwargs) → Any 的可调用对象
     """
     from features.registry import registry
 
     def handler(action: str, **kwargs) -> object:
-        kwargs.pop("ctx", None)  # DSLExecutor 内部参数
+        kwargs.pop("ctx", None)
 
         # ── 内联处理的 DSL 内部动作 ──
         if action == "delay":
@@ -89,13 +197,19 @@ def make_action_handler():
             return _eval_condition(kwargs.get("condition", ""))
 
         if action == "template_capture":
-            # 模板截图 — GUI 操作，模拟成功
             return True
 
-        # ── 委派给 @feature registry ──
+        # ── Priority 1: RPA.Windows ──
+        try:
+            rpa_result = _rpa_handler(action, **kwargs)
+            if rpa_result is not None:
+                return rpa_result
+        except Exception as e:
+            logger.debug("RPA.Windows handler failed, falling back: %s", e)
+
+        # ── Priority 2: @feature registry (uiautomation/win32) ──
         feature_name = ACTION_TO_FEATURE.get(action, action)
 
-        # 只传 feature 声明接受的参数，避免多余参数导致 TypeError
         spec = registry.get(feature_name)
         if spec is None:
             raise RuntimeError(f"Action '{action}': feature '{feature_name}' not found")
@@ -122,7 +236,6 @@ def _eval_condition(condition: str) -> bool:
     if cl in ("false", "0", "no"):
         return False
 
-    # 前缀条件 — 通过 registry 求值
     if c.startswith("text:"):
         query = c[5:].strip().strip('"').strip("'")
         from features.registry import registry
@@ -142,5 +255,4 @@ def _eval_condition(condition: str) -> bool:
             r = registry.execute("detect_color", h=int(parts[0]), s=int(parts[1]), v=int(parts[2]))
             return bool(r.get("result")) if r.get("success") else False
 
-    # 未知条件 — 安全返回 False
     return False

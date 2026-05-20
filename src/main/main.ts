@@ -11,6 +11,7 @@ import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './sch
 import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
+import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -1146,30 +1147,7 @@ ipcMain.handle('features:list', async () => {
 });
 
 ipcMain.handle('feature:call', async (_, featureName: string, params: Record<string, any>) => {
-  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'feature_call.py');
-  const proc = await spawnPythonOneShot([scriptPath], {
-    cwd: getBaseDir(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  const _out: Buffer[] = [];
-  const _err: Buffer[] = [];
-  proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-  proc.stdin!.write(JSON.stringify({ name: featureName, params }) + '\n');
-  proc.stdin!.end();
-  return new Promise((resolve) => {
-    proc.on('close', () => {
-          const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
-      if (stdout.trim()) {
-        try { resolve(JSON.parse(stdout)); }
-        catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); }
-      } else {
-        resolve({ success: false, error: stderr.trim() || '调用失败' });
-      }
-    });
-    proc.on('error', (err) => resolve({ success: false, error: err.message }));
-  });
+  return await callFeature(featureName, params);
 });
 
 // --- Macro Recording IPC ---
@@ -1519,16 +1497,9 @@ if (!gotTheLock) {
     scheduler.start(path.join(app.getPath('userData'), 'schedules.json'));
 
     // 后台扫描已安装程序（填充程序别名注册表）
-    (() => {
-      setTimeout(() => {
-        const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'feature_call.py');
-        runPythonCollect(
-          [scriptPath],
-          { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] },
-          JSON.stringify({ name: 'program_refresh', params: { background: true } }) + '\n'
-        ).catch(() => {}); // fire-and-forget
-      }, 5000); // delay 5s after startup so it doesn't slow UI
-    })();
+    setTimeout(() => {
+      callFeature('program_refresh', { background: true }).catch(() => {});
+    }, 5000);
 
     // 全局 F9 热键 — 在主进程直接控制引擎启停
     globalShortcut.register('F9', () => {
@@ -1564,6 +1535,7 @@ process.on('unhandledRejection', (reason) => {
 
 app.on('window-all-closed', () => {
   stopPythonEngine();
+  stopFeatureProcess();
   apiServer?.close();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -1571,5 +1543,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   stopPythonEngine();
+  stopFeatureProcess();
   scheduler.stop();
 });

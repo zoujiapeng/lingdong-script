@@ -16,7 +16,7 @@ Commands (stdin, one JSON object per line):
 Events (stdout, one JSON object per line, flush()ed):
   {"type": "log", "level": "info|warn|error", "message": "..."}
   {"type": "agent_start", "goal": "..."}
-  {"type": "step_complete", "step_num": N, "thought":"...", "tool":"...",
+  {"type": "step_complete", step_num: N, thought:"...", tool:"...",
        "parameters":{...}, "result": {"success": bool, "confidence": float, ...}}
   {"type": "agent_done", "status": "completed|failed|stopped",
        "total_steps": N, "fail_reason": "..."}
@@ -36,8 +36,6 @@ from queue import Empty, Queue
 _PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PATH not in sys.path:
     sys.path.insert(0, _PATH)
-
-from agent.controller import AgentController
 
 logger = logging.getLogger("agent.ipc")
 
@@ -92,70 +90,58 @@ def _stdin_reader(queue: Queue):
 
 
 # ====================================================================
-#  Agent runner (background thread)
+#  Agent runner (background thread) — LangGraphAgent only
 # ====================================================================
 
-def _run_agent(goal: str, config: dict | None = None, stop_event: threading.Event = None,
-               supervise: bool = True):
-    """Run the agent in a background thread, streaming events to stdout."""
+def _run_agent(goal: str, config: dict | None = None,
+               stop_event: threading.Event = None,
+               guidance_queue: Queue = None):
+    """Run LangGraphAgent in a background thread, streaming events to stdout."""
+    try:
+        from agent.langgraph_agent import LangGraphAgent
+    except ImportError:
+        _emit("error", {"message": "LangGraphAgent not available (langgraph / langchain not installed)"})
+        _emit("agent_done", {"status": "failed", "total_steps": 0, "fail_reason": "LangGraphAgent not available"})
+        return
+
     cfg = config or {}
     api_key = (cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
     api_base = (cfg.get("api_base") or os.environ.get("LLM_API_BASE", "")).strip()
     model = (cfg.get("model") or os.environ.get("LLM_MODEL", "")).strip()
-    multimodal = cfg.get("multimodal") or os.environ.get("LLM_MULTIMODAL", "")
 
-    # Export to env so downstream features (e.g. generate_flow_script) can read them
     if api_key:
         os.environ["ANTHROPIC_API_KEY"] = api_key
     if api_base:
         os.environ["LLM_API_BASE"] = api_base
     if model:
         os.environ["LLM_MODEL"] = model
-    if multimodal:
-        os.environ["LLM_MULTIMODAL"] = multimodal
 
-    # verify_enabled might be string 'true'/'false' from frontend config
-    _raw_verify = cfg.get("verify_enabled", False)
-    if isinstance(_raw_verify, str):
-        _raw_verify = _raw_verify.lower() in ("true", "1", "yes")
-    controller = AgentController(api_key=api_key, api_base=api_base, model=model,
-                                 multimodal=multimodal,
-                                 verify_enabled=_raw_verify)
+    def _lg_callback(data: dict):
+        ev_type = data.pop("type", "log")
+        _emit(ev_type, data)
 
-    # Wire guidance queue so IPC guidance() commands reach the controller
-    guidance_queue: Queue = getattr(_run_agent, "_guidance_queue", Queue())
-    _run_agent._guidance_queue = guidance_queue
-    controller.set_guidance_queue(guidance_queue)
-
-    # Wire event callback → stdout
-    controller.set_event_callback(lambda ev, d: _emit(ev, d))
-
-    # Wire stop event (controller checks it natively in run() and supervision)
-    if stop_event:
-        controller.set_stop_event(stop_event)
-
-    _emit("agent_start", {"goal": goal})
-    _log("info", f"Agent started — goal: {goal[:120]}")
+    agent = LangGraphAgent(model=model, api_key=api_key,
+                           api_base=api_base, event_callback=_lg_callback,
+                           stop_event=stop_event,
+                           guidance_queue=guidance_queue)
+    _emit("agent_start", {"goal": goal, "engine": "langgraph"})
+    _log("info", f"LangGraph agent started — goal: {goal[:120]}")
 
     try:
-        report = controller.run(goal, supervise=supervise)
-        status = report["status"]
+        result = agent.run(goal)
+        status = "completed" if result.get("success") else "failed"
         if stop_event and stop_event.is_set():
             status = "stopped"
         _emit("agent_done", {
             "status": status,
-            "total_steps": report["total_steps"],
-            "fail_reason": report.get("fail_reason"),
+            "total_steps": result.get("total_steps", 0),
+            "steps": result.get("steps", []),
+            "summary": result.get("summary", ""),
         })
-        _log("info", f"Agent done — status={status}, steps={report['total_steps']}")
+        _log("info", f"LangGraph agent done — status={status}")
     except Exception as exc:
-        _emit("error", {"message": f"Agent crashed: {exc}"})
-        _log("error", f"Agent crashed: {exc}\n{traceback.format_exc()}")
-        _emit("agent_done", {
-            "status": "failed",
-            "total_steps": 0,
-            "fail_reason": str(exc),
-        })
+        _emit("error", {"message": f"LangGraph agent crashed: {exc}"})
+        _emit("agent_done", {"status": "failed", "total_steps": 0, "fail_reason": str(exc)})
 
 
 # ====================================================================
@@ -195,17 +181,12 @@ class AgentIPC:
             return
 
         config = msg.get("config", {})
-        supervise = msg.get("supervise", True)
         self._stop_event = threading.Event()
         self._guidance_queue = Queue()
 
-        # Wire guidance queue into _run_agent
-        _run_agent._guidance_queue = self._guidance_queue
-
         self._agent_thread = threading.Thread(
             target=_run_agent,
-            args=(goal, config, self._stop_event),
-            kwargs={"supervise": supervise},
+            args=(goal, config, self._stop_event, self._guidance_queue),
             daemon=True,
         )
         self._agent_thread.start()

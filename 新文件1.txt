@@ -1,0 +1,5 @@
+# Notepad++testimportsys
+得分test_func():    pass
+classApp:
+    得分润(瑟利夫):
+	        self.test()

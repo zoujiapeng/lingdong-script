@@ -1,0 +1,131 @@
+{
+  "meta": {
+    "id": "NuhyY3Wl33zNBp40hRy5Q",
+    "name": "桌面图标监控",
+    "description": "循环检测桌面目标图片，按优先级点击",
+    "created_at": "2026-05-16T17:29:58.768Z",
+    "updated_at": "2026-05-16T17:29:58.801Z",
+    "version": "1.0.0"
+  },
+  "nodes": [
+    {
+      "id": "raj0IgzMlBuzXI06oqtJ9",
+      "type": "start",
+      "x": 360,
+      "y": 40,
+      "params": {
+        "label": "开始"
+      },
+      "status": "idle"
+    },
+    {
+      "id": "CfPmHfmnEBmFA70cYW6JG",
+      "type": "loop",
+      "x": 360,
+      "y": 160,
+      "params": {
+        "loop_type": "infinite"
+      },
+      "status": "idle",
+      "label": "循环检测"
+    },
+    {
+      "id": "P8WlOOQYLOO1ishk45Y-C",
+      "type": "image_click",
+      "x": 80,
+      "y": 340,
+      "params": {
+        "targets": [],
+        "similarity": 85,
+        "timeout": 2,
+        "method": "single",
+        "offset_x": 0,
+        "offset_y": 0,
+        "delay_after": 0.3,
+        "multi_scale": true,
+        "match_all": false,
+        "description": "优先级1"
+      },
+      "label": "目标图片 1",
+      "status": "idle"
+    },
+    {
+      "id": "9oWqalclBzo0kOhiLeVQ2",
+      "type": "image_click",
+      "x": 320,
+      "y": 340,
+      "params": {
+        "targets": [],
+        "similarity": 85,
+        "timeout": 0.5,
+        "method": "single",
+        "offset_x": 0,
+        "offset_y": 0,
+        "delay_after": 0.3,
+        "multi_scale": true,
+        "match_all": false,
+        "description": "优先级2"
+      },
+      "label": "目标图片 2",
+      "status": "idle"
+    },
+    {
+      "id": "36SLquljBqEYJA60R9wsm",
+      "type": "image_click",
+      "x": 560,
+      "y": 340,
+      "params": {
+        "targets": [],
+        "similarity": 85,
+        "timeout": 0.5,
+        "method": "single",
+        "offset_x": 0,
+        "offset_y": 0,
+        "delay_after": 0.3,
+        "multi_scale": true,
+        "match_all": false,
+        "description": "优先级3"
+      },
+      "label": "目标图片 3",
+      "status": "idle"
+    }
+  ],
+  "edges": [
+    {
+      "id": "QJe-2qKTwkM6R-vldcfcA",
+      "from_node": "raj0IgzMlBuzXI06oqtJ9",
+      "from_port": "output",
+      "to_node": "CfPmHfmnEBmFA70cYW6JG",
+      "to_port": "input"
+    },
+    {
+      "id": "GHy9p9uolFNv84BW8U5bw",
+      "from_node": "CfPmHfmnEBmFA70cYW6JG",
+      "from_port": "loop_body",
+      "to_node": "P8WlOOQYLOO1ishk45Y-C",
+      "to_port": "input"
+    },
+    {
+      "id": "nr6oRiTtejhP7OnpBgg6I",
+      "from_node": "P8WlOOQYLOO1ishk45Y-C",
+      "from_port": "fail",
+      "to_node": "9oWqalclBzo0kOhiLeVQ2",
+      "to_port": "input"
+    },
+    {
+      "id": "DYmMIBcUeb3dDg3Ckxn5D",
+      "from_node": "9oWqalclBzo0kOhiLeVQ2",
+      "from_port": "fail",
+      "to_node": "36SLquljBqEYJA60R9wsm",
+      "to_port": "input"
+    }
+  ],
+  "variables": {},
+  "settings": {
+    "default_delay": 0.5,
+    "error_handling": "continue",
+    "max_retries": 3,
+    "retry_delay": 1,
+    "log_level": "info"
+  }
+}

@@ -83,6 +83,12 @@ class DSLExecutor:
             "log": [],
         }
 
+        # 后台对话框守护
+        self._dialog_auto = True
+        self._daemon_stop = threading.Event()
+        self._daemon_thread: Optional[threading.Thread] = None
+        self._start_dialog_daemon()
+
     # ── 作用域管理 ────────────────────────────────────────────────
     def _current_scope(self) -> dict:
         return self._scope_stack[-1]
@@ -159,10 +165,12 @@ class DSLExecutor:
         try:
             self._execute_node(ast, ctx)
             if not self._stop_flag.is_set():
+                self._sweep_dialogs()
                 self._set_state(ExecutorState.FINISHED)
             return {"success": True, "state": self._state.value}
         except ReturnSignal:
             if not self._stop_flag.is_set():
+                self._sweep_dialogs()
                 self._set_state(ExecutorState.FINISHED)
             return {"success": True, "state": self._state.value}
         except Exception as e:
@@ -206,6 +214,7 @@ class DSLExecutor:
     def stop(self):
         self._stop_flag.set()
         self._pause_event.set()
+        self._daemon_stop.set()
         self._set_state(ExecutorState.STOPPED)
         return self._state.value
 
@@ -233,10 +242,12 @@ class DSLExecutor:
         try:
             self._execute_node(ast, ctx)
             if not self._stop_flag.is_set():
+                self._sweep_dialogs()
                 self._set_state(ExecutorState.FINISHED)
         except ReturnSignal:
             # 顶层 RETURN 忽略
             if not self._stop_flag.is_set():
+                self._sweep_dialogs()
                 self._set_state(ExecutorState.FINISHED)
         except Exception as e:
             self._emit("error", message=str(e), traceback=traceback.format_exc())
@@ -416,6 +427,13 @@ class DSLExecutor:
             self._exec_clipboard_get(node, ctx)
         elif node.type in (NodeType.MINIMIZE, NodeType.MAXIMIZE, NodeType.CLOSE_WINDOW, NodeType.RESIZE_WINDOW):
             self._exec_window_control(node, ctx)
+
+        elif node.type == NodeType.FILEDIALOG_SAVE:
+            self._exec_filedialog_save(node, ctx)
+        elif node.type == NodeType.FILEDIALOG_OPEN:
+            self._exec_filedialog_open(node, ctx)
+        elif node.type == NodeType.FILEDIALOG_FOLDER:
+            self._exec_filedialog_folder(node, ctx)
 
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
@@ -984,10 +1002,21 @@ class DSLExecutor:
                        args="failed", line=node.line)
 
     def _exec_popup_close(self, node: ASTNode, ctx: ExecutionContext):
-        """POPUP_CLOSE [策略] — 关闭弹窗"""
+        """POPUP_CLOSE [策略] — 关闭弹窗。优先走 dialog_handler (win32 API)。"""
         args = self._interpolate(node.args)
         self._emit("node_start", node_type="POPUP_CLOSE", args=args, line=node.line)
         self._log(f"POPUP_CLOSE: {args or 'auto'}")
+        # Priority 1: dialog_handler (win32 API)
+        try:
+            from agent.dialog_handler import handle_any_dialog
+            result = handle_any_dialog()
+            if result != "not_found":
+                self._log(f"  POPUP_CLOSE 通过 dialog_handler 处理: {result}")
+                self._emit("node_done", node_type="POPUP_CLOSE", args=args, line=node.line)
+                return
+        except Exception:
+            pass
+        # Fallback: old OCR/pyautogui close strategy
         self._call_action("popup_close", strategy=args or "auto", ctx=ctx)
         self._emit("node_done", node_type="POPUP_CLOSE", args=args, line=node.line)
 
@@ -1377,6 +1406,49 @@ class DSLExecutor:
             pass
         self._emit("node_done", node_type=ntype, args=args, line=node.line)
 
+    # ── 文件对话框执行 ───────────────────────────────────────────
+    def _exec_filedialog_save(self, node: ASTNode, ctx: ExecutionContext):
+        """FILEDIALOG_SAVE 'path' — 在保存对话框中填写路径并确认"""
+        path = self._interpolate(node.args).strip().strip('"').strip("'")
+        self._emit("node_start", node_type="FILEDIALOG_SAVE", args=path, line=node.line)
+        self._log(f"FILEDIALOG_SAVE: {path}")
+        try:
+            from features.filedialog_features import filedialog_save
+            result = filedialog_save(path=path, overwrite=True, timeout=15)
+            self._set_var("_filedialog_result", result.get("result", False))
+            self._log(f"  结果: {result.get('result', False)}")
+        except Exception as e:
+            self._log(f"  FILEDIALOG_SAVE 失败: {e}")
+        self._emit("node_done", node_type="FILEDIALOG_SAVE", args=path, line=node.line)
+
+    def _exec_filedialog_open(self, node: ASTNode, ctx: ExecutionContext):
+        """FILEDIALOG_OPEN 'path' — 在打开对话框中填写路径并确认"""
+        path = self._interpolate(node.args).strip().strip('"').strip("'")
+        self._emit("node_start", node_type="FILEDIALOG_OPEN", args=path, line=node.line)
+        self._log(f"FILEDIALOG_OPEN: {path}")
+        try:
+            from features.filedialog_features import filedialog_open
+            result = filedialog_open(path=path, timeout=15)
+            self._set_var("_filedialog_result", result.get("result", False))
+            self._log(f"  结果: {result.get('result', False)}")
+        except Exception as e:
+            self._log(f"  FILEDIALOG_OPEN 失败: {e}")
+        self._emit("node_done", node_type="FILEDIALOG_OPEN", args=path, line=node.line)
+
+    def _exec_filedialog_folder(self, node: ASTNode, ctx: ExecutionContext):
+        """FILEDIALOG_FOLDER 'path' — 在文件夹选择对话框中输入路径并确认"""
+        path = self._interpolate(node.args).strip().strip('"').strip("'")
+        self._emit("node_start", node_type="FILEDIALOG_FOLDER", args=path, line=node.line)
+        self._log(f"FILEDIALOG_FOLDER: {path}")
+        try:
+            from features.filedialog_features import filedialog_folder
+            result = filedialog_folder(path=path, timeout=15)
+            self._set_var("_filedialog_result", result.get("result", False))
+            self._log(f"  结果: {result.get('result', False)}")
+        except Exception as e:
+            self._log(f"  FILEDIALOG_FOLDER 失败: {e}")
+        self._emit("node_done", node_type="FILEDIALOG_FOLDER", args=path, line=node.line)
+
     # ── 层次化 DSL 执行 ──────────────────────────────────────────
     def _exec_call(self, node: ASTNode, ctx: ExecutionContext):
         name = node.args
@@ -1567,6 +1639,61 @@ class DSLExecutor:
             self._log(f"  VLM 内联条件失败: {e}")
             return False
 
+    # ── 对话框处理 ──────────────────────────────────────────────────
+    def _try_handle_dialog(self):
+        """Action 执行后自动检测并关闭弹窗（不阻塞、不报错）"""
+        if not self._dialog_auto:
+            return
+        try:
+            from agent.dialog_handler import handle_any_dialog
+            result = handle_any_dialog()
+            if result != "not_found":
+                self._log(f"  [对话框] 已处理: {result}")
+        except Exception:
+            pass
+
+    def _sweep_dialogs(self, max_wait: float = 2.0, interval: float = 0.3):
+        """执行完毕后继续轮询对话框（弹窗可能延迟出现）。
+
+        在 HOTKEY alt+F4 等操作后，对话框可能延迟数百毫秒才弹出。
+        此方法在设置 FINISHED 前做最后清扫。
+        """
+        if not self._dialog_auto:
+            return
+        deadline = time.time() + max_wait
+        while time.time() < deadline and not self._stop_flag.is_set():
+            try:
+                from agent.dialog_handler import handle_any_dialog
+                result = handle_any_dialog()
+                if result != "not_found":
+                    self._log(f"  [结束清扫] 对话框已处理: {result}")
+                    # 处理了一个对话框 → 重置 deadline（可能连锁弹窗）
+                    deadline = time.time() + max_wait
+            except Exception:
+                pass
+            time.sleep(interval)
+
+    def _start_dialog_daemon(self):
+        """启动后台对话框守护线程（每 1.5 秒轮询一次）"""
+        def _daemon():
+            while not self._daemon_stop.is_set():
+                try:
+                    if self._state == ExecutorState.RUNNING and self._dialog_auto:
+                        from agent.dialog_handler import handle_any_dialog
+                        result = handle_any_dialog()
+                        if result != "not_found":
+                            self._log(f"  [弹窗守护] 已处理: {result}")
+                except Exception:
+                    pass
+                self._daemon_stop.wait(1.5)
+
+        self._daemon_thread = threading.Thread(target=_daemon, daemon=True)
+        self._daemon_thread.start()
+
+    def set_dialog_auto(self, enabled: bool):
+        """设置是否自动处理对话框"""
+        self._dialog_auto = enabled
+
     # ── 动作调用 ─────────────────────────────────────────────────
     def _call_action(self, action: str, **kwargs) -> Any:
         with self._action_lock:
@@ -1579,7 +1706,10 @@ class DSLExecutor:
             last_err = None
             for attempt in range(1, retry_limit + 1):
                 try:
-                    return self._action_handler(action, **kwargs)
+                    result = self._action_handler(action, **kwargs)
+                    # Action 成功后自动检测对话框
+                    self._try_handle_dialog()
+                    return result
                 except Exception as e:
                     last_err = e
                     self._log(f"  [重试 {attempt}/{retry_limit}] {action} 失败: {e}")

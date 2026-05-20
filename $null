@@ -1,0 +1,14 @@
+使用“1”个参数调用“FromFile”时发生异常:“C:\Users\Administrator\Desktop\screenshot.png”
+所在位置 行:1 字符: 40
++ ... em.Drawing; $img = [System.Drawing.Image]::FromFile('C:\Users\Adminis ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException
+    + FullyQualifiedErrorId : FileNotFoundException
+ 
+不能对 Null 值表达式调用方法。
+所在位置 行:1 字符: 130
++ ... shot.png'); $img.Save('C:\Users\Administrator\Desktop\screenshot.png' ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) []，RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 

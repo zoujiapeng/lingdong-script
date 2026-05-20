@@ -1,0 +1,73 @@
+{
+  "nodes": [
+    {
+      "id": "n_start",
+      "type": "start",
+      "x": 400,
+      "y": 0,
+      "params": { "label": "开始" },
+      "status": "idle"
+    },
+    {
+      "id": "n_hotkey",
+      "type": "keyboard",
+      "x": 400,
+      "y": 100,
+      "params": {
+        "keys": ["o"],
+        "modifiers": ["ctrl"],
+        "delay_after": 2.0
+      },
+      "status": "idle",
+      "label": "Ctrl+O 触发打开"
+    },
+    {
+      "id": "n_open",
+      "type": "tool_call",
+      "x": 400,
+      "y": 220,
+      "params": {
+        "feature_name": "filedialog_open",
+        "params": {
+          "path": "",
+          "timeout": 15
+        }
+      },
+      "status": "idle",
+      "label": "打开文件对话框"
+    },
+    {
+      "id": "n_end",
+      "type": "end",
+      "x": 400,
+      "y": 340,
+      "params": { "label": "结束" },
+      "status": "idle"
+    }
+  ],
+  "edges": [
+    { "id": "e1", "from_node": "n_start", "from_port": "output", "to_node": "n_hotkey", "to_port": "input" },
+    { "id": "e2", "from_node": "n_hotkey", "from_port": "output", "to_node": "n_open", "to_port": "input" },
+    { "id": "e3", "from_node": "n_open", "from_port": "output", "to_node": "n_end", "to_port": "input" }
+  ],
+  "meta": {
+    "id": "template-open-dialog",
+    "name": "打开文件对话框",
+    "description": "Ctrl+O触发打开 → UIA自动化填写路径并确认。无坐标依赖，任意分辨率可用。需要填写 path 参数为目标文件路径。",
+    "created_at": "2026-05-17",
+    "updated_at": "",
+    "version": "1.0",
+    "author": "system"
+  },
+  "selection": { "nodes": [], "edges": [] },
+  "viewMode": "canvas",
+  "ui": {
+    "canvas_transform": { "x": 100, "y": 50, "scale": 1 },
+    "selection": { "nodes": [], "edges": [] },
+    "show_grid": true,
+    "snap_to_grid": true,
+    "grid_size": 20,
+    "dark_mode": false,
+    "viewMode": "canvas"
+  }
+}

@@ -87,6 +87,10 @@ class NodeType(str, Enum):
     RESIZE_WINDOW = "RESIZE_WINDOW"
     WAIT_FILE = "WAIT_FILE"
     VARIABLE_INC = "VARIABLE_INC"
+    # 文件对话框
+    FILEDIALOG_SAVE = "FILEDIALOG_SAVE"
+    FILEDIALOG_OPEN = "FILEDIALOG_OPEN"
+    FILEDIALOG_FOLDER = "FILEDIALOG_FOLDER"
     # Registry 关键字回退（无对应枚举成员时）
     REGISTRY_FEATURE = "REGISTRY_FEATURE"
 
@@ -153,6 +157,9 @@ _SIMPLE_NODE_TYPES: dict[str, NodeType] = {
     "RESIZE_WINDOW": NodeType.RESIZE_WINDOW,
     "WAIT_FILE": NodeType.WAIT_FILE,
     "VARIABLE_INC": NodeType.VARIABLE_INC,
+    "FILEDIALOG_SAVE": NodeType.FILEDIALOG_SAVE,
+    "FILEDIALOG_OPEN": NodeType.FILEDIALOG_OPEN,
+    "FILEDIALOG_FOLDER": NodeType.FILEDIALOG_FOLDER,
 }
 
 @dataclass
@@ -225,7 +232,8 @@ class DSLParser:
                 "WALLPAPER", "DISPLAY_OFF", "SLEEP", "DESKTOP", "BATTERY",
                 "EMPTY_BIN", "BRIGHTNESS", "CLIPBOARD_SET", "CLIPBOARD_GET",
                 "MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW",
-                "WAIT_FILE", "VARIABLE_INC"}
+                "WAIT_FILE", "VARIABLE_INC",
+                "FILEDIALOG_SAVE", "FILEDIALOG_OPEN", "FILEDIALOG_FOLDER"}
     _registry_loaded = False
 
     @classmethod

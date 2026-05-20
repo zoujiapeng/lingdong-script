@@ -1,0 +1,13 @@
+{
+  "name": "node-red-contrib-lobster",
+  "version": "0.1.0",
+  "description": "灵动脚本 Lobster nodes for Node-RED",
+  "node-red": {
+    "version": ">=2.0.0",
+    "nodes": {
+      "lobster-click": "lobster-click.js",
+      "lobster-type": "lobster-type.js",
+      "lobster-run-dsl": "lobster-run-dsl.js"
+    }
+  }
+}

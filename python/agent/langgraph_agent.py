@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+from queue import Queue
 from typing import Any, Callable, Dict, List, Optional, Set
 from datetime import datetime, timezone
 
@@ -49,7 +50,7 @@ class LangGraphAgent:
 
     - 工具自动从 @feature 注册表加载
     - 状态由 LangGraph 管理 (断点续跑/回滚)
-    - ToolNode 内嵌监督层 (窗口焦点/重试/屏幕稳定/OCR验证/恢复)
+    - ToolNode 内嵌监督层 (窗口焦点/重试/对话框自动处理/屏幕稳定)
     - 生成流程图脚本时可前端可视化展示
     """
 
@@ -57,16 +58,17 @@ class LangGraphAgent:
 
     def __init__(self, model: str = "deepseek-chat", api_key: str = "",
                  api_base: str = "", event_callback: Optional[Callable] = None,
-                 stop_event: Optional[threading.Event] = None):
+                 stop_event: Optional[threading.Event] = None,
+                 guidance_queue: Optional[Queue] = None):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self._event_cb = event_callback
         self._graph = None
         self._tools: list = []
-        self._verify_enabled = True
         self._last_launched: str = ""
         self._stop_event = stop_event
+        self._guidance_queue = guidance_queue
         # Export to env so downstream features (e.g. generate_flow_script) can read them
         if api_key:
             os.environ["ANTHROPIC_API_KEY"] = api_key
@@ -244,19 +246,6 @@ class LangGraphAgent:
         """Wait for screen to settle after an action."""
         time.sleep(min(timeout, 1.5))
 
-    def _verify_step(self, tool_name: str, args: dict, result_str: str) -> dict:
-        """Verify step result using the verifier module."""
-        if not self._verify_enabled:
-            return {"success": True, "method": "disabled"}
-        try:
-            from agent.verifier import verify_step_result
-            return verify_step_result(tool_name, args, result_str)
-        except ImportError:
-            return {"success": True, "method": "no_verifier"}
-        except Exception as e:
-            logger.debug("Verification error: %s", e)
-            return {"success": True, "method": "error", "message": str(e)}
-
     def _decide_recovery(self, tool_name: str, args: dict,
                          error: str, retry_count: int = 0) -> dict:
         """Decide recovery strategy for a failed step (rules-based, no LLM)."""
@@ -345,8 +334,7 @@ class LangGraphAgent:
         2. Execute with retry — exponential backoff (1s, 2s, 4s)
         3. Auto-handle dialogs — dismiss any popups using dialog_handler
         4. Screen stability wait — let UI settle
-        5. OCR verification — verify step result
-        6. Recovery — retry → alternative → skip → fail
+        5. Track launched programs
 
         Note: Modern IFileDialog save dialogs cannot be interacted with
         via automation (DirectUI rendering). The agent should save files
@@ -393,9 +381,6 @@ class LangGraphAgent:
                         raise
                     last_result = None
 
-            result_content = self._extract_content(last_result) or ""
-            result_ok = True
-
             # ── 3. Auto-handle any dialogs ──
             if name in _GUI_ACTIONS or name in ("screenshot", "hotkey", "file_write",
                                                   "run_dsl", "run_dsl_sync",
@@ -406,48 +391,11 @@ class LangGraphAgent:
             if name in _GUI_ACTIONS:
                 self._wait_screen_stable()
 
-            # ── 5. OCR verification ──
-            if name in _GUI_ACTIONS and self._verify_enabled:
-                verify = self._verify_step(name, args, result_content)
-                if not verify.get("success"):
-                    # Recovery: retry
-                    recovery = self._decide_recovery(name, args,
-                                                     verify.get("message", "verify_fail"))
-                    if recovery.get("action") == "retry":
-                        for retry_attempt in range(2):
-                            if retry_attempt > 0:
-                                time.sleep(2 ** retry_attempt)
-                            try:
-                                last_result = execute(call_req)
-                                result_content = self._extract_content(last_result) or ""
-                                verify2 = self._verify_step(name, args, result_content)
-                                if verify2.get("success"):
-                                    result_ok = True
-                                    break
-                            except Exception:
-                                pass
-                        else:
-                            result_ok = False
-                    elif recovery.get("action") == "fail":
-                        result_ok = False
-
-            # ── 6. Track launched programs ──
+            # ── 5. Track launched programs ──
             if name == "launch_program":
                 target = args.get("target") or args.get("name") or ""
                 if target:
                     self._last_launched = target
-
-            # If result was originally successful but verification failed,
-            # wrap the result to indicate the failure
-            if not result_ok and result_content:
-                try:
-                    parsed = json.loads(result_content)
-                    if isinstance(parsed, dict) and parsed.get("success", False):
-                        parsed["success"] = False
-                        parsed["verification_failed"] = True
-                        return json.dumps(parsed, ensure_ascii=False)
-                except (json.JSONDecodeError, TypeError):
-                    pass
 
             return last_result
 
@@ -505,9 +453,17 @@ class LangGraphAgent:
     # ── 图初始化 ──────────────────────────────────────────────
 
     def init(self):
-        """初始化 LangGraph 图（含监督 ToolNode + 系统提示词）。"""
+        """初始化 LangGraph 图（含监督 ToolNode + 系统提示词 + 后台对话框监控）。"""
         if not self._tools:
             self.load_tools()
+
+        # 启动后台对话框监控（自动处理命名错误/保存提示/确认弹窗等）
+        try:
+            from agent.dialog_handler import start_dialog_monitor
+            desktop = os.path.expanduser("~/Desktop")
+            start_dialog_monitor(save_dir=desktop)
+        except Exception:
+            pass
 
         llm = self._create_llm()
 

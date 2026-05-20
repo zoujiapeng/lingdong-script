@@ -615,7 +615,7 @@ function buildCorePrompt(lang: PromptLanguage): string {
 5. 弹窗关闭、OCR 验证等非关键步骤标记为"（可选）"
 6. 复杂操作拆分为清晰的步骤序列
 7. 涉及视觉检测的步骤，如果不知道具体路径/文字，用合理描述占位
-8. 启动程序时，可以用中文名称直接启动（如 \`启动 "微信"\`、\`启动 "记事本"\`、\`启动 "微星小飞机"\`），系统会自动解析路径。无需提前查找完整路径
+8. 启动程序时，可以用中文名称直接启动（如 \`启动 "微信"\`、\`启动 "记事本"\`、\`启动 "微星小飞机"\`），系统会自动解析路径。无需提前查找完整路径`
   } else {
     return `You are a DSL generator for desktop automation named Lingdong Script.
 Generate ONLY raw DSL code, no markdown, no explanations in the DSL portion.
@@ -629,7 +629,7 @@ Return JSON: {"pseudocode":"DSL code","explanation":"brief explanation"}
 5. Mark non-critical steps (popup close, OCR verify) with comment "optional"
 6. Break complex tasks into clear step sequences
 7. Use placeholder paths/text when specific values are unknown
-8. When launching a program, use the common name directly (e.g. \`启动 "微信"\`, \`启动 "记事本"\`, \`启动 "chrome"\`). The system auto-resolves them to full paths — no need to look up paths manually.
+8. When launching a program, use the common name directly (e.g. \`启动 "微信"\`, \`启动 "记事本"\`, \`启动 "chrome"\`). The system auto-resolves them to full paths — no need to look up paths manually.`
   }
 }
 

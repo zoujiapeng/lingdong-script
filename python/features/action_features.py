@@ -1,12 +1,20 @@
 """
 动作类功能注册
 CLICK / TYPE / SCROLL / DRAG / HOTKEY
+
+All operations route through ActionHandler (uiautomation/win32api priority chain).
 """
 import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
 from features._utils import parse_region, resolve_coord
 from features.input_features import _find_target_coords
+
+
+def _do(action, **kw):
+    """Shortcut: route action through ActionHandler's priority chain."""
+    from interaction.actions import ActionHandler
+    return ActionHandler()(action, **kw)
 
 
 @feature(
@@ -62,15 +70,10 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     ],
 )
 def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool:
-    import pyautogui
     if clear_first:
-        pyautogui.hotkey("ctrl", "a")
+        _do("hotkey", keys="ctrl+a")
         time.sleep(0.05)
-    try:
-        from interaction.actions import HumanKeyboard
-        HumanKeyboard.type_text(text, interval=interval if interval > 0 else None)
-    except ImportError:
-        pyautogui.typewrite(text, interval=interval if interval > 0 else 0.01)
+    _do("type", text=text)
     return True
 
 
@@ -96,18 +99,14 @@ def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool
     ],
 )
 def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1, target: str = "") -> bool:
-    try:
-        import pyautogui
-        clicks = amount if direction in ("down", "right") else -amount
-        if target:
-            x, y = _find_target_coords(target)
-        kwargs = {}
-        if x >= 0 and y >= 0:
-            kwargs = {"x": x, "y": y}
-        pyautogui.scroll(clicks, **kwargs)
-        return True
-    except ImportError:
-        return False
+    clicks = amount if direction in ("down", "right") else -amount
+    if target:
+        x, y = _find_target_coords(target)
+    if x >= 0 and y >= 0:
+        from interaction.actions import _ensure_win32
+        w32 = _ensure_win32()
+        w32['api'].SetCursorPos((int(x), int(y)))
+    return _do("scroll", clicks=clicks)
 
 
 @feature(
@@ -134,14 +133,7 @@ def scroll(direction: str, amount: int = 3, x: int = -1, y: int = -1, target: st
     deprecated=True,
 )
 def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> bool:
-    try:
-        from interaction.actions import HumanMouse
-        HumanMouse.drag(start_x, start_y, end_x, end_y, duration=duration)
-        return True
-    except ImportError:
-        return False
-    except Exception:
-        return False
+    return _do("swipe", start_x=start_x, start_y=start_y, end_x=end_x, end_y=end_y, duration=duration)
 
 
 @feature(
@@ -161,15 +153,9 @@ def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: f
     examples=["DRAG 文件图标 TO 目标文件夹"],
 )
 def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
-    try:
-        import pyautogui
-        x1, y1 = _find_target_coords(from_target)
-        x2, y2 = _find_target_coords(to_target)
-        pyautogui.moveTo(x1, y1, duration=0.1)
-        pyautogui.drag(x2 - x1, y2 - y1, duration=duration, button='left')
-        return True
-    except Exception:
-        return False
+    x1, y1 = _find_target_coords(from_target)
+    x2, y2 = _find_target_coords(to_target)
+    return _do("swipe", start_x=x1, start_y=y1, end_x=x2, end_y=y2, duration=duration)
 
 
 @feature(
@@ -190,13 +176,8 @@ def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
     ],
 )
 def hotkey(keys: str) -> bool:
-    try:
-        import pyautogui
-        key_list = [k.strip() for k in keys.split("+")]
-        pyautogui.hotkey(*key_list)
-        return True
-    except ImportError:
-        return False
+    key_list = [k.strip() for k in keys.replace("+", " ").split()]
+    return _do("hotkey", keys=key_list)
 
 
 @feature(
@@ -219,21 +200,13 @@ def hotkey(keys: str) -> bool:
 def type_clipboard(text: str) -> bool:
     try:
         import pyperclip
-        import pyautogui
         import time
-        # 保存原剪贴板
         old = pyperclip.paste()
         pyperclip.copy(text)
         time.sleep(0.05)
-        pyautogui.hotkey("ctrl", "v")
+        _do("hotkey", keys=["ctrl", "v"])
         time.sleep(0.1)
-        # 恢复
         pyperclip.copy(old)
         return True
     except ImportError:
-        try:
-            import pyautogui
-            pyautogui.write(text, interval=0.05)
-            return True
-        except ImportError:
-            return False
+        return _do("type", text=text)

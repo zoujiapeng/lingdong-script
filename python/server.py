@@ -134,6 +134,18 @@ def run_dsl_sync():
         return jsonify({"success": False, "error": "DSL 内容为空"}), 400
     _current_dsl = source
     start = time.time()
+
+    # 主路径: Robot Framework
+    try:
+        from engine.robot_runner import run_robot
+        result = run_robot(source, task_name="HTTP Automation")
+        result["elapsed_ms"] = round((time.time() - start) * 1000, 1)
+        result["logs"] = _get_logs(200)
+        return jsonify(result)
+    except Exception:
+        pass  # fallback to DSLExecutor
+
+    # 回退: 旧 DSLExecutor
     try:
         DSLParser.from_string(source)
         ctx = ExecutionContext(

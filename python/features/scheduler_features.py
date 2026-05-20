@@ -16,12 +16,18 @@ def _get_schedules_path() -> str:
     env = os.getenv("SCHEDULES_PATH", "")
     if env:
         return env
-    # Windows 用户数据目录（与 Electron userData 一致）
+    # 与 Electron 主进程 app.getPath('userData') 一致
     appdata = os.getenv("APPDATA", "")
     if appdata:
-        candidate = os.path.join(appdata, "灵动脚本", "schedules.json")
-        if os.path.exists(candidate):
-            return candidate
+        # Electron package.json name = "lingdong-script"
+        electron_path = os.path.join(appdata, "lingdong-script", "schedules.json")
+        if os.path.exists(electron_path):
+            return electron_path
+        # 旧版路径
+        legacy_path = os.path.join(appdata, "灵动脚本", "schedules.json")
+        if os.path.exists(legacy_path):
+            return legacy_path
+    # Fallback: 独立运行时使用 ~/.lingdong 目录
     fallback = os.path.join(Path.home(), ".lingdong", "schedules.json")
     os.makedirs(os.path.dirname(fallback), exist_ok=True)
     return fallback

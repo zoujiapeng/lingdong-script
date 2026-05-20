@@ -1,0 +1,25 @@
+<script type="text/html" data-template-name="lobster-run-dsl">
+    <div class="form-row">
+        <label for="node-input-dsl">DSL 脚本</label>
+    </div>
+    <div class="form-row">
+        <textarea id="node-input-dsl" style="height: 200px; width: 100%; font-family: monospace;" placeholder="CLICK 100 200&#10;WAIT 1&#10;TYPE hello"></textarea>
+    </div>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType('lobster-run-dsl', {
+        category: 'lobster',
+        color: '#cba6f7',
+        defaults: {
+            dsl: { value: '', required: true }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: 'template.svg',
+        label: function () {
+            var lines = (this.dsl || '').split('\n').filter(Boolean);
+            return 'DSL (' + lines.length + ' 步)';
+        }
+    });
+</script>
