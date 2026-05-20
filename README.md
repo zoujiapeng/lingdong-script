@@ -2,7 +2,7 @@
 
 # 灵动脚本
 
-**可视化桌面自动化流程编辑器 — AI Agent 监督执行 · 拖拽编排 · 万物可控**
+**可视化桌面自动化流程编辑器 — AI Agent · 拖拽编排 · 万物可控**
 
 [![Electron](https://img.shields.io/badge/Electron-31-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
@@ -16,7 +16,7 @@
 
 灵动脚本是一款**可视化桌面自动化流程编辑器**，通过拖拽节点编排流程图来创建自动化脚本。无需编程经验，即可完成屏幕点击、文字输入、OCR 识别、图片检测、进度条监控、条件分支、循环等桌面自动化操作。
 
-内置 **AI Agent** 具备自主规划与监督执行能力：分析目标 → 生成流程图 → 逐步执行 → OCR 验证 → 失败恢复，全流程闭环。
+内置 **AI Agent** 具备自主规划与监督执行能力：分析目标 → 生成流程图 → 逐步执行 → OCR 验证 → 失败恢复，全流程闭环。Agent 持有 99 个直接工具（浏览器控制/WiFi/音量/窗口管理/剪贴板等），并能通过 `generate_flow_script` 使用全部 184 个 DSL 关键字编排自动化流程。注册表热加载，新增 @feature 后 Agent 自动感知可用。
 
 **三种用法：** ① 手动拖拽编排流程图 ② AI Agent 自然语言自动生成+监督执行 ③ Claude Code / MCP 远程控制
      

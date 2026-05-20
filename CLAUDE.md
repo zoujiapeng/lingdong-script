@@ -141,6 +141,7 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 
 DSL 关键字: 184 个（自动从 @feature 注册表生成，含所有控制流关键字）
 Agent 工具集: 99 个直接工具（浏览器控制/窗口管理/系统功能/WiFi/剪贴板/媒体等）
+Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能自动纳入 Agent 可用范围（重启 Agent 生效）
 
 关键工具示例：
 - `dsl_to_flow(dsl: string)` — DSL 文本转 FlowScript JSON
