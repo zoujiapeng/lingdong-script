@@ -4,7 +4,7 @@
  * Traversal logic is shared; only per-node text generation differs.
  */
 
-import { FlowScript, FlowNode, FlowEdge } from '../types';
+import { FlowScript, FlowNode, FlowEdge, FeatureDefinition } from '../types';
 
 export type TextMode = 'pseudocode' | 'dsl';
 
@@ -341,6 +341,12 @@ function getGens(mode: TextMode): GenFunctions {
 
 // ─── Main traversal (shared) ───
 
+let _featureKwMap: Record<string, string> = {};
+
+export function _setFeatureKeywordMap(map: Record<string, string>) {
+  _featureKwMap = map;
+}
+
 function generateNode(nodeId: string, state: GenState, gens: GenFunctions, convergence?: string): void {
   if (!nodeId || state.visited.has(nodeId)) return;
   if (nodeId === convergence) return;
@@ -464,8 +470,9 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
 
     case 'tool_call': {
       const fn = p.feature_name ?? '';
+      const dslKw = _featureKwMap[fn] || fn.toUpperCase().replace(/_/g, '_');
       const args = p.params ? Object.entries(p.params).map(([k, v]) => `${k}=${v}`).join(' ') : '';
-      emit(state, `${gens.toolCallPrefix} ${fn}${args ? ` ${args}` : ''}`);
+      emit(state, args ? `${dslKw} ${args}` : dslKw);
       forward(nodeId, 'output', state, gens, convergence);
       break;
     }

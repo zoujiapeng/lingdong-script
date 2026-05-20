@@ -482,6 +482,38 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     return { type: 'set_wallpaper', params: { path: wallMatch[1] } };
   }
 
+  // ── Catch-all for ANY unknown DSL keyword (ALL_CAPS) → tool_call ──
+  // Matches patterns like: BROWSER_NAVIGATE url=https://example.com
+  //                          VOLUME_SET level=50
+  const dslCatchRe = /^([A-Z][A-Z_]{2,})\s+(.+)$/;
+  const dslCatchMatch = line.match(dslCatchRe);
+  if (dslCatchMatch) {
+    const keyword = dslCatchMatch[1];
+    const rest = dslCatchMatch[2].trim();
+    // Parse key=value pairs
+    const params: Record<string, any> = {};
+    const pairRe = /(\w+)=("[^"]*"|\S+)/g;
+    let pairMatch;
+    while ((pairMatch = pairRe.exec(rest)) !== null) {
+      let val: any = pairMatch[2];
+      if (val.startsWith('"') && val.endsWith('"')) {
+        val = val.slice(1, -1);
+      } else if (/^\d+$/.test(val)) {
+        val = parseInt(val, 10);
+      } else if (/^\d+\.\d+$/.test(val)) {
+        val = parseFloat(val);
+      }
+      params[pairMatch[1]] = val;
+    }
+    return {
+      type: 'tool_call',
+      params: {
+        feature_name: keyword.toLowerCase(),
+        params,
+      },
+    };
+  }
+
   return null;
 }
 

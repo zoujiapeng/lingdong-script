@@ -4,7 +4,8 @@ import { generateText, TextMode } from '../utils/textGenerator';
 import { Copy, Download, Edit3, AlertTriangle, CheckCircle, XCircle, Languages } from 'lucide-react';
 
 export function PseudoPanel() {
-  const { script } = useStore();
+  const script = useStore(s => s.script);
+  const featureList = useStore(s => s.featureList);
   const [displayCode, setDisplayCode] = useState('');
   const [draftCode, setDraftCode] = useState('');
   const [isEditing, setIsEditing] = useState(false);
@@ -13,6 +14,19 @@ export function PseudoPanel() {
   const [textMode, setTextMode] = useState<TextMode>('pseudocode');
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
+
+  // Sync feature keyword map to textGenerator for DSL generation
+  useEffect(() => {
+    if (featureList.length > 0) {
+      const map: Record<string, string> = {};
+      for (const f of featureList) {
+        if (f.dsl_keyword) {
+          map[f.name] = f.dsl_keyword;
+        }
+      }
+      import('../utils/textGenerator').then(m => m._setFeatureKeywordMap(map));
+    }
+  }, [featureList]);
 
   // Generate text from current script (both modes)
   const generatedCode = useMemo(() => {
@@ -125,8 +139,20 @@ export function PseudoPanel() {
     URL.revokeObjectURL(url);
   }, [script]);
 
-  // Syntax highlighting
-  const highlighted = useMemo(() => highlightText(displayCode, textMode), [displayCode, textMode]);
+  // Syntax highlighting — dynamic from registry keywords
+  const dslKeywords = useMemo(() => {
+    const kws: string[] = [];
+    for (const f of featureList) {
+      if (f.dsl_keyword) kws.push(f.dsl_keyword);
+    }
+    // Add control flow keywords not in registry
+    kws.push('IF', 'ELSE', 'END', 'LOOP', 'BREAK', 'RETURN', 'CALL', 'IMPORT', 'PARALLEL', 'WHILE', 'UNTIL', 'ELIF', 'ELSEIF');
+    return [...new Set(kws)];
+  }, [featureList]);
+
+  const highlighted = useMemo(() => {
+    return highlightText(displayCode, textMode, dslKeywords);
+  }, [displayCode, textMode, dslKeywords]);
 
   return (
     <div className="code-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -219,9 +245,13 @@ export function PseudoPanel() {
 
 // ─── Syntax highlighting ───
 
-function highlightText(code: string, mode: TextMode): string {
+function highlightText(code: string, mode: TextMode, dslKeywords: string[] = []): string {
   const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const lines = escaped.split('\n');
+  const dslKwPattern = dslKeywords.length > 0
+    ? dslKeywords.sort((a, b) => b.length - a.length).join('|')
+    : '';
+
   return lines.map((line) => {
     if (/^\s*#/.test(line)) return `<span class="hl-comment">${line}</span>`;
     let h = line;
@@ -229,11 +259,13 @@ function highlightText(code: string, mode: TextMode): string {
     h = h.replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-number">$1</span>');
 
     if (mode === 'dsl') {
-      // DSL keywords
-      h = h.replace(
-        /\b(IF|ELSE|END|LOOP|WAIT|CLICK|TYPE|HOTKEY|SWIPE|SCREENSHOT|RETURN|BREAK|CALL|SET|REGION_SELECT|REGION_WAIT|SCENE_CONDITION|PROGRESS_WAIT|POPUP_CLOSE|COLOR_CHECK|OCR_FIND|OCR_EXTRACT|IMAGE_CLICK|IMAGE_FIND|WAITSCREEN|TOOL)\b/g,
-        '<span class="hl-keyword">$1</span>'
-      );
+      // Dynamic DSL keywords from registry + control flow
+      if (dslKwPattern) {
+        h = h.replace(
+          new RegExp(`\\b(${dslKwPattern})\\b`, 'g'),
+          '<span class="hl-keyword">$1</span>'
+        );
+      }
     } else {
       // Pseudocode keywords
       h = h.replace(
