@@ -161,9 +161,16 @@ def software_save_script() -> dict:
     display_name="运行脚本",
     description="【软件操控】执行当前流程图脚本（触发引擎运行）",
     category=F.CONTROL,
-    params=[],
+    params=[
+        P("script_json", "object", "要执行的完整脚本 JSON；为空时执行当前画布脚本", required=False, default=None),
+    ],
     returns="dict{success, result}",
     tags=["software"],
 )
-def software_run_script() -> dict:
-    return _api_post("/api/engine/pause", {}, timeout=3)
+def software_run_script(script_json: dict = None) -> dict:
+    if script_json is None:
+        state = _api_post("/api/get-state", {}, timeout=3)
+        if not state.get("success"):
+            return state
+        script_json = state.get("result") or {}
+    return _api_post("/api/engine/start", {"script": script_json}, timeout=3)

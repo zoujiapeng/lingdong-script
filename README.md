@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python)](https://www.python.org/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-102_✔-success)](https://github.com/zoujiapeng/lingdong-script)
+[![Tests](https://img.shields.io/badge/Tests-2149_✔-success)](https://github.com/zoujiapeng/lingdong-script)
 [![Bundle](https://img.shields.io/badge/Bundle-298_KB_JS-FF6B35)](https://github.com/zoujiapeng/lingdong-script)
 
 </div>
@@ -227,7 +227,7 @@ python/
 │   ├── pseudocode.py #   伪代码 → 结构化步骤解析
 │   └── memory.py   #   短期/长期记忆
 ├── engine/         # 自动化执行引擎 (DSL执行/条件评估)
-├── features/       # @feature 注册表 (~160 工具, 懒加载)
+├── features/       # @feature 注册表 (226 工具, 懒加载)
 ├── mcp/            # Python MCP 服务器
 ├── macros/         # 宏录制文件保存
 ├── interaction/    # 滚轮选择器/区域选择器
@@ -252,12 +252,12 @@ Three ways to use: ① Manual flowchart editing ② AI Agent (natural language �
 
 ### Key Features
 
-- **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, and failure recovery
+- **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, failure recovery, and 99 built-in tools (browser/volume/wifi/clipboard/etc.)
 - **Visual Flow Editor** — 100+ node types, 3 view modes (canvas/pseudocode/settings)
 - **Macro Recording** — F6 hotkey, smart filtering, one-click convert to flowchart
 - **AI-Powered** — Natural language to automation scripts (DeepSeek/OpenAI)
 - **DSL Scripting** — Built-in domain-specific language for text-based editing
-- **@Feature Registry** — 160+ tools, lazy-loaded (20ms cold start), auto MCP/CLI/HTTP
+- **@Feature Registry** — 226 tools (184 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
 - **Architecture Optimized** — Code splitting (298KB JS), Python process pool (max 3), async file I/O
 - **HTTP API Bridge** — 50+ endpoints on `127.0.0.1:5877` for remote control
 - **MCP Protocol** — Python + TypeScript dual MCP servers

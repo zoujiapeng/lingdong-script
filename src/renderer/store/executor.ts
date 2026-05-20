@@ -8,6 +8,7 @@ export interface ExecutionController {
   pause: () => void;
   resume: () => void;
   stop: () => void;
+  stepNext: () => void;
 }
 
 interface ExecCallbacks {
@@ -16,16 +17,22 @@ interface ExecCallbacks {
   onDone: (status: 'completed' | 'stopped' | 'error') => void;
   onCurrentNode: (nodeId: string | undefined) => void;
   onIteration?: (current: number, total: number, nodeId: string) => void;
+  onPausedAtBreakpoint?: (nodeId: string) => void;
 }
 
 export function createFlowExecutor(
   script: FlowScript,
   callbacks: ExecCallbacks,
-  scripts?: Record<string, FlowScript>
+  scripts?: Record<string, FlowScript>,
+  breakpoints?: string[],
+  stepping?: boolean,
 ): ExecutionController {
   let _paused = false;
   let _stopped = false;
+  let _stepping = stepping || false;
+  let _breakpoints = new Set(breakpoints || []);
   let resumeResolve: (() => void) | null = null;
+  let stepResolve: (() => void) | null = null;
   let _subFlowDepth = 0;
   const MAX_SUB_FLOW_DEPTH = 10;
 
@@ -75,6 +82,18 @@ export function createFlowExecutor(
     const node = nodeMap.get(nodeId);
     if (!node) { log('error', `节点未找到: ${nodeId}`); return ''; }
     if (node.disabled) { log('info', `跳过已禁用节点: ${node.type}`, nodeId); return 'output'; }
+
+    // Breakpoint check: pause before executing if node has a breakpoint
+    if (_breakpoints.has(nodeId)) {
+      log('info', `🔴 断点命中: ${node.type}`, nodeId);
+      _paused = true;
+      callbacks.onPausedAtBreakpoint?.(nodeId);
+      while (_paused && !_stopped) {
+        await new Promise<void>((r) => { resumeResolve = r; });
+        resumeResolve = null;
+      }
+      if (_stopped) throw new Error('stopped');
+    }
 
     callbacks.onCurrentNode(nodeId);
     callbacks.onNodeStatus(nodeId, 'running');
@@ -359,6 +378,40 @@ export function createFlowExecutor(
           break;
         }
 
+        case 'web_browser': {
+          const actionLabels: Record<string, string> = { navigate: '导航', click: '点击', input_text: '输入', screenshot: '截图', wait: '等待', extract: '提取', scroll: '滚动' };
+          const action = actionLabels[params.action] || params.action || '未知';
+          const target = params.url || params.selector || '';
+          log('info', `🌐 浏览器操作: ${action} ${target}`, nodeId);
+          const win = window as any;
+          if (win.electronAPI?.callFeature) {
+            try {
+              const res = await win.electronAPI.callFeature('web_browser_execute', {
+                action: params.action,
+                url: params.url,
+                selector: params.selector,
+                text: params.text,
+                wait_seconds: params.wait_seconds,
+                extract_attr: params.extract_attr,
+                scroll_direction: params.scroll_direction,
+                timeout: params.timeout || 30,
+                headless: params.headless || false,
+              });
+              log('info', `🌐 浏览器结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+              if (res?.result?.extracted) {
+                log('info', `📄 提取内容: ${String(res.result.extracted).slice(0, 500)}`, nodeId);
+              }
+            } catch (e: any) {
+              log('error', `🌐 浏览器操作失败: ${e.message}`, nodeId);
+            }
+          } else {
+            log('warn', `🌐 浏览器操作模拟: ${action} ${target}`, nodeId);
+            await delay(500);
+          }
+          result = 'output';
+          break;
+        }
+
         case 'tool_call': {
           const featureName = params.feature_name || 'unknown';
           log('info', `调用工具: ${featureName}`, nodeId);
@@ -419,6 +472,13 @@ export function createFlowExecutor(
       }
 
       callbacks.onNodeStatus(nodeId, 'success');
+
+      // Step mode: pause after this node completes so next node waits
+      if (_stepping && !_paused) {
+        _paused = true;
+        log('debug', '⏭️ 单步模式 — 按 F10 继续', nodeId);
+      }
+
       return result;
 
     } catch (e: any) {
@@ -504,6 +564,12 @@ export function createFlowExecutor(
     stop: () => {
       _stopped = true;
       if (resumeResolve) resumeResolve();
+      if (stepResolve) stepResolve();
+    },
+    stepNext: () => {
+      _paused = false;
+      if (resumeResolve) resumeResolve();
+      if (stepResolve) stepResolve();
     },
   };
 }

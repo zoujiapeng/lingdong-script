@@ -85,17 +85,36 @@ class LangGraphAgent:
         "click_target", "right_click", "hover", "mouse_move",
         "type_text", "type_clipboard",
         "hotkey", "scroll", "drag", "swipe",
+        "triple_click", "middle_click", "select_text",
+        # ---- 浏览器 ----
+        "browser_connect", "browser_navigate", "browser_click", "browser_type",
+        "browser_list_tabs", "browser_close_tab", "browser_screenshot",
+        "browser_get_url", "browser_get_text", "browser_find_elements",
+        "browser_wait_element", "browser_wait_page_load", "browser_execute_js",
+        "browser_refresh", "browser_go_back", "browser_new_tab", "browser_switch_tab",
         # ---- 感知识别 ----
         "screenshot", "find_image", "ocr_find_text", "ocr_extract_all",
+        "region_select", "color_check", "popup_close",
+        "a11y_get_tree", "find_element", "wait_element",
         # ---- 系统控制 ----
         "launch_program", "run_command", "program_resolve", "program_list",
         "focus_window", "get_active_window", "list_windows",
+        # ---- 窗口管理 ----
+        "window_minimize", "window_maximize", "window_close",
+        "window_resize", "window_restore", "show_desktop",
+        # ---- 进程 ----
+        "detect_process", "find_processes", "kill_process",
+        # ---- 系统功能 ----
+        "volume_set", "volume_mute", "display_brightness",
+        "battery_status", "lock_workstation",
+        "wifi_list", "wifi_connect", "wifi_disconnect",
         # ---- 等待 ----
         "wait_action", "wait_screen_stable", "wait_screen_change",
-        # ---- 进程 ----
-        "detect_process", "find_processes",
         # ---- 剪贴板 ----
         "clipboard_set_text", "clipboard_get_text",
+        "clipboard_clear", "clipboard_get_files", "clipboard_get_image",
+        # ---- 对话框 ----
+        "handle_dialog", "fill_save_dialog",
         # ---- 变量 ----
         "set_variable", "get_variable",
         # ---- DSL ----
@@ -104,14 +123,20 @@ class LangGraphAgent:
         "a11y_find_element", "a11y_click_element",
         # ---- 网络 ----
         "network_status",
-        # ---- 调度器（新增）----
+        # ---- 调度器 ----
         "scheduler_create", "scheduler_delete", "scheduler_list",
+        "scheduler_update", "scheduler_get",
         "quick_schedule",
-        # ---- 流程生成（新增）----
+        # ---- 流程生成 ----
         "generate_flow_script",
         # ---- 文件 ----
         "file_read", "file_write", "file_list",
         "file_exists", "file_edit",
+        "file_append", "file_copy", "file_move", "file_delete",
+        # ---- 媒体 ----
+        "screen_record_start", "screen_record_stop",
+        # ---- 菜单 ----
+        "menu_click",
     }
 
     # ── 工具加载 ──────────────────────────────────────────────

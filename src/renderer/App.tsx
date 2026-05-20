@@ -116,6 +116,23 @@ export default function App() {
           case 'd': e.preventDefault(); store.duplicateNodes(store.ui.selection.nodes); break;
         }
       }
+      // F10: Step over (debugger)
+      if (e.key === 'F10') {
+        e.preventDefault();
+        store.stepOver();
+        return;
+      }
+      // F5: Run
+      if (e.key === 'F5') {
+        e.preventDefault();
+        if (store.execution.status === 'idle' || store.execution.status === 'stopped' || store.execution.status === 'completed') {
+          store.startExecution();
+        } else {
+          store.stopExecution();
+        }
+        return;
+      }
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const { nodes, edges } = store.ui.selection;
         if (nodes.length > 0) store.deleteNodes(nodes.filter(id => {

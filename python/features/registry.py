@@ -100,6 +100,17 @@ class FeatureSpec:
             self.cli_command = self.name.replace("_", "-")
         if not self.http_endpoint:
             self.http_endpoint = f"/api/feature/{self.name}"
+        # 自动生成 DSL 关键字（如果未指定且类别适合直接调用）
+        if not self.dsl_keyword and self.category in (
+            FeatureCategory.ACTION, FeatureCategory.SYSTEM,
+            FeatureCategory.PERCEPTION, FeatureCategory.CONTROL,
+        ):
+            kw = self.name.upper()
+            # 移除常见后缀，让关键字更简洁
+            for suffix in ("_ACTION", "_COMMAND", "_FEATURE"):
+                if kw.endswith(suffix) and len(kw) > len(suffix) + 2:
+                    kw = kw[:-len(suffix)]
+            self.dsl_keyword = kw
 
     def to_mcp_schema(self) -> dict:
         properties = {}
@@ -379,7 +390,7 @@ class FeatureRegistry:
     def export_claude_context(self) -> str:
         lines = [
             "# Lobster 功能注册表",
-            f"# 共 {len(self._features)} 个功能",
+            f"# 共 {len(self._features)} 个功能（{len([f for f in self.all() if f.dsl_keyword])} 个可用 DSL 直接调用）",
             f"# 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         ]
         for cat in FeatureCategory:
@@ -388,11 +399,21 @@ class FeatureRegistry:
                 continue
             lines.append(f"\n## {cat.value.upper()}: {CAT_NAMES.get(cat, cat.value)}")
             for f in features:
-                lines.append(f"- **{f.name}** → MCP: `{f.mcp_tool_name}`")
+                dsl_tag = f" DSL:`{f.dsl_keyword}`" if f.dsl_keyword else ""
+                lines.append(f"- **{f.name}** → MCP: `{f.mcp_tool_name}`{dsl_tag}")
                 lines.append(f"  - {f.description}")
                 if f.dsl_template:
                     lines.append(f"  - DSL: `{f.dsl_template}`")
                 lines.append(f"  - 参数: {', '.join(f'{p.name}:{p.type}' for p in f.params)}")
+        lines.append("")
+        lines.append("## DSL 使用方式")
+        lines.append("在 DSL 文本中直接用关键字加参数调用：")
+        lines.append("```")
+        lines.append("BROWSER_NAVIGATE url=https://example.com")
+        lines.append("VOLUME_SET level=50")
+        lines.append("FIND_ELEMENT query=搜索 timeout=5")
+        lines.append("```")
+        lines.append("参数格式为 `key=value`，多个参数用空格分隔。")
         lines.extend([
             "",
             "## 如何新增功能",

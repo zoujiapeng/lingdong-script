@@ -96,18 +96,22 @@ class WindowManager:
             True if successful.
         """
         if self._win32_available:
-            def enum_callback(hwnd, target):
+            found = []
+
+            def enum_callback(hwnd, results):
                 if not self._win32gui.IsWindowVisible(hwnd):
                     return
                 wtext = self._win32gui.GetWindowText(hwnd)
-                match = (wtext.lower() == target.lower()) if exact \
-                    else (target.lower() in wtext.lower())
+                match = (wtext.lower() == title.lower()) if exact \
+                    else (title.lower() in wtext.lower())
                 if match:
                     self._win32gui.ShowWindow(hwnd, self._win32con.SW_RESTORE)
-                    self._win32gui.SetForegroundWindow(hwnd)
-                    target.append(hwnd)
+                    try:
+                        self._win32gui.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+                    results.append(hwnd)
 
-            found = []
             self._win32gui.EnumWindows(enum_callback, found)
             if found:
                 time.sleep(0.2)

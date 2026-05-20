@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import { ChildProcess } from 'child_process';
 import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
-import { callFeature } from './featureCallBridge';
+import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { handleMCPRequest } from './mcp-handler';
 
 export interface ApiDeps {
@@ -111,7 +111,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
                 const required: Record<string, string[]> = {
                   click: ['x', 'y'],
                   input_text: ['text'],
-                  wait: ['time'],
+                  wait: [],
                   image_click: ['targets'],
                   click_text: ['text'],
                   keyboard: ['keys'],
@@ -127,6 +127,16 @@ export function startApiServer(deps: ApiDeps): http.Server {
                   n.params?.[p] === undefined || n.params[p] === null || n.params[p] === '' ||
                   (Array.isArray(n.params[p]) && n.params[p].length === 0)
                 );
+                if (n.type === 'wait') {
+                  const waitType = n.params?.wait_type || 'time';
+                  if (waitType === 'time' && (n.params?.duration === undefined || n.params.duration === null || n.params.duration === '')) {
+                    missing.push('duration');
+                  } else if (waitType === 'window' && !n.params?.window_title) {
+                    missing.push('window_title');
+                  } else if (waitType === 'image' && !n.params?.image_path && !n.params?.template_name) {
+                    missing.push('image_path');
+                  }
+                }
                 return { id: n.id, type: n.type, missing, ok: missing.length === 0 };
               });
               send(200, { ok: true, results });
@@ -229,15 +239,22 @@ export function startApiServer(deps: ApiDeps): http.Server {
           }
 
           // ─── Engine control ───
+          case '/api/engine/start':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            if (!payload.script) { send(400, { error: '缺少 script' }); return; }
+            deps.mainWindow.webContents.send('api-command', { action: 'start', payload: { script: payload.script } });
+            send(200, { ok: true });
+            break;
+
           case '/api/engine/pause':
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.mainWindow.webContents.send('engine-control', { action: 'pause' });
+            deps.mainWindow.webContents.send('api-command', { action: 'pause', payload: {} });
             send(200, { ok: true });
             break;
 
           case '/api/engine/resume':
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.mainWindow.webContents.send('engine-control', { action: 'resume' });
+            deps.mainWindow.webContents.send('api-command', { action: 'resume', payload: {} });
             send(200, { ok: true });
             break;
 
@@ -364,6 +381,11 @@ export function startApiServer(deps: ApiDeps): http.Server {
             })();
             break;
 
+          case '/api/features/reload':
+            stopFeatureProcess();
+            send(200, { ok: true, reloaded: true });
+            break;
+
           case '/api/features/call':
             (async () => {
               const result = await callFeature(payload.name, payload.params || {});
@@ -380,7 +402,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
           // ─── UI ───
           case '/api/set-view-mode':
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.mainWindow.webContents.send('api-command', { action: 'setViewMode', payload: payload.mode });
+            deps.mainWindow.webContents.send('api-command', { action: 'setViewMode', payload: { mode: payload.mode } });
             send(200, { ok: true });
             break;
 

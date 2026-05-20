@@ -435,6 +435,9 @@ class DSLExecutor:
         elif node.type == NodeType.FILEDIALOG_FOLDER:
             self._exec_filedialog_folder(node, ctx)
 
+        elif node.type == NodeType.REGISTRY_FEATURE:
+            self._exec_registry_feature(node, ctx)
+
         # SUBROUTINE 定义直接跳过（已在 parser 注册）
 
     # ── 指令执行 ─────────────────────────────────────────────────
@@ -1693,6 +1696,40 @@ class DSLExecutor:
     def set_dialog_auto(self, enabled: bool):
         """设置是否自动处理对话框"""
         self._dialog_auto = enabled
+
+    # ── Registry Feature 执行 ─────────────────────────────────────
+    def _exec_registry_feature(self, node: ASTNode, ctx: ExecutionContext):
+        """执行由 DSL 关键字映射到的注册表功能（@feature 装饰器注册）。"""
+        keyword = node.keyword or node.type.value
+        self._emit("node_start", node_type=keyword, args=node.args, line=node.line)
+        self._log(f"{keyword}: {node.args}")
+
+        try:
+            from features.registry import registry
+            spec = registry.by_dsl_keyword(keyword)
+            if not spec:
+                self._log(f"  DSL 关键字 '{keyword}' 未匹配到功能", level="warn")
+                self._emit("node_done", node_type=keyword, error="not_found", line=node.line)
+                return
+
+            # 解析 key=value 参数
+            kwargs = {}
+            raw = node.args.strip()
+            if raw:
+                import re
+                for pair in re.split(r'\s+', raw):
+                    if "=" in pair:
+                        k, v = pair.split("=", 1)
+                        kwargs[k.strip()] = v.strip().strip('"').strip("'")
+
+            result = registry.execute_with_typed_params(spec.name, **kwargs)
+            status = "ok" if result.get("success") else "error"
+            if not result.get("success"):
+                self._log(f"  {keyword} 执行失败: {result.get('error', '')}", level="error")
+            self._emit("node_done", node_type=keyword, status=status, result=result.get("result"), line=node.line)
+        except Exception as e:
+            self._log(f"  {keyword} 异常: {e}", level="error")
+            self._emit("node_done", node_type=keyword, error=str(e), line=node.line)
 
     # ── 动作调用 ─────────────────────────────────────────────────
     def _call_action(self, action: str, **kwargs) -> Any:

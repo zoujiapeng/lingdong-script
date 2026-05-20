@@ -13,6 +13,8 @@ Files originally based on pywinauto removed per 2026-05-16 refactoring:
 import logging
 import os
 import time
+from pathlib import Path
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -228,9 +230,12 @@ class ActionHandler:
     # ── Click / Right / Middle / Triple ─────────────────────────
 
     def _exec_click(self, target=None, x=None, y=None, button="left", **kw):
+        learn_target_id = kw.get("learn_target_id") or kw.get("target_id")
+        learn_label = kw.get("learn_label") or (target if isinstance(target, str) else "")
         # Priority 1: uiautomation click by target name
         if target and isinstance(target, str) and not target.startswith("("):
             if _uia_click_by_name(target):
+                self._learn_click_target(learn_target_id, learn_label or target, action="click", uia_name=target, button=button)
                 return True
         # Priority 2: win32api coordinate click
         cx, cy = None, None
@@ -239,9 +244,16 @@ class ActionHandler:
         elif target is not None and isinstance(target, (list, tuple)) and len(target) >= 2:
             cx, cy = int(target[0]), int(target[1])
         if cx is not None:
-            return _win32_click(cx, cy, button)
+            ok = _win32_click(cx, cy, button)
+            if ok:
+                self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
+            return ok
         # Fallback: current position
-        return _win32_click(*_get_cursor_pos(), button)
+        cx, cy = _get_cursor_pos()
+        ok = _win32_click(cx, cy, button)
+        if ok:
+            self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
+        return ok
 
     def _exec_right_click(self, target=None, x=None, y=None, **kw):
         return self._exec_click(target=target, x=x, y=y, button="right", **kw)
@@ -445,6 +457,155 @@ class ActionHandler:
             time.sleep(duration / steps)
         w32['api'].mouse_event(w32['con'].MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         return True
+
+    def _handle_image_click(
+        self,
+        targets="",
+        similarity=0.9,
+        method="single",
+        timeout=5,
+        region="",
+        offset_x=0,
+        offset_y=0,
+        match_all=False,
+        **kw,
+    ):
+        from features._utils import parse_region
+        from perception.vision import TemplateMatcher
+
+        target_names = [Path(t.strip()).stem for t in str(targets or "").split(",") if t.strip()]
+        if not target_names:
+            return {"success": True, "found": False, "error": "缺少模板名"}
+
+        reg = parse_region(region) if isinstance(region, str) else region
+        matcher = TemplateMatcher()
+        deadline = time.time() + max(0.0, float(timeout))
+        clicked = []
+        last_error = "未找到匹配图像"
+
+        while time.time() <= deadline:
+            for name in target_names:
+                if match_all:
+                    matches = matcher.find_all(name, threshold=float(similarity), region=reg)
+                    if not matches:
+                        continue
+                    for (x, y), conf in matches:
+                        cx, cy = self._adjust_match_point(x, y, reg, offset_x, offset_y)
+                        self._click_by_method(cx, cy, method)
+                        clicked.append({"target": name, "x": cx, "y": cy, "confidence": conf})
+                    return {"success": True, "found": True, "clicked": clicked, "count": len(clicked)}
+
+                result = matcher.find(name, threshold=float(similarity), region=reg)
+                if not result:
+                    continue
+                (x, y), conf = result
+                cx, cy = self._adjust_match_point(x, y, reg, offset_x, offset_y)
+                self._click_by_method(cx, cy, method)
+                learn_target_id = kw.get("learn_target_id") or kw.get("target_id") or name
+                self._learn_click_target(
+                    learn_target_id,
+                    name,
+                    x=cx,
+                    y=cy,
+                    action="image_click",
+                    template_name=name,
+                    region=reg,
+                    offset_x=offset_x,
+                    offset_y=offset_y,
+                    confidence=conf,
+                    button=method,
+                )
+                return {"success": True, "found": True, "target": name, "x": cx, "y": cy, "confidence": conf}
+            if timeout <= 0:
+                break
+            time.sleep(0.2)
+
+        return {"success": False, "found": False, "error": last_error, "targets": target_names}
+
+    def _adjust_match_point(self, x, y, region, offset_x, offset_y):
+        if region:
+            x += int(region[0])
+            y += int(region[1])
+        return int(x + int(offset_x)), int(y + int(offset_y))
+
+    def _click_by_method(self, x, y, method):
+        method = str(method or "single").lower()
+        button = "right" if method == "right" else "left"
+        _win32_click(x, y, button)
+        if method == "double":
+            time.sleep(0.05)
+            _win32_click(x, y, button)
+        return True
+
+    def _learn_click_target(
+        self,
+        target_id=None,
+        label="",
+        x=None,
+        y=None,
+        action="click",
+        uia_name="",
+        template_name="",
+        region=None,
+        offset_x=0,
+        offset_y=0,
+        confidence=0.0,
+        button="left",
+    ):
+        target_id = str(target_id or "").strip()
+        if not target_id:
+            return
+        try:
+            from engine.store import get_store
+            app = self._active_app_context()
+            template_path = ""
+            if template_name:
+                template_path = str(Path("templates") / f"{Path(template_name).stem}.png")
+            elif x is not None and y is not None:
+                template_path = self._capture_click_template(target_id, int(x), int(y))
+            target = {
+                "target_id": target_id,
+                "app": app,
+                "action": action,
+                "template_path": template_path,
+                "ocr": {"text": label} if label else {},
+                "uia": {"name": uia_name} if uia_name else {},
+                "offset": {"x": int(offset_x or 0), "y": int(offset_y or 0)},
+                "context": {"region": list(region) if region else None, "button": button, "confidence": float(confidence or 0)},
+                "success_count": 1,
+                "failure_count": 0,
+                "last_used_at": time.time(),
+            }
+            get_store().save_learned_target(target)
+        except Exception as e:
+            logger.debug("learn target failed: %s", e)
+
+    def _capture_click_template(self, target_id, x, y, size=64):
+        try:
+            import cv2
+            from perception.vision import ScreenCapture
+            safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in target_id)[:80]
+            template_dir = Path(__file__).resolve().parents[2] / "templates"
+            template_dir.mkdir(exist_ok=True)
+            half = size // 2
+            region = (max(0, x - half), max(0, y - half), size, size)
+            img = ScreenCapture.capture(region)
+            if img is None or img.size == 0:
+                return ""
+            path = template_dir / f"learned_{safe}.png"
+            cv2.imwrite(str(path), img)
+            return str(path)
+        except Exception:
+            return ""
+
+    def _active_app_context(self):
+        try:
+            w32 = _ensure_win32()
+            hwnd = w32['gui'].GetForegroundWindow()
+            title = w32['gui'].GetWindowText(hwnd) if hwnd else ""
+            return {"hwnd": hwnd, "title": title}
+        except Exception:
+            return {}
 
     # ── Condition check ─────────────────────────────────────────
 

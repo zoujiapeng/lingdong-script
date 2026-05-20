@@ -381,6 +381,74 @@ def cmd_delegate(args):
         print(f"✓ 已启动 Claude Code 新实例")
 
 
+def cmd_template(args):
+    """社区模板市场 — 搜索/安装/管理模板
+
+    用法:
+      lobster template search <query>   搜索远程模板
+      lobster template install <id>     安装模板到本地
+      lobster template list             列出已安装模板
+      lobster template publish <path>   准备发布模板
+      lobster template refresh          刷新模板索引缓存
+
+    模板源: https://github.com/{owner}/lobster-templates
+    可通过 LOBSTER_TEMPLATE_SOURCE 环境变量指定自定义源。
+    """
+    from tools.template_market import search, install, list_installed, publish, fetch_index
+    if not args or args[0] in ("-h", "--help"):
+        print(cmd_template.__doc__ or __doc__)
+        return
+    sub = args[0]
+    sub_args = args[1:]
+    if sub == "search":
+        q = " ".join(sub_args)
+        if not q:
+            print("用法: lobster template search <query>", file=sys.stderr); sys.exit(1)
+        results = search(q)
+        if not results:
+            print("未找到匹配的模板")
+            return
+        print(f"📋 找到 {len(results)} 个模板:\n")
+        for r in results:
+            tags = ", ".join(r.get("tags", []))
+            print(f"  [{r['id']}]")
+            print(f"    名称: {r.get('name', '?')}")
+            print(f"    说明: {r.get('description', '')}")
+            if tags:
+                print(f"    标签: {tags}")
+            print()
+    elif sub == "install":
+        if not sub_args:
+            print("用法: lobster template install <id>", file=sys.stderr); sys.exit(1)
+        install(sub_args[0])
+    elif sub == "list":
+        installed = list_installed()
+        if not installed:
+            print("本地未安装任何模板")
+            return
+        print(f"📦 本地模板 ({len(installed)}):\n")
+        for t in installed:
+            size_kb = t["size"] / 1024
+            print(f"  [{t['id']}] {t['name']}  ({size_kb:.1f} KB)")
+            if t["description"]:
+                print(f"    {t['description']}")
+    elif sub == "publish":
+        if not sub_args:
+            print("用法: lobster template publish <path> [--name <name>]", file=sys.stderr); sys.exit(1)
+        path = sub_args[0]
+        name = None
+        if "--name" in sub_args:
+            idx = sub_args.index("--name")
+            if idx + 1 < len(sub_args):
+                name = sub_args[idx + 1]
+        publish(path, name)
+    elif sub == "refresh":
+        fetch_index(force=True)
+        print("✅ 模板索引已刷新")
+    else:
+        print(f"未知模板命令: {sub}", file=sys.stderr); sys.exit(1)
+
+
 def cmd_exec(args):
     """直接执行 DSL (无需后端, 直接调用执行引擎)
 
@@ -459,6 +527,7 @@ COMMANDS = {
     "call": cmd_call, "list": cmd_list, "info": cmd_info, "test": cmd_test,
     "mcp": cmd_mcp,
     "region-select": cmd_region_select,
+    "template": cmd_template,
 }
 
 HELP = """Lobster CLI v2 - 低Token AI自动化执行系统
@@ -484,6 +553,11 @@ HELP = """Lobster CLI v2 - 低Token AI自动化执行系统
 
 模板:
   match <query>             搜索前端模板（HTN + 语义匹配）
+  template search <query>   搜索社区模板市场（GitHub 源）
+  template install <id>     从社区市场安装模板
+  template list             列出本地已安装模板
+  template publish <path>   准备发布模板到社区
+  template refresh          刷新模板索引缓存
 
 高级:
   delegate <prompt>         打开新终端启动另一个 Claude Code 实例

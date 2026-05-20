@@ -4,6 +4,7 @@ find_element / wait_element — 融合 OCR + 图像 + 无障碍树
 """
 from features.registry import feature, P, TC, FeatureCategory as F
 from features._utils import parse_region
+from pathlib import Path
 
 
 @feature(
@@ -24,6 +25,113 @@ from features._utils import parse_region
 )
 def find_element(query: str, region: str = "", threshold: float = 0.6) -> dict:
     try:
+        from engine.store import get_store
+        store = get_store()
+        learned = store.get_learned_target(query)
+        if learned:
+            app_id = learned.get("app", {}).get("identifier", "")
+            if app_id:
+                try:
+                    from system.window import WindowManager
+                    active = WindowManager().get_active_window() or {}
+                    active_title = active.get("title", "").lower()
+                    if app_id.lower() not in active_title:
+                        learned = None
+                except Exception:
+                    learned = None
+            if learned:
+                tpl = learned.get("template_path", "")
+                ocr_data = learned.get("ocr", {})
+                uia_data = learned.get("uia", {})
+                offset = learned.get("offset", {})
+                cx_offset = offset.get("x", 0) if isinstance(offset, dict) else 0
+                cy_offset = offset.get("y", 0) if isinstance(offset, dict) else 0
+                if uia_data.get("name"):
+                    try:
+                        import uiautomation as auto
+                        root = auto.GetRootControl()
+                        if root:
+                            name_q = uia_data["name"]
+                            role_q = uia_data.get("role", "")
+                            controls = []
+
+                            def walk(ctrl):
+                                if len(controls) >= 10:
+                                    return
+                                try:
+                                    n = ctrl.Name or ""
+                                    if name_q.lower() in n.lower():
+                                        if not role_q or role_q.lower() in (ctrl.ControlTypeName or "").lower():
+                                            controls.append(ctrl)
+                                    for child in ctrl.GetChildren():
+                                        walk(child)
+                                except Exception:
+                                    pass
+
+                            walk(root)
+                            for ctrl in controls:
+                                rect = ctrl.BoundingRectangle
+                                if not rect:
+                                    continue
+                                x, y = int(rect.left), int(rect.top)
+                                w, h = int(rect.right - rect.left), int(rect.bottom - rect.top)
+                                if w <= 0 or h <= 0:
+                                    continue
+                                store.update_target_stats(query, True)
+                                return {
+                                    "found": True, "text": ctrl.Name or name_q,
+                                    "x": x, "y": y, "w": w, "h": h,
+                                    "confidence": 0.95,
+                                    "strategy": "learned_uia",
+                                    "learned": True,
+                                    "target_id": query,
+                                }
+                    except Exception:
+                        pass
+                if ocr_data.get("text"):
+                    reg = parse_region(region)
+                    from perception.ocr import OCREngine
+                    ocr = OCREngine()
+                    hit = ocr.find_text(ocr_data["text"], region=reg, threshold=float(threshold))
+                    if hit:
+                        bx, by, bw, bh = hit.bbox
+                        store.update_target_stats(query, True)
+                        return {
+                            "found": True, "text": hit.text,
+                            "x": int(bx), "y": int(by),
+                            "w": int(bw), "h": int(bh),
+                            "confidence": float(hit.confidence),
+                            "strategy": "learned_ocr",
+                            "learned": True,
+                            "target_id": query,
+                        }
+                if tpl:
+                    reg = parse_region(region)
+                    from perception.vision import TemplateMatcher
+                    template_path = tpl
+                    template_dir = str(Path(template_path).parent) if Path(template_path).parent != Path('.') else "templates"
+                    matcher = TemplateMatcher(template_dir=template_dir)
+                    name = Path(template_path).stem
+                    res = matcher.find(name, threshold=float(threshold), region=reg)
+                    if res:
+                        (px, py), conf = res
+                        if reg:
+                            px += int(reg[0])
+                            py += int(reg[1])
+                        px += cx_offset
+                        py += cy_offset
+                        store.update_target_stats(query, True)
+                        return {
+                            "found": True, "text": name,
+                            "x": int(px), "y": int(py),
+                            "w": 1, "h": 1,
+                            "confidence": float(conf),
+                            "strategy": "learned_template",
+                            "learned": True,
+                            "target_id": query,
+                            "center_x": int(px), "center_y": int(py),
+                        }
+        # Step 2: local fusion resolver (UIA → OCR → template)
         from perception.fusion import get_fusion_engine
         engine = get_fusion_engine()
         reg = parse_region(region)
