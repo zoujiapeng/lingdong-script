@@ -179,9 +179,6 @@ function parseTime(text: string): TimeParseResult {
     }
   }
 
-  // 4. cron: 每N小时
-  m = remaining.match(/每(\d+)\s*小时/);
-
   // 3b. cron: 每周末
   m = remaining.match(
     /每周末\s*(?:凌晨|清晨|早上|上午|早晨|中午|下午|傍晚|晚上|夜晚)?\s*(\d+)\s*点\s*(?:(\d+)\s*分?|半)?/
@@ -331,7 +328,7 @@ function parseTime(text: string): TimeParseResult {
     const period = findPeriod(m[0]);
     h = adjustHour(h, period, '');
     if (h >= 0 && h <= 23) {
-      return { cron: `0 ${h} * * *`, confidence: 55, matched: m[0], remaining: remaining.replace(m[0], '').trim() };
+      return { cron: `0 ${h} * * *`, confidence: 55, fuzzy: true, matched: m[0], remaining: remaining.replace(m[0], '').trim() };
     }
   }
 

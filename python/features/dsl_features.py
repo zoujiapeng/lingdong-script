@@ -83,6 +83,45 @@ def run_dsl_sync(dsl: str, max_loops: int = 10, retry_limit: int = 1, timeout: f
 
 
 @feature(
+    name="run_dsl_robot",
+    display_name="执行 DSL (Robot Framework)",
+    description="【免 token 执行·新引擎】通过 Robot Framework 执行 Lobster DSL 脚本。比旧引擎更可靠：支持控件级别定位、更好的 Unicode 输入、窗口管理。适用于：需要高可靠性的自动化任务。自动降级到旧引擎",
+    category=F.CONTROL,
+    params=[
+        P("dsl", "str", "DSL 脚本内容，多行文本", example="CLICK 开始\nWAIT 2\nCLICK 确认"),
+        P("timeout", "number", "超时秒数", required=False, default=60),
+        P("task_name", "str", "任务名称", required=False, default="Lobster Automation"),
+    ],
+    returns="dict{success, logs, passed, failed, elapsed_ms} - 执行结果",
+    dsl_keyword=None,
+    examples=[
+        "lobster call run_dsl_robot dsl='CLICK 100 200\nWAIT 1\nTYPE hello'",
+    ],
+    tags=["core", "dsl", "execution", "robot"],
+)
+def run_dsl_robot(dsl: str, timeout: float = 60, task_name: str = "Lobster Automation") -> dict:
+    """通过 Robot Framework 执行 DSL。
+
+    Primary path: RF + RPA.Windows (控件级别定位)
+    Fallback: 旧 DSLExecutor (pyautogui 像素坐标)
+    """
+    try:
+        from engine.robot_runner import run_robot
+        result = run_robot(dsl, task_name=task_name)
+        return result
+    except ImportError as e:
+        # Fallback to old executor
+        from engine.executor import DSLExecutor, ExecutionContext
+        from features.action_map import make_action_handler
+        executor = DSLExecutor(action_handler=make_action_handler())
+        ctx = ExecutionContext(max_loops=100, timeout=timeout)
+        result = executor.run_dsl_sync(dsl, ctx=ctx)
+        return result
+    except Exception as e:
+        return {"success": False, "error": str(e), "logs": []}
+
+
+@feature(
     name="run_script",
     display_name="运行子脚本",
     description="【DSL·调用】在 DSL 中调用另一个已注册的子流程/子脚本。需要引擎上下文支持，MCP 直接调用将返回模拟成功",

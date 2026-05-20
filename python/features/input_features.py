@@ -1,6 +1,7 @@
 """
 高级输入功能
-右键 / 悬停 / 鼠标移动 / 连击 / 中键 — 基于 PyAutoGUI
+右键 / 悬停 / 鼠标移动 / 连击 / 中键
+All operations route through ActionHandler (uiautomation/win32api).
 """
 import time
 import random
@@ -9,16 +10,19 @@ from features.registry import feature, P, TC, FeatureCategory as F
 from features._utils import resolve_coord, parse_region
 
 
+def _do(action, **kw):
+    from interaction.actions import ActionHandler
+    return ActionHandler()(action, **kw)
+
+
 def _find_target_coords(target: str, region: str = "") -> tuple:
     """将目标文字解析为屏幕坐标 (x, y)"""
-    # 优先尝试坐标解析
     try:
         parts = target.strip().split(",")
         if len(parts) == 2:
             return int(parts[0]), int(parts[1])
     except Exception:
         pass
-    # 尝试 OCR 定位文字
     try:
         from features.perception_features import ocr_find_text
         reg = parse_region(region)
@@ -48,17 +52,10 @@ def _find_target_coords(target: str, region: str = "") -> tuple:
     tags=["mouse", "click"],
 )
 def right_click(target: str, region: str = "") -> bool:
-    try:
-        import pyautogui
-        x, y = _find_target_coords(target, region)
-        if x == 0 and y == 0:
-            # 无效坐标，在当前位置右键
-            pyautogui.click(button="right")
-        else:
-            pyautogui.rightClick(x, y)
-        return True
-    except ImportError:
-        return False
+    x, y = _find_target_coords(target, region)
+    if x == 0 and y == 0:
+        return _do("click", button="right")
+    return _do("click", x=x, y=y, button="right")
 
 
 @feature(
@@ -74,18 +71,14 @@ def right_click(target: str, region: str = "") -> bool:
     tags=["mouse", "hover"],
 )
 def hover(target: str, duration: float = 0.5) -> bool:
-    try:
-        import pyautogui
-        x, y = _find_target_coords(target)
-        if x == 0 and y == 0:
-            return False
-        # 人类贝塞尔曲线轨迹移动到目标
-        duration_t = random.uniform(0.15, 0.35)
-        pyautogui.moveTo(x, y, duration=duration_t)
-        time.sleep(duration)
-        return True
-    except ImportError:
+    x, y = _find_target_coords(target)
+    if x == 0 and y == 0:
         return False
+    from interaction.actions import _ensure_win32
+    w32 = _ensure_win32()
+    w32['api'].SetCursorPos((int(x), int(y)))
+    time.sleep(duration)
+    return True
 
 
 @feature(
@@ -103,19 +96,14 @@ def hover(target: str, duration: float = 0.5) -> bool:
     tags=["mouse"],
 )
 def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = "") -> bool:
-    try:
-        import pyautogui
-        if target:
-            x, y = _find_target_coords(target)
-        if human_like:
-            import random
-            duration = random.uniform(0.1, 0.4)
-            pyautogui.moveTo(x, y, duration=duration)
-        else:
-            pyautogui.moveTo(x, y)
-        return True
-    except ImportError:
-        return False
+    if target:
+        x, y = _find_target_coords(target)
+    from interaction.actions import _ensure_win32
+    w32 = _ensure_win32()
+    w32['api'].SetCursorPos((int(x), int(y)))
+    if human_like:
+        time.sleep(random.uniform(0.05, 0.15))
+    return True
 
 
 @feature(
@@ -130,16 +118,10 @@ def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = ""
     tags=["mouse", "click"],
 )
 def triple_click(target: str) -> bool:
-    try:
-        import pyautogui
-        x, y = _find_target_coords(target)
-        if x == 0 and y == 0:
-            pyautogui.tripleClick()
-        else:
-            pyautogui.tripleClick(x, y)
-        return True
-    except ImportError:
-        return False
+    x, y = _find_target_coords(target)
+    if x == 0 and y == 0:
+        return _do("triple_click")
+    return _do("triple_click", x=x, y=y)
 
 
 @feature(
@@ -155,19 +137,16 @@ def triple_click(target: str) -> bool:
     tags=["mouse", "text"],
 )
 def select_text(target: str, extend_to_line: bool = False) -> bool:
-    try:
-        import pyautogui
-        x, y = _find_target_coords(target)
-        if x == 0 and y == 0:
-            return False
-        # 双击选中单词
-        pyautogui.doubleClick(x, y)
-        if extend_to_line:
-            time.sleep(0.05)
-            pyautogui.tripleClick(x, y)
-        return True
-    except ImportError:
+    x, y = _find_target_coords(target)
+    if x == 0 and y == 0:
         return False
+    _do("click", x=x, y=y)
+    time.sleep(0.05)
+    _do("click", x=x, y=y)
+    if extend_to_line:
+        time.sleep(0.05)
+        _do("click", x=x, y=y)
+    return True
 
 
 @feature(
@@ -182,13 +161,7 @@ def select_text(target: str, extend_to_line: bool = False) -> bool:
     tags=["mouse", "click"],
 )
 def middle_click(target: str) -> bool:
-    try:
-        import pyautogui
-        x, y = _find_target_coords(target)
-        if x == 0 and y == 0:
-            pyautogui.click(button="middle")
-        else:
-            pyautogui.middleClick(x, y)
-        return True
-    except ImportError:
-        return False
+    x, y = _find_target_coords(target)
+    if x == 0 and y == 0:
+        return _do("click", button="middle")
+    return _do("click", x=x, y=y, button="middle")

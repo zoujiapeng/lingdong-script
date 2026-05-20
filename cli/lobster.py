@@ -407,6 +407,20 @@ def cmd_exec(args):
         print("用法: lobster exec \"CLICK 目标\"", file=sys.stderr)
         sys.exit(1)
 
+    # 主路径: Robot Framework
+    try:
+        from engine.robot_runner import run_robot
+        result = run_robot(dsl, task_name="CLI Automation")
+        if result.get("success"):
+            print(f"\n✓ 执行成功 (RF): {result.get('passed', 0)} passed, {result.get('failed', 0)} failed")
+            if result.get("logs"):
+                for log in result["logs"][-10:]:
+                    print(f"  {log}")
+            sys.exit(0)
+    except Exception:
+        pass  # fallback to DSLExecutor
+
+    # 回退: 旧 DSLExecutor
     try:
         from engine.executor import DSLExecutor
         from interaction.actions import ActionHandler

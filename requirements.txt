@@ -1,5 +1,5 @@
 # Core
-pyautogui>=0.9.54
+pyautogui>=0.9.54           # deprecated: kept for screenshot fallback only
 opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
@@ -9,23 +9,23 @@ PyGetWindow>=0.0.9
 psutil>=5.9.0
 pynput>=1.7.6
 
-# Windows-specific (optional, for advanced window management)
-pywin32>=306
+# Windows desktop automation (primary)
+pywin32>=306                 # win32api/win32gui — native Windows API access
+uiautomation>=2.0.0          # yinkaisheng — UIA control finding (replaces pywinauto)
 
-# OCR (at least one recommended)
-# PaddleOCR (best for Chinese):
-# paddlepaddle>=2.5.0
-# paddleocr>=2.7.0
-#
-# EasyOCR (good fallback):
-# easyocr>=1.7.0
-#
-# Tesseract (lightweight):
-# pytesseract>=0.3.10
+# OCR — Windows built-in OCR (WinRT, 0 installation cost, Windows 10+)
+winrt-Windows.Media.Ocr>=3.2.0
+winrt-Windows.Globalization>=3.2.0
+winrt-Windows.Graphics.Imaging>=3.2.0
+winrt-Windows.Storage.Streams>=3.2.0
+winrt-Windows.Foundation>=3.2.0
+winrt-Windows.Foundation.Collections>=3.2.0
 
-# Scene recognition (optional)
-# torch>=2.0.0
-# transformers>=4.30.0
+# OCR — RapidOCR (best Chinese accuracy, light, Python 3.14 OK)
+rapidocr-onnxruntime>=1.3.0
+
+# OCR fallback — EasyOCR (multilingual)
+easyocr>=1.7.0
 
 # Development
 # pytest>=7.0.0

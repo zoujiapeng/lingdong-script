@@ -113,13 +113,31 @@ def _exec_run_dsl(args: dict) -> str:
 
 
 def _exec_run_dsl_sync(args: dict) -> str:
-    """本地执行 DSL（同步，等待完成）"""
+    """本地执行 DSL（同步，等待完成）。优先使用 Robot Framework，失败回退旧 DSLExecutor。"""
     dsl = args.get("dsl", "")
     if not dsl.strip():
         return "错误: DSL 内容为空"
     start = time.time()
     try:
         DSLParser.from_string(dsl)
+    except Exception as e:
+        elapsed = round(time.time() - start, 2)
+        return json.dumps({
+            "success": False, "error": f"DSL 语法错误: {e}", "elapsed": elapsed,
+        }, ensure_ascii=False)
+
+    # 主路径: Robot Framework
+    try:
+        from engine.robot_runner import run_robot
+        result = run_robot(dsl, task_name="MCP Automation")
+        elapsed = round(time.time() - start, 2)
+        result["elapsed"] = elapsed
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as rf_err:
+        pass  # fallback to DSLExecutor
+
+    # 回退: 旧 DSLExecutor
+    try:
         ctx = ExecutionContext(
             max_loops=args.get("max_loops", 10),
             retry_limit=args.get("retry_limit", 1),

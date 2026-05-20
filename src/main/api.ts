@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import { ChildProcess } from 'child_process';
 import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
+import { callFeature } from './featureCallBridge';
 import { handleMCPRequest } from './mcp-handler';
 
 export interface ApiDeps {
@@ -146,10 +147,11 @@ export function startApiServer(deps: ApiDeps): http.Server {
               const scriptPath = path.join(getBaseDir(), 'tools', 'dsl_to_flow.py');
               const dslProc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
               const out: Buffer[] = [];
+              const errOut: Buffer[] = [];
               let sent = false;
               const sendOnce = (code: number, data: any) => { if (!sent) { sent = true; send(code, data); } };
               dslProc.stdout!.on('data', (c: Buffer) => out.push(c));
-              dslProc.stderr!.on('data', (c: Buffer) => out.push(c));
+              dslProc.stderr!.on('data', (c: Buffer) => errOut.push(c));
               dslProc.on('close', () => {
                 const dslStdout = Buffer.concat(out).toString('utf8');
                 try {
@@ -364,22 +366,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
 
           case '/api/features/call':
             (async () => {
-              const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'feature_call.py');
-              const proc = await spawnPythonOneShot([scriptPath], { cwd: getBaseDir(), stdio: ['pipe', 'pipe', 'pipe'] });
-              const _out: Buffer[] = []; const _err: Buffer[] = [];
-              proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-              proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
-              proc.stdin!.write(JSON.stringify({ name: payload.name, params: payload.params || {} }) + '\n');
-              proc.stdin!.end();
-              const result = await new Promise<any>((resolve) => {
-                proc.on('close', () => {
-                  const stdout = Buffer.concat(_out).toString('utf8');
-                  const stderr = Buffer.concat(_err).toString('utf8');
-                  if (stdout.trim()) { try { resolve(JSON.parse(stdout)); } catch { resolve({ success: false, error: 'JSON 解析失败', raw: stdout }); } }
-                  else { resolve({ success: false, error: stderr.trim() || '调用失败' }); }
-                });
-                proc.on('error', (err) => resolve({ error: err.message }));
-              });
+              const result = await callFeature(payload.name, payload.params || {});
               send(200, result);
             })();
             break;

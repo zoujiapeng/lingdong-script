@@ -12,13 +12,13 @@ import { createTool } from './registry';
 
 function findEngine(): string {
   const candidates = [
-    path.join(__dirname, '..', '..', '..', '..', 'src', 'python', 'engine.py'),
-    path.join(process.cwd(), 'src', 'python', 'engine.py'),
+    path.join(__dirname, '..', '..', '..', '..', 'python', 'engine', 'engine.py'),
+    path.join(process.cwd(), 'python', 'engine', 'engine.py'),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
   }
-  return 'src/python/engine.py';
+  return 'python/engine/engine.py';
 }
 
 function parsePseudoToFlow(pseudo: string): any {

@@ -3,6 +3,7 @@
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
+from datetime import datetime
 
 from engine.nlp_schedule_parser import parse, is_schedule_intent
 
@@ -43,8 +44,18 @@ class TestIsScheduleIntent:
 
 class TestParseTime:
     def test_tonight_9pm(self):
-        r = parse("今晚9点提醒我写周报")
-        assert r["confidence"] >= 65
+        # Freeze time at 8pm so "今晚9点" is still in the future
+        import engine.nlp_schedule_parser as _nsp
+        _orig_dt = _nsp.datetime
+        class _Frozen:
+            @classmethod
+            def now(cls): return datetime(2026, 5, 16, 20, 0)
+        _nsp.datetime = _Frozen
+        try:
+            r = parse("今晚9点提醒我写周报")
+            assert r["confidence"] >= 65
+        finally:
+            _nsp.datetime = _orig_dt
         assert r["triggers"][0]["type"] == "cron"
         # 0 21 6 5 * => hour=21
         assert r["triggers"][0]["cron_expr"].startswith("0 21")

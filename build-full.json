@@ -14,11 +14,6 @@
       "filter": ["**/*"]
     },
     {
-      "from": "src/python",
-      "to": "python",
-      "filter": ["**/*"]
-    },
-    {
       "from": "tools",
       "to": "tools",
       "filter": ["**/*"]

@@ -13,6 +13,8 @@ const PRESET_LIST = [
   { id: 'form-filler', name: '表单填写器', desc: '循环填写表单数据' },
   { id: 'app-launcher', name: '应用启动器', desc: '启动应用并执行操作' },
   { id: 'screenshot-logger', name: '定时截图记录', desc: '每隔30秒自动截图' },
+  { id: 'filedialog-save', name: '保存文件对话框', desc: 'Ctrl+S → UIA自动填写路径保存' },
+  { id: 'filedialog-open', name: '打开文件对话框', desc: 'Ctrl+O → UIA自动填写路径打开' },
   // 复杂自动化模板
   { id: 'complex-image-pipeline', name: '多目标智能检测流水线', desc: '多目标图片检测 + OCR验证 + 失败重试' },
   { id: 'complex-web-scraper', name: '网页数据采集与监控', desc: '自动滚动→截图→翻页→循环采集多页' },

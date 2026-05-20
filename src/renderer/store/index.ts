@@ -223,6 +223,56 @@ const PRESET_TEMPLATES: ScriptTemplate[] = [
       };
     },
   },
+  {
+    id: 'filedialog-save',
+    name: '保存文件对话框',
+    category: 'system',
+    description: '触发保存快捷键(Ctrl+S) → 在保存对话框中输入路径并确认',
+    createScript: () => {
+      const ids = { start: nanoid(), hotkey: nanoid(), save: nanoid(), end: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '保存文件对话框', description: 'Ctrl+S触发保存 → UIA自动化填写并确认', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 400, y: 20, params: { label: '开始' }, status: 'idle' },
+          { id: ids.hotkey, type: 'keyboard', x: 400, y: 120, params: { keys: ['s'], modifiers: ['ctrl'], delay_after: 2.0 }, status: 'idle', label: 'Ctrl+S 触发保存' },
+          { id: ids.save, type: 'tool_call', x: 400, y: 240, params: { feature_name: 'filedialog_save', params: { path: '', overwrite: true, timeout: 15 } }, status: 'idle', label: '填写路径并保存' },
+          { id: ids.end, type: 'end', x: 400, y: 360, params: { label: '结束' }, status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.hotkey, to_port: 'input' },
+          { id: nanoid(), from_node: ids.hotkey, from_port: 'output', to_node: ids.save, to_port: 'input' },
+          { id: nanoid(), from_node: ids.save, from_port: 'output', to_node: ids.end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
+    id: 'filedialog-open',
+    name: '打开文件对话框',
+    category: 'system',
+    description: '触发打开快捷键(Ctrl+O) → 在打开对话框中输入路径并确认',
+    createScript: () => {
+      const ids = { start: nanoid(), hotkey: nanoid(), open: nanoid(), end: nanoid() };
+      return {
+        meta: { id: nanoid(), name: '打开文件对话框', description: 'Ctrl+O触发打开 → UIA自动化填写并确认', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: '1.0.0' },
+        nodes: [
+          { id: ids.start, type: 'start', x: 400, y: 20, params: { label: '开始' }, status: 'idle' },
+          { id: ids.hotkey, type: 'keyboard', x: 400, y: 120, params: { keys: ['o'], modifiers: ['ctrl'], delay_after: 2.0 }, status: 'idle', label: 'Ctrl+O 触发打开' },
+          { id: ids.open, type: 'tool_call', x: 400, y: 240, params: { feature_name: 'filedialog_open', params: { path: '', timeout: 15 } }, status: 'idle', label: '填写路径并打开' },
+          { id: ids.end, type: 'end', x: 400, y: 360, params: { label: '结束' }, status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.hotkey, to_port: 'input' },
+          { id: nanoid(), from_node: ids.hotkey, from_port: 'output', to_node: ids.open, to_port: 'input' },
+          { id: nanoid(), from_node: ids.open, from_port: 'output', to_node: ids.end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
   // ======== 复杂自动化模板 1: 多目标智能检测 ========
   {
     id: 'complex-image-pipeline',
@@ -1384,6 +1434,10 @@ const PRESET_TEMPLATE_META: Array<{
     aliases: ['启动', 'launcher', '启动应用'], keywords: ['启动', '应用', '程序', '打开'], tags: ['system', 'launch'] },
   { id: 'screenshot-logger', name: '定时截图记录', description: '按指定时间间隔循环截图，用于监控和记录', category: 'image',
     aliases: ['截图', '录屏', 'screenshot', '定时截图'], keywords: ['截图', '定时', '监控', '记录', '捕获'], tags: ['image', 'screenshot', 'timer'] },
+  { id: 'filedialog-save', name: '保存文件对话框', description: '在文件保存对话框中输入路径并确认保存', category: 'system',
+    aliases: ['保存', '保存文件', '另存为', 'save-as'], keywords: ['保存', '文件', '对话框', '保存文件'], tags: ['system', 'dialog', 'file'] },
+  { id: 'filedialog-open', name: '打开文件对话框', description: '在文件打开对话框中输入路径并确认打开', category: 'system',
+    aliases: ['打开文件', '打开', 'open'], keywords: ['打开', '文件', '对话框', '打开文件'], tags: ['system', 'dialog', 'file'] },
   { id: 'complex-image-pipeline', name: '多目标图像流水线', description: '多目标图像检测流水线，支持优先级、兜底、重试', category: 'image',
     aliases: ['图像流水线', '图片流水线', 'image-pipeline'], keywords: ['图片', '图像', '检测', '流水线', '优先级', '兜底'], tags: ['image', 'detection', 'pipeline'] },
   { id: 'complex-web-scraper', name: '网页数据采集', description: '模拟滑动和等待，采集网页动态内容', category: 'app',

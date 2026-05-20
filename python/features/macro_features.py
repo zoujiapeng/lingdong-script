@@ -1,10 +1,8 @@
 """
 宏录制播放功能
-录制 / 播放 / 管理宏 — 独立进程 (macro_recorder.py) + @feature 接口
+录制 / 播放 / 管理宏 — AHK 优先，pynput 回退
 """
-import json, os, time, threading
-import subprocess
-import sys
+import json, os, time, threading, sys
 from datetime import datetime
 from pathlib import Path
 
@@ -13,131 +11,17 @@ from features.registry import feature, P, TC, FeatureCategory as F
 _MACRO_DIR = Path(__file__).resolve().parent.parent / "macros"
 _MACRO_DIR.mkdir(exist_ok=True)
 
-_recording = {"active": False, "events": [], "start": 0, "thread": None}
-
-# ─── 新独立录制器进程管理 ───
-_recorder_proc: subprocess.Popen | None = None
-_recorder_buf = ""
-_recorder_result: dict | None = None
-_recorder_lock = threading.Lock()
+# AHK 后端
+_HAS_AHK = False
+try:
+    from tools.ahk_manager import start_recorder, stop_recorder, recorder_status, is_ahk_available
+    _HAS_AHK = is_ahk_available()
+except ImportError:
+    pass
 
 
 def _macro_path(name: str) -> Path:
     return _MACRO_DIR / f"{name}.json"
-
-
-@feature(
-    name="macro_record",
-    display_name="录制宏（旧版）",
-    description="【宏】录制鼠标和键盘操作序列（旧版阻塞式）。建议改用 macro_start_recording（支持 F6 热键启停、非阻塞）",
-    category=F.MACRO,
-    deprecated=True,
-    params=[
-        P("name", "str", "宏名称", example="登录流程"),
-        P("include_mouse", "boolean", "是否录制鼠标移动", required=False, default=True),
-        P("include_keys", "boolean", "是否录制键盘输入", required=False, default=True),
-        P("duration", "number", "最大录制秒数", required=False, default=30),
-    ],
-    returns="dict{name, events, duration} - 录制结果",
-    tags=["macro", "recording"],
-)
-def macro_record(name: str, include_mouse: bool = True, include_keys: bool = True, duration: float = 30) -> dict:
-    global _recording
-    if _recording["active"]:
-        return {"success": False, "error": "已有录制在进行中"}
-
-    try:
-        from pynput import mouse, keyboard
-    except ImportError:
-        return {"success": False, "error": "需要 pynput: pip install pynput"}
-
-    _recording["active"] = True
-    _recording["events"] = []
-    _recording["start"] = time.time()
-
-    def on_click(x, y, button, pressed):
-        if not _recording["active"]:
-            return False
-        if include_mouse:
-            _recording["events"].append({
-                "type": "click", "time": time.time() - _recording["start"],
-                "x": x, "y": y, "button": str(button), "pressed": pressed,
-            })
-
-    def on_move(x, y):
-        if not _recording["active"]:
-            return False
-        if include_mouse:
-            if not _recording["events"] or _recording["events"][-1].get("type") != "move":
-                _recording["events"].append({
-                    "type": "move", "time": time.time() - _recording["start"],
-                    "x": x, "y": y,
-                })
-
-    def on_press(key):
-        if not _recording["active"]:
-            return False
-        if include_keys:
-            try:
-                k = key.char
-            except AttributeError:
-                k = str(key)
-            _recording["events"].append({
-                "type": "key", "time": time.time() - _recording["start"],
-                "key": k, "pressed": True,
-            })
-
-    def on_release(key):
-        if not _recording["active"]:
-            return False
-        if include_keys:
-            try:
-                k = key.char
-            except AttributeError:
-                k = str(key)
-            _recording["events"].append({
-                "type": "key", "time": time.time() - _recording["start"],
-                "key": k, "pressed": False,
-            })
-
-    m_listener = mouse.Listener(on_click=on_click, on_move=on_move)
-    k_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    m_listener.start()
-    k_listener.start()
-
-    def _stop_after():
-        time.sleep(duration)
-        _recording["active"] = False
-        m_listener.stop()
-        k_listener.stop()
-
-    threading.Thread(target=_stop_after, daemon=True).start()
-    _recording["active"] = True
-
-    # 等待录制完成
-    while _recording["active"]:
-        time.sleep(0.1)
-    m_listener.join(timeout=2)
-    k_listener.join(timeout=2)
-
-    actual_duration = time.time() - _recording["start"]
-    events = _recording["events"]
-    _recording["active"] = False
-
-    # 保存到文件
-    data = {
-        "name": name, "events": events,
-        "duration": round(actual_duration, 1),
-        "created": datetime.now().isoformat(),
-        "include_mouse": include_mouse, "include_keys": include_keys,
-    }
-    with open(_macro_path(name), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    return {
-        "success": True,
-        "result": {"name": name, "events": len(events), "duration": round(actual_duration, 1)},
-    }
 
 
 @feature(
@@ -158,10 +42,8 @@ def macro_playback(name: str, speed: float = 1.0, loop: int = 0) -> dict:
     if not path.exists():
         return {"success": False, "error": f"宏 '{name}' 不存在"}
 
-    try:
-        import pyautogui
-    except ImportError:
-        return {"success": False, "error": "需要 pyautogui: pip install pyautogui"}
+    from interaction.actions import ActionHandler
+    ah = ActionHandler()
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -182,9 +64,11 @@ def macro_playback(name: str, speed: float = 1.0, loop: int = 0) -> dict:
             if ev["type"] == "click" and ev["pressed"]:
                 button = "left" if "left" in ev.get("button", "") else \
                          "right" if "right" in ev.get("button", "") else "middle"
-                pyautogui.click(ev["x"], ev["y"], button=button)
+                ah("click", x=ev["x"], y=ev["y"], button=button)
             elif ev["type"] == "move":
-                pyautogui.moveTo(ev["x"], ev["y"], duration=0.05)
+                from interaction.actions import _ensure_win32
+                w32 = _ensure_win32()
+                w32['api'].SetCursorPos((int(ev["x"]), int(ev["y"])))
             elif ev["type"] == "key" and ev["pressed"]:
                 key = ev["key"]
                 if key.startswith("Key."):
@@ -193,10 +77,7 @@ def macro_playback(name: str, speed: float = 1.0, loop: int = 0) -> dict:
                                     "backspace": "backspace", "esc": "escape",
                                     "shift": "shift", "ctrl": "ctrl", "alt": "alt"}
                     key = special_keys.get(key.lower(), key)
-                try:
-                    pyautogui.write(key, interval=0.01)
-                except Exception:
-                    pyautogui.press(key)
+                ah("hotkey", keys=[key])
 
     return {"success": True, "result": True}
 
@@ -227,90 +108,109 @@ def macro_list() -> dict:
     return {"success": True, "result": macros}
 
 
-# ─── 新独立录制器 @feature 接口 ───
+# ─── 录制器后端（AHK 优先 → pynput 回退） ───
 
-_RECORDER_SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "macro_recorder.py"
+_HAS_PYNPUT = False
+try:
+    import pynput  # noqa
+    _HAS_PYNPUT = True
+except ImportError:
+    pass
+
+_pynput_recording = {"active": False, "events": [], "start": 0, "thread": None}
 
 
-def _spawn_recorder() -> subprocess.Popen | None:
-    """启动独立录制器进程，等待 ready 信号"""
-    global _recorder_proc, _recorder_buf, _recorder_result
-    if _recorder_proc and _recorder_proc.poll() is None:
-        return _recorder_proc
-    if not _RECORDER_SCRIPT.exists():
-        return None
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, str(_RECORDER_SCRIPT)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-        _recorder_proc = proc
-        _recorder_buf = ""
-        _recorder_result = None
-        # Wait for ready signal (timeout 10s)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            line = proc.stdout.readline()  # type: ignore
-            if not line:
-                break
-            _recorder_buf += line
+def _record_pynput(name: str, include_mouse: bool, include_keys: bool) -> dict:
+    """pynput 回退版录制"""
+    global _pynput_recording
+    if _pynput_recording["active"]:
+        return {"success": False, "error": "已有录制在进行中"}
+    if not _HAS_PYNPUT:
+        return {"success": False, "error": "需要安装 pynput: pip install pynput"}
+
+    from pynput import mouse, keyboard
+
+    _pynput_recording["active"] = True
+    _pynput_recording["events"] = []
+    _pynput_recording["start"] = time.time()
+
+    def on_click(x, y, button, pressed):
+        if not _pynput_recording["active"]:
+            return False
+        if include_mouse:
+            _pynput_recording["events"].append({
+                "type": "click", "time": time.time() - _pynput_recording["start"],
+                "x": x, "y": y, "button": str(button), "pressed": pressed,
+            })
+
+    def on_move(x, y):
+        if not _pynput_recording["active"]:
+            return False
+        if include_mouse:
+            if not _pynput_recording["events"] or _pynput_recording["events"][-1].get("type") != "move":
+                _pynput_recording["events"].append({
+                    "type": "move", "time": time.time() - _pynput_recording["start"],
+                    "x": x, "y": y,
+                })
+
+    def on_press(key):
+        if not _pynput_recording["active"]:
+            return False
+        if include_keys:
             try:
-                msg = json.loads(line.strip())
-                if msg.get("type") == "ready":
-                    return proc
-            except json.JSONDecodeError:
-                continue
-        # Timeout — kill and return None
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        _recorder_proc = None
-        return None
-    except Exception:
-        return None
+                k = key.char
+            except AttributeError:
+                k = str(key)
+            _pynput_recording["events"].append({
+                "type": "key", "time": time.time() - _pynput_recording["start"],
+                "key": k, "pressed": True,
+            })
+
+    m_listener = mouse.Listener(on_click=on_click, on_move=on_move)
+    k_listener = keyboard.Listener(on_press=on_press)
+    m_listener.start()
+    k_listener.start()
+
+    # 非阻塞等待: 直到 active=False
+    def _wait():
+        while _pynput_recording["active"]:
+            time.sleep(0.1)
+        m_listener.stop()
+        k_listener.stop()
+        m_listener.join(timeout=2)
+        k_listener.join(timeout=2)
+    threading.Thread(target=_wait, daemon=True).start()
+
+    return {"success": True, "result": {"recording": True, "name": name}}
 
 
-def _send_to_recorder(cmd: dict, timeout: float = 30) -> dict:
-    """向录制器进程发送命令并等待 {type: 'result'} 响应"""
-    global _recorder_proc, _recorder_buf, _recorder_result
-    proc = _spawn_recorder()
-    if not proc or not proc.stdin:
-        return {"success": False, "error": "录制器进程不可用"}
-    try:
-        proc.stdin.write(json.dumps(cmd) + "\n")
-        proc.stdin.flush()
-    except Exception as e:
-        return {"success": False, "error": f"写入失败: {e}"}
-    # 读取 stdout 直到收到 type=result
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            line = proc.stdout.readline()  # type: ignore
-        except Exception:
-            break
-        if not line:
-            break
-        _recorder_buf += line
-        try:
-            msg = json.loads(line.strip())
-        except json.JSONDecodeError:
-            continue
-        if msg.get("type") == "result":
-            return msg
-        if msg.get("type") == "error":
-            return {"success": False, "error": msg.get("message", "录制器错误")}
-        # status / pong — ignore
-    return {"success": False, "error": "录制器无响应（超时）"}
+def _stop_pynput() -> dict:
+    """停止 pynput 录制并保存"""
+    global _pynput_recording
+    if not _pynput_recording["active"]:
+        return {"success": False, "error": "录制器未运行"}
+    _pynput_recording["active"] = False
+    time.sleep(0.3)  # 等线程退出
+
+    actual_duration = round(time.time() - _pynput_recording["start"], 1)
+    events = _pynput_recording["events"]
+
+    name = f"recording_{int(time.time())}"
+    data = {
+        "name": name, "events": events,
+        "duration": actual_duration,
+        "created": datetime.now().isoformat(),
+        "include_mouse": True, "include_keys": True,
+    }
+    with open(_macro_path(name), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"success": True, "result": {"name": name, "events": len(events), "duration": actual_duration}}
 
 
 @feature(
     name="macro_start_recording",
     display_name="开始录制宏",
-    description="【宏】启动独立录制进程，支持 F6 热键启停、鼠标智能过滤。非阻塞，立即返回",
+    description="【宏】启动录制（AHK 优先 → pynput 回退），支持 F6 热键启停、鼠标智能过滤。非阻塞，立即返回",
     category=F.MACRO,
     params=[
         P("name", "str", "宏名称", required=False, default=None),
@@ -323,15 +223,14 @@ def _send_to_recorder(cmd: dict, timeout: float = 30) -> dict:
 def macro_start_recording(name: str | None = None, include_mouse: bool = True, include_keys: bool = True) -> dict:
     if not name:
         name = f"recording_{int(time.time())}"
-    result = _send_to_recorder({
-        "type": "start",
-        "name": name,
-        "include_mouse": include_mouse,
-        "include_keys": include_keys,
-    })
-    if result.get("success"):
-        return {"success": True, "result": {"recording": True, "name": name}}
-    return result
+    # AHK 优先
+    if _HAS_AHK:
+        result = start_recorder(name, include_mouse, include_keys)
+        if result.get("success"):
+            return result
+        # AHK 失败时静默回退
+    # pynput 回退
+    return _record_pynput(name, include_mouse, include_keys)
 
 
 @feature(
@@ -344,8 +243,13 @@ def macro_start_recording(name: str | None = None, include_mouse: bool = True, i
     tags=["macro", "recording"],
 )
 def macro_stop_recording() -> dict:
-    result = _send_to_recorder({"type": "stop"})
-    return result
+    # AHK 优先
+    if _HAS_AHK:
+        result = stop_recorder()
+        if result.get("success"):
+            return result
+    # pynput 回退
+    return _stop_pynput()
 
 
 @feature(

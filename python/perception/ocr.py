@@ -22,6 +22,30 @@ except ImportError:
     HAS_TESSERACT = False
 
 try:
+    from paddleocr import PaddleOCR
+    HAS_PADDLE = True
+    _PaddleOCR = PaddleOCR
+except Exception:
+    HAS_PADDLE = False
+    _PaddleOCR = None
+
+try:
+    import easyocr
+    HAS_EASYOCR = True
+    _EasyOCR = easyocr
+except ImportError:
+    HAS_EASYOCR = False
+    _EasyOCR = None
+
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    HAS_RAPID = True
+    _RapidOCR = RapidOCR
+except ImportError:
+    HAS_RAPID = False
+    _RapidOCR = None
+
+try:
     import requests as _requests
     HAS_REQUESTS = True
 except ImportError:
@@ -133,11 +157,104 @@ class UmiOCRBackend:
         return results
 
 
+class WindowsOcrBackend:
+    """Windows.Media.Ocr 后端（Windows 10+ 内置，0 安装成本）。
+
+    使用 WinRT API 直接调用 Windows 内置 OCR 引擎。
+    对中文识别质量与系统语言包相关，通常优于 Tesseract。
+
+    注意：首次调用可能略慢（约 1-2 秒加载 OCR 引擎）。
+    """
+
+    def __init__(self, language: str = "zh-cn"):
+        self.language = language
+        self._engine = None
+        self._available: Optional[bool] = None
+
+    def _init_engine(self) -> bool:
+        if self._engine is not None:
+            return True
+        try:
+            from winrt.windows.media.ocr import OcrEngine
+            from winrt.windows.globalization import Language
+            lang = Language(self.language)
+            if OcrEngine.is_language_supported(lang):
+                self._engine = OcrEngine.try_create_from_language(lang)
+            else:
+                # Fallback to English
+                self._engine = OcrEngine.try_create_from_language(Language("en"))
+            return self._engine is not None
+        except Exception:
+            return False
+
+    @property
+    def available(self) -> bool:
+        if self._available is None:
+            self._available = self._init_engine()
+        return self._available
+
+    def extract_all(self, img: np.ndarray) -> List[OCRResult]:
+        if not self._init_engine():
+            return []
+
+        try:
+            from winrt.windows.media.ocr import OcrEngine
+            from winrt.windows.graphics.imaging import BitmapDecoder
+            from winrt.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
+            import winrt.windows.graphics.imaging as imaging
+
+            # Encode image as PNG in memory
+            success, buf = cv2.imencode(".png", img)
+            if not success:
+                return []
+            png_bytes = buf.tobytes()
+
+            # Write to in-memory stream via DataWriter (winrt 3.x compatible)
+            stream = InMemoryRandomAccessStream()
+            writer = DataWriter(stream)
+            writer.write_bytes(png_bytes)
+            writer.store_async().get()
+            stream.seek(0)
+
+            # Decode PNG → SoftwareBitmap
+            decoder = BitmapDecoder.create_async(stream).get()
+            software_bitmap = decoder.get_software_bitmap_async().get()
+
+            # Run OCR
+            ocr_result = self._engine.recognize_async(software_bitmap).get()
+
+            results: List[OCRResult] = []
+            if ocr_result and ocr_result.lines:
+                for line in ocr_result.lines:
+                    text = line.text.strip()
+                    if not text:
+                        continue
+                    rect = line.words[0].bounding_rect if line.words else None
+                    if rect:
+                        x, y = int(rect.x), int(rect.y)
+                        w, h = int(rect.width), int(rect.height)
+                        for word in line.words:
+                            wr = word.bounding_rect
+                            x = min(x, int(wr.x))
+                            y = min(y, int(wr.y))
+                            w = max(w, int(wr.x + wr.width) - x)
+                            h = max(h, int(wr.y + wr.height) - y)
+                        bbox = (x, y, w, h)
+                    else:
+                        bbox = (0, 0, 0, 0)
+                    results.append(OCRResult(text=text, bbox=bbox, confidence=1.0))
+            return results
+
+        except Exception as e:
+            self._available = False
+            return []
+
+
 class OCREngine:
     """
     OCR 引擎封装
     支持: 全屏/区域 OCR, 文本定位, 模糊搜索
-    自动选择后端: Umi-OCR (HTTP) → Tesseract
+    自动选择后端: Windows OCR (built-in) → RapidOCR → EasyOCR → PaddleOCR → Umi-OCR → Tesseract → mock
     """
 
     def __init__(self, lang: str = "chi_sim+eng"):
@@ -145,9 +262,47 @@ class OCREngine:
         self._cache: Dict[str, Tuple[float, List[OCRResult]]] = {}
         self._cache_ttl = 0.3
         self._umi = UmiOCRBackend()
+        self._win_ocr = WindowsOcrBackend()
         self._backend_name: str = ""
+        self._paddle_instance: Any = None
+        self._easyocr_instance: Any = None
+        self._rapid_instance: Any = None
+
+    def _init_paddle(self) -> bool:
+        if not HAS_PADDLE or _PaddleOCR is None:
+            return False
+        try:
+            if self._paddle_instance is None:
+                self._paddle_instance = _PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+            return True
+        except Exception:
+            return False
+
+    def _init_easyocr(self) -> bool:
+        if not HAS_EASYOCR or _EasyOCR is None:
+            return False
+        try:
+            if self._easyocr_instance is None:
+                self._easyocr_instance = _EasyOCR.Reader(["ch_sim", "en"], gpu=False)
+            return True
+        except Exception:
+            return False
 
     def _detect_backend(self) -> str:
+        # Priority: Windows OCR (built-in, 0 deps) → RapidOCR (best Chinese accuracy)
+        #           → EasyOCR (multilingual) → PaddleOCR → Umi-OCR → Tesseract → mock
+        if self._win_ocr.available:
+            self._backend_name = "win_ocr"
+            return "win_ocr"
+        if self._init_rapid():
+            self._backend_name = "rapid"
+            return "rapid"
+        if self._init_easyocr():
+            self._backend_name = "easyocr"
+            return "easyocr"
+        if self._init_paddle():
+            self._backend_name = "paddle"
+            return "paddle"
         if self._umi.available:
             self._backend_name = "umi"
             return "umi"
@@ -155,6 +310,16 @@ class OCREngine:
         return self._backend_name
 
     # ── 主要 API ──────────────────────────────────────────────────
+    def _init_rapid(self) -> bool:
+        if not HAS_RAPID or _RapidOCR is None:
+            return False
+        try:
+            if self._rapid_instance is None:
+                self._rapid_instance = _RapidOCR()
+            return True
+        except Exception:
+            return False
+
     def extract_all(
         self, region: Optional[BBox] = None, use_cache: bool = True
     ) -> List[OCRResult]:
@@ -168,17 +333,29 @@ class OCREngine:
         img = ScreenCapture.capture(region)
 
         self._detect_backend()
-        if self._backend_name == "umi":
-            offset = region[:2] if region else (0, 0)
+        offset = region[:2] if region else (0, 0)
+        if self._backend_name == "win_ocr":
+            results = self._win_ocr.extract_all(img)
+            if offset != (0, 0):
+                ox, oy = offset
+                for r in results:
+                    x, y, w, h = r.bbox
+                    r.bbox = (x + ox, y + oy, w, h)
+        elif self._backend_name == "paddle":
+            results = self._run_paddle(img, offset)
+        elif self._backend_name == "easyocr":
+            results = self._run_easyocr(img, offset)
+        elif self._backend_name == "rapid":
+            results = self._run_rapid(img, offset)
+        elif self._backend_name == "umi":
             results = self._umi.extract_all(img)
-            # Apply region offset
             if offset != (0, 0):
                 ox, oy = offset
                 for r in results:
                     x, y, w, h = r.bbox
                     r.bbox = (x + ox, y + oy, w, h)
         else:
-            results = self._run_ocr(img, offset=region[:2] if region else (0, 0))
+            results = self._run_ocr(img, offset=offset)
 
         if use_cache:
             self._cache[cache_key] = (time.time(), results)
@@ -278,6 +455,68 @@ class OCREngine:
             results.append(OCRResult(text=text, bbox=(x, y, w, h), confidence=conf / 100))
         return results
 
+    def _run_easyocr(self, img: np.ndarray, offset: Tuple[int, int] = (0, 0)) -> List[OCRResult]:
+        """使用 EasyOCR 进行文字识别（中文良好，轻量级）"""
+        try:
+            if self._easyocr_instance is None:
+                if not self._init_easyocr():
+                    return []
+            results = self._easyocr_instance.readtext(img)
+            ox, oy = offset
+            out = []
+            for box, text, conf in results:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                x, y = int(min(xs)) + ox, int(min(ys)) + oy
+                w, h = int(max(xs)) - int(min(xs)), int(max(ys)) - int(min(ys))
+                out.append(OCRResult(text=str(text), bbox=(x, y, w, h), confidence=float(conf)))
+            return out
+        except Exception:
+            return []
+
+    def _run_rapid(self, img: np.ndarray, offset: Tuple[int, int] = (0, 0)) -> List[OCRResult]:
+        """使用 RapidOCR-onnxruntime 进行文字识别（快速初始化，ONNX 推理）"""
+        try:
+            if self._rapid_instance is None:
+                if not self._init_rapid():
+                    return []
+            result, elapse = self._rapid_instance(img)
+            if not result:
+                return []
+            ox, oy = offset
+            out = []
+            for box, text, conf in result:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                x, y = int(min(xs)) + ox, int(min(ys)) + oy
+                w, h = int(max(xs)) - int(min(xs)), int(max(ys)) - int(min(ys))
+                out.append(OCRResult(text=str(text), bbox=(x, y, w, h), confidence=float(conf)))
+            return out
+        except Exception:
+            return []
+
+    def _run_paddle(self, img: np.ndarray, offset: Tuple[int, int] = (0, 0)) -> List[OCRResult]:
+        """使用 PaddleOCR 进行文字识别（中文最优）"""
+        try:
+            if self._paddle_instance is None:
+                if not self._init_paddle():
+                    return []
+            results = self._paddle_instance.ocr(img, cls=True)
+            if not results or not results[0]:
+                return []
+            ox, oy = offset
+            out = []
+            for line in results[0]:
+                box, (text, conf) = line
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                x, y = int(min(xs)) + ox, int(min(ys)) + oy
+                w, h = int(max(xs)) - int(min(xs)), int(max(ys)) - int(min(ys))
+                out.append(OCRResult(text=text, bbox=(x, y, w, h), confidence=float(conf)))
+            return out
+        except Exception:
+            return []
+
     def _mock_ocr(self, img: np.ndarray) -> List[OCRResult]:
         """Tesseract不可用时的模拟结果"""
         return []
@@ -286,7 +525,7 @@ class OCREngine:
 class MultiBackendOCR:
     """
     多后端 OCR 识别器
-    自动选择可用后端: PaddleOCR → EasyOCR → Tesseract → 降级
+    自动选择可用后端: RapidOCR → EasyOCR → PaddleOCR → Tesseract → 降级
     """
 
     def __init__(self, lang: str = "chi_sim+eng"):
@@ -297,12 +536,20 @@ class MultiBackendOCR:
     def _init(self):
         if self._backend:
             return
-        for name, try_import in [("paddle", self._try_paddle), ("easyocr", self._try_easyocr),
-                                  ("tesseract", self._try_tesseract)]:
+        for name, try_import in [("rapid", self._try_rapid), ("easyocr", self._try_easyocr),
+                                  ("paddle", self._try_paddle), ("tesseract", self._try_tesseract)]:
             if try_import():
                 self._backend = name
                 return
         self._backend = "simple"
+
+    def _try_rapid(self) -> bool:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            self._instance = RapidOCR()
+            return True
+        except ImportError:
+            return False
 
     def _try_paddle(self) -> bool:
         try:
@@ -338,13 +585,32 @@ class MultiBackendOCR:
         else:
             offset = (0, 0)
 
-        if self._backend == "paddle":
+        if self._backend == "rapid":
+            return self._run_rapid(image, offset)
+        elif self._backend == "paddle":
             return self._run_paddle(image, offset)
         elif self._backend == "easyocr":
             return self._run_easyocr(image, offset)
         elif self._backend == "tesseract":
             return self._run_tesseract(image, offset)
         return []
+
+    def _run_rapid(self, img: np.ndarray, offset: Tuple[int, int]) -> List[OCRResult]:
+        try:
+            result, elapse = self._instance(img)
+            if not result:
+                return []
+            ox, oy = offset
+            out = []
+            for box, text, conf in result:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                x, y = int(min(xs)) + ox, int(min(ys)) + oy
+                w, h = int(max(xs)) - int(min(xs)), int(max(ys)) - int(min(ys))
+                out.append(OCRResult(text=str(text), bbox=(x, y, w, h), confidence=float(conf)))
+            return out
+        except Exception:
+            return []
 
     def _run_paddle(self, img: np.ndarray, offset: Tuple[int, int]) -> List[OCRResult]:
         try:

@@ -668,6 +668,9 @@ def _dsl_args_to_params(ntype: str, args: str,
             "similarity": 90,
         }
 
+    elif ntype in ("FILEDIALOG_SAVE", "FILEDIALOG_OPEN", "FILEDIALOG_FOLDER"):
+        params = {"path": args.strip().strip('"').strip("'")}
+
     else:
         params = {"_raw_args": args}
 
@@ -709,6 +712,9 @@ def _dsl_label(ntype: str, args: str) -> str:
         "REBOOT": "重启" + (f" ({args}s)" if args.strip() else ""),
         "LOGOFF": "注销" + (f" ({args}s)" if args.strip() else ""),
         "HIBERNATE": "休眠" + (f" ({args}s)" if args.strip() else ""),
+        "FILEDIALOG_SAVE": "保存文件对话框",
+        "FILEDIALOG_OPEN": "打开文件对话框",
+        "FILEDIALOG_FOLDER": "选择文件夹对话框",
     }
     return labels.get(ntype, "")
 
@@ -963,6 +969,33 @@ def flow_to_dsl(script: dict) -> str:
         if ntype == "sub_script":
             name = p.get("script_name", "") or p.get("script_id", "")
             return f'CALL {name}'
+
+        if ntype == "tool_call":
+            # 将 tool_call 节点转换为 DSL（用于 Python 引擎路径）
+            feature_name = p.get("feature_name", "")
+            feature_params = p.get("params", {})
+            path = feature_params.get("path", "") if isinstance(feature_params, dict) else ""
+            if feature_name == "filedialog_save":
+                return f'FILEDIALOG_SAVE "{path}"'
+            elif feature_name == "filedialog_open":
+                return f'FILEDIALOG_OPEN "{path}"'
+            elif feature_name == "filedialog_folder":
+                return f'FILEDIALOG_FOLDER "{path}"'
+            return f"# TOOL_CALL: {feature_name}"
+
+        # 文件对话框类型（来自 DSL→Flow 转换后的类型）
+        if ntype == "filedialog_save":
+            path = p.get("path") or p.get("_raw_args", "")
+            path = path.strip('"').strip("'")
+            return f'FILEDIALOG_SAVE "{path}"'
+        if ntype == "filedialog_open":
+            path = p.get("path") or p.get("_raw_args", "")
+            path = path.strip('"').strip("'")
+            return f'FILEDIALOG_OPEN "{path}"'
+        if ntype == "filedialog_folder":
+            path = p.get("path") or p.get("_raw_args", "")
+            path = path.strip('"').strip("'")
+            return f'FILEDIALOG_FOLDER "{path}"'
 
         # 回退
         return f"# UNKNOWN: {ntype}"
