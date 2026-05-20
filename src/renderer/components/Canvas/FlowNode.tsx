@@ -93,6 +93,12 @@ function getNodeSummary(node: FlowNodeType): string {
       const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', close: '关闭', resize: '调整大小' };
       return `窗口${opLabels[p.operation] || p.operation}${p.title ? ': ' + p.title : ''}`;
     }
+    case 'web_browser': {
+      const actionLabels: Record<string, string> = { navigate: '导航', click: '点击', input_text: '输入', screenshot: '截图', wait: '等待', extract: '提取', scroll: '滚动' };
+      const action = actionLabels[(p as any).action] || p.action || '未知';
+      const target = p.action === 'navigate' ? ((p as any).url || '').substring(0, 30) : (p as any).selector || '';
+      return `🌐 ${action}: ${target}`;
+    }
     default: return `(${node.type})`;
   }
 }
@@ -122,9 +128,11 @@ interface Props {
 
 export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, onPortMouseUp }: Props) {
   const isSelected = useStore(s => s.ui.selection.nodes.includes(node.id));
+  const isBreakpoint = useStore(s => s.execution.breakpoints.includes(node.id));
   const connectingActive = useStore(s => s.ui.connecting.active);
   const selectNodes = useStore(s => s.selectNodes);
   const moveNode = useStore(s => s.moveNode);
+  const toggleBreakpoint = useStore(s => s.toggleBreakpoint);
   const def = NODE_DEFINITIONS[node.type];
   const dragStartRef = useRef<{ nx: number; ny: number; mx: number; my: number } | null>(null);
   const hasDragged = useRef(false);
@@ -318,7 +326,9 @@ export const FlowNode = React.memo(function FlowNode({ node, onPortMouseDown, on
         style={{ width: nodeW }}
       >
         {/* Header */}
-        <div className="flow-node-header">
+        <div className="flow-node-header" onContextMenu={(e) => { e.preventDefault(); toggleBreakpoint(node.id); }}>
+          {/* Breakpoint indicator */}
+          {isBreakpoint && <div style={{ position: 'absolute', left: -6, top: -6, width: 14, height: 14, borderRadius: '50%', background: '#ef4444', border: '2px solid var(--bg-primary)', zIndex: 10, boxShadow: '0 0 6px rgba(239,68,68,0.6)' }} title="断点" />}
           <div className="flow-node-icon" style={{ background: def.color }}>
             <NodeIcon name={def.icon} size={14} />
           </div>

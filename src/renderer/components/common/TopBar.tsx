@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus, Circle
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus, Circle, Brain
 } from 'lucide-react';
 import { useStore, loadCustomTemplates, saveCustomTemplates } from '../../store';
 import { MacroPanel } from './MacroPanel';
+import { LearnedTargetPanel } from './LearnedTargetPanel';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
@@ -44,6 +45,10 @@ export const TopBar = React.memo(function TopBar() {
   const fitToScreen = useStore(s => s.fitToScreen);
   const newScript = useStore(s => s.newScript);
   const stopRecording = useStore(s => s.stopRecording);
+  const toggleLearnedPanel = useStore(s => s.toggleLearnedPanel);
+  const stepOver = useStore(s => s.stepOver);
+  const isPaused = executionStatus === 'paused';
+  const breakpoints = useStore(s => s.execution.breakpoints);
 
   const [editingTitle, setEditingTitle] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -339,11 +344,26 @@ export const TopBar = React.memo(function TopBar() {
                 继续
               </button>
             )}
+            {/* Step Over (F10) — shown during pause for debugging */}
+            {isPaused && (
+              <button className="btn btn-ghost" onClick={stepOver} style={{ color: '#8b5cf6', borderColor: 'rgba(139,92,246,0.3)', gap: 4 }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="6" y1="4" x2="6" y2="20" /><polyline points="10 4 20 12 10 20" />
+                </svg>
+                单步 (F10)
+              </button>
+            )}
             <button className="btn btn-danger" onClick={stopExecution}>
               <Square size={12} fill="white" />
               停止
             </button>
           </>
+        )}
+        {/* Breakpoint indicator */}
+        {breakpoints.length > 0 && (
+          <span style={{ fontSize: 10, color: '#ef4444', marginLeft: 4 }}>
+            {breakpoints.length} 断点
+          </span>
         )}
 
         <span style={{ width: 1, height: 20, background: 'var(--border-primary)' }} />
@@ -365,6 +385,13 @@ export const TopBar = React.memo(function TopBar() {
         </button>
         <button
           className="btn btn-ghost btn-icon"
+          onClick={toggleLearnedPanel}
+          title="已学习目标"
+        >
+          <Brain size={15} />
+        </button>
+        <button
+          className="btn btn-ghost btn-icon"
           onClick={() => setUI({ dark_mode: !darkMode })}
           title={darkMode ? '亮色模式' : '深色模式'}
         >
@@ -374,6 +401,7 @@ export const TopBar = React.memo(function TopBar() {
 
       {/* Macro Panel */}
       {(showMacroPanel || recordingActive) && <MacroPanel />}
+      <LearnedTargetPanel />
     </div>
   );
 });

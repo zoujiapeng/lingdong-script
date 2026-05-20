@@ -45,7 +45,8 @@ export type NodeType =
   | 'display_brightness'
   | 'clipboard_set'
   | 'clipboard_get'
-  | 'window_control';
+  | 'window_control'
+  | 'web_browser';
 
 export type ConditionType =
   | 'image_exists'
@@ -327,6 +328,19 @@ export interface WindowControlParams {
   height?: number;
 }
 
+export interface WebBrowserNodeParams {
+  action: 'navigate' | 'click' | 'input_text' | 'screenshot' | 'wait' | 'extract' | 'scroll';
+  url?: string;
+  selector?: string;
+  text?: string;
+  wait_seconds?: number;
+  extract_attr?: string;
+  scroll_direction?: 'down' | 'up';
+  timeout: number;
+  headless: boolean;
+  description?: string;
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
@@ -365,7 +379,8 @@ export type NodeParams =
   | DisplayBrightnessParams
   | ClipboardSetParams
   | ClipboardGetParams
-  | WindowControlParams;
+  | WindowControlParams
+  | WebBrowserNodeParams;
 
 // --- Flow Node & Edge ---
 
@@ -443,6 +458,8 @@ export interface ExecutionState {
   finished_at?: string;
   error?: string;
   loop_iteration?: { current: number; total: number; node_id: string } | null;
+  breakpoints: string[];
+  stepping: boolean;
 }
 
 export interface LogEntry {
@@ -646,6 +663,24 @@ export interface ConditionRule {
 export interface ConditionGroup {
   operator: ConditionOperator;
   rules: ConditionRule[];
+}
+
+// --- Learned Targets ---
+
+export interface LearnedTarget {
+  target_id: string;
+  app: Record<string, any>;
+  action: string;
+  template_path: string;
+  ocr: Record<string, any>;
+  uia: Record<string, any>;
+  offset: Record<string, any>;
+  context: Record<string, any>;
+  success_count: number;
+  failure_count: number;
+  created_at: number;
+  updated_at: number;
+  last_used_at: number;
 }
 
 export interface ScheduleEntry {

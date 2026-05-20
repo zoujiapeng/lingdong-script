@@ -604,6 +604,9 @@ interface AppStore {
   updateNodeStatus: (nodeId: string, status: FlowNode['status'], error?: string) => void;
   addLog: (entry: Omit<LogEntry, 'timestamp'>) => void;
   clearLog: () => void;
+  // Debugger
+  toggleBreakpoint: (nodeId: string) => void;
+  stepOver: () => void;
   // Feature registry
   fetchFeatures: () => Promise<void>;
   callFeatureDirect: (featureName: string, displayName: string, params: Record<string, any>) => Promise<any>;
@@ -629,6 +632,14 @@ interface AppStore {
   playMacro: (name: string) => Promise<void>;
   deleteMacro: (name: string) => Promise<void>;
   convertMacroToFlow: (name: string) => Promise<void>;
+
+  // Learned targets
+  learnedTargets: LearnedTarget[];
+  showLearnedPanel: boolean;
+  fetchLearnedTargets: (app?: string) => Promise<void>;
+  deleteLearnedTarget: (targetId: string) => Promise<void>;
+  recordLearnedTarget: (targetId: string, success: boolean) => Promise<void>;
+  toggleLearnedPanel: () => void;
 }
 
 // History for undo/redo
@@ -655,6 +666,8 @@ export const useStore = create<AppStore>()(
       status: 'idle',
       variables: {},
       log: [],
+      breakpoints: [],
+      stepping: false,
     },
     clipboard: null,
     _executor: null,
@@ -663,6 +676,8 @@ export const useStore = create<AppStore>()(
     subFlowNav: { stack: [] },
     recording: { active: false, macroName: '' },
     macroList: [],
+    learnedTargets: [],
+    showLearnedPanel: false,
 
     newScript: () => {
       const s = createTemplateScript('desktop-monitor');
@@ -1126,28 +1141,39 @@ export const useStore = create<AppStore>()(
         });
       } else {
         // --- BROWSER SIMULATOR (fallback for dev) ---
-        const ctrl = createFlowExecutor(freshState.script, {
-          onNodeStatus: (nodeId, status, error) => {
-            get().updateNodeStatus(nodeId, status, error);
+        const bp = freshState.execution.breakpoints || [];
+        const stepping = freshState.execution.stepping;
+        const ctrl = createFlowExecutor(
+          freshState.script,
+          {
+            onNodeStatus: (nodeId, status, error) => {
+              get().updateNodeStatus(nodeId, status, error);
+            },
+            onLog: (entry) => {
+              get().addLog(entry);
+            },
+            onDone: (status) => {
+              set((s) => {
+                s.execution.status = status;
+                s.execution.finished_at = new Date().toISOString();
+                s.execution.loop_iteration = null;
+                s._executor = null;
+              });
+            },
+            onCurrentNode: (nodeId) => {
+              set((s) => { s.execution.current_node_id = nodeId; });
+            },
+            onIteration: (current, total, nodeId) => {
+              set((s) => { s.execution.loop_iteration = { current, total, node_id: nodeId }; });
+            },
+            onPausedAtBreakpoint: (nodeId) => {
+              get().addLog({ level: 'warn', message: `🔴 断点暂停: 节点 ${nodeId}` });
+            },
           },
-          onLog: (entry) => {
-            get().addLog(entry);
-          },
-          onDone: (status) => {
-            set((s) => {
-              s.execution.status = status;
-              s.execution.finished_at = new Date().toISOString();
-              s.execution.loop_iteration = null;
-              s._executor = null;
-            });
-          },
-          onCurrentNode: (nodeId) => {
-            set((s) => { s.execution.current_node_id = nodeId; });
-          },
-          onIteration: (current, total, nodeId) => {
-            set((s) => { s.execution.loop_iteration = { current, total, node_id: nodeId }; });
-          },
-        }, get().scripts);
+          undefined,
+          bp,
+          stepping,
+        );
         set((s) => { s._executor = ctrl; });
       }
     },
@@ -1203,6 +1229,30 @@ export const useStore = create<AppStore>()(
 
     clearLog: () => {
       set((state) => { state.execution.log = []; });
+    },
+
+    toggleBreakpoint: (nodeId) => {
+      set((state) => {
+        const bps = state.execution.breakpoints;
+        const idx = bps.indexOf(nodeId);
+        if (idx >= 0) {
+          bps.splice(idx, 1);
+        } else {
+          bps.push(nodeId);
+        }
+      });
+      get().addLog({ level: 'debug', message: `🔴 断点: ${useStore.getState().execution.breakpoints.includes(nodeId) ? '已设置' : '已移除'}` });
+    },
+
+    stepOver: () => {
+      const ctrl = get()._executor;
+      if (ctrl && 'stepNext' in ctrl) {
+        (ctrl as any).stepNext();
+      }
+      // Also resume from regular pause (for breakpoint → step case)
+      if (get().execution.status === 'paused') {
+        get().resumeExecution();
+      }
     },
 
     fetchFeatures: async () => {
@@ -1414,6 +1464,46 @@ export const useStore = create<AppStore>()(
       } catch (e: any) {
         get().addLog({ level: 'error', message: `转换失败: ${e.message}` });
       }
+    },
+
+    // ── Learned Targets ──────────────────────────────────────
+
+    fetchLearnedTargets: async (app?: string) => {
+      try {
+        const api = (window as any).electronAPI;
+        if (!api?.callFeature) return;
+        const result = await api.callFeature('learned_list', { app: app || '', limit: 200 });
+        if (result?.success && Array.isArray(result.result)) {
+          set((s) => { s.learnedTargets = result.result; });
+        } else if (Array.isArray(result)) {
+          set((s) => { s.learnedTargets = result; });
+        } else if (result?.result && Array.isArray(result.result)) {
+          set((s) => { s.learnedTargets = result.result; });
+        }
+      } catch { /* ignore */ }
+    },
+
+    deleteLearnedTarget: async (targetId: string) => {
+      try {
+        const api = (window as any).electronAPI;
+        if (!api?.callFeature) return;
+        await api.callFeature('learned_delete', { target_id: targetId });
+        get().addLog({ level: 'info', message: `🗑️ 已删除已学习目标: ${targetId}` });
+        await get().fetchLearnedTargets();
+      } catch { /* ignore */ }
+    },
+
+    recordLearnedTarget: async (targetId: string, success: boolean) => {
+      try {
+        const api = (window as any).electronAPI;
+        if (!api?.callFeature) return;
+        await api.callFeature('learned_record', { target_id: targetId, success });
+      } catch { /* ignore */ }
+    },
+
+    toggleLearnedPanel: () => {
+      set((s) => { s.showLearnedPanel = !s.showLearnedPanel; });
+      if (!get().showLearnedPanel) get().fetchLearnedTargets();
     },
   }))
 );
@@ -1636,12 +1726,15 @@ function _registerListeners() {
         case 'setViewMode': if (payload?.mode) { store.setViewMode(payload.mode); pushState(); } break;
         case 'fitScreen': store.fitToScreen(); break;
         case 'getState': _api.pushState({ nodes: store.script.nodes, edges: store.script.edges, meta: store.script.meta, selection: store.ui.selection, viewMode: store.ui.viewMode, ui: store.ui }); break;
+        case 'start': if (payload?.script) { store.loadScript(payload.script); store.startExecution(); pushState(); } break;
+        case 'pause': store.pauseExecution(); break;
+        case 'resume': store.resumeExecution(); break;
         case 'undo': store.undo(); break;
         case 'redo': store.redo(); break;
         case 'saveScript': store.saveScript(); break;
-        case 'setScriptName': if (payload?.name) store.setScriptName(payload.name); break;
+        case 'setScriptName': if (payload?.name) store.setScriptName(payload.name); pushState(); break;
         case 'saveTemplate': if (payload?.name) store.saveAsTemplate(payload.name, payload.description); break;
-        case 'setUI': if (payload) store.setUI(payload); break;
+        case 'setUI': if (payload) store.setUI(payload); pushState(); break;
         case 'copySelected': store.copySelected(); break;
         case 'cutSelected': store.cutSelected(); break;
         case 'paste': store.paste(); break;

@@ -10,7 +10,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run build` | 构建 renderer + main |
 | `npx electron-builder --win portable` | 构建免安装便携版 |
 | `npx electron . --prod` | 测试生产模式 (file:// 加载) |
-| `python -m pytest tests/` | 运行 Python 测试 (102 tests) |
+| `python -m pytest tests/` | 运行 Python 测试 (2149+ tests) |
 | `python python/mcp/server.py` | 启动 Python MCP 服务器 |
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
 | `python cli/lobster.py run-flow <file.flow>` | CLI 执行流程 |
@@ -45,7 +45,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── executor.py #   - DSL 执行器 (核心)
 │   │   ├── dsl_parser.py #  - DSL 解析器
 │   │   └── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
-│   ├── features/       # @feature 注册表 (~160 功能)
+│   ├── features/       # @feature 注册表 (226 功能)
 │   │   ├── registry.py #   - 装饰器, 自动生成 MCP/CLI/HTTP
 │   │   └── _all.py     #   - 导入所有 feature 模块
 │   ├── mcp/server.py   # Python MCP 服务器 (stdio 协议)
@@ -127,18 +127,20 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 ~160 工具，覆盖：
+通过 `@feature` 注册表动态生成 226 工具，覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
-| 交互动作 | ~15 | click, type, swipe, hotkey, scroll, screenshot... |
-| 感知识别 | ~12 | find_image, OCR, color_detect, progress_detect... |
-| 控制流 | ~4 | wait, loop, condition... |
-| AI 规划 | ~8 | plan, execute_plan, debug... |
-| AI Agent | ~5 | agent_start, agent_stop, agent_status, agent_guidance... |
-| 系统功能 | ~10 | window, process, clipboard, file... |
-| 调试诊断 | ~10 | test, validate, system_info... |
-| DSL 工具 | 5 | run_dsl, dsl_to_flow, flow_to_dsl, create_flow_from_dsl |
+| 交互动作 | 60 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
+| 感知识别 | 26 | find_image, OCR, color_detect, progress, A11y, fusion... |
+| 控制流 | 23 | wait, loop, condition, timer, software control... |
+| AI 规划 | 8 | plan, execute_plan, debug, VLM analyze... |
+| 宏指令 | 7 | record, playback, list, delete, convert_to_flow... |
+| 系统功能 | 72 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
+| 调试诊断 | 27 | test, validate, system_info, feature introspection... |
+
+DSL 关键字: 184 个（自动从 @feature 注册表生成，含所有控制流关键字）
+Agent 工具集: 99 个直接工具（浏览器控制/窗口管理/系统功能/WiFi/剪贴板/媒体等）
 
 关键工具示例：
 - `dsl_to_flow(dsl: string)` — DSL 文本转 FlowScript JSON
@@ -294,7 +296,7 @@ Agent Controller
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
 - **Agent IPC 协议**: `python/agent/__main__.py` 通过 stdin/stdout JSON 与 Electron 通信（start/stop/guidance/status 命令，agent_start/step_complete/agent_done/log 事件）
 - **Python 协议**: `engine/engine.py` 通过 stdin/stdout JSON 与 Electron 通信
-- **测试**: `pytest tests/` 102 tests (Python), 暂无前端测试脚本
+- **测试**: `pytest tests/` 2149+ tests (Python, 覆盖全部 @feature 执行, DSL 转换, 往返验证), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 - **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
 

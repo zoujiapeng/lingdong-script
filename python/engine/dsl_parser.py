@@ -169,6 +169,7 @@ class ASTNode:
     children: List[ASTNode] = field(default_factory=list)
     else_children: List[ASTNode] = field(default_factory=list)
     line: int = 0
+    keyword: str = ""  # 原始关键字（REGISTRY_FEATURE 类型节点使用）
     params: List[str] = field(default_factory=list)      # SUBROUTINE param names
     call_args: List[str] = field(default_factory=list)    # CALL arg expressions
     event_key: str = ""                                   # WHEN trigger type
@@ -473,7 +474,8 @@ class DSLParser:
             else:
                 # Registry 回退：带 dsl_keyword 的 @feature 自动处理
                 nt = getattr(NodeType, keyword, NodeType.REGISTRY_FEATURE)
-                nodes.append(ASTNode(nt, args, line=lineno))
+                nodes.append(ASTNode(nt, args, line=lineno,
+                    keyword=keyword if nt == NodeType.REGISTRY_FEATURE else ""))
 
         return nodes
 

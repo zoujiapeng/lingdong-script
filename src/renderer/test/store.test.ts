@@ -138,4 +138,57 @@ describe('store', () => {
     useStore.getState().clearSelection();
     expect(useStore.getState().ui.selection.nodes).toEqual([]);
   });
+
+  // ── Learned Targets ─────────────────────────────────────
+
+  describe('learned targets', () => {
+    it('initial state is empty', async () => {
+      const { useStore } = await import('../store');
+      const state = useStore.getState();
+      expect(state.learnedTargets).toEqual([]);
+      expect(state.showLearnedPanel).toBe(false);
+    });
+
+    it('toggleLearnedPanel flips visibility', async () => {
+      const { useStore } = await import('../store');
+      expect(useStore.getState().showLearnedPanel).toBe(false);
+      useStore.getState().toggleLearnedPanel();
+      expect(useStore.getState().showLearnedPanel).toBe(true);
+      useStore.getState().toggleLearnedPanel();
+      expect(useStore.getState().showLearnedPanel).toBe(false);
+    });
+
+    it('fetchLearnedTargets calls callFeature', async () => {
+      const { useStore } = await import('../store');
+      const callFeature = mockElectronAPI.callFeature as ReturnType<typeof vi.fn>;
+      callFeature.mockResolvedValueOnce({
+        success: true,
+        result: [
+          { target_id: 'test.target', action: 'click', success_count: 5, failure_count: 1, uia: { name: 'Button' } },
+        ],
+      });
+
+      await useStore.getState().fetchLearnedTargets();
+      const state = useStore.getState();
+      expect(state.learnedTargets).toHaveLength(1);
+      expect(state.learnedTargets[0].target_id).toBe('test.target');
+      expect(callFeature).toHaveBeenCalledWith('learned_list', { app: '', limit: 200 });
+    });
+
+    it('deleteLearnedTarget calls callFeature and refreshes', async () => {
+      const { useStore } = await import('../store');
+      const callFeature = mockElectronAPI.callFeature as ReturnType<typeof vi.fn>;
+      callFeature
+        .mockResolvedValueOnce({ success: true, result: [{ target_id: 'del.me', success_count: 1, failure_count: 0 }] })
+        .mockResolvedValueOnce({ success: true })
+        .mockResolvedValueOnce({ success: true, result: [] });
+
+      await useStore.getState().fetchLearnedTargets();
+      expect(useStore.getState().learnedTargets).toHaveLength(1);
+
+      await useStore.getState().deleteLearnedTarget('del.me');
+      expect(useStore.getState().learnedTargets).toHaveLength(0);
+      expect(callFeature).toHaveBeenCalledWith('learned_delete', { target_id: 'del.me' });
+    });
+  });
 });

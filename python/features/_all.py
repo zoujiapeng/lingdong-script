@@ -33,6 +33,7 @@ _FEATURE_MODULES = [
     "features.image_search_features",
     "features.variable_features",
     "features.vlm_features",
+    "features.web_features",
     "features.canvas_features",
     "features.claude_code_features",
     "features.scheduler_features",
@@ -42,5 +43,6 @@ _FEATURE_MODULES = [
     "features.program_registry",
     "features.dialog_features",
     "features.menu_features",
+    "features.qq_features",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

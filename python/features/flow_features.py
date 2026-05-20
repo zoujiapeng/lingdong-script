@@ -61,6 +61,38 @@ def _build_structured_types_section() -> str:
     ])
 
 
+def _build_dsl_reference() -> str:
+    """动态从注册表构建完整的 DSL 关键字参考（让 LLM 知道所有可用指令）。"""
+    try:
+        from features.registry import registry
+        import features._all  # noqa: F401
+        # Group by category
+        cats = {}
+        for f in registry.all():
+            if not f.dsl_keyword or f.deprecated or f.hidden:
+                continue
+            cat = cats.setdefault(f.category.value, [])
+            cat.append(f)
+
+        lines = ["", "=== COMPLETE LOBSTER DSL REFERENCE (all available commands) ===", ""]
+        for cat_name in ("action", "perception", "control", "system", "ai", "macro", "debug"):
+            if cat_name not in cats:
+                continue
+            lines.append(f"[{cat_name.upper()}]")
+            for f in sorted(cats[cat_name], key=lambda x: x.dsl_keyword):
+                params = " ".join(p.name for p in f.params[:3])
+                if len(f.params) > 3:
+                    params += " ..."
+                lines.append(f"  {f.dsl_keyword}  {params}  # {f.description[:60]}")
+            lines.append("")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+# Build the prompt at module load time so it includes the full registry
+_DSL_REFERENCE = _build_dsl_reference()
+
 GENERATION_PROMPT = f"""You are an automation script generator. Given a user's goal, generate a step-by-step pseudocode script, structured steps, and LOBSTER DSL.
 
 {_build_commands_section()}
@@ -76,7 +108,7 @@ IMPORTANT RULES:
 8. When using `双击` or `右键单击`, do NOT wrap the target in quotes in the pseudocode. Write `双击 回收站` not `双击 '回收站'`. (Quotes are optional in structured_steps targets.)
 9. When launching a program, you can use Chinese names directly (e.g. `启动 "微信"`, `启动 "记事本"`, `启动 "微星小飞机"`). The system will auto-resolve them to full paths. Do NOT use `运行命令 "where 程序名"` for program path lookup — just use the Chinese or common name directly.
 
-DSL SYNTAX (Lobster DSL — one line per action, indentation for blocks):
+BASIC DSL SYNTAX (common commands):
   CLICK {{target}}           — click on text/coordinate
   WAIT {{seconds}}           — wait for N seconds
   TYPE {{text}}              — type text
@@ -87,14 +119,10 @@ DSL SYNTAX (Lobster DSL — one line per action, indentation for blocks):
   SCROLL {{direction}}       — scroll up/down
   DRAG {{x1}} {{y1}} TO {{x2}} {{y2}}  — drag from-to
   IF {{condition}}           — conditional branch, ends with END
-    {{actions...}}
-  ELSE
-    {{actions...}}
-  END
   LOOP {{N}}                 — repeat N times, ends with END
-    {{actions...}}
-  END
-  RUN {{macro_name}}         — run a macro
+
++ ALL commands below are also available as DSL keywords (use the keyword as the first token):
+{_DSL_REFERENCE}
 
 Respond ONLY with a JSON object (no markdown, no extra text):
 {{

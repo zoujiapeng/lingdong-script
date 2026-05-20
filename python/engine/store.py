@@ -1,6 +1,6 @@
 """
 执行状态持久化存储: SQLite 后端
-支持执行 checkpoint / resume / telemetry / vault
+支持执行 checkpoint / resume / telemetry / vault / learned targets
 """
 from __future__ import annotations
 import json
@@ -50,6 +50,23 @@ class TelemetryEntry:
     timestamp: float = 0.0
 
 
+@dataclass
+class LearnedTarget:
+    target_id: str
+    app: dict = field(default_factory=dict)
+    action: str = "click"
+    template_path: str = ""
+    ocr: dict = field(default_factory=dict)
+    uia: dict = field(default_factory=dict)
+    offset: dict = field(default_factory=dict)
+    context: dict = field(default_factory=dict)
+    success_count: int = 0
+    failure_count: int = 0
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    last_used_at: float = 0.0
+
+
 class ExecutionStore:
     """
     SQLite 持久化存储
@@ -58,6 +75,7 @@ class ExecutionStore:
       checkpoints  — 执行断点
       telemetry    — 功能调用统计
       vault        — 加密敏感信息
+      learned_targets — 已学习的本地目标
     """
 
     _instance: Optional["ExecutionStore"] = None
@@ -104,8 +122,24 @@ class ExecutionStore:
                 value TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS learned_targets (
+                target_id TEXT PRIMARY KEY,
+                app TEXT DEFAULT '{}',
+                action TEXT DEFAULT 'click',
+                template_path TEXT DEFAULT '',
+                ocr TEXT DEFAULT '{}',
+                uia TEXT DEFAULT '{}',
+                offset TEXT DEFAULT '{}',
+                context TEXT DEFAULT '{}',
+                success_count INTEGER DEFAULT 0,
+                failure_count INTEGER DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                last_used_at REAL DEFAULT 0
+            );
             CREATE INDEX IF NOT EXISTS idx_telemetry_feature ON telemetry(feature_name);
             CREATE INDEX IF NOT EXISTS idx_telemetry_time ON telemetry(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_learned_targets_updated ON learned_targets(updated_at);
         """)
         conn.commit()
 
@@ -212,6 +246,89 @@ class ExecutionStore:
             "total_calls": row["total_calls"] or 0,
             "total_successes": row["total_successes"] or 0,
             "avg_duration_ms": round(row["avg_duration"] or 0, 1),
+        }
+
+    # ── Learned Target API ────────────────────────────────────────
+
+    def save_learned_target(self, target: LearnedTarget | dict) -> dict:
+        conn = self._get_conn()
+        now = time.time()
+        data = asdict(target) if isinstance(target, LearnedTarget) else dict(target)
+        target_id = str(data.get("target_id") or "").strip()
+        if not target_id:
+            raise ValueError("target_id is required")
+        existing = self.get_learned_target(target_id)
+        created_at = data.get("created_at") or (existing or {}).get("created_at") or now
+        conn.execute(
+            """INSERT OR REPLACE INTO learned_targets
+               (target_id, app, action, template_path, ocr, uia, offset, context,
+                success_count, failure_count, created_at, updated_at, last_used_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                target_id,
+                json.dumps(data.get("app") or {}, ensure_ascii=False),
+                data.get("action") or "click",
+                data.get("template_path") or "",
+                json.dumps(data.get("ocr") or {}, ensure_ascii=False),
+                json.dumps(data.get("uia") or {}, ensure_ascii=False),
+                json.dumps(data.get("offset") or {}, ensure_ascii=False),
+                json.dumps(data.get("context") or {}, ensure_ascii=False),
+                int(data.get("success_count", (existing or {}).get("success_count", 0)) or 0),
+                int(data.get("failure_count", (existing or {}).get("failure_count", 0)) or 0),
+                created_at,
+                now,
+                float(data.get("last_used_at", (existing or {}).get("last_used_at", 0)) or 0),
+            ),
+        )
+        conn.commit()
+        return self.get_learned_target(target_id) or {}
+
+    def get_learned_target(self, target_id: str) -> Optional[dict]:
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM learned_targets WHERE target_id = ?", (target_id,)).fetchone()
+        return self._row_to_learned_target(row) if row else None
+
+    def list_learned_targets(self, app: str = "", limit: int = 100) -> List[dict]:
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM learned_targets ORDER BY updated_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        items = [self._row_to_learned_target(r) for r in rows]
+        if app:
+            needle = app.lower()
+            items = [t for t in items if needle in json.dumps(t.get("app") or {}, ensure_ascii=False).lower()]
+        return items
+
+    def update_target_stats(self, target_id: str, success: bool):
+        conn = self._get_conn()
+        field = "success_count" if success else "failure_count"
+        conn.execute(
+            f"UPDATE learned_targets SET {field} = {field} + 1, last_used_at = ?, updated_at = ? WHERE target_id = ?",
+            (time.time(), time.time(), target_id),
+        )
+        conn.commit()
+
+    def delete_learned_target(self, target_id: str):
+        conn = self._get_conn()
+        conn.execute("DELETE FROM learned_targets WHERE target_id = ?", (target_id,))
+        conn.commit()
+
+    def _row_to_learned_target(self, row: sqlite3.Row) -> dict:
+        return {
+            "target_id": row["target_id"],
+            "app": json.loads(row["app"] or "{}"),
+            "action": row["action"],
+            "template_path": row["template_path"],
+            "ocr": json.loads(row["ocr"] or "{}"),
+            "uia": json.loads(row["uia"] or "{}"),
+            "offset": json.loads(row["offset"] or "{}"),
+            "context": json.loads(row["context"] or "{}"),
+            "success_count": row["success_count"],
+            "failure_count": row["failure_count"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "last_used_at": row["last_used_at"],
         }
 
     # ── Vault API ───────────────────────────────────────────────

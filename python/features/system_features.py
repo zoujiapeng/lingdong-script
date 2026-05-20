@@ -104,20 +104,58 @@ def get_active_window() -> dict:
         return {"error": "窗口管理模块不可用"}
 
 
+def _try_focus_existing(exe_name: str) -> bool:
+    """尝试查找已运行程序的窗口并聚焦。成功返回 True。"""
+    try:
+        import psutil, win32gui, win32con
+        exe_lower = exe_name.lower()
+        target_pids = set()
+        for p in psutil.process_iter(["pid", "name"]):
+            try:
+                if p.info["name"] and p.info["name"].lower() == exe_lower:
+                    target_pids.add(p.info["pid"])
+            except Exception:
+                continue
+        if not target_pids:
+            return False
+
+        found = False
+        def enum_cb(hwnd, _pids):
+            nonlocal found
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid in target_pids:
+                    r = win32gui.GetWindowRect(hwnd)
+                    if int(r[2]-r[0]) > 200 and int(r[3]-r[1]) > 100:
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                        found = True
+            except Exception:
+                pass
+        import win32process
+        win32gui.EnumWindows(enum_cb, target_pids)
+        return found
+    except Exception:
+        return False
+
+
 @feature(
     name="launch_program",
     display_name="启动程序",
-    description="【系统·启动】启动可执行程序或打开文件/URL。支持 exe、文档、网址。用 subprocess 或 os.startfile",
+    description="【系统·启动】启动可执行程序或打开文件/URL。如果程序已在运行，会自动聚焦其窗口避免重复启动",
     category=F.SYSTEM,
     params=[
         P("target", "str", "程序路径、文件名（如 notepad.exe）、文档或 URL", example="notepad.exe"),
         P("args", "str", "命令行参数（可选）", required=False, default=""),
         P("wait", "boolean", "是否等待程序退出", required=False, default=False),
+        P("force_new", "boolean", "即使程序已运行也强制启动新实例", required=False, default=False),
     ],
     returns="dict{success, pid} - 启动结果",
     tags=["system", "process", "launch"],
 )
-def launch_program(target: str, args: str = "", wait: bool = False) -> dict:
+def launch_program(target: str, args: str = "", wait: bool = False, force_new: bool = False) -> dict:
     try:
         import subprocess, os, re
 
@@ -135,19 +173,24 @@ def launch_program(target: str, args: str = "", wait: bool = False) -> dict:
                 hint = f"，你是不是想启动: {' / '.join(f'『{c["name"]}』' for c in close)}"
             return {"success": False, "error": f"未找到程序「{target}」{hint}"}
 
-        full_args = [resolved] + (args.split() if args else [])
-
-        # If resolved target looks like a non-executable file/dir/URL, use os.startfile
+        # If resolved target is a non-executable file/dir/URL, use os.startfile
         if not any(resolved.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
             os.startfile(resolved)
             return {"success": True, "pid": None, "resolved_path": resolved}
 
+        # 防重复启动：程序已在运行且非强制新实例 → 聚焦现有窗口
+        if not force_new and not args:
+            exe_name = os.path.basename(resolved)
+            if _try_focus_existing(exe_name):
+                logger.info("程序 %s 已在运行，已聚焦窗口", exe_name)
+                return {"success": True, "focused_existing": True, "resolved_path": resolved}
+
+        full_args = [resolved] + (args.split() if args else [])
         proc = subprocess.Popen(full_args, shell=False)
         if wait:
             proc.wait()
         return {"success": True, "pid": proc.pid, "resolved_path": resolved}
     except FileNotFoundError:
-        # Fallback: shell=True resolves via Windows App Paths registry
         try:
             import subprocess
             proc = subprocess.Popen([target] + (args.split() if args else []), shell=True)

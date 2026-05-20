@@ -22,6 +22,7 @@ import { RegionWaitParams } from './params/RegionWaitParams';
 import { SceneConditionParams } from './params/SceneConditionParams';
 import { ScreenshotParams } from './params/ScreenshotParams';
 import { ToolCallParams } from './params/ToolCallParams';
+import { WebBrowserParams } from './params/WebBrowserParams';
 import { CommonNodeSettings } from './params/CommonNodeSettings';
 
 function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
@@ -136,6 +137,7 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'region_wait': return <RegionWaitParams params={node.params as any} onChange={updateParams} />;
     case 'scene_condition': return <SceneConditionParams params={node.params as any} onChange={updateParams} />;
     case 'screenshot': return <ScreenshotParams params={node.params as any} onChange={updateParams} />;
+    case 'web_browser': return <WebBrowserParams params={node.params as any} onChange={updateParams} />;
     case 'tool_call': return <ToolCallParams params={node.params as any} onChange={updateParams} />;
     case 'shutdown':
     case 'reboot':
