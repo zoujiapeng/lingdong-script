@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain } from 'lucide-react';
 import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
@@ -42,6 +42,14 @@ function storeVerify(val: boolean) {
   try { localStorage.setItem(VERIFY_STORAGE, val ? 'true' : 'false'); } catch {}
 }
 
+const AUTO_LEARN_STORAGE = 'lingdong-auto-learn';
+function getStoredAutoLearn(): boolean {
+  try { return localStorage.getItem(AUTO_LEARN_STORAGE) === 'true'; } catch { return false; }
+}
+function storeAutoLearn(val: boolean) {
+  try { localStorage.setItem(AUTO_LEARN_STORAGE, val ? 'true' : 'false'); } catch {}
+}
+
 export function SettingsPanel() {
   const { script, ui, setUI } = useStore();
   const [apiKey, setApiKey] = useState(() => getStoredKey());
@@ -49,6 +57,7 @@ export function SettingsPanel() {
   const [model, setModel] = useState(() => getStoredModel());
   const [multimodal, setMultimodal] = useState(() => getStoredMultimodal());
   const [verifyEnabled, setVerifyEnabled] = useState(() => getStoredVerify());
+  const [autoLearn, setAutoLearn] = useState(() => getStoredAutoLearn());
   const [apiKeySaved, setApiKeySaved] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
@@ -327,6 +336,22 @@ export function SettingsPanel() {
           {!verifyEnabled && (
             <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
               关闭后 Agent 执行步骤后跳过验证，直接继续下一步，执行更快但不检测结果是否正确。
+            </div>
+          )}
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Brain size={15} />
+              <span>自动学习（Agent 模式）</span>
+            </div>
+            <button
+              className={`toggle ${autoLearn ? 'on' : ''}`}
+              onClick={() => { const v = !autoLearn; setAutoLearn(v); storeAutoLearn(v); }}
+            />
+          </div>
+          {autoLearn && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+              开启后 Agent 每次执行成功自动记录屏幕状态和目标信息，后续可快速复用相似任务。
             </div>
           )}
         </section>

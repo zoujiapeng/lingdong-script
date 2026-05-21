@@ -50,6 +50,7 @@ const DEFAULT_UI_STATE: UIState = {
   show_log_panel: false,
   show_tool_call_panel: false,
   show_ai_dialog: false,
+  auto_learn: false,
 };
 
 // --- Preset Templates ---
