@@ -377,7 +377,7 @@ function createWindow() {
       mainWindow?.minimize();
     }
     _rendererReady = true;
-    // 注入 API 配置环境变量到前端（如未在 localStorage 中设置）
+    // 注入 API 配置环境变量到前端（每次启动覆盖 localStorage）
     const envKey = process.env.ANTHROPIC_API_KEY || '';
     const envBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1';
     const envModel = process.env.LLM_MODEL || 'deepseek-chat';
@@ -387,14 +387,14 @@ function createWindow() {
         (function() {
           const k = '__DEEPSEEK_KEY__'; const b = '__LLM_API_BASE__'; const m = '__LLM_MODEL__'; const mm = '__LLM_MULTIMODAL__';
           const lk = 'lingdong-deepseek-key'; const lb = 'lingdong-llm-base'; const lmd = 'lingdong-llm-model'; const lmm = 'lingdong-llm-multimodal';
-          window[k] = window[k] || ${JSON.stringify(envKey)};
-          window[b] = window[b] || ${JSON.stringify(envBase)};
-          window[m] = window[m] || ${JSON.stringify(envModel)};
-          window[mm] = window[mm] !== undefined ? window[mm] : ${JSON.stringify(envMultimodal)};
-          if (!localStorage.getItem(lk)) localStorage.setItem(lk, window[k]);
-          if (!localStorage.getItem(lb)) localStorage.setItem(lb, window[b]);
-          if (!localStorage.getItem(lmd)) localStorage.setItem(lmd, window[m]);
-          if (!localStorage.getItem(lmm)) localStorage.setItem(lmm, window[mm] ? 'true' : 'false');
+          window[k] = ${JSON.stringify(envKey)};
+          window[b] = ${JSON.stringify(envBase)};
+          window[m] = ${JSON.stringify(envModel)};
+          window[mm] = ${JSON.stringify(envMultimodal)};
+          localStorage.setItem(lk, window[k]);
+          localStorage.setItem(lb, window[b]);
+          localStorage.setItem(lmd, window[m]);
+          localStorage.setItem(lmm, window[mm] ? 'true' : 'false');
         })();
       `);
     }
@@ -505,7 +505,7 @@ function buildAppMenu() {
               '• @feature 工具注册表（120+ 工具）',
               '• MCP 协议支持（Python + TypeScript 双服务器）',
               '• CLI 命令行工具（run/ask/create/serve）',
-              '• HTTP API 桥接（127.0.0.1:5877）',
+              `• HTTP API 桥接（127.0.0.1:${parseInt(process.env.API_PORT || '7880', 10)}）`,
               '• 区域选择 / 滚轮选择器 / OCR 识别',
               '',
               '目录结构：',
@@ -665,7 +665,7 @@ let _agentLineBuffer = '';
 /** UTF-8 decoder for agent stdout (handles multi-byte chars split across chunks) */
 let _agentDecoder: StringDecoder;
 
-function startAgentProcess(goal: string, config?: Record<string, string>, supervise: boolean = true) {
+function startAgentProcess(goal: string, config?: Record<string, string>, supervise: boolean = true, steps?: any[]) {
   // Stop existing agent if running — kill immediately, then wait before spawning new one
   if (agentProcess && !agentProcess.killed) {
     sendToAgent({ type: 'stop' });
@@ -733,12 +733,12 @@ function startAgentProcess(goal: string, config?: Record<string, string>, superv
 
   // Send start command (use a short delay to ensure Python process is listening)
   setTimeout(() => {
-    sendToAgent({ type: 'start', goal, config: config || {}, supervise });
+    sendToAgent({ type: 'start', goal, config: config || {}, supervise, steps });
   }, 300);
 }
 
-ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>, supervise?: boolean) => {
-  startAgentProcess(goal, config, supervise ?? true);
+ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>, supervise?: boolean, steps?: any[]) => {
+  startAgentProcess(goal, config, supervise ?? true, steps);
   return { success: true };
 });
 
@@ -1483,7 +1483,7 @@ if (!gotTheLock) {
         if (!claudeConfig.mcpServers['lingdong-script']) {
           claudeConfig.mcpServers['lingdong-script'] = {
             type: 'http',
-            url: 'http://127.0.0.1:5877/mcp',
+            url: `http://127.0.0.1:${parseInt(process.env.API_PORT || '7880', 10)}/mcp`,
           };
           fs.writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2), 'utf-8');
           console.log('[MCP] Auto-registered lingdong-script in ~/.claude.json');

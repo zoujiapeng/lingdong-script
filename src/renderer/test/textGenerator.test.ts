@@ -291,7 +291,7 @@ describe('textGenerator DSL mode', () => {
       ],
     });
     const result = generateText(script, 'dsl');
-    expect(result).toContain('# TOOL: screenshot');
+    expect(result).toContain('SCREENSHOT region=full');
   });
 
   it('generates LAUNCH for launch_program node', () => {

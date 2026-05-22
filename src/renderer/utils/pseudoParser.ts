@@ -482,9 +482,86 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     return { type: 'set_wallpaper', params: { path: wallMatch[1] } };
   }
 
+  // ── 浏览器操作: 浏览器导航 "URL" / BROWSER_NAV URL ──
+  const browserNavRe = /^(?:浏览器导航|BROWSER_NAV)\s+"?((?:https?:\/\/)?[^\s"]+)/i;
+  const browserNavMatch = line.match(browserNavRe);
+  if (browserNavMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'navigate', url: browserNavMatch[1], headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器点击 "selector" / BROWSER_CLICK selector ──
+  const browserClickRe = /^(?:浏览器点击|BROWSER_CLICK)\s+"?([^\s"]+)/i;
+  const browserClickMatch = line.match(browserClickRe);
+  if (browserClickMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'click', selector: browserClickMatch[1], headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器输入 "selector" "text" / BROWSER_TYPE selector "text" ──
+  const browserTypeRe = /^(?:浏览器输入|BROWSER_TYPE)\s+"?([^\s"]+)"?\s+"([^"]*)"/i;
+  const browserTypeMatch = line.match(browserTypeRe);
+  if (browserTypeMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'input_text', selector: browserTypeMatch[1], text: browserTypeMatch[2], headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器等待 "selector" [timeout] / BROWSER_WAIT selector [timeout] ──
+  const browserWaitRe = /^(?:浏览器等待|BROWSER_WAIT)\s+"?([^\s"]+)"?(?:\s+(\d+))?/i;
+  const browserWaitMatch = line.match(browserWaitRe);
+  if (browserWaitMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'wait', selector: browserWaitMatch[1], wait_seconds: browserWaitMatch[2] ? parseInt(browserWaitMatch[2]) : 5, headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器获取文本 "selector" / BROWSER_TEXT selector ──
+  const browserTextRe = /^(?:浏览器获取文本|BROWSER_TEXT)\s+"?([^\s"]+)/i;
+  const browserTextMatch = line.match(browserTextRe);
+  if (browserTextMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'extract', selector: browserTextMatch[1], extract_attr: 'textContent', headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器查找 "selector" / BROWSER_FIND selector ──
+  const browserFindRe = /^(?:浏览器查找|BROWSER_FIND)\s+"?([^\s"]+)/i;
+  const browserFindMatch = line.match(browserFindRe);
+  if (browserFindMatch) {
+    return {
+      type: 'web_browser',
+      params: { action: 'wait', selector: browserFindMatch[1], wait_seconds: 1, headless: false, timeout: 10 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器截图 / BROWSER_SCREENSHOT ──
+  if (/^(?:浏览器截图|BROWSER_SCREENSHOT)\s*$/i.test(line)) {
+    return {
+      type: 'web_browser',
+      params: { action: 'screenshot', headless: false, timeout: 30 },
+    };
+  }
+
+  // ── 浏览器操作: 浏览器执行JS "code" / BROWSER_JS code ──
+  const browserJsRe = /^(?:浏览器执行JS|BROWSER_JS)\s+"?(.+)/i;
+  const browserJsMatch = line.match(browserJsRe);
+  if (browserJsMatch) {
+    return {
+      type: 'tool_call',
+      params: { feature_name: 'browser_execute_js', params: { code: browserJsMatch[1] } },
+    };
+  }
+
   // ── Catch-all for ANY unknown DSL keyword (ALL_CAPS) → tool_call ──
-  // Matches patterns like: BROWSER_NAVIGATE url=https://example.com
-  //                          VOLUME_SET level=50
+  // Matches patterns like: VOLUME_SET level=50
   const dslCatchRe = /^([A-Z][A-Z_]{2,})\s+(.+)$/;
   const dslCatchMatch = line.match(dslCatchRe);
   if (dslCatchMatch) {
@@ -723,6 +800,7 @@ function getDefaultParams(type: string): any {
     case 'empty_recycle_bin': return {};
     case 'display_brightness': return { level: 50 };
     case 'display_off': return {};
+    case 'web_browser': return { action: 'navigate', url: '', selector: '', text: '', wait_seconds: 1, timeout: 30, headless: false };
     case 'set_wallpaper': return { path: '' };
     default: return {};
   }

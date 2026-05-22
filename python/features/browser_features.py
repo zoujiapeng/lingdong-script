@@ -1228,3 +1228,311 @@ def browser_close() -> dict:
         return {"success": True, "result": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ════════════════════════════════════════════════════════════════
+#  视觉锚点 (Visual Anchor) — 截图 + 元素定位 → 坐标
+# ════════════════════════════════════════════════════════════════
+
+
+@feature(
+    name="browser_visual_anchor",
+    display_name="视觉锚点定位",
+    description="【浏览器·视觉】在页面中定位元素并返回其屏幕坐标和尺寸。支持按文本匹配、CSS 选择器或图片查找。返回元素的 bounding box {x, y, w, h, center_x, center_y}，可用于后续点击/悬停等操作。适用于 canvas、SVG、iframe 或 CSS 选择器难以定位的元素",
+    category=F.ACTION,
+    params=[
+        P("text", "str", "元素文本内容匹配（与 selector/description 三选一）", required=False, default=""),
+        P("selector", "str", "CSS 选择器（与 text/description 三选一）", required=False, default=""),
+        P("description", "str", "元素自然语言描述（实验性，使用 OCR 匹配附近文本）", required=False, default=""),
+        P("timeout", "number", "等待超时秒数", required=False, default=10),
+    ],
+    returns="dict{x, y, w, h, center_x, center_y} - 元素坐标和尺寸",
+    tags=["browser", "visual", "anchor", "coordinate"],
+)
+def browser_visual_anchor(text: str = "", selector: str = "", description: str = "", timeout: float = 10) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_visual_anchor(text, selector, description, timeout))
+
+
+def _do_visual_anchor(text: str, selector: str, description: str, timeout: float):
+    """Locate element and return its bounding box coordinates."""
+    page = _get_page()
+    ms = int(timeout * 1000)
+
+    el = None
+    if selector:
+        el = page.locator(selector).first
+    elif text:
+        el = page.get_by_text(text, exact=False).first
+    elif description:
+        # Fallback: try text match on description keywords
+        keywords = [w for w in description.replace("，", ",").replace(" ", ",").split(",") if len(w) > 1]
+        for kw in keywords:
+            try:
+                el = page.get_by_text(kw, exact=False).first
+                if el.is_visible():
+                    break
+                el = None
+            except Exception:
+                el = None
+
+    if el is None:
+        return {"success": False, "error": "无法定位元素，请尝试使用更精确的选择器或文本"}
+
+    try:
+        el.wait_for(state="visible", timeout=ms)
+        box = el.bounding_box()
+        if box is None:
+            return {"success": False, "error": "元素存在但无法获取坐标（可能不可见）"}
+        return {
+            "success": True,
+            "result": {
+                "x": box["x"],
+                "y": box["y"],
+                "w": box["width"],
+                "h": box["height"],
+                "center_x": box["x"] + box["width"] / 2,
+                "center_y": box["y"] + box["height"] / 2,
+            },
+        }
+    except PWTimeout:
+        return {"success": False, "error": f"等待元素超时 ({timeout}s)"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ════════════════════════════════════════════════════════════════
+#  浏览器状态快照 (State Snapshot) — 保存/恢复 cookies + storage
+# ════════════════════════════════════════════════════════════════
+
+
+@feature(
+    name="browser_state_snapshot",
+    display_name="保存浏览器状态快照",
+    description="【浏览器·状态】保存当前浏览器的 cookies、localStorage 和 sessionStorage 到 JSON 文件。可用于断点续传、保持登录态、恢复会话等场景。返回快照文件路径",
+    category=F.ACTION,
+    params=[
+        P("name", "str", "快照名称（用于后续恢复，如 'login-state'）", required=False, default=""),
+        P("path", "str", "保存路径（留空自动生成）", required=False, default=""),
+    ],
+    returns="dict{path, name, cookie_count, storage_keys} - 快照信息",
+    tags=["browser", "state", "snapshot", "persist"],
+)
+def browser_state_snapshot(name: str = "", path: str = "") -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_state_snapshot(name, path))
+
+
+def _do_state_snapshot(name: str, path: str):
+    page = _get_page()
+    cookies = page.context.cookies()
+    local_storage = page.evaluate("JSON.stringify(Object.entries(localStorage))")
+    session_storage = page.evaluate("JSON.stringify(Object.entries(sessionStorage))")
+
+    snapshot = {
+        "name": name or f"snapshot_{int(time.time())}",
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "url": page.url,
+        "title": page.title(),
+        "cookies": cookies,
+        "localStorage": json.loads(local_storage),
+        "sessionStorage": json.loads(session_storage),
+    }
+
+    if not path:
+        save_dir = os.path.join(os.path.dirname(__file__), "..", "browser_snapshots")
+        os.makedirs(save_dir, exist_ok=True)
+        path = os.path.join(save_dir, f"{snapshot['name']}.json")
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+
+    return {
+        "success": True,
+        "result": {
+            "path": path,
+            "name": snapshot["name"],
+            "cookie_count": len(cookies),
+            "storage_keys": [k for k, _ in json.loads(local_storage)],
+        },
+    }
+
+
+@feature(
+    name="browser_state_restore",
+    display_name="恢复浏览器状态快照",
+    description="【浏览器·状态】从之前保存的快照 JSON 文件恢复 cookies、localStorage 和 sessionStorage。用于恢复登录态或会话",
+    category=F.ACTION,
+    params=[
+        P("path", "str", "快照文件路径（或快照名称）", example="login-state"),
+        P("navigate", "boolean", "恢复后是否导航到快照时的 URL", required=False, default=False),
+    ],
+    returns="dict{cookie_count, storage_keys, url} - 恢复结果",
+    tags=["browser", "state", "snapshot", "restore"],
+)
+def browser_state_restore(path: str, navigate: bool = False) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_state_restore(path, navigate))
+
+
+def _do_state_restore(path: str, navigate: bool):
+    import glob as _glob
+
+    page = _get_page()
+
+    # If path doesn't exist, try snapshots directory
+    if not os.path.exists(path):
+        snap_dir = os.path.join(os.path.dirname(__file__), "..", "browser_snapshots")
+        candidates = _glob.glob(os.path.join(snap_dir, f"{path}*"))
+        if not candidates:
+            return {"success": False, "error": f"快照文件不存在: {path}"}
+        path = candidates[0]
+
+    with open(path, "r", encoding="utf-8") as f:
+        snapshot = json.load(f)
+
+    # Navigate to the domain first for cookie injection
+    target_url = snapshot.get("url", "")
+    if target_url:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded")
+        except Exception:
+            pass
+
+    # Set cookies
+    for c in snapshot.get("cookies", []):
+        try:
+            page.context.add_cookies([{
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c.get("domain", ""),
+                "path": c.get("path", "/"),
+            }])
+        except Exception:
+            pass
+
+    # Restore localStorage
+    for k, v in snapshot.get("localStorage", []):
+        try:
+            safe_val = json.dumps(v)
+            page.evaluate(f"localStorage.setItem('{k.replace(chr(39), '\\' + chr(39))}', {safe_val})")
+        except Exception:
+            pass
+
+    # Restore sessionStorage
+    for k, v in snapshot.get("sessionStorage", []):
+        try:
+            safe_val = json.dumps(v)
+            page.evaluate(f"sessionStorage.setItem('{k.replace(chr(39), '\\' + chr(39))}', {safe_val})")
+        except Exception:
+            pass
+
+    if navigate and target_url:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded")
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "result": {
+            "cookie_count": len(snapshot.get("cookies", [])),
+            "storage_keys": [k for k, _ in snapshot.get("localStorage", [])],
+            "url": page.url,
+        },
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+#  后台持续监控 (Background Monitor) — 轮询页面状态
+# ════════════════════════════════════════════════════════════════
+
+
+@feature(
+    name="browser_wait_for",
+    display_name="等待浏览器条件满足",
+    description="【浏览器·监控】在后台轮询浏览器页面，等待指定条件满足（文本出现/消失、元素可见/隐藏、URL 匹配、标题匹配等）。适合在自动化流程中等待异步操作完成",
+    category=F.ACTION,
+    params=[
+        P("condition", "str", "等待条件类型: text_visible | text_hidden | element_visible | element_hidden | url_contains | title_contains | page_stable", example="text_visible"),
+        P("target", "str", "条件目标值（如文本内容、URL 片段、选择器）", example="登录成功"),
+        P("timeout", "number", "超时秒数", required=False, default=60),
+        P("interval", "number", "轮询间隔秒数", required=False, default=1),
+    ],
+    returns="dict{matched, url, title, elapsed} - 匹配结果",
+    tags=["browser", "monitor", "wait", "poll"],
+)
+def browser_wait_for(condition: str, target: str, timeout: float = 60, interval: float = 1) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_wait_for(condition, target, timeout, interval))
+
+
+def _do_wait_for(condition: str, target: str, timeout: float, interval: float):
+    page = _get_page()
+    start = time.time()
+    deadline = start + timeout
+
+    valid_conditions = {"text_visible", "text_hidden", "element_visible", "element_hidden", "url_contains", "title_contains", "page_stable"}
+    if condition not in valid_conditions:
+        return {"success": False, "error": f"不支持的条件类型: {condition}。支持: {', '.join(sorted(valid_conditions))}"}
+
+    while time.time() < deadline:
+        try:
+            current_url = page.url
+            current_title = page.title()
+            elapsed = time.time() - start
+            matched = False
+
+            if condition == "text_visible":
+                matched = page.get_by_text(target, exact=False).first.is_visible()
+            elif condition == "text_hidden":
+                try:
+                    matched = not page.get_by_text(target, exact=False).first.is_visible()
+                except Exception:
+                    matched = True  # element doesn't exist = hidden
+            elif condition == "element_visible":
+                matched = page.locator(target).first.is_visible()
+            elif condition == "element_hidden":
+                try:
+                    matched = not page.locator(target).first.is_visible()
+                except Exception:
+                    matched = True
+            elif condition == "url_contains":
+                matched = target.lower() in current_url.lower()
+            elif condition == "title_contains":
+                matched = target.lower() in current_title.lower()
+            elif condition == "page_stable":
+                html1 = page.content()
+                time.sleep(0.5)
+                html2 = page.content()
+                matched = html1 == html2
+
+            if matched:
+                return {
+                    "success": True,
+                    "result": {
+                        "matched": True,
+                        "url": current_url,
+                        "title": current_title,
+                        "elapsed": round(elapsed, 2),
+                    },
+                }
+        except Exception:
+            pass
+
+        time.sleep(interval)
+
+    return {
+        "success": True,
+        "result": {
+            "matched": False,
+            "url": page.url,
+            "title": page.title(),
+            "elapsed": round(timeout, 2),
+            "error": f"等待条件 '{condition}={target}' 超时 ({timeout}s)",
+        },
+    }

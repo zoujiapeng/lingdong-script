@@ -26,7 +26,7 @@ export interface ApiDeps {
   startAgent: (goal: string, config: Record<string, string>, supervise: boolean) => void;
 }
 
-const API_PORT = 5877;
+const API_PORT = parseInt(process.env.API_PORT || '7880', 10);
 
 export function startApiServer(deps: ApiDeps): http.Server {
   const apiServer = http.createServer((req, res) => {

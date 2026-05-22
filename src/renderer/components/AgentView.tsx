@@ -20,14 +20,23 @@ type LogEntry =
 let _logIdCounter = 0;
 let _hasActiveRun = false;
 let _persistedLog: LogEntry[] = [];
+let _cachedSteps: any[] | null = null;  // cached structured_steps from generate phase
+
+const _STORAGE_KEY = 'lingdong-agent-goal';
 
 export function AgentView() {
-  const [goal, setGoal] = useState('');
+  const [goal, setGoal] = useState(() => sessionStorage.getItem(_STORAGE_KEY) || '');
   const [running, setRunning] = useState(false);
   const [generatedScript, setGeneratedScript] = useState<{ pseudocode: string; explanation: string } | null>(null);
   const [log, setLog] = useState<LogEntry[]>(() => _persistedLog);
   const [guidance, setGuidance] = useState('');
   const msgEndRef = useRef<HTMLDivElement>(null);
+
+  // Persist goal to sessionStorage so it survives navigation
+  const handleSetGoal = useCallback((val: string) => {
+    setGoal(val);
+    sessionStorage.setItem(_STORAGE_KEY, val);
+  }, []);
 
   const addEntry = useCallback((entry: LogEntry) => {
     const entryWithId = { ...entry, _id: ++_logIdCounter } as any;
@@ -55,14 +64,26 @@ export function AgentView() {
         case 'step_complete': {
           addEntry({ type: 'step', data: msg });
           // If agent generated a flow script, auto-load it into the canvas
-          if (msg.tool === 'generate_flow_script' && msg.result?.success) {
-            const data = msg.result.data || {};
-            const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
-            const explanation = data.explanation || data.result?.result?.explanation || data.result?.explanation || '';
-            if (pseudocode) {
-              addEntry({ type: 'script', pseudocode, explanation });
-              setGeneratedScript({ pseudocode, explanation });
-              loadScriptToCanvas(pseudocode);
+          if (msg.tool === 'generate_flow_script') {
+            if (msg.result?.success) {
+              const data = msg.result.data || {};
+              const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
+              const explanation = data.explanation || data.result?.result?.explanation || data.result?.explanation || '';
+              if (pseudocode) {
+                addEntry({ type: 'script', pseudocode, explanation });
+                setGeneratedScript({ pseudocode, explanation });
+                // Cache structured_steps for execution phase
+                const steps = data.structured_steps || data.result?.structured_steps || [];
+                if (Array.isArray(steps) && steps.length > 0) {
+                  _cachedSteps = steps;
+                }
+                loadScriptToCanvas(pseudocode);
+              } else {
+                addEntry({ type: 'system', text: '⚠️ AI 返回了空脚本，请重试或修改描述' });
+              }
+            } else {
+              const errMsg = msg.result?.error || msg.result?.data?.error || '未知错误';
+              addEntry({ type: 'system', text: `⚠️ 生成流程图失败: ${errMsg}` });
             }
           }
           break;
@@ -78,9 +99,12 @@ export function AgentView() {
 
         case 'agent_done':
           if (!_hasActiveRun) return;
-          addEntry(msg.status === 'completed'
-            ? { type: 'complete', steps: msg.total_steps }
-            : { type: 'fail', reason: msg.fail_reason || '未知原因' });
+          if (msg.status === 'completed' && msg.total_steps > 0) {
+            addEntry({ type: 'complete', steps: msg.total_steps });
+          } else {
+            const reason = msg.fail_reason || (msg.status === 'failed' ? 'AI 处理失败，请检查 API 密钥是否有效' : '');
+            addEntry({ type: 'fail', reason });
+          }
           setRunning(false);
           _hasActiveRun = false;
           break;
@@ -120,6 +144,7 @@ export function AgentView() {
     const multimodal = (window as any).__LLM_MULTIMODAL__ !== undefined
       ? (window as any).__LLM_MULTIMODAL__ : localStorage.getItem('lingdong-llm-multimodal') === 'true';
     const verifyEnabled = localStorage.getItem('lingdong-verify-enabled') === 'true';
+    const autoLearn = localStorage.getItem('lingdong-auto-learn') === 'true';
     const apiKey = rawKey.trim();
     const apiBase = rawBase.trim();
     const model = rawModel.trim();
@@ -131,7 +156,9 @@ export function AgentView() {
     }
 
     try {
-      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false' }, supervise);
+      // In execution mode, pass cached structured_steps so agent doesn't re-call API
+      const stepsArg = supervise ? _cachedSteps : undefined;
+      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false', auto_learn: autoLearn ? 'true' : 'false' }, supervise, stepsArg);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
@@ -187,13 +214,16 @@ export function AgentView() {
           <input
             className="agent-input"
             value={goal}
-            onChange={e => { setGoal(e.target.value); setGeneratedScript(null); }}
+            onChange={e => { handleSetGoal(e.target.value); setGeneratedScript(null); }}
             onKeyDown={e => e.key === 'Enter' && !running && runAgent(false)}
             placeholder="输入需求后按 Enter 生成流程图，再按「执行」运行动作"
             disabled={running}
           />
           {running ? (
-            <button className="agent-btn agent-btn-danger" onClick={stopAgent}>停止</button>
+            <button className="agent-btn agent-btn-danger" onClick={stopAgent} style={{ gap: 6 }}>
+              <span className="agent-spinner" />
+              停止
+            </button>
           ) : generatedScript ? (
             <>
               <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)} style={{ gap: 6 }}>
@@ -231,10 +261,10 @@ export function AgentView() {
                   {(entry.data.step_label || entry.data.tool !== entry.data.step_type) && (
                     <span className="agent-step-label"> — {entry.data.step_label || ''}</span>
                   )}
-                  <span className="agent-conf"> conf={entry.data.result.confidence.toFixed(2)}</span>
-                  {entry.data.result.success ? ' ✓' : ' ✗'}
-                  {(entry.data.thought || (entry.data as any).error) && (
-                    <div className="agent-thought">{(entry.data as any).error || entry.data.thought?.slice(0, 200)}</div>
+                  <span className="agent-conf"> conf={entry.data.result?.confidence?.toFixed(2) ?? 'N/A'}</span>
+                  {entry.data.result?.success ? ' ✓' : ' ✗'}
+                  {(entry.data.thought || entry.data.error) && (
+                    <div className="agent-thought">{(entry.data.error || entry.data.thought?.slice(0, 200)) || ''}</div>
                   )}
                 </>
               )}
@@ -258,6 +288,12 @@ export function AgentView() {
               )}
             </div>
           ))}
+          {/* Loading indicator when waiting for API response */}
+          {running && log.length > 0 && !log.some(e => e.type === 'script' || e.type === 'complete' || e.type === 'fail') && (
+            <div className="agent-msg agent-msg-system" style={{ opacity: 0.6 }}>
+              <span className="agent-spinner" /> 正在等待 AI 响应...
+            </div>
+          )}
           <div ref={msgEndRef} />
         </div>
 

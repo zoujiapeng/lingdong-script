@@ -90,8 +90,8 @@ _ZH_ALIAS_MAP: dict[str, list[str]] = {
     "perfmon":         ["性能监视器"],
 
     # ── 浏览器 ──
-    "chrome":          ["谷歌浏览器", "Chrome浏览器"],
-    "msedge":          ["Edge浏览器", "微软浏览器"],
+    "chrome":          ["谷歌浏览器", "Chrome浏览器", "浏览器"],
+    "msedge":          ["Edge浏览器", "微软浏览器", "浏览器"],
     "firefox":         ["火狐浏览器", "Firefox浏览器"],
     "opera":           ["Opera浏览器"],
     "brave":           ["Brave浏览器"],

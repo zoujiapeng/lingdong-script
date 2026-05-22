@@ -997,6 +997,29 @@ def flow_to_dsl(script: dict) -> str:
             path = path.strip('"').strip("'")
             return f'FILEDIALOG_FOLDER "{path}"'
 
+        if ntype == "web_browser":
+            action = p.get("action", "navigate")
+            url = p.get("url", "")
+            selector = p.get("selector", "")
+            text = p.get("text", "")
+            wait_sec = p.get("wait_seconds", 1)
+            timeout = p.get("timeout", 30)
+            if action == "navigate":
+                return f'BROWSER_NAV {url}'
+            elif action == "click":
+                return f'BROWSER_CLICK {selector}'
+            elif action == "input_text":
+                return f'BROWSER_TYPE {selector} "{text}"'
+            elif action == "screenshot":
+                return f'BROWSER_SCREENSHOT {selector}'
+            elif action == "wait":
+                return f'BROWSER_WAIT {selector} {timeout}'
+            elif action == "extract":
+                return f'BROWSER_TEXT {selector}'
+            elif action == "scroll":
+                return f'BROWSER_SCROLL {selector}'
+            return f'BROWSER_NAV {url}'
+
         # 回退
         return f"# UNKNOWN: {ntype}"
 

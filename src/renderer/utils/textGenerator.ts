@@ -676,6 +676,19 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       forward(nodeId, 'output', state, gens, convergence);
       break;
     }
+    case 'web_browser': {
+      const actionLabels: Record<string, string> = { navigate: '导航', click: '点击', input_text: '输入', screenshot: '截图', wait: '等待', extract: '提取', scroll: '滚动' };
+      const actionLabel = actionLabels[(p as any).action] || (p as any).action || '未知';
+      const target = (p as any).action === 'navigate' ? ((p as any).url || '').substring(0, 40) : ((p as any).selector || '');
+      if (gens.ifKeyword === 'IF') {
+        const dslAction: Record<string, string> = { navigate: 'BROWSER_NAV', click: 'BROWSER_CLICK', input_text: 'BROWSER_TYPE', screenshot: 'BROWSER_SCREENSHOT', wait: 'BROWSER_WAIT', extract: 'BROWSER_TEXT', scroll: 'BROWSER_SCROLL' };
+        emit(state, `${dslAction[(p as any).action] || 'BROWSER'} ${target}`);
+      } else {
+        emit(state, `浏览器${actionLabel} ${target}`);
+      }
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
     default:
       emit(state, `# UNKNOWN: ${node.type}`);
       forward(nodeId, 'output', state, gens, convergence);
