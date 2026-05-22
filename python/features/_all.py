@@ -44,5 +44,6 @@ _FEATURE_MODULES = [
     "features.dialog_features",
     "features.menu_features",
     "features.qq_features",
+    "features.visual_macro_features",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

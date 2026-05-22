@@ -207,6 +207,48 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 }
 ```
 
+### 视觉宏录制 (Visual Macro Recording)
+
+自动从录制操作中提取按钮小图，用于后续离线 OpenCV 模板匹配定位，无需视觉模型。
+
+**设计思路:**
+
+普通宏录制只记坐标，界面变化后坐标无效。视觉宏录制在每次点击时截全屏，录制结束后从截图中智能检测按钮边界，裁剪小图存入经验库，后续通过 OpenCV 模板匹配定位，与界面布局无关。
+
+**三阶段流程:**
+
+| 阶段 | 操作 | 耗时 | 说明 |
+|---|---|---|---|
+| 录制 | `macro_start_visual_recording` | ~10ms/click | pynput 监听 + PIL/mss 截全屏存缓存目录 |
+| 停止 | `macro_stop_visual_recording` | 即时 | 保存事件 JSON（含截图文件引用路径） |
+| 提取 | `macro_extract_visual_templates` | ~200ms/click | **手动触发**，遍历 click → 智能裁图 → OCR → 存经验库 |
+
+**按钮边界检测策略**（`_smart_crop_around_click`，三层递进）:
+
+1. **floodFill 连通域**（容差 15→30→50）— 从点击点做种子填充，取连通域的 bounding rect。点在按钮空白区域时直接命中整个按钮；点在文字上时递增容差溢出到按钮底色
+2. **Canny + findContours 兜底** — 点在渐变/复杂按钮上 floodFill 不准时，做边缘检测，找包含点击点的最小轮廓
+3. **固定 40×40 裁剪兜底** — 前两者均失败时以点击点居中裁剪
+
+**OCR 自动命名:**
+
+裁剪后调用 EasyOCR 识别小图中的文字，用识别结果作为 `target_text` 存入经验库。以后直接 `visual_locator.locate("搜索", "click", ...)` 就能匹配到，完全离线。
+
+**与普通宏录制的区别:**
+
+| | 普通宏 | 视觉宏 |
+|---|---|---|
+| 录制数据 | 坐标+时间 | 坐标+时间+截图 |
+| 回放方式 | 定点点击 | OpenCV 模板匹配定位 |
+| 抗界面变化 | 否 | 是（按钮位置变了也能找到） |
+| 存储 | `macros/*.json` | `macros/*.json` + `experience/templates/*.png` |
+| VLM 依赖 | 无 | 无（OCR 可离线） |
+
+**关键文件:**
+- `python/features/visual_macro_features.py` — 3 个 @feature 工具（录制/停止/提取）
+- `python/agent/visual_locator.py` — 定位器，查经验库 + OpenCV 匹配
+- `python/agent/experience_db.py` — 经验数据库，JSON 索引 + PNG 模板
+- `python/experience/templates/` — 裁剪小图存储目录
+
 ## 工作流
 
 ### 创建自动化流程
