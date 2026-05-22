@@ -1,6 +1,7 @@
 """
 触发器管理功能注册
 trigger_list_types / trigger_list / trigger_stop / trigger_stop_all
+crystallized_list / skill_tree_get
 """
 from features.registry import feature, P, TC, FeatureCategory as F
 
@@ -89,3 +90,38 @@ def trigger_get(instance_id: str) -> dict:
         return result or {"error": "触发器不存在"}
     except ImportError:
         return {"error": "触发器模块不可用"}
+
+
+# ── 结晶化查询 ────────────────────────────────────────────
+
+
+@feature(
+    name="crystallized_list",
+    display_name="列出结晶模板",
+    description="【结晶化】列出所有已自动保存的结晶模板（执行成功后自动生成的 .flow 文件）",
+    category=F.DEBUG,
+    params=[],
+    returns="list[dict{id, name, description, path, size, created}]",
+)
+def crystallized_list() -> list:
+    try:
+        from engine.crystallizer import list_crystallized
+        return list_crystallized()
+    except ImportError:
+        return []
+
+
+@feature(
+    name="skill_tree_get",
+    display_name="获取技能树",
+    description="【结晶化】获取 skill tree 索引，按分类/模式组织的结晶模板层级结构",
+    category=F.DEBUG,
+    params=[],
+    returns="dict{version, categories}",
+)
+def skill_tree_get() -> dict:
+    try:
+        from engine.crystallizer import get_skill_tree
+        return get_skill_tree()
+    except ImportError:
+        return {"version": 1, "categories": {}}

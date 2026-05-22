@@ -23,6 +23,7 @@ logger = logging.getLogger("features.dialog")
         "lobster call handle-dialog",
     ],
     tags=["dialog", "windows", "popup"],
+    hidden=True,
 )
 def handle_dialog(timeout: float = 0) -> str:
     import time, importlib
@@ -51,6 +52,7 @@ def handle_dialog(timeout: float = 0) -> str:
     params=[],
     returns="list[dict] - 对话框列表（hwnd, title, class_name, type, buttons, buttons_win32, buttons_uia）",
     tags=["dialog", "diagnostic"],
+    hidden=True,
 )
 def dialog_list() -> list:
     try:
@@ -73,6 +75,7 @@ def dialog_list() -> list:
     ],
     returns="bool - 是否成功",
     tags=["dialog", "windows"],
+    hidden=True,
 )
 def dialog_take_action(action: str, timeout: float = 3) -> bool:
     import time
@@ -153,6 +156,7 @@ def dialog_take_action(action: str, timeout: float = 3) -> bool:
     ],
     returns="bool - 是否保存成功",
     tags=["dialog", "save", "windows"],
+    hidden=True,
 )
 def fill_save_dialog(filepath: str, timeout: float = 8) -> bool:
     try:

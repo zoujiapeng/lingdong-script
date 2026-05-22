@@ -1,0 +1,51 @@
+{
+  "meta": {
+    "name": "测试结晶",
+    "description": "手动触发的结晶测试",
+    "id": "测试结晶",
+    "updated_at": "2026-05-22T19:15:34",
+    "created_at": "2026-05-22T19:15:34",
+    "version": "1.0"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "x": 100,
+      "y": 100
+    },
+    {
+      "id": "wait1",
+      "type": "wait",
+      "x": 200,
+      "y": 200,
+      "params": {
+        "time": 0.5
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "x": 300,
+      "y": 300
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from_node": "start",
+      "to_node": "wait1",
+      "from_port": "output",
+      "to_port": "input"
+    },
+    {
+      "id": "e2",
+      "from_node": "wait1",
+      "to_node": "end",
+      "from_port": "output",
+      "to_port": "input"
+    }
+  ],
+  "variables": {},
+  "settings": {}
+}

@@ -4,6 +4,8 @@ import { FlowCanvas } from './components/Canvas/FlowCanvas';
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
 import { TopBar } from './components/common/TopBar';
 import { StatusBar } from './components/common/StatusBar';
+import { TriggerBar } from './components/common/TriggerBar';
+import { TriggerConfigPanel } from './components/common/TriggerConfigPanel';
 import { LogPanel } from './components/common/LogPanel';
 import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { PseudoPanel } from './components/PseudoPanel';
@@ -97,7 +99,7 @@ export default function App() {
         const next = !store.ui.panels_visible;
         if (!next) {
           // 隐藏时同时关闭所有独立面板
-          store.setUI({ panels_visible: false, show_node_library: false, show_property_panel: false, show_log_panel: false, show_tool_call_panel: false });
+          store.setUI({ panels_visible: false, show_node_library: false, show_property_panel: false, show_log_panel: false, show_tool_call_panel: false, show_trigger_config: false });
         } else {
           store.setUI({ panels_visible: true });
         }
@@ -202,6 +204,9 @@ export default function App() {
         </button>
       </div>
       </div>
+
+      <TriggerBar />
+      <TriggerConfigPanel />
 
       <div className={`app-body${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
         {viewMode === 'settings' ? (

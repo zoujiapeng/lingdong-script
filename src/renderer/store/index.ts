@@ -50,6 +50,7 @@ const DEFAULT_UI_STATE: UIState = {
   show_log_panel: false,
   show_tool_call_panel: false,
   show_ai_dialog: false,
+  show_trigger_config: false,
   auto_learn: false,
 };
 
@@ -641,6 +642,24 @@ interface AppStore {
   deleteLearnedTarget: (targetId: string) => Promise<void>;
   recordLearnedTarget: (targetId: string, success: boolean) => Promise<void>;
   toggleLearnedPanel: () => void;
+
+  // Crystallized templates
+  crystallizedTemplates: any[];
+  newCrystallizedCount: number;
+  fetchCrystallizedTemplates: () => Promise<void>;
+  markCrystallizedSeen: () => void;
+
+  // Triggers (runtime)
+  triggers: import('../types').TriggerUIState[];
+  setTriggers: (triggers: import('../types').TriggerUIState[]) => void;
+  stopTrigger: (instanceId: string) => Promise<void>;
+  stopAllTriggers: () => Promise<void>;
+
+  // Script-level trigger config
+  scriptTriggers: import('../types').TriggerDef[];
+  addScriptTrigger: (trigger: import('../types').TriggerDef) => void;
+  removeScriptTrigger: (index: number) => void;
+  updateScriptTrigger: (index: number, trigger: import('../types').TriggerDef) => void;
 }
 
 // History for undo/redo
@@ -679,6 +698,11 @@ export const useStore = create<AppStore>()(
     macroList: [],
     learnedTargets: [],
     showLearnedPanel: false,
+    crystallizedTemplates: [],
+    newCrystallizedCount: 0,
+
+    triggers: [],
+    scriptTriggers: [],
 
     newScript: () => {
       const s = createTemplateScript('desktop-monitor');
@@ -687,6 +711,7 @@ export const useStore = create<AppStore>()(
       pushHistory(s.nodes, s.edges);
       set((state) => {
         state.script = s;
+        state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
         state.execution = { status: 'idle', variables: {}, log: [] };
@@ -701,6 +726,7 @@ export const useStore = create<AppStore>()(
       pushHistory(s.nodes, s.edges);
       set((state) => {
         state.script = s;
+        state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
         state.execution = { status: 'idle', variables: {}, log: [] };
@@ -732,6 +758,7 @@ export const useStore = create<AppStore>()(
       if (!script.meta.id) script.meta.id = id;
       set((state) => {
         state.script = script;
+        state.scriptTriggers = script.triggers || [];
         state.scripts[id] = script;
         state.activeScriptId = id;
         state.isDirty = false;
@@ -1261,7 +1288,11 @@ export const useStore = create<AppStore>()(
       if (api?.featuresList) {
         try {
           const features = await api.featuresList();
-          set((state) => { state.featureList = features; });
+          if (Array.isArray(features)) {
+            set((state) => { state.featureList = features; });
+          } else {
+            console.warn('[fetchFeatures] invalid response (not an array):', features);
+          }
         } catch { /* ignore */ }
       }
     },
@@ -1503,8 +1534,93 @@ export const useStore = create<AppStore>()(
     },
 
     toggleLearnedPanel: () => {
-      set((s) => { s.showLearnedPanel = !s.showLearnedPanel; });
+      set((s) => {
+        s.showLearnedPanel = !s.showLearnedPanel;
+        if (s.showLearnedPanel) s.newCrystallizedCount = 0;
+      });
       if (!get().showLearnedPanel) get().fetchLearnedTargets();
+    },
+
+    // Crystallized templates
+    fetchCrystallizedTemplates: async () => {
+      try {
+        const api = (window as any).electronAPI;
+        if (!api?.callFeature) return;
+        const result = await api.callFeature('crystallized_list', {});
+        if (Array.isArray(result)) {
+          set((s) => {
+            const old = s.crystallizedTemplates.length;
+            s.crystallizedTemplates = result;
+            if (!s.showLearnedPanel && result.length > old) {
+              s.newCrystallizedCount += result.length - old;
+            }
+          });
+        } else if (result?.result && Array.isArray(result.result)) {
+          set((s) => {
+            const old = s.crystallizedTemplates.length;
+            s.crystallizedTemplates = result.result;
+            if (!s.showLearnedPanel && result.result.length > old) {
+              s.newCrystallizedCount += result.result.length - old;
+            }
+          });
+        } else if (result?.success && Array.isArray(result.result)) {
+          set((s) => {
+            const old = s.crystallizedTemplates.length;
+            s.crystallizedTemplates = result.result;
+            if (!s.showLearnedPanel && result.result.length > old) {
+              s.newCrystallizedCount += result.result.length - old;
+            }
+          });
+        }
+      } catch { /* ignore */ }
+    },
+
+    markCrystallizedSeen: () => {
+      set((s) => { s.newCrystallizedCount = 0; });
+    },
+
+    // Triggers
+    setTriggers: (triggers) => {
+      set((s) => { s.triggers = triggers; });
+    },
+    stopTrigger: async (instanceId: string) => {
+      try {
+        const api = (window as any).electronAPI;
+        if (api?.callFeature) {
+          await api.callFeature('trigger_stop', { instance_id: instanceId });
+        }
+      } catch { /* ignore */ }
+    },
+    stopAllTriggers: async () => {
+      try {
+        const api = (window as any).electronAPI;
+        if (api?.callFeature) {
+          await api.callFeature('trigger_stop_all', {});
+        }
+      } catch { /* ignore */ }
+    },
+
+    // Script-level trigger config (part of the script/template)
+    addScriptTrigger: (trigger) => {
+      set((s) => {
+        s.scriptTriggers.push(trigger);
+        s.script.triggers = [...s.scriptTriggers];
+        s.isDirty = true;
+      });
+    },
+    removeScriptTrigger: (index) => {
+      set((s) => {
+        s.scriptTriggers.splice(index, 1);
+        s.script.triggers = [...s.scriptTriggers];
+        s.isDirty = true;
+      });
+    },
+    updateScriptTrigger: (index, trigger) => {
+      set((s) => {
+        s.scriptTriggers[index] = trigger;
+        s.script.triggers = [...s.scriptTriggers];
+        s.isDirty = true;
+      });
     },
   }))
 );
@@ -1664,12 +1780,22 @@ function _registerListeners() {
             s._executor = null;
             s.script.nodes.forEach((n) => { if (n.status === 'running') n.status = 'idle'; });
           });
+          // 执行成功后刷新结晶模板
+          if (msg.status === 'completed') {
+            useStore.getState().addLog({ level: 'info', message: '执行完成，已自动保存为模板（结晶化）' });
+            setTimeout(() => useStore.getState().fetchCrystallizedTemplates(), 500);
+          }
           break;
         case 'status_report':
           useStore.setState((s) => { s.execution.status = msg.status; });
           break;
         case 'loop_iteration':
           useStore.setState((s) => { s.execution.loop_iteration = { current: msg.current, total: msg.total, node_id: msg.node_id }; });
+          break;
+        case 'trigger_status':
+          if (msg.triggers) {
+            useStore.setState((s) => { s.triggers = msg.triggers; });
+          }
           break;
       }
     }));

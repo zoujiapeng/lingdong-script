@@ -17,6 +17,18 @@ if str(_python_root) not in sys.path:
 
 from engine.executor import DSLExecutor
 from engine.dsl_flow_converter import flow_to_dsl
+from engine.crystallizer import crystallize
+
+# 启动时预加载所有 feature 模块，避免首次 API 调用触发 10-20s 懒加载
+try:
+    from features._all import *
+    import sys as _sys
+    _sys.stderr.write("[engine] feature 模块预加载完成\n")
+    _sys.stderr.flush()
+except Exception as _e:
+    import sys as _sys
+    _sys.stderr.write(f"[engine] feature 预加载失败: {_e}\n")
+    _sys.stderr.flush()
 
 
 # ── Action Handler 初始化 ──────────────────────────────────────
@@ -59,6 +71,11 @@ def execute_flow(script: dict) -> dict:
     try:
         result = executor.run_dsl_sync(dsl_text)
         if result.get("success"):
+            # 结晶化：将成功执行的流程保存为模板
+            try:
+                crystallize(script, dsl_text)
+            except Exception as ce:
+                emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
             emit({"type": "execution_done", "status": "completed"})
         else:
             emit({"type": "execution_done", "status": "error", "error": result.get("error")})
@@ -102,6 +119,10 @@ def main():
                     executor.on("log", lambda **kw: emit({"type": "log", **kw}))
                     try:
                         executor.run_dsl_sync(dsl_text)
+                        try:
+                            crystallize(None, dsl_text)
+                        except Exception as ce:
+                            emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
                         emit({"type": "execution_done", "status": "completed"})
                     except Exception as e:
                         emit({"type": "execution_done", "status": "error", "error": str(e)})
@@ -118,6 +139,10 @@ def main():
         executor.on("log", lambda **kw: emit({"type": "log", **kw}))
         try:
             executor.run_dsl_sync(line)
+            try:
+                crystallize(None, line)
+            except Exception as ce:
+                emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
             emit({"type": "execution_done", "status": "completed"})
         except Exception as e:
             emit({"type": "execution_done", "status": "error", "error": str(e)})

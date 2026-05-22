@@ -19,10 +19,15 @@ function getPythonPath(): string {
 }
 
 /** 跨平台 Python 子进程启动：强制 UTF-8 环境防止中文乱码 */
+let _vlmBackend = '';  // 由 setVlmBackend() 设置
+export function setVlmBackend(val: string) { _vlmBackend = val; }
+export function getVlmBackend() { return _vlmBackend; }
+
 export function spawnPython(args: string[], options?: SpawnOptions) {
+  const vlmEnv = _vlmBackend ? { VLM_BACKEND: _vlmBackend } : {};
   return spawn(getPythonPath(), args, {
     ...options,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...options?.env },
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...vlmEnv, ...options?.env },
   });
 }
 

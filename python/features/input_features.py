@@ -50,6 +50,7 @@ def _find_target_coords(target: str, region: str = "") -> tuple:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
+    hidden=True,
 )
 def right_click(target: str, region: str = "") -> bool:
     x, y = _find_target_coords(target, region)
@@ -69,6 +70,7 @@ def right_click(target: str, region: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "hover"],
+    hidden=True,
 )
 def hover(target: str, duration: float = 0.5) -> bool:
     x, y = _find_target_coords(target)
@@ -94,6 +96,7 @@ def hover(target: str, duration: float = 0.5) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse"],
+    hidden=True,
 )
 def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = "") -> bool:
     if target:
@@ -116,6 +119,7 @@ def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = ""
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
+    hidden=True,
 )
 def triple_click(target: str) -> bool:
     x, y = _find_target_coords(target)
@@ -135,6 +139,7 @@ def triple_click(target: str) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "text"],
+    hidden=True,
 )
 def select_text(target: str, extend_to_line: bool = False) -> bool:
     x, y = _find_target_coords(target)
@@ -159,6 +164,7 @@ def select_text(target: str, extend_to_line: bool = False) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
+    hidden=True,
 )
 def middle_click(target: str) -> bool:
     x, y = _find_target_coords(target)

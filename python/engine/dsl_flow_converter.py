@@ -53,7 +53,7 @@ _BASE_DSL_TO_FLOW = {
 # 用于 @feature 关键字的兼容降级映射（registry flow_type 优先）
 # 所有带 dsl_keyword 的 @feature 都已声明 flow_type，此处仅作兜底
 _BASIC_DSL_TO_FLOW = {
-    "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
+    "CLICK": "mouse_operation", "TYPE": "input_text", "HOTKEY": "keyboard",
     "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
     "SET": "variable_set", "INPUT_TEXT": "input_text",
     "CLICK_IMAGE": "image_click",
@@ -63,25 +63,37 @@ _BASIC_DSL_TO_FLOW = {
     "POPUP_CLOSE": "popup_close", "COLOR_CHECK": "color_check",
     "REGION_WAIT": "region_wait", "SCENE_CONDITION": "scene_condition",
     "CALL": "sub_script", "WAIT": "wait", "DELAY": "wait",
-    "SHUTDOWN": "shutdown", "REBOOT": "reboot",
-    "LOGOFF": "logoff", "HIBERNATE": "hibernate",
-    "LOCK": "lock_workstation", "VOLUME": "volume_set", "MUTE": "volume_mute",
-    "LAUNCH": "launch_program", "KILL": "kill_process",
-    "WAIT_PROCESS": "wait_process", "WAIT_EXIT": "wait_process",
-    "WALLPAPER": "set_wallpaper", "DISPLAY_OFF": "display_off",
-    "SLEEP": "system_sleep", "DESKTOP": "show_desktop",
-    "BATTERY": "battery_status", "EMPTY_BIN": "empty_recycle_bin",
+    "SHUTDOWN": "system_power", "REBOOT": "system_power",
+    "LOGOFF": "system_power", "HIBERNATE": "system_power",
+    "LOCK": "system_power", "VOLUME": "audio_action", "MUTE": "audio_action",
+    "LAUNCH": "process_action", "KILL": "process_action",
+    "WAIT_PROCESS": "process_action", "WAIT_EXIT": "process_action",
+    "FOCUS": "process_action",
+    "WALLPAPER": "desktop_action", "DISPLAY_OFF": "system_power",
+    "SLEEP": "system_power", "DESKTOP": "desktop_action",
+    "BATTERY": "battery_status", "EMPTY_BIN": "desktop_action",
+    "DIALOG_HANDLE": "dialog_action", "DIALOG_LIST": "dialog_action",
+    "DIALOG_ACTION": "dialog_action", "DIALOG_SAVE": "dialog_action",
+    "A11Y_TREE": "a11y_action", "A11Y_FIND": "a11y_action",
+    "A11Y_CLICK": "a11y_action",
+    "WIFI_LIST": "wifi_action", "WIFI_CONNECT": "wifi_action",
+    "WIFI_DISCONNECT": "wifi_action",
     "BRIGHTNESS": "display_brightness",
-    "CLIPBOARD_SET": "clipboard_set", "CLIPBOARD_GET": "clipboard_get",
+    "CLIPBOARD_SET": "clipboard_action", "CLIPBOARD_GET": "clipboard_action",
+    "CLIPBOARD_GET_IMAGE": "clipboard_action", "CLIPBOARD_GET_FILES": "clipboard_action",
+    "CLIPBOARD_CLEAR": "clipboard_action",
     "MINIMIZE": "window_control", "MAXIMIZE": "window_control",
     "CLOSE_WINDOW": "window_control", "RESIZE_WINDOW": "window_control",
-    "WAIT_RANDOM": "wait", "FOCUS": "click", "RUN": "sub_script",
+    "RESTORE_WINDOW": "window_control", "SNAP_WINDOW": "window_control",
+    "WAIT_RANDOM": "wait", "RUN": "sub_script",
     "WAITSCREEN": "region_wait", "SCREENSTABLE": "region_wait",
     "IMAGE_FIND": "condition", "OCR_EXTRACT": "screenshot",
     "PROGRESS_INIT": "progress_wait", "PROGRESS_RELOCATE": "progress_wait",
     "REGION_SELECT": "screenshot",
     "FINDCANVAS": "condition",
-    "DRAG": "click",
+    "DRAG": "swipe",
+    "HOVER": "mouse_operation",
+    "MOUSE_MOVE": "mouse_operation",
 }
 
 _dsl_to_flow_cache: dict[str, str] | None = None
@@ -332,21 +344,25 @@ def _dsl_args_to_params(ntype: str, args: str,
     """将 DSL arguments 字符串转为 FlowNode params 字典。"""
     params: dict = {}
 
-    if ntype == "CLICK" or ntype == "FOCUS":
+    if ntype == "CLICK":
         parts = args.split()
         coords = [p for p in parts if p.lstrip("-").isdigit()]
         params = {
+            "sub_operation": "click",
+            "mode": "coordinate",
             "x": int(coords[0]) if len(coords) > 0 else 0,
             "y": int(coords[1]) if len(coords) > 1 else 0,
             "method": "single",
             "delay_after": 0.5,
         }
         # 检查后缀修饰
-        if any(kw in args.upper() for kw in (" RIGHT", " DOUBLE", " R")):
+        if any(kw in args.upper() for kw in (" RIGHT", " DOUBLE", " TRIPLE", " R")):
             if "RIGHT" in args.upper() or " R" in args.upper():
                 params["method"] = "right"
             if "DOUBLE" in args.upper():
                 params["method"] = "double"
+            if "TRIPLE" in args.upper():
+                params["method"] = "triple"
 
     elif ntype == "WAIT":
         try:
@@ -381,6 +397,7 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype == "CLICK_TEXT":
         text = args.strip().strip("\"'")
         params = {
+            "mode": "text",
             "text": text,
             "similarity": 80,
             "method": "single",
@@ -419,6 +436,27 @@ def _dsl_args_to_params(ntype: str, args: str,
             "delay_after": 0.5,
         }
 
+    elif ntype == "HOVER":
+        parts = args.split()
+        nums = [p for p in parts if p.replace(".", "").lstrip("-").isdigit()]
+        params = {
+            "sub_operation": "hover",
+            "hover_x": int(float(nums[0])) if len(nums) > 0 else 0,
+            "hover_y": int(float(nums[1])) if len(nums) > 1 else 0,
+            "hover_duration": float(nums[2]) if len(nums) > 2 else 0.5,
+            "delay_after": 0.5,
+        }
+
+    elif ntype == "MOUSE_MOVE":
+        parts = args.split()
+        nums = [p for p in parts if p.lstrip("-").isdigit()]
+        params = {
+            "sub_operation": "move",
+            "move_x": int(nums[0]) if len(nums) > 0 else 0,
+            "move_y": int(nums[1]) if len(nums) > 1 else 0,
+            "delay_after": 0.5,
+        }
+
     elif ntype == "SCREENSHOT":
         params = {}
 
@@ -431,6 +469,7 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype in ("IMAGE_CLICK", "CLICK_IMAGE"):
         paths = re.findall(r'"([^"]*)"', args)
         params = {
+            "mode": "image",
             "targets": [{"path": p} for p in paths],
             "similarity": 90, "timeout": 5,
             "method": "single", "offset_x": 0, "offset_y": 0,
@@ -458,6 +497,7 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype == "OCR_FIND":
         text = args.strip().strip("\"'")
         params = {
+            "mode": "text",
             "text": text, "similarity": 80,
             "method": "single", "offset_x": 0, "offset_y": 0,
             "timeout": 5, "delay_after": 0.5,
@@ -492,33 +532,35 @@ def _dsl_args_to_params(ntype: str, args: str,
 
     elif ntype in ("SHUTDOWN", "REBOOT", "LOGOFF", "HIBERNATE"):
         nums = re.findall(r"\d+", args)
+        action_map = {"SHUTDOWN": "shutdown", "REBOOT": "reboot", "LOGOFF": "logoff", "HIBERNATE": "hibernate"}
         params = {
+            "action": action_map[ntype],
             "delay_seconds": int(nums[0]) if nums else 0,
             "confirm": True,
         }
 
     elif ntype == "LOCK":
-        params = {"confirm": True}
+        params = {"action": "lock_workstation", "confirm": True}
 
     elif ntype == "VOLUME":
         nums = re.findall(r"\d+", args)
-        params = {"level": int(nums[0]) if nums else 50}
+        params = {"action": "volume_set", "level": int(nums[0]) if nums else 50}
 
     elif ntype == "MUTE":
         a = args.strip().lower()
+        mute_val = None
         if a in ("on", "true", "1"):
-            params = {"mute": True}
+            mute_val = True
         elif a in ("off", "false", "0"):
-            params = {"mute": False}
-        else:
-            params = {"mute": None}
+            mute_val = False
+        params = {"action": "volume_mute", "mute": mute_val}
 
     elif ntype == "LAUNCH":
-        params = {"target": args, "args": "", "wait": False}
+        params = {"action": "launch", "target": args, "args": "", "wait": False}
 
     elif ntype == "KILL":
         parts = args.split()
-        params = {"name": parts[0] if parts else args, "force": "force" in args.lower() or "-f" in args}
+        params = {"action": "kill", "name": parts[0] if parts else args, "force": "force" in args.lower() or "-f" in args}
 
     elif ntype == "WAIT_PROCESS":
         parts = args.split()
@@ -528,7 +570,7 @@ def _dsl_args_to_params(ntype: str, args: str,
             name = parts[0]
             if len(parts) > 1 and parts[1].isdigit():
                 timeout = int(parts[1])
-        params = {"name": name, "timeout": timeout, "wait_for": "start"}
+        params = {"action": "wait_start", "name": name, "timeout": timeout, "wait_for": "start"}
 
     elif ntype == "WAIT_EXIT":
         parts = args.split()
@@ -538,7 +580,10 @@ def _dsl_args_to_params(ntype: str, args: str,
             name = parts[0]
             if len(parts) > 1 and parts[1].isdigit():
                 timeout = int(parts[1])
-        params = {"name": name, "timeout": timeout, "wait_for": "exit"}
+        params = {"action": "wait_exit", "name": name, "timeout": timeout, "wait_for": "exit"}
+
+    elif ntype == "FOCUS":
+        params = {"action": "focus", "title": args}
 
     elif ntype == "WALLPAPER":
         parts = args.split(None, 1)
@@ -548,38 +593,92 @@ def _dsl_args_to_params(ntype: str, args: str,
             s = parts[1].strip().lower()
             if s in ("fill", "fit", "stretch", "tile", "center"):
                 style = s
-        params = {"path": path, "style": style}
+        params = {"action": "set_wallpaper", "path": path, "style": style}
 
     elif ntype == "DISPLAY_OFF":
-        params = {"confirm": True}
+        params = {"action": "display_off", "confirm": True}
 
     elif ntype == "SLEEP":
-        params = {"confirm": True}
+        params = {"action": "system_sleep", "confirm": True}
 
     elif ntype == "DESKTOP":
-        params = {}
+        params = {"action": "show_desktop"}
 
     elif ntype == "BATTERY":
         params = {}
 
     elif ntype == "EMPTY_BIN":
         a = args.strip().lower()
-        params = {"confirm": a not in ("no", "false", "0")}
+        params = {"action": "empty_recycle_bin", "confirm": a not in ("no", "false", "0")}
 
     elif ntype == "BRIGHTNESS":
         nums = re.findall(r"\d+", args)
         params = {"level": int(nums[0]) if nums else 80}
 
     elif ntype == "CLIPBOARD_SET":
-        params = {"text": args}
+        params = {"action": "set", "text": args}
 
     elif ntype == "CLIPBOARD_GET":
-        params = {}
+        params = {"action": "get"}
 
-    elif ntype in ("MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW"):
-        op_map = {"MINIMIZE": "minimize", "MAXIMIZE": "maximize", "CLOSE_WINDOW": "close", "RESIZE_WINDOW": "resize"}
+    elif ntype == "CLIPBOARD_GET_IMAGE":
+        parts = args.split()
+        fmt = "base64"
+        save_path = ""
+        for i, p in enumerate(parts):
+            if p.startswith("format=") or p.startswith("format_="):
+                fmt = p.split("=", 1)[1]
+            elif p.startswith("save=") or p.startswith("path="):
+                save_path = p.split("=", 1)[1]
+        params = {"action": "get_image", "format_": fmt, "save_path": save_path}
+
+    elif ntype == "CLIPBOARD_GET_FILES":
+        params = {"action": "get_files"}
+
+    elif ntype == "CLIPBOARD_CLEAR":
+        params = {"action": "clear"}
+
+    elif ntype in ("DIALOG_HANDLE", "DIALOG_LIST", "DIALOG_ACTION", "DIALOG_SAVE"):
+        action_map = {"DIALOG_HANDLE": "handle", "DIALOG_LIST": "list", "DIALOG_ACTION": "take_action", "DIALOG_SAVE": "fill_save"}
+        params = {"action": action_map[ntype]}
+        if ntype == "DIALOG_HANDLE":
+            try: params["timeout"] = int(args.strip())
+            except ValueError: params["timeout"] = 10
+        elif ntype == "DIALOG_ACTION":
+            params["button"] = args.strip()
+            params["timeout"] = 10
+        elif ntype == "DIALOG_SAVE":
+            params["path"] = args.strip().strip("\"'")
+
+    elif ntype in ("A11Y_TREE", "A11Y_FIND", "A11Y_CLICK"):
+        action_map = {"A11Y_TREE": "get_tree", "A11Y_FIND": "find_element", "A11Y_CLICK": "click_element"}
+        params = {"action": action_map[ntype]}
+        if ntype == "A11Y_TREE":
+            nums = re.findall(r"\d+", args)
+            params["max_depth"] = int(nums[0]) if nums else 5
+        elif ntype == "A11Y_FIND":
+            parts = args.split(None, 2)
+            params["name"] = parts[0] if parts else ""
+            params["role"] = parts[1] if len(parts) > 1 else ""
+            params["control_type"] = parts[2] if len(parts) > 2 else ""
+        elif ntype == "A11Y_CLICK":
+            parts = args.split(None, 1)
+            params["name"] = parts[0] if parts else ""
+            params["role"] = parts[1] if len(parts) > 1 else ""
+
+    elif ntype in ("WIFI_LIST", "WIFI_CONNECT", "WIFI_DISCONNECT"):
+        action_map = {"WIFI_LIST": "list", "WIFI_CONNECT": "connect", "WIFI_DISCONNECT": "disconnect"}
+        params = {"action": action_map[ntype]}
+        if ntype == "WIFI_CONNECT":
+            parts = args.split(None, 1)
+            params["ssid"] = parts[0] if parts else ""
+            params["password"] = parts[1] if len(parts) > 1 else ""
+
+    elif ntype in ("MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW", "RESTORE_WINDOW", "SNAP_WINDOW"):
+        op_map = {"MINIMIZE": "minimize", "MAXIMIZE": "maximize", "CLOSE_WINDOW": "close", "RESIZE_WINDOW": "resize", "RESTORE_WINDOW": "restore", "SNAP_WINDOW": "snap"}
         title = args
         width, height = 800, 600
+        snap_position = "left"
         if ntype == "RESIZE_WINDOW":
             nums = re.findall(r"\d+", args)
             if len(nums) >= 2:
@@ -588,10 +687,21 @@ def _dsl_args_to_params(ntype: str, args: str,
                 for n in nums[:2]:
                     rest = rest.replace(str(n), "", 1)
                 title = rest.strip()
-        params = {"operation": op_map[ntype], "title": title, "width": width, "height": height}
+        if ntype == "SNAP_WINDOW":
+            parts = args.split(None, 2)
+            pos_part = parts[0] if parts else "left"
+            valid_positions = {"left","right","top","bottom","top_left","top_right","bottom_left","bottom_right"}
+            if pos_part in valid_positions:
+                snap_position = pos_part
+                title = parts[1] if len(parts) > 1 else ""
+            else:
+                title = args
+        params = {"operation": op_map[ntype], "title": title, "width": width, "height": height, "snap_position": snap_position}
         if ntype != "RESIZE_WINDOW":
             params.pop("width", None)
             params.pop("height", None)
+        if ntype != "SNAP_WINDOW":
+            params.pop("snap_position", None)
 
     elif ntype == "REGION_WAIT":
         nums = re.findall(r"-?\d+", args)
@@ -715,6 +825,27 @@ def _dsl_label(ntype: str, args: str) -> str:
         "FILEDIALOG_SAVE": "保存文件对话框",
         "FILEDIALOG_OPEN": "打开文件对话框",
         "FILEDIALOG_FOLDER": "选择文件夹对话框",
+        "DIALOG_HANDLE": "处理对话框",
+        "DIALOG_LIST": "列出对话框",
+        "DIALOG_ACTION": "操作对话框",
+        "DIALOG_SAVE": "填写保存对话框",
+        "A11Y_TREE": "获取无障碍树",
+        "A11Y_FIND": "查找元素",
+        "A11Y_CLICK": "点击元素",
+        "WIFI_LIST": "列出WiFi",
+        "WIFI_CONNECT": "连接WiFi",
+        "WIFI_DISCONNECT": "断开WiFi",
+        "CLIPBOARD_SET": f"剪贴板写入",
+        "CLIPBOARD_GET": "读取剪贴板",
+        "CLIPBOARD_GET_IMAGE": "获取剪贴板图片",
+        "CLIPBOARD_GET_FILES": "获取剪贴板文件",
+        "CLIPBOARD_CLEAR": "清空剪贴板",
+        "MINIMIZE": "最小化窗口",
+        "MAXIMIZE": "最大化窗口",
+        "CLOSE_WINDOW": "关闭窗口",
+        "RESIZE_WINDOW": "调整窗口大小",
+        "RESTORE_WINDOW": "还原窗口",
+        "SNAP_WINDOW": f"贴靠窗口 {args}",
     }
     return labels.get(ntype, "")
 
@@ -809,6 +940,63 @@ def flow_to_dsl(script: dict) -> str:
             elif method == "right":
                 suffix = " RIGHT"
             return f"CLICK {x} {y}{suffix}"
+
+        if ntype == "click_action":
+            mode = p.get("mode", "coordinate")
+            if mode == "image":
+                targets = p.get("targets", [])
+                paths = " ".join(f'"{t["path"]}"' for t in targets if t.get("path"))
+                return f"IMAGE_CLICK {paths}"
+            elif mode == "text":
+                text = p.get("text", "")
+                return f'OCR_FIND "{text}"'
+            else:
+                x, y = p.get("x", 0), p.get("y", 0)
+                method = p.get("method", "single")
+                suffix = ""
+                if method == "double":
+                    suffix = " DOUBLE"
+                elif method == "right":
+                    suffix = " RIGHT"
+                elif method == "triple":
+                    suffix = " TRIPLE"
+                return f"CLICK {x} {y}{suffix}"
+
+        if ntype == "mouse_operation":
+            sub = p.get("sub_operation", "click")
+            if sub == "scroll":
+                direction = p.get("scroll_direction", "down")
+                amount = p.get("scroll_amount", 3)
+                return f"SCROLL {direction} {amount}"
+            if sub == "hover":
+                hx = p.get("hover_x", 0)
+                hy = p.get("hover_y", 0)
+                dur = p.get("hover_duration", 0.5)
+                return f"HOVER {hx} {hy} {dur}"
+            if sub == "move":
+                mx = p.get("move_x", 0)
+                my = p.get("move_y", 0)
+                return f"MOUSE_MOVE {mx} {my}"
+            # click sub-operation
+            mode = p.get("mode", "coordinate")
+            if mode == "image":
+                targets = p.get("targets", [])
+                paths = " ".join(f'"{t["path"]}"' for t in targets if t.get("path"))
+                return f"IMAGE_CLICK {paths}"
+            elif mode == "text":
+                text = p.get("text", "")
+                return f'OCR_FIND "{text}"'
+            else:
+                x, y = p.get("x", 0), p.get("y", 0)
+                method = p.get("method", "single")
+                suffix = ""
+                if method == "double":
+                    suffix = " DOUBLE"
+                elif method == "right":
+                    suffix = " RIGHT"
+                elif method == "triple":
+                    suffix = " TRIPLE"
+                return f"CLICK {x} {y}{suffix}"
 
         if ntype == "wait":
             wt = p.get("wait_type", "time")
@@ -937,14 +1125,120 @@ def flow_to_dsl(script: dict) -> str:
             return "CLIPBOARD_GET"
         if ntype == "window_control":
             op = p.get("operation", "minimize")
-            op_map = {"minimize": "MINIMIZE", "maximize": "MAXIMIZE", "close": "CLOSE_WINDOW", "resize": "RESIZE_WINDOW"}
+            op_map = {"minimize": "MINIMIZE", "maximize": "MAXIMIZE", "close": "CLOSE_WINDOW", "resize": "RESIZE_WINDOW", "restore": "RESTORE_WINDOW", "snap": "SNAP_WINDOW"}
             title = p.get("title", "")
             width = p.get("width", 800)
             height = p.get("height", 600)
+            snap_position = p.get("snap_position", "left")
             dsl_kw = op_map.get(op, "MINIMIZE")
             if op == "resize":
                 return f"{dsl_kw} {width} {height} {title}".strip()
+            if op == "snap":
+                return f"{dsl_kw} {snap_position} {title}".strip()
             return f"{dsl_kw} {title}".strip()
+
+        # 聚合类型 flow→DSL
+        if ntype == "system_power":
+            action = p.get("action", "shutdown")
+            delay = p.get("delay_seconds", 0)
+            kw = {"shutdown": "SHUTDOWN", "reboot": "REBOOT", "logoff": "LOGOFF", "hibernate": "HIBERNATE",
+                  "lock_workstation": "LOCK", "system_sleep": "SLEEP", "display_off": "DISPLAY_OFF"}
+            result = kw.get(action, "SHUTDOWN")
+            return f"{result} {delay}" if delay else result
+
+        if ntype == "audio_action":
+            sub = p.get("action", "volume_set")
+            if sub == "volume_mute":
+                m = p.get("mute")
+                if m is None:
+                    return "MUTE"
+                return f"MUTE {'ON' if m else 'OFF'}"
+            return f"VOLUME {p.get('level', 50)}"
+
+        if ntype == "desktop_action":
+            sub = p.get("action", "show_desktop")
+            if sub == "set_wallpaper":
+                return f"WALLPAPER {p.get('path', '')}"
+            if sub == "empty_recycle_bin":
+                return "EMPTY_BIN"
+            return "DESKTOP"
+
+        if ntype == "dialog_action":
+            action = p.get("action", "handle")
+            if action == "handle":
+                return f"DIALOG_HANDLE {p.get('timeout', 10)}"
+            if action == "list":
+                return "DIALOG_LIST"
+            if action == "take_action":
+                return f"DIALOG_ACTION {p.get('button', '')}"
+            if action == "fill_save":
+                return f"DIALOG_SAVE {p.get('path', '')}"
+            return "DIALOG_HANDLE"
+
+        if ntype == "a11y_action":
+            action = p.get("action", "get_tree")
+            if action == "get_tree":
+                return f"A11Y_TREE {p.get('max_depth', 5)}"
+            if action == "find_element":
+                name = p.get("name", "")
+                role = p.get("role", "")
+                ctype = p.get("control_type", "")
+                parts = " ".join(x for x in [name, role, ctype] if x)
+                return f"A11Y_FIND {parts}"
+            if action == "click_element":
+                name = p.get("name", "")
+                role = p.get("role", "")
+                parts = " ".join(x for x in [name, role] if x)
+                return f"A11Y_CLICK {parts}"
+            return "A11Y_TREE"
+
+        if ntype == "wifi_action":
+            action = p.get("action", "list")
+            if action == "list":
+                return "WIFI_LIST"
+            if action == "connect":
+                ssid = p.get("ssid", "")
+                password = p.get("password", "")
+                return f"WIFI_CONNECT {ssid} {password}".strip()
+            if action == "disconnect":
+                return "WIFI_DISCONNECT"
+            return "WIFI_LIST"
+
+        if ntype == "clipboard_action":
+            sub = p.get("action", "get")
+            if sub == "set":
+                return f"CLIPBOARD_SET {p.get('text', '')}"
+            if sub == "get_image":
+                fmt = p.get("format_", "base64")
+                sp = p.get("save_path", "")
+                parts = []
+                if fmt != "base64":
+                    parts.append(f"format={fmt}")
+                if sp:
+                    parts.append(f"save={sp}")
+                extra = " " + " ".join(parts) if parts else ""
+                return f"CLIPBOARD_GET_IMAGE{extra}"
+            if sub == "get_files":
+                return "CLIPBOARD_GET_FILES"
+            if sub == "clear":
+                return "CLIPBOARD_CLEAR"
+            return "CLIPBOARD_GET"
+
+        if ntype == "process_action":
+            sub = p.get("action", "launch")
+            if sub == "launch":
+                target = p.get("target", "")
+                args = p.get("args", "")
+                return f"LAUNCH {target} {args}".strip() if args else f"LAUNCH {target}".strip()
+            if sub == "kill":
+                return f"KILL {p.get('name', '')}"
+            if sub == "wait_start":
+                return f"WAIT_PROCESS {p.get('name', '')} {p.get('timeout', 30)}"
+            if sub == "wait_exit":
+                return f"WAIT_EXIT {p.get('name', '')} {p.get('timeout', 30)}"
+            if sub == "focus":
+                return f"FOCUS {p.get('title', '')}"
+            return "LAUNCH"
 
         if ntype == "condition":
             ct = p.get("condition_type", "always_true")
@@ -981,6 +1275,27 @@ def flow_to_dsl(script: dict) -> str:
                 return f'FILEDIALOG_OPEN "{path}"'
             elif feature_name == "filedialog_folder":
                 return f'FILEDIALOG_FOLDER "{path}"'
+            # 通过 registry 查找 DSL 关键字，生成可执行 DSL。
+            # 仅对无 flow_type 的 feature 生效（有 flow_type 的已有专用节点处理路径）。
+            # 这样大部分 tool_call 节点才能在 Python 引擎中实际执行（而非仅输出注释）。
+            try:
+                import features._all
+                from features.registry import registry
+                spec = registry.get(feature_name)
+                # 跳过有 flow_type 的 feature：它们的 DSL 关键字已被硬编码的 executor 处理，
+                # 参数格式不同（如 CLICK 期望坐标而非 key=value），直接从这里输出会导致调度错误。
+                if spec and spec.dsl_keyword and not spec.flow_type:
+                    kw = spec.dsl_keyword.upper()
+                    if isinstance(feature_params, dict) and feature_params:
+                        args = ' '.join(
+                            f'{k}="{v}"' if isinstance(v, str) and (' ' in v)
+                            else f'{k}={v}'
+                            for k, v in feature_params.items()
+                        )
+                        return f"{kw} {args}"
+                    return kw
+            except ImportError:
+                pass
             return f"# TOOL_CALL: {feature_name}"
 
         # 文件对话框类型（来自 DSL→Flow 转换后的类型）

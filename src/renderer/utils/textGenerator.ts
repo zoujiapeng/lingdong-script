@@ -114,6 +114,24 @@ function dslGenClickText(params: any): string {
   return `OCR_FIND "${text}"${method}`;
 }
 
+function dslGenClickAction(params: any): string {
+  const mode = params.mode ?? 'coordinate';
+  if (mode === 'image') {
+    const targets = params.targets ?? [];
+    return `IMAGE_CLICK ${targets.map((t: any) => `"${t.path}"`).join(' ')}`;
+  }
+  if (mode === 'text') {
+    const text = params.text ?? '';
+    const method = params.method === 'double' ? ' DOUBLE' : params.method === 'right' ? ' RIGHT' : '';
+    return `OCR_FIND "${text}"${method}`;
+  }
+  const x = params.x ?? 0;
+  const y = params.y ?? 0;
+  const method = params.method ?? 'single';
+  const suffix: Record<string, string> = { double: ' DOUBLE', right: ' RIGHT', middle: ' MIDDLE' };
+  return `CLICK ${x} ${y}${suffix[method] || ''}`;
+}
+
 function dslGenPopupClose(params: any): string {
   return `POPUP_CLOSE ${(params.strategies ?? ['auto'])[0] === 'auto' ? '' : (params.strategies ?? ['auto'])[0]}`.trim();
 }
@@ -230,6 +248,43 @@ function pseudoGenClickText(params: any): string {
   return line;
 }
 
+function pseudoGenClickAction(params: any): string {
+  const mode = params.mode ?? 'coordinate';
+  if (mode === 'image') {
+    const targets = params.targets ?? [];
+    let line = '点击图片';
+    for (const t of targets) line += ` "${t.path}"`;
+    const parts: string[] = [];
+    if (params.similarity && params.similarity !== 90) parts.push(`相似度=${params.similarity}`);
+    if (params.timeout && params.timeout !== 5) parts.push(`超时=${params.timeout}`);
+    if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
+    if (params.method && params.method !== 'single') {
+      const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
+      parts.push(m[params.method] || params.method);
+    }
+    if (parts.length > 0) line += ' ' + parts.join(' ');
+    return line;
+  }
+  if (mode === 'text') {
+    let line = `点击文本 "${params.text ?? ''}"`;
+    const parts: string[] = [];
+    if (params.similarity && params.similarity !== 80) parts.push(`相似度=${params.similarity}`);
+    if (params.offset_x || params.offset_y) parts.push(`偏移(${params.offset_x ?? 0},${params.offset_y ?? 0})`);
+    if (params.method && params.method !== 'single') {
+      const m: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
+      parts.push(m[params.method] || params.method);
+    }
+    if (parts.length > 0) line += ' ' + parts.join(' ');
+    return line;
+  }
+  let line = `点击 (${params.x ?? 0}, ${params.y ?? 0})`;
+  const method = params.method ?? 'single';
+  const methodMap: Record<string, string> = { double: '双击', right: '右击', middle: '中键' };
+  if (method !== 'single') line += ` ${methodMap[method] || method}`;
+  if (params.delay_after && params.delay_after !== 0.5) line += ` 延迟=${params.delay_after}`;
+  return line;
+}
+
 function pseudoGenPopupClose(params: any): string {
   if (params.strategies?.[0] && params.strategies[0] !== 'auto') return `关闭弹窗 策略=${params.strategies[0]}`;
   return '关闭弹窗';
@@ -281,6 +336,7 @@ function pseudoGenCondition(params: any): string {
 
 interface GenFunctions {
   genClick: (p: any) => string;
+  genClickAction: (p: any) => string;
   genWait: (p: any) => string;
   genType: (p: any) => string;
   genKeyboard: (p: any) => string;
@@ -309,7 +365,7 @@ interface GenFunctions {
 function getGens(mode: TextMode): GenFunctions {
   if (mode === 'dsl') {
     return {
-      genClick: dslGenClick, genWait: dslGenWait, genType: dslGenType,
+      genClick: dslGenClick, genClickAction: dslGenClickAction, genWait: dslGenWait, genType: dslGenType,
       genKeyboard: dslGenKeyboard, genSwipe: dslGenSwipe, genImageClick: dslGenImageClick,
       genScreenshot: dslGenScreenshot, genVariableSet: dslGenVariableSet,
       genVariableGet: dslGenVariableGet, genClickText: dslGenClickText,
@@ -324,7 +380,7 @@ function getGens(mode: TextMode): GenFunctions {
     };
   }
   return {
-    genClick: pseudoGenClick, genWait: pseudoGenWait, genType: pseudoGenType,
+    genClick: pseudoGenClick, genClickAction: pseudoGenClickAction, genWait: pseudoGenWait, genType: pseudoGenType,
     genKeyboard: pseudoGenKeyboard, genSwipe: pseudoGenSwipe, genImageClick: pseudoGenImageClick,
     genScreenshot: pseudoGenScreenshot, genVariableSet: pseudoGenVariableSet,
     genVariableGet: pseudoGenVariableGet, genClickText: pseudoGenClickText,
@@ -368,6 +424,16 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
 
     case 'click':
       emit(state, gens.genClick(p));
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+
+    case 'click_action':
+      emit(state, gens.genClickAction(p));
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+
+    case 'mouse_operation':
+      emit(state, gens.genClickAction(p));
       forward(nodeId, 'output', state, gens, convergence);
       break;
 
@@ -664,14 +730,125 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       forward(nodeId, 'output', state, gens, convergence);
       break;
     }
+    case 'system_power': {
+      const l: Record<string, { dsl: string; pseudo: string }> = {
+        shutdown: { dsl:'SHUTDOWN', pseudo:'关机' }, reboot: { dsl:'REBOOT', pseudo:'重启' },
+        logoff: { dsl:'LOGOFF', pseudo:'注销' }, hibernate: { dsl:'HIBERNATE', pseudo:'休眠' },
+        lock_workstation: { dsl:'LOCK', pseudo:'锁定工作站' }, system_sleep: { dsl:'SLEEP', pseudo:'睡眠' },
+        display_off: { dsl:'DISPLAY_OFF', pseudo:'关闭显示器' },
+      };
+      const m = l[p.action] || { dsl:'SHUTDOWN', pseudo:'关机' };
+      if (gens.ifKeyword === 'IF') emit(state, p.delay_seconds > 0 ? `${m.dsl} ${p.delay_seconds}` : m.dsl);
+      else emit(state, p.delay_seconds > 0 ? `${m.pseudo} (${p.delay_seconds}秒后)` : m.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'audio_action': {
+      if (p.action === 'volume_mute') {
+        if (gens.ifKeyword === 'IF') emit(state, p.mute === null ? 'MUTE' : p.mute ? 'MUTE ON' : 'MUTE OFF');
+        else emit(state, p.mute === null ? '切换静音' : p.mute ? '静音' : '取消静音');
+      } else {
+        if (gens.ifKeyword === 'IF') emit(state, `VOLUME ${p.level ?? 50}`);
+        else emit(state, `设置音量 ${p.level ?? 50}%`);
+      }
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'desktop_action': {
+      const dm: Record<string, { dsl: string; pseudo: string }> = {
+        show_desktop: { dsl:'DESKTOP', pseudo:'显示桌面' },
+        set_wallpaper: { dsl:'WALLPAPER', pseudo:'设置壁纸' },
+        empty_recycle_bin: { dsl:'EMPTY_BIN', pseudo:'清空回收站' },
+      };
+      const m = dm[p.action] || { dsl:'DESKTOP', pseudo:'桌面操作' };
+      if (gens.ifKeyword === 'IF') emit(state, p.action === 'set_wallpaper' ? `${m.dsl} ${p.path || ''}`.trim() : m.dsl);
+      else emit(state, p.action === 'set_wallpaper' ? `${m.pseudo}: ${p.path || ''}`.trim() : m.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'clipboard_action': {
+      const cm: Record<string, { dsl: string; pseudo: string }> = {
+        set: { dsl:'CLIPBOARD_SET', pseudo:'剪贴板写入' },
+        get: { dsl:'CLIPBOARD_GET', pseudo:'读取剪贴板' },
+        get_image: { dsl:'CLIPBOARD_GET_IMAGE', pseudo:'获取剪贴板图片' },
+        get_files: { dsl:'CLIPBOARD_GET_FILES', pseudo:'获取剪贴板文件列表' },
+        clear: { dsl:'CLIPBOARD_CLEAR', pseudo:'清空剪贴板' },
+      };
+      const m = cm[p.action] || { dsl:'CLIPBOARD', pseudo:'剪贴板操作' };
+      if (gens.ifKeyword === 'IF') emit(state, p.action === 'set' ? `${m.dsl} ${p.text || ''}` : m.dsl);
+      else emit(state, p.action === 'set' ? `${m.pseudo} "${(p.text||'').substring(0,30)}${p.text?.length>30?'…':''}"` : m.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'dialog_action': {
+      const dm: Record<string, { dsl: string; pseudo: string }> = {
+        handle: { dsl:'DIALOG_HANDLE', pseudo:'处理对话框' },
+        list: { dsl:'DIALOG_LIST', pseudo:'列出对话框' },
+        take_action: { dsl:'DIALOG_ACTION', pseudo:'操作对话框' },
+        fill_save: { dsl:'DIALOG_SAVE', pseudo:'填写保存对话框' },
+      };
+      const m = dm[p.action] || { dsl:'DIALOG', pseudo:'对话框操作' };
+      if (gens.ifKeyword === 'IF') emit(state, p.action === 'fill_save' ? `${m.dsl} ${p.path || ''}`.trim() : p.action === 'take_action' ? `${m.dsl} ${p.button || ''}`.trim() : m.dsl);
+      else emit(state, p.action === 'fill_save' ? `${m.pseudo}: ${p.path || ''}`.trim() : p.action === 'take_action' ? `${m.pseudo}: ${p.button || ''}`.trim() : m.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'a11y_action': {
+      const am: Record<string, { dsl: string; pseudo: string }> = {
+        get_tree: { dsl:'A11Y_TREE', pseudo:'获取无障碍树' },
+        find_element: { dsl:'A11Y_FIND', pseudo:'查找元素' },
+        click_element: { dsl:'A11Y_CLICK', pseudo:'点击元素' },
+      };
+      const m2 = am[p.action] || { dsl:'A11Y', pseudo:'无障碍操作' };
+      if (gens.ifKeyword === 'IF') emit(state, p.action !== 'get_tree' ? `${m2.dsl} ${p.name || ''}`.trim() : m2.dsl);
+      else emit(state, p.action !== 'get_tree' ? `${m2.pseudo}: ${p.name || ''}`.trim() : m2.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'wifi_action': {
+      const wm: Record<string, { dsl: string; pseudo: string }> = {
+        list: { dsl:'WIFI_LIST', pseudo:'列出WiFi' },
+        connect: { dsl:'WIFI_CONNECT', pseudo:'连接WiFi' },
+        disconnect: { dsl:'WIFI_DISCONNECT', pseudo:'断开WiFi' },
+      };
+      const m3 = wm[p.action] || { dsl:'WIFI', pseudo:'WiFi操作' };
+      if (gens.ifKeyword === 'IF') emit(state, p.action === 'connect' ? `${m3.dsl} ${p.ssid || ''}`.trim() : m3.dsl);
+      else emit(state, p.action === 'connect' ? `${m3.pseudo}: ${p.ssid || ''}`.trim() : m3.pseudo);
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
+    case 'process_action': {
+      if (p.action === 'launch') {
+        const target = p.target || '';
+        if (gens.ifKeyword === 'IF') emit(state, target ? `LAUNCH ${target}` : 'LAUNCH');
+        else emit(state, target ? `启动 ${target}` : '启动程序');
+      } else if (p.action === 'kill') {
+        if (gens.ifKeyword === 'IF') emit(state, `KILL ${p.name || ''}`);
+        else emit(state, `终止进程 ${p.name || ''}`);
+      } else if (p.action === 'wait_start') {
+        if (gens.ifKeyword === 'IF') emit(state, `WAIT_PROCESS ${p.name || ''} ${p.timeout ?? 30}`);
+        else emit(state, `等待进程启动 ${p.name || ''} (超时${p.timeout ?? 30}s)`);
+      } else if (p.action === 'wait_exit') {
+        if (gens.ifKeyword === 'IF') emit(state, `WAIT_EXIT ${p.name || ''} ${p.timeout ?? 30}`);
+        else emit(state, `等待进程退出 ${p.name || ''} (超时${p.timeout ?? 30}s)`);
+      } else if (p.action === 'focus') {
+        if (gens.ifKeyword === 'IF') emit(state, `FOCUS ${p.title || ''}`);
+        else emit(state, `激活窗口 ${p.title || ''}`);
+      }
+      forward(nodeId, 'output', state, gens, convergence);
+      break;
+    }
     case 'window_control': {
-      const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', close: '关闭', resize: '调整大小' };
-      const opDsl: Record<string, string> = { minimize: 'MINIMIZE', maximize: 'MAXIMIZE', close: 'CLOSE', resize: 'RESIZE' };
+      const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', restore: '还原', close: '关闭', resize: '调整大小', snap: '贴靠' };
+      const opDsl: Record<string, string> = { minimize: 'MINIMIZE', maximize: 'MAXIMIZE', restore: 'RESTORE_WINDOW', close: 'CLOSE_WINDOW', resize: 'RESIZE_WINDOW', snap: 'SNAP_WINDOW' };
       const title = p.title || '';
       if (gens.ifKeyword === 'IF') {
-        emit(state, `${opDsl[p.operation] || 'MINIMIZE'}${title ? ' ' + title : ''}`);
+        if (p.operation === 'resize') emit(state, `${opDsl[p.operation] || 'MINIMIZE'} ${p.width||800} ${p.height||600} ${title}`.trim());
+        else if (p.operation === 'snap') emit(state, `${opDsl[p.operation]} ${p.snap_position||'left'}${title ? ' ' + title : ''}`);
+        else emit(state, `${opDsl[p.operation] || 'MINIMIZE'}${title ? ' ' + title : ''}`);
       } else {
-        emit(state, `${opLabels[p.operation] || '最小化'}窗口${title ? ' ' + title : ''}`);
+        if (p.operation === 'snap') emit(state, `窗口贴靠${p.snap_position||'左'}${title ? ' ' + title : ''}`);
+        else emit(state, `窗口${opLabels[p.operation] || '最小化'}${title ? ' ' + title : ''}`);
       }
       forward(nodeId, 'output', state, gens, convergence);
       break;

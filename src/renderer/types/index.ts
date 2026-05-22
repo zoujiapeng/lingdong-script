@@ -46,7 +46,19 @@ export type NodeType =
   | 'clipboard_set'
   | 'clipboard_get'
   | 'window_control'
-  | 'web_browser';
+  | 'web_browser'
+  // 聚合节点类型
+  | 'system_power'
+  | 'audio_action'
+  | 'desktop_action'
+  | 'clipboard_action'
+  | 'process_action'
+  | 'click_action'
+  | 'mouse_operation'
+  // 对话框 / 无障碍 / WiFi
+  | 'dialog_action'
+  | 'a11y_action'
+  | 'wifi_action';
 
 export type ConditionType =
   | 'image_exists'
@@ -58,7 +70,7 @@ export type ConditionType =
   | 'scene_match'
   | 'always_true';
 
-export type ClickMethod = 'single' | 'double' | 'right' | 'middle';
+export type ClickMethod = 'single' | 'double' | 'right' | 'middle' | 'triple';
 export type WaitType = 'time' | 'image' | 'window';
 export type LoopType = 'count' | 'condition' | 'infinite';
 export type KeyModifier = 'ctrl' | 'alt' | 'shift' | 'win';
@@ -182,6 +194,30 @@ export interface VariableSetNodeParams {
 export interface ClickTextNodeParams {
   text: string;
   similarity: number;
+  method: ClickMethod;
+  offset_x: number;
+  offset_y: number;
+  timeout: number;
+  delay_after: number;
+  description?: string;
+}
+
+export type ClickMode = 'coordinate' | 'image' | 'text';
+
+export interface ClickActionParams {
+  mode: ClickMode;
+  // coordinate mode
+  x?: number;
+  y?: number;
+  // image mode
+  targets?: ImageTarget[];
+  similarity?: number;
+  multi_scale?: boolean;
+  region?: { x: number; y: number; w: number; h: number };
+  match_all?: boolean;
+  // text mode
+  text?: string;
+  // common
   method: ClickMethod;
   offset_x: number;
   offset_y: number;
@@ -322,10 +358,11 @@ export interface ClipboardGetParams {
 }
 
 export interface WindowControlParams {
-  operation: 'minimize' | 'maximize' | 'close' | 'resize';
+  operation: 'minimize' | 'maximize' | 'close' | 'resize' | 'restore' | 'snap';
   title: string;
   width?: number;
   height?: number;
+  snap_position?: 'left' | 'right' | 'top' | 'bottom' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
 }
 
 export interface WebBrowserNodeParams {
@@ -341,12 +378,39 @@ export interface WebBrowserNodeParams {
   description?: string;
 }
 
+export interface DialogActionParams {
+  action: 'handle' | 'list' | 'take_action' | 'fill_save';
+  title?: string;
+  button?: string;
+  path?: string;
+  timeout?: number;
+  description?: string;
+}
+
+export interface A11yActionParams {
+  action: 'get_tree' | 'find_element' | 'click_element';
+  name?: string;
+  role?: string;
+  control_type?: string;
+  max_depth?: number;
+  filter_visible?: boolean;
+  description?: string;
+}
+
+export interface WifiActionParams {
+  action: 'list' | 'connect' | 'disconnect';
+  ssid?: string;
+  password?: string;
+  description?: string;
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
   | ClickNodeParams
   | ImageClickNodeParams
   | ClickTextNodeParams
+  | ClickActionParams
   | WaitNodeParams
   | InputTextNodeParams
   | KeyboardNodeParams
@@ -380,7 +444,10 @@ export type NodeParams =
   | ClipboardSetParams
   | ClipboardGetParams
   | WindowControlParams
-  | WebBrowserNodeParams;
+  | WebBrowserNodeParams
+  | DialogActionParams
+  | A11yActionParams
+  | WifiActionParams;
 
 // --- Flow Node & Edge ---
 
@@ -435,6 +502,7 @@ export interface FlowScript {
   edges: FlowEdge[];
   variables: Record<string, string>; // global variables
   settings: ScriptSettings;
+  triggers?: TriggerDef[];  // 脚本级别的触发配置（定时/事件/启动）
 }
 
 export interface ScriptSettings {
@@ -533,7 +601,19 @@ export interface UIState {
   show_log_panel: boolean;
   show_tool_call_panel: boolean;
   show_ai_dialog: boolean;
+  show_trigger_config: boolean;
   auto_learn: boolean;
+}
+
+export interface TriggerUIState {
+  id: string;
+  spec_name: string;
+  display_name?: string;
+  status: 'running' | 'paused' | 'stopped' | 'fired';
+  fired_count: number;
+  config: Record<string, any>;
+  last_fired?: number;
+  created_at: number;
 }
 
 // --- Node Library Definition ---
@@ -578,6 +658,7 @@ export interface FeatureParam {
   required: boolean;
   default: any;
   example: any;
+  choices?: Record<string, string>;
 }
 
 export interface FeatureDefinition {
@@ -589,6 +670,7 @@ export interface FeatureDefinition {
   returns: string;
   dsl_keyword?: string;
   dsl_template?: string;
+  flow_type?: string;
   examples?: string[];
   mcp_tool_name: string;
   cli_command: string;

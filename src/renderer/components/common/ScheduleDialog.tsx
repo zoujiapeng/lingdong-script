@@ -97,6 +97,11 @@ export function ScheduleDialog({ onClose, onCreated }: ScheduleDialogProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // Quick schedule (NLP)
+  const [quickText, setQuickText] = useState('');
+  const [quickMode, setQuickMode] = useState(false);
+  const [quickResult, setQuickResult] = useState<any>(null);
+
   useEffect(() => {
     try {
       const reg = (window as any).__templateRegistry;
@@ -104,7 +109,9 @@ export function ScheduleDialog({ onClose, onCreated }: ScheduleDialogProps) {
     } catch {}
   }, []);
 
-  const canSave = name.trim() && templateId.trim() && !saving;
+  const canSave = quickMode
+    ? quickText.trim().length >= 4 && !saving
+    : name.trim() && templateId.trim() && !saving;
 
   const addCondition = (type: string) => {
     setConditions([...conditions, { type, params: getDefaultParams(type) }]);
@@ -135,22 +142,33 @@ export function ScheduleDialog({ onClose, onCreated }: ScheduleDialogProps) {
     setSaving(true);
     setError('');
     try {
-      const trigger: any = { type: triggerType };
-      if (triggerType === 'cron') trigger.cron_expr = cronExpr.trim();
-      if (triggerType === 'interval') trigger.interval_seconds = intervalSec;
+      if (quickMode) {
+        const api = (window as any).electronAPI;
+        const r = await api?.callFeature('quick_schedule', { text: quickText.trim() });
+        const parsed = r?.result || r;
+        if (parsed?.error) { setError(parsed.error); setSaving(false); return; }
+        if (parsed) {
+          setQuickResult(parsed);
+          await api?.scheduleCreate(parsed);
+        }
+      } else {
+        const trigger: any = { type: triggerType };
+        if (triggerType === 'cron') trigger.cron_expr = cronExpr.trim();
+        if (triggerType === 'interval') trigger.interval_seconds = intervalSec;
 
-      const entry: any = {
-        name: name.trim(),
-        template_id: templateId.trim(),
-        template_name: templateName.trim(),
-        triggers: [trigger],
-        enabled: true,
-      };
-      if (conditions.length > 0) {
-        entry.conditions = { operator: conditionOp, rules: conditions };
+        const entry: any = {
+          name: name.trim(),
+          template_id: templateId.trim(),
+          template_name: templateName.trim(),
+          triggers: [trigger],
+          enabled: true,
+        };
+        if (conditions.length > 0) {
+          entry.conditions = { operator: conditionOp, rules: conditions };
+        }
+
+        await (window as any).electronAPI?.scheduleCreate(entry);
       }
-
-      await (window as any).electronAPI?.scheduleCreate(entry);
       onCreated();
       onClose();
     } catch (e: any) {
@@ -168,6 +186,46 @@ export function ScheduleDialog({ onClose, onCreated }: ScheduleDialogProps) {
         <div style={HEADER_STYLE}>新增定时任务</div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: 16 }}>
+          {/* 模式切换: 标准 / 快速调度 */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: -8 }}>
+            <button onClick={() => { setQuickMode(false); setQuickResult(null); }}
+              style={{
+                padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
+                border: quickMode ? '1px solid var(--border-primary)' : '1px solid var(--accent)',
+                background: quickMode ? 'var(--bg-secondary)' : 'var(--accent)',
+                color: quickMode ? 'var(--text-primary)' : '#fff',
+              }}>标准配置</button>
+            <button onClick={() => setQuickMode(true)}
+              style={{
+                padding: '4px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
+                border: quickMode ? '1px solid var(--accent)' : '1px solid var(--border-primary)',
+                background: quickMode ? 'var(--accent)' : 'var(--bg-secondary)',
+                color: quickMode ? '#fff' : 'var(--text-primary)',
+              }}>快速调度</button>
+          </div>
+
+          {quickMode ? (
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                用自然语言描述调度计划，系统自动解析为定时任务。<br />
+                例如：<code>每个工作日上午9点打开微信</code>、<code>每30分钟截图一次</code>
+              </div>
+              <textarea className="settings-input" value={quickText}
+                onChange={e => setQuickText(e.target.value)} rows={3}
+                placeholder="每个工作日早9点运行脚本..."
+                style={{ width: '100%', fontSize: 13, resize: 'vertical', fontFamily: 'inherit' }} />
+              {quickResult && (
+                <div style={{ marginTop: 8, padding: 8, borderRadius: 6,
+                  background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
+                  fontSize: 12, lineHeight: 1.6 }}>
+                  <div><strong>解析结果:</strong></div>
+                  <div>名称: {quickResult.name}</div>
+                  <div>触发器: {quickResult.trigger_desc}</div>
+                  {quickResult.conditions && <div>条件: {quickResult.conditions}</div>}
+                </div>
+              )}
+            </div>
+          ) : (<>
           {/* 名称 */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>任务名称</label>
@@ -308,6 +366,7 @@ export function ScheduleDialog({ onClose, onCreated }: ScheduleDialogProps) {
           </div>
 
           {error && <div style={{ fontSize: 12, color: 'var(--error)' }}>{error}</div>}
+          </>)}
         </div>
 
         <div style={{

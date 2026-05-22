@@ -62,6 +62,25 @@ export function ToolCallParams({ params, onChange }: Props) {
     const val = params.params[p.name];
     const type = p.type;
 
+    if (p.choices) {
+      return (
+        <div key={p.name} className="form-group">
+          <label className="form-label">
+            {p.name}
+            {p.required && <span style={{ color: 'var(--accent-red)', marginLeft: 2 }}>*</span>}
+          </label>
+          <select className="form-input form-select"
+            value={val ?? p.default ?? ''}
+            onChange={(e) => handleParamChange(p.name, e.target.value)}>
+            <option value="">-- 请选择 --</option>
+            {Object.entries(p.choices).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </div>
+      );
+    }
+
     if (type === 'boolean') {
       return (
         <div key={p.name} className="form-group" style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -106,6 +125,39 @@ export function ToolCallParams({ params, onChange }: Props) {
     );
   };
 
+  // 有 feature_name 时直接显示参数，不显示"选择功能"大下拉
+  if (selectedFeature) {
+    return (
+      <div>
+        {selectedFeature.params.length === 0 && (
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
+            此功能无需参数
+          </div>
+        )}
+        {selectedFeature.params.map(renderParamField)}
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="topbar-btn"
+            onClick={handleTestExecute}
+            disabled={testing}
+            style={{ padding: '4px 12px', fontSize: 12 }}>
+            {testing ? '执行中...' : '执行测试'}
+          </button>
+        </div>
+        {testResult && (
+          <div style={{ marginTop: 8 }}>
+            <div className="form-label">执行结果</div>
+            <pre style={{
+              fontSize: 10, padding: 6, borderRadius: 4,
+              background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+              maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            }}>{testResult}</pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // feature_name 为空时显示选择下拉（兜底）
   return (
     <div>
       <div className="form-group">
@@ -127,43 +179,6 @@ export function ToolCallParams({ params, onChange }: Props) {
           })}
         </select>
       </div>
-
-      {selectedFeature && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, padding: '6px 8px', background: 'var(--bg-secondary)', borderRadius: 4 }}>
-            {selectedFeature.description}
-            <div style={{ marginTop: 2, fontSize: 10 }}>返回值: {selectedFeature.returns}</div>
-          </div>
-
-          {selectedFeature.params.length === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
-              此功能无需参数
-            </div>
-          )}
-
-          {selectedFeature.params.map(renderParamField)}
-
-          <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button className="topbar-btn"
-              onClick={handleTestExecute}
-              disabled={testing}
-              style={{ padding: '4px 12px', fontSize: 12 }}>
-              {testing ? '执行中...' : '执行测试'}
-            </button>
-          </div>
-
-          {testResult && (
-            <div style={{ marginTop: 8 }}>
-              <div className="form-label">执行结果</div>
-              <pre style={{
-                fontSize: 10, padding: 6, borderRadius: 4,
-                background: 'var(--bg-secondary)', color: 'var(--text-primary)',
-                maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-              }}>{testResult}</pre>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

@@ -31,6 +31,7 @@ def _poll(condition_fn, timeout: float, interval: float = 0.5) -> bool:
     ],
     returns="bool - 是否在规定时间内检测到",
     tags=["timer", "control"],
+    hidden=True,
 )
 def timer_wait_file(path: str, timeout: float = 60, wait_delete: bool = False) -> dict:
     exists = os.path.exists(path)
@@ -54,6 +55,7 @@ def timer_wait_file(path: str, timeout: float = 60, wait_delete: bool = False) -
     ],
     returns="bool - 是否在规定时间内检测到",
     tags=["timer", "control"],
+    hidden=True,
 )
 def timer_wait_process(name: str, timeout: float = 60, wait_exit: bool = False) -> dict:
     try:
@@ -99,6 +101,7 @@ def timer_wait_process(name: str, timeout: float = 60, wait_exit: bool = False) 
     ],
     returns="bool - 是否在规定时间内达到目标状态",
     tags=["timer", "control"],
+    hidden=True,
 )
 def timer_wait_network(timeout: float = 30, wait_disconnect: bool = False) -> dict:
     def has_connection():
@@ -125,6 +128,7 @@ def timer_wait_network(timeout: float = 30, wait_disconnect: bool = False) -> di
     ],
     returns="bool - 是否到达指定时间",
     tags=["timer", "control"],
+    hidden=True,
 )
 def timer_wait_time(target: str) -> dict:
     try:

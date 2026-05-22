@@ -102,6 +102,7 @@ class TriggerEngine:
         self._executor = None  # DSLExecutor 引用，由 set_executor 设置
         self._instance_counter = 0
         self._instance_lock = threading.Lock()
+        self._status_callback = None  # 由 trigger_bridge 设置
 
     def set_action_handler(self, handler):
         self._action_handler = handler
@@ -109,6 +110,10 @@ class TriggerEngine:
     def set_executor(self, executor):
         """设置 DSLExecutor 引用，用于 handler 动作执行"""
         self._executor = executor
+
+    def set_status_callback(self, callback):
+        """设置状态变更回调（由 trigger_bridge 使用）。每次触发器注册/停止/触发时调用"""
+        self._status_callback = callback
 
     def register(self, spec_name: str, config: dict,
                  handler_actions: list,
@@ -148,6 +153,11 @@ class TriggerEngine:
 
         with _instances_lock:
             _TRIGGER_INSTANCES[inst.id] = inst
+
+        # 状态变更通知
+        if self._status_callback:
+            self._status_callback()
+
         return inst
 
     def _watcher_loop(self, inst: TriggerInstance, spec: TriggerSpec,
@@ -173,6 +183,8 @@ class TriggerEngine:
                     inst.fired_count += 1
                     inst.last_fired = time.time()
                     inst.status = "fired"
+                    if self._status_callback:
+                        self._status_callback()
                     self._execute_handler(inst)
                     if inst.recurring:
                         inst.status = "running"
@@ -227,6 +239,8 @@ class TriggerEngine:
                 return False
             inst._stop_event.set()
             inst.status = "stopped"
+        if self._status_callback:
+            self._status_callback()
         return True
 
     def stop_all(self):
@@ -236,6 +250,8 @@ class TriggerEngine:
                 if inst.status == "running":
                     inst._stop_event.set()
                     inst.status = "stopped"
+        if self._status_callback:
+            self._status_callback()
 
     def get_instance(self, instance_id: str) -> Optional[dict]:
         with _instances_lock:
