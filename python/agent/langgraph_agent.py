@@ -11,6 +11,7 @@ IPC 兼容: 保持与 __main__.py 相同的 JSON stdout 事件协议。
 import json
 import logging
 import os
+import re
 import threading
 import time
 from queue import Queue
@@ -42,7 +43,26 @@ _SYSTEM_PROMPT = """你是一个桌面自动化助手。可用工具通过 @feat
 4. 遇到失败时尝试 recovery: 重试→替代方案→跳过→失败
 5. 工具调用完成后无需额外标记，直接结束即可
 6. 使用 wait_action 代替 time.sleep
-7. 所有坐标默认为屏幕绝对坐标"""
+7. 所有坐标默认为屏幕绝对坐标
+8. 浏览器操作规则（重要）：
+   a. 打开浏览器使用 launch_program(target="浏览器")，然后等待 2-3 秒
+   b. 导航到 URL 使用 browser_navigate(url="https://example.com") — 不要用键盘在地址栏输入
+   c. 点击页面元素使用 browser_click(selector="CSS选择器") — selector 从页面上下文推断（id, class, role, 文本等）
+   d. 输入文本到页面元素使用 browser_type(selector="CSS选择器", text="内容")
+   e. 等待页面元素出现使用 browser_wait_element(selector="CSS选择器", timeout=10)
+   f. 获取页面文本使用 browser_get_text(selector="CSS选择器")
+   g. 浏览器截图使用 browser_screenshot()
+   h. 在新标签页中打开使用 browser_new_tab(url="URL")
+   i. 切换标签页使用 browser_switch_tab(index=N)
+9. 绝对不要编造用户名、密码或凭据。如果用户目标提到"登录"但没有提供凭据，请暂停并输出一条消息要求用户提供，而不是使用占位符值。
+10. 对于所有需要浏览网页的任务（搜索、登录、填写表单、查看网页等），必须使用 browser_* 系列工具（browser_navigate, browser_click, browser_type 等），这些工具通过 Playwright CDP 协议直接控制浏览器，比 OCR/鼠标模拟更精确可靠。不要在浏览器上使用 click_target/type_text 等通用桌面自动化工具。
+11. 登录流程规则：当用户让"登录"某个网站时，不能只点击一下登录按钮就认为完成。正确的流程：
+    a. 点击登录按钮 → browser_wait_element 等待登录表单出现
+    b. 如果用户没有提供凭据，暂停并输出消息要求提供，不要编造
+    c. 获取凭据后使用 browser_type 填写表单
+    d. browser_click 点击提交按钮
+    e. browser_wait_element 等待登录成功后页面跳转
+12. 流程完整性：每个操作之间必须有适当等待。导航后等加载，点击后等新内容出现。"""
 
 
 class LangGraphAgent:
@@ -59,10 +79,16 @@ class LangGraphAgent:
     def __init__(self, model: str = "deepseek-chat", api_key: str = "",
                  api_base: str = "", event_callback: Optional[Callable] = None,
                  stop_event: Optional[threading.Event] = None,
-                 guidance_queue: Optional[Queue] = None):
+                 guidance_queue: Optional[Queue] = None,
+                 multimodal: bool = False,
+                 auto_learn: bool = False,
+                 verify_enabled: bool = True):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
+        self.multimodal = multimodal
+        self.auto_learn = auto_learn
+        self.verify_enabled = verify_enabled
         self._event_cb = event_callback
         self._graph = None
         self._tools: list = []
@@ -332,6 +358,118 @@ class LangGraphAgent:
 
     # (unused SendInput methods removed — dialog_handler handles dialogs)
 
+    # ── 视觉定位 (Visual Locator) ──────────────────────────────
+
+    def _apply_visual_locator(self, name: str, args: dict) -> dict:
+        """Use visual locator to find GUI element before click/type.
+
+        Strategy:
+        1. Extract target text from args based on tool name
+        2. Take a screenshot
+        3. Call visual_locator.locate() — tries ExperienceDB first, VLM fallback
+        4. If located, update args with center_x / center_y coordinates
+
+        Returns updated args dict (coordinates injected if found).
+        """
+        # Map tool names → (target_param, step_type)
+        _MAP = {
+            "click_target":   ("target", "click"),
+            "right_click":    ("target", "click"),
+            "hover":          ("target", "click"),
+            "mouse_move":     ("target", "click"),
+            "type_text":      ("text",   "type"),
+            "type_clipboard": ("text",   "type"),
+            "drag":           ("from_target", "drag"),
+            "scroll":         ("target", "scroll"),
+        }
+
+        if name not in _MAP:
+            return args
+
+        target_param, step_type = _MAP[name]
+        target_text = args.get(target_param, "")
+
+        # Skip if: no target text, already has explicit coords, or target is a raw coordinate
+        if not target_text or not isinstance(target_text, str):
+            return args
+        if re.match(r'^-?\d+$', target_text.strip()):
+            return args
+        if re.match(r'^-?\d+\s*,\s*-?\d+$', target_text.strip()):
+            return args
+        x_val = args.get("x", -1)
+        y_val = args.get("y", -1)
+        if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
+            if x_val >= 0 and y_val >= 0:
+                return args
+
+        # ── Take screenshot to temp file ──
+        import pyautogui as _pg
+        import tempfile
+        screenshot_path = os.path.join(
+            tempfile.gettempdir(),
+            f"lg_vl_{int(time.time())}_{hash(target_text) & 0xFFFF}.png",
+        )
+        try:
+            _pg.screenshot(screenshot_path)
+        except Exception as exc:
+            logger.warning("Visual locator screenshot failed: %s", exc)
+            return args
+
+        # ── Run locator ──
+        try:
+            from agent import visual_locator as _vl
+
+            vlm_config = None
+            if self.multimodal and self.api_key:
+                vlm_config = {
+                    "api_key": self.api_key,
+                    "api_base": self.api_base or "https://api.deepseek.com/v1",
+                    "model": self.model or "deepseek-chat",
+                }
+
+            result = _vl.locate(
+                target_text=target_text,
+                step_type=step_type,
+                screenshot_path=screenshot_path,
+                use_vlm=self.multimodal,
+                vlm_config=vlm_config,
+                window_title="",
+                threshold=0.75,
+            )
+
+            if result.get("success"):
+                coords = result["result"]
+                args = dict(args)  # shallow copy — don't mutate caller
+                cx = coords.get("center_x", coords.get("x", 0))
+                cy = coords.get("center_y", coords.get("y", 0))
+                args["x"] = int(cx)
+                args["y"] = int(cy)
+                # For click_target, update target to coordinates so @feature skips OCR
+                if name == "click_target":
+                    args["target"] = f"{cx},{cy}"
+                self._emit("log", {
+                    "level": "info",
+                    "message": (
+                        f"视觉定位: 「{target_text}」→ ({cx}, {cy}) "
+                        f"[{coords.get('method', '?')}]"
+                    ),
+                })
+            else:
+                self._emit("log", {
+                    "level": "debug",
+                    "message": f"视觉定位未命中: 「{target_text}」({result.get('error', '无匹配')})",
+                })
+        except Exception as exc:
+            logger.warning("Visual locator error (non-fatal): %s", exc)
+        finally:
+            try:
+                if os.path.exists(screenshot_path):
+                    os.remove(screenshot_path)
+            except Exception:
+                pass
+
+        return args
+
     # ── Helpers ──────────────────────────────────────────────────
 
     @staticmethod
@@ -369,6 +507,13 @@ class LangGraphAgent:
             tool_call = call_req.tool_call
             name = tool_call.get("name", "")
             args = tool_call.get("args", {})
+
+            # ── 0. Visual locator: experience → VLM → coordinate ──
+            if name in _GUI_ACTIONS and (self.auto_learn or self.multimodal):
+                try:
+                    args = self._apply_visual_locator(name, args)
+                except Exception as e:
+                    logger.warning("Visual locator error (non-fatal): %s", e)
 
             # ── 1. Window focus safety (GUI actions only) ──
             if name in _GUI_ACTIONS:

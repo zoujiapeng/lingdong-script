@@ -31,8 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Agent control
-  agentStart: (goal: string, config?: Record<string, string>, supervise?: boolean) =>
-    ipcRenderer.invoke('agent:start', goal, config, supervise),
+  agentStart: (goal: string, config?: Record<string, string>, supervise?: boolean, steps?: any[]) =>
+    ipcRenderer.invoke('agent:start', goal, config, supervise, steps),
   agentStop: () =>
     ipcRenderer.invoke('agent:stop'),
   agentGuidance: (text: string) =>

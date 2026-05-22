@@ -286,6 +286,72 @@ Agent Controller
       └─ 发送 step_complete 事件 → 前端高亮节点
 ```
 
+## 视觉定位 + 经验复用学习系统
+
+Agent 监督执行时通过 **视觉定位** 模块将语义目标（如"搜索按钮"）转为屏幕坐标，并使用 **经验数据库** 实现"越用越快"。
+
+### 架构
+
+```
+Agent 监督层 (supervision wrapper)
+  └─ step 0: _apply_visual_locator(name, args)
+       ├─ 提取 target_text（如 "搜索按钮"）
+       ├─ 截取全屏截图
+       ├─ visual_locator.locate()
+       │    ├─ ① ExperienceDB → 有模板?
+       │    │    └─ OpenCV matchTemplate → 命中 → 返回坐标
+       │    ├─ ② VLM 兜底 (多模态开启时)
+       │    │    └─ VLM API 分析截图 → 返回坐标 → 裁剪小图 → 存入 ExperienceDB
+       │    └─ ③ 均失败 → 返回错误，走正常执行流程
+       └─ 更新 args.x / args.y → 监督执行使用坐标
+```
+
+### 三层设计
+
+| 层 | 文件 | 功能 | 依赖 |
+|---|---|---|---|
+| **经验数据库** | `python/agent/experience_db.py` | JSON 存储经验条目，SHA256 签名（step_type\|target_text\|window_title），裁剪小图保存在 `experience/templates/` | 无外部依赖 |
+| **视觉定位器** | `python/agent/visual_locator.py` | 统一入口 `locate()`：先查经验库→OpenCV 匹配，再 VLM 兜底 | OpenCV (`cv2`)，PIL (fallback) |
+| **LangGraph 集成** | `python/agent/langgraph_agent.py` → `_apply_visual_locator()` | 在监督包装器 step 0 调用，自动注入坐标到工具参数 | `pyautogui` (截图) |
+
+### 控制开关 (设置面板)
+
+| 开关 | localStorage key | 效果 |
+|---|---|---|
+| **多模态 (视觉模型)** | `lingdong-llm-multimodal` | 开启后首次遇到新界面时调用 VLM API 分析截图定位元素。纯文本模型(如 DeepSeek)必须关闭 |
+| **自动学习** | `lingdong-auto-learn` | 开启后每次执行成功自动记录屏幕状态，后续同目标可直接用 OpenCV 匹配，无需 API 调用 |
+
+### 经验数据存储位置
+
+```
+python/experience/
+├── db.json            # 经验索引（签名→路径/坐标/置信度）
+└── templates/         # 裁剪小图（PNG）
+```
+
+### 生命周期
+
+1. **首次执行**（自动学习 ON，多模态 ON）：
+   1. Agent 需要点击"搜索按钮"
+   2. 经验库无匹配 → VLM 发送截图+描述 → 返回坐标
+   3. 执行点击 → 成功后裁剪按钮小图存入 `experience/templates/`
+   4. 经验条目写入 `db.json`（含签名、坐标、置信度）
+
+2. **再次执行同目标**（自动学习 ON，多模态 OFF）：
+   1. Agent 需要点击"搜索按钮"
+   2. 经验库命中 → 加载模板小图 → OpenCV `matchTemplate` 扫描屏幕
+   3. 找到匹配位置 → 返回坐标 → 执行点击
+   4. 整个过程无需调用任何 API，完全离线
+
+3. **手动清除**：`python -c "from agent.experience_db import clear; clear()"`
+
+### settings 面板已有开关
+
+- `lingdong-llm-multimodal`: 多模态视觉开关（默认关闭，避免纯文本模型报错）
+- `lingdong-auto-learn`: 自动学习开关（默认关闭）
+
+两个开关同时开启才启用 VLM 兜底；仅 auto-learn 开启时只使用 ExperienceDB + OpenCV。
+
 ## 关键约定
 
 - **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `engine.py` (execute_*)
@@ -300,6 +366,7 @@ Agent Controller
 - **测试**: `pytest tests/` 2149+ tests (Python, 覆盖全部 @feature 执行, DSL 转换, 往返验证), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 - **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
+- **视觉定位系统**: `agent/visual_locator.py` + `agent/experience_db.py`。语义目标→屏幕坐标的两步策略：经验库→OpenCV 匹配，VLM 兜底。`_apply_visual_locator()` 在 `langgraph_agent.py` 监督层 step 0 自动调用。所有 VLM 定位成功的坐标和按钮小图自动存入经验数据库供后续离线复用
 
 ## 节点类型速查
 

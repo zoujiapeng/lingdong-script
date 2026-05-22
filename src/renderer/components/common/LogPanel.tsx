@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { useStore } from '../../store';
-import { Trash2, Eye, Search, Copy, Download, Filter } from 'lucide-react';
+import { Trash2, Eye, Search, Copy, Download, Filter, MousePointer } from 'lucide-react';
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -24,13 +24,24 @@ export const LogPanel = React.memo(function LogPanel() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [prevTimestamp, setPrevTimestamp] = useState(0);
+  const [filterNodeId, setFilterNodeId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: typeof logEntries[number] } | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  // Close context menu on any click outside
+  useEffect(() => {
+    const close = () => setContextMenu(null);
+    if (contextMenu) {
+      window.addEventListener('click', close);
+      return () => window.removeEventListener('click', close);
+    }
+  }, [contextMenu]);
 
   // Build a node lookup map: id → node
   const nodeMap = useMemo(() => {
     const map = new Map<string, { type: string; label: string }>();
     for (const n of nodes) {
-      map.set(n.id, { type: n.type, label: n.data?.label || n.type });
+      map.set(n.id, { type: n.type, label: n.label || n.type });
     }
     return map;
   }, [nodes]);
@@ -70,6 +81,7 @@ export const LogPanel = React.memo(function LogPanel() {
   const filteredEntries = useMemo(() => {
     return logEntries.filter(entry => {
       if (!activeLevels.has(entry.level as LogLevel)) return false;
+      if (filterNodeId && entry.node_id !== filterNodeId) return false;
       if (searchText) {
         const q = searchText.toLowerCase();
         const msgMatch = entry.message.toLowerCase().includes(q);
@@ -79,7 +91,7 @@ export const LogPanel = React.memo(function LogPanel() {
       }
       return true;
     });
-  }, [logEntries, activeLevels, searchText]);
+  }, [logEntries, activeLevels, searchText, filterNodeId]);
 
   const copyAll = useCallback(() => {
     const text = filteredEntries.map(e =>
@@ -110,6 +122,19 @@ export const LogPanel = React.memo(function LogPanel() {
     if (delta < 1000) return `${delta}ms`;
     return `${(delta / 1000).toFixed(1)}s`;
   };
+
+  const copySingleEntry = useCallback((entry: typeof logEntries[number], format: 'text' | 'json' | 'message' | 'timestamp') => {
+    const time = new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+    let text = '';
+    switch (format) {
+      case 'json': text = JSON.stringify(entry, null, 2); break;
+      case 'message': text = entry.message; break;
+      case 'timestamp': text = entry.timestamp; break;
+      default: text = `[${time}] [${entry.level.toUpperCase()}]${entry.node_id ? ` [${entry.node_id}]` : ''} ${entry.message}`;
+    }
+    navigator.clipboard.writeText(text);
+    setContextMenu(null);
+  }, []);
 
   return (
     <div className="log-panel">
@@ -211,6 +236,17 @@ export const LogPanel = React.memo(function LogPanel() {
             </button>
           )}
         </div>
+        {filterNodeId && (
+          <button
+            className="log-filter-node-chip"
+            onClick={() => setFilterNodeId(null)}
+            title="清除节点过滤"
+          >
+            <MousePointer size={9} />
+            {filterNodeId.length > 10 ? filterNodeId.slice(0, 10) + '…' : filterNodeId}
+            <span style={{ marginLeft: 3 }}>×</span>
+          </button>
+        )}
       </div>
 
       {/* Log entries */}
@@ -236,6 +272,10 @@ export const LogPanel = React.memo(function LogPanel() {
               key={`${entry.timestamp}-${i}`}
               className={`log-entry ${isExpanded ? 'expanded' : ''}`}
               onClick={() => longMsg && setExpandedIdx(isExpanded ? null : i)}
+              onContextMenu={e => {
+                e.preventDefault();
+                setContextMenu({ x: e.clientX, y: e.clientY, entry });
+              }}
             >
               <span className="log-time">{new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</span>
               {i < filteredEntries.length - 1 && (
@@ -248,7 +288,14 @@ export const LogPanel = React.memo(function LogPanel() {
               )}
               <span className={`log-level ${entry.level}`}>{entry.level.toUpperCase()}</span>
               {nodeInfo && (
-                <span className="log-node-badge" title={entry.node_id}>
+                <span
+                  className={`log-node-badge ${filterNodeId === entry.node_id ? 'active' : ''}`}
+                  title={entry.node_id}
+                  onClick={e => {
+                    e.stopPropagation();
+                    setFilterNodeId(filterNodeId === entry.node_id ? null : entry.node_id!);
+                  }}
+                >
                   {nodeInfo.type}
                 </span>
               )}
@@ -263,6 +310,28 @@ export const LogPanel = React.memo(function LogPanel() {
         })}
         <div ref={logEndRef} />
       </div>
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          className="log-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={e => e.stopPropagation()}
+        >
+          <button className="log-context-item" onClick={() => copySingleEntry(contextMenu.entry, 'text')}>
+            <Copy size={10} /> 复制整行
+          </button>
+          <button className="log-context-item" onClick={() => copySingleEntry(contextMenu.entry, 'message')}>
+            <Copy size={10} /> 复制消息
+          </button>
+          <button className="log-context-item" onClick={() => copySingleEntry(contextMenu.entry, 'timestamp')}>
+            <Copy size={10} /> 复制时间戳
+          </button>
+          <button className="log-context-item" onClick={() => copySingleEntry(contextMenu.entry, 'json')}>
+            <Copy size={10} /> 复制 JSON
+          </button>
+        </div>
+      )}
     </div>
   );
 });

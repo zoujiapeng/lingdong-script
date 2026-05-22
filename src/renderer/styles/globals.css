@@ -1433,6 +1433,66 @@ textarea.form-input {
   padding-left: 2px;
 }
 
+/* Filter by node chip */
+.log-filter-node-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 9px;
+  font-family: 'JetBrains Mono', monospace;
+  background: rgba(139,92,246,0.15);
+  color: #a78bfa;
+  flex-shrink: 0;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.log-filter-node-chip:hover { background: rgba(139,92,246,0.25); }
+
+/* Node badge active (filtered) */
+.log-node-badge.active {
+  background: rgba(139,92,246,0.2);
+  color: #a78bfa;
+  cursor: pointer;
+}
+.log-node-badge:hover {
+  background: rgba(148,163,184,0.15);
+  color: rgba(148, 163, 184, 0.7);
+}
+
+/* Context menu */
+.log-context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: rgba(30, 41, 59, 0.97);
+  border: 1px solid rgba(148,163,184,0.15);
+  border-radius: 6px;
+  padding: 3px;
+  min-width: 120px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.log-context-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  color: rgba(203, 213, 225, 0.8);
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', monospace;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 0.1s;
+  text-align: left;
+}
+.log-context-item:hover { background: rgba(139,92,246,0.2); color: #e2e8f0; }
+
 /* ============================================================
    STATUS BAR
    ============================================================ */
@@ -2461,6 +2521,21 @@ textarea.form-input {
 }
 .agent-btn-danger:hover:not(:disabled) {
   background: #dc2626;
+}
+
+/* Agent spinner for loading state */
+.agent-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(148, 163, 184, 0.3);
+  border-top-color: #a78bfa;
+  border-radius: 50%;
+  animation: agent-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes agent-spin {
+  to { transform: rotate(360deg); }
 }
 
 .agent-result {
