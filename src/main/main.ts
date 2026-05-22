@@ -1344,6 +1344,13 @@ ipcMain.handle('settings:set-auto-start', (_, enable: boolean) => {
   return enable;
 });
 
+// --- Vision backend IPC ---
+ipcMain.handle('settings:set-vision-backend', (_, backend: string) => {
+  const { setVlmBackend } = require('./engine');
+  setVlmBackend(backend);
+  return true;
+});
+
 // --- Notification IPC ---
 ipcMain.handle('notification:show', (_, title: string, body: string) => {
   try {

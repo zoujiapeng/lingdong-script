@@ -212,6 +212,40 @@ def _click_result_or_press_enter(query, steps, attempts=3):
 # ── Features ─────────────────────────────────────────────────────────
 
 @feature(
+    name="qq_operation",
+    display_name="操作 QQ",
+    description="QQ 综合操作：启动/发送消息/查找联系人/查看状态",
+    category=F.ACTION,
+    params=[
+        P("action", "str", "操作类型",
+          choices={"launch": "启动QQ", "send_message": "发送消息", "find_contact": "查找联系人", "get_status": "查看状态"}),
+        P("contact", "str", "联系人名称（发送消息/查找联系人时用）", required=False),
+        P("message", "str", "消息内容（发送消息时用）", required=False),
+        P("timeout", "number", "操作超时秒数", required=False, default=15),
+    ],
+    returns="dict{success, ...} - 操作结果",
+    tags=["qq", "app"],
+    hidden=False,
+    dsl_keyword="",
+)
+def qq_operation(action: str = "launch", contact: str = "", message: str = "", timeout: float = 15) -> dict:
+    """QQ 综合操作：根据 action 分发到具体的子功能。"""
+    if action == "launch":
+        return qq_launch(wait=True, timeout=timeout)
+    elif action == "send_message":
+        if not contact or not message:
+            return {"success": False, "error": "发送消息需要填写 contact 和 message 参数"}
+        return qq_send_message(contact=contact, message=message, max_wait=timeout)
+    elif action == "find_contact":
+        if not contact:
+            return {"success": False, "error": "查找联系人需要填写 contact 参数"}
+        return qq_find_contact(contact=contact, timeout=timeout)
+    elif action == "get_status":
+        return qq_get_status()
+    return {"success": False, "error": f"未知操作: {action}"}
+
+
+@feature(
     name="qq_launch",
     display_name="启动 QQ",
     description="【QQ·启动】启动 QQNT。如果 QQ 已经在运行，则聚焦到 QQ 窗口",
@@ -222,6 +256,7 @@ def _click_result_or_press_enter(query, steps, attempts=3):
     ],
     returns="dict{hwnd, width, height, left, top} - 窗口信息",
     tags=["qq", "launch", "app"],
+    hidden=True,
 )
 def qq_launch(wait: bool = True, timeout: float = 20) -> dict:
     try:
@@ -268,6 +303,7 @@ def qq_launch(wait: bool = True, timeout: float = 20) -> dict:
     returns="dict{success, steps, error} - 执行结果",
     tags=["qq", "message", "automation"],
     examples=["qq_send_message contact=手机 message=测试消息"],
+    hidden=True,
 )
 def qq_send_message(contact: str, message: str, max_wait: float = 15) -> dict:
     steps = []
@@ -368,6 +404,7 @@ def qq_send_message(contact: str, message: str, max_wait: float = 15) -> dict:
     ],
     returns="dict{found, x, y, w, h, confidence, strategy}",
     tags=["qq", "perception", "find"],
+    hidden=True,
 )
 def qq_find_contact(contact: str, timeout: float = 10) -> dict:
     hwnd = _adapter.find_window()
@@ -400,6 +437,7 @@ def qq_find_contact(contact: str, timeout: float = 10) -> dict:
     params=[],
     returns="dict{running, hwnd, left, top, width, height}",
     tags=["qq", "status", "window"],
+    hidden=True,
 )
 def qq_get_status() -> dict:
     try:

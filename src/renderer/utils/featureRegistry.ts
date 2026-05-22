@@ -54,7 +54,7 @@ export function featureToNodeItem(feature: FeatureDefinition): FeatureNodeItem {
 /** Get features that should appear in the node library */
 export function getLibraryFeatures(features: FeatureDefinition[]): FeatureNodeItem[] {
   return features
-    .filter((f) => !f.hidden && !f.deprecated)
+    .filter((f) => !f.hidden && !f.deprecated && !f.flow_type)
     .map(featureToNodeItem);
 }
 

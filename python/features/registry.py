@@ -42,6 +42,7 @@ class ParamSpec:
     required: bool = True
     default: Any = None
     example: Any = None
+    choices: Optional[Dict[str, str]] = None  # {value: display_label} — renders as dropdown
 
 
 @dataclass

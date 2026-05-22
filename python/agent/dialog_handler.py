@@ -474,6 +474,12 @@ _SYSTEM_WINDOW_CLASSES = {
     "SystemSettings", "SearchPane", "MultitaskingViewFrame",
     "SnappedDesktop", "FlyoutNavPane",
     "Qt51515QWindowToolTipSaveBits", "Qt51515QWindowIcon",
+    # 终端/控制台窗口（常被误检为对话框）
+    "ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS",
+    "WindowsTerminal", "VirtualConsoleClass",
+    "XConsoleWindowClass", "WinConsoleWindowClass",
+    "ConEmu", "mintty", "PuTTY",
+    "WslWindowClass", "VcXsrv",
 }
 
 # 广泛匹配的弹窗标题关键词（多语言）
@@ -1093,6 +1099,16 @@ def handle_any_dialog(save_filename: str = "") -> str:
         "unhandlable" — 找到但为自绘界面，无法自动处理
         str(dlg_type) — 特定类型但处理失败
     """
+    global _DIALOG_SKIP_CACHE
+
+    # 定期清理过期缓存
+    now = time.time()
+    if _DIALOG_SKIP_CACHE:
+        expired = {h for h, ts in _DIALOG_SKIP_CACHE.items() if now - ts > _DIALOG_SKIP_COOLDOWN}
+        if expired:
+            for h in expired:
+                _DIALOG_SKIP_CACHE.pop(h, None)
+
     dialogs = find_all_dialogs()
     if not dialogs:
         return "not_found"
@@ -1103,6 +1119,12 @@ def handle_any_dialog(save_filename: str = "") -> str:
             dlg_title = getattr(dlg, "title", "")
             dlg_class = getattr(dlg, "class_name", "")
             dlg_btns = [b.get("text", "") for b in getattr(dlg, "buttons", [])]
+
+            # 冷却缓存内的 UNKNOWN / UNHANDLABLE 窗口直接跳过
+            hwnd = _get_hwnd(dlg)
+            if dlg_type in (UNKNOWN, UNHANDLABLE) and hwnd and hwnd in _DIALOG_SKIP_CACHE:
+                continue
+
             logger.info("Found: type=%s title=%s class=%s btns=%s",
                          dlg_type, dlg_title, dlg_class, dlg_btns)
         except Exception:
@@ -1110,6 +1132,9 @@ def handle_any_dialog(save_filename: str = "") -> str:
 
         try:
             if dlg.dialog_type == UNHANDLABLE:
+                hwnd = _get_hwnd(dlg)
+                if hwnd:
+                    _DIALOG_SKIP_CACHE[hwnd] = time.time()
                 handle_unhandlable(dlg)
                 continue  # 不自绘对话框继续处理其他对话框
 
@@ -1142,6 +1167,10 @@ def handle_any_dialog(save_filename: str = "") -> str:
                 # Unknown dialog — try all strategies
                 if _handle_unknown(dlg):
                     return "handled"
+                # 无法处理的 UNKNOWN 窗口加入冷却缓存避免刷日志
+                hwnd = _get_hwnd(dlg)
+                if hwnd:
+                    _DIALOG_SKIP_CACHE[hwnd] = time.time()
 
         except Exception as e:
             logger.warning("Error handling %s: %s", dlg.dialog_type, e)
@@ -1195,6 +1224,11 @@ _monitor_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 _seen_hwnds: set[int] = set()
 _monitor_save_dir: Optional[str] = None
+
+# 非对话框窗口冷却缓存：hwnd → timestamp，防止重复扫描同一窗口刷日志
+# 被标记为 UNKNOWN 或 UNHANDLABLE 的窗口在 COOLDOWN 秒内不再处理/记录
+_DIALOG_SKIP_CACHE: dict[int, float] = {}
+_DIALOG_SKIP_COOLDOWN = 30.0  # 跳过同一非对话框窗口的秒数
 
 
 def start_dialog_monitor(save_dir: Optional[str] = None) -> None:

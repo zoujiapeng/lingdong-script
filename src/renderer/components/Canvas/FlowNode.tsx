@@ -35,6 +35,32 @@ function getNodeSummary(node: FlowNodeType): string {
       const methodLabel = p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击';
       return `OCR「${txt.substring(0, 16)}${txt.length > 16 ? '…' : ''}」 ${methodLabel}`;
     }
+    case 'click_action': {
+      if (p.mode === 'image') {
+        const targets = p.targets || [];
+        if (!targets.length) return '图片点击: 未设目标';
+        const names = targets.slice(0, 2).map((t: any) => (t.path||'').split(/[\\/]/).pop()).filter(Boolean);
+        return `图片点击: ${names.join(',')}${targets.length>2?'…':''} ${p.similarity}%`;
+      }
+      if (p.mode === 'text') return `文本点击: 「${(p.text||'').substring(0,12)}」`;
+      const methodL = p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击';
+      return `坐标(${p.x},${p.y}) ${methodL}`;
+    }
+    case 'mouse_operation': {
+      const sub = p.sub_operation || 'click';
+      if (sub === 'scroll') return `滚轮: ${p.scroll_direction || 'down'} ${p.scroll_amount || 3}格`;
+      if (sub === 'hover') return `悬停 (${p.hover_x},${p.hover_y}) ${p.hover_duration || 0.5}s`;
+      if (sub === 'move') return `移动至 (${p.move_x},${p.move_y})`;
+      // click
+      if (p.mode === 'image') {
+        const targets = p.targets || [];
+        if (!targets.length) return '点击: 未设目标';
+        return `点击图片: ${targets.map((t: any)=>t.path||'').join(',')}`;
+      }
+      if (p.mode === 'text') return `点击文字: 「${(p.text||'').substring(0,12)}」`;
+      const mLabel: Record<string,string> = {single:'单击',double:'双击',right:'右击',middle:'中键',triple:'三击'};
+      return `点击 (${p.x},${p.y}) ${mLabel[p.method] || p.method}`;
+    }
     case 'screenshot':
       return `保存截图`;
     case 'popup_close': {
@@ -63,6 +89,16 @@ function getNodeSummary(node: FlowNodeType): string {
       return `音量: ${p.level ?? 50}%`;
     case 'volume_mute':
       return p.mute === null ? '切换静音' : p.mute ? '静音' : '取消静音';
+    case 'process_action': {
+      const labels: Record<string, string> = { launch:'启动', kill:'终止', wait_start:'等待启动', wait_exit:'等待退出', focus:'激活窗口' };
+      const a = p.action || 'launch';
+      if (a === 'launch') return `启动: ${p.target || '未设置'}`;
+      if (a === 'kill') return `终止: ${p.name || '未设置'}${p.force ? '(强制)' : ''}`;
+      if (a === 'focus') return `激活窗口: ${p.title || '未设置'}`;
+      if (a === 'wait_start') return `等待启动: ${p.name || '未设置'} (超时${p.timeout??30}s)`;
+      if (a === 'wait_exit') return `等待退出: ${p.name || '未设置'} (超时${p.timeout??30}s)`;
+      return `${labels[a]||a}: ${p.name||p.target||''}`;
+    }
     case 'launch_program':
       return `启动: ${p.target || '未设置'}`;
     case 'kill_process':
@@ -90,14 +126,51 @@ function getNodeSummary(node: FlowNodeType): string {
     case 'clipboard_get':
       return '读取剪贴板文本';
     case 'window_control': {
-      const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', close: '关闭', resize: '调整大小' };
-      return `窗口${opLabels[p.operation] || p.operation}${p.title ? ': ' + p.title : ''}`;
+      const opLabels: Record<string, string> = { minimize: '最小化', maximize: '最大化', close: '关闭', resize: '调整大小', restore: '还原', snap: '贴靠' };
+      const op = p.operation || 'minimize';
+      if (op === 'snap') return `窗口贴靠${p.snap_position||'左'}: ${p.title||'当前窗口'}`;
+      return `窗口${opLabels[op] || op}${p.title ? ': ' + p.title : ''}`;
+    }
+    case 'system_power': {
+      const al: Record<string, string> = { shutdown:'关机', reboot:'重启', logoff:'注销', hibernate:'休眠', lock_workstation:'锁定', system_sleep:'睡眠', display_off:'关闭显示器' };
+      return `系统电源: ${al[p.action] || p.action}${p.delay_seconds ? ' (延迟'+p.delay_seconds+'s)' : ''}`;
+    }
+    case 'audio_action':
+      return p.action === 'volume_mute'
+        ? (p.mute === null ? '切换静音' : p.mute ? '静音' : '取消静音')
+        : `音量: ${p.level ?? 50}%`;
+    case 'desktop_action': {
+      const al: Record<string, string> = { show_desktop:'显示桌面', set_wallpaper:'设置壁纸', empty_recycle_bin:'清空回收站' };
+      return p.action === 'set_wallpaper' ? `${al[p.action]||'壁纸'}: ${p.path||'未设置'}` : (al[p.action] || p.action);
+    }
+    case 'clipboard_action': {
+      const ca: Record<string, string> = { set:'剪贴板写入', get:'读取剪贴板文本', get_image:'获取剪贴板图片', get_files:'获取剪贴板文件', clear:'清空剪贴板' };
+      const sub = p.action || 'get';
+      if (sub === 'set') return `剪贴板写入: "${(p.text||'').substring(0,20)}${p.text?.length>20?'…':''}"`;
+      if (sub === 'get_image') return `获取剪贴板图片${p.format_==='file'?' → '+p.save_path:''}`;
+      return ca[sub] || '剪贴板操作';
+    }
+    case 'dialog_action': {
+      const da: Record<string, string> = { handle:'处理对话框', list:'列出对话框', take_action:'操作对话框', fill_save:'填写保存对话框' };
+      const sub = da[p.action] || p.action || '处理对话框';
+      return p.action === 'fill_save' ? `${sub}: ${p.path||''}` : sub;
+    }
+    case 'a11y_action': {
+      const aa: Record<string, string> = { get_tree:'获取无障碍树', find_element:'查找元素', click_element:'点击元素' };
+      return p.action === 'get_tree' ? `无障碍树 (深度${p.max_depth||5})` : `${aa[p.action]||p.action}: ${p.name||''}`;
+    }
+    case 'wifi_action': {
+      const wa: Record<string, string> = { list:'列出网络', connect:'连接WiFi', disconnect:'断开WiFi' };
+      return p.action === 'connect' ? `连接: ${p.ssid||''}` : (wa[p.action] || 'WiFi操作');
     }
     case 'web_browser': {
       const actionLabels: Record<string, string> = { navigate: '导航', click: '点击', input_text: '输入', screenshot: '截图', wait: '等待', extract: '提取', scroll: '滚动' };
       const action = actionLabels[(p as any).action] || p.action || '未知';
       const target = p.action === 'navigate' ? ((p as any).url || '').substring(0, 30) : (p as any).selector || '';
       return `🌐 ${action}: ${target}`;
+    }
+    case 'tool_call': {
+      return p.feature_name ? `${p.feature_name}` : '(调用工具)';
     }
     default: return `(${node.type})`;
   }

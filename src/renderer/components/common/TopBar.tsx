@@ -6,6 +6,7 @@ import {
 import { useStore, loadCustomTemplates, saveCustomTemplates } from '../../store';
 import { MacroPanel } from './MacroPanel';
 import { LearnedTargetPanel } from './LearnedTargetPanel';
+import { TemplateMarketDialog } from './TemplateMarketDialog';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
@@ -46,6 +47,9 @@ export const TopBar = React.memo(function TopBar() {
   const newScript = useStore(s => s.newScript);
   const stopRecording = useStore(s => s.stopRecording);
   const toggleLearnedPanel = useStore(s => s.toggleLearnedPanel);
+  const crystallizedTemplates = useStore(s => s.crystallizedTemplates);
+  const fetchCrystallizedTemplates = useStore(s => s.fetchCrystallizedTemplates);
+  const newCrystallizedCount = useStore(s => s.newCrystallizedCount);
   const stepOver = useStore(s => s.stepOver);
   const isPaused = executionStatus === 'paused';
   const breakpoints = useStore(s => s.execution.breakpoints);
@@ -57,6 +61,11 @@ export const TopBar = React.memo(function TopBar() {
   const [showMacroPanel, setShowMacroPanel] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Fetch crystallized templates when dropdown opens
+  useEffect(() => {
+    if (showTemplates) fetchCrystallizedTemplates();
+  }, [showTemplates, fetchCrystallizedTemplates]);
 
   // Handle native menu actions (Ctrl+N/O/S from menu bar)
   useEffect(() => {
@@ -147,6 +156,20 @@ export const TopBar = React.memo(function TopBar() {
     setShowTemplates(false);
   };
 
+  const handleCrystallizedTemplate = async (tpl: { path: string }) => {
+    try {
+      const api = (window as any).electronAPI;
+      const content = api?.readFile ? await api.readFile(tpl.path) : null;
+      if (content) {
+        const script = JSON.parse(content);
+        loadScript(script);
+      }
+    } catch (e) {
+      console.error('[TopBar] 加载结晶模板失败:', e);
+    }
+    setShowTemplates(false);
+  };
+
   const handleSaveAsTemplate = () => {
     const name = templateName.trim();
     if (!name) return;
@@ -154,6 +177,12 @@ export const TopBar = React.memo(function TopBar() {
     setTemplateName('');
     setSavingName(false);
     setShowTemplates(false);
+  };
+
+  const [marketOpen, setMarketOpen] = useState(false);
+  const handleMarketOpen = () => {
+    setShowTemplates(false);
+    setMarketOpen(true);
   };
 
   const handleDeleteCustomTemplate = (e: React.MouseEvent, id: string) => {
@@ -272,6 +301,29 @@ export const TopBar = React.memo(function TopBar() {
                 );
               })()}
 
+              {/* Crystallized templates (auto-generated from execution) */}
+              {crystallizedTemplates.length > 0 && (
+                <>
+                  <div style={{ height: 1, background: 'var(--border-primary)', margin: '4px 0' }} />
+                  <div style={{ padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>
+                    <Zap size={11} style={{ marginRight: 4, color: '#f59e0b' }} />
+                    最近结晶
+                    <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>
+                      (执行后自动生成)
+                    </span>
+                  </div>
+                  {crystallizedTemplates.slice(0, 10).map((tpl: any) => (
+                    <button key={tpl.id} className="dropdown-item" onClick={() => handleCrystallizedTemplate(tpl)}>
+                      <div className="dropdown-item-title">{tpl.name}</div>
+                      <div className="dropdown-item-desc">
+                        {tpl.description || tpl.id}
+                        {tpl.created && <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontSize: 9 }}>{new Date(tpl.created).toLocaleDateString()}</span>}
+                      </div>
+                    </button>
+                  ))}
+                </>
+              )}
+
               {/* Save as template */}
               <div style={{ height: 1, background: 'var(--border-primary)', margin: '4px 0' }} />
               {savingName ? (
@@ -298,6 +350,11 @@ export const TopBar = React.memo(function TopBar() {
                   保存当前为模板
                 </button>
               )}
+              {/* 从市场安装 */}
+              <button className="dropdown-item" onClick={handleMarketOpen} style={{ color: 'var(--text-muted)' }}>
+                <Download size={14} />
+                从市场安装...
+              </button>
             </div>
           )}
         </div>
@@ -387,8 +444,25 @@ export const TopBar = React.memo(function TopBar() {
           className="btn btn-ghost btn-icon"
           onClick={toggleLearnedPanel}
           title="已学习目标"
+          style={{ position: 'relative' }}
         >
           <Brain size={15} />
+          {newCrystallizedCount > 0 && (
+            <span style={{
+              position: 'absolute', top: 2, right: 2,
+              width: 7, height: 7, borderRadius: '50%',
+              background: '#f59e0b',
+            }} />
+          )}
+        </button>
+        {/* 脚本触发配置按钮 — 始终可见 */}
+        <button
+          className="btn btn-ghost btn-icon"
+          onClick={() => setUI({ show_trigger_config: !useStore.getState().ui.show_trigger_config })}
+          title="定时/触发配置"
+          style={{ position: 'relative' }}
+        >
+          <Zap size={15} style={{ color: useStore.getState().scriptTriggers.length > 0 ? '#f59e0b' : 'var(--text-muted)' }} />
         </button>
         <button
           className="btn btn-ghost btn-icon"
@@ -402,6 +476,9 @@ export const TopBar = React.memo(function TopBar() {
       {/* Macro Panel */}
       {(showMacroPanel || recordingActive) && <MacroPanel />}
       <LearnedTargetPanel />
+
+      {/* ── 模板市场对话框 ── */}
+      {marketOpen && <TemplateMarketDialog onClose={() => setMarketOpen(false)} />}
     </div>
   );
 });

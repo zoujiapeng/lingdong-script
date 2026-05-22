@@ -29,6 +29,7 @@ def _ffmpeg_available() -> bool:
     params=[],
     returns="list[dict{name, volume, muted}] - 应用音量列表",
     tags=["multimedia", "audio"],
+    hidden=True,
 )
 def audio_volume_get() -> dict:
     try:

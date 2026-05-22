@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
+import { List } from 'lucide-react';
 
 interface StepData {
   step_num: number;
@@ -31,6 +32,22 @@ export function AgentView() {
   const [log, setLog] = useState<LogEntry[]>(() => _persistedLog);
   const [guidance, setGuidance] = useState('');
   const msgEndRef = useRef<HTMLDivElement>(null);
+
+  // Agent tool explorer
+  const [showTools, setShowTools] = useState(false);
+  const [agentTools, setAgentTools] = useState<string[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(false);
+
+  const loadAgentTools = async () => {
+    setToolsLoading(true);
+    try {
+      const api = (window as any).electronAPI;
+      const r = await api?.callFeature?.('list_features', { category: 'agent' }) || await api?.callFeature?.('list_features', {});
+      const list = Array.isArray(r) ? r : r?.result || [];
+      setAgentTools(list.map((f: any) => f.name || f));
+    } catch { setAgentTools([]); }
+    setToolsLoading(false);
+  };
 
   // Persist goal to sessionStorage so it survives navigation
   const handleSetGoal = useCallback((val: string) => {
@@ -206,6 +223,10 @@ export function AgentView() {
         </svg>
         <span>AI Agent</span>
         <span className="agent-status online">● {running ? '运行中' : '就绪'}</span>
+        <button className="btn btn-ghost btn-icon" onClick={() => { setShowTools(true); loadAgentTools(); }}
+          style={{ marginLeft: 8, width: 22, height: 22 }} title="可用 Agent 工具">
+          <List size={12} />
+        </button>
       </div>
 
       <div className="agent-body">
@@ -311,6 +332,55 @@ export function AgentView() {
           </div>
         )}
       </div>
+
+      {/* Agent Tool Explorer */}
+      {showTools && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1100,
+          background: 'rgba(0,0,0,0.4)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
+        }} onClick={() => setShowTools(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: 'var(--bg-primary)', borderRadius: 12,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+            width: 440, maxHeight: '70vh', display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{
+              padding: '14px 16px', borderBottom: '1px solid var(--border-primary)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              fontSize: 15, fontWeight: 600,
+            }}>
+              <span>Agent 可用工具</span>
+              <button className="btn btn-ghost btn-icon" onClick={() => setShowTools(false)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <div style={{ padding: '8px 16px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-primary)' }}>
+              Agent 在执行任务时可调用以下后端工具
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', padding: 8 }}>
+              {toolsLoading ? (
+                <div style={{ textAlign: 'center', padding: 20, fontSize: 12, color: 'var(--text-muted)' }}>加载中...</div>
+              ) : agentTools.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 20, fontSize: 12, color: 'var(--text-muted)' }}>
+                  暂无数据<br />
+                  <span style={{ fontSize: 11 }}>可通过 MCP: <code>list_features</code> 获取完整工具列表</span>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                  {agentTools.map((name: string) => (
+                    <span key={name} style={{
+                      fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                      background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
+                      color: 'var(--text-primary)',
+                    }}>{name}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

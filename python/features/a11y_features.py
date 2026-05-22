@@ -97,6 +97,7 @@ def _walk_tree(ctrl, depth: int, max_depth: int, filter_visible: bool):
     ],
     returns="dict{role, name, children} - 无障碍树",
     tags=["a11y", "uia"],
+    hidden=True,
 )
 def a11y_get_tree(max_depth: int = 5, filter_visible: bool = True) -> dict:
     try:
@@ -156,6 +157,7 @@ def _control_to_dict(ctrl) -> dict:
     ],
     returns="list[dict{name, role, bounds, enabled}] - 匹配元素列表",
     tags=["a11y", "uia"],
+    hidden=True,
 )
 def a11y_find_element(name: str, role: str = "", control_type: str = "") -> dict:
     try:
@@ -182,6 +184,7 @@ def a11y_find_element(name: str, role: str = "", control_type: str = "") -> dict
     ],
     returns="bool - 是否点击成功",
     tags=["a11y", "uia"],
+    hidden=True,
 )
 def a11y_click_element(name: str, role: str = "") -> dict:
     try:

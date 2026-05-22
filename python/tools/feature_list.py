@@ -20,8 +20,10 @@ for f in registry.all():
         "description": f.description,
         "category": f.category.value,
         "params": [{"name": p.name, "type": p.type, "description": p.description,
-                     "required": p.required, "default": p.default, "example": p.example} for p in f.params],
+                     "required": p.required, "default": p.default, "example": p.example,
+                     "choices": p.choices} for p in f.params],
         "returns": f.returns,
+        "flow_type": f.flow_type,
         "deprecated": f.deprecated,
         "tags": f.tags,
     })

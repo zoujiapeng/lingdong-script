@@ -431,6 +431,165 @@ export function createFlowExecutor(
           break;
         }
 
+        // ── 聚合类型 ──
+        case 'system_power': {
+          const action = params.action || 'shutdown';
+          log('info', `系统电源: ${action}`, nodeId);
+          await delay(100);
+          result = 'output';
+          break;
+        }
+        case 'audio_action': {
+          log('info', params.action === 'volume_mute' ? '静音控制' : `音量: ${params.level ?? 50}%`, nodeId);
+          await delay(100);
+          result = 'output';
+          break;
+        }
+        case 'desktop_action': {
+          const al: Record<string, string> = { show_desktop:'显示桌面', set_wallpaper:'设置壁纸', empty_recycle_bin:'清空回收站' };
+          log('info', al[params.action] || params.action || '桌面操作', nodeId);
+          await delay(100);
+          result = 'output';
+          break;
+        }
+        case 'clipboard_action': {
+          const clipLogs: Record<string, string> = { set:'写入剪贴板', get:'读取剪贴板', get_image:'获取剪贴板图片', get_files:'获取剪贴板文件列表', clear:'清空剪贴板' };
+          const clipFn: Record<string, string> = { set:'clipboard_set_text', get:'clipboard_get_text', get_image:'clipboard_get_image', get_files:'clipboard_get_files', clear:'clipboard_clear' };
+          const sub = params.action || 'get';
+          log('info', clipLogs[sub] || '剪贴板操作', nodeId);
+          const cw = window as any;
+          if (cw.electronAPI?.callFeature) {
+            try {
+              const cp: any = {};
+              if (sub === 'set') cp.text = params.text || '';
+              if (sub === 'get_image') { cp.format_ = params.format_ || 'base64'; cp.save_path = params.save_path || ''; }
+              const res = await cw.electronAPI.callFeature(clipFn[sub] || 'clipboard_get_text', cp);
+              log('info', `剪贴板结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) { log('error', `剪贴板操作失败: ${e.message}`, nodeId); }
+          } else { log('warn', `剪贴板操作模拟: ${clipLogs[sub]}`, nodeId); await delay(100); }
+          result = 'output';
+          break;
+        }
+        case 'window_control': {
+          const winLogs: Record<string, string> = { minimize:'最小化窗口', maximize:'最大化窗口', restore:'还原窗口', close:'关闭窗口', resize:'调整窗口大小', snap:'贴靠窗口' };
+          const winFn: Record<string, string> = { minimize:'window_minimize', maximize:'window_maximize', restore:'window_restore', close:'window_close', resize:'window_resize', snap:'window_snap' };
+          const op = params.operation || 'minimize';
+          log('info', winLogs[op] || '窗口操作', nodeId);
+          const ww = window as any;
+          if (ww.electronAPI?.callFeature) {
+            try {
+              const wp: any = { title: params.title || '' };
+              if (op === 'resize') { wp.width = params.width ?? 800; wp.height = params.height ?? 600; }
+              if (op === 'snap') wp.position = params.snap_position || 'left';
+              const res = await ww.electronAPI.callFeature(winFn[op] || 'window_minimize', wp);
+              log('info', `窗口操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) { log('error', `窗口操作失败: ${e.message}`, nodeId); }
+          } else { log('warn', `窗口操作模拟: ${winLogs[op]}`, nodeId); await delay(300); }
+          result = 'output';
+          break;
+        }
+        case 'process_action': {
+          const al: Record<string, string> = { launch:'启动程序', kill:'终止进程', wait_start:'等待启动', wait_exit:'等待退出', focus:'激活窗口' };
+          log('info', `${al[params.action] || params.action}: ${params.target || params.name || params.title || ''}`, nodeId);
+          await delay(100);
+          result = 'output';
+          break;
+        }
+
+        case 'click_action': {
+          const mode = params.mode || 'coordinate';
+          if (mode === 'image') {
+            const target = (params.targets || [])[0];
+            const fname = target ? target.path.split(/[\\/]/).pop() : '未知';
+            log('info', `检测图片: ${fname}`, nodeId);
+            await delay(200);
+          } else if (mode === 'text') {
+            log('info', `OCR点击文本: "${(params.text || '').substring(0, 30)}"`, nodeId);
+            await delay(300);
+            await delay((params.delay_after || 0.5) * 1000);
+          } else {
+            log('info', `点击: (${params.x}, ${params.y}) [${params.method}]`, nodeId);
+            await delay(200);
+            await delay((params.delay_after || 0.5) * 1000);
+          }
+          result = 'output';
+          break;
+        }
+
+        case 'mouse_operation': {
+          const sub = params.sub_operation || 'click';
+          if (sub === 'scroll') {
+            log('info', `滚轮: ${params.scroll_direction || 'down'} ${params.scroll_amount || 3}格`, nodeId);
+          } else if (sub === 'hover') {
+            log('info', `悬停 (${params.hover_x},${params.hover_y}) ${params.hover_duration || 0.5}s`, nodeId);
+          } else if (sub === 'move') {
+            log('info', `移动至 (${params.move_x},${params.move_y})`, nodeId);
+          } else {
+            log('info', `点击: (${params.x}, ${params.y}) [${params.method}]`, nodeId);
+          }
+          await delay(200);
+          await delay((params.delay_after || 0.5) * 1000);
+          result = 'output';
+          break;
+        }
+
+        case 'dialog_action': {
+          log('info', `对话框操作: ${params.action || 'handle'}`, nodeId);
+          const win = window as any;
+          if (win.electronAPI?.callFeature) {
+            try {
+              const featureName = params.action === 'handle' ? 'handle_dialog'
+                : params.action === 'list' ? 'dialog_list'
+                : params.action === 'take_action' ? 'dialog_take_action'
+                : 'fill_save_dialog';
+              const featureParams: any = {};
+              if (params.action === 'handle') featureParams.timeout = params.timeout ?? 10;
+              if (params.action === 'take_action') { featureParams.action = `click:${params.button || ''}`; featureParams.timeout = params.timeout ?? 10; }
+              if (params.action === 'fill_save') { featureParams.filepath = params.path || ''; featureParams.timeout = params.timeout ?? 10; }
+              const res = await win.electronAPI.callFeature(featureName, featureParams);
+              log('info', `对话框结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) { log('error', `对话框操作失败: ${e.message}`, nodeId); }
+          } else { log('warn', '对话框操作模拟', nodeId); await delay(300); }
+          result = 'output';
+          break;
+        }
+        case 'a11y_action': {
+          log('info', `无障碍操作: ${params.action || 'get_tree'}`, nodeId);
+          const win2 = window as any;
+          if (win2.electronAPI?.callFeature) {
+            try {
+              const fn = params.action === 'get_tree' ? 'a11y_get_tree'
+                : params.action === 'find_element' ? 'a11y_find_element'
+                : 'a11y_click_element';
+              const fp: any = {};
+              if (params.action === 'get_tree') { fp.max_depth = params.max_depth ?? 5; fp.filter_visible = params.filter_visible !== false; }
+              if (params.action !== 'get_tree') fp.name = params.name || '';
+              if (params.action === 'find_element') { fp.role = params.role || ''; fp.control_type = params.control_type || ''; }
+              if (params.action === 'click_element') fp.role = params.role || '';
+              const res = await win2.electronAPI.callFeature(fn, fp);
+              log('info', `无障碍结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) { log('error', `无障碍操作失败: ${e.message}`, nodeId); }
+          } else { log('warn', '无障碍操作模拟', nodeId); await delay(300); }
+          result = 'output';
+          break;
+        }
+        case 'wifi_action': {
+          log('info', `WiFi操作: ${params.action || 'list'}`, nodeId);
+          const win3 = window as any;
+          if (win3.electronAPI?.callFeature) {
+            try {
+              const fn = params.action === 'list' ? 'wifi_list'
+                : params.action === 'connect' ? 'wifi_connect'
+                : 'wifi_disconnect';
+              const fp: any = {};
+              if (params.action === 'connect') { fp.ssid = params.ssid || ''; fp.password = params.password || ''; }
+              const res = await win3.electronAPI.callFeature(fn, fp);
+              log('info', `WiFi结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            } catch (e: any) { log('error', `WiFi操作失败: ${e.message}`, nodeId); }
+          } else { log('warn', 'WiFi操作模拟', nodeId); await delay(300); }
+          result = 'output';
+          break;
+        }
         default:
           // System command types → forward to @feature via callFeature
           const FEATURE_MAP: Record<string, string> = {

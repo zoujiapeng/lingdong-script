@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useStore } from '../../store';
-import { Play, Trash2, X, RotateCcw } from 'lucide-react';
+import { Play, Trash2, X, RotateCcw, Eye, Loader2, CheckCircle } from 'lucide-react';
 
 export function MacroPanel() {
   const {
@@ -8,6 +8,11 @@ export function MacroPanel() {
     listMacros, playMacro, deleteMacro, convertMacroToFlow,
     startRecording, stopRecording,
   } = useStore();
+
+  // Visual macro
+  const [visualRecording, setVisualRecording] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [extractMsg, setExtractMsg] = useState('');
 
   useEffect(() => {
     useStore.getState().listMacros();
@@ -60,25 +65,54 @@ export function MacroPanel() {
       {/* Record controls */}
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border-primary)' }}>
         {recording.active ? (
-          <button
-            className="btn btn-danger"
-            onClick={stopRecording}
-            style={{ width: '100%', gap: 6 }}
-          >
+          <button className="btn btn-danger" onClick={stopRecording} style={{ width: '100%', gap: 6 }}>
             <RotateCcw size={14} />
             停止录制 (F6)
           </button>
         ) : (
-          <button
-            className="btn btn-success"
-            onClick={() => startRecording()}
-            style={{ width: '100%', gap: 6 }}
-          >
-            <span style={{
-              width: 10, height: 10, borderRadius: '50%', background: '#fff',
-            }} />
+          <button className="btn btn-success" onClick={() => startRecording()} style={{ width: '100%', gap: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#fff' }} />
             开始录制 (F6)
           </button>
+        )}
+
+        {/* Visual macro toggle */}
+        <div style={{ marginTop: 8, display: 'flex', gap: 4, alignItems: 'center' }}>
+          <button className={`btn btn-ghost ${visualRecording ? 'active' : ''}`}
+            onClick={async () => {
+              if (visualRecording) {
+                await (window as any).electronAPI?.callFeature('macro_stop_visual_recording', {});
+                setVisualRecording(false);
+                setTimeout(() => listMacros?.(), 300);
+              } else {
+                await (window as any).electronAPI?.callFeature('macro_start_visual_recording', {});
+                setVisualRecording(true);
+              }
+            }}
+            style={{ flex: 1, padding: '4px 8px', fontSize: 11, gap: 4,
+              borderColor: visualRecording ? 'var(--accent)' : undefined }}>
+            <Eye size={12} />
+            {visualRecording ? '停止视觉' : '视觉录制'}
+          </button>
+          <button className="btn btn-ghost"
+            onClick={async () => {
+              setExtracting(true); setExtractMsg('');
+              try {
+                const r = await (window as any).electronAPI?.callFeature('macro_extract_visual_templates', {});
+                setExtractMsg(r?.success || r?.ok ? '提取完成' : '无新模板');
+              } catch { setExtractMsg('失败'); }
+              setExtracting(false);
+            }}
+            disabled={extracting}
+            style={{ padding: '4px 8px', fontSize: 11, gap: 4 }}>
+            {extracting ? <Loader2 size={11} className="spin" /> : <CheckCircle size={12} />}
+            提取模板
+          </button>
+        </div>
+        {extractMsg && (
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4, textAlign: 'center' }}>
+            {extractMsg}
+          </div>
         )}
       </div>
 

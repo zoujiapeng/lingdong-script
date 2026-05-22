@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain, Volume2, Sun as SunIcon, Wifi, Package, Activity } from 'lucide-react';
 import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
 const BASE_STORAGE = 'lingdong-llm-base';
 const MODEL_STORAGE = 'lingdong-llm-model';
 const MULTIMODAL_STORAGE = 'lingdong-llm-multimodal';
+const VISION_BACKEND_STORAGE = 'lingdong-vision-backend';
 
 function getStoredKey(): string {
   try { return localStorage.getItem(KEY_STORAGE) || ''; } catch { return ''; }
@@ -33,6 +34,12 @@ function getStoredMultimodal(): boolean {
 function storeMultimodal(val: boolean) {
   try { localStorage.setItem(MULTIMODAL_STORAGE, val ? 'true' : 'false'); } catch {}
 }
+function getStoredVisionBackend(): string {
+  try { return localStorage.getItem(VISION_BACKEND_STORAGE) || 'gpt-4o-mini'; } catch { return 'gpt-4o-mini'; }
+}
+function storeVisionBackend(val: string) {
+  try { localStorage.setItem(VISION_BACKEND_STORAGE, val); } catch {}
+}
 
 const VERIFY_STORAGE = 'lingdong-verify-enabled';
 function getStoredVerify(): boolean {
@@ -56,6 +63,7 @@ export function SettingsPanel() {
   const [apiBase, setApiBase] = useState(() => getStoredBase());
   const [model, setModel] = useState(() => getStoredModel());
   const [multimodal, setMultimodal] = useState(() => getStoredMultimodal());
+  const [visionBackend, setVisionBackend] = useState(() => getStoredVisionBackend());
   const [verifyEnabled, setVerifyEnabled] = useState(() => getStoredVerify());
   const [autoLearn, setAutoLearn] = useState(() => getStoredAutoLearn());
   const [apiKeySaved, setApiKeySaved] = useState(false);
@@ -67,6 +75,26 @@ export function SettingsPanel() {
   const [showScheduleDialog, setShowScheduleDialog] = useState(false);
   const [scheduleLoading, setScheduleLoading] = useState(true);
   const [schedulesError, setSchedulesError] = useState('');
+
+  // ── 保险库 ──
+  const [vaultItems, setVaultItems] = useState<{key: string; created: string}[]>([]);
+  const [vaultNewKey, setVaultNewKey] = useState('');
+  const [vaultNewVal, setVaultNewVal] = useState('');
+  const [vaultShowAdd, setVaultShowAdd] = useState(false);
+  const [vaultLoading, setVaultLoading] = useState(false);
+
+  // ── 系统控制 ──
+  const [volume, setVolume] = useState(100);
+  const [brightness, setBrightness] = useState(100);
+  const [wifiNetworks, setWifiNetworks] = useState<any[]>([]);
+  const [wifiScanning, setWifiScanning] = useState(false);
+
+  // ── 插件 ──
+  const [plugins, setPlugins] = useState<any[]>([]);
+  const [pluginLoading, setPluginLoading] = useState(false);
+
+  // ── 高级功能折叠 ──
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     (window as any).electronAPI?.getAutoStart().then(setAutoStart).catch(() => {});
@@ -92,6 +120,52 @@ export function SettingsPanel() {
     }
   };
 
+  const loadVault = async () => {
+    setVaultLoading(true);
+    try {
+      const api = (window as any).electronAPI;
+      if (!api?.callFeature) return;
+      const r = await api.callFeature('exec_vault_list', {});
+      setVaultItems(Array.isArray(r) ? r : (Array.isArray(r?.result) ? r.result : []));
+    } catch {}
+    setVaultLoading(false);
+  };
+
+  const saveVaultItem = async () => {
+    if (!vaultNewKey.trim() || !vaultNewVal.trim()) return;
+    try {
+      const api = (window as any).electronAPI;
+      await api?.callFeature('exec_vault_set', { key: vaultNewKey.trim(), value: vaultNewVal.trim() });
+      setVaultNewKey(''); setVaultNewVal(''); setVaultShowAdd(false);
+      loadVault();
+    } catch {}
+  };
+
+  const deleteVaultItem = async (key: string) => {
+    try {
+      await (window as any).electronAPI?.callFeature('exec_vault_set', { key, value: '' });
+      loadVault();
+    } catch {}
+  };
+
+  const toggleWifiScan = async () => {
+    setWifiScanning(true);
+    try {
+      const r = await (window as any).electronAPI?.callFeature('wifi_list', {});
+      setWifiNetworks(Array.isArray(r) ? r : r?.result || []);
+    } catch {}
+    setWifiScanning(false);
+  };
+
+  const loadPlugins = async () => {
+    setPluginLoading(true);
+    try {
+      const r = await (window as any).electronAPI?.callFeature('plugin_list', {});
+      setPlugins(Array.isArray(r) ? r : (Array.isArray(r?.result) ? r.result : []));
+    } catch {}
+    setPluginLoading(false);
+  };
+
   const toggleSchedule = async (id: string) => {
     const entry = schedules.find(s => s.id === id);
     if (!entry) return;
@@ -111,10 +185,12 @@ export function SettingsPanel() {
     storeBase(apiBase);
     storeModel(model);
     storeMultimodal(multimodal);
+    storeVisionBackend(visionBackend);
     (window as any).__DEEPSEEK_KEY__ = apiKey;
     (window as any).__LLM_API_BASE__ = apiBase;
     (window as any).__LLM_MODEL__ = model;
     (window as any).__LLM_MULTIMODAL__ = multimodal;
+    (window as any).__VLM_BACKEND__ = visionBackend;
     setApiKeySaved(true);
     setTimeout(() => setApiKeySaved(false), 2000);
   };
@@ -320,6 +396,26 @@ export function SettingsPanel() {
               启用后 AI 助手和 Agent 可使用截图分析、图像识别等视觉能力。
               需要模型支持多模态（如 GPT-4o、Claude 3.5+、Qwen-VL）。
               DeepSeek 等纯文本模型不支持多模态，开启后调用会出错。
+            </div>
+          )}
+          {multimodal && (
+            <div className="settings-row" style={{ paddingLeft: 28 }}>
+              <div className="settings-row-label">
+                <span style={{ fontSize: 13 }}>VLM 后端</span>
+              </div>
+              <select
+                value={visionBackend}
+                onChange={e => setVisionBackend(e.target.value)}
+                style={{
+                  fontSize: 12, padding: '2px 6px', borderRadius: 4,
+                  border: '1px solid var(--border-color)',
+                  background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+                  maxWidth: 160,
+                }}
+              >
+                <option value="gpt-4o-mini">GPT-4o-mini（默认）</option>
+                <option value="local">本地模型 (llama-server)</option>
+              </select>
             </div>
           )}
 
@@ -537,6 +633,136 @@ export function SettingsPanel() {
               新增定时任务
             </button>
           </div>
+        </section>
+
+        {/* ════════════════════════════ 高级功能 ════════════════════════════ */}
+        <section className="settings-section" style={{ marginTop: 12 }}>
+          <h3 className="settings-section-title" onClick={() => {
+            setShowAdvanced(!showAdvanced);
+            if (!showAdvanced) { loadVault(); loadPlugins(); }
+          }} style={{ cursor: 'pointer', userSelect: 'none' }}>
+            <Package size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+            高级功能（保险库 · 系统控制 · 插件）
+            <span style={{ float: 'right', fontSize: 11 }}>{showAdvanced ? '▲' : '▼'}</span>
+          </h3>
+          <div style={{ display: showAdvanced ? '' : 'none' }}>
+
+          {/* ── 保险库 ── */}
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Key size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+              凭据保险库（加密存储）
+            </h3>
+            {vaultLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 4 }}>加载中...</div>
+            ) : vaultItems.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 4 }}>暂无存储的凭据</div>
+            ) : (
+              vaultItems.map((item: any) => (
+                <div key={item.key} className="settings-row" style={{ padding: '4px 0' }}>
+                  <span style={{ fontSize: 13, flex: 1 }}>{item.key}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 8 }}>
+                    {item.created ? new Date(item.created).toLocaleDateString() : ''}
+                  </span>
+                  <button className="btn btn-ghost" onClick={() => deleteVaultItem(item.key)}
+                    style={{ padding: '2px 6px', fontSize: 11, color: 'var(--text-muted)' }}>
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              ))
+            )}
+            {vaultShowAdd ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 0' }}>
+                <input className="settings-input" value={vaultNewKey} onChange={e => setVaultNewKey(e.target.value)}
+                  placeholder="名称 (如: github_token)" style={{ width: '100%', fontSize: 12 }} />
+                <input className="settings-input" type="password" value={vaultNewVal} onChange={e => setVaultNewVal(e.target.value)}
+                  placeholder="值" style={{ width: '100%', fontSize: 12 }} />
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button className="btn btn-primary" onClick={saveVaultItem}
+                    style={{ padding: '4px 12px', fontSize: 11 }}>保存</button>
+                  <button className="btn btn-ghost" onClick={() => setVaultShowAdd(false)}
+                    style={{ padding: '4px 12px', fontSize: 11 }}>取消</button>
+                </div>
+              </div>
+            ) : (
+              <button className="btn btn-ghost" onClick={() => setVaultShowAdd(true)}
+                style={{ padding: '4px 12px', fontSize: 11, marginTop: 4 }}>
+                <Plus size={12} style={{ marginRight: 4 }} />新增
+              </button>
+            )}
+          </section>
+
+          {/* ── 系统控制 ── */}
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <SunIcon size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+              系统控制
+            </h3>
+            <div className="settings-row">
+              <div className="settings-row-label"><Volume2 size={14} /><span>系统音量</span></div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="range" min={0} max={100} value={volume}
+                  onChange={async e => {
+                    const v = parseInt(e.target.value); setVolume(v);
+                    await (window as any).electronAPI?.callFeature('volume_set', { level: v / 100 });
+                  }} style={{ width: 100 }} />
+                <span className="settings-value">{volume}%</span>
+              </div>
+            </div>
+            <div className="settings-row">
+              <div className="settings-row-label"><SunIcon size={14} /><span>屏幕亮度</span></div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="range" min={0} max={100} value={brightness}
+                  onChange={async e => {
+                    const v = parseInt(e.target.value); setBrightness(v);
+                    await (window as any).electronAPI?.callFeature('display_brightness', { level: v / 100 });
+                  }} style={{ width: 100 }} />
+                <span className="settings-value">{brightness}%</span>
+              </div>
+            </div>
+            <div className="settings-row">
+              <div className="settings-row-label"><Wifi size={14} /><span>Wi-Fi 网络</span></div>
+              <button className="btn btn-ghost" onClick={toggleWifiScan} disabled={wifiScanning}
+                style={{ padding: '4px 10px', fontSize: 11 }}>
+                {wifiScanning ? '扫描中...' : '扫描'}
+              </button>
+            </div>
+            {wifiNetworks.length > 0 && (
+              <div style={{ maxHeight: 120, overflow: 'auto', fontSize: 11, marginTop: 4 }}>
+                {wifiNetworks.slice(0, 10).map((w: any) => (
+                  <div key={w.ssid || w.bssid} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 4px' }}>
+                    <span>{w.ssid || '(隐藏)'}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      {w.signal_level !== undefined ? `${Math.round(w.signal_level * 100)}%` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* ── 插件 ── */}
+          <section className="settings-section">
+            <h3 className="settings-section-title">
+              <Package size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+              插件
+            </h3>
+            {pluginLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 4 }}>加载中...</div>
+            ) : plugins.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: 4 }}>无已加载插件</div>
+            ) : (
+              plugins.map((p: any) => (
+                <div key={p.name || p.path} className="settings-row" style={{ padding: '4px 0' }}>
+                  <span style={{ fontSize: 13, flex: 1 }}>{p.name || p.path}</span>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    {p.status || (p.loaded ? '已加载' : '')}
+                  </span>
+                </div>
+              ))
+            )}
+          </section>
+        </div>
         </section>
       </div>
 

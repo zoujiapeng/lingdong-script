@@ -60,6 +60,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     const methodMatch = rest.match(/(?:\b|(?<=\s))(single|double|right|middle|单击|双击|右击|中键)(?:\b|(?=\s|$))/i);
 
     const params: any = {
+      mode: 'image',
       targets,
       similarity: simMatch ? parseInt(simMatch[1]) : 90,
       timeout: timeoutMatch ? parseFloat(timeoutMatch[1]) : 5,
@@ -69,24 +70,25 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
     if (methodMatch) {
       const m = methodMatch[1].toLowerCase();
-      params.method = { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle' }[m] || m;
+      params.method = { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle', '三击': 'triple' }[m] || m;
     }
-    return { type: 'image_click', params };
+    return { type: 'mouse_operation', params };
   }
 
   // click (x, y) [method] / 点击 (x, y) [method]
   // Also handle "点击图片" already caught above, so "点击" alone is click coordinate
-  const clickRe = /^(?:click|点击)\s+\((-?\d+)\s*,\s*(-?\d+)\)\s*(single|double|right|middle|单击|双击|右击|中键)?\s*(.*)?/i;
+  const clickRe = /^(?:click|点击)\s+\((-?\d+)\s*,\s*(-?\d+)\)\s*(single|double|right|middle|triple|单击|双击|右击|中键|三击)?\s*(.*)?/i;
   const clickMatch = line.match(clickRe);
   if (clickMatch) {
     const delayMatch = line.match(/(?:\b|(?<=\s|^))(?:delay|延迟)[=:](\d+(\.\d+)?)/i);
     const m = (clickMatch[3] || 'single').toLowerCase();
     return {
-      type: 'click',
+      type: 'mouse_operation',
       params: {
+        mode: 'coordinate',
         x: parseInt(clickMatch[1]),
         y: parseInt(clickMatch[2]),
-        method: { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle' }[m] || m,
+        method: { '单击': 'single', '双击': 'double', '右击': 'right', '中键': 'middle', '三击': 'triple' }[m] || m,
         delay_after: delayMatch ? parseFloat(delayMatch[1]) : 0.5,
       },
     };
@@ -195,10 +197,15 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   const clickTextMatch = line.match(clickTextRe);
   if (clickTextMatch) {
     return {
-      type: 'click_text',
+      type: 'mouse_operation',
       params: {
+        mode: 'text',
         text: clickTextMatch[1],
         similarity: clickTextMatch[2] ? parseInt(clickTextMatch[2]) : 85,
+        method: 'single',
+        offset_x: 0,
+        offset_y: 0,
+        timeout: 5,
         delay_after: 0.5,
       },
     };
@@ -301,33 +308,33 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
     };
   }
 
-  // ── 启动 "path" / launch "path" — launch_program feature ──
+  // ── 启动 "path" / launch "path" → process_action ──
   const launchRe = /^(?:启动|launch)\s+"([^"]*)"/i;
   const launchMatch = line.match(launchRe);
   if (launchMatch) {
     return {
-      type: 'launch_program',
-      params: { target: launchMatch[1] },
+      type: 'process_action',
+      params: { action: 'launch', target: launchMatch[1] },
     };
   }
 
-  // ── 激活 "title" / focus "title" — focus_window feature ──
+  // ── 激活 "title" / focus "title" → process_action ──
   const focusRe = /^(?:激活|聚焦|focus)\s+"([^"]*)"/i;
   const focusMatch = line.match(focusRe);
   if (focusMatch) {
     return {
-      type: 'focus_window',
-      params: { title: focusMatch[1] },
+      type: 'process_action',
+      params: { action: 'focus', title: focusMatch[1] },
     };
   }
 
-  // ── 终止 "name" / kill "name" — kill_process feature ──
+  // ── 终止 "name" / kill "name" → process_action ──
   const killRe = /^(?:终止|kill)\s+"([^"]*)"/i;
   const killMatch = line.match(killRe);
   if (killMatch) {
     return {
-      type: 'kill_process',
-      params: { name: killMatch[1] },
+      type: 'process_action',
+      params: { action: 'kill', name: killMatch[1] },
     };
   }
 
@@ -336,8 +343,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   const rightClickMatch = line.match(rightClickRe);
   if (rightClickMatch) {
     return {
-      type: 'click',
-      params: { x: parseInt(rightClickMatch[1]), y: parseInt(rightClickMatch[2]), method: 'right', delay_after: 0.5 },
+      type: 'mouse_operation',
+      params: { mode: 'coordinate', x: parseInt(rightClickMatch[1]), y: parseInt(rightClickMatch[2]), method: 'right', delay_after: 0.5 },
     };
   }
 
@@ -346,8 +353,8 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   const doubleClickMatch = line.match(doubleClickRe);
   if (doubleClickMatch) {
     return {
-      type: 'click',
-      params: { x: parseInt(doubleClickMatch[1]), y: parseInt(doubleClickMatch[2]), method: 'double', delay_after: 0.5 },
+      type: 'mouse_operation',
+      params: { mode: 'coordinate', x: parseInt(doubleClickMatch[1]), y: parseInt(doubleClickMatch[2]), method: 'double', delay_after: 0.5 },
     };
   }
 
@@ -387,16 +394,41 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   const clipWriteMatch = line.match(clipWriteRe);
   if (clipWriteMatch) {
     return {
-      type: 'clipboard_set',
-      params: { text: clipWriteMatch[1] },
+      type: 'clipboard_action',
+      params: { action: 'set', text: clipWriteMatch[1] },
     };
   }
 
   // ── 读取剪贴板 / clipboard_get / CLIPBOARD_GET ──
   if (/^(?:读取剪贴板|clipboard_get|CLIPBOARD_GET)\s*/i.test(line)) {
     return {
-      type: 'clipboard_get',
-      params: {},
+      type: 'clipboard_action',
+      params: { action: 'get' },
+    };
+  }
+
+  // ── 获取剪贴板图片 / clipboard_get_image / CLIPBOARD_GET_IMAGE ──
+  const clipImgRe = /^(?:获取剪贴板图片|clipboard_get_image|CLIPBOARD_GET_IMAGE)\s*/i;
+  if (clipImgRe.test(line)) {
+    return {
+      type: 'clipboard_action',
+      params: { action: 'get_image', format_: 'base64', save_path: '' },
+    };
+  }
+
+  // ── 获取剪贴板文件 / clipboard_get_files / CLIPBOARD_GET_FILES ──
+  if (/^(?:获取剪贴板文件|clipboard_get_files|CLIPBOARD_GET_FILES)\s*/i.test(line)) {
+    return {
+      type: 'clipboard_action',
+      params: { action: 'get_files' },
+    };
+  }
+
+  // ── 清空剪贴板 / clipboard_clear / CLIPBOARD_CLEAR ──
+  if (/^(?:清空剪贴板|clipboard_clear|CLIPBOARD_CLEAR)\s*/i.test(line)) {
+    return {
+      type: 'clipboard_action',
+      params: { action: 'clear' },
     };
   }
 
@@ -424,33 +456,42 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   }
 
   // ── 系统命令（通过 tool_call 转发到 @feature） ──
+  // ── 关机/重启/注销/休眠 (simple keywords → system_power) ──
+  const powerSimpleRe = /^(关机|重启|注销|休眠|shutdown|reboot|logoff|hibernate)\s*/i;
+  const powerSimpleMatch = line.match(powerSimpleRe);
+  if (powerSimpleMatch) {
+    const pm: Record<string, string> = { '关机':'shutdown','重启':'reboot','注销':'logoff','休眠':'hibernate','shutdown':'shutdown','reboot':'reboot','logoff':'logoff','hibernate':'hibernate' };
+    const delayMatch = line.match(/(?:delay|延迟)[=:](\d+)/i);
+    return { type: 'system_power', params: { action: pm[powerSimpleMatch[1].toLowerCase()]||'shutdown', delay_seconds: delayMatch ? parseInt(delayMatch[1]) : 0, confirm: true } };
+  }
+
   // 音量 N / volume N
   const volRe = /^(?:音量|volume)\s+(\d+)\s*/i;
   const volMatch = line.match(volRe);
   if (volMatch) {
-    return { type: 'volume_set', params: { level: parseInt(volMatch[1]) } };
+    return { type: 'audio_action', params: { action: 'volume_set', level: parseInt(volMatch[1]) } };
   }
 
   // 静音 [on/off] / mute
   if (/^(?:静音|mute)\s*/i.test(line)) {
     const muteOn = /开启|on/i.test(line);
     const muteOff = /关闭|off/i.test(line);
-    return { type: 'volume_mute', params: { mute: muteOn ? true : muteOff ? false : undefined } };
+    return { type: 'audio_action', params: { action: 'volume_mute', mute: muteOn ? true : muteOff ? false : undefined } };
   }
 
   // 锁定 / lock
   if (/^(?:锁定|lock)\s*/i.test(line)) {
-    return { type: 'lock_workstation', params: {} };
+    return { type: 'system_power', params: { action: 'lock_workstation', confirm: true } };
   }
 
   // 睡眠 / sleep
   if (/^(?:睡眠|sleep)\s*/i.test(line)) {
-    return { type: 'system_sleep', params: {} };
+    return { type: 'system_power', params: { action: 'system_sleep', confirm: true } };
   }
 
-  // 桌面 / desktop (Win+D)
-  if (/^(?:桌面|desktop)\s*/i.test(line)) {
-    return { type: 'show_desktop', params: {} };
+  // 桌面 / desktop (Win+D) — bare keyword only
+  if (/^(?:桌面|desktop)\s*$/i.test(line)) {
+    return { type: 'desktop_action', params: { action: 'show_desktop' } };
   }
 
   // 电池 / battery
@@ -460,7 +501,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
 
   // 清空回收站 / empty recycle bin
   if (/^(?:清空回收站|empty_recycle_bin|回收站)\s*/i.test(line)) {
-    return { type: 'empty_recycle_bin', params: {} };
+    return { type: 'desktop_action', params: { action: 'empty_recycle_bin', confirm: true } };
   }
 
   // 亮度 N / brightness N
@@ -472,14 +513,14 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
 
   // 关闭显示器 / display off
   if (/^(?:关闭显示器|display_off)\s*/i.test(line)) {
-    return { type: 'display_off', params: {} };
+    return { type: 'system_power', params: { action: 'display_off', confirm: true } };
   }
 
   // 壁纸 "path" / wallpaper / set_wallpaper
   const wallRe = /^(?:壁纸|wallpaper|set_wallpaper)\s+"([^"]*)"/i;
   const wallMatch = line.match(wallRe);
   if (wallMatch) {
-    return { type: 'set_wallpaper', params: { path: wallMatch[1] } };
+    return { type: 'desktop_action', params: { action: 'set_wallpaper', path: wallMatch[1] } };
   }
 
   // ── 浏览器操作: 浏览器导航 "URL" / BROWSER_NAV URL ──
@@ -558,6 +599,111 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
       type: 'tool_call',
       params: { feature_name: 'browser_execute_js', params: { code: browserJsMatch[1] } },
     };
+  }
+
+  // ── Consolidated parameterized actions ──
+  // 系统/SYSTEM power=shutdown|reboot|... [delay=N]
+  const systemPowerRe = /^(?:系统|SYSTEM)\s+(?:操作=)?(?:power=)?(关机|重启|注销|休眠|锁定|睡眠|关闭显示器|shutdown|reboot|logoff|hibernate|lock|sleep|display_off)\s*(.*)/i;
+  const spMatch = line.match(systemPowerRe);
+  if (spMatch) {
+    const action = spMatch[1].toLowerCase();
+    const delayMatch = line.match(/(?:delay|延迟)[=:](\d+)/i);
+    const map: Record<string, string> = {
+      '关机':'shutdown','重启':'reboot','注销':'logoff','休眠':'hibernate',
+      '锁定':'lock_workstation','睡眠':'system_sleep','关闭显示器':'display_off',
+      'shutdown':'shutdown','reboot':'reboot','logoff':'logoff',
+      'hibernate':'hibernate','lock':'lock_workstation','sleep':'system_sleep','display_off':'display_off',
+    };
+    return { type: 'system_power', params: { action: map[action]||'shutdown', delay_seconds: delayMatch ? parseInt(delayMatch[1]) : 0, confirm: true } };
+  }
+
+  // 音频/AUDIO volume=N | mute
+  const audioVolRe = /^(?:音频|AUDIO)\s+(?:操作=)?(?:音量|volume)[=:](\d+)/i;
+  const audioVolMatch = line.match(audioVolRe);
+  if (audioVolMatch) return { type: 'audio_action', params: { action: 'volume_set', level: parseInt(audioVolMatch[1]) } };
+  const audioMuteRe = /^(?:音频|AUDIO)\s+(?:操作=)?(?:静音|mute)(?:=(开启|on|关闭|off))?/i;
+  const audioMuteMatch = line.match(audioMuteRe);
+  if (audioMuteMatch) {
+    const v = audioMuteMatch[1];
+    return { type: 'audio_action', params: { action: 'volume_mute', mute: v ? /(开启|on)/i.test(v) : undefined } };
+  }
+
+  // 桌面/DESKTOP action=show|wallpaper|battery|empty_bin
+  const desktopRe = /^(?:桌面|DESKTOP)\s+(?:操作=)?(?:action=)?(桌面|显示桌面|壁纸|电池|清空回收站|show|wallpaper|battery|empty_bin)\s*(.*)/i;
+  const desktopMatch = line.match(desktopRe);
+  if (desktopMatch) {
+    const a = desktopMatch[1].toLowerCase();
+    if (/壁纸|wallpaper/.test(a)) {
+      const p = desktopMatch[2].match(/"([^"]*)"/);
+      return { type: 'desktop_action', params: { action: 'set_wallpaper', path: p ? p[1] : '' } };
+    }
+    if (/电池|battery/.test(a)) return { type: 'battery_status', params: {} };
+    if (/清空|empty_bin/.test(a)) return { type: 'desktop_action', params: { action: 'empty_recycle_bin', confirm: true } };
+    return { type: 'desktop_action', params: { action: 'show_desktop' } };
+  }
+
+  // 窗口/WINDOW action=minimize|maximize|restore|close|resize|snap [title] [width=N height=N]
+  const windowOpRe = /^(?:窗口|WINDOW)\s+(?:操作=)?(?:action=)?(最小化|最大化|还原|关闭|调整大小|贴靠|minimize|maximize|restore|close|resize|snap)\s*(.*)/i;
+  const windowOpMatch = line.match(windowOpRe);
+  if (windowOpMatch) {
+    const a = windowOpMatch[1].toLowerCase();
+    const rest = windowOpMatch[2];
+    const tm = rest.match(/"([^"]*)"/);
+    const wm = rest.match(/(?:width|宽)[=:](\d+)/i);
+    const hm = rest.match(/(?:height|高)[=:](\d+)/i);
+    const sm = rest.match(/(?:snap_position|位置)[=:](left|right|top|bottom|top_left|top_right|bottom_left|bottom_right|左|右|上|下|左上|右上|左下|右下)/i);
+    const opMap: Record<string, string> = {
+      '最小化':'minimize','最大化':'maximize','还原':'restore','关闭':'close','调整大小':'resize','贴靠':'snap',
+      'minimize':'minimize','maximize':'maximize','restore':'restore','close':'close','resize':'resize','snap':'snap',
+    };
+    const op = opMap[a] || 'minimize';
+    const snapPosMap: Record<string, string> = { '左':'left','右':'right','上':'top','下':'bottom','左上':'top_left','右上':'top_right','左下':'bottom_left','右下':'bottom_right' };
+    const sp = sm ? (snapPosMap[sm[1]] || sm[1]) : 'left';
+    return { type: 'window_control', params: { operation: op, title: tm ? tm[1] : '', width: wm ? parseInt(wm[1]) : 800, height: hm ? parseInt(hm[1]) : 600, snap_position: sp } };
+  }
+
+  // 图片/IMAGE action=find|click|capture "path" [similarity=N]
+  const imageOpRe = /^(?:图片|IMAGE)\s+(?:操作=)?(?:action=)?(查找|点击|捕获|find|click|capture)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?/i;
+  const imageOpMatch = line.match(imageOpRe);
+  if (imageOpMatch) {
+    const action = imageOpMatch[1].toLowerCase();
+    const path = imageOpMatch[2];
+    const sim = imageOpMatch[3] ? parseInt(imageOpMatch[3]) : 90;
+    if (/点击|click/.test(action)) return { type: 'mouse_operation', params: { mode: 'image', targets: [{ path }], similarity: sim, timeout: 5, method: 'single', delay_after: 0.5 } };
+    return { type: 'tool_call', params: { feature_name: /查找|find/.test(action) ? 'find_image' : 'template_capture', params: { path, similarity: sim } } };
+  }
+
+  // OCR action=find|extract|click "text" [similarity=N]
+  const ocrOpRe = /^(?:OCR)\s+(?:操作=)?(?:action=)?(查找|提取|点击|find|extract|click)\s+"([^"]*)"(?:\s+(?:similarity|相似度)[=:](\d+))?/i;
+  const ocrOpMatch = line.match(ocrOpRe);
+  if (ocrOpMatch) {
+    const action = ocrOpMatch[1].toLowerCase();
+    const text = ocrOpMatch[2];
+    const sim = ocrOpMatch[3] ? parseInt(ocrOpMatch[3]) : 80;
+    if (/点击|click/.test(action)) return { type: 'mouse_operation', params: { mode: 'text', text, similarity: sim, method: 'single', delay_after: 0.5 } };
+    return { type: 'tool_call', params: { feature_name: /查找|find/.test(action) ? 'ocr_find_text' : 'ocr_extract_all', params: { text, similarity: sim } } };
+  }
+
+  // VLM action=analyze|condition "prompt"
+  const vlmOpRe = /^(?:VLM)\s+(?:操作=)?(?:action=)?(分析|判断|analyze|condition)\s+"([^"]*)"/i;
+  const vlmOpMatch = line.match(vlmOpRe);
+  if (vlmOpMatch) {
+    const action = vlmOpMatch[1].toLowerCase();
+    const prompt = vlmOpMatch[2];
+    return { type: 'tool_call', params: { feature_name: /分析|analyze/.test(action) ? 'vlm_analyze' : 'vlm_condition', params: { prompt } } };
+  }
+
+  // 剪贴板/CLIPBOARD action=set|get|get_image|get_files|clear "text"
+  const clipOpRe = /^(?:剪贴板|CLIPBOARD)\s+(?:操作=)?(?:action=)?(写入|读取|set|get|get_image|get_files|clear|获取图片|获取文件|清空)\s*(.*)/i;
+  const clipOpMatch = line.match(clipOpRe);
+  if (clipOpMatch) {
+    const a = clipOpMatch[1].toLowerCase();
+    if (/写入|set/.test(a)) {
+      const tm = clipOpMatch[2].match(/"([^"]*)"/);
+      return { type: 'clipboard_action', params: { action: 'set', text: tm ? tm[1] : clipOpMatch[2].trim() } };
+    }
+    const subMap: Record<string, string> = { 'get_image':'get_image', '获取图片':'get_image', 'get_files':'get_files', '获取文件':'get_files', 'clear':'clear', '清空':'clear' };
+    return { type: 'clipboard_action', params: { action: subMap[a] || 'get' } };
   }
 
   // ── Catch-all for ANY unknown DSL keyword (ALL_CAPS) → tool_call ──
@@ -771,6 +917,8 @@ function getDefaultParams(type: string): any {
     case 'click': return { x: 0, y: 0, method: 'single', delay_after: 0.5 };
     case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.5, multi_scale: false, match_all: false };
     case 'click_text': return { text: '', similarity: 80, method: 'single', offset_x: 0, offset_y: 0, timeout: 5, delay_after: 0.5 };
+    case 'click_action': return { mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, offset_x: 0, offset_y: 0, timeout: 5 };
+    case 'mouse_operation': return { sub_operation: 'click', mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, timeout: 5, scroll_direction: 'down', scroll_amount: 3, hover_x: 0, hover_y: 0, hover_duration: 0.5, move_x: 0, move_y: 0 };
     case 'wait': return { wait_type: 'time', duration: 1 };
     case 'input_text': return { text: '', click_before: false, clear_before: true, delay_after: 0.3 };
     case 'keyboard': return { keys: [], modifiers: [], delay_after: 0.2 };
@@ -802,6 +950,15 @@ function getDefaultParams(type: string): any {
     case 'display_off': return {};
     case 'web_browser': return { action: 'navigate', url: '', selector: '', text: '', wait_seconds: 1, timeout: 30, headless: false };
     case 'set_wallpaper': return { path: '' };
+    case 'system_power': return { action: 'shutdown', delay_seconds: 0, confirm: true };
+    case 'audio_action': return { action: 'volume_set', level: 50 };
+    case 'desktop_action': return { action: 'show_desktop' };
+    case 'clipboard_action': return { action: 'set', text: '', format_: 'base64', save_path: '' };
+    case 'window_control': return { operation: 'minimize', title: '', width: 800, height: 600, snap_position: 'left' };
+    case 'dialog_action': return { action: 'handle', title: '', button: '', path: '', timeout: 10 };
+    case 'a11y_action': return { action: 'get_tree', name: '', role: '', control_type: '', max_depth: 5, filter_visible: true };
+    case 'wifi_action': return { action: 'list', ssid: '', password: '' };
+    case 'process_action': return { action: 'launch', target: '', args: '', name: '', timeout: 30, title: '', force: false };
     default: return {};
   }
 }

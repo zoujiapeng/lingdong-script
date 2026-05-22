@@ -17,6 +17,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
         P("exact", "boolean", "是否精确匹配", required=False, default=False),
     ],
     returns="bool - 进程是否存在",
+    hidden=True,
     test_cases=[
         TC("python", {"name": "python"}, "success",
            validator=lambda r: r.get("success") is True, skip_in_ci=False),
@@ -39,6 +40,7 @@ def detect_process(name: str, exact: bool = False) -> bool:
         P("name", "str", "进程名称", example="python"),
     ],
     returns="list[dict{pid, name, cpu, memory}]",
+    hidden=True,
 )
 def find_processes(name: str) -> list:
     try:
@@ -154,6 +156,7 @@ def _try_focus_existing(exe_name: str) -> bool:
     ],
     returns="dict{success, pid} - 启动结果",
     tags=["system", "process", "launch"],
+    hidden=True,
 )
 def launch_program(target: str, args: str = "", wait: bool = False, force_new: bool = False) -> dict:
     try:

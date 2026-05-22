@@ -17,6 +17,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
     ],
     returns="bool - 是否成功",
     tags=["system", "audio"],
+    hidden=True,
 )
 def volume_set(level: float) -> bool:
     try:
@@ -50,6 +51,7 @@ def volume_set(level: float) -> bool:
     ],
     returns="dict{muted, volume} - 当前状态",
     tags=["system", "audio"],
+    hidden=True,
 )
 def volume_mute(mute: bool = None) -> dict:
     try:
@@ -88,6 +90,7 @@ def volume_mute(mute: bool = None) -> dict:
     ],
     returns="bool - 是否成功",
     tags=["system", "display"],
+    hidden=True,
 )
 def display_brightness(level: float, display_index: int = 0) -> bool:
     try:
@@ -114,6 +117,7 @@ def display_brightness(level: float, display_index: int = 0) -> bool:
     params=[],
     returns="bool - 是否成功",
     tags=["system", "security"],
+    hidden=True,
 )
 def lock_workstation() -> bool:
     try:
@@ -137,6 +141,7 @@ def lock_workstation() -> bool:
     params=[],
     returns="dict{percentage, charging, remaining} - 电池信息",
     tags=["system", "power"],
+    hidden=True,
 )
 def battery_status() -> dict:
     try:
@@ -190,6 +195,7 @@ def battery_status() -> dict:
     ],
     returns="bool - 是否成功",
     tags=["system", "disk"],
+    hidden=True,
 )
 def empty_recycle_bin(confirm: bool = True) -> bool:
     if confirm:

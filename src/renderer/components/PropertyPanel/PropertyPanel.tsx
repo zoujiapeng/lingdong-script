@@ -297,6 +297,61 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
         </div>
       );
     }
+    // ── 聚合：进程操作 ──
+    case 'process_action': {
+      const p = node.params as any;
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={p.action || 'launch'} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              <option value="launch">启动程序</option>
+              <option value="kill">终止进程</option>
+              <option value="wait_start">等待进程启动</option>
+              <option value="wait_exit">等待进程退出</option>
+              <option value="focus">激活窗口</option>
+            </select>
+          </div>
+          {(p.action === 'launch') && (<>
+            <div className="form-group"><label className="form-label">程序路径/URL</label>
+              <input className="form-input" type="text" value={p.target || ''} placeholder="notepad.exe"
+                onChange={(e) => updateParams({ ...p, target: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">启动参数</label>
+              <input className="form-input" type="text" value={p.args || ''} placeholder="（可选）"
+                onChange={(e) => updateParams({ ...p, args: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-checkbox-label">
+              <input type="checkbox" checked={p.wait || false} onChange={(e) => updateParams({ ...p, wait: e.target.checked })} style={{ marginRight: 6 }} />等待程序退出
+            </label></div>
+          </>)}
+          {(p.action === 'kill') && (<>
+            <div className="form-group"><label className="form-label">进程名称</label>
+              <input className="form-input" type="text" value={p.name || ''} placeholder="notepad.exe"
+                onChange={(e) => updateParams({ ...p, name: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-checkbox-label">
+              <input type="checkbox" checked={p.force || false} onChange={(e) => updateParams({ ...p, force: e.target.checked })} style={{ marginRight: 6 }} />强制终止
+            </label></div>
+          </>)}
+          {(p.action === 'wait_start' || p.action === 'wait_exit') && (<>
+            <div className="form-group"><label className="form-label">进程名称</label>
+              <input className="form-input" type="text" value={p.name || ''} placeholder="notepad.exe"
+                onChange={(e) => updateParams({ ...p, name: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">超时 (秒)</label>
+              <input className="form-input" type="number" min={1} value={p.timeout ?? 30}
+                onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 30 })} />
+            </div>
+          </>)}
+          {(p.action === 'focus') && (<>
+            <div className="form-group"><label className="form-label">窗口标题</label>
+              <input className="form-input" type="text" value={p.title || ''} placeholder="记事本"
+                onChange={(e) => updateParams({ ...p, title: e.target.value })} />
+            </div>
+          </>)}
+        </div>
+      );
+    }
     case 'set_wallpaper': {
       const p = node.params as any;
       return (
@@ -391,6 +446,425 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
     case 'clipboard_get':
       return <div><div className="form-group"><label className="form-label">读取剪贴板</label>
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>读取系统剪贴板中的文本内容（无参数）</div></div></div>;
+    // ── 聚合类型参数面板 ──
+    case 'system_power': {
+      const p = node.params as any;
+      const actions = [
+        { value: 'shutdown', label: '关机' }, { value: 'reboot', label: '重启' },
+        { value: 'logoff', label: '注销' }, { value: 'hibernate', label: '休眠' },
+        { value: 'lock_workstation', label: '锁定' }, { value: 'system_sleep', label: '睡眠' },
+        { value: 'display_off', label: '关闭显示器' },
+      ];
+      const descs: Record<string, string> = { shutdown:'关闭计算机', reboot:'重新启动', logoff:'注销当前用户', hibernate:'进入休眠', lock_workstation:'锁定工作站 (Win+L)', system_sleep:'进入睡眠状态', display_off:'关闭所有显示器' };
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={p.action || 'shutdown'} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              {actions.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+            </select>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{descs[p.action] || ''}</div>
+          </div>
+          {p.action !== 'logoff' && p.action !== 'hibernate' && p.action !== 'lock_workstation' && (
+            <div className="form-group"><label className="form-label">延迟（秒）</label>
+              <input className="form-input" type="number" min={0} value={p.delay_seconds ?? 0}
+                onChange={(e) => updateParams({ ...p, delay_seconds: parseInt(e.target.value) || 0 })} />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>0 表示立即执行</div>
+            </div>
+          )}
+          {p.action !== 'display_off' && p.action !== 'system_sleep' && (
+            <div className="form-group"><label className="form-checkbox-label">
+              <input type="checkbox" checked={p.confirm !== false}
+                onChange={(e) => updateParams({ ...p, confirm: e.target.checked })} style={{ marginRight: 6 }} />执行前确认
+            </label></div>
+          )}
+        </div>
+      );
+    }
+    case 'audio_action': {
+      const p = node.params as any;
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={p.action || 'volume_set'} onChange={(e) => updateParams({ ...p, action: e.target.value, level: 50, mute: undefined })}>
+              <option value="volume_set">设置音量</option>
+              <option value="volume_mute">静音控制</option>
+            </select>
+          </div>
+          {p.action === 'volume_set' ? (
+            <div className="form-group"><label className="form-label">音量 (%)</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input className="form-input" type="range" min={0} max={100} value={p.level ?? 50}
+                  onChange={(e) => updateParams({ ...p, level: parseInt(e.target.value) })} style={{ flex: 1 }} />
+                <span style={{ minWidth: 32, textAlign: 'right' }}>{p.level ?? 50}%</span>
+              </div>
+            </div>
+          ) : (
+            <div className="form-group"><label className="form-label">静音操作</label>
+              <select className="form-input" value={p.mute === null ? 'toggle' : p.mute ? 'mute' : 'unmute'}
+                onChange={(e) => { const v = e.target.value; updateParams({ ...p, mute: v === 'toggle' ? null : v === 'mute' }); }}>
+                <option value="toggle">切换静音</option>
+                <option value="mute">静音</option>
+                <option value="unmute">取消静音</option>
+              </select>
+            </div>
+          )}
+        </div>
+      );
+    }
+    case 'desktop_action': {
+      const p = node.params as any;
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={p.action || 'show_desktop'} onChange={(e) => updateParams({ ...p, action: e.target.value, path: '' })}>
+              <option value="show_desktop">显示桌面</option>
+              <option value="set_wallpaper">设置壁纸</option>
+              <option value="empty_recycle_bin">清空回收站</option>
+            </select>
+          </div>
+          {p.action === 'show_desktop' && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>最小化所有窗口，显示桌面 (Win+D)</div>}
+          {p.action === 'set_wallpaper' && (
+            <div className="form-group"><label className="form-label">图片路径</label>
+              <input className="form-input" type="text" value={p.path || ''} placeholder="C:\\wallpaper.jpg"
+                onChange={(e) => updateParams({ ...p, path: e.target.value })} />
+            </div>
+          )}
+          {p.action === 'empty_recycle_bin' && (
+            <div className="form-group"><label className="form-checkbox-label">
+              <input type="checkbox" checked={p.confirm !== false}
+                onChange={(e) => updateParams({ ...p, confirm: e.target.checked })} style={{ marginRight: 6 }} />执行前确认
+            </label></div>
+          )}
+        </div>
+      );
+    }
+    case 'clipboard_action': {
+      const p = node.params as any;
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={p.action || 'set'} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              <option value="set">写入剪贴板</option>
+              <option value="get">读取剪贴板</option>
+              <option value="get_image">获取剪贴板图片</option>
+              <option value="get_files">获取剪贴板文件列表</option>
+              <option value="clear">清空剪贴板</option>
+            </select>
+          </div>
+          {p.action === 'set' ? (
+            <div className="form-group"><label className="form-label">文本内容</label>
+              <textarea className="form-input" rows={3} value={p.text || ''} placeholder="要写入的文本"
+                onChange={(e) => updateParams({ ...p, text: e.target.value })} style={{ resize: 'vertical' }} />
+            </div>
+          ) : p.action === 'get_image' ? (<>
+            <div className="form-group"><label className="form-label">输出格式</label>
+              <select className="form-input" value={p.format_ || 'base64'} onChange={(e) => updateParams({ ...p, format_: e.target.value })}>
+                <option value="base64">Base64 编码</option>
+                <option value="file">保存到文件</option>
+              </select>
+            </div>
+            {p.format_ === 'file' && (
+              <div className="form-group"><label className="form-label">保存路径</label>
+                <input className="form-input" type="text" value={p.save_path || ''} placeholder="C:\path\to\image.png"
+                  onChange={(e) => updateParams({ ...p, save_path: e.target.value })} />
+              </div>
+            )}
+          </>) : p.action === 'get_files' ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>读取剪贴板中的文件路径列表（无参数）</div>
+          ) : p.action === 'clear' ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>清空系统剪贴板内容（无参数）</div>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>读取系统剪贴板中的文本内容（无参数）</div>
+          )}
+        </div>
+      );
+    }
+    case 'mouse_operation': {
+      const p = node.params as any;
+      const sub = p.sub_operation || 'click';
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">子操作</label>
+            <select className="form-input" value={sub} onChange={(e) => updateParams({ ...p, sub_operation: e.target.value })}>
+              <option value="click">点击</option>
+              <option value="scroll">滚轮</option>
+              <option value="hover">悬停</option>
+              <option value="move">移动</option>
+            </select>
+          </div>
+          {sub === 'click' && (<>
+            <div className="form-group"><label className="form-label">点击模式</label>
+              <select className="form-input" value={p.mode || 'coordinate'} onChange={(e) => updateParams({ ...p, mode: e.target.value })}>
+                <option value="coordinate">坐标点击</option>
+                <option value="image">图片识别</option>
+                <option value="text">文字识别</option>
+              </select>
+            </div>
+            {p.mode === 'coordinate' && (<>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
+                  <input className="form-input" type="number" value={p.x ?? 0} onChange={(e) => updateParams({ ...p, x: parseInt(e.target.value) || 0 })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
+                  <input className="form-input" type="number" value={p.y ?? 0} onChange={(e) => updateParams({ ...p, y: parseInt(e.target.value) || 0 })} />
+                </div>
+              </div>
+              <div className="form-group"><label className="form-label">点击方式</label>
+                <select className="form-input" value={p.method || 'single'} onChange={(e) => updateParams({ ...p, method: e.target.value })}>
+                  <option value="single">单击</option>
+                  <option value="double">双击</option>
+                  <option value="right">右击</option>
+                  <option value="middle">中键</option>
+                  <option value="triple">三击</option>
+                </select>
+              </div>
+            </>)}
+            {p.mode === 'image' && (<>
+              <div className="form-group"><label className="form-label">目标图片</label>
+                {(p.targets || []).map((t: any, i: number) => (
+                  <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+                    <input className="form-input" type="text" value={t.path || ''} placeholder="图片路径"
+                      onChange={(e) => { const targets = [...(p.targets || [])]; targets[i] = { ...targets[i], path: e.target.value }; updateParams({ ...p, targets }); }} style={{ flex: 1 }} />
+                    <button onClick={() => { const targets = (p.targets || []).filter((_: any, j: number) => j !== i); updateParams({ ...p, targets }); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>×</button>
+                  </div>
+                ))}
+                <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', marginTop: 4 }}
+                  onClick={() => updateParams({ ...p, targets: [...(p.targets || []), { path: '' }] })}>+ 添加图片</button>
+              </div>
+              <div className="form-group"><label className="form-label">相似度</label>
+                <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 90}
+                  onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 90 })} />
+              </div>
+            </>)}
+            {p.mode === 'text' && (<>
+              <div className="form-group"><label className="form-label">文字内容</label>
+                <input className="form-input" type="text" value={p.text ?? ''} placeholder="要点击的文字"
+                  onChange={(e) => updateParams({ ...p, text: e.target.value })} />
+              </div>
+              <div className="form-group"><label className="form-label">相似度</label>
+                <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 80}
+                  onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 80 })} />
+              </div>
+            </>)}
+          </>)}
+          {sub === 'scroll' && (<>
+            <div className="form-group"><label className="form-label">方向</label>
+              <select className="form-input" value={p.scroll_direction || 'down'} onChange={(e) => updateParams({ ...p, scroll_direction: e.target.value })}>
+                <option value="down">向下</option>
+                <option value="up">向上</option>
+                <option value="left">向左</option>
+                <option value="right">向右</option>
+              </select>
+            </div>
+            <div className="form-group"><label className="form-label">滚动格数</label>
+              <input className="form-input" type="number" min={1} max={100} value={p.scroll_amount ?? 3}
+                onChange={(e) => updateParams({ ...p, scroll_amount: parseInt(e.target.value) || 3 })} />
+            </div>
+          </>)}
+          {sub === 'hover' && (<>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
+                <input className="form-input" type="number" value={p.hover_x ?? 0} onChange={(e) => updateParams({ ...p, hover_x: parseInt(e.target.value) || 0 })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
+                <input className="form-input" type="number" value={p.hover_y ?? 0} onChange={(e) => updateParams({ ...p, hover_y: parseInt(e.target.value) || 0 })} />
+              </div>
+            </div>
+            <div className="form-group"><label className="form-label">悬停秒数</label>
+              <input className="form-input" type="number" min={0} step={0.1} value={p.hover_duration ?? 0.5}
+                onChange={(e) => updateParams({ ...p, hover_duration: parseFloat(e.target.value) || 0 })} />
+            </div>
+          </>)}
+          {sub === 'move' && (<>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
+                <input className="form-input" type="number" value={p.move_x ?? 0} onChange={(e) => updateParams({ ...p, move_x: parseInt(e.target.value) || 0 })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
+                <input className="form-input" type="number" value={p.move_y ?? 0} onChange={(e) => updateParams({ ...p, move_y: parseInt(e.target.value) || 0 })} />
+              </div>
+            </div>
+          </>)}
+          <div className="form-group"><label className="form-label">操作后延迟（秒）</label>
+            <input className="form-input" type="number" min={0} step={0.1} value={p.delay_after ?? 0.5}
+              onChange={(e) => updateParams({ ...p, delay_after: parseFloat(e.target.value) || 0 })} />
+          </div>
+        </div>
+      );
+    }
+    case 'dialog_action': {
+      const p = node.params as any;
+      const action = p.action || 'handle';
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={action} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              <option value="handle">处理对话框</option>
+              <option value="list">列出对话框</option>
+              <option value="take_action">对话框操作（点击按钮）</option>
+              <option value="fill_save">填写保存对话框</option>
+            </select>
+          </div>
+          {action === 'handle' && (
+            <div className="form-group"><label className="form-label">超时（秒）</label>
+              <input className="form-input" type="number" min={0} value={p.timeout ?? 10}
+                onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 10 })} />
+            </div>
+          )}
+          {action === 'take_action' && (<>
+            <div className="form-group"><label className="form-label">按钮文字</label>
+              <input className="form-input" type="text" value={p.button || ''} placeholder="保存、确定、取消等"
+                onChange={(e) => updateParams({ ...p, button: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">超时（秒）</label>
+              <input className="form-input" type="number" min={0} value={p.timeout ?? 10}
+                onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 10 })} />
+            </div>
+          </>)}
+          {action === 'fill_save' && (<>
+            <div className="form-group"><label className="form-label">保存路径</label>
+              <input className="form-input" type="text" value={p.path || ''} placeholder="C:\\path\\file.txt"
+                onChange={(e) => updateParams({ ...p, path: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">超时（秒）</label>
+              <input className="form-input" type="number" min={0} value={p.timeout ?? 10}
+                onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 10 })} />
+            </div>
+          </>)}
+        </div>
+      );
+    }
+    case 'a11y_action': {
+      const p = node.params as any;
+      const action = p.action || 'get_tree';
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={action} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              <option value="get_tree">获取无障碍树</option>
+              <option value="find_element">查找元素</option>
+              <option value="click_element">点击元素</option>
+            </select>
+          </div>
+          {action === 'get_tree' && (<>
+            <div className="form-group"><label className="form-label">最大深度</label>
+              <input className="form-input" type="number" min={1} max={10} value={p.max_depth ?? 5}
+                onChange={(e) => updateParams({ ...p, max_depth: parseInt(e.target.value) || 5 })} />
+            </div>
+            <div className="form-group"><label className="form-checkbox-label">
+              <input type="checkbox" checked={p.filter_visible !== false}
+                onChange={(e) => updateParams({ ...p, filter_visible: e.target.checked })} style={{ marginRight: 6 }} />仅可见元素
+            </label></div>
+          </>)}
+          {(action === 'find_element' || action === 'click_element') && (<>
+            <div className="form-group"><label className="form-label">元素名称</label>
+              <input className="form-input" type="text" value={p.name || ''} placeholder="确定、保存、搜索等"
+                onChange={(e) => updateParams({ ...p, name: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">角色（可选）</label>
+              <input className="form-input" type="text" value={p.role || ''} placeholder="button, edit, list"
+                onChange={(e) => updateParams({ ...p, role: e.target.value })} />
+            </div>
+            {action === 'find_element' && (
+              <div className="form-group"><label className="form-label">控件类型（可选）</label>
+                <input className="form-input" type="text" value={p.control_type || ''} placeholder="Edit, Button, ComboBox"
+                  onChange={(e) => updateParams({ ...p, control_type: e.target.value })} />
+              </div>
+            )}
+          </>)}
+        </div>
+      );
+    }
+    case 'wifi_action': {
+      const p = node.params as any;
+      const action = p.action || 'list';
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">操作</label>
+            <select className="form-input" value={action} onChange={(e) => updateParams({ ...p, action: e.target.value })}>
+              <option value="list">列出网络</option>
+              <option value="connect">连接 WiFi</option>
+              <option value="disconnect">断开 WiFi</option>
+            </select>
+          </div>
+          {action === 'connect' && (<>
+            <div className="form-group"><label className="form-label">WiFi 名称 (SSID)</label>
+              <input className="form-input" type="text" value={p.ssid || ''} placeholder="MyWiFi"
+                onChange={(e) => updateParams({ ...p, ssid: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">密码（可选）</label>
+              <input className="form-input" type="password" value={p.password || ''} placeholder="留空表示无需密码"
+                onChange={(e) => updateParams({ ...p, password: e.target.value })} />
+            </div>
+          </>)}
+        </div>
+      );
+    }
+    case 'click_action': {
+      const p = node.params as any;
+      const mode = p.mode || 'coordinate';
+      return (
+        <div>
+          <div className="form-group"><label className="form-label">点击模式</label>
+            <select className="form-input" value={mode} onChange={(e) => updateParams({ ...p, mode: e.target.value })}>
+              <option value="coordinate">坐标点击</option>
+              <option value="image">图片识别</option>
+              <option value="text">文字识别</option>
+            </select>
+          </div>
+          {mode === 'coordinate' && (<>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
+                <input className="form-input" type="number" value={p.x ?? 0} onChange={(e) => updateParams({ ...p, x: parseInt(e.target.value) || 0 })} />
+              </div>
+              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
+                <input className="form-input" type="number" value={p.y ?? 0} onChange={(e) => updateParams({ ...p, y: parseInt(e.target.value) || 0 })} />
+              </div>
+            </div>
+            <div className="form-group"><label className="form-label">点击方式</label>
+              <select className="form-input" value={p.method || 'single'} onChange={(e) => updateParams({ ...p, method: e.target.value })}>
+                <option value="single">单击</option>
+                <option value="double">双击</option>
+                <option value="right">右击</option>
+                <option value="middle">中键</option>
+                <option value="triple">三击</option>
+              </select>
+            </div>
+          </>)}
+          {mode === 'image' && (<>
+            <div className="form-group"><label className="form-label">目标图片</label>
+              {(p.targets || []).map((t: any, i: number) => (
+                <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+                  <input className="form-input" type="text" value={t.path || ''} placeholder="图片路径"
+                    onChange={(e) => { const targets = [...(p.targets || [])]; targets[i] = { ...targets[i], path: e.target.value }; updateParams({ ...p, targets }); }} style={{ flex: 1 }} />
+                  <button onClick={() => { const targets = (p.targets || []).filter((_: any, j: number) => j !== i); updateParams({ ...p, targets }); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>×</button>
+                </div>
+              ))}
+              <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', marginTop: 4 }}
+                onClick={() => updateParams({ ...p, targets: [...(p.targets || []), { path: '' }] })}>+ 添加图片</button>
+            </div>
+            <div className="form-group"><label className="form-label">相似度</label>
+              <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 90}
+                onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 90 })} />
+            </div>
+          </>)}
+          {mode === 'text' && (<>
+            <div className="form-group"><label className="form-label">文字内容</label>
+              <input className="form-input" type="text" value={p.text ?? ''} placeholder="要点击的文字"
+                onChange={(e) => updateParams({ ...p, text: e.target.value })} />
+            </div>
+            <div className="form-group"><label className="form-label">相似度</label>
+              <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 80}
+                onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 80 })} />
+            </div>
+          </>)}
+          <div className="form-group"><label className="form-label">点击后延迟（秒）</label>
+            <input className="form-input" type="number" min={0} step={0.1} value={p.delay_after ?? 0.5}
+              onChange={(e) => updateParams({ ...p, delay_after: parseFloat(e.target.value) || 0 })} />
+          </div>
+        </div>
+      );
+    }
     case 'window_control': {
       const p = node.params as any;
       return (
@@ -400,8 +874,10 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
               onChange={(e) => updateParams({ ...p, operation: e.target.value })}>
               <option value="minimize">最小化</option>
               <option value="maximize">最大化</option>
+              <option value="restore">还原</option>
               <option value="close">关闭</option>
               <option value="resize">调整大小</option>
+              <option value="snap">贴靠</option>
             </select>
           </div>
           <div className="form-group"><label className="form-label">窗口标题（留空=当前窗口）</label>
@@ -418,6 +894,21 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
                 onChange={(e) => updateParams({ ...p, height: parseInt(e.target.value) || 600 })} />
             </div>
           </>)}
+          {p.operation === 'snap' && (
+            <div className="form-group"><label className="form-label">贴靠位置</label>
+              <select className="form-input" value={p.snap_position || 'left'}
+                onChange={(e) => updateParams({ ...p, snap_position: e.target.value })}>
+                <option value="left">左半屏</option>
+                <option value="right">右半屏</option>
+                <option value="top">上半屏</option>
+                <option value="bottom">下半屏</option>
+                <option value="top_left">左上角</option>
+                <option value="top_right">右上角</option>
+                <option value="bottom_left">左下角</option>
+                <option value="bottom_right">右下角</option>
+              </select>
+            </div>
+          )}
         </div>
       );
     }

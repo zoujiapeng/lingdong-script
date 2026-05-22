@@ -120,6 +120,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAutoStart: () => ipcRenderer.invoke('settings:get-auto-start'),
   setAutoStart: (enable: boolean) => ipcRenderer.invoke('settings:set-auto-start', enable),
 
+  // Vision backend (VLM provider)
+  setVisionBackend: (backend: string) => ipcRenderer.invoke('settings:set-vision-backend', backend),
+
   // Schedule CRUD
   scheduleList: () => ipcRenderer.invoke('schedule:list'),
   scheduleCreate: (entry: any) => ipcRenderer.invoke('schedule:create', entry),

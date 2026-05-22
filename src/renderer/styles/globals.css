@@ -136,6 +136,7 @@ html, body, #root {
   flex-direction: column;
   height: 100vh;
   background: var(--bg-canvas);
+  position: relative;
 }
 
 .app-body {
@@ -2573,4 +2574,284 @@ textarea.form-input {
 .agent-result-actions {
   display: flex;
   gap: 6px;
+}
+
+/* ============================================================
+   TRIGGER BAR
+   ============================================================ */
+.trigger-bar {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  gap: 4px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.trigger-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+}
+
+.trigger-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  font-size: 11px;
+  cursor: pointer;
+  position: relative;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.trigger-pill:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+.trigger-pill-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.trigger-pill-name {
+  color: var(--text-primary);
+  font-size: 10px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trigger-pill-count {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.trigger-pill-detail {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 8px 10px;
+  z-index: 200;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trigger-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.trigger-detail-row span:first-child {
+  color: var(--text-muted);
+}
+
+.trigger-detail-stop {
+  margin-top: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  border: 1px solid var(--danger, #ef4444);
+  background: transparent;
+  color: var(--danger, #ef4444);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.trigger-detail-stop:hover {
+  background: var(--danger, #ef4444);
+  color: white;
+}
+
+.trigger-bar-stop-all {
+  padding: 2px 8px;
+  font-size: 10px;
+  border: 1px solid var(--danger, #ef4444);
+  background: transparent;
+  color: var(--danger, #ef4444);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.trigger-bar-stop-all:hover {
+  background: var(--danger, #ef4444);
+  color: white;
+}
+
+/* Canvas overlay mode */
+.canvas-view .trigger-bar {
+  position: absolute;
+  top: 52px;
+  left: 0;
+  right: 0;
+  z-index: 99;
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.canvas-view.panels-visible .trigger-bar {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.trigger-bar-empty {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   TRIGGER CONFIG PANEL
+   ============================================================ */
+.trigger-config-overlay {
+  position: absolute;
+  top: 52px;
+  right: 12px;
+  z-index: 200;
+  width: 380px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-xl);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.trigger-config-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+}
+
+.trigger-config-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+
+.trigger-config-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trigger-config-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 16px 8px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.trigger-config-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-primary);
+  display: flex;
+  gap: 6px;
+}
+
+.trigger-editor {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.trigger-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 11px;
+}
+
+.trigger-editor-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.trigger-editor-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trigger-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.trigger-editor-field label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.trigger-editor-field input,
+.trigger-editor-field select {
+  font-size: 11px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.trigger-editor-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.script-trigger-badge {
+  border-color: var(--accent-light, #c7d2fe);
+  background: rgba(99, 102, 241, 0.06);
 }

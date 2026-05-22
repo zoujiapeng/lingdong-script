@@ -15,6 +15,7 @@ from features.registry import feature, P, TC, FeatureCategory as F
     params=[],
     returns="dict{success, result: str} - 剪贴板文本",
     tags=["clipboard"],
+    hidden=True,
 )
 def clipboard_get_text() -> dict:
     try:
@@ -48,6 +49,7 @@ def clipboard_get_text() -> dict:
     ],
     returns="dict{format, data, width, height} - 图片数据",
     tags=["clipboard"],
+    hidden=True,
 )
 def clipboard_get_image(format_: str = "base64", save_path: str = "") -> dict:
     try:
@@ -103,6 +105,7 @@ def clipboard_get_image(format_: str = "base64", save_path: str = "") -> dict:
     params=[],
     returns="dict{success, result: list[str]} - 文件路径列表",
     tags=["clipboard"],
+    hidden=True,
 )
 def clipboard_get_files() -> dict:
     try:
@@ -130,6 +133,7 @@ def clipboard_get_files() -> dict:
     params=[],
     returns="dict{success, result: bool} - 是否成功",
     tags=["clipboard"],
+    hidden=True,
 )
 def clipboard_clear() -> dict:
     try:
@@ -161,6 +165,7 @@ def clipboard_clear() -> dict:
     flow_type="clipboard_set",
     examples=["CLIPBOARD_SET Hello World"],
     tags=["clipboard"],
+    hidden=True,
 )
 def clipboard_set_text(text: str) -> dict:
     try:

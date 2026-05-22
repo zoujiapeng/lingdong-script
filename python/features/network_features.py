@@ -72,6 +72,7 @@ def network_status() -> dict:
     params=[],
     returns="list[dict{ssid, signal, security}] - WiFi 列表",
     tags=["network"],
+    hidden=True,
 )
 def wifi_list() -> dict:
     output = _netsh("wlan show networks mode=bssid")
@@ -103,6 +104,7 @@ def wifi_list() -> dict:
     ],
     returns="bool - 是否连接成功",
     tags=["network"],
+    hidden=True,
 )
 def wifi_connect(ssid: str, password: str = "") -> dict:
     try:
@@ -148,6 +150,7 @@ def wifi_connect(ssid: str, password: str = "") -> dict:
     params=[],
     returns="bool - 是否成功",
     tags=["network"],
+    hidden=True,
 )
 def wifi_disconnect() -> dict:
     try:
