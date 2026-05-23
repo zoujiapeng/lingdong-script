@@ -309,7 +309,7 @@ def detect_color(h: int, s: int, v: int, region: str = "", tolerance: int = 15) 
     description="【感知·进度】自动识别区域内的进度条并返回填充比例(0.0-1.0)。用于等待安装/下载/加载完成的场景，替代固定秒数等待",
     category=F.PERCEPTION,
     params=[
-        P("region", "str", "进度条区域 'x,y,w,h'（必填）"),
+        P("region", "str", "进度条区域 'x,y,w,h'（必填）", example="100,200,300,20"),
         P("direction", "str", "方向: horizontal|vertical|auto", required=False, default="auto"),
     ],
     returns="float - 进度 0.0~1.0",
@@ -491,7 +491,7 @@ def progress_relocate():
         P("h", "number", "色相 Hue 0-179", example=120),
         P("s", "number", "饱和度 Saturation 0-255", example=200),
         P("v", "number", "亮度 Value 0-255", example=200),
-        P("region", "str", "检测区域 'x,y,w,h'"),
+        P("region", "str", "检测区域 'x,y,w,h'", example="0,0,200,200"),
         P("tolerance", "number", "HSV容差", required=False, default=15),
         P("min_ratio", "number", "最小占比 0-1", required=False, default=0.1),
     ],
@@ -536,7 +536,7 @@ def color_check(h: int, s: int, v: int, region: str, tolerance: int = 15, min_ra
     """,
     category=F.PERCEPTION,
     params=[
-        P("options", "str", "选项列表，用 | 分隔（如 '截取图片 | 文件选择 | 口头说明'）"),
+        P("options", "str", "选项列表，用 | 分隔", example="截取图片 | 文件选择 | 口头说明"),
         P("values", "str", "对应返回值列表，用 | 分隔（可选，默认返回选项文字）", required=False, default=""),
         P("title", "str", "窗口标题", required=False, default="请选择"),
         P("message", "str", "顶部提示文字", required=False, default=""),

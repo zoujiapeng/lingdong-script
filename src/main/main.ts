@@ -365,6 +365,13 @@ function createWindow() {
     show: false,
   }));
 
+  // Auto-grant microphone permission for voice input
+  mainWindow!.webContents.session.setPermissionRequestHandler(
+    (_wc, permission, callback) => {
+      callback(permission === 'media');
+    }
+  );
+
   if (isDev) {
     mainWindow!.loadURL('http://localhost:5173');
   } else {

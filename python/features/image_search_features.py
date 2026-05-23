@@ -109,7 +109,7 @@ def _score_match(filename: str, keywords: list[str]) -> float:
     此工具不需要 DSL 关键字，是纯 MCP 辅助工具。""",
     category=F.PERCEPTION,
     params=[
-        P("query", "str", "自然语言描述，如'回收站图标'、'红色按钮'、'attack button'"),
+        P("query", "str", "自然语言描述图片", example="回收站图标"),
         P("limit", "number", "最大返回结果数", required=False, default=10),
     ],
     returns="dict{success, results: [{name, path, template_name, score}], query}",

@@ -1,11 +1,14 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { List } from 'lucide-react';
+import { List, Wifi, WifiOff, Mic, MicOff } from 'lucide-react';
 
 interface StepData {
   step_num: number;
   tool: string;
   thought: string;
+  step_label?: string;
+  step_type?: string;
+  error?: string;
   result: { success: boolean; confidence: number };
 }
 
@@ -32,11 +35,17 @@ export function AgentView() {
   const [log, setLog] = useState<LogEntry[]>(() => _persistedLog);
   const [guidance, setGuidance] = useState('');
   const msgEndRef = useRef<HTMLDivElement>(null);
+  const goalRef = useRef(goal);
+  goalRef.current = goal;
 
   // Agent tool explorer
   const [showTools, setShowTools] = useState(false);
   const [agentTools, setAgentTools] = useState<string[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const [offlineRunning, setOfflineRunning] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [voiceSupported] = useState(() => !!(window.SpeechRecognition || (window as any).webkitSpeechRecognition));
 
   const loadAgentTools = async () => {
     setToolsLoading(true);
@@ -145,6 +154,48 @@ export function AgentView() {
     return () => { unsubMessages?.(); unsubLog?.(); };
   }, [addEntry]);
 
+  // Listen for engine messages (offline mode execution)
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api) return;
+
+    const unsubEngineMsg = api.onEngineMessage?.((msg: any) => {
+      switch (msg.type) {
+        case 'node_done': {
+          const nodeLabel = msg.node_type || msg.node_id || '';
+          addEntry({
+            type: 'step',
+            data: {
+              step_num: msg.node_index || 0,
+              tool: nodeLabel,
+              thought: '',
+              result: { success: !msg.error, confidence: msg.error ? 0 : 1 },
+              error: msg.error,
+            },
+          });
+          break;
+        }
+        case 'execution_done':
+          if (msg.status === 'completed') {
+            addEntry({ type: 'complete', steps: 0 });
+          } else {
+            addEntry({ type: 'fail', reason: msg.error || '执行失败' });
+          }
+          setOfflineRunning(false);
+          setRunning(false);
+          _hasActiveRun = false;
+          break;
+      }
+    });
+
+    const unsubEngineLog = api.onEngineLog?.((msg: any) => {
+      if (msg.level === 'error') addEntry({ type: 'system', text: `[引擎] ${msg.message}` });
+      else addEntry({ type: 'system', text: msg.message });
+    });
+
+    return () => { unsubEngineMsg?.(); unsubEngineLog?.(); };
+  }, [addEntry]);
+
   const runAgent = useCallback(async (supervise: boolean) => {
     if (!goal.trim()) return;
     _hasActiveRun = false;
@@ -175,7 +226,7 @@ export function AgentView() {
     try {
       // In execution mode, pass cached structured_steps so agent doesn't re-call API
       const stepsArg = supervise ? _cachedSteps : undefined;
-      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false', auto_learn: autoLearn ? 'true' : 'false' }, supervise, stepsArg);
+      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false', auto_learn: autoLearn ? 'true' : 'false' }, supervise, stepsArg ?? undefined);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
@@ -183,14 +234,19 @@ export function AgentView() {
 
   const stopAgent = useCallback(async () => {
     try {
-      await window.electronAPI!.agentStop();
+      if (offline) {
+        await window.electronAPI!.engineStop();
+        setOfflineRunning(false);
+      } else {
+        await window.electronAPI!.agentStop();
+      }
       addEntry({ type: 'system', text: '已停止' });
       setRunning(false);
       _hasActiveRun = false;
     } catch (err: any) {
       addEntry({ type: 'system', text: `停止失败: ${err.message}` });
     }
-  }, [addEntry]);
+  }, [addEntry, offline]);
 
   const sendGuidance = useCallback(async () => {
     if (!guidance.trim() || !running) return;
@@ -199,6 +255,60 @@ export function AgentView() {
     } catch {}
     setGuidance('');
   }, [guidance, running]);
+
+  const runOffline = useCallback(async () => {
+    if (!goal.trim()) return;
+    _hasActiveRun = false;
+    _persistedLog = [];
+    setLog([]);
+    setGeneratedScript(null);
+    addEntry({ type: 'system', text: '正在离线执行流程图...' });
+    setOfflineRunning(true);
+    setRunning(true);
+
+    try {
+      const script = useStore.getState().script;
+      window.electronAPI!.engineStart(JSON.stringify(script));
+    } catch (err: any) {
+      addEntry({ type: 'fail', reason: `离线执行失败: ${err.message}` });
+      setRunning(false);
+      setOfflineRunning(false);
+      _hasActiveRun = false;
+    }
+  }, [goal, addEntry]);
+
+  const startVoiceInput = useCallback(() => {
+    if (listening) return;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      addEntry({ type: 'system', text: '⚠️ 浏览器不支持语音识别' });
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'zh-CN';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+
+    recognition.onstart = () => setListening(true);
+    recognition.onerror = (event: any) => {
+      setListening(false);
+      addEntry({ type: 'system', text: `⚠️ 语音识别失败: ${event.error === 'not-allowed' ? '请允许麦克风权限' : event.error}` });
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onresult = (event: any) => {
+      let finalText = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalText += event.results[i][0].transcript;
+        }
+      }
+      if (finalText) {
+        const prev = goalRef.current;
+        handleSetGoal(prev ? prev + '，' + finalText : finalText);
+      }
+    };
+    try { recognition.start(); } catch { setListening(false); }
+  }, [listening, handleSetGoal, addEntry]);
 
   const loadScriptToCanvas = useCallback(async (pseudocode: string) => {
     try {
@@ -222,10 +332,18 @@ export function AgentView() {
           <path d="M12 14c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z" />
         </svg>
         <span>AI Agent</span>
-        <span className="agent-status online">● {running ? '运行中' : '就绪'}</span>
+        <span className={`agent-status ${offline ? 'offline' : 'online'}`}>
+          ● {offline ? '离线' : running ? '运行中' : '就绪'}
+        </span>
         <button className="btn btn-ghost btn-icon" onClick={() => { setShowTools(true); loadAgentTools(); }}
           style={{ marginLeft: 8, width: 22, height: 22 }} title="可用 Agent 工具">
           <List size={12} />
+        </button>
+        <button className={`btn btn-ghost btn-icon ${offline ? 'offline' : ''}`}
+          onClick={() => setOffline(!offline)}
+          style={{ marginLeft: 4, width: 22, height: 22 }}
+          title={offline ? '切换为在线模式（需 API 密钥）' : '切换为离线模式（直接执行流程图，无需 API 密钥）'}>
+          {offline ? <WifiOff size={12} /> : <Wifi size={12} />}
         </button>
       </div>
 
@@ -236,14 +354,28 @@ export function AgentView() {
             className="agent-input"
             value={goal}
             onChange={e => { handleSetGoal(e.target.value); setGeneratedScript(null); }}
-            onKeyDown={e => e.key === 'Enter' && !running && runAgent(false)}
-            placeholder="输入需求后按 Enter 生成流程图，再按「执行」运行动作"
+            onKeyDown={e => e.key === 'Enter' && !running && (offline ? runOffline() : runAgent(false))}
+            placeholder={offline ? '输入描述后按 Enter 直接执行当前流程图' : "输入需求后按 Enter 生成流程图，再按「执行」运行动作"}
             disabled={running}
           />
+          {voiceSupported && (
+            <button className={`btn btn-ghost btn-icon ${listening ? 'listening' : ''}`}
+              onClick={startVoiceInput} disabled={running}
+              style={{ width: 28, height: 28, flexShrink: 0, position: 'relative' }}
+              title={listening ? '聆听中...' : '语音输入'}>
+              {listening ? <MicOff size={14} /> : <Mic size={14} />}
+              {listening && <span className="voice-pulse" />}
+            </button>
+          )}
           {running ? (
             <button className="agent-btn agent-btn-danger" onClick={stopAgent} style={{ gap: 6 }}>
               <span className="agent-spinner" />
               停止
+            </button>
+          ) : offline ? (
+            <button className="agent-btn agent-btn-primary" onClick={runOffline} disabled={!goal.trim()} style={{ gap: 6 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a4 4 0 014 4c0 2-2 4-4 6-2-2-4-4-4-6a4 4 0 014-4z"/><path d="M12 14c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z"/></svg>
+              离线执行
             </button>
           ) : generatedScript ? (
             <>
@@ -265,10 +397,15 @@ export function AgentView() {
 
         {/* Log area */}
         <div className="agent-log">
-          {log.length === 0 && (
+          {log.length === 0 && !offline && (
             <div className="agent-empty">
               输入目标后点击「运行」，Agent 会自动分析任务并选择最佳执行方式：
               简单操作直接执行，复杂任务生成可视化流程图。
+            </div>
+          )}
+          {log.length === 0 && offline && (
+            <div className="agent-empty">
+              离线模式：在画布上编辑好流程图，输入描述后点击「离线执行」直接运行，无需 API 密钥。
             </div>
           )}
           {log.map((entry) => (
@@ -312,14 +449,14 @@ export function AgentView() {
           {/* Loading indicator when waiting for API response */}
           {running && log.length > 0 && !log.some(e => e.type === 'script' || e.type === 'complete' || e.type === 'fail') && (
             <div className="agent-msg agent-msg-system" style={{ opacity: 0.6 }}>
-              <span className="agent-spinner" /> 正在等待 AI 响应...
+              <span className="agent-spinner" /> {offlineRunning ? '正在执行...' : '正在等待 AI 响应...'}
             </div>
           )}
           <div ref={msgEndRef} />
         </div>
 
-        {/* Guidance input (only when agent running) */}
-        {running && (
+        {/* Guidance input (only when agent running and online) */}
+        {running && !offline && (
           <div className="agent-guidance-bar">
             <input
               className="agent-input"

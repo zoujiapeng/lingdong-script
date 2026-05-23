@@ -30,7 +30,7 @@ def exec_list_checkpoints(limit: int = 20) -> list:
     description="【持久化】获取指定任务的执行断点详情，包含 DSL、状态、变量快照。用于检查和恢复任务",
     category=F.DEBUG,
     params=[
-        P("task_id", "str", "任务ID"),
+        P("task_id", "str", "任务ID", example="task_001"),
     ],
     returns="dict - 断点详情",
     tags=["persistence", "store"],
@@ -61,7 +61,7 @@ def exec_get_checkpoint(task_id: str) -> dict:
     description="【持久化】删除指定任务的执行断点。用于清理已完成或不需要恢复的任务",
     category=F.DEBUG,
     params=[
-        P("task_id", "str", "任务ID"),
+        P("task_id", "str", "任务ID", example="task_001"),
     ],
     returns="bool - 是否成功",
     tags=["persistence", "store"],
@@ -224,7 +224,7 @@ def learned_save(
     description="【学习·目标】根据目标 ID 查询已学习的目标信息",
     category=F.PERCEPTION,
     params=[
-        P("target_id", "str", "目标唯一标识"),
+        P("target_id", "str", "目标唯一标识", example="learned_btn_001"),
     ],
     returns="dict - 目标信息（不存在返回空）",
     tags=["learned", "target"],
@@ -264,7 +264,7 @@ def learned_list(app: str = "", limit: int = 100) -> list:
     description="【学习·目标】删除指定的已学习目标",
     category=F.PERCEPTION,
     params=[
-        P("target_id", "str", "目标唯一标识"),
+        P("target_id", "str", "目标唯一标识", example="learned_btn_001"),
     ],
     returns="bool - 是否成功",
     tags=["learned", "target"],
@@ -284,8 +284,8 @@ def learned_delete(target_id: str) -> bool:
     description="【学习·目标】在目标被查询并命中后，记录成功或失败统计",
     category=F.PERCEPTION,
     params=[
-        P("target_id", "str", "目标唯一标识"),
-        P("success", "bool", "是否成功"),
+        P("target_id", "str", "目标唯一标识", example="learned_btn_001"),
+        P("success", "bool", "是否成功", example=True),
     ],
     returns="dict - 更新结果",
     tags=["learned", "target"],

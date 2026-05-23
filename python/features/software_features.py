@@ -54,7 +54,7 @@ def software_new_script() -> dict:
     description="【软件操控】在流程图中添加一个自动化节点",
     category=F.CONTROL,
     params=[
-        P("type", "str", "节点类型: click, input_text, wait, image_click, click_text, keyboard, swipe, screenshot, condition, loop 等"),
+        P("type", "str", "节点类型: click, input_text, wait, image_click, click_text, keyboard, swipe, screenshot, condition, loop 等", example="click"),
         P("x", "int", "节点在画布上的 X 坐标", required=False, default=300),
         P("y", "int", "节点在画布上的 Y 坐标", required=False, default=200),
         P("params", "object", "节点参数字典", required=False, default={}),
@@ -72,8 +72,8 @@ def software_add_node(type: str, x: int = 300, y: int = 200, params: dict = None
     description="【软件操控】连接流程图中的两个节点",
     category=F.CONTROL,
     params=[
-        P("from_node", "str", "起始节点 ID"),
-        P("to_node", "str", "目标节点 ID"),
+        P("from_node", "str", "起始节点 ID", example="node_001"),
+        P("to_node", "str", "目标节点 ID", example="node_002"),
         P("from_port", "str", "起始端口", required=False, default="output"),
         P("to_port", "str", "目标端口", required=False, default="input"),
     ],
@@ -93,7 +93,7 @@ def software_add_edge(from_node: str, to_node: str, from_port: str = "output", t
     description="【软件操控】加载完整脚本到流程图。script_json 需包含 nodes, edges, meta 字段",
     category=F.CONTROL,
     params=[
-        P("script_json", "object", "完整的脚本 JSON（包含 nodes, edges, meta）"),
+        P("script_json", "object", "完整的脚本 JSON（包含 nodes, edges, meta）", example={"nodes":[],"edges":[],"meta":{"name":"test"}}),
     ],
     returns="dict{success, result}",
     tags=["software"],
@@ -121,7 +121,7 @@ def software_auto_layout() -> dict:
     description="【软件操控】切换软件视图模式",
     category=F.CONTROL,
     params=[
-        P("mode", "str", "视图模式: canvas | pseudocode | agent | settings"),
+        P("mode", "str", "视图模式: canvas | pseudocode | agent | settings", example="canvas"),
     ],
     returns="dict{success, result}",
     tags=["software"],

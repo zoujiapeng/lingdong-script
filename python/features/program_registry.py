@@ -934,8 +934,8 @@ def program_list(query: str = "") -> list:
     description="【系统·注册表】手动添加程序别名。用于自动扫描未覆盖的自定义程序",
     category=F.SYSTEM,
     params=[
-        P("name", "str", "别名（如 myapp）"),
-        P("path", "str", "完整路径（如 C:\\Tools\\myapp.exe）"),
+        P("name", "str", "别名（如 myapp）", example="myapp"),
+        P("path", "str", "完整路径（如 C:\\Tools\\myapp.exe）", example="C:\\Tools\\myapp.exe"),
     ],
     returns="dict{success}",
     tags=["system", "program", "registry"],

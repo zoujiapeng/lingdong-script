@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { generateText, TextMode } from '../utils/textGenerator';
+import { generateText, TextMode, _setFeatureKeywordMap } from '../utils/textGenerator';
 import { Copy, Download, Edit3, AlertTriangle, CheckCircle, XCircle, Languages } from 'lucide-react';
 
 export function PseudoPanel() {
@@ -24,7 +24,7 @@ export function PseudoPanel() {
           map[f.name] = f.dsl_keyword;
         }
       }
-      import('../utils/textGenerator').then(m => m._setFeatureKeywordMap(map));
+      _setFeatureKeywordMap(map);
     }
   }, [featureList]);
 

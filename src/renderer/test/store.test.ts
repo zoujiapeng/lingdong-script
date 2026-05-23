@@ -48,6 +48,7 @@ describe('store', () => {
     expect(state.script.meta.name).toBe('桌面图标监控');
     expect(state.ui).toBeDefined();
     expect(state.ui.dark_mode).toBe(false);
+    expect(state.ui.themeMode).toBe('system');
     expect(state.ui.show_grid).toBe(true);
     expect(state.execution.status).toBe('idle');
   });

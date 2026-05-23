@@ -51,7 +51,7 @@ export const NodeLibrary = React.memo(function NodeLibrary() {
 
     // Native node definitions (exclude start/end from library)
     const OBSOLETE_TYPES = new Set(['click','image_click','click_text','click_action','shutdown','reboot','logoff','hibernate','lock_workstation','system_sleep','display_off',
-      'volume_set','volume_mute','show_desktop','set_wallpaper','battery_status','empty_recycle_bin',
+      'volume_set','volume_mute','show_desktop','set_wallpaper','empty_recycle_bin',
       'clipboard_set','clipboard_get','launch_program','kill_process','wait_process','focus_window']);
     for (const def of Object.values(NODE_DEFINITIONS)) {
       if (def.type === 'start' || def.type === 'end') continue;
@@ -199,7 +199,7 @@ export const NodeLibrary = React.memo(function NodeLibrary() {
           最近使用
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {['image_click', 'wait', 'condition'].map((type) => {
+          {['mouse_operation', 'wait', 'condition'].map((type) => {
             const def = NODE_DEFINITIONS[type as NodeType];
             if (!def) return null;
             return (

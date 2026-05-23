@@ -52,7 +52,9 @@ def _close_browser():
     description="【Web】通过 Playwright 执行浏览器操作。支持导航/点击/输入/截图/等待/提取内容/滚动。与桌面自动化操作混排。",
     category=F.ACTION,
     params=[
-        P("action", "str", "操作类型: navigate|click|input_text|screenshot|wait|extract|scroll"),
+        P("action", "str", "操作类型: navigate|click|input_text|screenshot|wait|extract|scroll",
+          example="navigate",
+          choices={"navigate": "导航", "click": "点击", "input_text": "输入文本", "screenshot": "截图", "wait": "等待", "extract": "提取内容", "scroll": "滚动"}),
         P("url", "str", "导航 URL（action=navigate 时需要）", required=False, default=""),
         P("selector", "str", "CSS 选择器（action=click/input_text/extract 时需要）", required=False, default=""),
         P("text", "str", "输入文本（action=input_text 时需要）", required=False, default=""),

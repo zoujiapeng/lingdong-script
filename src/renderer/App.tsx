@@ -14,21 +14,44 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
 import { htnRegistry } from './utils/htnRegistry';
 import { ALL_HTN_DEFS } from './utils/htnTemplateDefs';
+import { loadTemplateShortcuts } from './store';
 import { matchSemantic } from './utils/semanticMatcher';
 import './styles/globals.css';
 
 export default function App() {
   const viewMode = useStore(s => s.ui.viewMode);
-  const darkMode = useStore(s => s.ui.dark_mode);
+  const themeMode = useStore(s => s.ui.themeMode);
   const panelsVisible = useStore(s => s.ui.panels_visible);
   const showToolCallPanel = useStore(s => s.ui.show_tool_call_panel);
   const setUI = useStore(s => s.setUI);
   const setViewMode = useStore(s => s.setViewMode);
 
-  // Apply dark mode class
+  // Apply dark mode based on themeMode + system preference
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', darkMode);
-  }, [darkMode]);
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => {
+      let effectiveDark: boolean;
+      if (themeMode === 'system') {
+        effectiveDark = mq.matches;
+      } else {
+        effectiveDark = themeMode === 'dark';
+      }
+      document.documentElement.classList.toggle('dark', effectiveDark);
+      // Sync dark_mode for backward compat (store auto-save, HTTP API)
+      const current = useStore.getState().ui.dark_mode;
+      if (current !== effectiveDark) {
+        useStore.getState().setUI({ dark_mode: effectiveDark });
+      }
+    };
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, [themeMode, setUI]);
+
+  // Persist themeMode to localStorage
+  useEffect(() => {
+    try { localStorage.setItem('lingdong-theme-mode', themeMode); } catch {}
+  }, [themeMode]);
 
   // Center flowchart on initial mount
   useEffect(() => {
@@ -133,6 +156,34 @@ export default function App() {
           store.stopExecution();
         }
         return;
+      }
+
+      // Template shortcuts
+      const shortcuts = loadTemplateShortcuts();
+      const parts: string[] = [];
+      if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.altKey) parts.push('Alt');
+      if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) {
+        parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+        const combo = parts.join('+');
+        for (const [tplId, sc] of Object.entries(shortcuts)) {
+          if (sc === combo && store.script.nodes.filter(n => n.type !== 'start' && n.type !== 'end').length === 0) {
+            e.preventDefault();
+            store.loadTemplate(tplId);
+            store.setViewMode('canvas');
+            return;
+          }
+        }
+        // Also allow executing shortcut even if canvas has content (re-execute template check)
+        for (const [tplId, sc] of Object.entries(shortcuts)) {
+          if (sc === combo) {
+            e.preventDefault();
+            store.loadTemplate(tplId);
+            store.setViewMode('canvas');
+            return;
+          }
+        }
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {

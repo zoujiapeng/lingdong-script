@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { parseQuickSchedule, isScheduleIntent } from '../utils/quickScheduleParser';
 
 describe('isScheduleIntent', () => {

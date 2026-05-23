@@ -154,6 +154,21 @@ PARAMS_REQUIRED: dict[str, dict] = {
     # Program registry
     "program_add_alias": {"name": "_test_alias", "path": "C:\\Windows\\System32\\notepad.exe"},
     "program_resolve": {"query": "notepad"},
+    # Missing-param features (require args without defaults)
+    "browser_state_restore": {"path": ""},
+    "browser_wait_for": {"condition": "visible", "target": "body"},
+    "browser_upload_file": {"selector": "input", "files": '["test.txt"]'},
+    "browser_wait_request": {"url_substring": "/api/test"},
+    "fill_save_dialog": {"filepath": "test.txt"},
+    "menu_click": {"target": "", "path": ""},
+    "qq_send_message": {"contact": "", "message": ""},
+    "qq_find_contact": {"contact": ""},
+    "menu_structure": {"target": ""},
+    "macro_extract_visual_templates": {"macro_name": "__nonexistent__"},
+    "learned_delete": {"target_id": ""},
+    "learned_get": {"target_id": ""},
+    "learned_record": {"target_id": "", "success": True},
+    "learned_save": {"target_id": ""},
 }
 
 ALL_SKIP = DESTRUCTIVE | GUI_REQUIRED | AI_API_REQUIRED

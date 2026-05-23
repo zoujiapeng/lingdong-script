@@ -34,28 +34,28 @@ describe('pseudoParser', () => {
     const flow = parsePseudoToFlow('type "hello world"');
     const inputNodes = flow.nodes.filter(n => n.type === 'input_text');
     expect(inputNodes).toHaveLength(1);
-    expect(inputNodes[0].params.text).toBe('hello world');
+    expect((inputNodes[0].params as any).text).toBe('hello world');
   });
 
   it('parses Chinese type', () => {
     const flow = parsePseudoToFlow('输入 "你好世界"');
     const n = flow.nodes.find(n => n.type === 'input_text');
-    expect(n?.params.text).toBe('你好世界');
+    expect((n?.params as any).text).toBe('你好世界');
   });
 
   it('parses press key', () => {
     const flow = parsePseudoToFlow('press ctrl+alt+v');
     const n = flow.nodes.find(n => n.type === 'keyboard');
     expect(n).toBeDefined();
-    expect(n!.params.keys).toContain('v');
-    expect(n!.params.modifiers).toContain('ctrl');
-    expect(n!.params.modifiers).toContain('alt');
+    expect((n!.params as any).keys).toContain('v');
+    expect((n!.params as any).modifiers).toContain('ctrl');
+    expect((n!.params as any).modifiers).toContain('alt');
   });
 
   it('parses Chinese press key', () => {
     const flow = parsePseudoToFlow('按键 enter');
     const n = flow.nodes.find(n => n.type === 'keyboard');
-    expect(n?.params.keys).toContain('enter');
+    expect((n?.params as any).keys).toContain('enter');
   });
 
   it('parses wait', () => {
@@ -170,17 +170,17 @@ describe('pseudoParser', () => {
     const flow = parsePseudoToFlow('click image "icon.png" similarity=85 timeout=3');
     const n = flow.nodes.find(n => n.type === 'image_click');
     expect(n).toBeDefined();
-    expect(n!.params.targets).toHaveLength(1);
-    expect(n!.params.targets[0].path).toBe('icon.png');
-    expect(n!.params.similarity).toBe(85);
-    expect(n!.params.timeout).toBe(3);
+    expect((n!.params as any).targets).toHaveLength(1);
+    expect((n!.params as any).targets[0].path).toBe('icon.png');
+    expect((n!.params as any).similarity).toBe(85);
+    expect((n!.params as any).timeout).toBe(3);
   });
 
   it('parses Chinese image_click', () => {
     const flow = parsePseudoToFlow('点击图片 "button.png" 相似度=90');
     const n = flow.nodes.find(n => n.type === 'image_click');
     expect(n).toBeDefined();
-    expect(n!.params.targets[0].path).toBe('button.png');
+    expect((n!.params as any).targets[0].path).toBe('button.png');
   });
 
   it('parses swipe', () => {
@@ -194,14 +194,14 @@ describe('pseudoParser', () => {
     const flow = parsePseudoToFlow('滑动 (200, 600) 到 (200, 300)');
     const n = flow.nodes.find(n => n.type === 'swipe');
     expect(n).toBeDefined();
-    expect(n!.params.start_x).toBe(200);
+    expect((n!.params as any).start_x).toBe(200);
   });
 
   it('parses click_text', () => {
     const flow = parsePseudoToFlow('click_text "提交" similarity=90');
     const n = flow.nodes.find(n => n.type === 'click_text');
-    expect(n?.params.text).toBe('提交');
-    expect(n?.params.similarity).toBe(90);
+    expect((n?.params as any).text).toBe('提交');
+    expect((n?.params as any).similarity).toBe(90);
   });
 
   it('parses popup_close', () => {

@@ -217,8 +217,9 @@ def _click_result_or_press_enter(query, steps, attempts=3):
     description="QQ 综合操作：启动/发送消息/查找联系人/查看状态",
     category=F.ACTION,
     params=[
-        P("action", "str", "操作类型",
-          choices={"launch": "启动QQ", "send_message": "发送消息", "find_contact": "查找联系人", "get_status": "查看状态"}),
+        P("action", "str", "操作类型", example="send_message",
+          choices={"launch": "启动QQ", "send_message": "发送消息", "find_contact": "查找联系人", "get_status": "查看状态"},
+          default="launch", required=False),
         P("contact", "str", "联系人名称（发送消息/查找联系人时用）", required=False),
         P("message", "str", "消息内容（发送消息时用）", required=False),
         P("timeout", "number", "操作超时秒数", required=False, default=15),

@@ -31,8 +31,7 @@ export function createFlowExecutor(
   let _stopped = false;
   let _stepping = stepping || false;
   let _breakpoints = new Set(breakpoints || []);
-  let resumeResolve: (() => void) | null = null;
-  let stepResolve: (() => void) | null = null;
+  const _resolve = { resume: null as (() => void) | null, step: null as (() => void) | null };
   let _subFlowDepth = 0;
   const MAX_SUB_FLOW_DEPTH = 10;
 
@@ -62,8 +61,8 @@ export function createFlowExecutor(
     while (Date.now() - start < ms) {
       if (_stopped) throw new Error('stopped');
       while (_paused) {
-        await new Promise<void>((r) => { resumeResolve = r; });
-        resumeResolve = null;
+        await new Promise<void>((r) => { _resolve.resume = r; });
+        _resolve.resume = null;
         if (_stopped) throw new Error('stopped');
       }
       await new Promise((r) => setTimeout(r, 30));
@@ -72,8 +71,8 @@ export function createFlowExecutor(
 
   async function checkPauseStop() {
     while (_paused && !_stopped) {
-      await new Promise<void>((r) => { resumeResolve = r; });
-      resumeResolve = null;
+      await new Promise<void>((r) => { _resolve.resume = r; });
+      _resolve.resume = null;
     }
     if (_stopped) throw new Error('stopped');
   }
@@ -89,8 +88,8 @@ export function createFlowExecutor(
       _paused = true;
       callbacks.onPausedAtBreakpoint?.(nodeId);
       while (_paused && !_stopped) {
-        await new Promise<void>((r) => { resumeResolve = r; });
-        resumeResolve = null;
+        await new Promise<void>((r) => { _resolve.resume = r; });
+        _resolve.resume = null;
       }
       if (_stopped) throw new Error('stopped');
     }
@@ -718,17 +717,17 @@ export function createFlowExecutor(
     },
     resume: () => {
       _paused = false;
-      if (resumeResolve) resumeResolve();
+      _resolve.resume?.();
     },
     stop: () => {
       _stopped = true;
-      if (resumeResolve) resumeResolve();
-      if (stepResolve) stepResolve();
+      _resolve.resume?.();
+      _resolve.step?.();
     },
     stepNext: () => {
       _paused = false;
-      if (resumeResolve) resumeResolve();
-      if (stepResolve) stepResolve();
+      _resolve.resume?.();
+      _resolve.step?.();
     },
   };
 }

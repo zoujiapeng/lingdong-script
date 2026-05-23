@@ -2337,6 +2337,15 @@ textarea.form-input {
   color: var(--success);
 }
 
+.agent-status.offline {
+  color: var(--warning, #f59e0b);
+}
+
+/* Offline mode toggle button active state */
+.btn-ghost.btn-icon.offline {
+  color: var(--warning, #f59e0b);
+}
+
 .agent-body {
   flex: 1;
   display: flex;
@@ -2537,6 +2546,22 @@ textarea.form-input {
 }
 @keyframes agent-spin {
   to { transform: rotate(360deg); }
+}
+
+/* Voice input button pulse animation */
+.btn-ghost.btn-icon.listening {
+  color: #ef4444;
+}
+.voice-pulse {
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 2px solid #ef4444;
+  animation: voice-pulse 1.2s ease-out infinite;
+}
+@keyframes voice-pulse {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(1.4); opacity: 0; }
 }
 
 .agent-result {

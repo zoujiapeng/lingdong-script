@@ -14,7 +14,8 @@ from features.registry import feature, P, FeatureCategory as F
     category=F.CONTROL,
     params=[
         P("action", "str", "等待类型",
-          choices={"file": "等待文件", "process": "等待进程", "network": "等待网络", "time": "等待到指定时间"}),
+          choices={"file": "等待文件", "process": "等待进程", "network": "等待网络", "time": "等待到指定时间"},
+          default="file", example="file", required=False),
         P("path", "str", "文件路径（等待文件时必填）", required=False, default=""),
         P("name", "str", "进程名称（等待进程时必填）", required=False, default=""),
         P("timeout", "number", "超时秒数", required=False, default=60),
