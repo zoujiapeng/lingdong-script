@@ -6,24 +6,24 @@ function makeFlow(opts: {
   edges: Array<{ from: string; from_port?: string; to: string }>;
   name?: string;
   description?: string;
-}) {
+}): import('../types').FlowScript {
   const { nodes, edges, name = 'test', description = '' } = opts;
   return {
     meta: { id: 'test', name, description, created_at: '', updated_at: '', version: '1.0' },
     nodes: nodes.map(n => ({
       id: n.id,
-      type: n.type,
+      type: n.type as import('../types').NodeType,
       x: 0, y: 0,
       params: n.params || {},
       ...(n.disabled !== undefined ? { disabled: n.disabled } : {}),
-    })),
+    })) as import('../types').FlowNode[],
     edges: edges.map(e => ({
       id: `e-${e.from}-${e.to}`,
       from_node: e.from,
       from_port: e.from_port || 'output',
       to_node: e.to,
       to_port: 'input',
-    })),
+    })) as import('../types').FlowEdge[],
     variables: {},
     settings: { default_delay: 0.5, error_handling: 'stop' as const, max_retries: 0, retry_delay: 1, log_level: 'info' as const },
   };

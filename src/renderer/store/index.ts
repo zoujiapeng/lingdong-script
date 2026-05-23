@@ -16,6 +16,7 @@ import {
   MacroEvent,
   MacroInfo,
   RecordingState,
+  LearnedTarget,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { getNodeDimensions } from '../utils/constants';
@@ -43,6 +44,7 @@ const DEFAULT_UI_STATE: UIState = {
   snap_to_grid: true,
   grid_size: 20,
   dark_mode: false,
+  themeMode: (() => { try { const s = localStorage.getItem('lingdong-theme-mode'); if (s === 'light' || s === 'dark' || s === 'system') return s; } catch {} return 'system'; })(),
   viewMode: 'canvas',
   panels_visible: false,
   show_node_library: false,
@@ -714,7 +716,7 @@ export const useStore = create<AppStore>()(
         state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
-        state.execution = { status: 'idle', variables: {}, log: [] };
+        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false };
       });
       if (s.nodes.length > 0) get().fitToScreen();
     },
@@ -729,7 +731,7 @@ export const useStore = create<AppStore>()(
         state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
-        state.execution = { status: 'idle', variables: {}, log: [] };
+        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false };
       });
       if (s.nodes.length > 0) get().fitToScreen();
     },
@@ -1165,6 +1167,7 @@ export const useStore = create<AppStore>()(
             pause: () => api.enginePause(),
             resume: () => api.engineResume(),
             stop: () => api.engineStop(),
+            stepNext: () => api.engineStepNext?.(),
           };
         });
       } else {
@@ -1702,6 +1705,30 @@ export interface CustomTemplate {
   name: string;
   description: string;
   script: FlowScript;
+  shortcut?: string;
+}
+
+// ── Template Shortcut Registry ──
+const TEMPLATE_SHORTCUTS_KEY = 'lingdong-template-shortcuts';
+
+export function loadTemplateShortcuts(): Record<string, string> {
+  try {
+    const saved = localStorage.getItem(TEMPLATE_SHORTCUTS_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+}
+
+export function saveTemplateShortcut(templateId: string, shortcut: string) {
+  try {
+    const all = loadTemplateShortcuts();
+    if (shortcut) all[templateId] = shortcut;
+    else delete all[templateId];
+    localStorage.setItem(TEMPLATE_SHORTCUTS_KEY, JSON.stringify(all));
+  } catch {}
+}
+
+export function deleteTemplateShortcut(templateId: string) {
+  saveTemplateShortcut(templateId, '');
 }
 
 export function loadCustomTemplates(): CustomTemplate[] {

@@ -100,7 +100,7 @@ def scheduler_list(enabled_only: bool = False) -> list:
     description="【调度器】按 ID 查看单个调度规则的详细配置",
     category=F.SYSTEM,
     params=[
-        P("id", "str", "调度 ID"),
+        P("id", "str", "调度 ID", example="schedule_001"),
     ],
     returns="dict - 调度详情（不存在时返回空字典）",
     tags=["scheduler", "schedule"],
@@ -118,10 +118,10 @@ def scheduler_get(id: str) -> dict:
     description="【调度器】创建一条新的定时调度规则，支持 ECA 模型：触发器（何时检查）+ 守卫条件（是否执行）+ 模板（执行什么）",
     category=F.SYSTEM,
     params=[
-        P("name", "str", "调度名称，如「上班自动打卡」"),
-        P("template_id", "str", "要执行的模板 ID（对应 templates/ 目录下的文件名不含后缀）"),
+        P("name", "str", "调度名称，如「上班自动打卡」", example="上班打卡"),
+        P("template_id", "str", "要执行的模板 ID", example="attendance_card"),
         P("template_name", "str", "模板显示名称（可选）", required=False, default=""),
-        P("triggers", "list", '触发器列表，如 [{"type":"cron","cron_expr":"0 9 * * 1-5"}]'),
+        P("triggers", "list", '触发器列表', example=[{"type":"cron","cron_expr":"0 9 * * 1-5"}]),
         P("conditions", "object", '守卫条件组（可选），如 {"operator":"AND","rules":[{"type":"window_exists","params":{"title":"企业微信"}}]}', required=False, default=None),
         P("enabled", "boolean", "是否立即启用", required=False, default=True),
     ],
@@ -159,7 +159,7 @@ def scheduler_create(name: str, template_id: str, triggers: list,
     description="【调度器】更新已存在的调度规则（部分更新，仅修改提供的字段）",
     category=F.SYSTEM,
     params=[
-        P("id", "str", "调度 ID"),
+        P("id", "str", "调度 ID", example="schedule_001"),
         P("name", "str", "调度名称", required=False, default=None),
         P("template_id", "str", "模板 ID", required=False, default=None),
         P("template_name", "str", "模板显示名称", required=False, default=None),
@@ -189,7 +189,7 @@ def scheduler_update(id: str, **kwargs) -> dict:
     description="【调度器】删除指定的调度规则。用于清理不再需要的自动任务",
     category=F.SYSTEM,
     params=[
-        P("id", "str", "要删除的调度 ID"),
+        P("id", "str", "要删除的调度 ID", example="schedule_001"),
     ],
     returns="bool - 是否成功",
     tags=["scheduler", "schedule"],
@@ -241,7 +241,7 @@ def scheduler_trigger_types() -> list:
     description="【调度器】用自然语言一句话创建定时调度，无需手动填表。自动解析时间和动作，支持：提醒、打开软件、运行模板。示例：'今晚9点提醒我写周报并打开企业微信'",
     category=F.SYSTEM,
     params=[
-        P("text", "str", "自然语言调度描述，如「今晚9点提醒我写周报并打开企业微信」"),
+        P("text", "str", "自然语言调度描述", example="今晚9点提醒我写周报"),
     ],
     returns="dict - 创建的调度规则（含 id、confidence、解析详情）",
     examples=[

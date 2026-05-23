@@ -100,7 +100,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   wait: {
     type: 'wait',
     label: '等待',
-    description: '等待指定时间或条件',
+    description: '等待指定时间或条件成立（图片/窗口/文件/进程）',
     icon: 'Clock',
     category: 'basic',
     color: '#0ea5e9',
@@ -118,7 +118,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   input_text: {
     type: 'input_text',
     label: '输入文本',
-    description: '在指定位置输入文字',
+    description: '在指定位置输入文字（支持自动聚焦和清空）',
     icon: 'Type',
     category: 'basic',
     color: '#10b981',
@@ -136,7 +136,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   keyboard: {
     type: 'keyboard',
     label: '键盘事件',
-    description: '模拟键盘按键',
+    description: '模拟键盘按键（支持组合键和修饰键）',
     icon: 'Command',
     category: 'device',
     color: '#f59e0b',
@@ -211,7 +211,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   sub_script: {
     type: 'sub_script',
     label: '运行子脚本',
-    description: '调用其他脚本',
+    description: '调用其他 .flow 脚本作为子流程执行',
     icon: 'FileCode',
     category: 'control',
     color: '#a855f7',
@@ -227,7 +227,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   screenshot: {
     type: 'screenshot',
     label: '截图',
-    description: '截取屏幕图像',
+    description: '截取屏幕图像（支持全屏/区域截图，PNG/JPG/BMP格式）',
     icon: 'Camera',
     category: 'image',
     color: '#64748b',
@@ -246,7 +246,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     color: '#22c55e',
     defaultParams: {
       action: 'navigate',
-      url: 'https://',
+      url: '',
       selector: '',
       text: '',
       wait_seconds: 1,
@@ -356,7 +356,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   variable_set: {
     type: 'variable_set',
     label: '设置变量',
-    description: '设置全局变量的值',
+    description: '设置全局变量的值（支持字符串/数字/布尔/JSON）',
     icon: 'Variable',
     category: 'data',
     color: '#ec4899',
@@ -372,7 +372,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   variable_get: {
     type: 'variable_get',
     label: '读取变量',
-    description: '读取全局变量的值',
+    description: '读取全局变量的值（字符串/数字/布尔/JSON）',
     icon: 'Database',
     category: 'data',
     color: '#d946ef',
@@ -461,7 +461,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   volume_mute: {
     type: 'volume_mute',
     label: '静音切换',
-    description: '切换或设置静音状态',
+    description: '切换或设置静音状态（true=静音，false=取消静音，null=切换）',
     icon: 'VolumeX',
     category: 'system',
     color: '#3b82f6',
@@ -516,7 +516,13 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     category: 'system',
     color: '#22c55e',
     defaultParams: { action: 'launch', target: '', args: '', name: '', timeout: 30, wait_for: 'start', title: '', force: false },
-    ports: { inputs: [{ id: 'input', type: 'flow' }], outputs: [{ id: 'output', type: 'flow' }] },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: '成功', type: 'flow' },
+        { id: 'fail', label: '失败', type: 'flow' },
+      ],
+    },
   },
   set_wallpaper: {
     type: 'set_wallpaper',
@@ -658,6 +664,31 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     defaultParams: { action: 'set', text: '', format_: 'base64', save_path: '' },
     ports: { inputs: [{ id: 'input', type: 'flow' }], outputs: [{ id: 'output', type: 'flow' }] },
   },
+  click_action: {
+    type: 'click_action',
+    label: '点击操作',
+    description: '点击综合操作：坐标/图片/OCR文字定位点击',
+    icon: 'MousePointerClick',
+    category: 'basic',
+    color: '#3b82f6',
+    defaultParams: {
+      mode: 'coordinate',
+      x: 960, y: 540,
+      method: 'single',
+      targets: [],
+      similarity: 90,
+      offset_x: 0, offset_y: 0,
+      timeout: 5,
+      multi_scale: false,
+      match_all: false,
+      text: '',
+      delay_after: 0.5,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
   mouse_operation: {
     type: 'mouse_operation',
     label: '鼠标操作',
@@ -688,7 +719,10 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
-      outputs: [{ id: 'output', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: '成功', type: 'flow' },
+        { id: 'fail', label: '失败', type: 'flow' },
+      ],
     },
   },
   dialog_action: {

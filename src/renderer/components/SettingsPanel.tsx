@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain, Volume2, Sun as SunIcon, Wifi, Package, Activity } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain, Volume2, Sun as SunIcon, Wifi, Package, Activity, Monitor } from 'lucide-react';
 import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
@@ -252,13 +252,20 @@ export function SettingsPanel() {
 
           <div className="settings-row">
             <div className="settings-row-label">
-              <Moon size={15} />
-              <span>深色模式</span>
+              <Monitor size={15} />
+              <span>主题模式</span>
             </div>
-            <button
-              className={`toggle ${ui.dark_mode ? 'on' : ''}`}
-              onClick={() => setUI({ dark_mode: !ui.dark_mode })}
-            />
+            <div style={{ display: 'flex', gap: 4, background: 'var(--bg-secondary)', borderRadius: 6, padding: 2 }}>
+              {(['light', 'dark', 'system'] as const).map(mode => (
+                <button key={mode} className={`toggle-segment ${ui.themeMode === mode ? 'active' : ''}`}
+                  onClick={() => setUI({ themeMode: mode })}
+                  style={{ padding: '4px 12px', fontSize: 12, borderRadius: 4, border: 'none', cursor: 'pointer',
+                    background: ui.themeMode === mode ? 'var(--accent)' : 'transparent',
+                    color: ui.themeMode === mode ? '#fff' : 'var(--text-primary)' }}>
+                  {mode === 'light' ? '亮色' : mode === 'dark' ? '深色' : '跟随系统'}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="settings-row">

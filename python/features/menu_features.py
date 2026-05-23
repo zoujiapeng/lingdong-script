@@ -15,8 +15,8 @@ logger = logging.getLogger("features.menu")
     description="【菜单】按路径点击 Windows 窗口菜单。自动降级：Win32 WM_COMMAND → 键盘加速键 → UIA。支持 owner-drawn 菜单（Notepad++ 等）",
     category=F.ACTION,
     params=[
-        P("target", "any", "窗口标题（模糊匹配）或 HWND 数字"),
-        P("path", "list", "菜单路径列表，如 [\"View\", \"Function List\"] 或 [\"文件\", \"打开\"]"),
+        P("target", "any", "窗口标题（模糊匹配）或 HWND 数字", example="记事本"),
+        P("path", "list", "菜单路径列表", example='["文件","打开"]'),
         P("timeout", "number", "超时秒数", required=False, default=5),
     ],
     returns="bool - 是否成功",
@@ -59,7 +59,7 @@ def menu_click(target: str | int, path: list, timeout: float = 5) -> bool:
     description="【菜单·诊断】获取窗口的完整菜单结构，用于调试和查找菜单项路径",
     category=F.DEBUG,
     params=[
-        P("target", "any", "窗口标题（模糊匹配）或 HWND 数字"),
+        P("target", "any", "窗口标题（模糊匹配）或 HWND 数字", example="记事本"),
     ],
     returns="list - 菜单结构（含子菜单、命令 ID、位置）",
     tags=["menu", "diagnostic"],

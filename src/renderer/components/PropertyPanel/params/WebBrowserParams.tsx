@@ -1,5 +1,5 @@
 import React from 'react';
-import { WebBrowserNodeParams } from '../../types';
+import { WebBrowserNodeParams } from '../../../types';
 
 interface Props {
   params: WebBrowserNodeParams;

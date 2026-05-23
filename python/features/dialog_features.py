@@ -151,7 +151,7 @@ def dialog_take_action(action: str, timeout: float = 3) -> bool:
     description="【弹窗·保存】通过 pywinauto 填写另存为对话框的文件名路径并保存。跨进程可靠，支持旧式 #32770 和现代 IFileDialog",
     category=F.ACTION,
     params=[
-        P("filepath", "str", "完整保存路径，如 C:\\Users\\xxx\\Desktop\\test.txt"),
+        P("filepath", "str", "完整保存路径，如 C:\\Users\\xxx\\Desktop\\test.txt", example="C:\\Users\\test\\Desktop\\output.txt"),
         P("timeout", "number", "等待对话框出现的秒数", required=False, default=8),
     ],
     returns="bool - 是否保存成功",

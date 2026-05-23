@@ -594,6 +594,7 @@ export interface UIState {
   snap_to_grid: boolean;
   grid_size: number;
   dark_mode: boolean;
+  themeMode: 'light' | 'dark' | 'system';
   viewMode: 'canvas' | 'pseudocode' | 'settings' | 'agent';
   panels_visible: boolean;
   show_node_library: boolean;

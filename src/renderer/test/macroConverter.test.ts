@@ -48,7 +48,7 @@ describe('macroConverter', () => {
     const flow = macroEventsToFlow(events, 'test');
     const kbNodes = flow.nodes.filter(n => n.type === 'keyboard');
     expect(kbNodes).toHaveLength(1);
-    expect(kbNodes[0].params.keys).toContain('enter');
+    expect((kbNodes[0].params as any).keys).toContain('enter');
   });
 
   it('converts single char key to input_text node', () => {

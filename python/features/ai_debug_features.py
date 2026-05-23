@@ -111,7 +111,7 @@ def dsl_to_graph(dsl: str, layout: str = "vertical") -> dict:
     description="【可视化·反向】将前端 Canvas FlowScript JSON（nodes+edges）转换回 DSL 文本。编辑流程图后调用此工具获得可执行的 DSL",
     category=F.AI,
     params=[
-        P("script", "string", "FlowScript JSON 字符串（含 nodes/edges）"),
+        P("script", "string", "FlowScript JSON 字符串（含 nodes/edges）", example='{"nodes":[],"edges":[]}'),
     ],
     returns="str - DSL文本",
     test_cases=[
@@ -155,7 +155,7 @@ def dsl_to_flow_feature(dsl: str, layout: str = "vertical") -> dict:
     description="【双向转换】将前端 Canvas FlowScript JSON 转换回 DSL 文本。编辑流程图后调用此工具可得到可执行的 DSL",
     category=F.AI,
     params=[
-        P("script", "string", "FlowScript JSON 字符串"),
+        P("script", "string", "FlowScript JSON 字符串", example='{"nodes":[],"edges":[]}'),
     ],
     returns="str - DSL文本",
 )
@@ -494,7 +494,7 @@ def load_template(name: str) -> dict:
     description="搜索 templates/ 目录下的 DSL 工作流模板，按关键词返回匹配的模板列表",
     category=F.DEBUG,
     params=[
-        P("query", "str", "搜索关键词"),
+        P("query", "str", "搜索关键词", example="打卡"),
         P("limit", "int", "返回结果数量上限", required=False, default=5),
     ],
     returns="list[dict{name, description, aliases, tags, keywords, category, match_score}]",

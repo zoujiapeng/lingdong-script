@@ -6,9 +6,34 @@ __pycache__/
 .env
 *.log
 .DS_Store
+**/.DS_Store
 Thumbs.db
 screenshot_*.png
-assets/
 *.js.map
 *.js
 python-runtime/
+
+# Build assets (icons, screenshots)
+assets/
+
+# Runtime artifacts
+electron_err.txt
+electron_out.txt
+browser_test_screenshot.png
+browser_test_*.png
+
+# Downloaded / generated temp files
+lingdong_*.txt
+lingdong-*.zip
+
+# Generated macro recordings
+python/macros/visual_*.json
+
+# Browser test snapshots
+python/browser_snapshots/
+
+# Generated flow files
+*.flow
+
+# MCP config
+.mcp.json

@@ -313,8 +313,9 @@ def browser_new_tab(url: str = "about:blank") -> dict:
         page = _get_page()
         context = page.context
         new_page = context.new_page()
-        if url and url != "about:blank":
-            if not url.startswith("http://") and not url.startswith("https://"):
+        if url:
+            _KNOWN_NON_HTTP = ("about:", "data:", "file:", "chrome:", "javascript:", "blob:", "view-source:")
+            if not url.startswith(("http://", "https://")) and "://" not in url and not url.startswith(_KNOWN_NON_HTTP):
                 url = "https://" + url
             new_page.goto(url, wait_until="domcontentloaded")
         return {"success": True, "result": {"title": new_page.title(), "url": new_page.url}}
@@ -394,7 +395,9 @@ def browser_navigate(url: str, wait_until: str = "domcontentloaded") -> dict:
 
 def _do_navigate(url: str, wait_until: str = "domcontentloaded"):
     page = _get_page()
-    if not url.startswith("http://") and not url.startswith("https://"):
+    # Only prepend https:// for bare domains, not special URLs like about:data:file:chrome:
+    _KNOWN_NON_HTTP_SCHEMES = ("about:", "data:", "file:", "chrome:", "javascript:", "blob:", "view-source:")
+    if not url.startswith(("http://", "https://")) and "://" not in url and not url.startswith(_KNOWN_NON_HTTP_SCHEMES):
         url = "https://" + url
     page.goto(url, wait_until=wait_until)
     return {"success": True, "result": {"title": page.title(), "url": page.url}}
@@ -704,7 +707,8 @@ def _do_press_key(key: str):
     params=[
         P("selector", "str", "CSS 选择器", required=False, default=""),
         P("text", "str", "元素文本匹配（与 selector 二选一）", required=False, default=""),
-        P("behavior", "str", "滚动行为: auto | smooth", required=False, default="smooth"),
+        P("behavior", "str", "滚动行为: auto | smooth", required=False, default="smooth",
+          choices={"auto": "自动", "smooth": "平滑"}),
     ],
     returns="bool - 是否成功",
     tags=["browser", "playwright", "scroll"],
@@ -722,6 +726,36 @@ def _do_scroll_to(selector: str, text: str, behavior: str):
     else:
         el = page.locator(selector)
     el.scroll_into_view_if_needed()
+    return {"success": True, "result": True}
+
+
+@feature(
+    name="browser_upload_file",
+    display_name="上传文件",
+    description="【浏览器·交互】通过文件输入元素上传文件。适用于 <input type=file>。支持多个文件同时上传",
+    category=F.ACTION,
+    params=[
+        P("selector", "str", "文件输入元素选择器", example='input[type="file"]'),
+        P("files", "str", "文件路径列表（JSON 数组）", example='["C:/doc/report.pdf"]'),
+        P("timeout", "number", "等待超时秒数", required=False, default=30),
+    ],
+    returns="bool - 是否成功",
+    tags=["browser", "playwright", "upload", "file"],
+)
+def browser_upload_file(selector: str, files: str, timeout: float = 30) -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_upload_file(selector, files, timeout))
+
+
+def _do_upload_file(selector: str, files: str, timeout: float):
+    page = _get_page()
+    import json as _json
+    try:
+        file_list = _json.loads(files) if isinstance(files, str) else list(files)
+    except Exception:
+        file_list = [files]
+    page.set_input_files(selector, file_list, timeout=int(timeout * 1000))
     return {"success": True, "result": True}
 
 
@@ -879,7 +913,9 @@ def _do_screenshot(selector: str, full_page: bool, path: str):
 
     from PIL import Image
     img = Image.open(path)
-    return {"success": True, "result": {"path": path, "width": img.width, "height": img.height}}
+    w, h = img.width, img.height
+    img.close()
+    return {"success": True, "result": {"path": path, "width": w, "height": h}}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -934,7 +970,8 @@ def _do_execute_js(code: str, selector: str):
         P("selector", "str", "CSS 选择器", required=False, default=""),
         P("text", "str", "等待包含此文本的元素出现（与 selector 二选一）", required=False, default=""),
         P("timeout", "number", "超时秒数", required=False, default=30),
-        P("state", "str", "元素状态: visible | attached | hidden", required=False, default="visible"),
+        P("state", "str", "元素状态: visible | attached | hidden", required=False, default="visible",
+          choices={"visible": "可见", "attached": "已附加", "hidden": "隐藏"}),
     ],
     returns="bool - 是否找到",
     tags=["browser", "playwright", "wait"],
@@ -993,6 +1030,48 @@ def browser_wait_page_load(timeout: float = 30) -> dict:
     if not HAS_PLAYWRIGHT:
         return _not_installed_msg()
     return _pwrap(lambda: _do_wait_navigation(timeout))
+
+
+@feature(
+    name="browser_wait_request",
+    display_name="等待网络请求",
+    description="【浏览器·等待】等待发往指定 URL 的网络请求完成。支持按 URL 片段和 HTTP 方法过滤。适用于等待 API 响应或表单提交结果",
+    category=F.ACTION,
+    params=[
+        P("url_substring", "str", "URL 包含的字符串（模糊匹配）", example="/api/submit"),
+        P("timeout", "number", "超时秒数", required=False, default=30),
+        P("method", "str", "HTTP 方法过滤（GET/POST/PUT/DELETE，留空不限制）", required=False, default=""),
+    ],
+    returns="dict{url, status, method} - 请求信息",
+    tags=["browser", "playwright", "wait", "network"],
+)
+def browser_wait_request(url_substring: str, timeout: float = 30, method: str = "") -> dict:
+    if not HAS_PLAYWRIGHT:
+        return _not_installed_msg()
+    return _pwrap(lambda: _do_wait_request(url_substring, timeout, method))
+
+
+def _do_wait_request(url_substring: str, timeout: float, method: str):
+    page = _get_page()
+    ms = int(timeout * 1000)
+
+    def predicate(req):
+        if url_substring.lower() not in req.url.lower():
+            return False
+        if method and req.method.upper() != method.upper():
+            return False
+        return True
+
+    with page.expect_response(predicate, timeout=ms) as resp_info:
+        resp = resp_info.value
+    return {
+        "success": True,
+        "result": {
+            "url": resp.url,
+            "status": resp.status,
+            "method": resp.request.method,
+        },
+    }
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1457,7 +1536,8 @@ def _do_state_restore(path: str, navigate: bool):
     description="【浏览器·监控】在后台轮询浏览器页面，等待指定条件满足（文本出现/消失、元素可见/隐藏、URL 匹配、标题匹配等）。适合在自动化流程中等待异步操作完成",
     category=F.ACTION,
     params=[
-        P("condition", "str", "等待条件类型: text_visible | text_hidden | element_visible | element_hidden | url_contains | title_contains | page_stable", example="text_visible"),
+        P("condition", "str", "等待条件类型: text_visible | text_hidden | element_visible | element_hidden | url_contains | title_contains | page_stable", example="text_visible",
+          choices={"text_visible": "文本出现", "text_hidden": "文本消失", "element_visible": "元素可见", "element_hidden": "元素隐藏", "url_contains": "URL 包含", "title_contains": "标题包含", "page_stable": "页面稳定"}),
         P("target", "str", "条件目标值（如文本内容、URL 片段、选择器）", example="登录成功"),
         P("timeout", "number", "超时秒数", required=False, default=60),
         P("interval", "number", "轮询间隔秒数", required=False, default=1),

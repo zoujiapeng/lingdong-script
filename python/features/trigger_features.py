@@ -79,7 +79,7 @@ def trigger_stop_all() -> bool:
     description="【触发器】查看指定触发器实例的详细信息和状态",
     category=F.DEBUG,
     params=[
-        P("instance_id", "str", "触发器实例 ID"),
+        P("instance_id", "str", "触发器实例 ID", example="trig_001"),
     ],
     returns="dict{id, spec_name, config, status, fired_count, ...} - 触发器详情",
 )

@@ -28,7 +28,8 @@ def _make_error_result(msg: str) -> dict:
     category=F.AI,
     params=[
         P("prompt", "str", "分析提示词，描述想看什么",
-          default="请详细描述这个画面中有什么，包括所有按钮、文字、图标和界面元素的位置关系"),
+          default="请详细描述这个画面中有什么，包括所有按钮、文字、图标和界面元素的位置关系",
+          example="这个画面里有什么按钮？", required=False),
         P("temperature", "number", "生成温度 0-1", required=False, default=0.1),
         P("max_tokens", "int", "最大输出 token 数", required=False, default=512),
     ],

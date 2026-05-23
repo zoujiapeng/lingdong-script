@@ -62,7 +62,7 @@ def find_processes(name: str) -> list:
     returns="bool - 是否成功",
     dsl_keyword="FOCUS",
     dsl_template="FOCUS {title}",
-    flow_type="click",
+    flow_type="focus_window",
     examples=["focus_window title=记事本"],
 )
 def focus_window(title: str, exact: bool = False) -> bool:

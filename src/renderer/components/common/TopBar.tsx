@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Settings, FileText, Plus, Circle, Brain
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Monitor, Settings, FileText, Plus, Circle, Brain
 } from 'lucide-react';
-import { useStore, loadCustomTemplates, saveCustomTemplates } from '../../store';
+import { useStore, loadCustomTemplates, saveCustomTemplates, loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut } from '../../store';
 import { MacroPanel } from './MacroPanel';
 import { LearnedTargetPanel } from './LearnedTargetPanel';
 import { TemplateMarketDialog } from './TemplateMarketDialog';
@@ -28,7 +28,7 @@ export const TopBar = React.memo(function TopBar() {
   const scriptName = useStore(s => s.script.meta.name);
   const isDirty = useStore(s => s.isDirty);
   const executionStatus = useStore(s => s.execution.status);
-  const darkMode = useStore(s => s.ui.dark_mode);
+  const themeMode = useStore(s => s.ui.themeMode);
   const recordingActive = useStore(s => s.recording.active);
   const setScriptName = useStore(s => s.setScriptName);
   const saveScript = useStore(s => s.saveScript);
@@ -59,13 +59,47 @@ export const TopBar = React.memo(function TopBar() {
   const [savingName, setSavingName] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [showMacroPanel, setShowMacroPanel] = useState(false);
+  const [bindingShortcut, setBindingShortcut] = useState<string | null>(null);
+  const [templateShortcuts, setTemplateShortcuts] = useState<Record<string, string>>(() => loadTemplateShortcuts());
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Fetch crystallized templates when dropdown opens
   useEffect(() => {
     if (showTemplates) fetchCrystallizedTemplates();
+    if (!showTemplates) setBindingShortcut(null);
   }, [showTemplates, fetchCrystallizedTemplates]);
+
+  // Template shortcut keybinding recorder
+  useEffect(() => {
+    if (!bindingShortcut) return;
+    const handler = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') { setBindingShortcut(null); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        deleteTemplateShortcut(bindingShortcut);
+        setTemplateShortcuts(prev => { const n = { ...prev }; delete n[bindingShortcut]; return n; });
+        setBindingShortcut(null);
+        return;
+      }
+      if (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta') return;
+
+      const parts: string[] = [];
+      if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.altKey) parts.push('Alt');
+      const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      parts.push(key);
+      const shortcut = parts.join('+');
+
+      saveTemplateShortcut(bindingShortcut, shortcut);
+      setTemplateShortcuts(prev => ({ ...prev, [bindingShortcut]: shortcut }));
+      setBindingShortcut(null);
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [bindingShortcut]);
 
   // Handle native menu actions (Ctrl+N/O/S from menu bar)
   useEffect(() => {
@@ -258,12 +292,28 @@ export const TopBar = React.memo(function TopBar() {
           {showTemplates && (
             <div className="dropdown-menu" style={{ maxHeight: 400, overflowY: 'auto' }}>
               <div style={{ padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>预设模板</div>
-              {PRESET_LIST.map((tpl) => (
-                <button key={tpl.id} className="dropdown-item" onClick={() => handleNewFromTemplate(tpl.id)}>
-                  <div className="dropdown-item-title">{tpl.name}</div>
-                  <div className="dropdown-item-desc">{tpl.desc}</div>
-                </button>
-              ))}
+              {PRESET_LIST.map((tpl) => {
+                const sc = templateShortcuts[tpl.id];
+                return (
+                  <button key={tpl.id} className="dropdown-item" onClick={() => handleNewFromTemplate(tpl.id)}
+                    style={{ paddingRight: sc ? 8 : 28 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                      <div>
+                        <div className="dropdown-item-title">{tpl.name}</div>
+                        <div className="dropdown-item-desc">{tpl.desc}</div>
+                      </div>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                        {sc && <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 3, background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-muted)' }}>{sc}</span>}
+                        <span onClick={(e) => { e.stopPropagation(); setBindingShortcut(bindingShortcut === tpl.id ? null : tpl.id); }}
+                          style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', opacity: bindingShortcut === tpl.id ? 0.5 : 0.3, hover: { opacity: 1 } }}
+                          title={bindingShortcut === tpl.id ? '按下组合键...' : (sc ? '更改快捷键' : '绑定快捷键')}>
+                          {bindingShortcut === tpl.id ? '⌨' : '⌨'}
+                        </span>
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
 
               {/* Custom templates */}
               {(() => {
@@ -273,30 +323,32 @@ export const TopBar = React.memo(function TopBar() {
                   <>
                     <div style={{ height: 1, background: 'var(--border-primary)', margin: '4px 0' }} />
                     <div style={{ padding: '4px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>我的模板</div>
-                    {customTpls.map((tpl) => (
-                      <button key={tpl.id} className="dropdown-item" onClick={() => handleCustomTemplate(tpl)} style={{ paddingRight: 28 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                          <div>
-                            <div className="dropdown-item-title">{tpl.name}</div>
-                            <div className="dropdown-item-desc">{tpl.description}</div>
+                    {customTpls.map((tpl) => {
+                      const sc = templateShortcuts[tpl.id];
+                      return (
+                        <button key={tpl.id} className="dropdown-item" onClick={() => handleCustomTemplate(tpl)} style={{ paddingRight: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                            <div>
+                              <div className="dropdown-item-title">{tpl.name}</div>
+                              <div className="dropdown-item-desc">{tpl.description}</div>
+                            </div>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                              {sc && <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 3, background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-muted)' }}>{sc}</span>}
+                              <span onClick={(e) => { e.stopPropagation(); setBindingShortcut(bindingShortcut === tpl.id ? null : tpl.id); }}
+                                style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', opacity: bindingShortcut === tpl.id ? 0.5 : 0.3 }}
+                                title={bindingShortcut === tpl.id ? '按下组合键...' : (sc ? '更改快捷键' : '绑定快捷键')}>
+                                {bindingShortcut === tpl.id ? '⌨' : '⌨'}
+                              </span>
+                              <span
+                                onClick={(e) => { e.stopPropagation(); handleDeleteCustomTemplate(e, tpl.id); }}
+                                style={{ color: 'var(--text-muted)', cursor: 'pointer', padding: '2px 4px', borderRadius: 4, fontSize: 14, lineHeight: 1 }}
+                                title="删除模板"
+                              >×</span>
+                            </span>
                           </div>
-                          <span
-                            onClick={(e) => handleDeleteCustomTemplate(e, tpl.id)}
-                            style={{
-                              color: 'var(--text-muted)',
-                              cursor: 'pointer',
-                              padding: '2px 4px',
-                              borderRadius: 4,
-                              fontSize: 14,
-                              lineHeight: 1,
-                            }}
-                            title="删除模板"
-                          >
-                            ×
-                          </span>
-                        </div>
-                      </button>
-                    ))}
+                        </button>
+                      );
+                    })}
                   </>
                 );
               })()}
@@ -312,15 +364,31 @@ export const TopBar = React.memo(function TopBar() {
                       (执行后自动生成)
                     </span>
                   </div>
-                  {crystallizedTemplates.slice(0, 10).map((tpl: any) => (
-                    <button key={tpl.id} className="dropdown-item" onClick={() => handleCrystallizedTemplate(tpl)}>
-                      <div className="dropdown-item-title">{tpl.name}</div>
-                      <div className="dropdown-item-desc">
-                        {tpl.description || tpl.id}
-                        {tpl.created && <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontSize: 9 }}>{new Date(tpl.created).toLocaleDateString()}</span>}
-                      </div>
-                    </button>
-                  ))}
+                  {crystallizedTemplates.slice(0, 10).map((tpl: any) => {
+                    const sc = templateShortcuts[tpl.id];
+                    return (
+                      <button key={tpl.id} className="dropdown-item" onClick={() => handleCrystallizedTemplate(tpl)}
+                        style={{ paddingRight: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                          <div>
+                            <div className="dropdown-item-title">{tpl.name}</div>
+                            <div className="dropdown-item-desc">
+                              {tpl.description || tpl.id}
+                              {tpl.created && <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontSize: 9 }}>{new Date(tpl.created).toLocaleDateString()}</span>}
+                            </div>
+                          </div>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                            {sc && <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 3, background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-muted)' }}>{sc}</span>}
+                            <span onClick={(e) => { e.stopPropagation(); setBindingShortcut(bindingShortcut === tpl.id ? null : tpl.id); }}
+                              style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', opacity: bindingShortcut === tpl.id ? 0.5 : 0.3 }}
+                              title={bindingShortcut === tpl.id ? '按下组合键...' : (sc ? '更改快捷键' : '绑定快捷键')}>
+                              {bindingShortcut === tpl.id ? '⌨' : '⌨'}
+                            </span>
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </>
               )}
 
@@ -466,10 +534,13 @@ export const TopBar = React.memo(function TopBar() {
         </button>
         <button
           className="btn btn-ghost btn-icon"
-          onClick={() => setUI({ dark_mode: !darkMode })}
-          title={darkMode ? '亮色模式' : '深色模式'}
+          onClick={() => {
+            const next = themeMode === 'light' ? 'dark' : themeMode === 'dark' ? 'system' : 'light';
+            setUI({ themeMode: next });
+          }}
+          title={themeMode === 'light' ? '亮色模式' : themeMode === 'dark' ? '深色模式' : '跟随系统'}
         >
-          {darkMode ? <Sun size={15} /> : <Moon size={15} />}
+          {themeMode === 'light' ? <Sun size={15} /> : themeMode === 'dark' ? <Moon size={15} /> : <Monitor size={15} />}
         </button>
       </div>
 

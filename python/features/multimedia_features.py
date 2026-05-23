@@ -55,7 +55,7 @@ def audio_volume_get() -> dict:
     description="【多媒体】持续监控指定区域画面变化并返回最新截图（FPS 限制）。用于监控动态区域变化",
     category=F.PERCEPTION,
     params=[
-        P("region", "str", "监控区域 'x,y,w,h'"),
+        P("region", "str", "监控区域 'x,y,w,h'", example="0,0,1920,1080"),
         P("max_fps", "number", "最大帧率", required=False, default=5),
         P("change_threshold", "number", "变化检测阈值 0-1", required=False, default=0.05),
     ],
