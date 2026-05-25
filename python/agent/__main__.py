@@ -34,6 +34,11 @@ import traceback
 from datetime import datetime, timezone
 from queue import Empty, Queue
 
+# Ensure the parent python/ directory is on sys.path so features/ is importable
+_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PATH not in sys.path:
+    sys.path.insert(0, _PATH)
+
 # Import in the main thread (not the agent thread) — importing all @feature
 # modules takes ~8s in the main thread but ~21s in a thread due to GIL contention.
 # The fast path (supervise=False) calls this function directly.
@@ -43,11 +48,6 @@ try:
     _HAS_GFS = True
 except ImportError:
     _generate_flow_script = None
-
-# Ensure the parent python/ directory is on sys.path so features/ is importable
-_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PATH not in sys.path:
-    sys.path.insert(0, _PATH)
 
 logger = logging.getLogger("agent.ipc")
 
@@ -74,6 +74,7 @@ _STEP_TO_TOOL: dict[str, str] = {
     "run_command":      "run_command",
     "mouse_move":       "mouse_move",
     "drag":             "drag",
+    "browser_connect":   "browser_connect",
     "browser_navigate":  "browser_navigate",
     "browser_click":     "browser_click",
     "browser_type":      "browser_type",
@@ -84,6 +85,9 @@ _STEP_TO_TOOL: dict[str, str] = {
     "browser_exec_js":   "browser_execute_js",
     "file_read":         "file_read",
     "file_write":        "file_write",
+    "file_save":         "file_write",
+    "check_condition":   "__check_condition__",
+    "wait_until":        "__wait_until__",
 }
 
 # GUI step types that benefit from window focus + settle wait
@@ -91,7 +95,7 @@ _STEP_GUI: set[str] = {"click", "text_click", "type", "hotkey", "image_click",
                         "scroll", "drag", "launch", "focus", "mouse_move"}
 
 # Browser step types (no visual locator, no focus settling)
-_STEP_BROWSER: set[str] = {"browser_navigate", "browser_click", "browser_type",
+_STEP_BROWSER: set[str] = {"browser_connect", "browser_navigate", "browser_click", "browser_type",
                             "browser_find", "browser_wait_element", "browser_get_text",
                             "browser_screenshot", "browser_exec_js"}
 
@@ -130,6 +134,8 @@ def _STEP_TO_KWARGS(step_type: str, step: dict) -> dict:
         return {"x": step.get("x", 0), "y": step.get("y", 0)}
     elif step_type == "drag":
         return {"from_target": step.get("from_target", ""), "to_target": step.get("to_target", "")}
+    elif step_type == "browser_connect":
+        return {"port": step.get("port", 9222)}
     elif step_type == "browser_navigate":
         return {"url": step.get("url", step.get("target", ""))}
     elif step_type == "browser_click":
@@ -152,6 +158,12 @@ def _STEP_TO_KWARGS(step_type: str, step: dict) -> dict:
         return {"path": step.get("path", "")}
     elif step_type == "file_write":
         return {"path": step.get("path", ""), "content": step.get("content", "")}
+    elif step_type == "file_save":
+        return {"path": step.get("path", ""), "content": step.get("content", "")}
+    elif step_type == "check_condition":
+        return {"condition": step.get("condition", ""), "timeout": step.get("timeout", 0)}
+    elif step_type == "wait_until":
+        return {"condition": step.get("condition", ""), "timeout": step.get("timeout", 10)}
     return {}
 
 
@@ -451,21 +463,7 @@ def _run_agent(goal: str, config: dict | None = None,
         return
 
     # Auto-launch browser if any browser_* step exists but no explicit launch step
-    _needs_browser = any(
-        s.get("type", "").startswith("browser_")
-        for s in structured_steps
-    )
-    _has_launch = any(
-        s.get("type") == "launch"
-        and any(kw in (s.get("target") or "") for kw in ("浏览器", "chrome", "edge", "谷歌", "google"))
-        for s in structured_steps
-    )
-    if _needs_browser and not _has_launch:
-        _emit("log", {"level": "info",
-                      "message": "Detected browser steps without launch — auto-inserting browser launch"})
-        # Insert launch + wait at the beginning
-        structured_steps.insert(0, {"type": "launch", "target": "浏览器"})
-        structured_steps.insert(1, {"type": "wait", "duration": 2})
+    # CDP auto-connects on first browser_* call — no manual launch needed
 
     for step in structured_steps:
         step_index += 1
@@ -490,6 +488,57 @@ def _run_agent(goal: str, config: dict | None = None,
         # Build kwargs from step fields
         kwargs = _STEP_TO_KWARGS(step_type, step)
         _emit("log", {"level": "info", "message": f"Step {step_index}/{len(structured_steps)}: {tool_name}({kwargs})"})
+
+        # ── Inline handlers for special step types ──
+        if tool_name == "__check_condition__":
+            try:
+                from features.action_map import _eval_condition
+                cond_ok = _eval_condition(kwargs.get("condition", ""))
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "check_condition",
+                    "step_type": step_type, "status": "completed" if cond_ok else "failed",
+                    "result": {"success": cond_ok, "condition": kwargs.get("condition", "")},
+                })
+                if not cond_ok:
+                    errors += 1
+            except Exception as exc:
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "check_condition",
+                    "step_type": step_type, "status": "failed",
+                    "result": {"success": False, "error": str(exc)},
+                })
+                errors += 1
+            continue
+
+        if tool_name == "__wait_until__":
+            condition = kwargs.get("condition", "")
+            timeout = kwargs.get("timeout", 10)
+            deadline = time.time() + timeout
+            found = False
+            try:
+                from features.action_map import _eval_condition
+                while time.time() < deadline:
+                    if stop_event and stop_event.is_set():
+                        break
+                    if _eval_condition(condition):
+                        found = True
+                        break
+                    time.sleep(0.5)
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "wait_until",
+                    "step_type": step_type, "status": "completed" if found else "failed",
+                    "result": {"success": found, "condition": condition, "timeout": timeout},
+                })
+                if not found:
+                    errors += 1
+            except Exception as exc:
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "wait_until",
+                    "step_type": step_type, "status": "failed",
+                    "result": {"success": False, "error": str(exc)},
+                })
+                errors += 1
+            continue
 
         # Execute with supervision (focus / retry / settle)
         step_ok = _execute_supervised(tool_name, kwargs, step_type,

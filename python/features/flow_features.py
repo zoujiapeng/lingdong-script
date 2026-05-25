@@ -41,9 +41,10 @@ AGENT_CAPABILITIES = [
 ]
 
 CONTROL_FLOW_CAPS = [
-    {"type": "condition", "pseudo": "如果 <条件> 则 <动作>",  "desc": "条件分支"},
-    {"type": "loop",      "pseudo": "循环 N次",               "desc": "重复执行后续步骤 N 次"},
-    {"type": "sub_flow",  "pseudo": '子流程 "名称"',          "desc": "调用子流程"},
+    # condition/loop/sub_flow are for CANVAS display only — NOT for LLM generation
+    # The LLM should flatten all logic into linear steps (see FLATTENING RULE in prompt)
+    {"type": "check_condition", "pseudo": '检查条件 "条件"',  "desc": "检查条件是否成立（等待/判断用）"},
+    {"type": "wait_until",      "pseudo": '等待直到 "条件"',  "desc": "等待条件成立，超时则继续"},
 ]
 
 
@@ -58,10 +59,6 @@ def _build_commands_section() -> str:
     for cap in AGENT_CAPABILITIES:
         if cap["type"].startswith("browser_"):
             lines.append(f"- {cap['pseudo']} — {cap['desc']}")
-    lines.append("")
-    lines.append("CONTROL FLOW (indentation-based block):")
-    for cap in CONTROL_FLOW_CAPS:
-        lines.append(f"- {cap['pseudo']} — {cap['desc']}")
     return "\n".join(lines)
 
 
@@ -70,12 +67,10 @@ def _build_structured_types_section() -> str:
     browser_linear = "|".join(c["type"] for c in AGENT_CAPABILITIES if c["type"].startswith("browser_"))
     return "\n".join([
         "STRUCTURED STEPS format rules:",
-        f'- Linear actions: {{"type": "{linear}", ...params}}',
-        f'- Browser actions: {{"type": "{browser_linear}", ...params}}',
-        '- Condition: {"type": "condition", "condition": "...", "true_branch": [...], "false_branch": [...]}',
-        '- Loop: {"type": "loop", "count": N, "body": [...]}',
-        '- Sub-flow: {"type": "sub_flow", "name": "...", "body": [...]}',
-        "- Matches pseudocode exactly: every pseudocode line has a corresponding structured_step",
+        f'- All steps must be from: {linear} (flat JSON objects, one per step)',
+        f'- Browser: {browser_linear}',
+        "- Each pseudo line maps to exactly one structured step",
+        "- NO condition/loop/sub_flow types — flatten all logic into linear steps",
         "",
         "Browser structured steps example:",
         '  {"type": "browser_navigate", "url": "https://example.com"}',
@@ -136,13 +131,13 @@ IMPORTANT RULES:
 11. For ALL web/website/browser tasks: use the BROWSER AUTOMATION commands (浏览器导航, 浏览器点击, 浏览器输入 etc.) which control the browser via CDP (Playwright) for precise element targeting. Do NOT use generic keyboard/mouse automation for browsing the web.
 12. When the goal involves multiple phases (wait → do A → do B), generate the steps in the exact order specified by the user, preserving all delays and dependencies between phases.
 13. BROWSER WORKFLOW RULES:
-    a. CRITICAL — browser_* commands (浏览器导航, 浏览器点击 etc.) control an ALREADY-RUNNING browser via CDP. They do NOT open the browser themselves. Therefore, for ANY task involving web browsing, you MUST include  as a step BEFORE the first browser_* command. Without this step the browser won't open and all commands will fail.
-    b. First step for ANY browser task: 启动 "浏览器" → 等待 2-3. Only THEN use browser_navigate.
+    a. IMPORTANT: browser_* commands use CDP (Chrome DevTools Protocol) which auto-starts the browser on first use. You do NOT need to launch the browser before browser_navigate — go straight to 浏览器导航 "URL".
+    b. First step for ANY browser task: 浏览器导航 "URL". No need to manually open the browser first.
     c. Use 浏览器点击 "CSS选择器" to click buttons/links (figure out selector from context: id, class, role, text).
     d. Use 浏览器输入 "CSS选择器" "文本" for input fields.
     e. After navigation/submission, use 浏览器等待 "CSS选择器" [超时秒数] for results.
     f. Use 浏览器获取文本 "CSS选择器" to read page content if needed.
-    g. Example CORRECT sequence: 启动 "浏览器" → 等待 2 → 浏览器导航 "URL" → 浏览器等待 "#kw" → 浏览器输入 "#kw" "搜索词" → 浏览器点击 "#su".
+    g. Example CORRECT sequence: 浏览器导航 "https://www.baidu.com" → 浏览器等待 "#kw" → 浏览器输入 "#kw" "搜索词" → 浏览器点击 "#su".
     h. NEVER type URLs in the browser address bar via keyboard — always use 浏览器导航.
 14. BROWSER AUTOMATION commands use Playwright CDP — pixel-perfect targeting, auto-wait for visibility, reliable input. They are the CORRECT way to interact with web pages, NOT generic mouse/keyboard automation.
 15. LOGIN WORKFLOW — 当用户说"登录"时，必须生成完整的登录步骤序列（不只是点击登录按钮）：
@@ -159,6 +154,13 @@ IMPORTANT RULES:
     d. 反例（太简单，缺少等待和中间步骤）：浏览器导航 → 浏览器点击 → 完成
     e. 正例（完整）：浏览器导航 → 浏览器等待 → 浏览器点击 → 浏览器等待新元素 → 浏览器输入 → 浏览器点击提交 → 浏览器等待结果
 
+17. FLATTENING RULE — CRITICAL: Do NOT generate "condition", "loop", or "sub_flow" step types. The system only supports flat linear step execution. For ALL complex logic, flatten into linear steps:
+    a. "如果X出现则点击Y" → 等待X出现 → 点击Y
+    b. "重复N次" → 展开为N个重复步骤（或使用 等待N 模拟循环间隔）
+    c. For conditional waits: use 等待 N 秒 + check if step succeeds
+    d. Example: "如果出现弹窗则关闭" → 等待 3 → 点击 "确定"（弹窗不存在时点击不会失败）
+    e. Every step must be a standalone linear action. No nesting.
+
 BASIC DSL SYNTAX (common commands):
   CLICK {{target}}           — click on text/coordinate
   WAIT {{seconds}}           — wait for N seconds
@@ -169,8 +171,6 @@ BASIC DSL SYNTAX (common commands):
   SCREENSHOT {{dest}}        — capture screenshot
   SCROLL {{direction}}       — scroll up/down
   DRAG {{x1}} {{y1}} TO {{x2}} {{y2}}  — drag from-to
-  IF {{condition}}           — conditional branch, ends with END
-  LOOP {{N}}                 — repeat N times, ends with END
 
 + ALL commands below are also available as DSL keywords (use the keyword as the first token):
 {_DSL_REFERENCE}
@@ -180,8 +180,6 @@ COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面�
 {{
   "explanation": "等待5秒后打开浏览器，导航到deepseek官网，进行登录操作（由于未提供具体凭据，仅点击登录按钮并等待用户输入），完成后等待5秒再打开记事本。",
   "pseudocode": "等待 5
-启动 "浏览器"
-等待 2
 浏览器导航 https://www.deepseek.com
 浏览器等待 .login-btn
 浏览器点击 .login-btn
@@ -192,8 +190,6 @@ COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面�
 等待 5
 启动 "记事本"",
   "dsl": "WAIT 5
-LAUNCH 浏览器
-WAIT 2
 BROWSER_NAV https://www.deepseek.com
 BROWSER_WAIT .login-btn
 BROWSER_CLICK .login-btn
@@ -205,8 +201,6 @@ WAIT 5
 LAUNCH 记事本",
   "structured_steps": [
     {{"type": "wait", "duration": 5}},
-    {{"type": "launch", "target": "浏览器"}},
-    {{"type": "wait", "duration": 2}},
     {{"type": "browser_navigate", "url": "https://www.deepseek.com"}},
     {{"type": "browser_wait_element", "selector": ".login-btn", "timeout": 10}},
     {{"type": "browser_click", "selector": ".login-btn"}},
@@ -228,14 +222,6 @@ Now generate the JSON for the user's goal. Respond ONLY with a JSON object (no m
     {{
       "type": "wait",
       "duration": 5
-    }},
-    {{
-      "type": "launch",
-      "target": "浏览器"
-    }},
-    {{
-      "type": "wait",
-      "duration": 2
     }},
     {{
       "type": "browser_navigate",
@@ -364,6 +350,12 @@ def _steps_to_dsl(steps: list) -> str:
             return [f'{prefix}FILEREAD {step.get("path", "")}']
         elif t == "file_write":
             return [f'{prefix}FILEWRITE {step.get("path", "")} {step.get("content", "")}']
+        elif t == "file_save":
+            return [f'{prefix}FILESAVE {step.get("path", "")}']
+        elif t == "check_condition":
+            return [f'{prefix}CHECK {step.get("condition", "")}']
+        elif t == "wait_until":
+            return [f'{prefix}WAIT_UNTIL {step.get("condition", "")} {step.get("timeout", 10)}']
         else:
             # Unknown step type — use raw text or skip
             raw = step.get("raw", "")
@@ -440,6 +432,12 @@ def _steps_to_pseudocode(steps: list) -> str:
             return [f'{prefix}读取文件 {step.get("path", "")}']
         elif t == "file_write":
             return [f'{prefix}写入文件 {step.get("path", "")} {step.get("content", "")}']
+        elif t == "file_save":
+            return [f'{prefix}保存文件 {step.get("path", "")}']
+        elif t == "check_condition":
+            return [f'{prefix}检查条件 {step.get("condition", "")}']
+        elif t == "wait_until":
+            return [f'{prefix}等待直到 {step.get("condition", "")} 超时{step.get("timeout", 10)}秒']
         elif t == "condition":
             result = [f'{prefix}如果 {step.get("condition", "")}']
             for s in step.get("true_branch", []):
@@ -569,6 +567,14 @@ def generate_flow_script(goal: str) -> dict:
             # Validate: each step must have a "type" field
             valid = [s for s in structured_steps if isinstance(s, dict) and s.get("type")]
             if len(valid) == len(structured_steps):
+                # Warn about unsupported control flow types (FLATTENING RULE violation)
+                _unsupported = {"condition", "loop", "sub_flow"}
+                _warnings = []
+                for s in valid:
+                    if s["type"] in _unsupported:
+                        _warnings.append(f"Step contains unsupported type '{s['type']}' — flattening rule was violated")
+                if _warnings:
+                    result["warnings"] = _warnings
                 result["structured_steps"] = valid
                 # Build node_mapping: step_index → step_type + label
                 node_mapping = {}
