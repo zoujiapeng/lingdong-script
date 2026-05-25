@@ -4,7 +4,7 @@ Comprehensive @feature library test — validates all 178 features:
   - parameter reasonableness
   - basic invocation (safe-path with dummy params)
 """
-import sys, os, json, threading, queue, time, signal
+import sys, os, json, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import pytest
@@ -17,14 +17,23 @@ def _all_features():
     return sorted(registry.all(), key=lambda f: (f.category.value, f.name))
 
 def _try_exec(name, params, timeout=10):
-    """Call registry.execute with a thread-based timeout."""
-    q = queue.Queue()
-    t = threading.Thread(target=lambda: q.put(registry.execute(name, **params)), daemon=True)
-    t.start()
-    t.join(timeout)
-    if t.is_alive():
+    """Call registry.execute in a subprocess to isolate COM crashes."""
+    script = os.path.join(os.path.dirname(__file__), "_exec_helper.py")
+    try:
+        r = subprocess.run(
+            [sys.executable, script, name, json.dumps(params)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        for line in r.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("RESULT:"):
+                return json.loads(line[7:])
+            if line.startswith("ERROR:"):
+                return {"success": False, "error": line[6:]}
+        stderr = r.stderr.strip()[:200]
+        return {"success": False, "error": f"CRASH: {stderr}" if stderr else "未知错误"}
+    except subprocess.TimeoutExpired:
         return {"success": False, "error": "TIMEOUT"}
-    return q.get()
 
 # ── skip sets ────────────────────────────────────────────────────
 

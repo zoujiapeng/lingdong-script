@@ -556,7 +556,7 @@ def _dsl_args_to_params(ntype: str, args: str,
         params = {"action": "volume_mute", "mute": mute_val}
 
     elif ntype == "LAUNCH":
-        params = {"action": "launch", "target": args, "args": "", "wait": False}
+        params = {"action": "launch", "target": args.strip("'\""), "args": "", "wait": False}
 
     elif ntype == "KILL":
         parts = args.split()

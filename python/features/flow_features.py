@@ -180,7 +180,7 @@ COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面�
 {{
   "explanation": "等待5秒后打开浏览器，导航到deepseek官网，进行登录操作（由于未提供具体凭据，仅点击登录按钮并等待用户输入），完成后等待5秒再打开记事本。",
   "pseudocode": "等待 5
-启动 浏览器
+启动 "浏览器"
 等待 2
 浏览器导航 https://www.deepseek.com
 浏览器等待 .login-btn
@@ -190,7 +190,7 @@ COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面�
 浏览器点击 .submit-btn
 浏览器等待 .user-center
 等待 5
-启动 记事本",
+启动 "记事本"",
   "dsl": "WAIT 5
 LAUNCH 浏览器
 WAIT 2
@@ -382,14 +382,16 @@ def _steps_to_pseudocode(steps: list) -> str:
     def _render_step(step: dict, indent: int = 0) -> list[str]:
         prefix = "  " * indent
         t = step.get("type", "")
-        if t == "click" or t == "text_click":
+        if t == "text_click":
+            return [f'{prefix}文字点击 "{step.get("target", "")}"']
+        elif t == "click":
             target = step.get("target", "")
             return [f'{prefix}点击 {target}'] if target else [f'{prefix}点击 ']
         elif t == "image_click":
-            return [f'{prefix}点击图片 {step.get("target", "")}']
+            return [f'{prefix}点击图片 "{step.get("target", "")}"']
         elif t == "type":
             text = step.get("text", "")
-            return [f'{prefix}输入 {text}'] if text else [f'{prefix}输入 ']
+            return [f'{prefix}输入 "{text}"'] if text else [f'{prefix}输入 ']
         elif t == "hotkey":
             keys = step.get("keys", [])
             if isinstance(keys, list):
@@ -400,9 +402,9 @@ def _steps_to_pseudocode(steps: list) -> str:
         elif t == "scroll":
             return [f'{prefix}滚动 {step.get("target", "down")}']
         elif t == "launch":
-            return [f'{prefix}启动 {step.get("target", "")}']
+            return [f'{prefix}启动 "{step.get("target", "")}"']
         elif t == "focus":
-            return [f'{prefix}聚焦 {step.get("title", step.get("target", ""))}']
+            return [f'{prefix}聚焦 "{step.get("title", step.get("target", ""))}"']
         elif t == "screenshot":
             return [f'{prefix}截图']
         elif t == "run_command":
