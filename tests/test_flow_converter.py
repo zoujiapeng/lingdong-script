@@ -210,7 +210,7 @@ class TestRegistryFlowTypes:
             ("SWIPE 0 0 100 100", "swipe"),
             ("SCROLL down", "swipe"),
             ("SCREENSHOT", "screenshot"),
-            ("FOCUS Paint", "click"),
+            ("FOCUS Paint", "focus_window"),
             ('IMAGE_CLICK "test.png"', "image_click"),
             ('OCR_FIND "text"', "click_text"),
             ("WAITSCREEN", "region_wait"),

@@ -309,7 +309,7 @@ function parseStmt(line: string): { type: string; params: any; isElse?: boolean;
   }
 
   // ── 启动 "path" / launch "path" → process_action ──
-  const launchRe = /^(?:启动|launch)\s+"([^"]*)"/i;
+  const launchRe = /^(?:启动|打开|launch)\s+"([^"]*)"/i;
   const launchMatch = line.match(launchRe);
   if (launchMatch) {
     return {

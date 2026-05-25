@@ -183,7 +183,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
               const result = await callLLM({
                 apiKey: payload.apiKey || '',
                 messages: [
-                  { role: 'system', content: '你是一个桌面自动化脚本生成器。根据用户描述生成 DSL 脚本。只输出 DSL，不要解释。' },
+                  { role: 'system', content: 'You are a desktop automation script generator. Output ONLY Lobster DSL lines, one per line. No markdown, no explanation.\n\nAvailable commands:\nCLICK x y — click coordinate\nTYPE text — type text\nWAIT N — wait N seconds\nLAUNCH program — launch program (use Chinese names like 记事本)\nHOTKEY keys — press hotkey, e.g. HOTKEY ctrl+c\nFOCUS title — focus window\nSCREENSHOT — capture screen\nSCROLL up/down — scroll\n\nExample: "5秒后打开记事本" →\nWAIT 5\nLAUNCH 记事本\n\nIMPORTANT: Follow the user timing exactly. If they say "X秒后" (after X seconds), add a WAIT N step before the next action. Do NOT wrap arguments in quotes. Output ONLY the DSL.' },
                   { role: 'user', content: payload.description },
                 ],
                 apiBase: payload.apiBase,
@@ -206,13 +206,16 @@ export function startApiServer(deps: ApiDeps): http.Server {
                 const llmResult = await callLLM({
                   apiKey: payload.apiKey || '',
                   messages: [
-                    { role: 'system', content: '你是一个桌面自动化脚本生成器。根据用户描述生成 DSL 脚本。只输出 DSL，不要解释。' },
+                    { role: 'system', content: 'You are a desktop automation script generator. Output ONLY Lobster DSL lines, one per line. No markdown, no explanation.\n\nAvailable commands:\nCLICK x y — click coordinate\nTYPE text — type text\nWAIT N — wait N seconds\nLAUNCH program — launch program (use Chinese names like 记事本)\nHOTKEY keys — press hotkey, e.g. HOTKEY ctrl+c\nFOCUS title — focus window\nSCREENSHOT — capture screen\nSCROLL up/down — scroll\n\nExample: "5秒后打开记事本" →\nWAIT 5\nLAUNCH 记事本\n\nIMPORTANT: Follow the user timing exactly. If they say "X秒后" (after X seconds), add a WAIT N step before the next action. Do NOT wrap arguments in quotes. Output ONLY the DSL.' },
                     { role: 'user', content: payload.description },
                   ],
                   apiBase: payload.apiBase,
                   model: payload.model,
                 });
-                dslText = llmResult.choices?.[0]?.message?.content?.trim();
+                let raw = llmResult.choices?.[0]?.message?.content?.trim() || '';
+                // Strip markdown code block fences if present (```dsl ... ``` or just ``` ... ```)
+                raw = raw.replace(/^```(?:dsl)?\s*/i, '').replace(/```\s*$/i, '').trim();
+                dslText = raw;
                 if (!dslText) { sendOnce(500, { error: 'DSL 生成为空' }); return; }
               }
               if (dslText) {
