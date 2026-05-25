@@ -16,8 +16,13 @@
   1. 启动 Chrome: chrome.exe --remote-debugging-port=9222
   2. 调用 browser_connect(port=9222) 连接
 """
+import atexit
 import json
 import os
+import shutil
+import socket
+import subprocess
+import tempfile
 import threading
 import time
 from typing import Optional
@@ -42,6 +47,10 @@ _page = None
 _pw = None  # playwright instance
 _connected = False  # True if connecting to external browser
 
+# Chrome CDP auto-launch
+_chrome_debug_process: Optional[subprocess.Popen] = None
+_chrome_debug_dir: Optional[str] = None
+
 
 def _ensure_playwright():
     """确保 Playwright 已安装。"""
@@ -51,8 +60,108 @@ def _ensure_playwright():
         )
 
 
+# ── Chrome CDP 自动启动 ──────────────────────────────────────
+
+def _find_chrome() -> Optional[str]:
+    """查找 Chrome 可执行文件路径。"""
+    paths = [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        os.path.expanduser("~\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"),
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return shutil.which("chrome") or shutil.which("google-chrome") or shutil.which("chromium")
+
+
+def _is_port_open(port: int, host: str = '127.0.0.1') -> bool:
+    """检查端口是否开放。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        return s.connect_ex((host, port)) == 0
+
+
+def _is_cdp_endpoint(port: int) -> bool:
+    """验证端口是否真的在提供 CDP 服务。"""
+    import urllib.request
+    try:
+        resp = urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=2)
+        return resp.status == 200
+    except Exception:
+        return False
+
+
+def _start_chrome_debug(port: int = 9222) -> bool:
+    """启动 Chrome 调试模式（如果尚未运行），返回是否就绪。"""
+    global _chrome_debug_process, _chrome_debug_dir
+
+    # Port open AND serving CDP → already running
+    if _is_port_open(port) and _is_cdp_endpoint(port):
+        return True
+
+    # Port open but not CDP → something else is on this port, can't use it
+    if _is_port_open(port) and not _is_cdp_endpoint(port):
+        return False
+
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        return False
+
+    # Use a temp profile so user's main Chrome is untouched
+    _chrome_debug_dir = tempfile.mkdtemp(prefix="chrome_debug_")
+    try:
+        _chrome_debug_process = subprocess.Popen(
+            [chrome_path,
+             f'--remote-debugging-port={port}',
+             f'--user-data-dir={_chrome_debug_dir}',
+             '--no-first-run', '--no-default-browser-check',
+             '--start-maximized'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Wait up to 5s for the port to open
+        for _ in range(25):
+            if _is_port_open(port):
+                return True
+            time.sleep(0.2)
+        return False
+    except Exception:
+        return False
+
+
+def _cleanup_chrome_debug():
+    """清理临时 Chrome 调试进程和数据目录。"""
+    global _chrome_debug_process, _chrome_debug_dir
+    if _chrome_debug_process:
+        try:
+            _chrome_debug_process.terminate()
+            _chrome_debug_process.wait(timeout=3)
+        except Exception:
+            try:
+                _chrome_debug_process.kill()
+            except Exception:
+                pass
+        _chrome_debug_process = None
+    if _chrome_debug_dir and os.path.exists(_chrome_debug_dir):
+        try:
+            shutil.rmtree(_chrome_debug_dir, ignore_errors=True)
+        except Exception:
+            pass
+        _chrome_debug_dir = None
+
+
+atexit.register(_cleanup_chrome_debug)
+
+
 def _get_page():
-    """获取当前活跃页面，懒启动浏览器。"""
+    """获取当前活跃页面，懒启动浏览器。
+
+    连接策略：
+    1. 已有活跃页面 → 直接复用
+    2. CDP 连接 (port 9222) → 自动启动 Chrome 调试模式
+    3. 复用已有 Browser/Context
+    4. 全新 Playwright Chromium 实例
+    """
     global _browser, _context, _page, _pw, _connected
     if _page is not None:
         try:
@@ -70,6 +179,21 @@ def _get_page():
             except Exception:
                 pass
 
+        # Try CDP connection to Chrome (auto-start if needed)
+        if not _connected:
+            try:
+                if _start_chrome_debug(9222):
+                    _pw = sync_playwright().start()
+                    _browser = _pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                    _context = _browser.contexts[0] if _browser.contexts else _browser.new_context()
+                    pages = _context.pages
+                    _page = pages[0] if pages else _context.new_page()
+                    _connected = True
+                    return _page
+            except Exception:
+                _full_cleanup()
+                _connected = False
+
         # Try to reuse existing context
         if _context is not None:
             try:
@@ -86,7 +210,7 @@ def _get_page():
             except Exception:
                 pass
 
-        # Try to reuse existing browser (but not via connect_over_cdp)
+        # Try to reuse existing browser
         if _browser is not None:
             try:
                 _context = _browser.new_context(
@@ -121,11 +245,13 @@ def _get_page():
 
 
 def _connect_browser(port: int = 9222):
-    """连接到已有 Chrome 实例（调试模式）。"""
+    """连接到 Chrome 浏览器（自动启动调试模式）。"""
     global _browser, _context, _page, _pw, _connected
     _ensure_playwright()
     with _lock:
         try:
+            # Auto-start Chrome debug mode if not already running
+            _start_chrome_debug(port)
             _pw = sync_playwright().start()
             _browser = _pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             _context = _browser.contexts[0] if _browser.contexts else _browser.new_context()
@@ -219,7 +345,7 @@ def _pwrap(fn, default=None):
 @feature(
     name="browser_connect",
     display_name="连接已有浏览器",
-    description="【浏览器】连接到已通过调试模式启动的 Chrome 浏览器（chrome.exe --remote-debugging-port=9222）。用于控制用户已有的浏览器而不是启动新实例",
+    description="【浏览器】连接到 Chrome 浏览器调试端口 (CDP)。如果端口 9222 上还没有 Chrome 监听，会自动启动一个新的 Chrome 调试实例。通过 CDP 连接后所有 browser_* 操作都直接控制用户浏览器",
     category=F.ACTION,
     params=[
         P("port", "int", "调试端口", required=False, default=9222),
