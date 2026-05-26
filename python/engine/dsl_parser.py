@@ -235,6 +235,14 @@ class DSLParser:
                 "MINIMIZE", "MAXIMIZE", "CLOSE_WINDOW", "RESIZE_WINDOW",
                 "WAIT_FILE", "VARIABLE_INC",
                 "FILEDIALOG_SAVE", "FILEDIALOG_OPEN", "FILEDIALOG_FOLDER"}
+    # 子令别名：代码库中使用缩写（如 BROWSER_NAV），但注册表使用全称（如 BROWSER_NAVIGATE）
+    KEYWORD_ALIASES = {
+        "BROWSER_NAV": "BROWSER_NAVIGATE",
+        "BROWSER_WAIT": "BROWSER_WAIT_ELEMENT",
+        "BROWSER_FIND": "BROWSER_FIND_ELEMENTS",
+        "BROWSER_TEXT": "BROWSER_GET_TEXT",
+        "BROWSER_JS": "BROWSER_EXECUTE_JS",
+    }
     _registry_loaded = False
 
     @classmethod
@@ -252,6 +260,9 @@ class DSLParser:
                     cls.KEYWORDS.add(kw)
         except ImportError:
             pass
+        # 别名关键字也加入 KEYWORDS（用于 tokenizer 校验）
+        for alias in cls.KEYWORD_ALIASES:
+            cls.KEYWORDS.add(alias)
     # 小写 → 大写映射（兼容灵动脚本的伪代码格式）
     LOWERCASE_MAP = {kw.lower(): kw for kw in KEYWORDS}
 
@@ -292,6 +303,9 @@ class DSLParser:
             # 小写转大写（兼容灵动脚本的伪代码）
             if keyword.lower() in self.LOWERCASE_MAP:
                 keyword = self.LOWERCASE_MAP[keyword.lower()]
+            # 子令别名替换（如 BROWSER_NAV → BROWSER_NAVIGATE）
+            if keyword in DSLParser.KEYWORD_ALIASES:
+                keyword = DSLParser.KEYWORD_ALIASES[keyword]
             if keyword not in self.KEYWORDS:
                 raise DSLParseError(f"未知指令: '{keyword}'", lineno)
             tokens.append((lineno, keyword, args))

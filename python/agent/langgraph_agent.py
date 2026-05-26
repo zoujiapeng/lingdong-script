@@ -83,7 +83,7 @@ class LangGraphAgent:
                  guidance_queue: Optional[Queue] = None,
                  multimodal: bool = False,
                  auto_learn: bool = False,
-                 verify_enabled: bool = True):
+                 verify_enabled: bool = False):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
