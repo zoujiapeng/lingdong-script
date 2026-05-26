@@ -88,6 +88,7 @@ _STEP_TO_TOOL: dict[str, str] = {
     "file_save":         "file_write",
     "check_condition":   "__check_condition__",
     "wait_until":        "__wait_until__",
+    "condition":         "__condition__",
 }
 
 # GUI step types that benefit from window focus + settle wait
@@ -540,6 +541,71 @@ def _run_agent(goal: str, config: dict | None = None,
                 errors += 1
             continue
 
+        # ── Condition step (if/else branching) ──
+        if tool_name == "__condition__":
+            try:
+                cond_text = step.get("condition", "")
+                true_branch = step.get("true_branch", [])
+                false_branch = step.get("false_branch", [])
+                _emit("log", {"level": "info", "message": f"Evaluating condition: {cond_text}"})
+
+                # Evaluate screen_change condition via wait_screen_change
+                cond_met = False
+                if "屏幕" in cond_text and "变化" in cond_text:
+                    try:
+                        region = step.get("region", "")
+                        args = {"timeout": step.get("timeout", 3)}
+                        if region:
+                            # region can be a string "x,y,w,h" or an object {x,y,w,h}
+                            if isinstance(region, str) and region.count(",") == 3:
+                                args["region"] = region
+                            elif isinstance(region, dict):
+                                args["region"] = f"{region.get('x',0)},{region.get('y',0)},{region.get('w',0)},{region.get('h',0)}"
+                        r = registry.execute("wait_screen_change", **args)
+                        if r.get("success"):
+                            result_data = r.get("result", {})
+                            cond_met = bool(result_data.get("matched", False))
+                    except Exception:
+                        cond_met = False
+                else:
+                    # Fallback: use _eval_condition for standard conditions
+                    from features.action_map import _eval_condition
+                    cond_met = _eval_condition(cond_text)
+
+                branch = true_branch if cond_met else false_branch
+                _emit("log", {"level": "info", "message": f"Condition '{cond_text}' = {cond_met}, executing {len(branch)} branch steps"})
+
+                # Execute branch steps recursively
+                branch_errors = 0
+                for i, branch_step in enumerate(branch):
+                    if stop_event and stop_event.is_set():
+                        break
+                    bs_type = branch_step.get("type", "")
+                    bs_tool = _STEP_TO_TOOL.get(bs_type)
+                    if not bs_tool:
+                        continue
+                    bs_kwargs = _STEP_TO_KWARGS(bs_type, branch_step)
+                    bs_ok = _execute_supervised(bs_tool, bs_kwargs, bs_type,
+                                                 stop_event, f"{step_index}.{i+1}", len(structured_steps))
+                    if not bs_ok:
+                        branch_errors += 1
+
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "condition",
+                    "step_type": step_type, "status": "completed",
+                    "result": {"success": True, "condition": cond_text, "cond_met": cond_met,
+                               "branch_errors": branch_errors},
+                })
+                errors += branch_errors
+            except Exception as exc:
+                _emit("step_complete", {
+                    "step_num": step_index, "tool": "condition",
+                    "step_type": step_type, "status": "failed",
+                    "result": {"success": False, "error": str(exc)},
+                })
+                errors += 1
+            continue
+
         # Execute with supervision (focus / retry / settle)
         step_ok = _execute_supervised(tool_name, kwargs, step_type,
                                        stop_event, step_index, len(structured_steps))
@@ -586,8 +652,11 @@ class AgentIPC:
 
     def _cmd_start(self, msg: dict):
         if self._agent_thread and self._agent_thread.is_alive():
-            _emit("error", {"message": "Agent is already running"})
-            return
+            _log("warn", "Agent already running — stopping previous and restarting")
+            if self._stop_event:
+                self._stop_event.set()
+            # Wait up to 3s for the old agent to finish
+            self._agent_thread.join(timeout=3.0)
 
         goal = (msg.get("goal") or "").strip()
         if not goal:

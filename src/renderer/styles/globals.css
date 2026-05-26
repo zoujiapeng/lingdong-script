@@ -142,11 +142,13 @@ html, body, #root {
 .app-body {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 .canvas-view-layout {
   position: relative;
+  min-height: 0;
 }
 
 .canvas-area {
@@ -2090,6 +2092,10 @@ textarea.form-input {
    ============================================================ */
 .view-tabs-spacer {
   flex: 1;
+}
+
+.bottom-wrapper {
+  flex-shrink: 0;
 }
 
 /* ============================================================

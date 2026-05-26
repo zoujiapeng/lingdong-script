@@ -4,6 +4,7 @@ Agent 内部调用：将自然语言目标转为可执行的流程图脚本（�
 """
 import json
 import os
+import re
 import time
 from features.registry import feature, P, TC, FeatureCategory as F, registry
 
@@ -19,6 +20,7 @@ AGENT_CAPABILITIES = [
     {"type": "type",        "pseudo": '输入 "文本"',       "desc": "输入文字（中文自动用剪贴板绕过输入法）"},
     {"type": "hotkey",      "pseudo": "按键 ctrl+c",        "desc": "按下快捷键组合"},
     {"type": "wait",        "pseudo": "等待 N秒",          "desc": "等待指定秒数"},
+    {"type": "wait_element","pseudo": '等待元素 "目标" 超时 N',"desc": "等待界面元素出现（OCR/图像），超时则继续"},
     {"type": "scroll",      "pseudo": "滚动 up/down",      "desc": "滚动页面"},
     {"type": "launch",      "pseudo": '启动 "程序"',       "desc": "启动 GUI 应用程序（非阻塞）"},
     {"type": "focus",       "pseudo": '聚焦 "窗口标题"',   "desc": "将窗口带到前台"},
@@ -38,13 +40,18 @@ AGENT_CAPABILITIES = [
     {"type": "browser_get_text",     "pseudo": '浏览器获取文本 "CSS选择器"', "desc": "获取页面元素的文本内容"},
     {"type": "browser_screenshot",   "pseudo": "浏览器截图",                  "desc": "截取浏览器当前页面截图"},
     {"type": "browser_exec_js",      "pseudo": '浏览器执行JS "代码"',        "desc": "在浏览器中执行 JavaScript"},
+    {"type": "browser_new_tab",     "pseudo": '浏览器新建标签页 "URL"',     "desc": "新建浏览器标签页并导航到 URL"},
+    {"type": "browser_close_tab",   "pseudo": "浏览器关闭当前标签页",         "desc": "关闭当前浏览器标签页"},
+    {"type": "browser_switch_tab",  "pseudo": '浏览器切换标签页 "索引/标题"', "desc": "切换到指定标签页"},
+    {"type": "ocr_extract",         "pseudo": 'OCR提取 "区域"',       "desc": "从屏幕区域提取文字（OCR）"},
+    {"type": "clipboard_get",       "pseudo": "读取剪贴板内容",             "desc": "获取系统剪贴板文本内容"},
+    {"type": "clipboard_set",       "pseudo": '设置剪贴板 "文本"',          "desc": "将文本写入系统剪贴板"},
 ]
 
 CONTROL_FLOW_CAPS = [
-    # condition/loop/sub_flow are for CANVAS display only — NOT for LLM generation
-    # The LLM should flatten all logic into linear steps (see FLATTENING RULE in prompt)
     {"type": "check_condition", "pseudo": '检查条件 "条件"',  "desc": "检查条件是否成立（等待/判断用）"},
     {"type": "wait_until",      "pseudo": '等待直到 "条件"',  "desc": "等待条件成立，超时则继续"},
+    {"type": "condition",       "pseudo": '如果 "条件" ... 否则 ...', "desc": "条件分支：true_branch 和 false_branch 各包含子步骤数组"},
 ]
 
 
@@ -65,12 +72,18 @@ def _build_commands_section() -> str:
 def _build_structured_types_section() -> str:
     linear = "|".join(c["type"] for c in AGENT_CAPABILITIES)
     browser_linear = "|".join(c["type"] for c in AGENT_CAPABILITIES if c["type"].startswith("browser_"))
+    control_linear = "|".join(c["type"] for c in CONTROL_FLOW_CAPS)
     return "\n".join([
         "STRUCTURED STEPS format rules:",
-        f'- All steps must be from: {linear} (flat JSON objects, one per step)',
+        f'- Steps must be from: {linear} (flat JSON objects, one per step)',
+        f'- Condition/control types: {control_linear} (use condition for branching with true_branch/false_branch)',
         f'- Browser: {browser_linear}',
         "- Each pseudo line maps to exactly one structured step",
-        "- NO condition/loop/sub_flow types — flatten all logic into linear steps",
+        "- NO loop/sub_flow types — flatten loops into linear steps",
+        "",
+        "Condition step example (if/else branching):",
+        '  {"type": "condition", "condition": "屏幕是否变化", "true_branch": [{"type": "hotkey", "keys": ["win", "l"]}], "false_branch": [{"type": "hotkey", "keys": ["volume_up"]}]}',
+        '  {"type": "condition", "condition": "弹窗是否出现", "true_branch": [{"type": "click", "target": "确定"}]}',
         "",
         "Browser structured steps example:",
         '  {"type": "browser_navigate", "url": "https://example.com"}',
@@ -154,12 +167,21 @@ IMPORTANT RULES:
     d. 反例（太简单，缺少等待和中间步骤）：浏览器导航 → 浏览器点击 → 完成
     e. 正例（完整）：浏览器导航 → 浏览器等待 → 浏览器点击 → 浏览器等待新元素 → 浏览器输入 → 浏览器点击提交 → 浏览器等待结果
 
-17. FLATTENING RULE — CRITICAL: Do NOT generate "condition", "loop", or "sub_flow" step types. The system only supports flat linear step execution. For ALL complex logic, flatten into linear steps:
-    a. "如果X出现则点击Y" → 等待X出现 → 点击Y
-    b. "重复N次" → 展开为N个重复步骤（或使用 等待N 模拟循环间隔）
-    c. For conditional waits: use 等待 N 秒 + check if step succeeds
-    d. Example: "如果出现弹窗则关闭" → 等待 3 → 点击 "确定"（弹窗不存在时点击不会失败）
-    e. Every step must be a standalone linear action. No nesting.
+17. CONDITIONAL BRANCHING — Use the "condition" step type for if/else logic:
+    a. "condition" type requires: "condition" (description string), "true_branch" (array of steps), and optional "false_branch" (array of steps)
+    b. Example: "如果屏幕变化则锁屏，否则音量最大" →
+       {{"type": "condition", "condition": "屏幕是否变化",
+         "true_branch": [{{"type": "hotkey", "keys": ["win", "l"]}}],
+         "false_branch": [{{"type": "hotkey", "keys": ["volume_up"]}}]
+       }}
+    c. Example: "如果出现弹窗则关闭" →
+       {{"type": "condition", "condition": "弹窗是否出现",
+         "true_branch": [{{"type": "click", "target": "确定"}}]
+       }}
+    d. Conditions CAN be nested inside branches, but keep it simple — one level is preferred.
+    e. Pseudocode format for condition: "如果 {{条件}}" / "否则" / "结束" on separate lines
+    f. DSL output for condition: IF {{条件}} / [true_branch steps] / ELSE / [false_branch steps] / END
+    g. IMPORTANT: Do NOT use "loop" or "sub_flow" types — those remain unsupported. Flatten loops by repeating steps.
 
 BASIC DSL SYNTAX (common commands):
   CLICK {{target}}           — click on text/coordinate
@@ -175,7 +197,7 @@ BASIC DSL SYNTAX (common commands):
 + ALL commands below are also available as DSL keywords (use the keyword as the first token):
 {_DSL_REFERENCE}
 
-COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面登录，完成后5秒打开记事本"这个目标，正确的输出是：
+━━━ EXAMPLE 1: Browser workflow (flat, no condition) — for "5秒后打开浏览器搜索deepseek然后在里面登录，完成后5秒打开记事本":
 
 {{
   "explanation": "等待5秒后打开浏览器，导航到deepseek官网，进行登录操作（由于未提供具体凭据，仅点击登录按钮并等待用户输入），完成后等待5秒再打开记事本。",
@@ -188,7 +210,7 @@ COMPLETE EXAMPLE — 对于"5秒后打开浏览器搜索deepseek然后在里面�
 浏览器点击 .submit-btn
 浏览器等待 .user-center
 等待 5
-启动 "记事本"",
+启动 记事本",
   "dsl": "WAIT 5
 BROWSER_NAV https://www.deepseek.com
 BROWSER_WAIT .login-btn
@@ -213,60 +235,82 @@ LAUNCH 记事本",
   ]
 }}
 
-Now generate the JSON for the user's goal. Respond ONLY with a JSON object (no markdown, no extra text):
+━━━ EXAMPLE 2: Conditional branching — for "3秒后打开记事本写'hello'然后判断屏幕是否变化,变化就锁屏":
+
 {{
-  "explanation": "brief explanation of what the script does",
-  "pseudocode": "the step-by-step pseudocode (flat lines, for frontend display)",
-  "dsl": "the equivalent Lobster DSL text (one action per line)",
+  "explanation": "等待3秒，打开记事本并输入hello，然后判断屏幕是否变化——变化则按下Win+L锁屏，否则不做额外操作。",
+  "pseudocode": "等待 3
+启动 记事本
+输入 hello
+如果 屏幕是否变化
+  按键 win+l
+结束",
+  "dsl": "WAIT 3
+LAUNCH 记事本
+TYPE hello
+IF 屏幕是否变化
+HOTKEY win+l
+END",
   "structured_steps": [
-    {{
-      "type": "wait",
-      "duration": 5
-    }},
-    {{
-      "type": "browser_navigate",
-      "url": "https://www.deepseek.com"
-    }},
-    {{
-      "type": "browser_wait_element",
-      "selector": ".login-btn",
-      "timeout": 10
-    }},
-    {{
-      "type": "browser_click",
-      "selector": ".login-btn"
-    }},
-    {{
-      "type": "browser_wait_element",
-      "selector": "#username-input",
-      "timeout": 10
-    }},
-    {{
-      "type": "browser_type",
-      "selector": "#username-input",
-      "text": "等待用户输入凭据"
-    }},
-    {{
-      "type": "browser_click",
-      "selector": ".submit-btn"
-    }},
-    {{
-      "type": "browser_wait_element",
-      "selector": ".user-center",
-      "timeout": 15
-    }},
-    {{
-      "type": "wait",
-      "duration": 5
-    }},
-    {{
-      "type": "launch",
-      "target": "记事本"
+    {{"type": "wait", "duration": 3}},
+    {{"type": "launch", "target": "记事本"}},
+    {{"type": "type", "text": "hello"}},
+    {{"type": "condition", "condition": "屏幕是否变化",
+      "true_branch": [
+        {{"type": "hotkey", "keys": ["win", "l"]}}
+      ]
     }}
   ]
 }}
 
+━━━ EXAMPLE 3: Condition with false_branch — for "判断屏幕是否变化,变化就锁屏,没有变化就音量最大":
+
+{{
+  "explanation": "检查屏幕是否发生变化，变化则锁屏，无变化则调大音量。",
+  "pseudocode": "如果 屏幕是否变化
+  按键 win+l
+否则
+  按键 volume_up
+结束",
+  "dsl": "IF 屏幕是否变化
+HOTKEY win+l
+ELSE
+HOTKEY volume_up
+END",
+  "structured_steps": [
+    {{"type": "condition", "condition": "屏幕是否变化",
+      "true_branch": [{{"type": "hotkey", "keys": ["win", "l"]}}],
+      "false_branch": [{{"type": "hotkey", "keys": ["volume_up"]}}]
+    }}
+  ]
+}}
+
+Now generate the JSON for the user's goal.
+
+CRITICAL: Before you respond, analyze the user's goal. If it contains ANY conditional logic (如果/否则/判断/是否/条件/depending on/if/if else/whether), you MUST use "condition" type steps in structured_steps. Tasks like "判断屏幕变化" "出现弹窗" "检查是否" ALWAYS require condition type.
+
+Respond ONLY with a JSON object (no markdown, no extra text).
+
 {_build_structured_types_section()}"""
+
+
+# ── Step type aliases for normalization ────────────────────────────
+# LLM occasionally produces variant type names. Map non-standard names to canonical ones.
+# NOTE: browser_screenshot IS valid (maps to BROWSER_SCREENSHOT DSL) — do NOT alias it.
+STEP_TYPE_ALIASES = {
+    "screen_shot": "screenshot",
+    "screen_capture": "screenshot",
+    "run": "run_command",
+    "navigate": "browser_navigate",
+    "input_text": "type",
+    "wait_for_element": "wait_element",
+    "wait_element_appear": "wait_element",
+    "wait_for": "wait",
+    "sleep": "wait",
+}
+
+# Canonical step types from AGENT_CAPABILITIES + CONTROL_FLOW_CAPS
+KNOWN_STEP_TYPES = {c["type"] for c in AGENT_CAPABILITIES} | {c["type"] for c in CONTROL_FLOW_CAPS}
 
 
 def _steps_to_dsl(steps: list) -> str:
@@ -291,6 +335,10 @@ def _steps_to_dsl(steps: list) -> str:
             return [f'{prefix}HOTKEY {keys}']
         elif t == "wait":
             return [f'{prefix}WAIT {step.get("duration", 1)}']
+        elif t == "wait_element":
+            target = step.get("target", step.get("text", ""))
+            timeout = step.get("timeout", 10)
+            return [f'{prefix}WAIT_UNTIL element:{target} {timeout}']
         elif t == "scroll":
             return [f'{prefix}SCROLL {step.get("target", "down")}']
         elif t == "launch":
@@ -327,7 +375,7 @@ def _steps_to_dsl(steps: list) -> str:
         elif t == "sub_flow":
             return [f'{prefix}CALL {step.get("name", "")}']
         elif t == "browser_navigate":
-            return [f'{prefix}BROWSER_NAV {step.get("url", step.get("target", ""))}']
+            return [f'{prefix}BROWSER_NAVIGATE {step.get("url", step.get("target", ""))}']
         elif t == "browser_click":
             return [f'{prefix}BROWSER_CLICK {step.get("selector", step.get("target", ""))}']
         elif t == "browser_type":
@@ -346,6 +394,20 @@ def _steps_to_dsl(steps: list) -> str:
             return [f'{prefix}BROWSER_SCREENSHOT']
         elif t == "browser_exec_js":
             return [f'{prefix}BROWSER_JS {step.get("code", "")}']
+        elif t == "browser_new_tab":
+            return [f'{prefix}BROWSER_NEW_TAB {step.get("url", step.get("target", ""))}']
+        elif t == "browser_close_tab":
+            return [f'{prefix}BROWSER_CLOSE_TAB']
+        elif t == "browser_switch_tab":
+            return [f'{prefix}BROWSER_SWITCH_TAB {step.get("target", step.get("index", ""))}']
+        elif t == "ocr_extract":
+            region = step.get("target", step.get("region", ""))
+            return [f'{prefix}OCR {region}']
+        elif t == "clipboard_get":
+            return [f'{prefix}CLIPBOARD_GET']
+        elif t == "clipboard_set":
+            text = step.get("text", step.get("content", ""))
+            return [f'{prefix}CLIPBOARD_SET {text}']
         elif t == "file_read":
             return [f'{prefix}FILEREAD {step.get("path", "")}']
         elif t == "file_write":
@@ -391,6 +453,10 @@ def _steps_to_pseudocode(steps: list) -> str:
             return [f'{prefix}按键 {keys}']
         elif t == "wait":
             return [f'{prefix}等待 {step.get("duration", 1)}']
+        elif t == "wait_element":
+            target = step.get("target", step.get("text", ""))
+            timeout = step.get("timeout", 10)
+            return [f'{prefix}等待元素 "{target}" 超时 {timeout}秒']
         elif t == "scroll":
             return [f'{prefix}滚动 {step.get("target", "down")}']
         elif t == "launch":
@@ -428,6 +494,20 @@ def _steps_to_pseudocode(steps: list) -> str:
             return [f'{prefix}浏览器截图']
         elif t == "browser_exec_js":
             return [f'{prefix}浏览器执行JS {step.get("code", "")}']
+        elif t == "browser_new_tab":
+            return [f'{prefix}浏览器新建标签页 {step.get("url", step.get("target", ""))}']
+        elif t == "browser_close_tab":
+            return [f'{prefix}浏览器关闭标签页']
+        elif t == "browser_switch_tab":
+            return [f'{prefix}浏览器切换标签页 {step.get("target", step.get("index", ""))}']
+        elif t == "ocr_extract":
+            region = step.get("target", step.get("region", ""))
+            return [f'{prefix}OCR提取 {region}']
+        elif t == "clipboard_get":
+            return [f'{prefix}读取剪贴板内容']
+        elif t == "clipboard_set":
+            text = step.get("text", step.get("content", ""))
+            return [f'{prefix}设置剪贴板 "{text}"']
         elif t == "file_read":
             return [f'{prefix}读取文件 {step.get("path", "")}']
         elif t == "file_write":
@@ -506,10 +586,10 @@ def generate_flow_script(goal: str) -> dict:
                     {"role": "user", "content": goal},
                 ],
                 "response_format": {"type": "json_object"},
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "temperature": 0.1,
             },
-            timeout=25,
+            timeout=60,
         )
 
         # Handle auth/HTTP errors with clear messages
@@ -527,8 +607,67 @@ def generate_flow_script(goal: str) -> dict:
             return {"success": False, "error": f"API 请求失败 ({resp.status_code}): {detail}"}
 
         resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(raw)
+        try:
+            resp_json = resp.json()
+        except json.JSONDecodeError:
+            # Extreme fallback: sanitize raw text by keeping only printable ASCII + JSON structure chars
+            import re as _re3
+            raw_text = resp.text
+            safe = ''.join(ch for ch in raw_text if ch.isprintable() or ch in '\n\r\t{}[]",:')
+            resp_json = json.loads(safe)
+        raw = resp_json["choices"][0]["message"]["content"]
+        if not isinstance(raw, str):
+            return {"success": False, "error": f"AI 返回了非字符串内容 (type={type(raw).__name__})"}
+
+        # Parse LLM's JSON output with multi-strategy fallback.
+        # Strategy 1: strict=False tolerates unescaped control chars in JSON strings
+        # (DeepSeek's json_object mode sometimes doesn't fully escape them).
+        # Strategy 2: strip only actual control chars (0x00-0x08, 0x0b, 0x0c, 0x0e-0x1f, 0x7f-0x9f)
+        # and retry — keeps all Unicode including Chinese.
+        # Strategy 3: progressive brace-matching on raw content.
+        parsed = None
+        parse_errors = []
+
+        # Strategy 1: try with strict=False
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            parse_errors.append(f"strict: {e}")
+            try:
+                parsed = json.loads(raw, strict=False)
+            except json.JSONDecodeError as e:
+                parse_errors.append(f"nonstrict: {e}")
+
+        # Strategy 2: strip control chars only, keep Unicode
+        if parsed is None:
+            sanitized = ''.join(ch for ch in raw
+                                if ch >= ' ' or ch in '\n\r\t')
+            try:
+                parsed = json.loads(sanitized)
+            except json.JSONDecodeError as e:
+                parse_errors.append(f"sanitized: {e}")
+
+        # Strategy 3: brace-matched extraction on raw content
+        if parsed is None:
+            for i in range(len(raw)):
+                if raw[i] == '{':
+                    depth = 0
+                    for j in range(i, len(raw)):
+                        if raw[j] == '{':
+                            depth += 1
+                        elif raw[j] == '}':
+                            depth -= 1
+                            if depth == 0:
+                                try:
+                                    parsed = json.loads(raw[i:j+1], strict=False)
+                                    break
+                                except json.JSONDecodeError:
+                                    break
+                    if parsed:
+                        break
+
+        if parsed is None:
+            return {"success": False, "error": f"AI 返回了非 JSON 格式数据: {'; '.join(parse_errors[:2])}"}
         pseudocode = parsed.get("pseudocode", "")
         explanation = parsed.get("explanation", "")
         dsl_text = parsed.get("dsl", "")
@@ -550,41 +689,67 @@ def generate_flow_script(goal: str) -> dict:
         }
 
         # ── DSL field (LLM-generated or fallback-converted) ──
-        if dsl_text:
+        if isinstance(structured_steps, list) and len(structured_steps) > 0:
+            _has_control = any(isinstance(s, dict) and s.get("type") in ("condition", "loop") for s in structured_steps)
+            # Always regenerate DSL from steps when branching, since LLM's flat DSL can't represent it
+            if _has_control:
+                result["dsl"] = _steps_to_dsl(structured_steps)
+            elif dsl_text:
+                result["dsl"] = dsl_text
+            else:
+                result["dsl"] = _steps_to_dsl(structured_steps)
+        elif dsl_text:
             result["dsl"] = dsl_text
-        elif isinstance(structured_steps, list) and len(structured_steps) > 0:
-            result["dsl"] = _steps_to_dsl(structured_steps)
 
-        # ── Pseudocode fallback: if LLM generated # UNKNOWN placeholders, regenerate ──
-        if "# UNKNOWN" in pseudocode and isinstance(structured_steps, list) and len(structured_steps) > 0:
-            fallback = _steps_to_pseudocode(structured_steps)
-            if fallback:
-                result["pseudocode"] = fallback
-                pseudocode = fallback
+        # ── Pseudocode fallback: regenerate when LLM's text can't represent branching ──
+        if isinstance(structured_steps, list) and len(structured_steps) > 0:
+            _should_regenerate = "# UNKNOWN" in pseudocode
+            # Always regenerate if structured_steps contain condition/loop — LLM's flat text can't represent branching
+            if not _should_regenerate and any(isinstance(s, dict) and s.get("type") in ("condition", "loop") for s in structured_steps):
+                _should_regenerate = True
+            if _should_regenerate:
+                fallback = _steps_to_pseudocode(structured_steps)
+                if fallback:
+                    result["pseudocode"] = fallback
+                    pseudocode = fallback
 
         # If LLM provided structured_steps, pass them through for supervised execution
         if isinstance(structured_steps, list) and len(structured_steps) > 0:
+            _warnings = list(result.get("warnings", []))
+
+            # Normalize step types using aliases
+            for s in structured_steps:
+                if isinstance(s, dict) and s.get("type") in STEP_TYPE_ALIASES:
+                    old_type = s["type"]
+                    s["type"] = STEP_TYPE_ALIASES[old_type]
+                    _warnings.append(f"Step type '{old_type}' normalized to '{s['type']}'")
+
             # Validate: each step must have a "type" field
             valid = [s for s in structured_steps if isinstance(s, dict) and s.get("type")]
-            if len(valid) == len(structured_steps):
-                # Warn about unsupported control flow types (FLATTENING RULE violation)
-                _unsupported = {"condition", "loop", "sub_flow"}
-                _warnings = []
-                for s in valid:
-                    if s["type"] in _unsupported:
-                        _warnings.append(f"Step contains unsupported type '{s['type']}' — flattening rule was violated")
-                if _warnings:
-                    result["warnings"] = _warnings
-                result["structured_steps"] = valid
-                # Build node_mapping: step_index → step_type + label
-                node_mapping = {}
-                for idx, s in enumerate(valid):
-                    label = s.get("target") or s.get("text") or s.get("title") or s.get("name") or s.get("type", "")
-                    node_mapping[str(idx)] = {
-                        "step_type": s["type"],
-                        "label": label[:60],
-                    }
-                result["node_mapping"] = node_mapping
+            if len(valid) < len(structured_steps):
+                filtered = len(structured_steps) - len(valid)
+                _warnings.append(f"{filtered} step(s) filtered out due to missing 'type' field")
+
+            # Check for unsupported control flow types (condition IS supported, loop/sub_flow are not)
+            _unsupported = {"loop", "sub_flow"}
+            for s in valid:
+                if s["type"] in _unsupported:
+                    _warnings.append(f"Step contains unsupported type '{s['type']}' — flattening rule was violated")
+                elif s["type"] not in KNOWN_STEP_TYPES:
+                    _warnings.append(f"Unknown step type '{s['type']}' — may not be executable")
+
+            if _warnings:
+                result["warnings"] = _warnings
+            result["structured_steps"] = valid
+            # Build node_mapping: step_index → step_type + label (for canvas highlighting)
+            node_mapping = {}
+            for idx, s in enumerate(valid):
+                label = s.get("target") or s.get("text") or s.get("title") or s.get("name") or s.get("type", "")
+                node_mapping[str(idx)] = {
+                    "step_type": s["type"],
+                    "label": label[:60],
+                }
+            result["node_mapping"] = node_mapping
 
         return {
             "success": True,

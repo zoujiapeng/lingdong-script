@@ -1615,6 +1615,18 @@ class DSLExecutor:
             desc = c[4:].strip().strip('"').strip("'")
             return self._eval_vlm_condition(desc)
 
+        # screen_change:timeout[,x,y,w,h] — detect screen changes via before/after comparison
+        if c.startswith("screen_change:"):
+            parts = c[15:].strip().split(",")
+            timeout = float(parts[0])
+            region = ""
+            if len(parts) == 5:
+                x, y, w, h = parts[1:]
+                if x != "0" or y != "0" or w != "0" or h != "0":
+                    region = f"{x},{y},{w},{h}"
+            result = self._call_action("wait_screen_change", timeout=timeout, region=region, ctx=ctx)
+            return bool(result)
+
         # 委托给 action_handler
         return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
 

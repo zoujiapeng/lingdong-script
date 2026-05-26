@@ -633,6 +633,7 @@ def wait_region(region: str, region_type: str = "stable",
         P("timeout", "number", "超时秒数", required=False, default=30),
         P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
         P("threshold", "number", "变化判定阈值（像素差异比例 0-1）", required=False, default=0.02),
+        P("region", "string", "监控区域 x,y,w,h（为空则全屏）", required=False, default=""),
     ],
     returns="dict{matched, elapsed} - 是否检测到变化",
     dsl_keyword="WAITSCREEN",
@@ -642,14 +643,22 @@ def wait_region(region: str, region_type: str = "stable",
     tags=["perception", "dsl", "wait"],
 )
 def wait_screen_change(timeout: float = 30, poll_interval: float = 0.5,
-                        threshold: float = 0.02) -> dict:
-    """等待全屏画面发生变化"""
+                        threshold: float = 0.02, region: str = "") -> dict:
+    """等待画面发生变化（可选区域监控）"""
     import time
     try:
         import mss
         import numpy as np
         with mss.mss() as sct:
-            mon = sct.monitors[1]
+            if region:
+                from features._utils import parse_region
+                reg = parse_region(region)
+                if reg:
+                    mon = {"left": reg[0], "top": reg[1], "width": reg[2], "height": reg[3]}
+                else:
+                    mon = sct.monitors[1]
+            else:
+                mon = sct.monitors[1]
             prev = np.array(sct.grab(mon))
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -679,6 +688,7 @@ def wait_screen_change(timeout: float = 30, poll_interval: float = 0.5,
         P("poll_interval", "number", "轮询间隔秒数", required=False, default=0.5),
         P("stability_threshold", "number", "稳定判定阈值（像素差异比例 0-1）", required=False, default=0.01),
         P("stable_rounds", "number", "连续稳定次数", required=False, default=2),
+        P("region", "string", "监控区域 x,y,w,h（为空则全屏）", required=False, default=""),
     ],
     returns="dict{matched, elapsed} - 是否已稳定",
     dsl_keyword="SCREENSTABLE",
@@ -688,14 +698,23 @@ def wait_screen_change(timeout: float = 30, poll_interval: float = 0.5,
     tags=["perception", "dsl", "wait"],
 )
 def wait_screen_stable(timeout: float = 30, poll_interval: float = 0.5,
-                        stability_threshold: float = 0.01, stable_rounds: int = 2) -> dict:
-    """等待全屏画面静止"""
+                        stability_threshold: float = 0.01, stable_rounds: int = 2,
+                        region: str = "") -> dict:
+    """等待画面静止（可选区域监控）"""
     import time
     try:
         import mss
         import numpy as np
         with mss.mss() as sct:
-            mon = sct.monitors[1]
+            if region:
+                from features._utils import parse_region
+                reg = parse_region(region)
+                if reg:
+                    mon = {"left": reg[0], "top": reg[1], "width": reg[2], "height": reg[3]}
+                else:
+                    mon = sct.monitors[1]
+            else:
+                mon = sct.monitors[1]
             prev = np.array(sct.grab(mon))
             stable_count = 0
             deadline = time.time() + timeout

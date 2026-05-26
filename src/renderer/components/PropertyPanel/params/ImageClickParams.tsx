@@ -234,7 +234,7 @@ export function ImageClickParams({ params, onChange }: Props) {
         <label className="form-label">点击后延时 (秒)</label>
         <div className="slider-group">
           <input type="range" min="0" max="5" step="0.1" value={params.delay_after} onChange={(e) => onChange({ delay_after: +e.target.value })} />
-          <span className="slider-value">{params.delay_after.toFixed(1)}</span>
+          <span className="slider-value">{(params.delay_after ?? 0.5).toFixed(1)}</span>
         </div>
       </div>
 

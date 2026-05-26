@@ -53,7 +53,7 @@ _BASE_DSL_TO_FLOW = {
 # 用于 @feature 关键字的兼容降级映射（registry flow_type 优先）
 # 所有带 dsl_keyword 的 @feature 都已声明 flow_type，此处仅作兜底
 _BASIC_DSL_TO_FLOW = {
-    "CLICK": "mouse_operation", "TYPE": "input_text", "HOTKEY": "keyboard",
+    "CLICK": "click", "TYPE": "input_text", "HOTKEY": "keyboard",
     "SWIPE": "swipe", "SCROLL": "swipe", "SCREENSHOT": "screenshot",
     "SET": "variable_set", "INPUT_TEXT": "input_text",
     "CLICK_IMAGE": "image_click",
@@ -1249,6 +1249,11 @@ def flow_to_dsl(script: dict) -> str:
                 x = p.get("x", 0); y = p.get("y", 0)
                 color = p.get("expected_color", "")
                 return f"COLOR_CHECK {x} {y} {color}"
+            if ct == "screen_change":
+                timeout = p.get("timeout", 3)
+                x = p.get("x", 0); y = p.get("y", 0)
+                w = p.get("w", 0); h = p.get("h", 0)
+                return f"IF screen_change:{timeout},{x},{y},{w},{h}"
             return "IF true"
 
         if ntype == "loop":

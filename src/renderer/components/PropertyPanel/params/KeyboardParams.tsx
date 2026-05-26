@@ -19,21 +19,24 @@ const COMMON_KEYS = [
 export function KeyboardParams({ params, onChange }: Props) {
   const [customKey, setCustomKey] = useState('');
 
+  const keys = params.keys || [];
+  const modifiers = params.modifiers || [];
+
   const addKey = (key: string) => {
-    if (!params.keys.includes(key)) {
-      onChange({ keys: [...params.keys, key] });
+    if (!keys.includes(key)) {
+      onChange({ keys: [...keys, key] });
     }
   };
 
   const removeKey = (key: string) => {
-    onChange({ keys: params.keys.filter((k) => k !== key) });
+    onChange({ keys: keys.filter((k) => k !== key) });
   };
 
   const toggleModifier = (mod: KeyModifier) => {
-    if (params.modifiers.includes(mod)) {
-      onChange({ modifiers: params.modifiers.filter((m) => m !== mod) });
+    if (modifiers.includes(mod)) {
+      onChange({ modifiers: modifiers.filter((m) => m !== mod) });
     } else {
-      onChange({ modifiers: [...params.modifiers, mod] });
+      onChange({ modifiers: [...modifiers, mod] });
     }
   };
 
@@ -55,9 +58,9 @@ export function KeyboardParams({ params, onChange }: Props) {
               className={`btn btn-ghost`}
               style={{
                 height: 28, padding: '0 10px', fontSize: 12,
-                background: params.modifiers.includes(mod) ? 'var(--accent-light)' : undefined,
-                color: params.modifiers.includes(mod) ? 'var(--accent)' : undefined,
-                borderColor: params.modifiers.includes(mod) ? 'var(--accent)' : undefined,
+                background: modifiers.includes(mod) ? 'var(--accent-light)' : undefined,
+                color: modifiers.includes(mod) ? 'var(--accent)' : undefined,
+                borderColor: modifiers.includes(mod) ? 'var(--accent)' : undefined,
               }}
               onClick={() => toggleModifier(mod)}
             >
@@ -70,7 +73,7 @@ export function KeyboardParams({ params, onChange }: Props) {
       <div className="form-group">
         <label className="form-label">按键序列</label>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-          {params.keys.map((key) => (
+          {keys.map((key) => (
             <span
               key={key}
               style={{
@@ -92,7 +95,7 @@ export function KeyboardParams({ params, onChange }: Props) {
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, maxHeight: 120, overflowY: 'auto', marginBottom: 8 }}>
-          {COMMON_KEYS.filter((k) => !params.keys.includes(k)).slice(0, 20).map((key) => (
+          {COMMON_KEYS.filter((k) => !keys.includes(k)).slice(0, 20).map((key) => (
             <button
               key={key}
               style={{
@@ -120,7 +123,7 @@ export function KeyboardParams({ params, onChange }: Props) {
         <label className="form-label">操作后延时 (秒)</label>
         <div className="slider-group">
           <input type="range" min="0" max="3" step="0.1" value={params.delay_after} onChange={(e) => onChange({ delay_after: +e.target.value })} />
-          <span className="slider-value">{params.delay_after.toFixed(1)}</span>
+          <span className="slider-value">{(params.delay_after ?? 0.5).toFixed(1)}</span>
         </div>
       </div>
 

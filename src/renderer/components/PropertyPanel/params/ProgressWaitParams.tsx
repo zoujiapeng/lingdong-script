@@ -74,7 +74,7 @@ export function ProgressWaitParams({ params, onChange }: Props) {
         <label className="form-label">轮询间隔 (秒)</label>
         <div className="slider-group">
           <input type="range" min="0.1" max="3" step="0.1" value={params.poll_interval} onChange={(e) => onChange({ poll_interval: +e.target.value })} />
-          <span className="slider-value">{params.poll_interval.toFixed(1)}s</span>
+          <span className="slider-value">{(params.poll_interval ?? 0.5).toFixed(1)}s</span>
         </div>
       </div>
       <div className="form-group">
