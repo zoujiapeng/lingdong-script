@@ -16,6 +16,8 @@ import { htnRegistry } from './utils/htnRegistry';
 import { ALL_HTN_DEFS } from './utils/htnTemplateDefs';
 import { loadTemplateShortcuts } from './store';
 import { matchSemantic } from './utils/semanticMatcher';
+import { unifiedSearch } from './utils/unifiedSearch';
+import { llmEnhanceSearch } from './utils/llmSearcher';
 import './styles/globals.css';
 
 export default function App() {
@@ -76,11 +78,33 @@ export default function App() {
     htnRegistry.autoRegisterFromTemplates();
 
     // Expose search function for main process HTTP API access
-    (window as any).__searchTemplates = (query: string, maxResults?: number) => {
+    (window as any).__searchTemplates = async (query: string, maxResults?: number) => {
       try {
-        const semantic = matchSemantic(query);
-        const htnResults = htnRegistry.search(query);
+        // Build unified search index (includes features + templates)
+        const store = useStore.getState();
+        unifiedSearch.rebuildIndex(store.featureList.length > 0 ? store.featureList as any : undefined);
+
+        // Offline unified search
         const limit = maxResults || 5;
+        const unified = unifiedSearch.search(query, { maxResults: limit * 2 });
+
+        // HTN search (kept for backward compatibility)
+        const htnResults = htnRegistry.search(query);
+
+        // Try LLM enhancement if confidence is low
+        const apiKey = (window as any).__llmApiKey || '';
+        let results = unified;
+        let enhanced = false;
+        if (apiKey && (unified.length === 0 || unified[0].score < 60)) {
+          const llmResult = await llmEnhanceSearch(query, unified, apiKey);
+          if (llmResult.enhanced) {
+            results = llmResult.results;
+            enhanced = true;
+          }
+        }
+
+        const topResults = results.slice(0, limit);
+
         return JSON.stringify({
           htn: htnResults.slice(0, limit).map((r: any) => ({
             id: r.node.id,
@@ -95,20 +119,41 @@ export default function App() {
               optional: c.optional,
             })),
           })),
-          flat: semantic.candidates.slice(0, limit).map((r: any) => ({
-            id: r.template.id,
-            name: r.template.name,
-            description: r.template.description,
-            score: r.score,
-            reasons: r.reasons,
-            hasScript: r.template.hasScript,
-          })),
-          autoSelect: semantic.autoSelect,
+          flat: topResults
+            .filter(r => r.item.type === 'template')
+            .map((r: any) => ({
+              id: r.item.id,
+              name: r.item.name,
+              description: r.item.description,
+              score: r.score,
+              reasons: r.reasons,
+              hasScript: r.item.hasScript,
+              tested: r.item.tested,
+            })),
+          features: topResults
+            .filter(r => r.item.type === 'feature')
+            .map((r: any) => ({
+              id: r.item.id,
+              name: r.item.name,
+              featureName: r.item.featureName,
+              description: r.item.description,
+              score: r.score,
+              reasons: r.reasons,
+              tested: r.item.tested,
+            })),
+          autoSelect: topResults.length > 0 && topResults[0].score >= 90,
+          enhanced,
         });
       } catch (e: any) {
         return JSON.stringify({ error: e.message });
       }
     };
+
+    // Expose API key from settings for LLM search
+    try {
+      const key = localStorage.getItem('lingdong-llm-api-key');
+      if (key) (window as any).__llmApiKey = key;
+    } catch {};
   }, []);
 
   // Keyboard shortcuts
@@ -139,6 +184,7 @@ export default function App() {
           case 'a': e.preventDefault(); store.selectAll(); break;
           case 's': e.preventDefault(); store.saveScript(); break;
           case 'd': e.preventDefault(); store.duplicateNodes(store.ui.selection.nodes); break;
+          case 'k': e.preventDefault(); useStore.getState().setUI({ show_unified_search: true }); break;
         }
       }
       // F10: Step over (debugger)

@@ -6,63 +6,73 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 
 | 命令 | 用途 |
 |---|---|
-| `npm run dev` | 启动开发环境 (Vite + Electron) |
-| `npm run build` | 构建 renderer + main |
+| `npm run dev` | 启动开发环境 (Vite + Electron)，renderer :5173，HTTP API :7880 |
+| `npm run build` | 构建 renderer (Vite) + main (tsc) |
 | `npx electron-builder --win portable` | 构建免安装便携版 |
-| `npx electron . --prod` | 测试生产模式 (file:// 加载) |
-| `python -m pytest tests/` | 运行 Python 测试 (2149+ tests) |
-| `python python/mcp/server.py` | 启动 Python MCP 服务器 |
-| `npm run ai:mcp` | 启动 TypeScript MCP 服务器 |
-| `python cli/lobster.py run-flow <file.flow>` | CLI 执行流程 |
+| `npx electron . --dev` | 在打包后强制开发模式 (loadURL) |
+| `npx electron . --minimized` | 启动后最小化到任务栏 |
+| `python -m pytest tests/` | 运行 Python 测试 (~296 tests) |
+| `python python/mcp/server.py` | 启动 Python MCP 服务器 (stdio JSON-RPC) |
+| `npm run ai:mcp` | 启动 TypeScript MCP 服务器 (5 tools, stdio) |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
-| `curl -X POST http://127.0.0.1:5877/api/ping` | 检查 HTTP API 桥接 |
+| `curl -X POST http://127.0.0.1:7880/api/ping` | 检查 HTTP API 桥接 |
 
 ## 目录结构
 
 ```
 ├── src/
-│   ├── main/           # Electron 主进程 (IPC handlers, 窗口管理)
-│   │   ├── main.ts     #   - 引擎管理, IPC handlers, HTTP API :5877
-│   │   └── preload.ts  #   - contextBridge API 暴露
-│   └── renderer/       # React 前端 (Vite)
-│       ├── App.tsx     #   - 根组件, 布局, 快捷键
-│       ├── store/      #   - Zustand + immer 状态管理
-│       ├── types/      #   - FlowNode, FlowEdge, NodeParams 类型
+│   ├── main/              # Electron 主进程
+│   │   ├── main.ts        #   - 引擎管理, IPC handlers, 窗口生命周期
+│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (53+ 端点)
+│   │   ├── env.ts         #   - isDev / getBaseDir 环境配置
+│   │   └── preload.ts     #   - contextBridge (40+ API 暴露)
+│   └── renderer/          # React 前端 (Vite)
+│       ├── App.tsx        #   - 根组件, 布局, 快捷键, HTN 注册
+│       ├── store/         #   - Zustand + immer 状态管理 (index.ts, executor.ts)
+│       ├── types/         #   - FlowNode, FlowEdge, NodeParams, FlowScript
 │       ├── components/
-│       │   ├── Canvas/ #   - FlowCanvas, FlowNode
-│       │   ├── PropertyPanel/ # - 节点参数编辑器 (16+ 种)
-│       │   ├── NodeLibrary/   # - 节点库面板 (127 个节点)
-│       │   └── common/ #   - TopBar, StatusBar, LogPanel, ToolCallPanel
-│       └── utils/      #   - textGenerator, featureRegistry, nodeDefinitions
+│       │   ├── Canvas/    #   - FlowCanvas, FlowNode, EdgeLayer, CanvasControls
+│       │   ├── PropertyPanel/ # - 参数编辑器 (53 种节点 × params/*.tsx)
+│       │   ├── NodeLibrary/   # - 节点库面板
+│       │   └── common/   #   - TopBar, StatusBar, LogPanel, ToolCallPanel,
+│       │                  #     TriggerBar, ParamPromptDialog, MacroPanel,
+│       │                  #     ScriptBrowser, TemplateSelector, ScheduleDialog
+│       └── utils/         #   - nodeDefinitions, pseudoParser, featureRegistry,
+│                           #     semanticMatcher, htnRegistry, textGenerator
 ├── python/
-│   ├── agent/          # AI Agent (规划/监督执行/OCR验证/失败恢复)
-│   │   ├── __main__.py #   IPC 入口 (stdin/stdout JSON 协议)
-│   │   ├── controller.py #   ReAct 循环 + 监督执行
-│   │   ├── planner.py  #   LLM 决策引擎 (DeepSeek)
-│   │   ├── pseudocode.py #   伪代码 → 结构化步骤解析
-│   │   └── memory.py   #   短期/长期记忆
-│   ├── engine/         # Python 自动化引擎
-│   │   ├── executor.py #   - DSL 执行器 (核心)
-│   │   ├── dsl_parser.py #  - DSL 解析器
-│   │   └── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
-│   ├── features/       # @feature 注册表 (226 功能)
-│   │   ├── registry.py #   - 装饰器, 自动生成 MCP/CLI/HTTP
-│   │   └── _all.py     #   - 导入所有 feature 模块
-│   ├── mcp/server.py   # Python MCP 服务器 (stdio 协议)
-│   ├── macros/         # 宏录制保存目录 (.json 事件文件)
-│   ├── interaction/    # 交互工具
-│   │   ├── wheel_selector.py # - 全屏滚轮选择器
-│   │   └── region_picker.py  # - 全屏区域选择器 (tkinter)
-│   └── perception/     # OCR, 图像匹配
-├── cli/lobster.js      # TypeScript CLI
-├── tools/              # 工具脚本 (dsl_to_flow.py 等)
-├── templates/          # 工作流模板 (.flow 文件)
-└── tests/              # Python 测试套件
+│   ├── agent/             # AI Agent 监督执行
+│   │   ├── __main__.py    #   IPC 入口 (stdin/stdout JSON 协议)
+│   │   ├── langgraph_agent.py #   LangGraph 监督包装器 + _apply_visual_locator
+│   │   ├── experience_db.py   #   经验数据库 (SHA256 签名索引)
+│   │   ├── visual_locator.py  #   语义目标→屏幕坐标定位器
+│   │   ├── dialog_handler.py  #   Windows 对话框检测/关闭 (win32 API)
+│   │   └── menu_handler.py    #   Windows 菜单操作
+│   ├── engine/            # Python 自动化引擎
+│   │   ├── executor.py    #   - DSL 执行器 (核心)
+│   │   ├── dsl_parser.py  #   - DSL 解析器 (190 关键字)
+│   │   ├── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
+│   │   ├── engine.py      #   - stdin/stdout JSON 协议引擎入口
+│   │   ├── condition_evaluator.py # - 条件求值
+│   │   ├── crystallizer.py    # - 流程图→DSL 结晶化
+│   │   ├── triggers.py        # - 触发器引擎
+│   │   ├── scheduler.py       # - 定时调度
+│   │   └── optimizer.py       # - 流程优化
+│   ├── features/          # @feature 注册表 (239 非弃用功能)
+│   │   ├── registry.py    #   - FeatureRegistry 单例, @feature 装饰器
+│   │   └── _all.py        #   - 导入所有 feature 模块 (49 文件)
+│   ├── mcp/server.py      # Python MCP 服务器 (stdio JSON-RPC 2.0)
+│   ├── macros/            # 宏录制保存目录 (.json 事件文件)
+│   ├── interaction/       # 交互工具 (wheel_selector, region_picker, actions)
+│   ├── perception/        # OCR, 图像匹配, 视觉融合
+│   └── experience/        # 视觉定位经验库 (db.json + templates/*.png)
+├── tools/                 # 工具脚本 (dsl_to_flow.py 等)
+├── templates/             # 工作流模板 (.flow / .dsl 文件)
+└── tests/                 # Python 测试套件 (~296 tests)
 ```
 
 ## HTTP API 桥接 (Claude Code 远程控制)
 
-Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost），Claude Code 可通过 curl 实时控制前端。
+Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost，可被 `API_PORT` 环境变量覆盖），Claude Code 可通过 curl 实时控制前端。
 
 | 端点 | 用途 | 关键参数 |
 |---|---|---|
@@ -79,12 +89,13 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 | `POST /api/generate-dsl` | 自然语言→DSL（调用LLM） | `{ description, apiKey? }` |
 | `POST /api/create-flow` | DSL/描述→流程图（含参数检查） | `{ description?, dsl?, apiKey? }` |
 | `POST /api/check-params` | 检查节点缺失参数 | `{ nodes[] }` |
-| `POST /api/resolve-param` | 设置节点参数值 | `{ node_id, param, value }` |
-| `POST /api/interactive-fill` | 人机交互补全参数（框选/截图等） | `{ node_id, param, tool, options?, hint? }` |
 | `POST /api/new-script` | 新建空白脚本 | — |
 | `POST /api/set-view-mode` | 切换视图 | `{ mode: 'canvas'\|'pseudocode'\|'settings' }` |
 | `POST /api/fit-screen` | 自适应缩放 | — |
 | `POST /api/get-state` | 读取当前状态 | — |
+| `POST /api/engine/start` | 启动脚本执行引擎 | `{ script }` |
+| `POST /api/engine/pause` | 暂停引擎 | — |
+| `POST /api/engine/resume` | 继续引擎 | — |
 | `POST /api/macro/start-recording` | 开始宏录制（F6 热键） | `{ name?, include_mouse?, include_keys? }` |
 | `POST /api/macro/stop-recording` | 停止录制并保存 | — |
 | `POST /api/macro/list` | 列出已录制宏 | — |
@@ -92,8 +103,6 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 | `POST /api/macro/delete` | 删除宏 | `{ name }` |
 | `POST /api/macro/get-events` | 读取宏原始事件 | `{ name }` |
 | `POST /api/macro/recording-status` | 录制器状态 | — |
-| `POST /api/engine/pause` | 暂停引擎 | — |
-| `POST /api/engine/resume` | 继续引擎 | — |
 | `POST /api/ai/generate` | 调用 LLM（DeepSeek） | `{ apiKey, messages[], apiBase?, model? }` |
 | `POST /api/screenshot/capture` | 全屏截图（交互框选） | — |
 | `POST /api/screenshot/select-region` | 框选屏幕区域 | — |
@@ -115,9 +124,11 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 | `POST /api/duplicate-nodes` | 复制节点 | `{ ids: string[] }` |
 | `POST /api/agent-start` | 启动 AI Agent 监督执行 | `{ goal, config?, supervise? }` |
 | `POST /api/features/list` | 列出所有可用 @feature 工具 | — |
+| `POST /api/features/reload` | 重新加载 @feature 注册表 | — |
 | `POST /api/features/call` | 调用任意 @feature 工具 | `{ name, params }` |
 | `POST /api/search-templates` | 语义搜索模板 | `{ query, maxResults? }` |
 | `POST /api/execute-js` | 在前端执行 JS 代码 | `{ code }` |
+| `POST /mcp` | MCP over HTTP 端点 | 标准 MCP JSON-RPC |
 
 ## MCP 工具
 
@@ -127,20 +138,20 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:5877`（仅 localhost�
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 226 工具，覆盖：
+通过 `@feature` 注册表动态生成 188 MCP 工具（stdin/stdout JSON-RPC 2.0），覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
-| 交互动作 | 60 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
+| 交互动作 | 67 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
 | 感知识别 | 26 | find_image, OCR, color_detect, progress, A11y, fusion... |
-| 控制流 | 23 | wait, loop, condition, timer, software control... |
+| 控制流 | 24 | wait, loop, condition, timer, software control... |
 | AI 规划 | 8 | plan, execute_plan, debug, VLM analyze... |
-| 宏指令 | 7 | record, playback, list, delete, convert_to_flow... |
+| 宏指令 | 10 | record, playback, list, delete, convert_to_flow... |
 | 系统功能 | 72 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
-| 调试诊断 | 27 | test, validate, system_info, feature introspection... |
+| 调试诊断 | 29 | test, validate, system_info, feature introspection... |
 
-DSL 关键字: 184 个（自动从 @feature 注册表生成，含所有控制流关键字）
-Agent 工具集: 99 个直接工具（浏览器控制/窗口管理/系统功能/WiFi/剪贴板/媒体等）
+DSL 关键字: 190 个（自动从 @feature 注册表生成，含所有控制流关键字）
+Agent 工具集: 188 MCP 工具（过滤弃用和隐藏功能后全部可用）
 Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能自动纳入 Agent 可用范围（重启 Agent 生效）
 
 关键工具示例：
@@ -151,9 +162,17 @@ Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能�
 
 ### 2. TypeScript MCP (桥接)
 
-启动: `npm run ai:mcp`
+启动: `npm run ai:mcp` (`node dist/ai-interface/index.js --mode mcp`)
 
-5 个工具用于前端集成和文件管理。
+5 个工具用于前端集成和文件管理：
+
+| 工具 | 用途 |
+|---|---|
+| `run_flow` | 执行 .flow 文件 |
+| `list_flows` | 列出模板 |
+| `create_flow` | 创建流程 |
+| `ask_ai` | AI 问答 |
+| `screen_capture` | 截屏 |
 
 ## 宏录制功能
 
@@ -167,7 +186,6 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 | **TopBar 按钮** | 点击录制按钮（红点动画），再点或按 F6 停止 |
 | **MCP 工具** | `lobster_macro_start_recording` / `lobster_macro_stop_recording` |
 | **HTTP API** | `POST /api/macro/start-recording` / `POST /api/macro/stop-recording` |
-| **CLI** | `python tools/macro_recorder.py`（独立进程 stdin/stdout） |
 
 ### MacroPanel 管理面板
 
@@ -225,8 +243,8 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 
 **按钮边界检测策略**（`_smart_crop_around_click`，三层递进）:
 
-1. **floodFill 连通域**（容差 15→30→50）— 从点击点做种子填充，取连通域的 bounding rect。点在按钮空白区域时直接命中整个按钮；点在文字上时递增容差溢出到按钮底色
-2. **Canny + findContours 兜底** — 点在渐变/复杂按钮上 floodFill 不准时，做边缘检测，找包含点击点的最小轮廓
+1. **floodFill 连通域**（容差 15→30→50）— 从点击点做种子填充，取连通域的 bounding rect
+2. **Canny + findContours 兜底** — 边缘检测，找包含点击点的最小轮廓
 3. **固定 40×40 裁剪兜底** — 前两者均失败时以点击点居中裁剪
 
 **OCR 自动命名:**
@@ -253,17 +271,19 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 
 ### 创建自动化流程
 1. 在画布拖拽节点编排流程
-2. 节点类型: 点击、输入、截图、OCR、条件、循环、等待
+2. 节点类型: 53 种（点击、输入、截图、OCR、条件、循环、等待、系统操作等）
 3. 属性面板编辑参数 (支持区域拾取、策略选择)
 4. 文本视图可切换中文伪代码 / 英文 DSL 模式
 5. 保存为 .flow 文件, 或导出 DSL
 
 ### 调试执行
-1. 点击 "运行" 或按 F9 启动
+1. 点击 "运行" 或按 **F5** 启动（前端快捷键）
 2. 引擎逐节点执行, 高亮当前节点
 3. 日志面板显示执行详情
 4. 支持暂停/继续/停止
 5. 节点标注成功/失败/跳过状态
+
+**全局 F9 热键**: 即使在应用未聚焦时，F9 也可启停 Python 引擎（主进程全局快捷键）。
 
 ### AI 辅助
 1. 点击 "AI 助手" 用自然语言描述需求
@@ -310,13 +330,14 @@ AI Agent 子进程通过 stdin/stdout JSON 与 Electron 主进程通信。协议
 ### 监督执行流程（supervise=true）
 
 ```
-Agent Controller
+Agent 主循环 (__main__.py)
   ├─ Phase 1: generate_flow_script(goal)
   │   └─ 生成流程图脚本 → 前端展示
   ├─ Phase 2: parse_pseudocode(pseudocode)
-  │   └─ 解析为结构化步骤（click/type/hotkey/wait/launch...）
+  │   └─ 解析为结构化步骤 (click/type/hotkey/wait/launch...)
   └─ Phase 3: 逐步骤监督执行
       ├─ 窗口焦点安全 (get_active_window)
+      ├─ 视觉定位 (visual_locator.locate → OpenCV/VLM)
       ├─ 执行动作 (registry.execute)
       ├─ 等待屏幕稳定 (wait_screen_stable)
       ├─ OCR 验证 (ocr_find_text / wait_screen_change)
@@ -335,7 +356,7 @@ Agent 监督执行时通过 **视觉定位** 模块将语义目标（如"搜索�
 ### 架构
 
 ```
-Agent 监督层 (supervision wrapper)
+Agent 监督层 (langgraph_agent.py supervision wrapper)
   └─ step 0: _apply_visual_locator(name, args)
        ├─ 提取 target_text（如 "搜索按钮"）
        ├─ 截取全屏截图
@@ -396,42 +417,119 @@ python/experience/
 
 ## 关键约定
 
-- **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `engine.py` (execute_*)
-- **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册
-- **新增 Agent 能力**: 在 `python/agent/` 添加，`controller.py` 驱动 ReAct 循环，`pseudocode.py` 解析步骤，`planner.py` 决策恢复策略
-- **新增 API 端点**: 在 `src/main/main.ts` 的 `startApiServer()` switch 中添加 case
+- **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `PropertyPanel.tsx` (switch case)
+- **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册 MCP/CLI/HTTP/DSL
+- **新增 Agent 能力**: 在 `python/agent/` 添加，`__main__.py` 驱动执行循环，`langgraph_agent.py` 监督包装
+- **新增 API 端点**: 在 `src/main/api.ts` 的 `switch (url.pathname)` 中添加 case
 - **状态管理**: Zustand + immer，`useStore` hook
 - **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
 - **Agent IPC 协议**: `python/agent/__main__.py` 通过 stdin/stdout JSON 与 Electron 通信（start/stop/guidance/status 命令，agent_start/step_complete/agent_done/log 事件）
 - **Python 协议**: `engine/engine.py` 通过 stdin/stdout JSON 与 Electron 通信
-- **测试**: `pytest tests/` 2149+ tests (Python, 覆盖全部 @feature 执行, DSL 转换, 往返验证), 暂无前端测试脚本
+- **测试**: `pytest tests/` ~296 tests (Python, 覆盖全部 @feature 执行, DSL 转换, 往返验证), 暂无前端测试脚本
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
+- **快捷键**:
+  - **F5**: 前端画布"运行/停止"执行
+  - **F6**: 全局宏录制启停
+  - **F9**: 全局系统级 Python 引擎启停（即使应用未聚焦）
+  - **Ctrl+Z/Y**: 撤销/重做
+  - **Ctrl+C/X/V**: 复制/剪切/粘贴节点
+  - **Delete/Backspace**: 删除选中节点/连线
+  - **Tab**: 切换面板显示
+- **生产模式**: `app.isPackaged` 控制 `loadURL` (dev) 或 `loadFile` (prod)。`--dev` 标志可在打包后强制开发模式。无 `--prod` 标志。
 - **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
 - **视觉定位系统**: `agent/visual_locator.py` + `agent/experience_db.py`。语义目标→屏幕坐标的两步策略：经验库→OpenCV 匹配，VLM 兜底。`_apply_visual_locator()` 在 `langgraph_agent.py` 监督层 step 0 自动调用。所有 VLM 定位成功的坐标和按钮小图自动存入经验数据库供后续离线复用
 
-## 节点类型速查
+## 节点类型速查 (53 种)
 
-| 类型 | 用途 | 参数 |
+### 基础交互
+| 类型 | 用途 | 主要参数 |
 |---|---|---|
-| click | 点击坐标 | x, y, method, offset |
-| input_text | 输入文字 | text, x, y, clear_before |
-| keyboard | 快捷键 | keys[], modifiers[] |
-| swipe | 滑动 | start_x/y, end_x/y, duration |
-| wait | 等待 | time / image / window |
-| condition | 条件分支 | image_exists / variable_equals / color_match |
-| loop | 循环 | count / condition / infinite |
+| click | 点击坐标 | x, y, method, offsetX, offsetY, delay_after |
+| input_text | 输入文字 | text, click_before, clear_before, delay_after |
+| keyboard | 快捷键 | keys[], modifiers[], delay_after |
+| swipe | 滑动 | start_x, start_y, end_x, end_y, duration, delay_after |
+| mouse_operation | 鼠标综合（点击/滚轮/悬停/移动） | sub_operation, x, y, method |
+| click_action | 点击综合（坐标/图片/文字） | mode, method, delay_after |
+
+### 图像与识别
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| image_click | 图片识别点击 | targets[], similarity, method, timeout, multi_scale, match_all |
+| click_text | OCR 文字点击 | text, similarity, method, timeout |
 | screenshot | 截图 | region, save_path, format |
-| image_click | 图片识别点击 | targets[], similarity |
-| click_text | OCR 文字点击 | text, similarity, method |
-| popup_close | 弹窗关闭 | strategies[], timeout |
-| color_check | 颜色检测 | region, expected_color, tolerance |
-| progress_wait | 等待进度条 | region, wait_type, timeout |
-| region_wait | 等待区域稳定 | region, region_type, timeout |
+| popup_close | 弹窗关闭 | strategies[], timeout, delay_after |
+| color_check | 颜色检测 | x, y, w, h, expected_color, tolerance |
+
+### 控制流
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| condition | 条件分支 | condition_type (image_exists/window_exists/variable_equals/color_match/scene_match/always_true), similarity |
+| loop | 循环 | loop_type (count/condition/infinite), count |
+| wait | 等待 | wait_type (time/image/window), duration, timeout |
+| sub_script | 子流程 | script_id, script_name |
 | scene_condition | 场景识别 | scene_name, similarity |
-| sub_script | 子流程 | script_id |
-| variable_set/get | 变量操作 | name, value |
+
+### 设备监控
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| progress_wait | 等待进度条 | wait_type, region, timeout, poll_interval |
+| region_wait | 等待区域稳定 | region_type, x, y, w, h, timeout, poll_interval |
+
+### 变量与数据
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| variable_set | 设置变量 | name, value |
+| variable_get | 读取变量 | name, value |
+
+### 系统操作 (独立类型)
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| shutdown | 关机 | delay_seconds, confirm |
+| reboot | 重启 | delay_seconds, confirm |
+| logoff | 注销 | confirm |
+| hibernate | 休眠 | delay_seconds, confirm |
+| lock_workstation | 锁定工作站 | confirm |
+| volume_set | 设置音量 | level |
+| volume_mute | 静音控制 | mute (true/false/toggle) |
+| launch_program | 启动程序 | target, args, wait |
+| kill_process | 终止进程 | name, force |
+| wait_process | 等待进程 | name, wait_for (start/exit), timeout |
+| focus_window | 激活窗口 | title, exact |
+| set_wallpaper | 设置壁纸 | path, style |
+| display_off | 关闭显示器 | confirm |
+| system_sleep | 睡眠 | confirm |
+| show_desktop | 显示桌面 | — |
+| battery_status | 电池状态 | — |
+| empty_recycle_bin | 清空回收站 | confirm |
+| display_brightness | 亮度 | level |
+| clipboard_set | 剪贴板写入 | text |
+| clipboard_get | 剪贴板读取 | — |
+| window_control | 窗口操作 | operation, title, width, height |
+
+### 高级工具
+| 类型 | 用途 | 主要参数 |
+|---|---|---|
+| web_browser | 浏览器操作 (Playwright) | action, url |
+| dialog_action | 对话框操作 | action, timeout, button |
+| a11y_action | 无障碍操作 (UIA) | action, name, role |
+| wifi_action | WiFi 操作 | action, ssid, password |
 | tool_call | 任意 @feature 工具 | feature_name, params |
+
+### 聚合类型（多合一）
+| 类型 | 包含子操作 | 用途 |
+|---|---|---|
+| system_power | shutdown/reboot/logoff/hibernate/lock_workstation/system_sleep/display_off | 系统电源统一入口 |
+| audio_action | volume_set/volume_mute | 音频控制统一入口 |
+| desktop_action | show_desktop/set_wallpaper/empty_recycle_bin | 桌面操作统一入口 |
+| clipboard_action | set/get/get_image/get_files/clear | 剪贴板操作统一入口 |
+| process_action | launch/kill/wait_start/wait_exit/focus | 进程操作统一入口 |
+
+### 特殊节点
+| 类型 | 用途 |
+|---|---|
+| start | 脚本入口点 |
+| end | 脚本终止点 |
 
 ## 常见任务
 
@@ -451,11 +549,17 @@ python -c "from features._all import *; from features.registry import registry; 
 # 启动滚轮选择器（独立测试）
 python python/interaction/wheel_selector.py
 
-# 通过 HTTP API 控制前端
-curl -X POST http://127.0.0.1:5877/api/ping
+# 通过 HTTP API 控制前端 (端口 7880)
+curl -X POST http://127.0.0.1:7880/api/ping
 
 # DSL → 流程图 → 加载到前端（一键）
-curl -X POST http://127.0.0.1:5877/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
+curl -X POST http://127.0.0.1:7880/api/run-dsl -H "Content-Type: application/json" -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
+
+# 框选屏幕区域
+curl -X POST http://127.0.0.1:7880/api/screenshot/select-region
+
+# 启动 AI Agent
+curl -X POST http://127.0.0.1:7880/api/agent-start -H "Content-Type: application/json" -d '{"goal":"打开记事本并输入文字","supervise":true}'
 ```
 
 ## 构建与部署
@@ -467,9 +571,11 @@ npm run build                    # 构建 renderer (Vite) + main (tsc)
 # 构建便携版
 npx electron-builder --win portable   # 输出到 release/灵动脚本-*-portable.exe
 
-# 测试生产模式 (file:// 加载)
-npx electron . --prod            # 强制生产模式，不加 --prod 则为 dev 模式
-npx electron . --prod --minimized  # 启动后最小化到任务栏
+# 测试生产模式
+npx electron . --dev             # 打包后强制开发模式 (loadURL)
+npx electron . --minimized       # 启动后最小化到任务栏
+# 无 --prod 标志。打包后默认 loadFile；未打包时默认 loadURL。
+# 使用 --dev 在打包后强制 loadURL。
 
 # 发布到 GitHub Release
 gh release create v1.0.1 "release/灵动脚本-1.0.0-portable.exe" --generate-notes
@@ -478,9 +584,9 @@ gh release create v1.0.1 "release/灵动脚本-1.0.0-portable.exe" --generate-no
 ### 生产模式注意事项
 
 - **CSP**：生产模式下从 `file://` 加载，已移除 CSP 头防止阻塞模块脚本
-- **`--prod` 标志**：在 `npx electron .` 时强制使用 `loadFile`（生产模式路径），用于测试
+- **`isDev` 判断**: `!app.isPackaged || process.argv.includes('--dev')` — 打包后默认生产模式，加 `--dev` 恢复开发模式
 - **`--minimized` 标志**：默认窗口正常显示，加此标志则启动后最小化
 - **`getBaseDir()`**：所有 Python 子进程的 `cwd` 通过此函数统一解析，开发时指向项目根目录，生产时指向 `process.resourcesPath`
 - **`extraResources`**：`python/`、`tools/` 目录通过 `extraResources` 复制到 asar 外部，Python 子进程可直接访问
 - **Python 路径**：生产模式下 Python 脚本位于 `resources/python/`，通过 `getEngineScriptPath()` 统一解析
-
+- **API 端口**: 默认 `7880`，可通过 `API_PORT` 环境变量覆盖

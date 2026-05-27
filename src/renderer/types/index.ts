@@ -404,6 +404,16 @@ export interface WifiActionParams {
   description?: string;
 }
 
+/** Param prompt dialog: missing parameters that need user input before execution */
+export interface ParamPromptItem {
+  nodeId: string;
+  nodeType: string;
+  nodeLabel: string;
+  params: string[];
+  labels: string[];
+  groupType: 'region' | 'text' | 'file';
+}
+
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
@@ -604,6 +614,8 @@ export interface UIState {
   show_ai_dialog: boolean;
   show_trigger_config: boolean;
   auto_learn: boolean;
+  show_unified_search: boolean;
+  unified_search_query: string;
 }
 
 export interface TriggerUIState {

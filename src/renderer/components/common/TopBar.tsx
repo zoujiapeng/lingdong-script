@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Play, Pause, Square, Undo2, Redo2, Save, Upload, Download,
-  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Monitor, Settings, FileText, Plus, Circle, Brain
+  Zap, LayoutGrid, GitBranch, ChevronDown, Moon, Sun, Monitor, Settings, FileText, Plus, Circle, Brain, Search, X
 } from 'lucide-react';
 import { useStore, loadCustomTemplates, saveCustomTemplates, loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut } from '../../store';
 import { MacroPanel } from './MacroPanel';
@@ -60,6 +60,10 @@ export const TopBar = React.memo(function TopBar() {
   const [templateName, setTemplateName] = useState('');
   const [showMacroPanel, setShowMacroPanel] = useState(false);
   const [bindingShortcut, setBindingShortcut] = useState<string | null>(null);
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [templateShortcuts, setTemplateShortcuts] = useState<Record<string, string>>(() => loadTemplateShortcuts());
   const titleRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -282,6 +286,54 @@ export const TopBar = React.memo(function TopBar() {
 
       {/* Actions */}
       <div className="topbar-actions">
+        {/* Unified Search: button morphs into input on click */}
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+          {searchExpanded ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'var(--bg-secondary)', borderRadius: 6, border: '1px solid var(--border-primary)', padding: '2px 8px', transition: 'all 0.2s', width: 200 }}>
+              <Search size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+              <input
+                ref={searchInputRef}
+                value={searchText}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSearchText(v);
+                  clearTimeout(searchTimerRef.current);
+                  if (v.trim().length >= 1) {
+                    setUI({ show_unified_search: true, unified_search_query: v });
+                  } else {
+                    setUI({ show_unified_search: false, unified_search_query: '' });
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setSearchText(''); setSearchExpanded(false);
+                    setUI({ show_unified_search: false, unified_search_query: '' });
+                  }
+                }}
+                onBlur={() => {
+                  if (!searchText.trim()) {
+                    setSearchExpanded(false);
+                    setUI({ show_unified_search: false, unified_search_query: '' });
+                  }
+                }}
+                placeholder="搜索指令库…"
+                style={{ flex: 1, border: 'none', outline: 'none', fontSize: 12, background: 'transparent', color: 'var(--text-primary)', fontFamily: 'inherit', width: 130 }}
+                autoFocus
+              />
+              {searchText && (
+                <button onClick={() => { setSearchText(''); setSearchExpanded(false); setUI({ show_unified_search: false, unified_search_query: '' }); }}
+                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', flexShrink: 0 }}>
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <button className="btn btn-ghost" onClick={() => { setSearchExpanded(true); setTimeout(() => searchInputRef.current?.focus(), 50); }} style={{ gap: 4 }}>
+              <Search size={14} />
+              搜索
+            </button>
+          )}
+        </div>
         {/* Templates */}
         <div className="topbar-template-dropdown">
           <button className="btn btn-ghost" onClick={() => setShowTemplates(!showTemplates)} style={{ gap: 4, position: 'relative' }}>
@@ -305,7 +357,8 @@ export const TopBar = React.memo(function TopBar() {
                       <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                         {sc && <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 3, background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', color: 'var(--text-muted)' }}>{sc}</span>}
                         <span onClick={(e) => { e.stopPropagation(); setBindingShortcut(bindingShortcut === tpl.id ? null : tpl.id); }}
-                          style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', opacity: bindingShortcut === tpl.id ? 0.5 : 0.3, hover: { opacity: 1 } }}
+                          className="shortcut-bind-btn"
+                          style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)', padding: '2px 4px', opacity: bindingShortcut === tpl.id ? 0.5 : 0.3 }}
                           title={bindingShortcut === tpl.id ? '按下组合键...' : (sc ? '更改快捷键' : '绑定快捷键')}>
                           {bindingShortcut === tpl.id ? '⌨' : '⌨'}
                         </span>
