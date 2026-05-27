@@ -88,6 +88,9 @@ export interface ElectronAPI {
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;
   onAgentLog: (callback: (msg: any) => void) => () => void;
+
+  // Voice server
+  getVoiceServerUrl: () => Promise<{ url: string | null }>;
 }
 
 declare global {

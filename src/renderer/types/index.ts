@@ -58,7 +58,10 @@ export type NodeType =
   // 对话框 / 无障碍 / WiFi
   | 'dialog_action'
   | 'a11y_action'
-  | 'wifi_action';
+  | 'wifi_action'
+  // 摄像头
+  | 'camera_capture'
+  | 'camera_record';
 
 export type ConditionType =
   | 'image_exists'
@@ -404,6 +407,26 @@ export interface WifiActionParams {
   description?: string;
 }
 
+export interface CameraCaptureParams {
+  camera_id: number;
+  output_path: string;
+  width?: number;
+  height?: number;
+  format?: 'png' | 'jpg';
+  wait_stable?: number;
+  description?: string;
+}
+
+export interface CameraRecordParams {
+  camera_id: number;
+  output_path: string;
+  fps?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  description?: string;
+}
+
 /** Param prompt dialog: missing parameters that need user input before execution */
 export interface ParamPromptItem {
   nodeId: string;
@@ -457,7 +480,9 @@ export type NodeParams =
   | WebBrowserNodeParams
   | DialogActionParams
   | A11yActionParams
-  | WifiActionParams;
+  | WifiActionParams
+  | CameraCaptureParams
+  | CameraRecordParams;
 
 // --- Flow Node & Edge ---
 

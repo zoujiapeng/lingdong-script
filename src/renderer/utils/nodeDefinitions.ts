@@ -771,6 +771,42 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       outputs: [{ id: 'output', type: 'flow' }],
     },
   },
+  camera_capture: {
+    type: 'camera_capture',
+    label: '摄像头抓拍',
+    description: '从摄像头抓拍一帧图像，保存到文件或返回 Base64',
+    icon: 'Camera',
+    category: 'image',
+    color: '#64748b',
+    defaultParams: {
+      camera_id: 0,
+      output_path: '',
+      format: 'jpg',
+      wait_stable: 0.5,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
+  camera_record: {
+    type: 'camera_record',
+    label: '摄像头录像',
+    description: '从摄像头录制视频到文件，支持设置时长和分辨率',
+    icon: 'Video',
+    category: 'image',
+    color: '#64748b',
+    defaultParams: {
+      camera_id: 0,
+      output_path: '',
+      fps: 15,
+      duration: 0,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [{ id: 'output', type: 'flow' }],
+    },
+  },
 };
 
 export const NODE_CATEGORIES = [

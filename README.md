@@ -31,7 +31,7 @@ DSL 层 (批处理执行)
   │  一次性生成, 本地零 Token 执行
   ▼
 Zero-AI Runtime (引擎内核)
-      239 @feature 工具, 190 DSL 关键字, 纯本地
+      240 @feature 工具, 190 DSL 关键字, 纯本地
 ```
 
 | 层 | 调用方式 | Token 成本 | 用途 |
@@ -99,7 +99,7 @@ VLM 后端可配置：GPT-4o-mini / 本地量化模型 / 关闭。所有 VLM 定
 ## 核心特性
 
 ### 可视化流程图编辑器
-- **拖拽编排** — 直观的流程图编辑界面，53 种节点类型
+- **拖拽编排** — 直观的流程图编辑界面，55 种节点类型
 - **实时连接** — 节点间连线定义执行顺序和条件分支
 - **属性面板** — 选中节点后直接在面板编辑参数（含区域拾取、策略选择）
 - **三视图模式** — 流程图 / 伪代码 / 设置 自由切换
@@ -117,6 +117,7 @@ VLM 后端可配置：GPT-4o-mini / 本地量化模型 / 关闭。所有 VLM 定
 | 系统工具 | ~20 | 运行程序/剪贴板(文本/图片/文件)/窗口操作(最小化/最大化/还原/贴靠)/进程管理 |
 | AI 辅助 | ~10 | AI 规划/自动生成/智能调试 |
 | 宏录制 | ~8 | 录制/回放/转流程图 |
+| 摄像头 | ~2 | 单帧拍照/视频录制 |
 | 变量工具 | ~5 | 变量设置/获取/运算 |
 | 调试工具 | ~10 | 日志/断点/状态查看 |
 | DSL 工具 | ~5 | DSL 转换/执行 |
@@ -164,6 +165,27 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **智能补全** — AI 推荐下一步操作节点
 - **多种 LLM** — 支持 DeepSeek、OpenAI 等兼容接口
 
+### 语音对话
+- **内置语音服务器** — 基于 WebSocket 的实时语音识别与合成
+- **多引擎支持** — 5 种 STT 引擎可切换：
+
+  | 引擎 | 大小 | 准确率 | 说明 |
+  |------|------|--------|------|
+  | whisper-tiny | ~75MB | 低（中文乱码） | 快速但中文准确率差 |
+  | whisper-base | ~139MB | 中 | 偶有识别错误 |
+  | whisper-small | ~461MB | **高** | 默认引擎，中文准确 |
+  | whisper-large-v3-turbo | ~1.5GB | **最高** | 最佳质量（首次需下载） |
+  | paraformer (sherpa-onnx) | ~40MB | **高** | 阿里达摩院中文 ASR，轻量准确 |
+
+- **引擎热切换** — 设置面板 / 语音面板均可切换，实时生效
+- **模型重下载** — 设置面板提供重新下载按钮
+- **TTS 语音合成** — 支持系统 TTS 和 ElevenLabs（需 API Key）
+- **状态栏显示** — 实时显示当前 STT 引擎名称
+
+### 摄像头节点
+- **camera_capture** — 单帧拍照，支持 png/jpg 格式和分辨率设置
+- **camera_record** — 视频录制，支持 fps、duration、分辨率参数
+
 ### DSL 脚本语言
 灵动脚本内置专用的 DSL（领域特定语言），支持文本编辑模式和 190 个关键字：
 
@@ -182,7 +204,7 @@ END
 DSL ↔ FlowScript 双向无损转换，支持往返编辑。
 
 ### @feature 工具注册表
-- **239 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
+- **240 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
 - **190 DSL 关键字** — 自动从注册表生成，含所有控制流关键字
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
@@ -314,7 +336,7 @@ python/
 │   ├── triggers.py #   TriggerEngine (6 种 watcher)
 │   ├── crystallizer.py # 结晶化 (执行成功→模板)
 │   └── scheduler_daemon.py # APScheduler 守护进程
-├── features/       # @feature 注册表 (239 工具, 懒加载)
+├── features/       # @feature 注册表 (240 工具, 懒加载)
 ├── providers/      # VLM Provider 抽象 (GPT-4o-mini/Local)
 ├── mcp/            # Python MCP 服务器
 ├── macros/         # 宏录制文件保存
@@ -341,17 +363,19 @@ templates/          # 工作流模板 (.flow) + skill_tree.json
 Three execution layers:
 1. **MCP Layer** (Claude Code / AI Agent) — feasibility check, DSL generation
 2. **DSL Layer** (batch execution) — one-shot generation, local zero-token execution
-3. **Zero-AI Runtime** (engine core) — 239 @feature tools, 190 DSL keywords, fully local
+3. **Zero-AI Runtime** (engine core) — 240 @feature tools, 190 DSL keywords, fully local
 
 ### Key Features
 
 - **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, failure recovery
+- **Voice Conversation** — Built-in WebSocket voice server with 5 STT engines (whisper-tiny/base/small/large-v3-turbo/paraformer), hot-switchable, TTS support (system + ElevenLabs)
+- **Camera Nodes** — camera_capture (photo) and camera_record (video) with resolution/fps settings
 - **Crystallization** — Auto-generate reusable templates from successful DSL executions
 - **Trigger System** — 6 trigger sources (timer/file/process/window/clipboard/network) with TriggerBar UI
 - **VLM Provider** — Pluggable vision backend (GPT-4o-mini/Local), OpenCV-first fallback
-- **Visual Flow Editor** — 53 native node types, hierarchical sub-operation structure
+- **Visual Flow Editor** — 55 native node types, hierarchical sub-operation structure
 - **Macro Recording** — F6 hotkey, smart filtering, visual template extraction
-- **@Feature Registry** — 239 tools (190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
+- **@Feature Registry** — 240 tools (190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
 - **Architecture Optimized** — Code splitting (~1.3MB JS), Python process pool (max 3), async file I/O
 - **HTTP API Bridge** — 55+ endpoints on `127.0.0.1:7880` for remote control
 - **Timer Scheduling** — cron/interval/startup triggers with condition guards
@@ -378,7 +402,7 @@ npx electron-builder --win portable  # Portable executable
 
 ### Tech Stack
 
-React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 239 @feature tools · MCP protocol · APScheduler
+React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 240 @feature tools · MCP protocol · APScheduler
 
 ---
 

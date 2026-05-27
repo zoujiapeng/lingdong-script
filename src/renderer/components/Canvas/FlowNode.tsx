@@ -63,6 +63,10 @@ function getNodeSummary(node: FlowNodeType): string {
     }
     case 'screenshot':
       return `保存截图`;
+    case 'camera_capture':
+      return `摄像头抓拍 (摄像头 ${p.camera_id ?? 0})`;
+    case 'camera_record':
+      return `摄像头录像 (摄像头 ${p.camera_id ?? 0}, ${p.duration ? p.duration + '秒' : '手动停止'})`;
     case 'popup_close': {
       const s = (p.strategies || ['auto'])[0];
       const strategyLabel: Record<string, string> = { auto: '自动', esc: 'Esc', close_btn: '关闭按钮', click_away: '空白区域', ocr_close: 'OCR查找', all: '全部尝试' };

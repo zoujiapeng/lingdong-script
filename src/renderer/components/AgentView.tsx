@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import { List, Wifi, WifiOff, Mic, MicOff } from 'lucide-react';
+import { VoiceConversationPanel } from './common/VoiceConversationPanel';
 
 interface StepData {
   step_num: number;
@@ -46,6 +47,8 @@ export function AgentView() {
   const [offlineRunning, setOfflineRunning] = useState(false);
   const [listening, setListening] = useState(false);
   const [voiceSupported] = useState(() => !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition));
+  const [voiceConversationMode, setVoiceConversationMode] = useState(false);
+  const [voicePanelMinimized, setVoicePanelMinimized] = useState(false);
 
   const loadAgentTools = async () => {
     setToolsLoading(true);
@@ -345,10 +348,32 @@ export function AgentView() {
           title={offline ? '切换为在线模式（需 API 密钥）' : '切换为离线模式（直接执行流程图，无需 API 密钥）'}>
           {offline ? <WifiOff size={12} /> : <Wifi size={12} />}
         </button>
+        {voiceSupported && (
+          <button className={`btn btn-ghost btn-icon ${voiceConversationMode ? 'voice-mode-active' : ''}`}
+            onClick={() => setVoiceConversationMode(!voiceConversationMode)}
+            style={{ marginLeft: 4, width: 22, height: 22 }}
+            title={voiceConversationMode ? '关闭语音对话' : '语音对话（STT + LLM + TTS）'}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+        )}
       </div>
 
       <div className="agent-body">
-        {/* Single input bar */}
+        {voiceConversationMode ? (
+          <VoiceConversationPanel
+            visible={true}
+            onClose={() => setVoiceConversationMode(false)}
+            minimized={voicePanelMinimized}
+            onToggleMinimize={() => setVoicePanelMinimized(!voicePanelMinimized)}
+          />
+        ) : null}
+        {/* Single input bar (hidden in voice conversation mode) */}
+        {!voiceConversationMode && (
         <div className="agent-goal-bar">
           <input
             className="agent-input"
@@ -394,8 +419,10 @@ export function AgentView() {
             </button>
           )}
         </div>
-
+        )}
         {/* Log area */}
+        {!voiceConversationMode && (
+        <>
         <div className="agent-log">
           {log.length === 0 && !offline && (
             <div className="agent-empty">
@@ -456,7 +483,7 @@ export function AgentView() {
         </div>
 
         {/* Guidance input (only when agent running and online) */}
-        {running && !offline && (
+        {running && !offline && !voiceConversationMode && (
           <div className="agent-guidance-bar">
             <input
               className="agent-input"
@@ -467,6 +494,8 @@ export function AgentView() {
             />
             <button className="agent-btn" onClick={sendGuidance} disabled={!guidance.trim()}>发送</button>
           </div>
+        )}
+        </>
         )}
       </div>
 

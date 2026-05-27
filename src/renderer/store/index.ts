@@ -769,6 +769,10 @@ export const useStore = create<AppStore>()(
       pushHistory(script.nodes, script.edges);
       const id = script.meta.id || nanoid();
       if (!script.meta.id) script.meta.id = id;
+      // Ensure settings exist to prevent crashes (e.g. SettingsPanel)
+      if (!script.settings) {
+        script.settings = { ...DEFAULT_SETTINGS };
+      }
       set((state) => {
         state.script = script;
         state.scriptTriggers = script.triggers || [];
@@ -866,6 +870,8 @@ export const useStore = create<AppStore>()(
         });
         state.activeScriptId = scriptId;
         state.script = sub;
+        // Ensure settings exist to prevent crashes
+        if (!state.script.settings) state.script.settings = { ...DEFAULT_SETTINGS };
         state.ui.selection = { nodes: [], edges: [] };
       });
       if (sub.nodes.length > 0) {
@@ -1786,6 +1792,8 @@ try {
       setTimeout(() => {
         useStore.setState((s) => {
           s.script = parsed;
+          // Ensure settings exist to prevent crashes
+          if (!s.script.settings) s.script.settings = { ...DEFAULT_SETTINGS };
           s.isDirty = false;
         });
       }, 0);
