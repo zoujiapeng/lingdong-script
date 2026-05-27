@@ -251,6 +251,9 @@ npm run build
 
 # 构建便携版
 npx electron-builder --win portable
+
+# 启动语音对话服务器（WebSocket :8765）
+python python/voice/server.py 8765
 ```
 
 ---
@@ -329,6 +332,8 @@ python/
 │   ├── experience_db.py  # 经验数据库 (模板裁剪小图存储)
 │   ├── dialog_handler.py # win32 API 对话框自动化处理
 │   └── menu_handler.py   # Windows 菜单操作
+├── voice/          # 语音对话服务器
+│   └── server.py   #   WebSocket 语音服务器 (5 引擎, TTS)
 ├── engine/         # 自动化执行引擎
 │   ├── executor.py #   DSL 执行器 (核心)
 │   ├── dsl_parser.py #  DSL 解析器
@@ -337,6 +342,7 @@ python/
 │   ├── crystallizer.py # 结晶化 (执行成功→模板)
 │   └── scheduler_daemon.py # APScheduler 守护进程
 ├── features/       # @feature 注册表 (240 工具, 懒加载)
+│   └── camera_features.py #   摄像头捕获/录制功能
 ├── providers/      # VLM Provider 抽象 (GPT-4o-mini/Local)
 ├── mcp/            # Python MCP 服务器
 ├── macros/         # 宏录制文件保存
