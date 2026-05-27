@@ -20,6 +20,7 @@ import {
   agentProcess, setAgentProcess,
   agentRunning, setAgentRunning,
   nextAgentToken, isAgentTokenCurrent,
+  voiceServerProcess, setVoiceServerProcess, setVoiceServerPort, voiceServerPort,
 } from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
@@ -771,6 +772,70 @@ ipcMain.handle('agent:status', () => {
   return { success: true };
 });
 
+// ── Voice Server ──────────────────────────────────────────────────
+
+/** Line buffer for voice server stdout */
+let _voiceLineBuffer = '';
+
+function startVoiceServer() {
+  // Kill existing voice server if running
+  stopVoiceServer();
+
+  const voiceDir = path.join(getBaseDir(), 'python');
+  const proc = spawnPython(
+    ['-u', path.join('voice', 'server.py'), '0'],
+    { cwd: voiceDir, stdio: ['pipe', 'pipe', 'pipe'] }
+  );
+  setVoiceServerProcess(proc);
+  _voiceLineBuffer = '';
+
+  proc.stdout!.on('data', (data: Buffer) => {
+    _voiceLineBuffer += data.toString('utf8');
+    const lines = _voiceLineBuffer.split('\n');
+    _voiceLineBuffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.type === 'voice_server_ready') {
+          setVoiceServerPort(msg.port);
+          console.log('[voice] Server ready on port', msg.port);
+        }
+      } catch {
+        console.log('[voice]', line);
+      }
+    }
+  });
+
+  proc.stderr!.on('data', (data: Buffer) => {
+    console.error('[voice]', data.toString('utf8').trim());
+  });
+
+  proc.on('exit', (code) => {
+    console.log('[voice] Process exited, code=' + code);
+    setVoiceServerProcess(null);
+    setVoiceServerPort(null);
+  });
+}
+
+function stopVoiceServer() {
+  const proc = voiceServerProcess;
+  if (proc && !proc.killed) {
+    proc.kill();
+    setVoiceServerProcess(null);
+    setVoiceServerPort(null);
+  }
+}
+
+// Re-export for external use (e.g., api.ts)
+export { startVoiceServer, stopVoiceServer };
+
+ipcMain.handle('voice:server-url', () => {
+  const port = voiceServerPort;
+  if (!port) return { url: null };
+  return { url: `ws://127.0.0.1:${port}` };
+});
+
 ipcMain.handle('ai:generate',(_, params: { apiKey: string; messages: { role: string; content: string }[]; apiBase?: string; model?: string }) => {
   return new Promise((resolve) => {
     const apiBase = (params.apiBase || process.env.LLM_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
@@ -1510,6 +1575,9 @@ if (!gotTheLock) {
     // 调度引擎
     scheduler.start(path.join(app.getPath('userData'), 'schedules.json'));
 
+    // 启动语音对话服务器
+    startVoiceServer();
+
     // 后台扫描已安装程序（填充程序别名注册表）
     setTimeout(() => {
       callFeature('program_refresh', { background: true }).catch(() => {});
@@ -1558,5 +1626,6 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   stopPythonEngine();
   stopFeatureProcess();
+  stopVoiceServer();
   scheduler.stop();
 });

@@ -16,6 +16,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 (5 tools, stdio) |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
 | `curl -X POST http://127.0.0.1:7880/api/ping` | 检查 HTTP API 桥接 |
+| `python python/voice/server.py 8765` | 启动语音对话服务器 (WebSocket :8765) |
 
 ## 目录结构
 
@@ -23,8 +24,9 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 ├── src/
 │   ├── main/              # Electron 主进程
 │   │   ├── main.ts        #   - 引擎管理, IPC handlers, 窗口生命周期
-│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (53+ 端点)
+│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (55+ 端点)
 │   │   ├── env.ts         #   - isDev / getBaseDir 环境配置
+│   │   ├── state.ts       #   - 全局状态管理
 │   │   └── preload.ts     #   - contextBridge (40+ API 暴露)
 │   └── renderer/          # React 前端 (Vite)
 │       ├── App.tsx        #   - 根组件, 布局, 快捷键, HTN 注册
@@ -32,13 +34,15 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │       ├── types/         #   - FlowNode, FlowEdge, NodeParams, FlowScript
 │       ├── components/
 │       │   ├── Canvas/    #   - FlowCanvas, FlowNode, EdgeLayer, CanvasControls
-│       │   ├── PropertyPanel/ # - 参数编辑器 (53 种节点 × params/*.tsx)
+│       │   ├── PropertyPanel/ # - 参数编辑器 (55 种节点 × params/*.tsx)
 │       │   ├── NodeLibrary/   # - 节点库面板
 │       │   └── common/   #   - TopBar, StatusBar, LogPanel, ToolCallPanel,
 │       │                  #     TriggerBar, ParamPromptDialog, MacroPanel,
-│       │                  #     ScriptBrowser, TemplateSelector, ScheduleDialog
+│       │                  #     ScriptBrowser, TemplateSelector, ScheduleDialog,
+│       │                  #     VoiceConversationPanel
 │       └── utils/         #   - nodeDefinitions, pseudoParser, featureRegistry,
-│                           #     semanticMatcher, htnRegistry, textGenerator
+│                           #     semanticMatcher, htnRegistry, textGenerator,
+│                           #     voiceConversation
 ├── python/
 │   ├── agent/             # AI Agent 监督执行
 │   │   ├── __main__.py    #   IPC 入口 (stdin/stdout JSON 协议)
@@ -57,9 +61,12 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── triggers.py        # - 触发器引擎
 │   │   ├── scheduler.py       # - 定时调度
 │   │   └── optimizer.py       # - 流程优化
-│   ├── features/          # @feature 注册表 (239 非弃用功能)
+│   ├── features/          # @feature 注册表 (240+ 非弃用功能)
 │   │   ├── registry.py    #   - FeatureRegistry 单例, @feature 装饰器
-│   │   └── _all.py        #   - 导入所有 feature 模块 (49 文件)
+│   │   ├── _all.py        #   - 导入所有 feature 模块 (50 文件)
+│   │   └── camera_features.py # - 摄像头捕获/录制功能
+│   ├── voice/             # 语音对话服务器
+│   │   └── server.py      #   - WebSocket 语音服务器 (:8765)
 │   ├── mcp/server.py      # Python MCP 服务器 (stdio JSON-RPC 2.0)
 │   ├── macros/            # 宏录制保存目录 (.json 事件文件)
 │   ├── interaction/       # 交互工具 (wheel_selector, region_picker, actions)
@@ -267,11 +274,73 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 - `python/agent/experience_db.py` — 经验数据库，JSON 索引 + PNG 模板
 - `python/experience/templates/` — 裁剪小图存储目录
 
+## 语音对话 (Voice Conversation)
+
+内置语音对话功能，支持语音输入 → STT 识别 → LLM 处理 → TTS 朗读的完整流程。
+
+### 架构
+
+```
+麦克风 → WebSocket → voice/server.py → Whisper/Paraformer STT
+                                              ↓
+Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
+```
+
+### STT 引擎
+
+| 引擎 | 大小 | 准确率 | 备注 |
+|------|------|--------|------|
+| whisper-tiny | ~75MB | ❌ 中文欠佳 | 字节级 BPE 拼接问题 |
+| whisper-base | ~139MB | ⚠️ 少量错误 | 基准模型 |
+| **whisper-small** | ~461MB | ✅ 高 | **默认引擎** |
+| whisper-large-v3-turbo | ~1.5GB | ✅ 最高 | 最佳质量，首次需下载 |
+| paraformer | ~40MB | ✅ 高 | 阿里达摩院中文 ASR，ONNX 推理 |
+
+支持一键切换引擎：设置面板选择 → 保存 → 语音面板自动重连。
+
+### 语音对话面板
+
+- `VoiceConversationPanel.tsx` — 浮动语音面板，显示对话记录、状态指示
+- 支持连续对话模式（AI 回复后自动开始聆听）
+- TTS 朗读支持 Edge TTS（免费）和 ElevenLabs（自定义音色）
+- 状态栏显示当前引擎和连接状态
+
+### 关键文件
+- `python/voice/server.py` — WebSocket 语音服务器 (:8765)
+- `src/renderer/utils/voiceConversation.ts` — 前端语音客户端
+- `src/renderer/components/common/VoiceConversationPanel.tsx` — 语音面板 UI
+
+### 快速测试
+```bash
+# 启动语音服务器
+python python/voice/server.py 8765
+
+# 测试 STT 引擎识别质量
+python -c "
+import whisper, soundfile as sf
+data, sr = sf.read('test_speech_16k_pcm.wav')
+model = whisper.load_model('small')
+result = model.transcribe(data.astype('float32'), language='zh')
+print(result['text'].strip())
+"
+```
+
+## 摄像头节点
+
+支持摄像头画面捕获和录像，作为自动化流程中的视觉输入源。
+
+| 节点类型 | 用途 | 主要参数 |
+|---------|------|---------|
+| camera_capture | 单帧拍照 | camera_id, output_path, format(png/jpg), resolution |
+| camera_record | 视频录制 | camera_id, output_path, fps, duration, resolution |
+
+- `python/features/camera_features.py` — @feature 注册的摄像头功能
+
 ## 工作流
 
 ### 创建自动化流程
 1. 在画布拖拽节点编排流程
-2. 节点类型: 53 种（点击、输入、截图、OCR、条件、循环、等待、系统操作等）
+2. 节点类型: 55 种（点击、输入、截图、OCR、条件、循环、等待、系统操作、摄像头等）
 3. 属性面板编辑参数 (支持区域拾取、策略选择)
 4. 文本视图可切换中文伪代码 / 英文 DSL 模式
 5. 保存为 .flow 文件, 或导出 DSL
@@ -440,7 +509,7 @@ python/experience/
 - **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
 - **视觉定位系统**: `agent/visual_locator.py` + `agent/experience_db.py`。语义目标→屏幕坐标的两步策略：经验库→OpenCV 匹配，VLM 兜底。`_apply_visual_locator()` 在 `langgraph_agent.py` 监督层 step 0 自动调用。所有 VLM 定位成功的坐标和按钮小图自动存入经验数据库供后续离线复用
 
-## 节点类型速查 (53 种)
+## 节点类型速查 (55 种)
 
 ### 基础交互
 | 类型 | 用途 | 主要参数 |
@@ -514,6 +583,8 @@ python/experience/
 | dialog_action | 对话框操作 | action, timeout, button |
 | a11y_action | 无障碍操作 (UIA) | action, name, role |
 | wifi_action | WiFi 操作 | action, ssid, password |
+| camera_capture | 摄像头拍照 | camera_id, output_path, format |
+| camera_record | 摄像头录像 | camera_id, output_path, fps, duration |
 | tool_call | 任意 @feature 工具 | feature_name, params |
 
 ### 聚合类型（多合一）

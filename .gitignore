@@ -37,3 +37,7 @@ python/browser_snapshots/
 
 # MCP config
 .mcp.json
+
+# Voice model files (downloaded on demand)
+python/voice/models/
+python/voice/whisper_models/

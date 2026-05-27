@@ -32,3 +32,11 @@ export function setAgentRunning(v: boolean) { agentRunning = v; }
 export let agentToken = 0;
 export function nextAgentToken(): number { return ++agentToken; }
 export function isAgentTokenCurrent(token: number): boolean { return token === agentToken; }
+
+/** 语音服务器进程 */
+export let voiceServerProcess: ChildProcess | null = null;
+export function setVoiceServerProcess(p: ChildProcess | null) { voiceServerProcess = p; }
+
+/** 语音服务器 WebSocket 端口 */
+export let voiceServerPort: number | null = null;
+export function setVoiceServerPort(p: number | null) { voiceServerPort = p; }

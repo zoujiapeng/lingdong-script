@@ -350,6 +350,16 @@ export function createFlowExecutor(
           await delay(200);
           result = 'output';
           break;
+        case 'camera_capture':
+          log('info', `摄像头抓拍 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
+          await delay(500);
+          result = 'output';
+          break;
+        case 'camera_record':
+          log('info', `摄像头录像 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
+          await delay(300);
+          result = 'output';
+          break;
 
         case 'variable_set':
           log('info', `设置变量: ${params.name} = "${params.value}"`, nodeId);
