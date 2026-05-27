@@ -18,11 +18,15 @@
 ### 摄像头节点
 - **camera_capture** — 新节点类型：摄像头单帧拍照，支持 png/jpg 格式和分辨率设置
 - **camera_record** — 新节点类型：摄像头视频录制，支持 fps、duration、分辨率参数
+- **camera_list** — @feature 工具：列出所有可用摄像头设备
+- **camera_record_start/stop** — @feature 工具：开始/停止视频录制（AVI/MP4）
+- **camera_detect_motion** — @feature 工具：帧差法运动检测，支持保存触发画面
 
 ### 其他变更
 - **节点总数**: 53 → 55 种
+- **@feature 工具**: 239 → 247（新增 5 摄像头 + 3 其他功能）
 - **HTTP API**: 新增语音服务器启停接口
-- **NodeLibrary**: 摄像头节点出现在"高级工具"分类
+- **NodeLibrary**: 摄像头节点出现在"图像与识别"分类
 
 ## [1.1.1] - 2026-05-09
 

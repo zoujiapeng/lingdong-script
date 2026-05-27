@@ -31,7 +31,7 @@ DSL 层 (批处理执行)
   │  一次性生成, 本地零 Token 执行
   ▼
 Zero-AI Runtime (引擎内核)
-      240 @feature 工具, 190 DSL 关键字, 纯本地
+      247 @feature 工具, 190 DSL 关键字, 纯本地
 ```
 
 | 层 | 调用方式 | Token 成本 | 用途 |
@@ -185,6 +185,10 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 ### 摄像头节点
 - **camera_capture** — 单帧拍照，支持 png/jpg 格式和分辨率设置
 - **camera_record** — 视频录制，支持 fps、duration、分辨率参数
+- **camera_list** — 列出可用摄像头设备
+- **camera_detect_motion** — 帧差法运动检测
+
+**@feature 工具**: 共 5 个（camera_list, camera_capture, camera_record_start/stop, camera_detect_motion）
 
 ### DSL 脚本语言
 灵动脚本内置专用的 DSL（领域特定语言），支持文本编辑模式和 190 个关键字：
@@ -204,7 +208,7 @@ END
 DSL ↔ FlowScript 双向无损转换，支持往返编辑。
 
 ### @feature 工具注册表
-- **240 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
+- **247 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
 - **190 DSL 关键字** — 自动从注册表生成，含所有控制流关键字
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
@@ -285,7 +289,7 @@ curl -X POST http://127.0.0.1:7880/api/agent-start \
   -d '{"goal":"打开记事本并输入 Hello"}'
 ```
 
-55+ API 端点覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成、Agent 执行。详见 [CLAUDE.md](CLAUDE.md)。
+55 API 端点（+ /mcp MCP over HTTP）覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成、Agent 执行、指令标记。详见 [CLAUDE.md](CLAUDE.md)。
 
 **注意：** 如果 API 包含中文参数，建议使用 Node.js 或 Python 发送请求（Windows Git Bash curl 无法正确处理命令行中的中文 UTF-8 编码）。
 
@@ -341,7 +345,7 @@ python/
 │   ├── triggers.py #   TriggerEngine (6 种 watcher)
 │   ├── crystallizer.py # 结晶化 (执行成功→模板)
 │   └── scheduler_daemon.py # APScheduler 守护进程
-├── features/       # @feature 注册表 (240 工具, 懒加载)
+├── features/       # @feature 注册表 (247 工具, 懒加载)
 │   └── camera_features.py #   摄像头捕获/录制功能
 ├── providers/      # VLM Provider 抽象 (GPT-4o-mini/Local)
 ├── mcp/            # Python MCP 服务器
@@ -369,19 +373,19 @@ templates/          # 工作流模板 (.flow) + skill_tree.json
 Three execution layers:
 1. **MCP Layer** (Claude Code / AI Agent) — feasibility check, DSL generation
 2. **DSL Layer** (batch execution) — one-shot generation, local zero-token execution
-3. **Zero-AI Runtime** (engine core) — 240 @feature tools, 190 DSL keywords, fully local
+3. **Zero-AI Runtime** (engine core) — 247 @feature tools, 190 DSL keywords, fully local
 
 ### Key Features
 
 - **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, failure recovery
 - **Voice Conversation** — Built-in WebSocket voice server with 5 STT engines (whisper-tiny/base/small/large-v3-turbo/paraformer), hot-switchable, TTS support (system + ElevenLabs)
-- **Camera Nodes** — camera_capture (photo) and camera_record (video) with resolution/fps settings
+- **Camera Nodes** — camera_capture (photo), camera_record (video), camera_list, camera_detect_motion (5 @feature tools)
 - **Crystallization** — Auto-generate reusable templates from successful DSL executions
 - **Trigger System** — 6 trigger sources (timer/file/process/window/clipboard/network) with TriggerBar UI
 - **VLM Provider** — Pluggable vision backend (GPT-4o-mini/Local), OpenCV-first fallback
 - **Visual Flow Editor** — 55 native node types, hierarchical sub-operation structure
 - **Macro Recording** — F6 hotkey, smart filtering, visual template extraction
-- **@Feature Registry** — 240 tools (190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
+- **@Feature Registry** — 247 tools (196 MCP tools, 190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
 - **Architecture Optimized** — Code splitting (~1.3MB JS), Python process pool (max 3), async file I/O
 - **HTTP API Bridge** — 55+ endpoints on `127.0.0.1:7880` for remote control
 - **Timer Scheduling** — cron/interval/startup triggers with condition guards
@@ -408,7 +412,7 @@ npx electron-builder --win portable  # Portable executable
 
 ### Tech Stack
 
-React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 240 @feature tools · MCP protocol · APScheduler
+React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 247 @feature tools · MCP protocol · APScheduler
 
 ---
 

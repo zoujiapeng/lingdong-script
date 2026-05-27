@@ -16,7 +16,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 (5 tools, stdio) |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
 | `curl -X POST http://127.0.0.1:7880/api/ping` | 检查 HTTP API 桥接 |
-| `python python/voice/server.py 8765` | 启动语音对话服务器 (WebSocket :8765) |
+| `python python/voice/server.py 8765` | 启动语音对话服务器 (WebSocket 指定端口) |
 
 ## 目录结构
 
@@ -24,7 +24,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 ├── src/
 │   ├── main/              # Electron 主进程
 │   │   ├── main.ts        #   - 引擎管理, IPC handlers, 窗口生命周期
-│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (55+ 端点)
+│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (55 端点 + /mcp)
 │   │   ├── env.ts         #   - isDev / getBaseDir 环境配置
 │   │   ├── state.ts       #   - 全局状态管理
 │   │   └── preload.ts     #   - contextBridge (40+ API 暴露)
@@ -61,12 +61,14 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── triggers.py        # - 触发器引擎
 │   │   ├── scheduler.py       # - 定时调度
 │   │   └── optimizer.py       # - 流程优化
-│   ├── features/          # @feature 注册表 (240+ 非弃用功能)
+│   ├── features/          # @feature 注册表 (247 功能, 196 MCP 工具)
 │   │   ├── registry.py    #   - FeatureRegistry 单例, @feature 装饰器
-│   │   ├── _all.py        #   - 导入所有 feature 模块 (50 文件)
+│   │   ├── _all.py        #   - 导入所有 feature 模块 (43 模块, 247 @feature)
 │   │   └── camera_features.py # - 摄像头捕获/录制功能
 │   ├── voice/             # 语音对话服务器
-│   │   └── server.py      #   - WebSocket 语音服务器 (:8765)
+│   │   ├── server.py      #   - WebSocket 语音服务器 (动态端口)
+│   │   ├── download_models.py  # - 批量下载 STT 模型
+│   │   └── test_stt.py    #   - STT 诊断脚本
 │   ├── mcp/server.py      # Python MCP 服务器 (stdio JSON-RPC 2.0)
 │   ├── macros/            # 宏录制保存目录 (.json 事件文件)
 │   ├── interaction/       # 交互工具 (wheel_selector, region_picker, actions)
@@ -134,6 +136,8 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 | `POST /api/features/reload` | 重新加载 @feature 注册表 | — |
 | `POST /api/features/call` | 调用任意 @feature 工具 | `{ name, params }` |
 | `POST /api/search-templates` | 语义搜索模板 | `{ query, maxResults? }` |
+| `POST /api/marks/save` | 保存指令标记 | `{ marks: Record<string, {visible?,pinned?}> }` |
+| `POST /api/marks/load` | 加载指令标记 | — |
 | `POST /api/execute-js` | 在前端执行 JS 代码 | `{ code }` |
 | `POST /mcp` | MCP over HTTP 端点 | 标准 MCP JSON-RPC |
 
@@ -145,20 +149,20 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 188 MCP 工具（stdin/stdout JSON-RPC 2.0），覆盖：
+通过 `@feature` 注册表动态生成 **196 MCP 工具**（过滤 48 hidden + 3 deprecated），覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
-| 交互动作 | 67 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
-| 感知识别 | 26 | find_image, OCR, color_detect, progress, A11y, fusion... |
-| 控制流 | 24 | wait, loop, condition, timer, software control... |
-| AI 规划 | 8 | plan, execute_plan, debug, VLM analyze... |
-| 宏指令 | 10 | record, playback, list, delete, convert_to_flow... |
-| 系统功能 | 72 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
-| 调试诊断 | 29 | test, validate, system_info, feature introspection... |
+| 交互动作 | 68 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
+| 感知识别 | 29 | find_image, OCR, color_detect, progress, A11y, fusion, camera... |
+| 控制流 | 25 | wait, loop, condition, timer, software control, aggregate... |
+| AI 规划 | 9 | plan, execute_plan, debug, VLM analyze, screen_understanding... |
+| 宏指令 | 10 | record, playback, list, delete, convert_to_flow, visual_macro... |
+| 系统功能 | 74 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
+| 调试诊断 | 32 | test, validate, system_info, feature introspection, healing, trigger... |
 
 DSL 关键字: 190 个（自动从 @feature 注册表生成，含所有控制流关键字）
-Agent 工具集: 188 MCP 工具（过滤弃用和隐藏功能后全部可用）
+Agent 工具集: 196 MCP 工具（过滤弃用和隐藏功能后全部可用）
 Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能自动纳入 Agent 可用范围（重启 Agent 生效）
 
 关键工具示例：
@@ -306,9 +310,41 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 - 状态栏显示当前引擎和连接状态
 
 ### 关键文件
-- `python/voice/server.py` — WebSocket 语音服务器 (:8765)
-- `src/renderer/utils/voiceConversation.ts` — 前端语音客户端
-- `src/renderer/components/common/VoiceConversationPanel.tsx` — 语音面板 UI
+- `python/voice/server.py` — WebSocket 语音服务器 (动态端口, 通过 `voice:server-url` IPC 获取)
+- `python/voice/download_models.py` — 批量下载 openai-whisper / faster-whisper 模型
+- `python/voice/test_stt.py` — STT 诊断脚本（测试麦克风、SAPI）
+- `src/renderer/utils/voiceConversation.ts` — 前端语音客户端（641 行，状态机/音频调度/WebSocket 协议）
+- `src/renderer/components/common/VoiceConversationPanel.tsx` — 语音面板 UI（321 行）
+
+### WebSocket 协议
+
+**客户端 -> 服务器:**
+| type | 载荷 | 说明 |
+|------|------|------|
+| init 消息 | `{ apiKey, elevenlabsKey?, elevenlabsVoiceId?, sttEngine? }` | 连接后首个消息 |
+| `start_recording` | `{}` | 开始麦克风录制 → STT → LLM → TTS 循环 |
+| `transcript` | `{ text }` | 直接发送文字进入 LLM 管道 |
+| `cancel` | `{}` | 取消当前对话轮次 |
+| `redownload_model` | `{}` | 清除模型缓存并重新下载 |
+
+**服务器 -> 客户端:**
+| type | 载荷 | 说明 |
+|------|------|------|
+| `recording_start` | `{}` | 开始录制确认 |
+| `stt_result` | `{ text }` | 语音识别结果（空串表示无语音） |
+| `llm_start` | `{}` | LLM 开始处理 |
+| `llm_text` | `{ text }` | LLM 文本回复 |
+| `switch_engine` | `{ engine }` | STT 引擎已切换 |
+| `model_redownloaded` | `{}` | 模型重下载成功 |
+| `model_redownload_error` | `{ message }` | 模型重下载失败 |
+| `tts_end` | `{}` | TTS 播放结束 |
+| `error` | `{ message }` | 错误 |
+
+**音频流:** TTS 音频块以原始二进制 ArrayBuffer 形式发送，前端通过 `AudioContext.decodeAudioData()` 解码并用精确调度消除间隙。支持 Edge TTS（默认）和 ElevenLabs（需 API Key）。
+
+### 对话状态机
+`VoiceState = 'idle' | 'listening' | 'thinking' | 'speaking'`
+连续模式：说话 → 空闲 → 自动收听 → VAD 检测 → STT → LLM → TTS → 循环。VAD 基于 RMS 能量阈值，自适应环境噪声。
 
 ### 快速测试
 ```bash
@@ -327,14 +363,24 @@ print(result['text'].strip())
 
 ## 摄像头节点
 
-支持摄像头画面捕获和录像，作为自动化流程中的视觉输入源。
+支持摄像头画面捕获、录像和运动检测，作为自动化流程中的视觉输入源。
 
 | 节点类型 | 用途 | 主要参数 |
 |---------|------|---------|
 | camera_capture | 单帧拍照 | camera_id, output_path, format(png/jpg), resolution |
 | camera_record | 视频录制 | camera_id, output_path, fps, duration, resolution |
 
-- `python/features/camera_features.py` — @feature 注册的摄像头功能
+### @feature 工具（5 个）
+
+| 工具名 | 用途 |
+|--------|------|
+| `camera_list` | 列出所有可用摄像头设备（索引 0-9） |
+| `camera_capture` | 捕获一帧画面，支持保存文件或 base64 返回 |
+| `camera_record_start` | 开始录制 AVI/MP4，支持限时录制 |
+| `camera_record_stop` | 停止正在进行的录制，返回文件大小和时长 |
+| `camera_detect_motion` | 帧差法运动检测，支持保存触发画面 |
+
+- `python/features/camera_features.py` — @feature 注册的摄像头功能（5 个）
 
 ## 工作流
 
@@ -529,6 +575,8 @@ python/experience/
 | screenshot | 截图 | region, save_path, format |
 | popup_close | 弹窗关闭 | strategies[], timeout, delay_after |
 | color_check | 颜色检测 | x, y, w, h, expected_color, tolerance |
+| camera_capture | 摄像头拍照 | camera_id, output_path, format |
+| camera_record | 摄像头录像 | camera_id, output_path, fps, duration |
 
 ### 控制流
 | 类型 | 用途 | 主要参数 |
@@ -583,8 +631,6 @@ python/experience/
 | dialog_action | 对话框操作 | action, timeout, button |
 | a11y_action | 无障碍操作 (UIA) | action, name, role |
 | wifi_action | WiFi 操作 | action, ssid, password |
-| camera_capture | 摄像头拍照 | camera_id, output_path, format |
-| camera_record | 摄像头录像 | camera_id, output_path, fps, duration |
 | tool_call | 任意 @feature 工具 | feature_name, params |
 
 ### 聚合类型（多合一）
