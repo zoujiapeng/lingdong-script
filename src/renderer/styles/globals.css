@@ -348,6 +348,7 @@ html, body, #root {
 }
 
 .dropdown-item:hover { background: var(--accent-light); }
+.shortcut-bind-btn:hover { opacity: 1 !important; }
 
 .dropdown-item-title {
   font-size: 13px;

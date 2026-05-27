@@ -288,16 +288,27 @@ export function FlowCanvas() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const nodeType = e.dataTransfer.getData('node-type') as NodeType;
+      const nodeType = e.dataTransfer.getData('node-type');
       if (!nodeType) return;
       const canvasPos = screenToCanvas(e.clientX, e.clientY);
       const NW = 220, NH = 80;
-      const id = addNode(nodeType, canvasPos.x - NW / 2, canvasPos.y - NH / 2);
 
-      // If dropping a feature tool → pre-fill feature_name
-      const featureName = e.dataTransfer.getData('feature-name');
-      if (featureName && nodeType === 'tool_call') {
-        useStore.getState().updateNodeParams(id, { feature_name: featureName, params: {} });
+      let id: string;
+
+      // Template drop → create sub_script node
+      if (nodeType === '__template') {
+        const templateName = e.dataTransfer.getData('template-name') || '未选择';
+        const templateId = e.dataTransfer.getData('template-id') || '';
+        id = addNode('sub_script' as NodeType, canvasPos.x - NW / 2, canvasPos.y - NH / 2);
+        useStore.getState().updateNodeParams(id, { script_id: templateId, script_name: templateName });
+      } else {
+        id = addNode(nodeType as NodeType, canvasPos.x - NW / 2, canvasPos.y - NH / 2);
+
+        // If dropping a feature tool → pre-fill feature_name
+        const featureName = e.dataTransfer.getData('feature-name');
+        if (featureName && nodeType === 'tool_call') {
+          useStore.getState().updateNodeParams(id, { feature_name: featureName, params: {} });
+        }
       }
     },
     [screenToCanvas, addNode]

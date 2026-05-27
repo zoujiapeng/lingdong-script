@@ -45,7 +45,7 @@ export function AgentView() {
   const [offline, setOffline] = useState(false);
   const [offlineRunning, setOfflineRunning] = useState(false);
   const [listening, setListening] = useState(false);
-  const [voiceSupported] = useState(() => !!(window.SpeechRecognition || (window as any).webkitSpeechRecognition));
+  const [voiceSupported] = useState(() => !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition));
 
   const loadAgentTools = async () => {
     setToolsLoading(true);
@@ -336,7 +336,7 @@ export function AgentView() {
           ● {offline ? '离线' : running ? '运行中' : '就绪'}
         </span>
         <button className="btn btn-ghost btn-icon" onClick={() => { setShowTools(true); loadAgentTools(); }}
-          style={{ marginLeft: 8, width: 22, height: 22 }} title="可用 Agent 工具">
+          style={{ marginLeft: 4, width: 22, height: 22 }} title="可用 Agent 工具">
           <List size={12} />
         </button>
         <button className={`btn btn-ghost btn-icon ${offline ? 'offline' : ''}`}
@@ -518,6 +518,7 @@ export function AgentView() {
           </div>
         </div>
       )}
+
     </div>
   );
 }

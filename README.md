@@ -9,8 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python)](https://www.python.org/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-2149_✔-success)](https://github.com/zoujiapeng/lingdong-script)
-[![Bundle](https://img.shields.io/badge/Bundle-298_KB_JS-FF6B35)](https://github.com/zoujiapeng/lingdong-script)
+[![Tests](https://img.shields.io/badge/Tests-296_✔-success)](https://github.com/zoujiapeng/lingdong-script)
 
 </div>
 
@@ -32,7 +31,7 @@ DSL 层 (批处理执行)
   │  一次性生成, 本地零 Token 执行
   ▼
 Zero-AI Runtime (引擎内核)
-      226 @feature 工具, 184 DSL 关键字, 纯本地
+      239 @feature 工具, 190 DSL 关键字, 纯本地
 ```
 
 | 层 | 调用方式 | Token 成本 | 用途 |
@@ -87,7 +86,7 @@ VLM 后端可配置：GPT-4o-mini / 本地量化模型 / 关闭。所有 VLM 定
 | 指标 | 优化前 | 优化后 |
 |---|---|---|
 | Python 冷启动 | 2-8 秒 | 20ms (400x) |
-| 前端 JS 体积 | 1.17 MB (单文件) | 298 KB (代码分割并行加载) |
+| 前端 JS 体积 | 1.17 MB (单文件) | ~1.3 MB (代码分割并行加载) |
 | 并发 Python 进程 | 无限制 (OOM 风险) | 最多 3 (排队) |
 | 调度器崩溃 | 静默死亡 | 2s 自动重启 |
 | 条件评估 | 无限阻塞 | 30s 超时 |
@@ -100,7 +99,7 @@ VLM 后端可配置：GPT-4o-mini / 本地量化模型 / 关闭。所有 VLM 定
 ## 核心特性
 
 ### 可视化流程图编辑器
-- **拖拽编排** — 直观的流程图编辑界面，100+ 种节点类型
+- **拖拽编排** — 直观的流程图编辑界面，53 种节点类型
 - **实时连接** — 节点间连线定义执行顺序和条件分支
 - **属性面板** — 选中节点后直接在面板编辑参数（含区域拾取、策略选择）
 - **三视图模式** — 流程图 / 伪代码 / 设置 自由切换
@@ -166,7 +165,7 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **多种 LLM** — 支持 DeepSeek、OpenAI 等兼容接口
 
 ### DSL 脚本语言
-灵动脚本内置专用的 DSL（领域特定语言），支持文本编辑模式和 184 个关键字：
+灵动脚本内置专用的 DSL（领域特定语言），支持文本编辑模式和 190 个关键字：
 
 ```
 CLICK 500 400
@@ -183,11 +182,11 @@ END
 DSL ↔ FlowScript 双向无损转换，支持往返编辑。
 
 ### @feature 工具注册表
-- **226 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
+- **239 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
-- **184 DSL 关键字** — 自动从注册表生成，含所有控制流关键字
+- **190 DSL 关键字** — 自动从注册表生成，含所有控制流关键字
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
-- **HTTP API 桥接** — `127.0.0.1:5877` 提供 60+ RESTful 端点
+- **HTTP API 桥接** — `127.0.0.1:7880` 提供 55+ RESTful 端点
 - **Agent 自我升级** — 工具集从注册表动态加载，新增功能自动纳入 Agent 可用范围
 
 ### 定时调度
@@ -236,32 +235,32 @@ npx electron-builder --win portable
 
 ## HTTP API 桥接
 
-Electron 主进程内置 HTTP 服务器 `127.0.0.1:5877`，Claude Code 可通过 curl 实时控制前端：
+Electron 主进程内置 HTTP 服务器 `127.0.0.1:7880`，Claude Code 可通过 curl 实时控制前端：
 
 ```bash
 # 健康检查
-curl -X POST http://127.0.0.1:5877/api/ping
+curl -X POST http://127.0.0.1:7880/api/ping
 
 # DSL → 流程图 → 加载到前端
-curl -X POST http://127.0.0.1:5877/api/run-dsl \
+curl -X POST http://127.0.0.1:7880/api/run-dsl \
   -H "Content-Type: application/json" \
   -d '{"dsl":"CLICK 500 400\nWAIT 2\nSCREENSHOT"}'
 
 # 添加节点
-curl -X POST http://127.0.0.1:5877/api/add-node \
+curl -X POST http://127.0.0.1:7880/api/add-node \
   -H "Content-Type: application/json" \
   -d '{"type":"click","x":200,"y":150,"params":{"x":500,"y":600}}'
 
 # 获取当前状态
-curl -X POST http://127.0.0.1:5877/api/get-state
+curl -X POST http://127.0.0.1:7880/api/get-state
 
 # 启动 AI Agent
-curl -X POST http://127.0.0.1:5877/api/agent-start \
+curl -X POST http://127.0.0.1:7880/api/agent-start \
   -H "Content-Type: application/json" \
   -d '{"goal":"打开记事本并输入 Hello"}'
 ```
 
-60+ API 端点覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成、Agent 执行。详见 [CLAUDE.md](CLAUDE.md)。
+55+ API 端点覆盖：脚本管理、节点操作、引擎控制、宏录制、截图识别、滚轮选择、AI 生成、Agent 执行。详见 [CLAUDE.md](CLAUDE.md)。
 
 **注意：** 如果 API 包含中文参数，建议使用 Node.js 或 Python 发送请求（Windows Git Bash curl 无法正确处理命令行中的中文 UTF-8 编码）。
 
@@ -288,8 +287,8 @@ curl -X POST http://127.0.0.1:5877/api/agent-start \
 ```
 src/
 ├── main/           # Electron 主进程
-│   ├── main.ts     #   窗口管理, IPC, HTTP API :5877
-│   ├── api.ts      #   HTTP API 服务器 (60+ 端点)
+│   ├── main.ts     #   窗口管理, IPC, HTTP API :7880
+│   ├── api.ts      #   HTTP API 服务器 (55+ 端点)
 │   ├── engine.ts   #   Python 子进程管理 (队列, 并发控制)
 │   ├── schedulerBridge.ts  # Python 调度器守护进程桥接
 │   ├── env.ts      #   环境配置 (isDev / getBaseDir)
@@ -303,13 +302,11 @@ src/
 python/
 ├── agent/          # AI Agent (规划/监督执行/OCR验证/失败恢复)
 │   ├── __main__.py #   IPC 入口 (stdin/stdout JSON 协议)
-│   ├── controller.py #   ReAct 循环 + 监督执行
-│   ├── planner.py  #   LLM 决策引擎 (DeepSeek)
-│   ├── pseudocode.py #   伪代码 → 结构化步骤解析
 │   ├── langgraph_agent.py # LangGraph 监督执行 + 视觉定位集成
 │   ├── visual_locator.py # 视觉定位器 (经验库→OpenCV→VLM)
 │   ├── experience_db.py  # 经验数据库 (模板裁剪小图存储)
-│   └── dialog_handler.py # win32 API 对话框自动化处理
+│   ├── dialog_handler.py # win32 API 对话框自动化处理
+│   └── menu_handler.py   # Windows 菜单操作
 ├── engine/         # 自动化执行引擎
 │   ├── executor.py #   DSL 执行器 (核心)
 │   ├── dsl_parser.py #  DSL 解析器
@@ -317,7 +314,7 @@ python/
 │   ├── triggers.py #   TriggerEngine (6 种 watcher)
 │   ├── crystallizer.py # 结晶化 (执行成功→模板)
 │   └── scheduler_daemon.py # APScheduler 守护进程
-├── features/       # @feature 注册表 (226 工具, 懒加载)
+├── features/       # @feature 注册表 (239 工具, 懒加载)
 ├── providers/      # VLM Provider 抽象 (GPT-4o-mini/Local)
 ├── mcp/            # Python MCP 服务器
 ├── macros/         # 宏录制文件保存
@@ -344,7 +341,7 @@ templates/          # 工作流模板 (.flow) + skill_tree.json
 Three execution layers:
 1. **MCP Layer** (Claude Code / AI Agent) — feasibility check, DSL generation
 2. **DSL Layer** (batch execution) — one-shot generation, local zero-token execution
-3. **Zero-AI Runtime** (engine core) — 226 @feature tools, 184 DSL keywords, fully local
+3. **Zero-AI Runtime** (engine core) — 239 @feature tools, 190 DSL keywords, fully local
 
 ### Key Features
 
@@ -352,11 +349,11 @@ Three execution layers:
 - **Crystallization** — Auto-generate reusable templates from successful DSL executions
 - **Trigger System** — 6 trigger sources (timer/file/process/window/clipboard/network) with TriggerBar UI
 - **VLM Provider** — Pluggable vision backend (GPT-4o-mini/Local), OpenCV-first fallback
-- **Visual Flow Editor** — 100+ native node types, hierarchical sub-operation structure
+- **Visual Flow Editor** — 53 native node types, hierarchical sub-operation structure
 - **Macro Recording** — F6 hotkey, smart filtering, visual template extraction
-- **@Feature Registry** — 226 tools (184 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
-- **Architecture Optimized** — Code splitting (298KB JS), Python process pool (max 3), async file I/O
-- **HTTP API Bridge** — 60+ endpoints on `127.0.0.1:5877` for remote control
+- **@Feature Registry** — 239 tools (190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
+- **Architecture Optimized** — Code splitting (~1.3MB JS), Python process pool (max 3), async file I/O
+- **HTTP API Bridge** — 55+ endpoints on `127.0.0.1:7880` for remote control
 - **Timer Scheduling** — cron/interval/startup triggers with condition guards
 
 ### Architecture Highlights
@@ -364,7 +361,7 @@ Three execution layers:
 | Metric | Before | After |
 |---|---|---|
 | Python cold start | 2-8s | 20ms (400x) |
-| JS bundle | 1.17 MB | 298 KB |
+| JS bundle | 1.17 MB | ~1.3 MB |
 | Concurrent Python | unlimited (OOM risk) | max 3 (queued) |
 | Scheduler crash | silent death | 2s auto-restart |
 | Frontend render | global re-render | selective + React.memo |
@@ -381,7 +378,7 @@ npx electron-builder --win portable  # Portable executable
 
 ### Tech Stack
 
-React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 226 @feature tools · MCP protocol · APScheduler
+React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 239 @feature tools · MCP protocol · APScheduler
 
 ---
 

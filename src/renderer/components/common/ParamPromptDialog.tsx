@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../../store';
 import { Crosshair, FolderOpen, Check } from 'lucide-react';
+import { ParamPromptItem } from '../../types';
 
 const OVERLAY_STYLE: React.CSSProperties = {
   position: 'fixed', inset: 0, zIndex: 1000,
@@ -141,7 +142,7 @@ export function ParamPromptDialog() {
 
         {/* Scrollable items list */}
         <div style={{ padding: '8px 16px', overflowY: 'auto', flex: 1 }}>
-          {queue.map((item) => {
+          {queue.map((item: ParamPromptItem) => {
             const key = itemKey(item);
             const isFilled = !!filled[key];
             const typeLabel = NODE_TYPE_LABELS[item.nodeType] || item.nodeType;

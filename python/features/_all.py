@@ -46,5 +46,6 @@ _FEATURE_MODULES = [
     "features.qq_features",
     "features.visual_macro_features",
     "features.aggregate_features",
+    "features.test_flow_features",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

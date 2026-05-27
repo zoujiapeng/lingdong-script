@@ -1,7 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { Search, FileCode, X, AlertTriangle } from 'lucide-react';
+import { Search, FileCode, X, AlertTriangle, Library } from 'lucide-react';
 import { useStore } from '../../store';
 import { templateRegistry, TemplateEntry } from '../../utils/templateRegistry';
+import { unifiedSearch } from '../../utils/unifiedSearch';
+import { UnifiedSearchDialog } from './UnifiedSearchDialog';
 
 interface ScriptBrowserProps {
   onSelect: (entry: { id: string; name: string }) => void;
@@ -10,8 +12,10 @@ interface ScriptBrowserProps {
 
 export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
   const [search, setSearch] = useState('');
+  const [showUnifiedSearch, setShowUnifiedSearch] = useState(false);
   const scripts = useStore((s) => s.scripts);
   const activeScriptId = useStore((s) => s.activeScriptId);
+  const featureList = useStore((s) => s.featureList);
 
   // Combine store scripts with registry templates
   const allScripts = useMemo(() => {
@@ -50,14 +54,12 @@ export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
 
   const filtered = useMemo(() => {
     if (!search.trim()) return allScripts;
-    const q = search.toLowerCase();
-    return allScripts.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.description.toLowerCase().includes(q) ||
-        s.tags.some((t) => t.toLowerCase().includes(q))
-    );
-  }, [allScripts, search]);
+    // Use unified search for better matching
+    unifiedSearch.rebuildIndex(featureList as any);
+    const unified = unifiedSearch.search(search, { types: ['template'], maxResults: 20, minScore: 10 });
+    const matchedIds = new Set(unified.map(r => r.item.id));
+    return allScripts.filter(s => matchedIds.has(s.id));
+  }, [allScripts, search, featureList]);
 
   const handleSelect = (entry: { id: string; name: string }) => {
     // Warn if selecting current script (circular reference)
@@ -87,7 +89,15 @@ export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
             onChange={(e) => setSearch(e.target.value)}
             autoFocus
           />
+          <button className="btn btn-ghost" onClick={() => setShowUnifiedSearch(true)}
+            style={{ fontSize: 11, padding: '3px 8px', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Library size={12} /> 搜索全部指令库
+          </button>
         </div>
+        {showUnifiedSearch && <UnifiedSearchDialog
+          onClose={() => setShowUnifiedSearch(false)}
+          onSelectTemplate={(entry) => { onSelect(entry); setShowUnifiedSearch(false); }}
+        />}
 
         <div className="script-browser-list">
           {filtered.length === 0 && (

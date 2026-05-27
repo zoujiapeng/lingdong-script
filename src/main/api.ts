@@ -1,6 +1,6 @@
 /**
  * HTTP API 服务器（提取自 main.ts）
- * 负责 :5877 端口的 REST API，供 Claude Code 远程控制前端
+ * 负责 :7880 端口的 REST API，供 Claude Code 远程控制前端
  */
 import * as http from 'http';
 import * as path from 'path';
@@ -490,13 +490,36 @@ export function startApiServer(deps: ApiDeps): http.Server {
               try {
                 const maxResults = payload.maxResults || 5;
                 const results = await deps.mainWindow!.webContents.executeJavaScript(
-                  `window.__searchTemplates(${JSON.stringify(payload.query)}, ${maxResults})`, true
+                  `(async () => { return await window.__searchTemplates(${JSON.stringify(payload.query)}, ${maxResults}) })()`, true
                 );
                 const parsed = JSON.parse(results);
                 if (parsed.error) { send(500, { error: parsed.error }); return; }
                 send(200, { ok: true, ...parsed });
               } catch (e: any) { send(500, { error: e.message }); }
             })();
+            break;
+
+          // ─── Item marks save/load ───
+          case '/api/marks/save':
+            if (!payload.marks) { send(400, { error: '缺少 marks' }); return; }
+            try {
+              const marksDir = path.join(getBaseDir(), 'data');
+              if (!fs.existsSync(marksDir)) fs.mkdirSync(marksDir, { recursive: true });
+              fs.writeFileSync(path.join(marksDir, 'item-marks.json'), JSON.stringify(payload.marks, null, 2), 'utf-8');
+              send(200, { ok: true });
+            } catch (e: any) { send(500, { error: e.message }); }
+            break;
+
+          case '/api/marks/load':
+            try {
+              const marksPath = path.join(getBaseDir(), 'data', 'item-marks.json');
+              if (fs.existsSync(marksPath)) {
+                const data = fs.readFileSync(marksPath, 'utf-8');
+                send(200, { ok: true, marks: JSON.parse(data) });
+              } else {
+                send(200, { ok: true, marks: [] });
+              }
+            } catch (e: any) { send(500, { error: e.message }); }
             break;
 
           // ─── Undo/Redo ───

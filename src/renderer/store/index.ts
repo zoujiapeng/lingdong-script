@@ -17,6 +17,7 @@ import {
   MacroInfo,
   RecordingState,
   LearnedTarget,
+  ParamPromptItem,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { getNodeDimensions } from '../utils/constants';
@@ -54,6 +55,8 @@ const DEFAULT_UI_STATE: UIState = {
   show_ai_dialog: false,
   show_trigger_config: false,
   auto_learn: false,
+  show_unified_search: false,
+  unified_search_query: '',
 };
 
 // --- Preset Templates ---
@@ -662,6 +665,12 @@ interface AppStore {
   addScriptTrigger: (trigger: import('../types').TriggerDef) => void;
   removeScriptTrigger: (index: number) => void;
   updateScriptTrigger: (index: number, trigger: import('../types').TriggerDef) => void;
+
+  // Param prompt dialog (missing parameters flow)
+  showParamPrompt: boolean;
+  paramPromptQueue: ParamPromptItem[];
+  cancelParamPrompt: () => void;
+  finishParamPrompt: () => void;
 }
 
 // History for undo/redo
@@ -705,6 +714,8 @@ export const useStore = create<AppStore>()(
 
     triggers: [],
     scriptTriggers: [],
+    showParamPrompt: false,
+    paramPromptQueue: [],
 
     newScript: () => {
       const s = createTemplateScript('desktop-monitor');
@@ -1625,6 +1636,27 @@ export const useStore = create<AppStore>()(
         s.isDirty = true;
       });
     },
+
+    // Param prompt dialog
+    cancelParamPrompt: () => {
+      set((s) => {
+        s.showParamPrompt = false;
+        s.paramPromptQueue = [];
+      });
+    },
+    finishParamPrompt: () => {
+      set((s) => {
+        s.showParamPrompt = false;
+        s.paramPromptQueue = [];
+      });
+      // Continue execution after params are filled
+      const exe = get().execution;
+      if (exe.status === 'paused') {
+        get().resumeExecution();
+      } else {
+        get().startExecution();
+      }
+    },
   }))
 );
 
@@ -1768,6 +1800,23 @@ useStore.subscribe((state) => {
   } catch {}
 });
 
+// Auto-save test flow to tests/flows/ after execution completes
+async function _autoSaveTestFlow() {
+  try {
+    const s = useStore.getState();
+    const api = (window as any).electronAPI;
+    if (!api?.callFeature) return;
+    const testName = `test_${s.script.meta.name || 'unnamed'}_${Date.now()}`.replace(/[^a-zA-Z0-9_一-鿿-]/g, '_');
+    await api.callFeature('save_test_flow', {
+      flow_data: JSON.stringify({ nodes: s.script.nodes, edges: s.script.edges, meta: s.script.meta }),
+      test_name: testName,
+      tags: ['auto-saved'],
+    });
+  } catch {
+    // non-blocking
+  }
+}
+
 // ─── HMR-safe IPC listener registration ───
 const _api = (window as any).electronAPI;
 const _listenerCleanups: (() => void)[] = [];
@@ -1811,6 +1860,8 @@ function _registerListeners() {
           if (msg.status === 'completed') {
             useStore.getState().addLog({ level: 'info', message: '执行完成，已自动保存为模板（结晶化）' });
             setTimeout(() => useStore.getState().fetchCrystallizedTemplates(), 500);
+            // 自动保存测试流程
+            _autoSaveTestFlow();
           }
           break;
         case 'status_report':
