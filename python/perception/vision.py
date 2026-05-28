@@ -19,12 +19,6 @@ import numpy as np
 from PIL import Image
 import mss
 
-try:
-    from skimage.metrics import structural_similarity as ssim
-    HAS_SKIMAGE = True
-except ImportError:
-    HAS_SKIMAGE = False
-
 
 BBox = Tuple[int, int, int, int]   # x, y, w, h
 Point = Tuple[int, int]            # x, y
@@ -233,11 +227,15 @@ class ChangeDetector:
             self._prev_frame = curr
             return False
 
-        if method == "ssim" and HAS_SKIMAGE:
-            gray_prev = cv2.cvtColor(self._prev_frame, cv2.COLOR_BGR2GRAY)
-            gray_curr = cv2.cvtColor(curr, cv2.COLOR_BGR2GRAY)
-            score, _ = ssim(gray_prev, gray_curr, full=True)
-            changed = score < threshold
+        if method == "ssim":
+            try:
+                from skimage.metrics import structural_similarity as _ssim
+                gray_prev = cv2.cvtColor(self._prev_frame, cv2.COLOR_BGR2GRAY)
+                gray_curr = cv2.cvtColor(curr, cv2.COLOR_BGR2GRAY)
+                score, _ = _ssim(gray_prev, gray_curr, full=True)
+                changed = score < threshold
+            except Exception:
+                changed = False
         else:
             # 帧差法
             diff = cv2.absdiff(self._prev_frame, curr)

@@ -38,6 +38,23 @@ python/browser_snapshots/
 # MCP config
 .mcp.json
 
+# OmniParser cloned repo (build from source with weights downloaded separately)
+omni_parser_repo/
+
+# Agent test screenshots
+agent_test.*
+browser_test.*
+web_screenshot_*.png
+vision_demo/
+vision_demo2/
+ufo_benchmark/
+
+# Test audio files
+test_*.wav
+
+# Temp state files
+\357\200\272TEMPstate.json
+
 # Voice model files (downloaded on demand)
 python/voice/models/
 python/voice/whisper_models/

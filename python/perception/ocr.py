@@ -15,35 +15,8 @@ from typing import List, Optional, Tuple, Dict, Any
 import cv2
 import numpy as np
 
-try:
-    import pytesseract
-    HAS_TESSERACT = True
-except ImportError:
-    HAS_TESSERACT = False
-
-try:
-    from paddleocr import PaddleOCR
-    HAS_PADDLE = True
-    _PaddleOCR = PaddleOCR
-except Exception:
-    HAS_PADDLE = False
-    _PaddleOCR = None
-
-try:
-    import easyocr
-    HAS_EASYOCR = True
-    _EasyOCR = easyocr
-except ImportError:
-    HAS_EASYOCR = False
-    _EasyOCR = None
-
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    HAS_RAPID = True
-    _RapidOCR = RapidOCR
-except ImportError:
-    HAS_RAPID = False
-    _RapidOCR = None
+# Lazy imports: Heavy ML/CV deps like paddleocr, easyocr, rapidocr are imported
+# on first use (in _init_paddle, _init_easyocr, _init_rapid), not at module level.
 
 try:
     import requests as _requests
@@ -269,21 +242,19 @@ class OCREngine:
         self._rapid_instance: Any = None
 
     def _init_paddle(self) -> bool:
-        if not HAS_PADDLE or _PaddleOCR is None:
-            return False
         try:
+            from paddleocr import PaddleOCR as _P
             if self._paddle_instance is None:
-                self._paddle_instance = _PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+                self._paddle_instance = _P(use_angle_cls=True, lang="ch", show_log=False)
             return True
         except Exception:
             return False
 
     def _init_easyocr(self) -> bool:
-        if not HAS_EASYOCR or _EasyOCR is None:
-            return False
         try:
+            import easyocr as _E
             if self._easyocr_instance is None:
-                self._easyocr_instance = _EasyOCR.Reader(["ch_sim", "en"], gpu=False)
+                self._easyocr_instance = _E.Reader(["ch_sim", "en"], gpu=False)
             return True
         except Exception:
             return False
@@ -306,16 +277,15 @@ class OCREngine:
         if self._umi.available:
             self._backend_name = "umi"
             return "umi"
-        self._backend_name = "tesseract" if HAS_TESSERACT else "mock"
+        self._backend_name = "tesseract" if self._try_tesseract() else "mock"
         return self._backend_name
 
     # ── 主要 API ──────────────────────────────────────────────────
     def _init_rapid(self) -> bool:
-        if not HAS_RAPID or _RapidOCR is None:
-            return False
         try:
+            from rapidocr_onnxruntime import RapidOCR as _R
             if self._rapid_instance is None:
-                self._rapid_instance = _RapidOCR()
+                self._rapid_instance = _R()
             return True
         except Exception:
             return False
@@ -421,7 +391,7 @@ class OCREngine:
     def _run_ocr(
         self, img: np.ndarray, offset: Tuple[int, int] = (0, 0)
     ) -> List[OCRResult]:
-        if not HAS_TESSERACT:
+        if not self._try_tesseract():
             return self._mock_ocr(img)
 
         # 预处理: 灰度 + 二值化
@@ -431,10 +401,10 @@ class OCREngine:
         )
 
         try:
-            data = pytesseract.image_to_data(
+            data = self._instance.image_to_data(
                 processed,
                 lang=self.lang,
-                output_type=pytesseract.Output.DICT,
+                output_type=self._instance.Output.DICT,
                 config="--psm 11",
             )
         except Exception:
@@ -650,8 +620,8 @@ class MultiBackendOCR:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                               cv2.THRESH_BINARY, 11, 2)
-            data = pytesseract.image_to_data(processed, lang=self.lang,
-                                             output_type=pytesseract.Output.DICT, config="--psm 11")
+            data = self._instance.image_to_data(processed, lang=self.lang,
+                                             output_type=self._instance.Output.DICT, config="--psm 11")
             ox, oy = offset
             out = []
             n = len(data["text"])

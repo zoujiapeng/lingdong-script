@@ -23,7 +23,7 @@ logger = logging.getLogger("lobster.vlm")
 # ── 默认配置 ──────────────────────────────────────────────────
 LOCAL_VLM_HOST = os.getenv("VLM_HOST", "http://localhost:8084")
 LOCAL_VLM_MODEL = "qwen2.5-vl:3b"
-GPT4o_MINI_MODEL = "gpt-4o-mini"
+GPT4o_MINI_MODEL = os.getenv("VLM_MODEL", "gpt-4o-mini")
 
 
 def _is_multimodal_enabled() -> bool:

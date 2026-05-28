@@ -530,6 +530,66 @@ python/experience/
 
 两个开关同时开启才启用 VLM 兜底；仅 auto-learn 开启时只使用 ExperienceDB + OpenCV。
 
+## Set-of-Mark (SoM) 标号系统
+
+Agent 在执行时对屏幕元素进行 **蓝色框 + #N 编号** 标注（Set-of-Mark），MIMO 等纯文本模型直接用 `#3` 指定目标，无需输出模糊的文字坐标描述。
+
+### 双轨 SoM 引擎
+
+| 引擎 | 技术栈 | 定位精度 | 速度 | 状态 |
+|---|---|---|---|---|
+| **OmniParser** | YOLOv8 图标检测 + Florence-2 标题 + EasyOCR | 像素级 | ~3-8s (CPU) | 需 transformers 4.x |
+| **UIA + OCR 兜底** | Windows UIA 控件树 + EasyOCR 文字检测 | 像素级 | ~1-3s | **默认工作路径** |
+
+### 执行流程
+
+```
+_apply_som(b64_img)
+  ├─ OmniParser 优先
+  │    ├─ 启动 FastAPI 子进程 (lazy, 仅首次)
+  │    ├─ POST /parse/ → 返回 {image_b64, label_map, count}
+  │    └─ 失败 → 静默降级到 UIA+OCR
+  └─ UIA + OCR 兜底 (always available)
+       ├─ a11y_get_tree(depth=3) → UIA 控件列表
+       ├─ ocr_extract_all() → OCR 文字框
+       ├─ 去重合并 → 编号排序 (从上到下, 从左到右)
+       └─ OpenCV 画蓝色框 + #N 编号
+```
+
+### 关键文件
+- `python/agent/agent.py` — `_apply_som()` 核心方法，`_supervised_execute()` 中 `#N` 解析
+- `python/agent/omniparser_client.py` — OmniParser FastAPI 客户端（子进程管理 + parse API）
+- `omni_parser_repo/` — OmniParser V2 仓库（克隆自 microsoft/OmniParser-v2.0）
+- `omni_parser_repo/weights/` — 下载的模型权重（icon_detect 40MB + icon_caption 1GB）
+
+### MIMO text_protocol SoM 集成
+
+```
+run_text_protocol(goal)
+  ├─ 系统提示词规则 8: "编号定位优先" 
+  ├─ 每步截图 → _apply_som() → 标号图 + label_map
+  ├─ 发送给 LLM: "屏幕元素编号... 使用 #N 指定目标"
+  ├─ LLM 回复: target: #3
+  └─ _supervised_execute → 解析 #3 → label_map[3] → (x, y, w, h)
+```
+
+### OmniParser 设置
+
+```bash
+# 克隆（已包含在 omni_parser_repo/）
+git clone https://github.com/microsoft/OmniParser.git omni_parser_repo
+
+# 下载权重
+python -c "
+import os; os.environ['HTTP_PROXY']='http://127.0.0.1:7897'
+from huggingface_hub import snapshot_download
+snapshot_download('microsoft/OmniParser-v2.0', local_dir='omni_parser_repo/weights')
+"
+
+# 注意: 需要 transformers < 5.0（当前 Python 3.14 + transformers 5.x 不兼容,
+# 降级方案: pip install 'transformers<5.0'）
+```
+
 ## 关键约定
 
 - **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `PropertyPanel.tsx` (switch case)
