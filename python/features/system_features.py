@@ -156,7 +156,7 @@ def _try_focus_existing(exe_name: str) -> bool:
     ],
     returns="dict{success, pid} - 启动结果",
     tags=["system", "process", "launch"],
-    hidden=True,
+    hidden=False,
 )
 def launch_program(target: str, args: str = "", wait: bool = False, force_new: bool = False) -> dict:
     try:

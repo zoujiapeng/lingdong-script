@@ -4,6 +4,7 @@ CLICK / TYPE / SCROLL / DRAG / HOTKEY
 
 All operations route through ActionHandler (uiautomation/win32api priority chain).
 """
+import re
 import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
@@ -41,13 +42,24 @@ def _do(action, **kw):
 )
 def click_target(target: str, region: str = "", timeout: float = 10,
                  human_like: bool = True, double: bool = False) -> bool:
+    from interaction.actions import ActionHandler
+    handler = ActionHandler()
+    # If target is plain text (not "x,y" coordinates), resolve via OCR first
+    target = target.strip().strip("[]()").strip()
+    is_coord = re.match(r"^\s*\d+\s*,\s*\d+\s*$", target) if target else False
+    if is_coord:
+        parts = [p.strip() for p in target.split(",")]
+        return handler("click", x=int(parts[0]), y=int(parts[1]))
+    # Semantic target: try OCR + UIA
     try:
-        from interaction.actions import ActionHandler
-        handler = ActionHandler()
-        parsed = parse_region(region)
-        return handler.clicker.click(target, region=parsed, timeout=timeout, human=human_like)
-    except ImportError:
-        return False
+        x, y = _find_target_coords(target, region=region)
+    except Exception:
+        x, y = 0, 0
+    # (0,0) means OCR didn't find the target — don't force-click at top-left
+    if x == 0 and y == 0:
+        # UIA-only attempt (skip coordinate click which would be at (0,0))
+        return handler("click", target=target)
+    return handler("click", target=target, x=x, y=y)
 
 
 @feature(
@@ -176,6 +188,8 @@ def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
     ],
 )
 def hotkey(keys: str) -> bool:
+    # Strip surrounding quotes (common when MIMO agent passes "ctrl+f" with quotes)
+    keys = keys.strip().strip("\"'")
     key_list = [k.strip() for k in keys.replace("+", " ").split()]
     return _do("hotkey", keys=key_list)
 

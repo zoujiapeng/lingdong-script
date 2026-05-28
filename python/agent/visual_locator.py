@@ -73,9 +73,12 @@ def template_match(template_path: str, screenshot_path: str,
 # ── VLM 视觉定位 ─────────────────────────────────────────────
 
 def vlm_locate(screenshot_path: str, description: str,
-               api_key: str, api_base: str = "https://api.deepseek.com/v1",
-               model: str = "deepseek-chat",
+               api_key: str,
+               api_base: str = "",
+               model: str = "",
                timeout: int = 30) -> Optional[dict]:
+    api_base = api_base or os.environ.get("OPENAI_API_BASE", "https://api.deepseek.com/v1")
+    model = model or os.environ.get("VLM_MODEL", "deepseek-chat")
     """Use VLM to locate an element by description in a screenshot.
 
     Sends the screenshot image + text description to a multimodal LLM

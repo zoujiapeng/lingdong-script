@@ -91,14 +91,6 @@ _STEP_TO_TOOL: dict[str, str] = {
     "condition":         "__condition__",
 }
 
-# GUI step types that benefit from window focus + settle wait
-_STEP_GUI: set[str] = {"click", "text_click", "type", "hotkey", "image_click",
-                        "scroll", "drag", "launch", "focus", "mouse_move"}
-
-# Browser step types (no visual locator, no focus settling)
-_STEP_BROWSER: set[str] = {"browser_connect", "browser_navigate", "browser_click", "browser_type",
-                            "browser_find", "browser_wait_element", "browser_get_text",
-                            "browser_screenshot", "browser_exec_js"}
 
 
 def _STEP_TO_KWARGS(step_type: str, step: dict) -> dict:
@@ -168,95 +160,29 @@ def _STEP_TO_KWARGS(step_type: str, step: dict) -> dict:
     return {}
 
 
-def _execute_supervised(tool_name: str, kwargs: dict, step_type: str,
-                         stop_event: threading.Event | None,
-                         step_index: int, total_steps: int) -> bool:
-    """Execute a single step via the @feature registry with supervision.
-
-    Supervision layers:
-    1. Browser steps → direct execution (no focus/settle needed)
-    2. GUI steps → window focus, retry with backoff, screen settle, auto-dialog
-    3. Other → direct execution
-    """
-    from features.registry import registry
-
-    is_gui = step_type in _STEP_GUI
-    is_browser = step_type in _STEP_BROWSER
-    max_retries = 2 if is_gui else 1
-
-    for attempt in range(max_retries + 1):
-        if stop_event and stop_event.is_set():
-            _emit("step_complete", {
-                "step_num": step_index, "tool": tool_name,
-                "step_type": step_type, "status": "stopped",
-                "result": {"success": False, "error": "stopped"},
-            })
-            return False
-
-        if attempt > 0:
-            delay = 2 ** (attempt - 1)
-            _emit("log", {"level": "info",
-                          "message": f"Retry {tool_name} ({attempt}/{max_retries}, {delay}s)"})
-            time.sleep(delay)
-
-        try:
-            # GUI: ensure window focus before action
-            if is_gui and attempt == 0:
-                _focus_for_step(kwargs)
-
-            result = registry.execute(tool_name, **kwargs)
-            success = result.get("success", False)
-
-            if not success:
-                if attempt < max_retries:
-                    continue
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": tool_name,
-                    "step_type": step_type, "status": "failed",
-                    "result": result,
-                })
-                return False
-
-            # GUI: settle wait + dialog check
-            if is_gui:
-                try:
-                    from agent.dialog_handler import handle_any_dialog
-                    handle_any_dialog()
-                except Exception:
-                    pass
-                time.sleep(0.5)
-
-            _emit("step_complete", {
-                "step_num": step_index, "tool": tool_name,
-                "step_type": step_type, "status": "completed",
-                "result": result,
-            })
-            return True
-
-        except Exception as exc:
-            if attempt < max_retries:
-                continue
-            _emit("step_complete", {
-                "step_num": step_index, "tool": tool_name,
-                "step_type": step_type, "status": "failed",
-                "result": {"success": False, "error": str(exc)},
-            })
-            return False
-
-    return False
-
-
-def _focus_for_step(kwargs: dict):
-    """Try to ensure the target window is focused for GUI actions."""
-    target = kwargs.get("target") or kwargs.get("title", "")
-    if not target:
-        return
+def _execute_supervised_step(agent, tool_name: str, kwargs: dict,
+                               step_index, total_steps: int) -> bool:
+    """Execute a single step via LingdongAgent._supervised_execute with IPC events."""
+    _emit("step_complete", {
+        "step_num": step_index, "tool": tool_name,
+        "status": "running",
+    })
     try:
-        from features.registry import registry as _r
-        _r.execute("focus_window", title=target)
-        time.sleep(0.3)
-    except Exception:
-        pass
+        result = agent._supervised_execute(tool_name, kwargs)
+        success = result.get("success", False)
+        _emit("step_complete", {
+            "step_num": step_index, "tool": tool_name,
+            "status": "completed" if success else "failed",
+            "result": result,
+        })
+        return success
+    except Exception as exc:
+        _emit("step_complete", {
+            "step_num": step_index, "tool": tool_name,
+            "status": "failed",
+            "result": {"success": False, "error": str(exc)},
+        })
+        return False
 
 
 def _emit(event: str, data: dict):
@@ -321,34 +247,50 @@ def _run_agent(goal: str, config: dict | None = None,
                stop_event: threading.Event = None,
                guidance_queue: Queue = None,
                supervise: bool = True,
-               steps: list | None = None):
+               steps: list | None = None,
+               mimo: bool = False):
     """Run agent in a background thread, streaming events to stdout.
 
-    Two modes:
-      supervise=True  — Generate plan via LLM, then auto-execute structured_steps
-                        using @feature registry (no LLM re-decision for each step).
-                        If steps= is provided, skip LLM call and execute directly.
-      supervise=False — Direct call to generate_flow_script only (for "生成流程图").
-                        Fast path — no execution.
+    Three modes:
+      mimo=True        — MIMO Agent: full ReAct loop with screenshot + 196 tools.
+      supervise=True   — Generate plan via LLM, then auto-execute structured_steps
+                         using @feature registry (no LLM re-decision for each step).
+      supervise=False  — Direct call to generate_flow_script only (for "生成流程图").
+                         Fast path — no execution.
     """
     cfg = config or {}
-    api_key = (cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")).strip()
-    api_base = (cfg.get("api_base") or os.environ.get("LLM_API_BASE", "")).strip()
-    model = (cfg.get("model") or os.environ.get("LLM_MODEL", "")).strip()
+    # Auto-detect MIMO mode: if model contains "mimo", use MIMO Agent
+    model_name = (cfg.get("model") or os.environ.get("VLM_MODEL", "")).strip().lower()
+    if not mimo and "mimo" in model_name:
+        mimo = True
 
-    if api_key:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-    if api_base:
-        os.environ["LLM_API_BASE"] = api_base
-    if model:
-        os.environ["LLM_MODEL"] = model
+    # ── Create unified LingdongAgent ──
+    from agent.agent import LingdongAgent
+    agent = LingdongAgent(
+        api_key=cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", ""),
+        api_base=cfg.get("api_base") or os.environ.get("OPENAI_API_BASE", "") or os.environ.get("LLM_API_BASE", ""),
+        model=cfg.get("model") or os.environ.get("VLM_MODEL", "") or os.environ.get("LLM_MODEL", ""),
+        event_callback=lambda d: _emit(d.pop("type", "log"), d) if callable(_emit) else None,
+        stop_event=stop_event,
+    )
 
-    # Clear proxy env vars — the agent only calls DeepSeek API via local network
-    # (no external proxy needed). If a proxy is inherited from the parent process,
-    # it breaks HTTP calls made by the `requests` library.
-    for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        os.environ.pop(_proxy_var, None)
-    _log("debug", f"Proxy cleared — HTTP_PROXY={os.environ.get('HTTP_PROXY', 'N/A')}")
+    # ── MIMO mode → text_protocol ──
+    if mimo:
+        _emit("agent_start", {"goal": goal, "engine": "mimo"})
+        _log("info", f"MIMO agent — goal: {goal[:120]}")
+        try:
+            result = agent.run_text_protocol(goal)
+            _emit("agent_done", {
+                "status": "completed" if result.get("success") else "failed",
+                "total_steps": result.get("total_steps", 0),
+                "summary": result.get("summary", ""),
+                "fail_reason": "" if result.get("success") else result.get("summary", ""),
+            })
+        except Exception as e:
+            _log("error", f"MIMO agent failed: {e}")
+            _emit("agent_done", {"status": "failed", "total_steps": 0,
+                                 "fail_reason": str(e)})
+        return
 
     # ── Fast path: supervise=False → direct generate_flow_script ──
     if not supervise:
@@ -585,8 +527,9 @@ def _run_agent(goal: str, config: dict | None = None,
                     if not bs_tool:
                         continue
                     bs_kwargs = _STEP_TO_KWARGS(bs_type, branch_step)
-                    bs_ok = _execute_supervised(bs_tool, bs_kwargs, bs_type,
-                                                 stop_event, f"{step_index}.{i+1}", len(structured_steps))
+                    bs_ok = _execute_supervised_step(
+                        agent, bs_tool, bs_kwargs,
+                        f"{step_index}.{i+1}", len(structured_steps))
                     if not bs_ok:
                         branch_errors += 1
 
@@ -606,9 +549,9 @@ def _run_agent(goal: str, config: dict | None = None,
                 errors += 1
             continue
 
-        # Execute with supervision (focus / retry / settle)
-        step_ok = _execute_supervised(tool_name, kwargs, step_type,
-                                       stop_event, step_index, len(structured_steps))
+        # Execute with unified supervision (LingdongAgent)
+        step_ok = _execute_supervised_step(
+            agent, tool_name, kwargs, step_index, len(structured_steps))
         if not step_ok:
             errors += 1
 
@@ -672,7 +615,7 @@ class AgentIPC:
         self._agent_thread = threading.Thread(
             target=_run_agent,
             args=(goal, config, self._stop_event, self._guidance_queue),
-            kwargs={"supervise": supervise, "steps": steps},
+            kwargs={"supervise": supervise, "steps": steps, "mimo": config.get("mimo", False)},
             daemon=True,
         )
         self._agent_thread.start()
