@@ -9,8 +9,8 @@
   .container { max-width: 1400px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
   h1 { text-align: center; color: #333; margin-bottom: 5px; font-size: 24px; }
   .subtitle { text-align: center; color: #888; margin-bottom: 25px; font-size: 14px; }
-  .mermaid { display: flex; justify-content: center; }
-  svg { max-width: 100%; height: auto; }
+  .mermaid-wrapper { overflow-x: auto; width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; }
+  .mermaid { min-width: 1200px; }
   .legend { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px; font-size: 13px; }
   .legend-item { display: flex; align-items: center; gap: 8px; }
   .legend-box { width: 16px; height: 16px; border-radius: 3px; display: inline-block; }
@@ -34,6 +34,7 @@
     <span class="legend-item"><span class="legend-box external"></span> 外部系统</span>
   </div>
 
+  <div class="mermaid-wrapper">
   <pre class="mermaid">
 ---
 title: 灵动脚本运行原理流程图
@@ -54,7 +55,7 @@ flowchart TB
   subgraph Frontend["React 渲染进程 (renderer:5173)"]
     direction TB
     Canvas["FlowCanvas\n流程图编辑器\nSVG 51种节点"]:::process
-    AgentView["AgentView\nAI Agent 面板"]:::process
+    AgentView["AgentView\nAI Agent 面板\n10项配置参数\nlocalStorage 驱动"]:::process
     Settings["SettingsPanel\n设置面板\nlocalStorage 持久化"]:::process
     VoicePanel["VoiceConversationPanel\n语音对话浮动面板"]:::process
     TopBar["TopBar + StatusBar\n工具栏 + 状态栏"]:::process
@@ -74,13 +75,14 @@ flowchart TB
   subgraph PythonAgt["Python Agent 进程 (agent/)"]
     direction TB
     AgentMain["__main__.py\nstdin/stdout JSON\nIPC 入口"]:::subp
-    AgentCore["LingdongAgent\n统一调度核心"]:::subp
-    ConfigModule["AgentConfig\n配置解析 + resolve_auto()"]:::subp
+    AgentCore["LingdongAgent\n统一调度核心\n_unified_run()"]:::subp
+    ConfigModule["AgentConfig\n12个配置字段\nresolve_auto() 智能适配"]:::subp
     Planner["Planner\n自然语言→步骤 DAG"]:::subp
-    Supervisor["Supervisor\n执行监督 + 恢复策略"]:::subp
+    Supervisor["Supervisor\n流水线: SoM→UIA→OCR→预聚焦→\n视觉定位→执行→恢复→\n对话框→稳定→诊断"]:::subp
     VisualLocator["visual_locator\n语义目标→屏幕坐标"]:::subp
     ExpDB["experience_db\n经验数据库\nSHA256 签名索引"]:::store
     SoM["_apply_som()\nSet-of-Mark 标号\nUIA+OCR / OmniParser"]:::subp
+    ScriptRunner["run_python_script\n脚本执行模式(Hermes风格)\n临时文件→subprocess→清理"]:::subp
   end
 
   subgraph PythonEng["Python 自动化引擎 (engine/)"]
@@ -97,8 +99,8 @@ flowchart TB
   subgraph PythonFeat["Python @feature 注册表 (features/)"]
     direction TB
     Registry["registry.py\nFeatureRegistry 单例\n@feature 装饰器"]:::subp
-    FeatureModules["43 模块 245 @feature\n交互/感知/AI/系统/宏/控制流/调试"]:::subp
-    MCPServer["mcp/server.py\nJSON-RPC stdio\n~245 工具"]:::subp
+    FeatureModules["43 模块 242 @feature\n交互/感知/AI/系统/宏/控制流/调试"]:::subp
+    MCPServer["mcp/server.py\nJSON-RPC stdio\n~196 MCP 工具"]:::subp
   end
 
   subgraph PythonVoice["Python 语音服务 (voice/)"]
@@ -165,10 +167,11 @@ flowchart TB
 
   %% ===== Agent 内部流 =====
   AgentMain -->|"agent.run()"| AgentCore
-  AgentCore -->|"AgentConfig"| ConfigModule
+  AgentCore -->|"AgentConfig.resolve_auto()"| ConfigModule
   AgentCore -->|"_unified_run()"| Planner
   AgentCore -->|"_unified_run()"| Supervisor
   AgentCore -->|"_apply_som()"| SoM
+  AgentCore -->|"scripted_mode:\nrun_python_script"| ScriptRunner
   Supervisor -->|"visual_locator.locate()"| VisualLocator
   VisualLocator -->|"查/写"| ExpDB
   VisualLocator -->|"VLM 兜底"| LLM
@@ -208,7 +211,7 @@ flowchart TB
   Store -->|"ipcRenderer.invoke('file:write')"| Scripts
   Store -->|"ipcRenderer.invoke('file:read')"| Scripts
   AgentMain -->|"file:write"| Macros
-  AgentMain -->|"file:write"| Experience
+  ScriptRunner -->|"tempfile→subprocess→清理"| OS
 
   %% ===== 快捷键流 =====
   OS -->|"globalShortcut F5/F6/F9"| Main
@@ -240,18 +243,20 @@ flowchart TB
     L6["🟡 黄色 = 用户操作"]:::user
   end
 </pre>
+</div>
 
   <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
     <h3 style="margin-top: 0; color: #333;">📖 核心流程说明</h3>
     <table style="width:100%; border-collapse: collapse; font-size: 14px;">
       <tr style="background: #e1f5fe;"><th style="padding:8px;text-align:left;border:1px solid #ddd;">#</th><th style="padding:8px;text-align:left;border:1px solid #ddd;">流程</th><th style="padding:8px;text-align:left;border:1px solid #ddd;">路径</th></tr>
       <tr><td style="padding:8px;border:1px solid #ddd;">①</td><td style="padding:8px;border:1px solid #ddd;"><b>流程图编辑→执行</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">画布编辑 → Store → IPC('engine:start') → spawnPython(engine.py) → DSLParser → Executor → 逐节点执行 → stdout 事件回调 → Store 更新 → 画布高亮</td></tr>
-      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">②</td><td style="padding:8px;border:1px solid #ddd;"><b>AI Agent 执行</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">AgentView 输入目标 → IPC('agent:start') → spawnPython(agent) → AgentConfig 解析 → _unified_run() → Planner(生成步骤) / ReAct(逐步骤) → 监督执行(焦点/定位/执行/OCR验证) → 步骤结果回传 → 前端展示进度</td></tr>
+      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">②</td><td style="padding:8px;border:1px solid #ddd;"><b>AI Agent 监督执行</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">AgentView 输入目标 → IPC('agent:start') → spawnPython(agent) → AgentConfig.resolve_auto() → _unified_run() → Planner(生成DAG) / ReAct(逐步骤决策) → Supervisor 流水线: SoM标号 → UIA控件定位 → 窗口感知OCR → UIA预聚焦输入框 → 视觉定位(经验库→OpenCV/VLM) → 防重复启动检测 → 窗口焦点安全 → 动作执行+自动重试 → 错误策略(重试/重新规划/跳过/停止) → 对话框检测处理 → 屏幕稳定等待 → 失败诊断 → 步骤结果回传 → 前端高亮+汇总报告</td></tr>
       <tr><td style="padding:8px;border:1px solid #ddd;">③</td><td style="padding:8px;border:1px solid #ddd;"><b>HTTP API 远程控制</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">Claude Code / curl → api.ts:7880 → ipcRenderer.send('api-command') → Store.dispatch → 前端更新 → GET /api/get-state 返回当前状态</td></tr>
       <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">④</td><td style="padding:8px;border:1px solid #ddd;"><b>MCP 工具调用</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">外部 MCP 客户端 → stdio JSON-RPC → mcp/server.py → FeatureRegistry → @feature 函数执行 → 结果返回</td></tr>
       <tr><td style="padding:8px;border:1px solid #ddd;">⑤</td><td style="padding:8px;border:1px solid #ddd;"><b>宏录制回放</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">F6 热键 → main.ts → spawnPython(录制器) → pynput 监听鼠标键盘 → 事件写入 macros/*.json → F6 停止 → 列表更新 → 可转换为流程图</td></tr>
       <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">⑥</td><td style="padding:8px;border:1px solid #ddd;"><b>视觉定位+经验学习</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">Agent 需要点击"搜索按钮" → visual_locator.locate() → 查 experience_db(OpenCV matchTemplate) → 命中返回坐标 / 未命中→VLM API 分析截图→返回坐标→裁剪小图→存入经验库→后续离线复用</td></tr>
       <tr><td style="padding:8px;border:1px solid #ddd;">⑦</td><td style="padding:8px;border:1px solid #ddd;"><b>语音对话</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">麦克风 → WebSocket → voice/server.py → Whisper STT → LLM → Edge TTS → 音频二进制流 → 前端 AudioContext 解码播放 → 状态机 idle↔listening↔thinking↔speaking</td></tr>
+      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">⑧</td><td style="padding:8px;border:1px solid #ddd;"><b>脚本执行模式 (Hermes 风格)</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">Agent 设置开启 scripted_mode(默认关闭) → AgentView 传递配置 → AgentConfig.scripted_mode=True → _unified_run() 注入脚本执行提示词 → LLM 生成完整 Python 脚本(pywinauto/pyautogui) → run_python_script() 写入临时文件 → subprocess.run 执行 → 超时/异常捕获 → 清理临时文件 → 结果返回 Agent → 继续下一步</td></tr>
     </table>
   </div>
 </div>
