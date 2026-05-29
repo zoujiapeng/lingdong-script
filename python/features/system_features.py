@@ -2,9 +2,12 @@
 系统功能注册
 进程检测 / 窗口管理 / 剪贴板输入
 """
+import logging
 import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
+
+logger = logging.getLogger(__name__)
 
 
 @feature(
@@ -106,38 +109,67 @@ def get_active_window() -> dict:
         return {"error": "窗口管理模块不可用"}
 
 
-def _try_focus_existing(exe_name: str) -> bool:
-    """尝试查找已运行程序的窗口并聚焦。成功返回 True。"""
-    try:
-        import psutil, win32gui, win32con
-        exe_lower = exe_name.lower()
-        target_pids = set()
-        for p in psutil.process_iter(["pid", "name"]):
-            try:
-                if p.info["name"] and p.info["name"].lower() == exe_lower:
-                    target_pids.add(p.info["pid"])
-            except Exception:
+def _find_matching_pids(exe_name: str, target_name: str = "") -> set:
+    """查找匹配的进程 PID，使用多重策略适配 Electron 多进程应用。"""
+    import psutil
+    exe_lower = exe_name.lower()
+    target_lower = target_name.lower().strip()
+    base = exe_lower.replace(".exe", "")
+
+    pids: set = set()
+    for p in psutil.process_iter(["pid", "name"]):
+        try:
+            pname = (p.info["name"] or "").lower()
+            # 1. Exact match
+            if pname == exe_lower:
+                pids.add(p.info["pid"])
                 continue
-        if not target_pids:
+            pname_stripped = pname.replace(".exe", "")
+            # 2. Base is substring of process name (QQ.exe → QQNT.exe)
+            if len(base) >= 3 and base in pname:
+                pids.add(p.info["pid"])
+                continue
+            # 3. Process name is substring of base (QQNT.exe → QQ.exe)
+            if len(pname_stripped) >= 3 and pname_stripped in base:
+                pids.add(p.info["pid"])
+                continue
+            # 4. Target name matches process name (e.g. "QQ" in "QQ.exe")
+            if len(target_lower) > 2 and target_lower in pname:
+                pids.add(p.info["pid"])
+        except Exception:
+            continue
+    return pids
+
+
+def _try_focus_existing(exe_name: str, target_name: str = "") -> bool:
+    """尝试查找已运行程序的窗口并聚焦。多重匹配策略。
+
+    对 Electron 多进程应用（QQ、微信等）可匹配不同子进程名。
+    """
+    try:
+        import win32gui, win32con, win32process
+        pids = _find_matching_pids(exe_name, target_name)
+        if not pids:
             return False
 
         found = False
-        def enum_cb(hwnd, _pids):
+        def enum_cb(hwnd, ctx):
             nonlocal found
             try:
                 if not win32gui.IsWindowVisible(hwnd):
                     return
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                if pid in target_pids:
-                    r = win32gui.GetWindowRect(hwnd)
-                    if int(r[2]-r[0]) > 200 and int(r[3]-r[1]) > 100:
-                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                        win32gui.SetForegroundWindow(hwnd)
-                        found = True
+                if pid not in ctx["pids"]:
+                    return
+                r = win32gui.GetWindowRect(hwnd)
+                w, h = int(r[2]-r[0]), int(r[3]-r[1])
+                if w > 200 and h > 100 and w < 5000 and h < 5000:
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    win32gui.SetForegroundWindow(hwnd)
+                    found = True
             except Exception:
                 pass
-        import win32process
-        win32gui.EnumWindows(enum_cb, target_pids)
+        win32gui.EnumWindows(enum_cb, {"pids": pids})
         return found
     except Exception:
         return False
@@ -163,12 +195,12 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
         import subprocess, os, re
 
         # Resolve via program registry first (PATH + App Paths + cached aliases)
-        from features.program_registry import resolve_program, get_program_registry
-        resolved = resolve_program(target) or target
+        from features.program_registry import get_program_registry
+        reg = get_program_registry()  # 确保注册表已加载
+        resolved = reg.resolve(target) or target
 
         # If the name wasn't resolved and looks like Chinese text, give a helpful hint
         if resolved == target and re.search(r'[一-鿿]', target):
-            reg = get_program_registry()
             all_items = reg.get_name_list()
             close = [i for i in all_items if target.lower() in i["name"] or i["name"] in target.lower()][:5]
             hint = ""
@@ -176,15 +208,20 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
                 hint = f"，你是不是想启动: {' / '.join(f'『{c["name"]}』' for c in close)}"
             return {"success": False, "error": f"未找到程序「{target}」{hint}"}
 
-        # If resolved target is a non-executable file/dir/URL, use os.startfile
-        if not any(resolved.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
+        # If resolved target is a URL, open it with the default browser
+        if "://" in resolved:
             os.startfile(resolved)
             return {"success": True, "pid": None, "resolved_path": resolved}
+
+        # Non-executable path — return error instead of calling os.startfile
+        # (os.startfile on an unresolvable program name opens Microsoft Store on Win11)
+        if not any(resolved.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
+            return {"success": False, "error": f"程序「{target}」解析为非可执行文件: {resolved}，请使用完整 .exe 路径"}
 
         # 防重复启动：程序已在运行且非强制新实例 → 聚焦现有窗口
         if not force_new and not args:
             exe_name = os.path.basename(resolved)
-            if _try_focus_existing(exe_name):
+            if _try_focus_existing(exe_name, target):
                 logger.info("程序 %s 已在运行，已聚焦窗口", exe_name)
                 return {"success": True, "focused_existing": True, "resolved_path": resolved}
 

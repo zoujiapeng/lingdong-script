@@ -42,20 +42,44 @@ class Planner:
     """
 
     def __init__(self, api_key: str = ""):
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+        self._api_base = (os.getenv("LLM_API_BASE") or "https://api.deepseek.com/v1").rstrip("/")
+        self._model = os.getenv("LLM_MODEL") or "deepseek-chat"
         self._registry = None
         self._steps: list[PlanStep] = []
         self._max_iterations = 10
-        self._client = None
         self._task_id = ""
 
-    def _ensure_client(self):
-        if self._client is None and self._api_key:
-            try:
-                import anthropic
-                self._client = anthropic.Anthropic(api_key=self._api_key)
-            except Exception:
-                pass
+    def _has_api_key(self) -> bool:
+        return bool(self._api_key)
+
+    def _call_llm(self, system_prompt: str, user_prompt: str, max_tokens: int = 512) -> dict | None:
+        """使用 OpenAI 兼容接口调用 LLM（支持 MIMO / DeepSeek / GPT / Claude API 等）。"""
+        import requests as _req
+        try:
+            resp = _req.post(
+                f"{self._api_base}/chat/completions",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            raw = data["choices"][0]["message"]["content"]
+            if raw:
+                return json.loads(raw)
+            return None
+        except Exception:
+            return None
 
     def set_registry(self, registry):
         """设置功能注册表引用"""
@@ -78,10 +102,9 @@ class Planner:
         """
         self._steps = []
         self._max_iterations = max_iterations
-        self._ensure_client()
         self._task_id = uuid.uuid4().hex[:12]
 
-        if not self._client:
+        if not self._has_api_key():
             return {
                 "success": False,
                 "error": "未配置 API Key，无法启动 AI 规划",
@@ -266,23 +289,11 @@ class Planner:
 参数值使用 {{变量名}} 引用之前步骤的输出（如果有需要）。
 """
 
-        try:
-            msg = self._client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=512,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = msg.content[0].text.strip()
-            # 提取 JSON
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1] if "\n" in text else text
-                text = text.rsplit("```", 1)[0] if "```" in text else text
-            plan = json.loads(text)
+        plan = self._call_llm("你是一个桌面自动化规划助手。", prompt, max_tokens=512)
+        if plan:
             return plan
-        except Exception as e:
-            # 解析失败时尝试简单重试
-            return {"action": "screenshot", "params": {}, "rationale": f"规划解析失败: {e}，尝试观察"}
+        # 解析失败时尝试简单重试
+        return {"action": "screenshot", "params": {}, "rationale": "规划解析失败，尝试观察"}
 
     def _act(self, plan: dict) -> dict:
         """执行规划的动作"""

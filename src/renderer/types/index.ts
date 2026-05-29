@@ -563,6 +563,44 @@ export interface ExecutionState {
   loop_iteration?: { current: number; total: number; node_id: string } | null;
   breakpoints: string[];
   stepping: boolean;
+  /** Plan DAG from Planner (for Agent frontend visualization) */
+  plan?: PlanDAGState;
+}
+
+/** Plan DAG node state (mirrors Python agent.planner.PlanNode) */
+export interface PlanNodeState {
+  id: string;
+  description: string;
+  tool: string;
+  params?: Record<string, unknown>;
+  path_level: number;
+  depends_on?: string[];
+  fallback_tools?: string[];
+  fallback_paths?: number[];
+  expected?: string;
+  critical?: boolean;
+  timeout?: number;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  attempts: number;
+  max_retries?: number;
+  error?: string;
+  result?: unknown;
+}
+
+/** Plan DAG state from Planner */
+export interface PlanDAGState {
+  goal: string;
+  status: string;       // pending | running | completed | failed | completed_with_errors
+  nodes: PlanNodeState[];
+  created_at?: number;
+  summary?: {
+    total: number;
+    completed: number;
+    failed: number;
+    skipped: number;
+    pending: number;
+    running: number;
+  };
 }
 
 export interface LogEntry {
@@ -573,6 +611,21 @@ export interface LogEntry {
 }
 
 // --- IPC Messages (Electron <-> Python) ---
+
+/** Agent execution history record */
+export interface AgentRunRecord {
+  id: string;
+  goal: string;
+  status: 'completed' | 'failed' | 'stopped';
+  total_steps: number;
+  completed_steps: number;
+  failed_steps: number;
+  skipped_steps: number;
+  started_at: string;
+  finished_at: string;
+  elapsed_seconds: number;
+  summary?: string;
+}
 
 export interface IPCMessage {
   type: 'execute' | 'pause' | 'resume' | 'stop' | 'status' | 'log' | 'node_status';

@@ -26,7 +26,6 @@ Events (stdout, one JSON object per line, flush()ed):
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
@@ -58,131 +57,6 @@ logger = logging.getLogger("agent.ipc")
 
 _lock = threading.Lock()
 _AGENT_TIMEOUT = 300  # seconds — hard limit on agent.run() (browser tasks need more time)
-
-# ── Structured step → feature tool mapping ──────────────────────
-_STEP_TO_TOOL: dict[str, str] = {
-    "click":            "click_target",
-    "text_click":       "click_target",
-    "image_click":      "find_image",
-    "type":             "type_text",
-    "hotkey":           "hotkey",
-    "wait":             "wait_action",
-    "scroll":           "scroll",
-    "launch":           "launch_program",
-    "focus":            "focus_window",
-    "screenshot":       "screenshot",
-    "run_command":      "run_command",
-    "mouse_move":       "mouse_move",
-    "drag":             "drag",
-    "browser_connect":   "browser_connect",
-    "browser_navigate":  "browser_navigate",
-    "browser_click":     "browser_click",
-    "browser_type":      "browser_type",
-    "browser_find":      "browser_find_elements",
-    "browser_wait_element": "browser_wait_element",
-    "browser_get_text":  "browser_get_text",
-    "browser_screenshot":"browser_screenshot",
-    "browser_exec_js":   "browser_execute_js",
-    "file_read":         "file_read",
-    "file_write":        "file_write",
-    "file_save":         "file_write",
-    "check_condition":   "__check_condition__",
-    "wait_until":        "__wait_until__",
-    "condition":         "__condition__",
-}
-
-
-
-def _STEP_TO_KWARGS(step_type: str, step: dict) -> dict:
-    """Convert structured step dict to keyword args for the feature tool."""
-    if step_type in ("click", "text_click"):
-        target = step.get("target", "")
-        # If target looks like "x,y" coordinates, pass x/y directly
-        if re.match(r'^-?\d+\s*,\s*-?\d+$', target):
-            parts = target.split(",")
-            return {"x": int(parts[0].strip()), "y": int(parts[1].strip())}
-        return {"target": target}
-    elif step_type == "image_click":
-        return {"target": step.get("target", ""), "similarity": 0.8}
-    elif step_type == "type":
-        return {"text": step.get("text", "")}
-    elif step_type == "hotkey":
-        keys = step.get("keys", step.get("target", ""))
-        if isinstance(keys, list):
-            return {"keys": "+".join(keys)}
-        return {"keys": str(keys)}
-    elif step_type == "wait":
-        return {"duration": step.get("duration", 1)}
-    elif step_type == "scroll":
-        return {"target": step.get("target", "down")}
-    elif step_type == "launch":
-        return {"target": step.get("target", "")}
-    elif step_type == "focus":
-        return {"title": step.get("title", step.get("target", ""))}
-    elif step_type == "screenshot":
-        return {}
-    elif step_type == "run_command":
-        return {"command": step.get("command", "")}
-    elif step_type == "mouse_move":
-        return {"x": step.get("x", 0), "y": step.get("y", 0)}
-    elif step_type == "drag":
-        return {"from_target": step.get("from_target", ""), "to_target": step.get("to_target", "")}
-    elif step_type == "browser_connect":
-        return {"port": step.get("port", 9222)}
-    elif step_type == "browser_navigate":
-        return {"url": step.get("url", step.get("target", ""))}
-    elif step_type == "browser_click":
-        return {"selector": step.get("selector", step.get("target", ""))}
-    elif step_type == "browser_type":
-        return {"selector": step.get("selector", step.get("target", "")),
-                "text": step.get("text", "")}
-    elif step_type == "browser_find":
-        return {"selector": step.get("selector", step.get("target", ""))}
-    elif step_type == "browser_wait_element":
-        return {"selector": step.get("selector", step.get("target", "")),
-                "timeout": step.get("timeout", 10)}
-    elif step_type == "browser_get_text":
-        return {"selector": step.get("selector", step.get("target", ""))}
-    elif step_type == "browser_screenshot":
-        return {}
-    elif step_type == "browser_exec_js":
-        return {"code": step.get("code", "")}
-    elif step_type == "file_read":
-        return {"path": step.get("path", "")}
-    elif step_type == "file_write":
-        return {"path": step.get("path", ""), "content": step.get("content", "")}
-    elif step_type == "file_save":
-        return {"path": step.get("path", ""), "content": step.get("content", "")}
-    elif step_type == "check_condition":
-        return {"condition": step.get("condition", ""), "timeout": step.get("timeout", 0)}
-    elif step_type == "wait_until":
-        return {"condition": step.get("condition", ""), "timeout": step.get("timeout", 10)}
-    return {}
-
-
-def _execute_supervised_step(agent, tool_name: str, kwargs: dict,
-                               step_index, total_steps: int) -> bool:
-    """Execute a single step via LingdongAgent._supervised_execute with IPC events."""
-    _emit("step_complete", {
-        "step_num": step_index, "tool": tool_name,
-        "status": "running",
-    })
-    try:
-        result = agent._supervised_execute(tool_name, kwargs)
-        success = result.get("success", False)
-        _emit("step_complete", {
-            "step_num": step_index, "tool": tool_name,
-            "status": "completed" if success else "failed",
-            "result": result,
-        })
-        return success
-    except Exception as exc:
-        _emit("step_complete", {
-            "step_num": step_index, "tool": tool_name,
-            "status": "failed",
-            "result": {"success": False, "error": str(exc)},
-        })
-        return False
 
 
 def _emit(event: str, data: dict):
@@ -251,18 +125,29 @@ def _run_agent(goal: str, config: dict | None = None,
                mimo: bool = False):
     """Run agent in a background thread, streaming events to stdout.
 
-    Three modes:
-      mimo=True        — MIMO Agent: full ReAct loop with screenshot + 196 tools.
-      supervise=True   — Generate plan via LLM, then auto-execute structured_steps
-                         using @feature registry (no LLM re-decision for each step).
-      supervise=False  — Direct call to generate_flow_script only (for "生成流程图").
-                         Fast path — no execution.
+    Uses unified AgentConfig dispatch. Supports both new (agent_config dict)
+    and legacy (mimo/supervise bools) config formats.
     """
     cfg = config or {}
-    # Auto-detect MIMO mode: if model contains "mimo", use MIMO Agent
     model_name = (cfg.get("model") or os.environ.get("VLM_MODEL", "")).strip().lower()
+
+    # Auto-detect MIMO for backward compatibility
     if not mimo and "mimo" in model_name:
         mimo = True
+
+    # ── Build AgentConfig from IPC config ──
+    from agent.config import AgentConfig, agent_config_from_legacy
+
+    agent_cfg_dict = cfg.get("agent_config", {})
+    if agent_cfg_dict and isinstance(agent_cfg_dict, dict):
+        # 新统一路径：从前端设置面板传递的 AgentConfig
+        _log("info", f"Using unified AgentConfig from frontend: {json.dumps(agent_cfg_dict, ensure_ascii=False)}")
+        agent_cfg = AgentConfig.from_dict(agent_cfg_dict)
+    else:
+        # 旧路径：从 mimo/supervise 标志转换
+        agent_cfg = agent_config_from_legacy(mimo, supervise, model_name)
+        _log("info", f"Legacy flags converted: mimo={mimo}, supervise={supervise} → "
+                      f"planning={agent_cfg.planning}, protocol={agent_cfg.llm_protocol}")
 
     # ── Create unified LingdongAgent ──
     from agent.agent import LingdongAgent
@@ -272,299 +157,31 @@ def _run_agent(goal: str, config: dict | None = None,
         model=cfg.get("model") or os.environ.get("VLM_MODEL", "") or os.environ.get("LLM_MODEL", ""),
         event_callback=lambda d: _emit(d.pop("type", "log"), d) if callable(_emit) else None,
         stop_event=stop_event,
+        omniparser_enabled=cfg.get("omniparser_enabled") == "true",
     )
 
-    # ── MIMO mode → text_protocol ──
-    if mimo:
-        _emit("agent_start", {"goal": goal, "engine": "mimo"})
-        _log("info", f"MIMO agent — goal: {goal[:120]}")
-        try:
-            result = agent.run_text_protocol(goal)
-            _emit("agent_done", {
-                "status": "completed" if result.get("success") else "failed",
-                "total_steps": result.get("total_steps", 0),
-                "summary": result.get("summary", ""),
-                "fail_reason": "" if result.get("success") else result.get("summary", ""),
-            })
-        except Exception as e:
-            _log("error", f"MIMO agent failed: {e}")
-            _emit("agent_done", {"status": "failed", "total_steps": 0,
-                                 "fail_reason": str(e)})
-        return
-
-    # ── Fast path: supervise=False → direct generate_flow_script ──
-    if not supervise:
-        _emit("agent_start", {"goal": goal, "engine": "direct"})
-        _log("info", f"Direct generate_flow_script — goal: {goal[:120]}")
-        if not _HAS_GFS:
-            _emit("error", {"message": "generate_flow_script feature not available"})
-            _emit("agent_done", {"status": "failed", "total_steps": 0,
-                                 "fail_reason": "generate_flow_script not available"})
-            return
-        try:
-            result = _generate_flow_script(goal)
-            success = result.get("success", False)
-            _emit("step_complete", {
-                "step_num": 1, "tool": "generate_flow_script",
-                "args": {"goal": goal},
-                "step_type": "generate_flow_script",
-                "status": "completed" if success else "failed",
-                "result": {
-                    "success": success,
-                    "confidence": 1.0 if success else 0.0,
-                    "data": result.get("result", result),
-                },
-            })
-            _emit("agent_done", {
-                "status": "completed" if success else "failed",
-                "total_steps": 1,
-                "steps": [],
-                "summary": "Flow script generated" if success else "Generation failed",
-            })
-        except Exception as exc:
-            _emit("error", {"message": f"generate_flow_script failed: {exc}"})
-            _emit("agent_done", {"status": "failed", "total_steps": 0,
-                                 "fail_reason": str(exc)})
-        return
-
-    # ── Supervise mode: generate plan THEN auto-execute structured_steps ──
-    # Step 1: generate the plan (or use pre-generated steps if provided)
-    _emit("agent_start", {"goal": goal, "engine": "supervised"})
-    _log("info", f"Supervised execution — goal: {goal[:120]}")
-
-    if steps:
-        # Pre-generated steps from the frontend's first API call — skip LLM
-        _log("info", f"Using {len(steps)} pre-generated steps from frontend")
-        structured_steps = steps
-        pseudocode = ""
-        plan_success = True
-
-        # Re-emit step_complete to acknowledge plan source
-        _emit("step_complete", {
-            "step_num": 0, "tool": "generate_flow_script",
-            "args": {"goal": goal},
-            "step_type": "generate_flow_script",
-            "status": "completed",
-            "result": {
-                "success": True,
-                "data": {"structured_steps": steps, "pseudocode": ""},
-            },
-        })
-    else:
-        # Generate plan via LLM
-        if not _HAS_GFS:
-            _emit("error", {"message": "generate_flow_script feature not available"})
-            _emit("agent_done", {"status": "failed", "total_steps": 0,
-                                 "fail_reason": "generate_flow_script not available"})
-            return
-
-        try:
-            plan = _generate_flow_script(goal)
-        except Exception as exc:
-            _emit("error", {"message": f"generate_flow_script failed: {exc}"})
-            _emit("agent_done", {"status": "failed", "total_steps": 0, "fail_reason": str(exc)})
-            return
-
-        plan_success = plan.get("success", False)
-        plan_result = plan.get("result", {})
-        structured_steps = plan_result.get("structured_steps", [])
-        pseudocode = plan_result.get("pseudocode", "")
-
-        _emit("step_complete", {
-            "step_num": 0, "tool": "generate_flow_script",
-            "args": {"goal": goal},
-            "step_type": "generate_flow_script",
-            "status": "completed" if plan_success and structured_steps else "failed",
-            "result": {
-                "success": plan_success,
-                "data": plan_result,
-            },
-        })
-
-    if not plan_success or not structured_steps:
-        _emit("agent_done", {
-            "status": "failed",
-            "total_steps": 0,
-            "steps": [],
-            "summary": "Failed to generate execution plan",
-            "fail_reason": plan.get("error", "No structured_steps in plan"),
-        })
-        return
-
-    # Step 2: auto-execute structured_steps using the @feature registry
-    _log("info", f"Executing {len(structured_steps)} structured steps automatically")
-    step_index = 0
-    errors = 0
-
+    # ── Unified execution ──
+    # agent.run(agent_config=...) → _unified_run() → 根据 config 自动选择执行策略
+    _emit("agent_start", {"goal": goal, "engine": agent_cfg._resolved_planning or "unified",
+                          "model": model_name})
+    result = {}
     try:
-        from features.registry import registry
-        import features._all  # noqa: F401 — ensure all features loaded
-    except ImportError:
-        _emit("error", {"message": "Feature registry not available"})
+        result = agent.run(goal, agent_config=agent_cfg, steps=steps)
+        status = "completed" if result.get("success") else "failed"
+        _emit("agent_done", {
+            "status": status,
+            "total_steps": result.get("total_steps", 0),
+            "summary": result.get("summary", ""),
+            "fail_reason": result.get("error", "" if result.get("success") else result.get("summary", "")),
+        })
+        total = result.get("total_steps", 0)
+    except Exception as e:
+        _log("error", f"Agent execution failed: {e}")
         _emit("agent_done", {"status": "failed", "total_steps": 0,
-                             "fail_reason": "Feature registry not available"})
-        return
+                             "fail_reason": str(e)})
+        total = 0
 
-    # Auto-launch browser if any browser_* step exists but no explicit launch step
-    # CDP auto-connects on first browser_* call — no manual launch needed
-
-    for step in structured_steps:
-        step_index += 1
-        if stop_event and stop_event.is_set():
-            _emit("log", {"level": "info", "message": "Stop requested — skipping remaining steps"})
-            break
-
-        step_type = step.get("type", "")
-        step_label = step.get("target") or step.get("text") or step.get("title") or step.get("name") or step_type
-
-        # Map step_type → feature tool name
-        tool_name = _STEP_TO_TOOL.get(step_type)
-        if not tool_name:
-            _emit("step_complete", {
-                "step_num": step_index, "tool": step_type,
-                "step_type": step_type, "status": "skipped",
-                "result": {"success": False, "error": f"Unknown step type: {step_type}"},
-            })
-            errors += 1
-            continue
-
-        # Build kwargs from step fields
-        kwargs = _STEP_TO_KWARGS(step_type, step)
-        _emit("log", {"level": "info", "message": f"Step {step_index}/{len(structured_steps)}: {tool_name}({kwargs})"})
-
-        # ── Inline handlers for special step types ──
-        if tool_name == "__check_condition__":
-            try:
-                from features.action_map import _eval_condition
-                cond_ok = _eval_condition(kwargs.get("condition", ""))
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "check_condition",
-                    "step_type": step_type, "status": "completed" if cond_ok else "failed",
-                    "result": {"success": cond_ok, "condition": kwargs.get("condition", "")},
-                })
-                if not cond_ok:
-                    errors += 1
-            except Exception as exc:
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "check_condition",
-                    "step_type": step_type, "status": "failed",
-                    "result": {"success": False, "error": str(exc)},
-                })
-                errors += 1
-            continue
-
-        if tool_name == "__wait_until__":
-            condition = kwargs.get("condition", "")
-            timeout = kwargs.get("timeout", 10)
-            deadline = time.time() + timeout
-            found = False
-            try:
-                from features.action_map import _eval_condition
-                while time.time() < deadline:
-                    if stop_event and stop_event.is_set():
-                        break
-                    if _eval_condition(condition):
-                        found = True
-                        break
-                    time.sleep(0.5)
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "wait_until",
-                    "step_type": step_type, "status": "completed" if found else "failed",
-                    "result": {"success": found, "condition": condition, "timeout": timeout},
-                })
-                if not found:
-                    errors += 1
-            except Exception as exc:
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "wait_until",
-                    "step_type": step_type, "status": "failed",
-                    "result": {"success": False, "error": str(exc)},
-                })
-                errors += 1
-            continue
-
-        # ── Condition step (if/else branching) ──
-        if tool_name == "__condition__":
-            try:
-                cond_text = step.get("condition", "")
-                true_branch = step.get("true_branch", [])
-                false_branch = step.get("false_branch", [])
-                _emit("log", {"level": "info", "message": f"Evaluating condition: {cond_text}"})
-
-                # Evaluate screen_change condition via wait_screen_change
-                cond_met = False
-                if "屏幕" in cond_text and "变化" in cond_text:
-                    try:
-                        region = step.get("region", "")
-                        args = {"timeout": step.get("timeout", 3)}
-                        if region:
-                            # region can be a string "x,y,w,h" or an object {x,y,w,h}
-                            if isinstance(region, str) and region.count(",") == 3:
-                                args["region"] = region
-                            elif isinstance(region, dict):
-                                args["region"] = f"{region.get('x',0)},{region.get('y',0)},{region.get('w',0)},{region.get('h',0)}"
-                        r = registry.execute("wait_screen_change", **args)
-                        if r.get("success"):
-                            result_data = r.get("result", {})
-                            cond_met = bool(result_data.get("matched", False))
-                    except Exception:
-                        cond_met = False
-                else:
-                    # Fallback: use _eval_condition for standard conditions
-                    from features.action_map import _eval_condition
-                    cond_met = _eval_condition(cond_text)
-
-                branch = true_branch if cond_met else false_branch
-                _emit("log", {"level": "info", "message": f"Condition '{cond_text}' = {cond_met}, executing {len(branch)} branch steps"})
-
-                # Execute branch steps recursively
-                branch_errors = 0
-                for i, branch_step in enumerate(branch):
-                    if stop_event and stop_event.is_set():
-                        break
-                    bs_type = branch_step.get("type", "")
-                    bs_tool = _STEP_TO_TOOL.get(bs_type)
-                    if not bs_tool:
-                        continue
-                    bs_kwargs = _STEP_TO_KWARGS(bs_type, branch_step)
-                    bs_ok = _execute_supervised_step(
-                        agent, bs_tool, bs_kwargs,
-                        f"{step_index}.{i+1}", len(structured_steps))
-                    if not bs_ok:
-                        branch_errors += 1
-
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "condition",
-                    "step_type": step_type, "status": "completed",
-                    "result": {"success": True, "condition": cond_text, "cond_met": cond_met,
-                               "branch_errors": branch_errors},
-                })
-                errors += branch_errors
-            except Exception as exc:
-                _emit("step_complete", {
-                    "step_num": step_index, "tool": "condition",
-                    "step_type": step_type, "status": "failed",
-                    "result": {"success": False, "error": str(exc)},
-                })
-                errors += 1
-            continue
-
-        # Execute with unified supervision (LingdongAgent)
-        step_ok = _execute_supervised_step(
-            agent, tool_name, kwargs, step_index, len(structured_steps))
-        if not step_ok:
-            errors += 1
-
-    # Summary
-    completed = step_index - errors
-    status = "completed" if errors == 0 else ("stopped" if (stop_event and stop_event.is_set()) else "failed")
-    _emit("agent_done", {
-        "status": status,
-        "total_steps": step_index,
-        "steps": [],
-        "summary": f"Executed {step_index} steps ({completed} ok, {errors} errors)",
-    })
-    _log("info", f"Supervised execution done — status={status}, steps={step_index}, errors={errors}")
+    _log("info", f"Agent done — status={'success' if result.get('success') else 'failed'}, total_steps={total}")
 
 
 # ====================================================================

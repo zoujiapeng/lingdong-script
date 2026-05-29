@@ -33,7 +33,9 @@ from features.state import get_logs
     ],
 )
 def ai_generate_dsl(task: str, api_key: str = "", context: str = "") -> dict:
-    key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+    key = api_key or os.getenv("ANTHROPIC_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    api_base = (os.getenv("LLM_API_BASE") or "https://api.deepseek.com/v1").rstrip("/")
+    model = os.getenv("LLM_MODEL") or "deepseek-chat"
     feature_ctx = _build_feature_context()
 
     system_prompt = f"""你是 Lobster 自动化系统的 DSL 规划引擎。
@@ -57,23 +59,41 @@ def ai_generate_dsl(task: str, api_key: str = "", context: str = "") -> dict:
         }
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-20250514", max_tokens=1024,
-            system=system_prompt,
-            messages=[{"role": "user", "content": task}],
+        # 使用 OpenAI 兼容接口（兼容 MIMO / DeepSeek / GPT / Claude API 等）
+        import requests as _req
+        resp = _req.post(
+            f"{api_base}/chat/completions",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {key}"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task},
+                ],
+                "max_tokens": 2048,
+                "temperature": 0.3,
+            },
+            timeout=60,
         )
-        dsl = msg.content[0].text.strip()
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
+        dsl = raw.strip()
+        # 移除可能的 markdown 代码块包裹
+        if dsl.startswith("```"):
+            dsl = dsl.split("\n", 1)[1] if "\n" in dsl else dsl
+            dsl = dsl.rsplit("```", 1)[0].strip()
         from engine.dsl_parser import DSLParser
         try:
             ast = DSLParser.from_string(dsl).to_dict()
         except Exception:
             ast = None
+        usage = data.get("usage", {})
         return {
             "dsl": dsl, "ast": ast,
-            "input_tokens": msg.usage.input_tokens,
-            "output_tokens": msg.usage.output_tokens,
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
             "simulated": False,
         }
     except Exception as e:

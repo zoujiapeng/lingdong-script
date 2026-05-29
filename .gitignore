@@ -55,6 +55,21 @@ test_*.wav
 # Temp state files
 \357\200\272TEMPstate.json
 
+# Junk / temp files from development
+0
+@AutomationLog.txt
+canvas_snapshot.txt
+screenshot_view.jpg
+test_screenshot.jpg
+test_ui.png
+test_ui_small.png
+vision_demo.py
+vision_demo2/
+omni_parser_repo.zip
+
+# User temp directory pointers
+UserszouDesktop*/
+
 # Voice model files (downloaded on demand)
 python/voice/models/
 python/voice/whisper_models/

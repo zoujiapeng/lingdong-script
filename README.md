@@ -156,14 +156,18 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **回放控制** — 支持速度调节、循环播放
 
 ### AI Agent（核心特性）
+- **统一执行引擎** — 4 种执行模式（text_protocol / langgraph / planned / direct）折叠为 1 个 `_unified_run()`，通过 `AgentConfig` dataclass 解耦所有配置轴
+- **设置面板可视化控制** — 7 项可调参数（LLM 协议、视觉模式、规划策略、屏幕上下文、错误处理、快速模式、截图去重），实时生效
+- **MIMO 全面兼容** — 多模态模型在所有规划策略（pre_plan / per_step）、所有视觉模式（direct / som / omniparser）下正常工作
+- **`resolve_auto()` 智能适配** — 多模态模型自动选择 text+direct+per_step+minimal；纯文本模型自动选择 function_calling+som+pre_plan+full
+- **向后兼容** — 旧版 IPC 协议（`mimo` + `supervise` 布尔标志）自动转换为 AgentConfig，无缝过渡
 - **自主规划** — AI 分析目标，自动生成执行计划（流程图可视化展示）
 - **监督执行** — Agent stay alive 逐步执行，不再生成脚本后退出
 - **窗口焦点安全** — 每步执行前检查目标窗口，防止输入错窗口
 - **OCR 验证** — 执行后自动 OCR 验证结果，确保操作生效
 - **失败恢复** — LLM 决策恢复策略（重试/替代方案/跳过/终止）
 - **自然语言生成** — 用中文描述需求，AI 自动生成 DSL 并转为流程图
-- **智能补全** — AI 推荐下一步操作节点
-- **多种 LLM** — 支持 DeepSeek、OpenAI 等兼容接口
+- **多种 LLM** — 支持 DeepSeek、MIMO、OpenAI 等兼容接口
 
 ### 语音对话
 - **内置语音服务器** — 基于 WebSocket 的实时语音识别与合成

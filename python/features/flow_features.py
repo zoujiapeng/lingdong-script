@@ -80,6 +80,8 @@ def _build_structured_types_section() -> str:
         f'- Browser: {browser_linear}',
         "- Each pseudo line maps to exactly one structured step",
         "- NO loop/sub_flow types — flatten loops into linear steps",
+        "- Each step can optionally include a `path_level` (0-6) to specify the optimal access path (lower = faster/more reliable). Omit for auto-selection based on step type.",
+        "- Each step can optionally include `depends_on` like `depends_on: [1, 3]` (1-based step indices) for explicit dependency ordering. Omit for sequential order.",
         "",
         "Condition step example (if/else branching):",
         '  {"type": "condition", "condition": "屏幕是否变化", "true_branch": [{"type": "hotkey", "keys": ["win", "l"]}], "false_branch": [{"type": "hotkey", "keys": ["volume_up"]}]}',
@@ -94,11 +96,16 @@ def _build_structured_types_section() -> str:
     ])
 
 
+_DSL_REFERENCE_CACHE = None
+
 def _build_dsl_reference() -> str:
     """动态从注册表构建完整的 DSL 关键字参考（让 LLM 知道所有可用指令）。"""
+    global _DSL_REFERENCE_CACHE
+    if _DSL_REFERENCE_CACHE is not None:
+        return _DSL_REFERENCE_CACHE
     try:
         from features.registry import registry
-        import features._all  # noqa: F401
+        # 注意: 不要在模块加载时调用此函数。features._all 由调用方确保已导入。
         # Group by category
         cats = {}
         for f in registry.all():
@@ -118,17 +125,30 @@ def _build_dsl_reference() -> str:
                     params += " ..."
                 lines.append(f"  {f.dsl_keyword}  {params}  # {f.description[:60]}")
             lines.append("")
-        return "\n".join(lines)
+        _DSL_REFERENCE_CACHE = "\n".join(lines)
+        return _DSL_REFERENCE_CACHE
     except Exception:
         return ""
 
 
-# Build the prompt at module load time so it includes the full registry
-_DSL_REFERENCE = _build_dsl_reference()
+_GEN_PROMPT_CACHE: str | None = None
 
-GENERATION_PROMPT = f"""You are an automation script generator. Given a user's goal, generate a step-by-step pseudocode script, structured steps, and LOBSTER DSL.
+def _get_generation_prompt() -> str:
+    """延迟构建 GENERATION_PROMPT — 模块加载时不执行，首次调用时才生成。"""
+    global _GEN_PROMPT_CACHE
+    if _GEN_PROMPT_CACHE is not None:
+        return _GEN_PROMPT_CACHE
+    _GEN_PROMPT_CACHE = _BUILD_GEN_PROMPT_TEMPLATE.format(
+        commands_section=_build_commands_section(),
+        dsl_reference=_build_dsl_reference(),
+        structured_types=_build_structured_types_section(),
+    )
+    return _GEN_PROMPT_CACHE
 
-{_build_commands_section()}
+
+_BUILD_GEN_PROMPT_TEMPLATE = """You are an automation script generator. Given a user's goal, generate a step-by-step pseudocode script, structured steps, and LOBSTER DSL.
+
+{commands_section}
 
 IMPORTANT RULES:
 1. Do NOT use `运行命令` to launch GUI apps (notepad, calc, mspaint, chrome, explorer) — use `启动` instead
@@ -183,6 +203,30 @@ IMPORTANT RULES:
     f. DSL output for condition: IF {{条件}} / [true_branch steps] / ELSE / [false_branch steps] / END
     g. IMPORTANT: Do NOT use "loop" or "sub_flow" types — those remain unsupported. Flatten loops by repeating steps.
 
+18. GOAL PREFIX — When the goal starts with [路径: ...], this is the system's recommended access path. Use it when assigning path_level to steps. E.g., [路径: 浏览器自动化] → use Level 1 (BROWSER_CDP). [路径: 系统操作] → use Level 0 (DIRECT_API).
+
+━━━ PATH HIERARCHY (7-Level Access Path System) ━━━
+The system has 7 access path levels (0=fastest/most-reliable to 6=slowest/most-flexible).
+Each step should use the LOWEST possible level that can accomplish the task:
+
+  Level 0 — DIRECT_API:  直接 API 调用（文件、剪贴板、快捷键、命令行、进程管理）— 最快，无需UI交互
+  Level 1 — BROWSER_CDP: 浏览器 CDP (Playwright) — 网页自动化首选，精确 CSS 选择器定位元素
+  Level 2 — WINDOWS_UIA: Windows UIA 无障碍树 — 桌面标准控件（按钮、输入框、列表、菜单）
+  Level 3 — VISUAL_OCR:  OCR 文字识别 — 屏幕文字定位，适合无 API/无障碍接口的界面
+  Level 4 — VISUAL_SOM:  Set-of-Mark 视觉标号 — 图像模板匹配 + AI 视觉分析，适合自定义控件/图像
+  Level 5 — MACRO:       宏录制回放 — 预录的鼠标/键盘事件序列，适合固定轨迹的精确时序操作
+  Level 6 — DSL_GEN:     AI 生成 DSL — 动态脚本生成，最慢，用于运行时动态决策
+
+Path selection rules by task type:
+- 文件/剪贴板/注册表/进程/系统设置/快捷键 → Level 0 (DIRECT_API)
+- 浏览器网页（导航/点击/输入/提取文字）→ Level 1 (BROWSER_CDP)
+- 桌面 GUI 应用的标准控件 → Level 2 (WINDOWS_UIA)
+- 图片/自定义控件/无文字标签的元素 → Level 3-4 (OCR / 视觉)
+- 固定轨迹的鼠标操作 → Level 5 (MACRO)
+- 动态内容需 AI 现场决策 → Level 6 (DSL_GEN)
+
+Each structured step can include an optional "path_level" field (0-6) to specify the optimal access path. When omitted, the system auto-selects based on step type.
+
 BASIC DSL SYNTAX (common commands):
   CLICK {{target}}           — click on text/coordinate
   WAIT {{seconds}}           — wait for N seconds
@@ -195,7 +239,7 @@ BASIC DSL SYNTAX (common commands):
   DRAG {{x1}} {{y1}} TO {{x2}} {{y2}}  — drag from-to
 
 + ALL commands below are also available as DSL keywords (use the keyword as the first token):
-{_DSL_REFERENCE}
+{dsl_reference}
 
 ━━━ EXAMPLE 1: Browser workflow (flat, no condition) — for "5秒后打开浏览器搜索deepseek然后在里面登录，完成后5秒打开记事本":
 
@@ -223,15 +267,15 @@ WAIT 5
 LAUNCH 记事本",
   "structured_steps": [
     {{"type": "wait", "duration": 5}},
-    {{"type": "browser_navigate", "url": "https://www.deepseek.com"}},
+    {{"type": "browser_navigate", "url": "https://www.deepseek.com", "path_level": 1}},
     {{"type": "browser_wait_element", "selector": ".login-btn", "timeout": 10}},
-    {{"type": "browser_click", "selector": ".login-btn"}},
+    {{"type": "browser_click", "selector": ".login-btn", "path_level": 1}},
     {{"type": "browser_wait_element", "selector": "#username-input", "timeout": 10}},
-    {{"type": "browser_type", "selector": "#username-input", "text": "等待用户输入凭据"}},
+    {{"type": "browser_type", "selector": "#username-input", "text": "等待用户输入凭据", "path_level": 1}},
     {{"type": "browser_click", "selector": ".submit-btn"}},
     {{"type": "browser_wait_element", "selector": ".user-center", "timeout": 15}},
     {{"type": "wait", "duration": 5}},
-    {{"type": "launch", "target": "记事本"}}
+    {{"type": "launch", "target": "记事本", "path_level": 0}}
   ]
 }}
 
@@ -291,7 +335,7 @@ CRITICAL: Before you respond, analyze the user's goal. If it contains ANY condit
 
 Respond ONLY with a JSON object (no markdown, no extra text).
 
-{_build_structured_types_section()}"""
+{structured_types}"""
 
 
 # ── Step type aliases for normalization ────────────────────────────
@@ -557,18 +601,38 @@ def _steps_to_pseudocode(steps: list) -> str:
     returns="dict{success, pseudocode, explanation} - 生成的脚本",
     tags=["agent", "flow", "generation"],
 )
+def _is_mimo_model(model: str) -> bool:
+    """检测模型是否为 MIMO（不支持 response_format 等 OpenAI 特有参数）。"""
+    name = model.strip().lower()
+    return name.startswith("mimo-") or "mimo" in name
+
+
 def generate_flow_script(goal: str) -> dict:
     if not goal.strip():
         return {"success": False, "error": "goal 不能为空"}
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or ""
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY", "") or ""
     api_base = (os.environ.get("LLM_API_BASE") or "https://api.deepseek.com/v1").rstrip("/")
     model = os.environ.get("LLM_MODEL") or "deepseek-chat"
     multimodal_env = os.environ.get("LLM_MULTIMODAL", "")
     multimodal = multimodal_env.lower() in ("true", "1", "yes")
+    is_mimo = _is_mimo_model(model)
 
     if not api_key:
-        return {"success": False, "error": "未配置 API 密钥（设置 ANTHROPIC_API_KEY 环境变量或在应用设置中配置）"}
+        return {"success": False, "error": "未配置 API 密钥（在应用设置中配置 API Key）"}
+
+    # 构建请求体：MIMO 不支持 response_format 参数
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _get_generation_prompt()},
+            {"role": "user", "content": goal},
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.1,
+    }
+    if not is_mimo:
+        payload["response_format"] = {"type": "json_object"}
 
     try:
         import requests as _req
@@ -579,16 +643,7 @@ def generate_flow_script(goal: str) -> dict:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": GENERATION_PROMPT},
-                    {"role": "user", "content": goal},
-                ],
-                "response_format": {"type": "json_object"},
-                "max_tokens": 4096,
-                "temperature": 0.1,
-            },
+            json=payload,
             timeout=60,
         )
 

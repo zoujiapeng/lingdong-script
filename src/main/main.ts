@@ -673,7 +673,7 @@ let _agentLineBuffer = '';
 /** UTF-8 decoder for agent stdout (handles multi-byte chars split across chunks) */
 let _agentDecoder: StringDecoder;
 
-function startAgentProcess(goal: string, config?: Record<string, string>, supervise: boolean = true, steps?: any[]) {
+function startAgentProcess(goal: string, config?: Record<string, any>, supervise: boolean = true, steps?: any[]) {
   // Stop existing agent if running — kill immediately, then wait before spawning new one
   if (agentProcess && !agentProcess.killed) {
     sendToAgent({ type: 'stop' });
@@ -745,7 +745,7 @@ function startAgentProcess(goal: string, config?: Record<string, string>, superv
   }, 300);
 }
 
-ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, string>, supervise?: boolean, steps?: any[]) => {
+ipcMain.handle('agent:start', (_, goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) => {
   startAgentProcess(goal, config, supervise ?? true, steps);
   return { success: true };
 });

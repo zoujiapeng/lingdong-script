@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional
 
@@ -104,7 +105,21 @@ def vlm_locate(screenshot_path: str, description: str,
     ext = os.path.splitext(screenshot_path)[1].lower()
     mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "bmp": "image/bmp"}.get(ext, "image/png")
 
-    system_prompt = """你是一个屏幕分析助手。给定一张屏幕截图和一段元素描述，你需要返回该元素的精确位置。
+    model_lower = model.lower()
+    is_mimo = "mimo" in model_lower
+
+    if is_mimo:
+        system_prompt = """你是一个屏幕分析助手。给定一张屏幕截图和一段元素描述，你需要返回该元素的精确位置。
+
+分析规则:
+1. 仔细查看截图，找到描述的目标元素
+2. 返回该元素在截图中的精确边界框 (bounding box) 坐标
+3. 坐标单位是像素，原点在截图左上角
+
+请直接返回如下格式的 JSON (不要用 markdown 代码块包裹):
+{"x": 100, "y": 200, "w": 80, "h": 30, "label": "搜索按钮", "confidence": 0.95}"""
+    else:
+        system_prompt = """你是一个屏幕分析助手。给定一张屏幕截图和一段元素描述，你需要返回该元素的精确位置。
 
 分析规则:
 1. 仔细查看截图，找到描述的目标元素
@@ -114,6 +129,20 @@ def vlm_locate(screenshot_path: str, description: str,
 请以 JSON 格式回复，不要包含其他文字:
 {"x": 100, "y": 200, "w": 80, "h": 30, "label": "搜索按钮", "confidence": 0.95}"""
 
+    # 构建请求体 (不传 response_format，MIMO 等模型不支持)
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"请找到截图中的: {description}"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
+            ]},
+        ],
+        "max_tokens": 512,
+        "temperature": 0.01,
+    }
+
     try:
         resp = _req.post(
             f"{api_base.rstrip('/')}/chat/completions",
@@ -121,19 +150,7 @@ def vlm_locate(screenshot_path: str, description: str,
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": f"请找到截图中的: {description}"},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
-                    ]},
-                ],
-                "response_format": {"type": "json_object"},
-                "max_tokens": 256,
-                "temperature": 0.1,
-            },
+            json=body,
             timeout=timeout,
         )
         if resp.status_code == 401:
@@ -145,14 +162,101 @@ def vlm_locate(screenshot_path: str, description: str,
         resp.raise_for_status()
 
         raw = resp.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(raw)
-        x = parsed.get("x", 0)
-        y = parsed.get("y", 0)
-        w = parsed.get("w", 0)
-        h = parsed.get("h", 0)
+
+        # 宽容解析: 尝试直接从 markdown 代码块提取 JSON
+        # 宽容解析: 尝试直接从 markdown 代码块提取 JSON
+        parsed = None
+        # 先尝试直接解析
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 从 ```json ... ``` 块提取
+        if parsed is None:
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    pass
+
+        # 从纯 { } 提取
+        if parsed is None:
+            m = re.search(r'\{[^{}]*"x"\s*:\s*\d+[^{}]*\}', raw, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+        # 修复不完整 JSON: {"x": 10, "y": 900 → 补全为 {"x": 10, "y": 900}
+        if parsed is None:
+            fixed = raw.strip()
+            # 如果以 { 开头但没有匹配的 }
+            if fixed.startswith("{") and "}" not in fixed:
+                fixed += "}"
+                try:
+                    parsed = json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+            # 如果包含 { 但没有结束
+            if parsed is None:
+                brace_start = fixed.find("{")
+                if brace_start >= 0:
+                    rest = fixed[brace_start:]
+                    if "}" not in rest:
+                        rest += "}"
+                        try:
+                            parsed = json.loads(rest)
+                        except json.JSONDecodeError:
+                            pass
+
+        if parsed is None:
+            logger.warning("VLM returned non-JSON: %s", raw[:200])
+            return None
+
+        # 归一化坐标: 处理多种 JSON 格式
+        x, y, w, h = 0, 0, 0, 0
+        conf = 0.7
+
+        # 格式1: {"x": 100, "y": 200, "w": 80, "h": 30, ...}
+        if "x" in parsed and "y" in parsed and ("w" in parsed or "width" in parsed):
+            x = int(parsed.get("x", 0))
+            y = int(parsed.get("y", 0))
+            w = int(parsed.get("w", parsed.get("width", 0)))
+            h = int(parsed.get("h", parsed.get("height", 0)))
+            conf = float(parsed.get("confidence", conf))
+
+        # 格式2: {"taskbar": {"coordinates": [x1, y1, x2, y2]}, ...}
+        # 或 {"taskbar": {"x": ..., "y": ..., "w": ..., "h": ...}}
+        if w <= 0 or h <= 0:
+            for key, val in parsed.items():
+                if not isinstance(val, dict):
+                    continue
+                # {key: {coordinates: [x1, y1, x2, y2]}}
+                if "coordinates" in val and isinstance(val["coordinates"], list) and len(val["coordinates"]) == 4:
+                    x = int(val["coordinates"][0])
+                    y = int(val["coordinates"][1])
+                    x2 = int(val["coordinates"][2])
+                    y2 = int(val["coordinates"][3])
+                    w = x2 - x
+                    h = y2 - y
+                    if "confidence" in val:
+                        conf = float(val["confidence"])
+                    break
+                # {key: {x: ..., y: ..., w: ..., h: ...}}
+                if "x" in val and "y" in val and ("w" in val or "width" in val):
+                    x = int(val.get("x", 0))
+                    y = int(val.get("y", 0))
+                    w = int(val.get("w", val.get("width", 0)))
+                    h = int(val.get("h", val.get("height", 0)))
+                    if "confidence" in val:
+                        conf = float(val["confidence"])
+                    break
 
         if w <= 0 or h <= 0:
-            logger.warning("VLM returned invalid bbox: %s", raw)
+            logger.warning("VLM returned zero bbox: %s", raw[:200])
             return None
 
         return {
