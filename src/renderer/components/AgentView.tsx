@@ -1,7 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { List, Wifi, WifiOff, Mic, MicOff } from 'lucide-react';
+import { List, Wifi, WifiOff, Mic, MicOff, Clock } from 'lucide-react';
 import { VoiceConversationPanel } from './common/VoiceConversationPanel';
+import { PlanVisualizer } from './common/PlanVisualizer';
+import type { AgentRunRecord } from '../types';
 
 interface StepData {
   step_num: number;
@@ -50,6 +52,11 @@ export function AgentView() {
   const [voiceConversationMode, setVoiceConversationMode] = useState(false);
   const [voicePanelMinimized, setVoicePanelMinimized] = useState(false);
 
+  // Completion summary
+  const [lastSummary, setLastSummary] = useState<{ status: string; steps: number; goal: string } | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const agentHistory = useStore((s) => s.agentHistory);
+
   const loadAgentTools = async () => {
     setToolsLoading(true);
     try {
@@ -86,8 +93,23 @@ export function AgentView() {
       switch (msg.type) {
         case 'agent_start':
           _hasActiveRun = true;
+          // Clear cached steps on new run
+          _cachedSteps = null;
           addEntry({ type: 'system', text: `正在处理：${msg.goal}` });
           setRunning(true);
+          setLastSummary(null);
+          break;
+
+        case 'plan_state':
+          // PlanVisualizer picks up from Zustand store — no local log needed
+          // But add a log entry for plan generation
+          if (msg.plan?.nodes?.length > 0 && !msg.final) {
+            addEntry({ type: 'system', text: `计划已生成：${msg.plan.nodes.length} 个步骤` });
+          }
+          break;
+
+        case 'step_attempt':
+          addEntry({ type: 'system', text: `[重试] ${msg.tool} (第 ${msg.attempt} 次)` });
           break;
 
         case 'step_complete': {
@@ -136,6 +158,13 @@ export function AgentView() {
           }
           setRunning(false);
           _hasActiveRun = false;
+          // Set summary for dashboard
+          const planState = useStore.getState().execution.plan;
+          setLastSummary({
+            status: msg.status,
+            steps: msg.total_steps || 0,
+            goal: msg.goal || planState?.goal || goalRef.current.slice(0, 80),
+          });
           break;
 
         case 'log':
@@ -187,6 +216,12 @@ export function AgentView() {
           setOfflineRunning(false);
           setRunning(false);
           _hasActiveRun = false;
+          // Summary for offline mode
+          setLastSummary({
+            status: msg.status === 'completed' ? 'completed' : 'failed',
+            steps: msg.total_nodes || 0,
+            goal: goalRef.current.slice(0, 80),
+          });
           break;
       }
     });
@@ -216,6 +251,7 @@ export function AgentView() {
       ? (window as any).__LLM_MULTIMODAL__ : localStorage.getItem('lingdong-llm-multimodal') === 'true';
     const verifyEnabled = localStorage.getItem('lingdong-verify-enabled') === 'true';
     const autoLearn = localStorage.getItem('lingdong-auto-learn') === 'true';
+    const omniparserEnabled = localStorage.getItem('lingdong-omniparser') === 'true';
     const apiKey = rawKey.trim();
     const apiBase = rawBase.trim();
     const model = rawModel.trim();
@@ -229,7 +265,26 @@ export function AgentView() {
     try {
       // In execution mode, pass cached structured_steps so agent doesn't re-call API
       const stepsArg = supervise ? _cachedSteps : undefined;
-      await window.electronAPI!.agentStart(goal.trim(), { api_key: apiKey, api_base: apiBase, model, multimodal: multimodal ? 'true' : 'false', verify_enabled: verifyEnabled ? 'true' : 'false', auto_learn: autoLearn ? 'true' : 'false' }, supervise, stepsArg ?? undefined);
+            // Read unified AgentConfig from localStorage (set via SettingsPanel)
+      const agentConfig = {
+        llm_protocol: localStorage.getItem('lingdong-agent-protocol') ?? 'auto',
+        vision_mode: localStorage.getItem('lingdong-agent-vision') ?? 'auto',
+        planning: localStorage.getItem('lingdong-agent-planning') ?? 'auto',
+        screen_context: localStorage.getItem('lingdong-agent-context') ?? 'auto',
+        on_error: localStorage.getItem('lingdong-agent-on-error') ?? 'retry',
+        fast_mode: localStorage.getItem('lingdong-agent-fast-mode') === 'true',
+        image_dedup: localStorage.getItem('lingdong-agent-image-dedup') !== 'false',
+      };
+      await window.electronAPI!.agentStart(goal.trim(), {
+        api_key: apiKey,
+        api_base: apiBase,
+        model,
+        multimodal: multimodal ? 'true' : 'false',
+        verify_enabled: verifyEnabled ? 'true' : 'false',
+        auto_learn: autoLearn ? 'true' : 'false',
+        omniparser_enabled: omniparserEnabled ? 'true' : 'false',
+        agent_config: agentConfig,  // NEW: unified agent config
+      }, supervise, stepsArg ?? undefined);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
@@ -246,6 +301,12 @@ export function AgentView() {
       addEntry({ type: 'system', text: '已停止' });
       setRunning(false);
       _hasActiveRun = false;
+      // Show summary on stop
+      setLastSummary({
+        status: 'failed',
+        steps: 0,
+        goal: goalRef.current.slice(0, 80),
+      });
     } catch (err: any) {
       addEntry({ type: 'system', text: `停止失败: ${err.message}` });
     }
@@ -420,6 +481,123 @@ export function AgentView() {
           )}
         </div>
         )}
+        {/* Plan DAG visualizer */}
+        {!voiceConversationMode && (running || lastSummary) && (
+          <PlanVisualizer />
+        )}
+
+        {/* Completion summary */}
+        {!voiceConversationMode && lastSummary && !running && (
+          <div className="agent-summary">
+            <div className="agent-summary-header">
+              <span className={`agent-summary-status ${lastSummary.status === 'completed' ? 'completed' : 'failed'}`}>
+                {lastSummary.status === 'completed' ? '✓ 完成' : '✗ 失败'}
+              </span>
+              <span style={{ flex: 1, fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {lastSummary.goal}
+              </span>
+              <button className="btn btn-ghost btn-icon"
+                onClick={() => setLastSummary(null)}
+                style={{ width: 20, height: 20 }} title="关闭">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <div className="agent-summary-stats">
+              {(() => {
+                const plan = useStore.getState().execution.plan;
+                const sum = plan?.summary;
+                const failedCount = sum?.failed || 0;
+                const skippedCount = sum?.skipped || 0;
+                return (
+                  <>
+                    <div className="agent-summary-stat">
+                      <span className="agent-summary-stat-value">{lastSummary.steps}</span>
+                      <span className="agent-summary-stat-label">总步数</span>
+                    </div>
+                    <div className="agent-summary-stat">
+                      <span className="agent-summary-stat-value" style={{ color: '#4CAF50' }}>{sum?.completed || lastSummary.status === 'completed' ? lastSummary.steps : 0}</span>
+                      <span className="agent-summary-stat-label">成功</span>
+                    </div>
+                    {failedCount > 0 && (
+                      <div className="agent-summary-stat">
+                        <span className="agent-summary-stat-value" style={{ color: '#F44336' }}>{failedCount}</span>
+                        <span className="agent-summary-stat-label">失败</span>
+                      </div>
+                    )}
+                    {skippedCount > 0 && (
+                      <div className="agent-summary-stat">
+                        <span className="agent-summary-stat-value" style={{ color: '#9E9E9E' }}>{skippedCount}</span>
+                        <span className="agent-summary-stat-label">跳过</span>
+                      </div>
+                    )}
+                    <div className="agent-summary-stat">
+                      <span className="agent-summary-stat-value" style={{ color: 'var(--text-muted)', fontSize: 14 }}>
+                        {(() => {
+                          const planNode = useStore.getState().execution.plan;
+                          if (!planNode?.nodes) return '';
+                          const levels = new Set(planNode.nodes.map((n: any) => n.path_level));
+                          return [...levels].sort().join('/');
+                        })()}
+                      </span>
+                      <span className="agent-summary-stat-label">路径层级</span>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+            <div className="agent-summary-footer">
+              <button className="agent-btn" style={{ fontSize: 11, padding: '4px 12px' }}
+                onClick={() => {
+                  setLastSummary(null);
+                  const goal = goalRef.current;
+                  if (goal.trim()) runAgent(true);
+                }}>
+                重新执行
+              </button>
+              {lastSummary.status === 'completed' && (
+                <button className="agent-btn" style={{ fontSize: 11, padding: '4px 12px' }}
+                  onClick={() => {
+                    setLastSummary(null);
+                    _persistedLog = [];
+                    setLog([]);
+                  }}>
+                  清除日志
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* History toggle */}
+        {!voiceConversationMode && !running && agentHistory.length > 0 && (
+          <div className="agent-history-toggle" onClick={() => setShowHistory(!showHistory)}>
+            <Clock size={12} />
+            <span>执行历史 ({agentHistory.length})</span>
+            <span style={{ marginLeft: 'auto', fontSize: 10, transition: 'transform 0.15s', display: 'inline-block', transform: showHistory ? 'rotate(90deg)' : 'none' }}>▶</span>
+          </div>
+        )}
+
+        {/* History panel */}
+        {!voiceConversationMode && showHistory && agentHistory.length > 0 && (
+          <div className="agent-history-panel">
+            {agentHistory.slice(0, 20).map((h: AgentRunRecord) => (
+              <div key={h.id} className="agent-history-item"
+                onClick={() => {
+                  handleSetGoal(h.goal);
+                  setShowHistory(false);
+                }}
+                title="点击填入目标">
+                <div className={`agent-history-status ${h.status}`} />
+                <span className="agent-history-goal" title={h.goal}>{h.goal || '(无目标)'}</span>
+                <span className="agent-history-meta">
+                  {h.total_steps} 步 · {h.elapsed_seconds}s
+                  {h.failed_steps > 0 && <span style={{ color: '#F44336', marginLeft: 4 }}>✗{h.failed_steps}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Log area */}
         {!voiceConversationMode && (
         <>

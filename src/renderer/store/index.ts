@@ -18,6 +18,9 @@ import {
   RecordingState,
   LearnedTarget,
   ParamPromptItem,
+  AgentRunRecord,
+  PlanNodeState,
+  PlanDAGState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { getNodeDimensions } from '../utils/constants';
@@ -648,6 +651,11 @@ interface AppStore {
   recordLearnedTarget: (targetId: string, success: boolean) => Promise<void>;
   toggleLearnedPanel: () => void;
 
+  // Agent execution history
+  agentHistory: AgentRunRecord[];
+  addAgentHistory: (record: AgentRunRecord) => void;
+  clearAgentHistory: () => void;
+
   // Crystallized templates
   crystallizedTemplates: any[];
   newCrystallizedCount: number;
@@ -699,6 +707,7 @@ export const useStore = create<AppStore>()(
       log: [],
       breakpoints: [],
       stepping: false,
+      plan: undefined,
     },
     clipboard: null,
     _executor: null,
@@ -711,6 +720,8 @@ export const useStore = create<AppStore>()(
     showLearnedPanel: false,
     crystallizedTemplates: [],
     newCrystallizedCount: 0,
+
+    agentHistory: loadAgentHistory(),
 
     triggers: [],
     scriptTriggers: [],
@@ -727,7 +738,7 @@ export const useStore = create<AppStore>()(
         state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
-        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false };
+        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false, plan: undefined };
       });
       if (s.nodes.length > 0) get().fitToScreen();
     },
@@ -742,7 +753,7 @@ export const useStore = create<AppStore>()(
         state.scriptTriggers = s.triggers || [];
         state.isDirty = false;
         state.ui.selection = { nodes: [], edges: [] };
-        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false };
+        state.execution = { status: 'idle', variables: {}, log: [], breakpoints: [], stepping: false, plan: undefined };
       });
       if (s.nodes.length > 0) get().fitToScreen();
     },
@@ -1561,6 +1572,20 @@ export const useStore = create<AppStore>()(
       if (!get().showLearnedPanel) get().fetchLearnedTargets();
     },
 
+    // ── Agent Execution History ──
+
+    addAgentHistory: (record) => {
+      set((s) => {
+        s.agentHistory = [record, ...s.agentHistory].slice(0, 50);
+      });
+      saveAgentHistory(get().agentHistory);
+    },
+
+    clearAgentHistory: () => {
+      set((s) => { s.agentHistory = []; });
+      saveAgentHistory([]);
+    },
+
     // Crystallized templates
     fetchCrystallizedTemplates: async () => {
       try {
@@ -1782,6 +1807,23 @@ export function saveCustomTemplates(templates: CustomTemplate[]) {
   } catch {}
 }
 
+// ── Agent History Persistence ──
+
+const AGENT_HISTORY_KEY = 'lingdong-agent-history';
+
+export function loadAgentHistory(): AgentRunRecord[] {
+  try {
+    const saved = localStorage.getItem(AGENT_HISTORY_KEY);
+    return saved ? JSON.parse(saved) : [];
+  } catch { return []; }
+}
+
+export function saveAgentHistory(history: AgentRunRecord[]) {
+  try {
+    localStorage.setItem(AGENT_HISTORY_KEY, JSON.stringify(history.slice(0, 50)));
+  } catch {}
+}
+
 // Restore from localStorage on load
 try {
   const saved = localStorage.getItem(STORAGE_KEY);
@@ -1890,33 +1932,125 @@ function _registerListeners() {
       useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
     }));
 
-    _listenerCleanups.push(_api.onAgentMessage((msg: any) => {
-      if (msg.type === 'step_complete' && msg.tool === 'generate_flow_script' && msg.result?.success) {
-        const data = msg.result.data || {};
-        const pseudocode = data.pseudocode || data.result?.result?.pseudocode || data.result?.pseudocode;
-        if (pseudocode) {
-          import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
-            try {
-              const script = parsePseudoToFlow(pseudocode);
-              const store = useStore.getState();
-              script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
-              store.loadScript(script);
-              store.setViewMode('canvas');
-            } catch (e) { console.error('[agent] loadScript failed:', e); }
+    // Agent message dedup guard: track last agent_done to prevent duplicate handling
+    let _agentDoneGoal = '';
+    let _agentStartTime = 0;
+
+    _listenerCleanups.push(_api.onAgentMessage((msg: Record<string, unknown>) => {
+      const msgType = typeof msg?.type === 'string' ? msg.type : '';
+      if (!msgType) return;
+
+      if (msgType === 'plan_state') {
+        const planData = msg.plan as Record<string, unknown> | undefined;
+        if (!planData?.nodes) return;
+        const nodes = (planData.nodes as PlanNodeState[]) ?? [];
+        useStore.setState((s) => {
+          s.execution.plan = {
+            goal: (planData.goal as string) ?? '',
+            status: (planData.status as string) ?? 'running',
+            nodes,
+            summary: planData.summary as PlanDAGState['summary'],
+          };
+          const runningNode = nodes.find((n: PlanNodeState) => n.status === 'running');
+          const failedNode = nodes.find((n: PlanNodeState) => n.status === 'failed');
+          s.execution.current_node_id = runningNode?.id ?? failedNode?.id ?? s.execution.current_node_id;
+          if (msg.final) {
+            s.execution.status = planData.status === 'completed' ? 'completed' : 'error';
+            s.execution.current_node_id = undefined;
+          }
+        });
+        return;
+      }
+
+      if (msgType === 'step_attempt') {
+        const nodeId = typeof msg.node_id === 'string' ? msg.node_id : '';
+        const tool = typeof msg.tool === 'string' ? msg.tool : '';
+        if (!nodeId) return;
+        useStore.setState((s) => {
+          const node = s.execution.plan?.nodes?.find((n: PlanNodeState) => n.id === nodeId);
+          if (node) {
+            node.attempts = (node.attempts ?? 0) + 1;
+            if (tool) node.tool = tool;
+          }
+        });
+        return;
+      }
+
+      if (msgType === 'step_complete') {
+        const tool = typeof msg.tool === 'string' ? msg.tool : '';
+        const result = msg.result as Record<string, unknown> | undefined;
+        if (tool === 'generate_flow_script' && result?.success) {
+          const data = (result.data as Record<string, unknown>) ?? {};
+          const dataResult = data.result as Record<string, unknown> | undefined;
+          const pseudocode =
+            (data.pseudocode as string) ??
+            (dataResult?.pseudocode as string) ??
+            ((dataResult?.result as Record<string, unknown> | undefined)?.pseudocode as string);
+          if (pseudocode) {
+            import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
+              try {
+                const script = parsePseudoToFlow(pseudocode);
+                const store = useStore.getState();
+                script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
+                store.loadScript(script);
+                store.setViewMode('canvas');
+              } catch (e) { console.error('[agent] loadScript failed:', e); }
+            });
+          }
+        } else if (tool !== 'generate_flow_script' && result) {
+          useStore.setState((s) => {
+            s.execution.status = result.success ? 'running' : 'error';
+            const stepNum = typeof msg.step_num === 'number' ? msg.step_num : undefined;
+            s.execution.current_node_id = stepNum != null ? `agent_step_${stepNum}` : undefined;
           });
         }
+        return;
       }
-      if (msg.type === 'step_complete' && msg.tool !== 'generate_flow_script' && msg.result) {
+
+      if (msgType === 'agent_start') {
+        // Reset state on new run; clear dedup guard; record start time
+        _agentDoneGoal = '';
+        _agentStartTime = Date.now();
         useStore.setState((s) => {
-          s.execution.status = msg.result.success ? 'running' : 'error';
-          s.execution.current_node_id = msg.step_num ? `agent_step_${msg.step_num}` : undefined;
+          s.execution.plan = undefined;
         });
+        return;
       }
-      if (msg.type === 'agent_done') {
+
+      if (msgType === 'agent_done') {
+        const status = typeof msg.status === 'string' ? msg.status : 'failed';
+        const totalSteps = typeof msg.total_steps === 'number' ? msg.total_steps : 0;
+        const goal = typeof msg.goal === 'string' ? msg.goal : '';
+        const failReason = typeof msg.fail_reason === 'string' ? msg.fail_reason : '';
+        const summaryText = typeof msg.summary === 'string' ? msg.summary : '';
+
+        // Dedup: agent_done with same goal should only fire once
+        if (goal && _agentDoneGoal === goal) return;
+        if (goal) _agentDoneGoal = goal;
+
         useStore.setState((s) => {
-          s.execution.status = msg.status === 'completed' ? 'completed' : 'error';
+          s.execution.status = status === 'completed' ? 'completed' : 'error';
           s.execution.current_node_id = undefined;
         });
+
+        // Record history
+        const plan = useStore.getState().execution.plan;
+        const elapsed = _agentStartTime > 0 ? Math.round((Date.now() - _agentStartTime) / 1000) : 0;
+        const record: AgentRunRecord = {
+          id: Math.random().toString(36).slice(2, 10),
+          goal: goal || plan?.goal || '',
+          status: status === 'completed' ? 'completed' : status === 'stopped' ? 'stopped' : 'failed',
+          total_steps: totalSteps,
+          completed_steps: plan?.summary?.completed ?? 0,
+          failed_steps: plan?.summary?.failed ?? 0,
+          skipped_steps: plan?.summary?.skipped ?? 0,
+          started_at: new Date(_agentStartTime || Date.now()).toISOString(),
+          finished_at: new Date().toISOString(),
+          elapsed_seconds: elapsed,
+          summary: summaryText || failReason || '',
+        };
+        useStore.getState().addAgentHistory(record);
+        return;
       }
     }));
 

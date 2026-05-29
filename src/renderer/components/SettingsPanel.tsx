@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
-import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain, Volume2, Sun as SunIcon, Wifi, Package, Activity, Monitor } from 'lucide-react';
+import { Settings, Moon, Sun, Grid3x3, Magnet, Eye, Key, Gauge, AlertTriangle, RefreshCw, FileText, CheckCircle, Loader2, Clock, Plus, Trash2, Shield, Brain, Volume2, Sun as SunIcon, Wifi, Package, Activity, Monitor, MessageSquare, GitBranch, Camera, Zap } from 'lucide-react';
 import { ScheduleDialog } from './common/ScheduleDialog';
 
 const KEY_STORAGE = 'lingdong-deepseek-key';
@@ -57,6 +57,45 @@ function storeAutoLearn(val: boolean) {
   try { localStorage.setItem(AUTO_LEARN_STORAGE, val ? 'true' : 'false'); } catch {}
 }
 
+const OMNIPARSER_STORAGE = 'lingdong-omniparser';
+function getStoredOmniparser(): boolean {
+  try { return localStorage.getItem(OMNIPARSER_STORAGE) === 'true'; } catch { return false; }
+}
+function storeOmniparser(val: boolean) {
+  try { localStorage.setItem(OMNIPARSER_STORAGE, val ? 'true' : 'false'); } catch {}
+}
+
+// Agent 配置 storage keys
+const AGENT_PROTOCOL_KEY = 'lingdong-agent-protocol';
+const AGENT_VISION_KEY = 'lingdong-agent-vision';
+const AGENT_PLANNING_KEY = 'lingdong-agent-planning';
+const AGENT_CONTEXT_KEY = 'lingdong-agent-context';
+const AGENT_ONERROR_KEY = 'lingdong-agent-on-error';
+const AGENT_FAST_MODE_KEY = 'lingdong-agent-fast-mode';
+const AGENT_DEDUP_KEY = 'lingdong-agent-image-dedup';
+
+function getStoredAgentProtocol(): string {
+  try { return localStorage.getItem(AGENT_PROTOCOL_KEY) || 'auto'; } catch { return 'auto'; }
+}
+function getStoredAgentVision(): string {
+  try { return localStorage.getItem(AGENT_VISION_KEY) || 'auto'; } catch { return 'auto'; }
+}
+function getStoredAgentPlanning(): string {
+  try { return localStorage.getItem(AGENT_PLANNING_KEY) || 'auto'; } catch { return 'auto'; }
+}
+function getStoredAgentContext(): string {
+  try { return localStorage.getItem(AGENT_CONTEXT_KEY) || 'auto'; } catch { return 'auto'; }
+}
+function getStoredAgentOnError(): string {
+  try { return localStorage.getItem(AGENT_ONERROR_KEY) || 'retry'; } catch { return 'retry'; }
+}
+function getStoredAgentFastMode(): boolean {
+  try { return localStorage.getItem(AGENT_FAST_MODE_KEY) === 'true'; } catch { return false; }
+}
+function getStoredAgentDedup(): boolean {
+  try { return localStorage.getItem(AGENT_DEDUP_KEY) !== 'false'; } catch { return true; }
+}
+
 const ELEVENLABS_KEY_STORAGE = 'lingdong-elevenlabs-key';
 const ELEVENLABS_VOICE_STORAGE = 'lingdong-elevenlabs-voice';
 function getStoredElevenlabsKey(): string {
@@ -103,6 +142,17 @@ export function SettingsPanel() {
   const [visionBackend, setVisionBackend] = useState(() => getStoredVisionBackend());
   const [verifyEnabled, setVerifyEnabled] = useState(() => getStoredVerify());
   const [autoLearn, setAutoLearn] = useState(() => getStoredAutoLearn());
+  const [omniparserEnabled, setOmniparserEnabled] = useState(() => getStoredOmniparser());
+
+  // Agent 配置 state
+  const [agentProtocol, setAgentProtocol] = useState(() => getStoredAgentProtocol());
+  const [agentVision, setAgentVision] = useState(() => getStoredAgentVision());
+  const [agentPlanning, setAgentPlanning] = useState(() => getStoredAgentPlanning());
+  const [agentContext, setAgentContext] = useState(() => getStoredAgentContext());
+  const [agentOnError, setAgentOnError] = useState(() => getStoredAgentOnError());
+  const [agentFastMode, setAgentFastMode] = useState(() => getStoredAgentFastMode());
+  const [agentDedup, setAgentDedup] = useState(() => getStoredAgentDedup());
+
   const [elevenlabsKey, setElevenlabsKey] = useState(() => getStoredElevenlabsKey());
   const [elevenlabsVoiceId, setElevenlabsVoiceId] = useState(() => getStoredElevenlabsVoice());
   const [elevenlabsSaved, setElevenlabsSaved] = useState(false);
@@ -521,6 +571,158 @@ export function SettingsPanel() {
               开启后 Agent 每次执行成功自动记录屏幕状态和目标信息，后续可快速复用相似任务。
             </div>
           )}
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Monitor size={15} />
+              <span>OmniParser（增强 SoM 标注）</span>
+            </div>
+            <button
+              className={`toggle ${omniparserEnabled ? 'on' : ''}`}
+              onClick={() => { const v = !omniparserEnabled; setOmniparserEnabled(v); storeOmniparser(v); }}
+            />
+          </div>
+          {!omniparserEnabled && (
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+              OmniParser 使用 YOLOv8+Florence-2 进行图标检测和描述，需要 transformers&lt;5.0。
+              默认关闭，使用 UIA+OCR 已满足大多数场景。
+            </div>
+          )}
+          {omniparserEnabled && (
+            <div style={{ fontSize: 11, color: 'var(--warning)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+              需要安装 transformers&lt;5.0 和 OmniParser 权重。首次启用时 Agent 会自动下载并启动。
+            </div>
+          )}
+        </section>
+
+        {/* Agent 配置 */}
+        <section className="settings-section">
+          <h3 className="settings-section-title">
+            <Brain size={15} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+            Agent 配置
+          </h3>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <MessageSquare size={15} />
+              <span>LLM 协议</span>
+            </div>
+            <select
+              value={agentProtocol}
+              onChange={e => { setAgentProtocol(e.target.value); localStorage.setItem(AGENT_PROTOCOL_KEY, e.target.value); }}
+              style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+            >
+              <option value="auto">自动</option>
+              <option value="text">文本协议</option>
+              <option value="function_calling">函数调用</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            文本协议适用于 MIMO/纯文本模型；函数调用适用于 DeepSeek/GPT/Claude。
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Eye size={15} />
+              <span>视觉模式</span>
+            </div>
+            <select
+              value={agentVision}
+              onChange={e => { setAgentVision(e.target.value); localStorage.setItem(AGENT_VISION_KEY, e.target.value); }}
+              style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+            >
+              <option value="auto">自动</option>
+              <option value="direct">直接截图（多模态）</option>
+              <option value="som">SoM 标号</option>
+              <option value="omniparser">OmniParser</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            direct: 直接发送截图给多模态模型；SoM: 截图编号后发送（适合纯文本模型）。
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <GitBranch size={15} />
+              <span>规划策略</span>
+            </div>
+            <select
+              value={agentPlanning}
+              onChange={e => { setAgentPlanning(e.target.value); localStorage.setItem(AGENT_PLANNING_KEY, e.target.value); }}
+              style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+            >
+              <option value="auto">自动</option>
+              <option value="per_step">逐步骤（ReAct 循环）</option>
+              <option value="pre_plan">先生成计划（DAG）</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            per_step: 每步截图+LLM 决策（多模态推荐）；pre_plan: 一次生成全部步骤再执行。
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <FileText size={15} />
+              <span>屏幕上下文</span>
+            </div>
+            <select
+              value={agentContext}
+              onChange={e => { setAgentContext(e.target.value); localStorage.setItem(AGENT_CONTEXT_KEY, e.target.value); }}
+              style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+            >
+              <option value="auto">自动</option>
+              <option value="minimal">精简</option>
+              <option value="full">完整</option>
+            </select>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            精简: 仅窗口标题+鼠标位置；完整: UIA 树+进程+窗口列表。
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <AlertTriangle size={15} />
+              <span>错误处理</span>
+            </div>
+            <select
+              value={agentOnError}
+              onChange={e => { setAgentOnError(e.target.value); localStorage.setItem(AGENT_ONERROR_KEY, e.target.value); }}
+              style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)' }}
+            >
+              <option value="retry">重试</option>
+              <option value="replan">重新规划</option>
+              <option value="skip">跳过</option>
+              <option value="stop">停止</option>
+            </select>
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Zap size={15} />
+              <span>快速模式</span>
+            </div>
+            <button
+              className={`toggle ${agentFastMode ? 'on' : ''}`}
+              onClick={() => { const v = !agentFastMode; setAgentFastMode(v); localStorage.setItem(AGENT_FAST_MODE_KEY, v ? 'true' : 'false'); }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            启用后减少历史窗口大小和等待时间，以节省 token。
+          </div>
+
+          <div className="settings-row">
+            <div className="settings-row-label">
+              <Camera size={15} />
+              <span>去重截图</span>
+            </div>
+            <button
+              className={`toggle ${agentDedup ? 'on' : ''}`}
+              onClick={() => { const v = !agentDedup; setAgentDedup(v); localStorage.setItem(AGENT_DEDUP_KEY, v ? 'true' : 'false'); }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '0 0 4px 28px', lineHeight: 1.5 }}>
+            截图内容未变化时跳过发送，减少 token 消耗。
+          </div>
         </section>
 
         {/* TTS 语音 */}

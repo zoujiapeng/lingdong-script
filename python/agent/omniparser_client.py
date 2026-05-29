@@ -52,6 +52,7 @@ class OmniParserClient:
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._available = False
+        self._permanently_failed = False  # 防止重复启动
 
     # ── Server lifecycle ──────────────────────────────────────────
 
@@ -69,6 +70,8 @@ class OmniParserClient:
         Returns True if the server is running after startup (either
         newly started or already running).
         """
+        if self._permanently_failed:
+            return False
         with self._lock:
             if self._available:
                 return True
@@ -78,6 +81,20 @@ class OmniParserClient:
                 if self._check_server():
                     self._available = True
                     return True
+
+            # Fast dependency check — skip OmniParser if transformers >= 5.0 (incompatible)
+            try:
+                import transformers
+                tv = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+                if tv >= (5, 0):
+                    logger.warning(
+                        "OmniParser requires transformers<5.0, got %s. Permanently disabled.",
+                        transformers.__version__,
+                    )
+                    self._permanently_failed = True
+                    return False
+            except Exception:
+                pass
 
             # Validate paths
             if not os.path.isfile(SERVER_SCRIPT):
@@ -122,6 +139,8 @@ class OmniParserClient:
             while time.time() < deadline:
                 if self._process.poll() is not None:
                     logger.warning("OmniParser server exited prematurely (code %d)", self._process.returncode)
+                    self._process = None
+                    self._permanently_failed = True
                     return False
                 if self._check_server():
                     self._available = True
@@ -130,6 +149,12 @@ class OmniParserClient:
                 time.sleep(HEALTH_CHECK_INTERVAL)
 
             logger.warning("OmniParser server failed to start within %ds", SERVER_START_TIMEOUT)
+            # 清理挂起的进程，标记为永久不可用，避免后续调用再次等待 60s
+            self._process.kill()
+            self._process.wait(timeout=3)
+            self._process = None
+            self._available = False
+            self._permanently_failed = True
             return False
 
     def stop(self):

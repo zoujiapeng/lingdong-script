@@ -16,12 +16,14 @@ LingdongAgent — 统一的桌面自动化 AI Agent
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("agent.lingdong")
@@ -30,243 +32,81 @@ DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2-omni"
 MAX_STEPS = 50
 
+# ── 已知多模态模型列表（可直接"看"截图，不需要 SoM 标号）──
+_MULTIMODAL_MODELS = frozenset({
+    "mimo-v2-omni", "mimo-omni", "mimo-v2", "mimo-pro",
+    "gpt-4o", "gpt-4o-mini", "gpt-4v", "gpt-4-vision",
+    "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+    "claude-3.5-sonnet", "claude-3.5-haiku",
+    "claude-4", "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
+    "gemini-pro-vision", "gemini-1.5-pro", "gemini-1.5-flash",
+    "qwen-vl", "qwen2-vl", "glm-4v", "glm-4v-plus",
+    "deepseek-vl2", "deepseek-vl",
+})
+
+_MULTIMODAL_PREFIXES = ("mimo-", "gpt-4", "claude-3", "claude-4", "claude-opus", "claude-sonnet", "claude-haiku", "gemini-", "qwen-vl", "qwen2-vl", "glm-4v", "deepseek-vl")
+
+
+def _is_multimodal_model(model_name: str) -> bool:
+    """检测模型是否支持图像理解（多模态视觉能力）。
+
+    多模态模型可以直接从截图中读取按钮文字、识别界面元素，
+    不需要 SoM 标号或 OCR 文本注入。
+    """
+    name = model_name.strip().lower()
+    if name in _MULTIMODAL_MODELS:
+        return True
+    for prefix in _MULTIMODAL_PREFIXES:
+        if name.startswith(prefix):
+            return True
+    # DeepSeek 纯文本模型排除
+    if "deepseek" in name and not any(vl in name for vl in ("vl", "vision")):
+        return False
+    # 包含 vision/multimodal 关键词
+    if "vision" in name or "multimodal" in name or "omni" in name:
+        return True
+    return False
+
+
 # ── 文本协议模式系统提示词 ─────────────────────────────────────
 
-SYSTEM_PROMPT_TEXT = """你是灵动脚本 (Lingdong Script) 的 AI Agent，可以通过 {tool_count} 个工具操控 Windows 电脑完成任何桌面自动化任务。
+SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个工具可用，在工具列表中按需选择。
 
 ## 工作方式
+每次我给你：截图 + 屏幕状态。你选择下一个工具调用。
+完成后回复 总结。
 
-每次我给你：
-1. 当前屏幕截图
-2. 之前操作的结果
-
-你需要：
-1. 观察截图，理解当前桌面状态
-2. 思考：当前处于什么状态？下一步该做什么？
-3. 从下方场景分组中选择合适的工具
-
-## 回复格式
-
-你必须严格按照以下格式回复：
-
+## 格式
 ```
-思考: 你的分析过程...
-工具: 工具名称
+思考: <你的推理>
+工具: <工具名>
 参数:
   参数名1: 值1
-  参数名2: 值2
+```
+完成:
+```
+总结: <结果>
 ```
 
-如果你认为任务已完成，回复：
-```
-总结: 完成了什么, 结果如何
-```
-
-## 可用工具（按使用场景分组）
-
+## 工具
 {tools_text}
-
----
-
-## 典型工作流
-
-### 示例1: 桌面应用操作（通用模式）
-适用于任何桌面应用：QQ/微信发消息、记事本、设置、安装程序等。
-
-```
-1. launch_program(target="应用名")      # 启动(已运行则自动聚焦)
-2. wait_process_start(name="进程名")     # 等进程起来
-3. focus_window(title="窗口标题")        # 确保前台
-4. screenshot()                         # 截图看状态
-5. popup_close()                        # 清理弹窗
-6. ocr_find_text(query="目标文字")       # OCR找目标
-7. click_target(target="目标文字")       # 点击
-8. wait_screen_change(timeout=3)        # 等界面变化
-9. screenshot()                         # 截图验证
-10. 重复 定位→点击→验证 直到任务完成
-```
-
-关键模式：任何点击/输入后必须截图验证效果，不要假设操作成功。
-
-### 示例2: 浏览器自动化
-适用于网页操作、数据提取、表单填写。
-
-```
-1. browser_navigate(url="https://...")   # 打开网页
-2. browser_wait_page_load(timeout=10)    # 等加载
-3. browser_find_elements(selector="css") # 看页面结构
-4. browser_click(text="链接文字")         # 点击
-5. browser_wait_navigation(timeout=5)    # 等跳转
-6. browser_type(selector="#input", text="xxx") # 输入
-7. browser_get_text(selector=".result")  # 提取内容
-8. browser_screenshot()                  # 截图留存
-```
-
-### 示例3: 错误恢复
-工具返回 success=true 但屏幕没变化时：
-
-```
-1. screenshot()                          # 确认当前状态
-2. 如果确实没变化:
-   a. click_target 无效 → 先用 ocr_find_text 取坐标再点
-   b. type_text 无效 → 改用 type_clipboard（中文）
-   c. 找不到窗口 → list_windows() 查实际标题
-3. 连续3次同工具失败 → 换完全不同的方法
-```
-
-## 重要规则
-
-1. **启动 vs 命令**: launch_program 启动GUI(非阻塞)，run_command 执行命令(阻塞有返回值)
-2. **中文输入**: 必须用 type_clipboard 而非 type_text（绕过输入法）
-3. **验证**: 每次操作后必须截图验证，不可假设成功
-4. **弹窗**: 操作前先 popup_close() 清理干扰
-5. **浏览器优先**: 网页操作优先用 browser_*，不用桌面通用点击
-6. **文件对话框**: 用 filedialog_* 工具，不要用 click_target 点对话框
-7. **失败换策略**: 连续2次失败必须换完全不同方法，禁止重复同一工具
-8. **编号定位优先**: 如果截图上有蓝色框和 #N 编号，用编号定位（target: #3）代替文字描述，
-   精度更高。编号在屏幕元素列表中可以查到对应元素。
-9. **目标达成后**回复总结（不要继续多余操作）
 """
 
 # ── 工具描述生成 (from MimoAgent) ─────────────────────────────
 
 def _build_tools_text() -> str:
-    """生成按场景分组的工具描述文本。"""
-    from features.registry import registry
-    import features._all  # noqa
-
-    spec_map = {}
-    for spec in registry.all():
-        if spec.deprecated or spec.hidden:
-            continue
-        spec_map[spec.name] = spec
-
-    def _fmt(spec, max_desc=80):
-        if not spec:
-            return ""
-        key_params = []
-        for p in spec.params:
-            if p.required:
-                key_params.append(p.name)
-            elif p.name in ("timeout", "region", "threshold", "similarity",
-                            "delay", "confirm", "target", "path", "keys",
-                            "checked", "query", "value", "direction",
-                            "name", "amount", "text", "action"):
-                key_params.append(p.name)
-        param_str = f"({', '.join(key_params[:4])})" if key_params else "()"
-        desc = spec.description[:max_desc].split("\n")[0].strip()
-        desc = re.sub(r"^【[^】]*】\s*", "", desc)
-        return f"  {spec.name}{param_str} → {desc}"
-
-    browser_tools = {s.name for s in spec_map.values()
-                     if s.name.startswith("browser_") or s.name == "web_browser_execute"}
-    vision_tools = {
-        "screenshot", "ocr_find_text", "ocr_extract_all", "find_image",
-        "find_element", "find_canvas", "color_check", "detect_color",
-        "detect_progress", "scene_match", "wait_element", "popup_close",
-        "wait_region", "wait_screen_change", "wait_screen_stable",
-    }
-    click_tools = {
-        "click_target", "image_click", "capture_multi", "type_text",
-        "type_clipboard", "hotkey", "drag", "scroll", "wheel_select",
-        "region_select", "menu_click",
-        "filedialog_open", "filedialog_save", "filedialog_folder",
-    }
-    window_tools = {
-        "launch_program", "focus_window", "list_windows", "get_active_window",
-        "kill_process", "wait_process_start", "wait_process_exit",
-        "detect_process", "find_processes", "show_desktop",
-    }
-    system_tools = {
-        "run_command", "network_status", "volume_set", "volume_mute",
-        "display_brightness", "display_off", "shutdown", "reboot",
-        "logoff", "hibernate", "system_sleep", "set_wallpaper",
-        "battery_status", "empty_recycle_bin",
-    }
-    file_tools = {
-        "file_read", "file_write", "file_edit", "file_append",
-        "file_delete", "file_copy", "file_move", "file_list", "file_exists",
-    }
-    ai_tools = {
-        "vlm_analyze", "dsl_to_flow", "flow_to_dsl", "create_flow_from_dsl",
-        "run_dsl", "run_dsl_sync", "run_dsl_robot", "ai_generate_dsl",
-        "ai_plan_and_execute", "wait_action", "wait_condition",
-        "set_variable", "get_variable", "generate_flow_script",
-        "search_flow_templates",
-    }
-    macro_tools = {
-        "macro_start_recording", "macro_stop_recording", "macro_playback",
-        "macro_list", "macro_delete", "macro_get_events",
-        "macro_convert_to_flow",
-        "macro_start_visual_recording", "macro_stop_visual_recording",
-        "macro_extract_visual_templates",
-    }
-    camera_tools = {
-        "camera_list", "camera_capture", "camera_detect_motion",
-        "camera_record_start", "camera_record_stop",
-        "screen_record_start", "screen_record_stop",
-    }
-
-    groups = [
-        ("1. 浏览器操作 — Browser",
-         "操作网页/Web应用时优先使用此组工具。自动管理浏览器生命周期。",
-         browser_tools),
-        ("2. 截图与视觉识别 — Screenshot & OCR",
-         "获取屏幕信息、定位文字/图标、判断画面状态。每步操作后建议截图验证。",
-         vision_tools),
-        ("3. 目标点击与输入 — Click & Input",
-         "点击屏幕元素、输入文字、快捷键、文件对话框。中文务必用type_clipboard。",
-         click_tools),
-        ("4. 窗口与进程管理 — Window & Process",
-         "启动/关闭程序、切换窗口。GUI用launch_program(非阻塞)，命令用run_command(阻塞有返回值)。",
-         window_tools),
-        ("5. 系统控制与命令 — System",
-         "Shell命令执行、电源管理、音量、网络等系统操作。",
-         system_tools),
-        ("6. 文件操作 — File",
-         "读写编辑文件、目录浏览、文件复制移动删除。使用绝对路径。",
-         file_tools),
-        ("7. AI规划与DSL执行 — AI & DSL",
-         "自然语言生成自动化流程、执行DSL脚本、VLM分析画面。",
-         ai_tools),
-        ("8. 宏录制与回放 — Macro",
-         "录制操作序列并回放。适合需要精确重现的操作流程。",
-         macro_tools),
-        ("9. 摄像头与录屏 — Camera & Screen",
-         "摄像头拍照/录像/运动检测、屏幕录制。",
-         camera_tools),
-    ]
-
-    all_grouped = set()
-    lines = []
-    for title, scenario, tool_set in groups:
-        all_grouped.update(tool_set)
-        tools_in_group = [s for s in spec_map.values() if s.name in tool_set]
-        if not tools_in_group:
-            continue
-        lines.append(f"\n### {title}")
-        lines.append(f"   {scenario}")
-        for t in sorted(tools_in_group, key=lambda x: x.name):
-            lines.append(_fmt(t))
-
-    ungrouped = {n: s for n, s in spec_map.items() if n not in all_grouped}
-    if ungrouped:
-        from collections import defaultdict
-        by_cat = defaultdict(list)
-        for name, spec in sorted(ungrouped.items()):
-            cat_name = spec.category.value.upper() if spec.category else "其他"
-            by_cat[cat_name].append(name)
-        lines.append("\n### 10. 其他辅助工具（按类别汇总，需要时查看详情）")
-        for cat in sorted(by_cat.keys()):
-            names = by_cat[cat]
-            lines.append(f"   {cat} ({len(names)}): {' / '.join(sorted(names))}")
-
-    return "\n".join(lines)
+    """生成按访问模式分组的工具描述文本（替代旧的按场景平铺分组）。"""
+    from agent.tool_path_selector import build_path_prompt
+    return build_path_prompt()
 
 
 # ====================================================================
 #  LingdongAgent — 统一 Agent
 # ====================================================================
+
+from agent.supervisor import Supervisor
+from agent.state_persistence import RunSummary, save_run, load_history
+from agent.config import AgentConfig, agent_config_from_legacy
 
 class LingdongAgent:
     """统一的桌面自动化 AI Agent。
@@ -279,29 +119,14 @@ class LingdongAgent:
         stop_event: 停止信号
     """
 
-    # GUI 动作集合 (受益于窗口焦点 + 重试 + 屏幕稳定)
-    GUI_ACTIONS = frozenset({
-        "click_target", "right_click", "hover", "mouse_move",
-        "type_text", "type_clipboard",
-        "hotkey", "scroll", "drag", "swipe",
-        "triple_click", "middle_click", "select_text",
-    })
-
-    # 不需要截图的工具 (读取类操作)
-    NO_SCREENSHOT_TOOLS = frozenset({
-        "list_windows", "get_active_window", "find_element", "ocr_find_text",
-        "ocr_extract_all", "get_variable", "file_read", "file_list",
-        "battery_status", "network_status", "detect_process",
-        "find_processes",
-    })
-
     # ── 初始化 ────────────────────────────────────────────────
 
     def __init__(self, api_key: str = "", api_base: str = "", model: str = "",
                  event_callback: Optional[Callable] = None,
                  stop_event: Optional[threading.Event] = None,
                  multimodal: bool = False,
-                 auto_learn: bool = False):
+                 auto_learn: bool = False,
+                 omniparser_enabled: bool = False):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         self.api_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
                          or os.environ.get("LLM_API_BASE", "")
@@ -311,14 +136,30 @@ class LingdongAgent:
         self.auto_learn = auto_learn
         self._event_cb = event_callback
         self._stop_event = stop_event or threading.Event()
-        self._last_launched: str = ""
         self._tools_text: str = ""
         self._system_prompt: str = ""
         self._registry_loaded = False
         self._som_enabled = True  # SoM 标号（截图元素编号）
-        self._last_som_map: dict[int, dict] = {}  # 编号→{text,x,y,w,h}
-        self._last_som_ts: float = 0  # 标号截图的像素时间戳
         self._omniparser = None  # OmniParser client (lazy init)
+        self._omniparser_enabled = omniparser_enabled  # 默认关闭，可在设置中开启
+
+        # 监督层 (Supervisor) — 被所有三种执行模式共享
+        self.supervisor = Supervisor(
+            emit_event=self._emit,
+            stop_event=self._stop_event,
+            auto_learn=self.auto_learn,
+            multimodal=self.multimodal,
+            api_key=self.api_key,
+            api_base=self.api_base,
+            model=self.model,
+        )
+
+        # Load run history for context continuity
+        self._history: list = []
+        try:
+            self._history = load_history(limit=10)
+        except Exception:
+            pass
 
         # Export env vars for downstream features
         if self.api_key:
@@ -355,371 +196,15 @@ class LingdongAgent:
         if self._event_cb:
             self._event_cb({"type": event, **data})
 
-    # ══════════════════════════════════════════════════════════
-    #  监督层 (共享于双模式)
-    # ══════════════════════════════════════════════════════════
+    def _get_screen_context(self, minimal: bool = False) -> str:
+        """获取当前屏幕上下文。
 
-    def _ensure_safe_window(self, tool_name: str, args: dict) -> dict:
-        """窗口焦点安全：GUI 操作前确认目标窗口已激活。"""
-        try:
-            target_hint = (
-                args.get("target_window") or
-                args.get("target") or
-                args.get("title") or
-                self._last_launched or ""
-            )
-            if not target_hint:
-                return {"success": True, "focused": True}
-
-            from features.registry import registry as r
-            result = r.execute("get_active_window")
-            active_data = result if isinstance(result, dict) else {}
-            active_data = active_data.get("result", active_data)
-            active_title = ""
-            if isinstance(active_data, dict):
-                active_title = active_data.get("title", "")
-
-            if target_hint.lower() in active_title.lower():
-                return {"success": True, "focused": True}
-
-            r.execute("focus_window", title=target_hint)
-            time.sleep(0.3)
-            return {"success": True, "focused": True}
-        except Exception as e:
-            logger.warning("Window focus check failed: %s", e)
-            return {"success": False, "focused": False, "error": str(e)}
-
-    @staticmethod
-    def _wait_screen_stable(timeout: float = 1.5):
-        """等待屏幕稳定。"""
-        time.sleep(min(timeout, 1.5))
-
-    def _auto_handle_dialogs(self) -> bool:
-        """自动关闭可见对话框。"""
-        try:
-            time.sleep(0.3)
-            from agent.dialog_handler import handle_any_dialog
-            result = handle_any_dialog()
-            if result != "not_found":
-                logger.info("Dialog handled: %s", result)
-                return True
-        except Exception:
-            pass
-        return False
-
-    def _apply_visual_locator(self, name: str, args: dict) -> dict:
-        """视觉定位：经验库 → VLM 兜底，注入坐标到 args。
-
-        仅当 auto_learn 或 multimodal 开启时生效。
-        (目前默认关闭，经验库自动学习暂不启用)
+        minimal=True: 仅窗口标题 + 鼠标位置（适合多模态模型，它们能从截图直接"看"到界面）
+        minimal=False: 完整上下文（UIA 树 + 进程列表 + 窗口列表）
         """
-        # 防御性检查：两标志都关时不执行任何定位/学习逻辑
-        if not self.auto_learn and not self.multimodal:
-            return args
-        _MAP = {
-            "click_target":   ("target", "click"),
-            "right_click":    ("target", "click"),
-            "hover":          ("target", "click"),
-            "mouse_move":     ("target", "click"),
-            "type_text":      ("text",   "type"),
-            "type_clipboard": ("text",   "type"),
-            "drag":           ("from_target", "drag"),
-            "scroll":         ("target", "scroll"),
-        }
-
-        if name not in _MAP:
-            return args
-
-        target_param, step_type = _MAP[name]
-        target_text = args.get(target_param, "")
-
-        if not target_text or not isinstance(target_text, str):
-            return args
-        if re.match(r'^-?\d+$', target_text.strip()):
-            return args
-        if re.match(r'^-?\d+\s*,\s*-?\d+$', target_text.strip()):
-            return args
-        x_val, y_val = args.get("x", -1), args.get("y", -1)
-        if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
-            if x_val >= 0 and y_val >= 0:
-                return args
-
-        # Screenshot
-        import pyautogui as _pg
-        import tempfile
-        ss_path = os.path.join(
-            tempfile.gettempdir(),
-            f"lg_vl_{int(time.time())}_{hash(target_text) & 0xFFFF}.png",
-        )
-        try:
-            _pg.screenshot(ss_path)
-        except Exception as exc:
-            logger.warning("Visual locator screenshot failed: %s", exc)
-            return args
-
-        try:
-            from agent import visual_locator as _vl
-            vlm_config = None
-            if self.multimodal and self.api_key:
-                vlm_config = {
-                    "api_key": self.api_key,
-                    "api_base": self.api_base or "https://api.deepseek.com/v1",
-                    "model": self.model or "deepseek-chat",
-                }
-
-            result = _vl.locate(
-                target_text=target_text,
-                step_type=step_type,
-                screenshot_path=ss_path,
-                use_vlm=self.multimodal,
-                vlm_config=vlm_config,
-                window_title="",
-                threshold=0.75,
-            )
-
-            if result.get("success"):
-                coords = result["result"]
-                args = dict(args)
-                cx = coords.get("center_x", coords.get("x", 0))
-                cy = coords.get("center_y", coords.get("y", 0))
-                args["x"] = int(cx)
-                args["y"] = int(cy)
-                if name == "click_target":
-                    args["target"] = f"{cx},{cy}"
-                self._emit("log", {
-                    "level": "info",
-                    "message": f"视觉定位: 「{target_text}」→ ({cx}, {cy}) [{coords.get('method', '?')}]",
-                })
-            else:
-                self._emit("log", {
-                    "level": "debug",
-                    "message": f"视觉定位未命中: 「{target_text}」({result.get('error', '无匹配')})",
-                })
-        except Exception as exc:
-            logger.warning("Visual locator error (non-fatal): %s", exc)
-        finally:
-            try:
-                if os.path.exists(ss_path):
-                    os.remove(ss_path)
-            except Exception:
-                pass
-
-        return args
-
-    @staticmethod
-    def _execute_with_type_conv(name: str, args: dict) -> dict:
-        """参数类型转换 + 注册表执行。"""
-        from features.registry import registry
-        spec = registry.get(name)
-        if spec:
-            converted = {}
-            for p in spec.params:
-                val = args.get(p.name)
-                if val is None:
-                    continue
-                if p.type in ("number", "int"):
-                    try:
-                        converted[p.name] = int(val) if p.type == "int" else float(val)
-                    except (ValueError, TypeError):
-                        converted[p.name] = val
-                elif p.type == "boolean":
-                    if isinstance(val, str):
-                        converted[p.name] = val.lower() in ("true", "1", "yes")
-                    else:
-                        converted[p.name] = bool(val)
-                elif p.type == "array":
-                    if isinstance(val, str):
-                        try:
-                            converted[p.name] = json.loads(val)
-                        except json.JSONDecodeError:
-                            converted[p.name] = [v.strip() for v in val.split(",") if v.strip()]
-                    else:
-                        converted[p.name] = val
-                else:
-                    converted[p.name] = str(val).strip("\"'") if not isinstance(val, str) else val.strip("\"'")
-        else:
-            converted = args
-        return registry.execute(name, **converted)
-
-    def _supervised_execute(self, name: str, args: dict) -> dict:
-        """带完整监督层的工具执行。
-
-        监督流水线:
-          1. 视觉定位 (auto_learn / multimodal) → 注入坐标
-          2. GUI 操作 → 窗口焦点安全
-          3. 执行 + 重试 (GUI: 2 次退避重试, 其他: 1 次)
-          4. GUI 操作后 → 对话框自动处理
-          5. GUI 操作后 → 等待屏幕稳定
-        """
-        is_gui = name in self.GUI_ACTIONS
-
-        # ── 0. SoM 编号解引用（#N → 坐标） ──
-        if is_gui and self._last_som_map:
-            som_target = args.get("target", "") or args.get("text", "") or args.get("from_target", "")
-            if isinstance(som_target, str) and som_target.startswith("#"):
-                try:
-                    idx = int(som_target.lstrip("#").strip())
-                    if idx in self._last_som_map:
-                        m = self._last_som_map[idx]
-                        args = dict(args)
-                        args["target"] = f"{m['x']},{m['y']}"
-                        self._emit("log", {
-                            "level": "info",
-                            "message": f"SoM#{idx}: 「{m['text']}」→ {m['x']},{m['y']}",
-                        })
-                except (ValueError, TypeError):
-                    pass
-
-        # ── 1a. UIA 语义定位（优先：免OCR免ML，Windows 标准控件全覆盖）──
-        if is_gui and name in ("click_target", "right_click", "hover",
-                                "mouse_move", "drag"):
-            target = args.get("target", "") or args.get("from_target", "")
-            if target and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
-                try:
-                    uia_match = self._resolve_via_a11y(target)
-                    if uia_match:
-                        args = dict(args)
-                        args["target"] = f"{uia_match['x']},{uia_match['y']}"
-                        self._emit("log", {
-                            "level": "info",
-                            "message": f"UIA定位: 「{target}」→ {uia_match['x']},{uia_match['y']} ({uia_match['role']})",
-                        })
-                except Exception as e:
-                    logger.warning("UIA resolution error: %s", e)
-
-        # ── 1b. 视觉定位（VLM / 经验库兜底，默认关闭）──
-        if is_gui and (self.auto_learn or self.multimodal):
-            try:
-                args = self._apply_visual_locator(name, args)
-            except Exception as e:
-                logger.warning("Visual locator error: %s", e)
-
-        # ── 2. 窗口焦点 ──
-        if is_gui:
-            self._ensure_safe_window(name, args)
-
-        # ── 3. 执行 + 重试 ──
-        max_retries = 2 if is_gui else 1
-        result = {"success": False, "error": "no_attempt"}
-        for attempt in range(max_retries + 1):
-            if self._stop_event and self._stop_event.is_set():
-                self._emit("log", {"level": "info", "message": f"停止请求，跳过 {name} 重试"})
-                return {"success": False, "error": "stopped"}
-
-            if attempt > 0:
-                delay = 2 ** (attempt - 1)
-                self._emit("log", {"level": "info", "message": f"重试 {name} ({attempt}/{max_retries}, {delay}s)"})
-                time.sleep(delay)
-
-            try:
-                result = self._execute_with_type_conv(name, args)
-                if result.get("success", False):
-                    break
-            except Exception as e:
-                result = {"success": False, "error": str(e)}
-                if attempt >= max_retries:
-                    break
-
-        # ── 4. 对话框处理 ──
-        if is_gui or name in ("screenshot", "hotkey", "launch_program"):
-            self._auto_handle_dialogs()
-
-        # ── 5. 屏幕稳定 ──
-        if is_gui:
-            self._wait_screen_stable()
-
-        # ── 6. 失败诊断：截图记录当前屏幕状态 ──
-        if not result.get("success") and is_gui:
-            try:
-                b64 = self._capture_b64()
-                a11y = self._capture_a11y_summary()
-                self._emit("log", {
-                    "level": "info",
-                    "message": f"故障诊断: {name} 失败 — 当前画面(base64): data:image/jpeg;base64,{b64[:50]}..."
-                })
-                if a11y:
-                    self._emit("log", {"level": "info", "message": a11y})
-            except Exception:
-                pass
-
-        # ── 跟踪启动的程序 ──
-        if name == "launch_program":
-            target = args.get("target") or args.get("name") or ""
-            if target:
-                self._last_launched = target
-
-        return result
-
-    # ══════════════════════════════════════════════════════════
-    #  文本协议模式 (MIMO V2 Omni 等纯文本模型)
-    # ══════════════════════════════════════════════════════════
-
-    def _capture_b64(self, max_size: int = 0) -> str:
-        """全屏截图 → base64 JPEG。"""
-        import cv2
-        from perception.vision import ScreenCapture
-        img = ScreenCapture.capture()
-        if max_size:
-            h, w = img.shape[:2]
-            if max(h, w) > max_size:
-                scale = max_size / max(h, w)
-                new_w, new_h = int(w * scale), int(h * scale)
-                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        return base64.b64encode(buf).decode()
-
-    @staticmethod
-    def _capture_a11y_summary(max_items: int = 30) -> str:
-        """捕获 UIA 无障碍控件树摘要，格式化为结构化文本。
-
-        返回类似:
-          [UI Controls]
-          Button "确定" (520,410 80x30)
-          Edit "搜索" (300,200 200x30)
-          Text "欢迎" (100,100 50x20)
-
-        用于作为 LLM 的结构化观察输入，与截图互补。
-        """
-        try:
-            from features.registry import registry
-            result = registry.execute("a11y_get_tree", depth=2)
-            if not result.get("success"):
-                return ""
-            tree = result.get("result", result)
-            if isinstance(tree, dict):
-                tree = tree.get("result", tree)
-
-            def _walk(node, depth=0):
-                items = []
-                if depth > 3:
-                    return items
-                name = node.get("name", "") or node.get("text", "") or ""
-                role = node.get("control_type", node.get("role", ""))
-                rect = node.get("bounding_rectangle", node.get("rect", {}))
-                if isinstance(rect, dict):
-                    x, y, w, h = rect.get("x", 0), rect.get("y", 0), rect.get("w", 0), rect.get("h", 0)
-                else:
-                    x = y = w = h = 0
-                if name and role and w > 0 and h > 0 and w < 1500 and h < 500:
-                    items.append(f"  {role} \"{name}\" ({x},{y} {w}x{h})")
-                for child in (node.get("children", node.get("items", [])) or []):
-                    if isinstance(child, dict):
-                        items.extend(_walk(child, depth + 1))
-                return items
-
-            visible = _walk(tree)[:max_items]
-            if not visible:
-                return ""
-            return "[UI Controls]\n" + "\n".join(visible)
-        except Exception:
-            return ""
-
-    def _get_screen_context(self) -> str:
-        """获取当前屏幕上下文：窗口信息、分辨率、鼠标位置、UIA 控件摘要。"""
         parts = []
         try:
             from features.registry import registry
-            # 活动窗口
             aw = registry.execute("get_active_window")
             if isinstance(aw, dict):
                 aw_data = aw.get("result", aw)
@@ -727,11 +212,55 @@ class LingdongAgent:
                     title = aw_data.get("title", "") or aw_data.get("name", "")
                     proc = aw_data.get("process", aw_data.get("class", ""))
                     if title:
-                        parts.append(f"窗口: 「{title}」")
+                        parts.append(f"活动窗口: 「{title}」")
                         if proc:
                             parts[-1] += f" ({proc})"
         except Exception:
             pass
+
+        if not minimal:
+            # 所有窗口列表（非 minimal 模式才获取）
+            try:
+                wins_raw = registry.execute("list_windows")
+                wins = wins_raw.get("result", wins_raw) if isinstance(wins_raw, dict) else wins_raw
+                all_titles = []
+                if isinstance(wins, list):
+                    for w in wins:
+                        t = w.get("title", "") if isinstance(w, dict) else str(w)
+                        if t and t.strip():
+                            all_titles.append(t.strip()[:40])
+                if all_titles:
+                    from collections import Counter
+                    title_counts = Counter(all_titles)
+                    summary = []
+                    for title, count in title_counts.most_common(12):
+                        if count > 1:
+                            summary.append(f"「{title}」×{count}")
+                        else:
+                            summary.append(f"「{title}」")
+                    parts.append(f"所有窗口: {'; '.join(summary)}")
+            except Exception:
+                pass
+
+            # 进程摘要（非 minimal 模式）
+            try:
+                import psutil
+                proc_summary = []
+                seen_procs = set()
+                for p in psutil.process_iter(["name"]):
+                    try:
+                        pn = (p.info["name"] or "").lower()
+                        if pn and pn not in seen_procs and pn.endswith(".exe") and len(pn) < 30:
+                            seen_procs.add(pn)
+                            proc_summary.append(pn.replace(".exe", ""))
+                    except Exception:
+                        pass
+                if proc_summary:
+                    parts.append(f"运行中: {', '.join(sorted(proc_summary)[:16])}")
+            except Exception:
+                pass
+
+        # 鼠标位置（所有模式都需要）
         try:
             import pyautogui
             w, h = pyautogui.size()
@@ -739,80 +268,36 @@ class LingdongAgent:
             parts.append(f"屏幕: {w}×{h}  鼠标: ({x},{y})")
         except Exception:
             pass
-        # UIA 控件摘要
-        a11y = self._capture_a11y_summary()
-        if a11y:
-            parts.append("")
-            parts.append(a11y)
+
+        if not minimal:
+            # UIA 控件摘要（非 minimal 模式）
+            a11y = self.supervisor.capture_a11y_summary()
+            if a11y:
+                parts.append("")
+                parts.append(a11y)
+
         return "\n".join(parts)
 
-    def _resolve_via_a11y(self, target_text: str) -> dict | None:
-        """用 UIA 无障碍树解析语义目标→屏幕坐标。
+    # ══════════════════════════════════════════════════════════
+    #  文本协议模式 (MIMO V2 Omni 等纯文本模型)
+    # ══════════════════════════════════════════════════════════
 
-        对 Windows 标准控件（按钮/输入框/菜单等）可实现像素级精准定位，
-        不需要 OCR 或视觉模型。返回 {x, y, w, h, name, role} 或 None。
-        """
-        if not target_text or not isinstance(target_text, str):
-            return None
-        target_text = target_text.strip().strip("\"'")
-        if not target_text:
-            return None
-
-        try:
-            from features.registry import registry
-            result = registry.execute("a11y_get_tree", depth=4)
-            if not result.get("success"):
-                return None
-            tree = result.get("result", result)
-            if isinstance(tree, dict):
-                tree = tree.get("result", tree)
-
-            best: dict | None = None
-            best_name_len = 9999
-
-            def _search(node, depth=0):
-                nonlocal best, best_name_len
-                if depth > 6:
-                    return
-                name = node.get("name", "") or node.get("text", "") or ""
-                role = node.get("control_type", node.get("role", ""))
-                rect = node.get("bounding_rectangle", node.get("rect", {}))
-                if isinstance(rect, dict):
-                    x, y, w_, h_ = rect.get("x", 0), rect.get("y", 0), rect.get("w", 0), rect.get("h", 0)
-                else:
-                    x = y = w_ = h_ = 0
-
-                if name and role and w_ > 0 and h_ > 0 and w_ < 2000 and h_ < 1000:
-                    nl = name.lower()
-                    tl = target_text.lower()
-                    # 精确匹配优先，包含匹配兜底
-                    if nl == tl or (tl in nl and len(name) < best_name_len):
-                        best = {
-                            "x": int(x + w_ // 2),
-                            "y": int(y + h_ // 2),
-                            "w": int(w_),
-                            "h": int(h_),
-                            "name": name,
-                            "role": role,
-                        }
-                        best_name_len = len(name)
-                for child in (node.get("children", node.get("items", [])) or []):
-                    if isinstance(child, dict):
-                        _search(child, depth + 1)
-
-            _search(tree)
-            return best
-        except Exception:
-            return None
-
-    def _apply_som(self, b64_img: str) -> dict:
+    def _apply_som(self, b64_img: str, multimodal: bool = False) -> dict:
         """Set-of-Mark 标号：检测屏幕元素（UIA+OCR），画框编号。
 
-        MIMO 看到标号截图后直接用 #N 定位，无需输出文字描述。
-        返回 {image_b64 (标号图), label_map ({N: {text, x, y, w, h}}), count}。
+        多模态模式 (multimodal=True): 跳过所有标注，直接返回原始截图。
+            模型可以直接从截图中"看"到界面，不需要 #N 编号。
+        非多模态模式: 完整 SoM 流程，UIA+OCR+画框编号。
+            LLM 看到标号截图后直接用 #N 定位，无需输出文字描述。
+
+        返回 {image_b64, label_map ({N: {text, x, y, w, h}}), count}。
         """
-        # ── OmniParser 优先（YOLOv8 图标检测 + Florence-2 描述 + OCR）──
-        if self._omniparser is not None or self._som_enabled:
+        # ── 多模态快速路径：模型自己"看"截图，不需要标注 ──
+        if multimodal:
+            return {"image_b64": b64_img, "label_map": {}, "count": 0, "_mode": "direct"}
+
+        # ── OmniParser（YOLOv8 图标检测 + Florence-2 描述 + OCR）──
+        if self._omniparser_enabled and (self._omniparser is not None or self._som_enabled):
             try:
                 if self._omniparser is None:
                     from agent.omniparser_client import OmniParserClient
@@ -831,12 +316,10 @@ class LingdongAgent:
         import cv2
         import numpy as np
 
-        # 解码截图
         nparr = np.frombuffer(base64.b64decode(b64_img), np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         h_img, w_img = img.shape[:2]
 
-        # ── 收集元素（UIA + OCR 兜底）──
         elements: list[dict] = []
         seen_positions: set = set()
 
@@ -912,13 +395,11 @@ class LingdongAgent:
         if not elements:
             return {"image_b64": b64_img, "label_map": {}, "count": 0}
 
-        # 排序：从上到下，从左到右
         elements.sort(key=lambda e: (e["y"] // 25, e["x"]))
 
-        # ── 画框 + 编号 ──
         label_map: dict = {}
         overlaid = img.copy()
-        for i, elem in enumerate(elements[:40]):  # 最多 40 个
+        for i, elem in enumerate(elements[:40]):
             idx = i + 1
             x, y, w, h = elem["x"], elem["y"], elem["w"], elem["h"]
             cx = min(w_img - 1, max(0, x + w // 2))
@@ -928,10 +409,7 @@ class LingdongAgent:
 
             label_map[idx] = {"text": elem["text"], "x": cx, "y": cy, "w": ow, "h": oh}
 
-            # 蓝色半透明框（增强可见性而不遮盖文字）
             cv2.rectangle(overlaid, (x, y), (x + ow, y + oh), (66, 133, 244), 2)
-
-            # 编号标签（白色背景 + 蓝色文字，放在框左上角）
             lbl = str(idx)
             (lbl_w, lbl_h), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
             bg_x1, bg_y1 = max(0, x - 1), max(0, y - lbl_h - 8)
@@ -943,7 +421,7 @@ class LingdongAgent:
         _, buf = cv2.imencode(".jpg", overlaid, [cv2.IMWRITE_JPEG_QUALITY, 85])
         result_b64 = base64.b64encode(buf).decode()
 
-        return {"image_b64": result_b64, "label_map": label_map, "count": len(label_map), "elements": elements}
+        return {"image_b64": result_b64, "label_map": label_map, "count": len(label_map)}
 
     def _call_llm(self, messages: list[dict], max_retries: int = 2) -> dict | None:
         """调用 LLM API (兼容文本和视觉消息)。"""
@@ -971,7 +449,9 @@ class LingdongAgent:
                 resp.raise_for_status()
                 data = resp.json()
                 msg = data["choices"][0]["message"]
-                content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
+                content = (msg.get("content", "") or
+                          msg.get("reasoning_content", "") or
+                          msg.get("reasoning", "") or "")  # MIMO 可能用 "reasoning" 字段
                 if not content:
                     self._emit("log", {"level": "warn", "message": "LLM returned empty content, retry"})
                     continue
@@ -995,7 +475,7 @@ class LingdongAgent:
         if not content:
             return "error", "", {}
 
-        if "总结:" in content:
+        if "总结:" in content and "工具:" not in content:
             return "done", "", {"summary": content}
 
         tool_match = re.search(r"工具:\s*(\S+)", content)
@@ -1014,28 +494,72 @@ class LingdongAgent:
 
         return "tool", tool_name, args
 
-    def run_text_protocol(self, goal: str) -> dict:
+    def run_text_protocol(self, goal: str, _agent_config: Optional[AgentConfig] = None) -> dict:
         """文本协议模式：循环 调用 LLM → 解析 → 监督执行 → 截图。
 
         适用于 MIMO V2 Omni 等不支持 function calling 的纯文本模型。
+
+        参数:
+            goal: 自然语言目标
+            _agent_config: 统一配置（由 _unified_run 传入），None 时自动检测
         """
         self._ensure_registry()
-        self._emit("agent_start", {"goal": goal, "engine": "text_protocol", "model": self.model})
+
+        # ── 从 AgentConfig 或自动检测确定多模态状态 ──
+        if _agent_config is not None:
+            multimodal = _agent_config._multimodal
+            vision_mode = _agent_config._resolved_vision_mode
+            context_minimal = _agent_config._resolved_screen_context == "minimal"
+            use_dedup = _agent_config.image_dedup
+            use_fast = _agent_config.fast_mode
+        else:
+            multimodal = _is_multimodal_model(self.model)
+            vision_mode = "direct" if multimodal else "som"
+            context_minimal = multimodal
+            use_dedup = multimodal
+            use_fast = False
+
+        if multimodal:
+            self._emit("log", {
+                "level": "info",
+                "message": f"多模态快速路径: {self.model} 可直接理解截图，跳过 SoM 标注",
+            })
+
+        self._emit("agent_start", {"goal": goal, "engine": "text_protocol", "model": self.model, "multimodal": multimodal})
 
         start = time.time()
         steps = []
+        last_b64_hash = ""  # 用于截图去重
 
         messages = [{"role": "system", "content": self._system_prompt}]
-        raw_b64 = self._capture_b64()
-        screen_ctx = self._get_screen_context()
 
-        # SoM 标号处理
+        # ── 路径提示：为目标选择合适的工具访问模式 ──
+        try:
+            from agent.tool_path_selector import select_best_path
+            suggested = select_best_path(goal)
+            if suggested is not None:
+                path_hint = (
+                    f"\n\n[路径建议] 根据目标「{goal[:60]}」, 建议使用 **{suggested.label_cn}**(L{suggested.value}) 路径。"
+                    f"\n原因: {suggested.guidance}。成本: {suggested.cost}。"
+                    f"\n如执行中遇到困难，可以降级到更低优先级的路径。"
+                )
+                messages[0] = {"role": "system", "content": self._system_prompt + path_hint}
+                self._emit("log", {"level": "info", "message": f"路径建议: {suggested.label_cn} (L{suggested.value})"})
+        except Exception:
+            pass
+
+        # ── 首次截图 + 上下文 ──
+        # 多模态: 原始截图 + minimal 上下文
+        # 非多模态: SoM 标注 + 完整上下文
+        raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
+        screen_ctx = self._get_screen_context(minimal=context_minimal)
+
         som_label = ""
         b64 = raw_b64
         if self._som_enabled:
-            som_result = self._apply_som(raw_b64)
-            self._last_som_map = som_result["label_map"]
-            if som_result["count"] > 0:
+            som_result = self._apply_som(raw_b64, multimodal=multimodal)
+            self.supervisor._last_som_map = som_result["label_map"]
+            if vision_mode != "direct" and som_result["count"] > 0:
                 b64 = som_result["image_b64"]
                 lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
                 som_label = (
@@ -1043,10 +567,17 @@ class LingdongAgent:
                     f"\n使用 #N 指定目标，如: target: #3  或  target: #5"
                 )
 
+        # 多模态提示词：直接让模型看图
+        first_prompt = (
+            f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}"
+            + (som_label if vision_mode != "direct" else "")
+            + ("\n\n分析屏幕截图，执行第一步。" if vision_mode != "direct"
+               else "\n\n屏幕截图可见。请基于截图内容判断下一步操作，返回工具调用。")
+        )
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}{som_label}\n\n分析屏幕截图，执行第一步。"},
+                {"type": "text", "text": first_prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         })
@@ -1071,7 +602,8 @@ class LingdongAgent:
             consecutive_fails = 0
             msg = raw["choices"][0]["message"]
             content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
-            reasoning = msg.get("reasoning_content", "") or ""
+            reasoning = (msg.get("reasoning_content", "") or
+                        msg.get("reasoning", "") or "")  # MIMO 兼容
 
             if reasoning:
                 self._emit("log", {"level": "info", "message": f"思考: {reasoning[:300]}"})
@@ -1106,7 +638,7 @@ class LingdongAgent:
 
             step_start = time.time()
             try:
-                result = self._supervised_execute(name, args)
+                result = self.supervisor.execute(name, args)
                 success = result.get("success", False)
             except Exception as e:
                 result = {"success": False, "error": str(e)}
@@ -1126,40 +658,51 @@ class LingdongAgent:
 
             # ── 更新消息历史 ──
             messages.append({"role": "assistant", "content": content})
+            hint = "\n\n(如果任务目标已达成，请直接回复 总结: 结束，不要继续多余操作)" if success else ""
             messages.append({
                 "role": "user",
-                "content": json.dumps(result, ensure_ascii=False)[:1500],
+                "content": json.dumps(result, ensure_ascii=False)[:1500] + hint,
             })
 
             status_txt = "成功" if success else f"失败: {result.get('error', 'unknown')}"
-            if name in self.NO_SCREENSHOT_TOOLS:
+            if name in Supervisor.NO_SCREENSHOT_TOOLS:
                 messages.append({
                     "role": "user",
-                    "content": f"执行{status_txt}。",
+                    "content": f"执行{status_txt}。{hint}",
                 })
             else:
-                raw_b64 = self._capture_b64()
-                screen_ctx = self._get_screen_context()
+                raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
 
-                # SoM 标号
-                som_label = ""
-                b64 = raw_b64
-                if self._som_enabled:
-                    som_result = self._apply_som(raw_b64)
-                    self._last_som_map = som_result["label_map"]
-                    if som_result["count"] > 0:
-                        b64 = som_result["image_b64"]
-                        lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
-                        som_label = f"\n屏幕元素编号:\n{lines}"
+                # ── 截图去重：如果截图内容没变，跳过发送 ──
+                cur_hash = hashlib.md5(raw_b64.encode()).hexdigest()[:16]
+                if cur_hash == last_b64_hash and use_dedup:
+                    messages.append({
+                        "role": "user",
+                        "content": f"执行{status_txt} (截图未变化，沿用上一帧)。{hint}",
+                    })
+                else:
+                    last_b64_hash = cur_hash
+                    screen_ctx = self._get_screen_context(minimal=context_minimal)
 
-                parts = [
-                    {"type": "text", "text": f"执行{status_txt}。\n\n当前状态:\n{screen_ctx}{som_label}"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ]
-                messages.append({"role": "user", "content": parts})
+                    # SoM 标号（非多模态模式才需要）
+                    som_label = ""
+                    b64 = raw_b64
+                    if self._som_enabled:
+                        som_result = self._apply_som(raw_b64, multimodal=multimodal)
+                        self.supervisor._last_som_map = som_result["label_map"]
+                        if vision_mode != "direct" and som_result["count"] > 0:
+                            b64 = som_result["image_b64"]
+                            lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
+                            som_label = f"\n屏幕元素编号:\n{lines}"
+
+                    parts = [
+                        {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{som_label}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ]
+                    messages.append({"role": "user", "content": parts})
 
             if not success:
-                time.sleep(1.5)
+                time.sleep(1.0)
 
             # ── 重复工具检测 ──
             if name == last_tool:
@@ -1175,6 +718,16 @@ class LingdongAgent:
                     "role": "user",
                     "content": f"你已连续 {total_repeats} 次使用 {name}，未取得进展。请换完全不同的策略，不要重复同一工具。"
                 })
+
+            # ── 滑动窗口：减少历史大小以加速 LLM 处理 ──
+            # 多模态：每步都带大图，保留更少历史
+            # 快速模式：保留最少历史（4条）
+            if use_fast:
+                MAX_HISTORY = 4
+            else:
+                MAX_HISTORY = 8 if multimodal else 12
+            if len(messages) > MAX_HISTORY:
+                messages = [messages[0], messages[1]] + messages[-(MAX_HISTORY - 2):]
 
         elapsed = time.time() - start
         ok_count = sum(1 for s in steps if s.get("status") == "completed")
@@ -1232,57 +785,23 @@ class LingdongAgent:
         logger.warning("langchain-openai not installed, using mock LLM")
         return _MockLLM()
 
-    AGENT_TOOLS = frozenset({
-        "click_target", "right_click", "hover", "mouse_move",
-        "type_text", "type_clipboard",
-        "hotkey", "scroll", "drag", "swipe",
-        "triple_click", "middle_click", "select_text",
-        "browser_connect", "browser_navigate", "browser_click", "browser_type",
-        "browser_list_tabs", "browser_close_tab", "browser_screenshot",
-        "browser_get_url", "browser_get_text", "browser_find_elements",
-        "browser_wait_element", "browser_wait_page_load", "browser_execute_js",
-        "browser_refresh", "browser_go_back", "browser_new_tab", "browser_switch_tab",
-        "screenshot", "find_image", "ocr_find_text", "ocr_extract_all",
-        "region_select", "color_check", "popup_close",
-        "a11y_get_tree", "find_element", "wait_element",
-        "launch_program", "run_command", "program_resolve", "program_list",
-        "focus_window", "get_active_window", "list_windows",
-        "window_minimize", "window_maximize", "window_close",
-        "window_resize", "window_restore", "show_desktop",
-        "detect_process", "find_processes", "kill_process",
-        "volume_set", "volume_mute", "display_brightness",
-        "battery_status", "lock_workstation",
-        "wifi_list", "wifi_connect", "wifi_disconnect",
-        "wait_action", "wait_screen_stable", "wait_screen_change",
-        "clipboard_set_text", "clipboard_get_text",
-        "clipboard_clear", "clipboard_get_files", "clipboard_get_image",
-        "handle_dialog", "fill_save_dialog",
-        "set_variable", "get_variable",
-        "run_dsl", "run_dsl_sync",
-        "a11y_find_element", "a11y_click_element",
-        "network_status",
-        "scheduler_create", "scheduler_delete", "scheduler_list",
-        "scheduler_update", "scheduler_get", "quick_schedule",
-        "generate_flow_script",
-        "file_read", "file_write", "file_list",
-        "file_exists", "file_edit", "file_append", "file_copy", "file_move", "file_delete",
-        "screen_record_start", "screen_record_stop",
-        "menu_click",
-    })
+    _langgraph_tools_cache: Optional[list] = None
 
     def _load_langgraph_tools(self) -> list:
-        """从 @feature 注册表加载 LangGraph 工具集。"""
+        """从 @feature 注册表加载所有可用工具（类级缓存，首次后复用）。"""
+        if self._langgraph_tools_cache is not None:
+            return self._langgraph_tools_cache
+
         from features.registry import registry
-        import features._all  # noqa
+        import features._all  # noqa (~8s 首次导入)
 
         tools = []
         for spec in registry.all():
             if spec.deprecated or spec.hidden:
                 continue
-            if spec.name not in self.AGENT_TOOLS:
-                continue
             tools.append(self._make_tool_func(spec))
-        logger.info("Loaded %d LangGraph tools from registry", len(tools))
+        LingdongAgent._langgraph_tools_cache = tools
+        logger.info("Loaded %d LangGraph tools from registry (cached)", len(tools))
         return tools
 
     def _make_tool_func(self, spec):
@@ -1316,86 +835,26 @@ class LingdongAgent:
     def _make_supervision_wrapper(self):
         """创建 LangGraph ToolNode 监督包装器。
 
-        与 _supervised_execute 共享监督逻辑，但适配 LangGraph 的
-        wrap_tool_call 接口 (call_req, execute) → result_str。
+        委托给 _supervised_execute，消除监督逻辑重复。
+        LangGraph 的 ToolNode 要求返回 JSON 字符串。
         """
-        def _extract_content(result) -> Optional[str]:
-            if result is None:
-                return None
-            if isinstance(result, str):
-                return result
-            if hasattr(result, "content"):
-                c = result.content
-                return str(c) if c is not None else None
-            return str(result)
-
         def wrapper(call_req, execute):
             tool_call = call_req.tool_call
             name = tool_call.get("name", "")
             args = tool_call.get("args", {})
-            is_gui = name in self.GUI_ACTIONS
-
-            # ── Pre: 视觉定位 ──
-            if is_gui and (self.auto_learn or self.multimodal):
-                try:
-                    args = self._apply_visual_locator(name, args)
-                except Exception as e:
-                    logger.warning("Visual locator error: %s", e)
-
-            # ── Pre: 窗口焦点 ──
-            if is_gui:
-                self._ensure_safe_window(name, args)
-
-            # ── 执行 + 重试 ──
-            last_result = None
-            max_retries = 2 if is_gui else 1
-            for attempt in range(max_retries + 1):
-                if attempt > 0 and self._stop_event and self._stop_event.is_set():
-                    self._emit("log", {"level": "info", "message": f"停止请求，跳过 {name} 重试"})
-                    break
-                if attempt > 0:
-                    delay = 2 ** (attempt - 1)
-                    self._emit("log", {"level": "info", "message": f"重试 {name} ({attempt}/{max_retries}, {delay}s)"})
-                    time.sleep(delay)
-                try:
-                    last_result = execute(call_req)
-                    content = _extract_content(last_result)
-                    if content and isinstance(content, str):
-                        try:
-                            parsed = json.loads(content)
-                            if isinstance(parsed, dict) and not parsed.get("success", True):
-                                if attempt < max_retries:
-                                    continue
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    break
-                except Exception as e:
-                    if attempt >= max_retries:
-                        raise
-                    last_result = None
-
-            # ── Post: 对话框 ──
-            if is_gui or name in ("screenshot", "hotkey", "launch_program"):
-                self._auto_handle_dialogs()
-
-            # ── Post: 屏幕稳定 ──
-            if is_gui:
-                self._wait_screen_stable()
-
-            # ── 跟踪启动程序 ──
-            if name == "launch_program":
-                target = args.get("target") or args.get("name") or ""
-                if target:
-                    self._last_launched = target
-
-            return last_result
+            result = self.supervisor.execute(name, args)
+            return json.dumps(result, ensure_ascii=False, default=str)
 
         return wrapper
 
-    def run_langgraph(self, goal: str, config: Optional[dict] = None) -> dict:
+    def run_langgraph(self, goal: str, config: Optional[dict] = None,
+                       _agent_config: Optional[AgentConfig] = None) -> dict:
         """LangGraph 模式：create_react_agent 驱动执行。
 
         适用于 DeepSeek/GPT/Claude 等支持函数调用的 LLM。
+
+        参数:
+            _agent_config: 统一配置（由 _unified_run 传入），None 时保持旧行为
         """
         from langgraph.prebuilt import create_react_agent, ToolNode
         from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
@@ -1414,17 +873,31 @@ class LingdongAgent:
 
         tool_node = ToolNode(tools, wrap_tool_call=self._make_supervision_wrapper())
 
-        system_prompt = """你是一个桌面自动化助手。可用工具通过 @feature 注册表提供。
+        # 用与文本协议相同的路径选择系统提示词
+        path_prompt = self._tools_text if self._tools_text else ""
+        path_hint = ""
+        try:
+            from agent.tool_path_selector import select_best_path, AccessPattern
+            suggested = select_best_path(goal)
+            if suggested is not None:
+                path_hint = f"\n建议路径: {suggested.label_cn}(L{suggested.value}) — {suggested.guidance}"
+        except Exception:
+            pass
 
-执行规则：
-1. 对于简单操作（点击、输入、截图等），直接调用对应工具
-2. 对于多步骤工作流，先用 generate_flow_script 生成流程，然后按步骤执行
-3. 遇到失败时尝试 recovery: 重试→替代方案→跳过→失败
-4. 工具调用完成后无需额外标记，直接结束即可
-5. 使用 wait_action 代替 time.sleep
+        system_prompt = f"""你是一个桌面自动化助手。可用工具已全部注册。
+
+## 工具选择策略
+
+{path_prompt}{path_hint}
+
+## 执行规则
+1. 先判断工具访问模式（DIRECT < BROWSER < UIA < OCR < SoM），从对应分组选工具
+2. 浏览器操作必须用 browser_* 工具，不走其他路径
+3. 对于多步骤工作流，先用 generate_flow_script 生成流程，然后按步骤执行
+4. 遇到失败时按路径降级重试（L0→L1→L2→...）
+5. 工具调用完成后无需额外标记，直接结束即可
 6. 所有坐标默认为屏幕绝对坐标
-7. 浏览器通过 CDP 自动连接，首次调用 browser_navigate 等工具时会自动启动 Chrome
-8. 登录流程：点击登录按钮 → 等待表单出现 → 填写 → 提交 → 等待跳转"""
+7. 浏览器通过 CDP 自动连接，首次 browser_navigate 等会自动启动 Chrome"""
 
         graph = create_react_agent(model=llm, tools=tool_node, prompt=system_prompt)
 
@@ -1513,19 +986,137 @@ class LingdongAgent:
             return error_result
 
     # ══════════════════════════════════════════════════════════
-    #  统一入口
+    #  Planned 模式 (Planner + PlanExecutor)
     # ══════════════════════════════════════════════════════════
 
-    def run(self, goal: str, mode: str = "auto") -> dict:
+    def run_planned(self, goal: str, steps: Optional[list] = None,
+                     _agent_config: Optional[AgentConfig] = None) -> dict:
+        """Planned mode: Planner → Plan DAG → PlanExecutor.
+
+        使用 Planner 将目标分解为 Plan DAG（带 fallback 链），
+        然后通过 PlanExecutor 拓扑序执行，支持自动重试 + 路径降级。
+
+        参数:
+            goal: 自然语言目标
+            steps: 可选预生成步骤，为 None 时自动调用 generate_flow_script
+            _agent_config: 统一配置（由 _unified_run 传入），None 时保持旧行为
+
+        返回:
+            dict{success, plan, steps, total_steps, summary, elapsed_ms}
+        """
+        self._ensure_registry()
+        self._emit("agent_start", {"goal": goal, "engine": "planned", "model": self.model})
+        start = time.time()
+
+        from agent.planner import Planner, PlanExecutor as PlanExec
+
+        planner = Planner(
+            api_key=self.api_key,
+            api_base=self.api_base,
+            model=self.model,
+        )
+
+        # ── 生成 Plan DAG ──
+        if steps:
+            plan = planner.plan_from_steps(goal, steps)
+            self._emit("log", {"level": "info",
+                               "message": f"Plan from {len(steps)} pre-generated steps ({len(plan.nodes)} nodes)"})
+        else:
+            plan = planner.plan(goal)
+            self._emit("log", {"level": "info",
+                               "message": f"Plan generated: {len(plan.nodes)} nodes"})
+
+        if not plan.nodes:
+            self._emit("log", {"level": "warn", "message": "Empty plan, falling back to text_protocol"})
+            return self.run_text_protocol(goal)
+
+        # ── 执行 Plan DAG ──
+        executor = PlanExec(
+            agent=self,
+            plan=plan,
+            emit_event=lambda e, d: self._emit(e, d),
+            stop_event=self._stop_event,
+            log_func=lambda lv, msg: self._emit("log", {"level": lv, "message": msg}),
+        )
+
+        exec_result = executor.execute()
+
+        elapsed = time.time() - start
+        summary = plan.summary()
+
+        final_status = "completed" if exec_result.get("success") else "failed"
+        self._emit("agent_done", {
+            "status": final_status,
+            "total_steps": summary["total"],
+            "summary": f"Plan executed: {summary.get('completed', 0)}/{summary['total']} steps ok",
+        })
+
+        return {
+            "success": exec_result.get("success", False),
+            "plan": plan.to_dict(),
+            "steps": [n.to_dict() for n in plan.nodes],
+            "total_steps": summary["total"],
+            "summary": f"Plan: {summary.get('completed', 0)}/{summary['total']} steps ok, "
+                       f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped",
+            "elapsed_ms": round(elapsed * 1000),
+        }
+
+    # ══════════════════════════════════════════════════════════
+    #  _unified_run — 统一执行入口
+    # ══════════════════════════════════════════════════════════
+
+    def _unified_run(self, goal: str, config: AgentConfig,
+                     steps: Optional[list] = None) -> dict:
+        """统一执行入口。根据 AgentConfig 自动选择执行策略。
+
+        替代旧的 4 路 dispatch（text_protocol / langgraph / planned / direct）。
+        """
+        config.resolve_auto(self.model)
+
+        self._emit("log", {"level": "info", "message":
+            f"Unified agent: planning={config._resolved_planning}, "
+            f"protocol={config._resolved_llm_protocol}, "
+            f"vision={config._resolved_vision_mode}, "
+            f"context={config._resolved_screen_context}, "
+            f"multimodal={config._multimodal}"})
+
+        # ── Planning: pre_plan vs per_step ──
+        if config._resolved_planning == "pre_plan":
+            return self._run_pre_plan(goal, steps, config)
+
+        elif config._resolved_planning == "per_step":
+            if config._resolved_llm_protocol == "text":
+                return self.run_text_protocol(goal, _agent_config=config)
+            elif config._resolved_llm_protocol == "function_calling":
+                return self._run_per_step_function_calling(goal, config)
+
+        # Fallback
+        return self.run_text_protocol(goal, _agent_config=config)
+
+    def _run_pre_plan(self, goal: str, steps: Optional[list],
+                      config: AgentConfig) -> dict:
+        """Pre-plan mode: generate all steps upfront, then execute via PlanExecutor."""
+        return self.run_planned(goal, steps=steps, _agent_config=config)
+
+    def _run_per_step_function_calling(self, goal: str, config: AgentConfig) -> dict:
+        """Per-step mode with function calling LLM (LangGraph)."""
+        return self.run_langgraph(goal, _agent_config=config)
+
+    # ══════════════════════════════════════════════════════════
+    #  统一入口 (保留旧 dispatch 保证向后兼容)
+    # ══════════════════════════════════════════════════════════
+
+    def run(self, goal: str, mode: str = "auto", **kwargs) -> dict:
         """执行目标。
 
         参数:
             goal: 自然语言目标描述
-            mode: 执行模式
+            mode: 执行模式 (当 agent_config 提供时忽略此参数)
                 "auto"           — 自动选择 (mimo-model → text_protocol, 否则 → langgraph)
                 "text_protocol"  — MIMO 风格文本协议循环
                 "langgraph"      — LangGraph create_react_agent
                 "direct"         — 仅生成流程图 (generate_flow_script)
+            agent_config: AgentConfig 实例（新统一路径，提供时忽略 mode）
 
         返回:
             dict{success, steps, summary, total_steps, elapsed_ms}
@@ -1534,6 +1125,12 @@ class LingdongAgent:
             return {"success": False, "steps": [], "total_steps": 0,
                     "error": "stopped before start", "elapsed_ms": 0}
 
+        # ── 新统一路径：AgentConfig 提供时直接使用 ──
+        agent_config = kwargs.get("agent_config")
+        if agent_config is not None:
+            return self._unified_run(goal, agent_config, steps=kwargs.get("steps"))
+
+        # ── 旧 4 路 dispatch（向后兼容）──
         # 自动检测模式
         if mode == "auto":
             model_lower = self.model.strip().lower()
@@ -1542,18 +1139,39 @@ class LingdongAgent:
             elif self._check_langgraph():
                 mode = "langgraph"
             else:
-                # 无 langgraph → 回退到文本协议 (即使不是 MIMO)
-                self._emit("log", {"level": "info", "message": "LangGraph not available, falling back to text_protocol"})
-                mode = "text_protocol"
+                # 无 langgraph → 回退到 planned (最便宜: 1次LLM调用, 然后离线执行)
+                self._emit("log", {"level": "info", "message": "LangGraph not available, falling back to planned"})
+                mode = "planned"
 
         if mode == "text_protocol":
-            return self.run_text_protocol(goal)
+            result = self.run_text_protocol(goal)
+        elif mode == "planned":
+            steps = kwargs.get("steps")
+            result = self.run_planned(goal, steps=steps)
         elif mode == "langgraph":
-            return self.run_langgraph(goal)
+            result = self.run_langgraph(goal)
         elif mode == "direct":
-            return self._run_direct(goal)
+            result = self._run_direct(goal)
         else:
             raise ValueError(f"Unknown mode: {mode}")
+
+        # Persist run summary
+        try:
+            save_run(RunSummary(
+                goal=goal[:200],
+                mode=mode,
+                model=self.model,
+                success=result.get("success", False),
+                total_steps=result.get("total_steps", 0),
+                elapsed_ms=result.get("elapsed_ms", 0),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                summary=(result.get("summary") or "")[:500],
+                error=result.get("error", ""),
+            ))
+        except Exception as e:
+            logger.warning("Failed to persist run summary: %s", e)
+
+        return result
 
     def _run_direct(self, goal: str) -> dict:
         """直接模式：仅调用 generate_flow_script 生成流程图。"""

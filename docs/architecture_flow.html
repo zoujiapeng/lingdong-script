@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>灵动脚本 - 运行原理流程图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  body { margin: 0; padding: 20px; background: #1a1a2e; font-family: sans-serif; }
+  .container { max-width: 1400px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+  h1 { text-align: center; color: #333; margin-bottom: 5px; font-size: 24px; }
+  .subtitle { text-align: center; color: #888; margin-bottom: 25px; font-size: 14px; }
+  .mermaid { display: flex; justify-content: center; }
+  svg { max-width: 100%; height: auto; }
+  .legend { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px; font-size: 13px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; }
+  .legend-box { width: 16px; height: 16px; border-radius: 3px; display: inline-block; }
+  .legend-box.process { background: #e1f5fe; border: 1px solid #4fc3f7; }
+  .legend-box.subprocess { background: #fff3e0; border: 1px solid #ffb74d; }
+  .legend-box.io { background: #e8f5e9; border: 1px solid #81c784; }
+  .legend-box.storage { background: #fce4ec; border: 1px solid #e57373; }
+  .legend-box.external { background: #f3e5f5; border: 1px solid #ba68c8; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔷 灵动脚本 — 整体运行原理</h1>
+  <p class="subtitle">Electron + React + Python 桌面自动化框架 · 进程/数据/控制流全貌</p>
+
+  <div class="legend">
+    <span class="legend-item"><span class="legend-box process"></span> 进程/组件</span>
+    <span class="legend-item"><span class="legend-box subprocess"></span> 子进程</span>
+    <span class="legend-item"><span class="legend-box io"></span> 数据/通信</span>
+    <span class="legend-item"><span class="legend-box storage"></span> 存储</span>
+    <span class="legend-item"><span class="legend-box external"></span> 外部系统</span>
+  </div>
+
+  <pre class="mermaid">
+---
+title: 灵动脚本运行原理流程图
+---
+flowchart TB
+  %% ===== 颜色定义 =====
+  classDef process fill:#e1f5fe,stroke:#4fc3f7,stroke-width:2px,color:#333
+  classDef subp fill:#fff3e0,stroke:#ffb74d,stroke-width:2px,color:#333
+  classDef io fill:#e8f5e9,stroke:#81c784,stroke-width:2px,color:#333
+  classDef store fill:#fce4ec,stroke:#e57373,stroke-width:2px,color:#333
+  classDef external fill:#f3e5f5,stroke:#ba68c8,stroke-width:2px,color:#333
+  classDef user fill:#fff9c4,stroke:#fdd835,stroke-width:2px,color:#333
+
+  %% ===== 用户层 =====
+  User([👤 用户操作]):::user
+  OS([🖥️ Windows 系统]):::external
+
+  subgraph Frontend["React 渲染进程 (renderer:5173)"]
+    direction TB
+    Canvas["FlowCanvas\n流程图编辑器\nSVG 51种节点"]:::process
+    AgentView["AgentView\nAI Agent 面板"]:::process
+    Settings["SettingsPanel\n设置面板\nlocalStorage 持久化"]:::process
+    VoicePanel["VoiceConversationPanel\n语音对话浮动面板"]:::process
+    TopBar["TopBar + StatusBar\n工具栏 + 状态栏"]:::process
+    Store["Zustand Store\n状态管理 ~40字段\nimmer middleware"]:::process
+    Utils["Utils\nnodeDefinitions / pseudoParser\nfeatureRegistry / htnRegistry"]:::process
+  end
+
+  subgraph Electron["Electron 主进程 (main/)"]
+    direction TB
+    Preload["preload.ts\ncontextBridge\n~40 方法暴露"]:::process
+    Main["main.ts\n窗口管理 + IPC 中枢\n36 ipcMain.handle"]:::process
+    API["api.ts\nHTTP 服务器 :7880\n57 REST 端点"]:::process
+    EngineBridge["engine.ts\nspawnPython()\n子进程管理"]:::process
+    State["state.ts\nGlobalState 单例"]:::process
+  end
+
+  subgraph PythonAgt["Python Agent 进程 (agent/)"]
+    direction TB
+    AgentMain["__main__.py\nstdin/stdout JSON\nIPC 入口"]:::subp
+    AgentCore["LingdongAgent\n统一调度核心"]:::subp
+    ConfigModule["AgentConfig\n配置解析 + resolve_auto()"]:::subp
+    Planner["Planner\n自然语言→步骤 DAG"]:::subp
+    Supervisor["Supervisor\n执行监督 + 恢复策略"]:::subp
+    VisualLocator["visual_locator\n语义目标→屏幕坐标"]:::subp
+    ExpDB["experience_db\n经验数据库\nSHA256 签名索引"]:::store
+    SoM["_apply_som()\nSet-of-Mark 标号\nUIA+OCR / OmniParser"]:::subp
+  end
+
+  subgraph PythonEng["Python 自动化引擎 (engine/)"]
+    direction TB
+    EngineEntry["engine.py\nstdin/stdout JSON\n协议入口"]:::subp
+    Parser["dsl_parser.py\n词法/语法解析\n96 NodeType"]:::subp
+    Converter["dsl_flow_converter.py\nDSL ↔ FlowScript\n双向转换"]:::subp
+    Executor["executor.py\nDSLExecutor\n~50 _exec_* 处理器"]:::subp
+    CondEval["condition_evaluator.py\n条件求值: 图片/窗口/变量"]:::subp
+    Triggers["triggers.py\n触发器引擎"]:::subp
+    Scheduler["scheduler.py\ncron 定时调度"]:::subp
+  end
+
+  subgraph PythonFeat["Python @feature 注册表 (features/)"]
+    direction TB
+    Registry["registry.py\nFeatureRegistry 单例\n@feature 装饰器"]:::subp
+    FeatureModules["43 模块 245 @feature\n交互/感知/AI/系统/宏/控制流/调试"]:::subp
+    MCPServer["mcp/server.py\nJSON-RPC stdio\n~245 工具"]:::subp
+  end
+
+  subgraph PythonVoice["Python 语音服务 (voice/)"]
+    direction TB
+    VoiceServer["server.py\nWebSocket 动态端口"]:::subp
+    STT["Whisper / Paraformer\n语音识别引擎"]:::subp
+    TTS["Edge TTS / ElevenLabs\n语音合成"]:::subp
+  end
+
+  subgraph PythonOther["其他 Python 模块"]
+    Perception["perception/\nOCR·图像匹配\n视觉融合"]:::subp
+    Interaction["interaction/\n滚轮选择器\n区域选择器"]:::subp
+    DialogH["dialog_handler.py\nWin32 对话框检测"]:::subp
+    MenuH["menu_handler.py\nWindows 菜单操作"]:::subp
+    OmniP["omniparser_client.py\nYOLOv8 + Florence-2"]:::subp
+  end
+
+  subgraph Storage["持久化存储"]
+    LocalS["localStorage\n前端设置缓存"]:::store
+    Scripts["scripts/*.flow\n流程图文件\nDSL + JSON"]:::store
+    Templates["templates/*\n模板文件"]:::store
+    Macros["macros/*.json\n宏录制事件"]:::store
+    Experience["experience/\ndb.json + templates/*.png\n视觉经验库"]:::store
+    Schedules["schedules.json\n定时调度配置"]:::store
+  end
+
+  subgraph External["外部接口"]
+    LLM["LLM API\nDeepSeek / 多模态模型"]:::external
+    ClaudeCode(["🤖 Claude Code\n远程控制"]):::external
+    MCPClient(["MCP 客户端\nVSCode / Cursor"]):::external
+  end
+
+  %% ===== 用户交互流 =====
+  User -->|"编辑流程图"| Canvas
+  User -->|"输入目标"| AgentView
+  User -->|"设置面板"| Settings
+  User -->|"语音对话"| VoicePanel
+  User -->|"F5 运行 / F6 录制 / Ctrl+Z 撤销"| OS
+
+  %% ===== 前端内部 =====
+  Canvas <-->|"useStore"| Store
+  AgentView <-->|"useStore"| Store
+  Settings -->|"localStorage.getItem/setItem"| LocalS
+  TopBar <-->|"useStore"| Store
+  VoicePanel <-->|"useStore"| Store
+
+  %% ===== 前端 → Electron 主进程 =====
+  Store -->|"ipcRenderer.invoke"| Preload
+  TopBar -->|"ipcRenderer.invoke('engine:*')"| Preload
+  AgentView -->|"ipcRenderer.invoke('agent:*')"| Preload
+  VoicePanel -->|"WebSocket"| VoiceServer
+
+  Preload -->|"contextBridge"| Main
+
+  %% ===== HTTP API 流 =====
+  ClaudeCode -->|"POST /api/* :7880"| API
+  API -->|"ipcRenderer.send('api-command')"| Store
+
+  %% ===== 主进程 → Python 子进程 =====
+  Main -->|"spawnPython('engine/engine.py')\nstdin JSON"| EngineEntry
+  Main -->|"spawnPython('agent/__main__.py')\nstdin JSON"| AgentMain
+  Main -->|"spawnPython('voice/server.py')"| VoiceServer
+  Main -->|"spawnPython('mcp/server.py')"| MCPServer
+
+  %% ===== Agent 内部流 =====
+  AgentMain -->|"agent.run()"| AgentCore
+  AgentCore -->|"AgentConfig"| ConfigModule
+  AgentCore -->|"_unified_run()"| Planner
+  AgentCore -->|"_unified_run()"| Supervisor
+  AgentCore -->|"_apply_som()"| SoM
+  Supervisor -->|"visual_locator.locate()"| VisualLocator
+  VisualLocator -->|"查/写"| ExpDB
+  VisualLocator -->|"VLM 兜底"| LLM
+  AgentCore -->|"逐步骤: click/type/wait..."| EngineEntry
+
+  %% ===== 引擎内部流 =====
+  EngineEntry -->|"parse_dsl()"| Parser
+  EngineEntry -->|"dsl_to_flow()"| Converter
+  EngineEntry -->|"executor.run()"| Executor
+  Executor -->|"_exec_click / _exec_wait / ..."| Interaction
+  Executor -->|"条件求值"| CondEval
+  EngineEntry <-->|"触发器"| Triggers
+  EngineEntry <-->|"定时调度"| Scheduler
+
+  %% ===== MCP 流 =====
+  MCPServer -->|"注册表"| Registry
+  MCPClient -->|"stdio JSON-RPC"| MCPServer
+  ClaudeCode -->|"stdio JSON-RPC"| MCPServer
+  Registry -->|"导出工具"| FeatureModules
+
+  %% ===== 事件回调 (子进程 → Electron → 前端) =====
+  EngineEntry -->|"stdout JSON\n{type:'step',nodeId:'...'}"| EngineBridge
+  AgentMain -->|"stdout JSON\n{type:'step_complete',...}"| EngineBridge
+  EngineBridge -->|"webContents.send('engine-message')"| Preload
+  EngineBridge -->|"webContents.send('agent-message')"| Preload
+  Preload -->|"onEngineMessage callback"| Store
+  Preload -->|"onAgentMessage callback"| Store
+  Store -->|"状态更新 → 重渲染"| Canvas
+  Store -->|"状态更新 → 重渲染"| AgentView
+
+  %% ===== LLM 调用 =====
+  AgentCore -->|"HTTP POST\nLLM API"| LLM
+  Executor -->|"aiGenerate IPC"| Main
+  Main -->|"spawnPythonOneShot"| LLM
+
+  %% ===== 存储流 =====
+  Store -->|"ipcRenderer.invoke('file:write')"| Scripts
+  Store -->|"ipcRenderer.invoke('file:read')"| Scripts
+  AgentMain -->|"file:write"| Macros
+  AgentMain -->|"file:write"| Experience
+
+  %% ===== 快捷键流 =====
+  OS -->|"globalShortcut F5/F6/F9"| Main
+  Main -->|"webContents.send('menu-action')"| Store
+
+  %% ===== 语音流 =====
+  VoicePanel -->|"start_recording"| VoiceServer
+  VoiceServer -->|"audio binary (TTS)"| VoicePanel
+  VoiceServer -->|"stt_result / llm_text"| VoicePanel
+
+  %% ===== 特征调用 =====
+  FeatureModules -->|"registry.execute(name, params)"| Interaction
+  FeatureModules -->|"registry.execute(name, params)"| Perception
+  FeatureModules -->|"registry.execute(name, params)"| DialogH
+  FeatureModules -->|"registry.execute(name, params)"| MenuH
+  FeatureModules -->|"registry.execute(name, params)"| OmniP
+
+  %% ===== 数据流标注 =====
+  Converter <-->|"DSL ↔ FlowScript"| Scripts
+  Scheduler <-->|"读写"| Schedules
+
+  %% ===== 层级标注 =====
+  subgraph Legend_Area["图例"]
+    L1["🔵 蓝色 = 进程/模块"]:::process
+    L2["🟠 橙色 = Python 子进程"]:::subp
+    L3["🟢 绿色 = 数据/通信"]:::io
+    L4["🔴 红色 = 存储"]:::store
+    L5["🟣 紫色 = 外部系统"]:::external
+    L6["🟡 黄色 = 用户操作"]:::user
+  end
+</pre>
+
+  <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+    <h3 style="margin-top: 0; color: #333;">📖 核心流程说明</h3>
+    <table style="width:100%; border-collapse: collapse; font-size: 14px;">
+      <tr style="background: #e1f5fe;"><th style="padding:8px;text-align:left;border:1px solid #ddd;">#</th><th style="padding:8px;text-align:left;border:1px solid #ddd;">流程</th><th style="padding:8px;text-align:left;border:1px solid #ddd;">路径</th></tr>
+      <tr><td style="padding:8px;border:1px solid #ddd;">①</td><td style="padding:8px;border:1px solid #ddd;"><b>流程图编辑→执行</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">画布编辑 → Store → IPC('engine:start') → spawnPython(engine.py) → DSLParser → Executor → 逐节点执行 → stdout 事件回调 → Store 更新 → 画布高亮</td></tr>
+      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">②</td><td style="padding:8px;border:1px solid #ddd;"><b>AI Agent 执行</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">AgentView 输入目标 → IPC('agent:start') → spawnPython(agent) → AgentConfig 解析 → _unified_run() → Planner(生成步骤) / ReAct(逐步骤) → 监督执行(焦点/定位/执行/OCR验证) → 步骤结果回传 → 前端展示进度</td></tr>
+      <tr><td style="padding:8px;border:1px solid #ddd;">③</td><td style="padding:8px;border:1px solid #ddd;"><b>HTTP API 远程控制</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">Claude Code / curl → api.ts:7880 → ipcRenderer.send('api-command') → Store.dispatch → 前端更新 → GET /api/get-state 返回当前状态</td></tr>
+      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">④</td><td style="padding:8px;border:1px solid #ddd;"><b>MCP 工具调用</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">外部 MCP 客户端 → stdio JSON-RPC → mcp/server.py → FeatureRegistry → @feature 函数执行 → 结果返回</td></tr>
+      <tr><td style="padding:8px;border:1px solid #ddd;">⑤</td><td style="padding:8px;border:1px solid #ddd;"><b>宏录制回放</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">F6 热键 → main.ts → spawnPython(录制器) → pynput 监听鼠标键盘 → 事件写入 macros/*.json → F6 停止 → 列表更新 → 可转换为流程图</td></tr>
+      <tr style="background:#f8f9fa;"><td style="padding:8px;border:1px solid #ddd;">⑥</td><td style="padding:8px;border:1px solid #ddd;"><b>视觉定位+经验学习</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">Agent 需要点击"搜索按钮" → visual_locator.locate() → 查 experience_db(OpenCV matchTemplate) → 命中返回坐标 / 未命中→VLM API 分析截图→返回坐标→裁剪小图→存入经验库→后续离线复用</td></tr>
+      <tr><td style="padding:8px;border:1px solid #ddd;">⑦</td><td style="padding:8px;border:1px solid #ddd;"><b>语音对话</b></td><td style="padding:8px;border:1px solid #ddd;font-size:13px;">麦克风 → WebSocket → voice/server.py → Whisper STT → LLM → Edge TTS → 音频二进制流 → 前端 AudioContext 解码播放 → 状态机 idle↔listening↔thinking↔speaking</td></tr>
+    </table>
+  </div>
+</div>
+</body>
+</html>

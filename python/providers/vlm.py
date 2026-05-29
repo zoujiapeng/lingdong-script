@@ -184,14 +184,30 @@ def get_vlm_provider() -> VLMProvider:
     选择逻辑:
     1. VLM_BACKEND=local → LocalVLMProvider
     2. VLM_BACKEND=gpt-4o-mini → GPT4oMiniProvider
-    3. 默认: gpt-4o-mini
+    3. 若 LLM_MODEL 包含 mimo/vision/omni/gpt-4/claude-3 → 使用 LLM 配置的 OpenAI 兼容提供者
+    4. 默认: gpt-4o-mini
     """
-    backend = os.environ.get("VLM_BACKEND", "gpt-4o-mini").strip().lower()
+    backend = os.environ.get("VLM_BACKEND", "").strip().lower()
 
     if backend == "local":
         return LocalVLMProvider()
 
-    # gpt-4o-mini (默认)
+    # 明确指定 gpt-4o-mini
+    if backend == "gpt-4o-mini":
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_base = os.environ.get("OPENAI_API_BASE", "")
+        return GPT4oMiniProvider(api_key=api_key, api_base=api_base)
+
+    # 自动检测：如果 LLM_MODEL 是多模态模型，使用 LLM 的 API 配置
+    model = os.environ.get("LLM_MODEL", "").strip().lower()
+    mimo_keywords = ("mimo", "vision", "omni", "gpt-4", "claude-3", "claude-4",
+                     "gemini", "qwen-vl", "deepseek-vl", "glm-4v")
+    if model and any(kw in model for kw in mimo_keywords):
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        api_base = os.environ.get("LLM_API_BASE", "") or os.environ.get("OPENAI_API_BASE", "")
+        return GPT4oMiniProvider(api_key=api_key, api_base=api_base)
+
+    # 默认: gpt-4o-mini
     api_key = os.environ.get("OPENAI_API_KEY", "")
     api_base = os.environ.get("OPENAI_API_BASE", "")
     return GPT4oMiniProvider(api_key=api_key, api_base=api_base)
