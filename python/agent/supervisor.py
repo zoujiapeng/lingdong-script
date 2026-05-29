@@ -42,7 +42,8 @@ class Supervisor:
                  multimodal: bool = False,
                  api_key: str = "",
                  api_base: str = "",
-                 model: str = ""):
+                 model: str = "",
+                 on_error: str = ""):
         self._emit = emit_event or (lambda e, d: None)
         self._stop_event = stop_event or threading.Event()
         self.auto_learn = auto_learn
@@ -50,6 +51,7 @@ class Supervisor:
         self.api_key = api_key
         self.api_base = api_base
         self.model = model
+        self.on_error = on_error  # "retry"|"replan"|"skip"|"stop" — "" 表示使用默认行为
 
         # Runtime state
         self._last_launched: str = ""
@@ -390,15 +392,41 @@ class Supervisor:
                 if attempt >= max_retries:
                     break
 
-        # ── 4. 对话框处理 ──
+        # ── 4. 事后策略: 根据 on_error 处理失败 ──
+        if not result.get("success"):
+            strategy = self.on_error or "retry"
+            if strategy == "skip":
+                self._emit("log", {
+                    "level": "warning",
+                    "message": f"on_error=skip: 「{name}」执行失败已跳过 ({result.get('error', '?')})",
+                })
+                result = {"success": True, "skipped": True, "original_error": result.get("error"), "tool": name}
+
+            elif strategy == "stop":
+                self._emit("log", {
+                    "level": "error",
+                    "message": f"on_error=stop: 「{name}」执行失败，终止执行 ({result.get('error', '?')})",
+                })
+                if self._stop_event:
+                    self._stop_event.set()
+                result = {"success": False, "error": "stopped_by_error_strategy", "tool": name}
+
+            elif strategy == "replan":
+                self._emit("log", {
+                    "level": "warning",
+                    "message": f"on_error=replan: 「{name}」执行失败，请求重新规划 ({result.get('error', '?')})",
+                })
+                result = {"success": False, "error": "replan_needed", "original_error": result.get("error"), "tool": name}
+
+        # ── 5. 对话框处理 ──
         if is_gui or name in ("screenshot", "hotkey", "launch_program"):
             self.auto_handle_dialogs()
 
-        # ── 5. 屏幕稳定 ──
+        # ── 6. 屏幕稳定 ──
         if is_gui:
             self.wait_screen_stable()
 
-        # ── 6. 失败诊断 ──
+        # ── 7. 失败诊断 ──
         if not result.get("success") and is_gui:
             try:
                 b64 = self.capture_b64()
