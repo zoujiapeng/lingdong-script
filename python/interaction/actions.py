@@ -248,12 +248,15 @@ class ActionHandler:
             if ok:
                 self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
             return ok
-        # Fallback: current position
-        cx, cy = _get_cursor_pos()
-        ok = _win32_click(cx, cy, button)
-        if ok:
-            self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
-        return ok
+        # Fallback: current position (only when no target specified — otherwise UIA already failed)
+        if not target:
+            cx, cy = _get_cursor_pos()
+            ok = _win32_click(cx, cy, button)
+            if ok:
+                self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
+            return ok
+        # Target text was given but not found by UIA — don't click at current position
+        return False
 
     def _exec_right_click(self, target=None, x=None, y=None, **kw):
         return self._exec_click(target=target, x=x, y=y, button="right", **kw)

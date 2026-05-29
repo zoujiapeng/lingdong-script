@@ -10,8 +10,11 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
+import tempfile
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("agent.supervisor")
@@ -36,6 +39,9 @@ class Supervisor:
         "find_processes",
     })
 
+    # 脚本执行工具（不走 registry，由 supervisor 直接处理）
+    SCRIPT_TOOLS = frozenset({"run_python_script"})
+
     def __init__(self, emit_event: Optional[Callable] = None,
                  stop_event: Optional[threading.Event] = None,
                  auto_learn: bool = False,
@@ -52,6 +58,11 @@ class Supervisor:
         self.api_base = api_base
         self.model = model
         self.on_error = on_error  # "retry"|"replan"|"skip"|"stop" — "" 表示使用默认行为
+
+        # ── 增强型动作开关 ──
+        self.window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
+        self.uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
+        self.scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
 
         # Runtime state
         self._last_launched: str = ""
@@ -256,6 +267,60 @@ class Supervisor:
             converted = args
         return registry.execute(name, **converted)
 
+    # ── 脚本执行模式 ───────────────────────────────────────────
+
+    def run_python_script(self, script: str, timeout: int = 120) -> dict:
+        """执行 Python 脚本（Hermes 风格），自动处理依赖和超时。"""
+        try:
+            # 写入临时文件
+            fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="lg_script_")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(script)
+            except Exception:
+                os.unlink(tmp_path)
+                return {"success": False, "error": "failed to write script"}
+
+            start = time.time()
+            proc = subprocess.run(
+                [sys.executable, tmp_path],
+                capture_output=True, text=True, timeout=timeout,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            elapsed = time.time() - start
+
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
+            success = proc.returncode == 0
+
+            self._emit("log", {
+                "level": "info" if success else "warning",
+                "message": f"脚本执行: {'✓' if success else '✗'} ({elapsed:.1f}s, exit={proc.returncode})",
+            })
+            if stdout:
+                self._emit("log", {"level": "info", "message": f"[脚本输出] {stdout[:500]}"})
+            if stderr:
+                self._emit("log", {"level": "warning", "message": f"[脚本错误] {stderr[:500]}"})
+
+            return {
+                "success": success,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": proc.returncode,
+                "elapsed": round(elapsed, 1),
+            }
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - start
+            self._emit("log", {"level": "error", "message": f"脚本超时 ({timeout}s)"})
+            return {"success": False, "error": f"timout ({timeout}s)", "elapsed": round(elapsed, 1)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
     # ── 核心监督流水线 ─────────────────────────────────────────
 
     def execute(self, name: str, args: dict) -> dict:
@@ -272,6 +337,12 @@ class Supervisor:
           8. 失败诊断截图
         """
         is_gui = name in self.GUI_ACTIONS
+
+        # ── S. 脚本执行模式（跳过 SoM/UIA/OCR 管道） ──
+        if name in self.SCRIPT_TOOLS:
+            script = args.get("script", "")
+            timeout = int(args.get("timeout", 120))
+            return self.run_python_script(script, timeout)
 
         # ── 0. SoM 编号解引用（#N → 坐标） ──
         if is_gui and self._last_som_map:
@@ -307,7 +378,44 @@ class Supervisor:
                 except Exception as e:
                     logger.warning("UIA resolution error: %s", e)
 
-        # ── 1b. 视觉定位 ──
+        # ── 1b. 窗口感知 OCR（将 OCR 搜索限定到活动窗口区域）──
+        if is_gui and self.window_aware_ocr and name in ("click_target", "right_click", "hover", "mouse_move"):
+            target = args.get("target", "") or args.get("from_target", "")
+            if target and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
+                region = args.get("region", "")
+                if not region:
+                    try:
+                        import win32gui
+                        hwnd = win32gui.GetForegroundWindow()
+                        if hwnd:
+                            rect = win32gui.GetWindowRect(hwnd)
+                            # rect: (left, top, right, bottom)
+                            win_region = f"{rect[0]},{rect[1]},{rect[2]-rect[0]},{rect[3]-rect[1]}"
+                            args = dict(args)
+                            args["region"] = win_region
+                            self._emit("log", {
+                                "level": "info",
+                                "message": f"窗口感知OCR: 限定搜索到「{win32gui.GetWindowText(hwnd)[:40]}」({rect[0]},{rect[1]},{rect[2]-rect[0]}×{rect[3]-rect[1]})",
+                            })
+                    except Exception:
+                        pass
+
+        # ── 1c. UIA 预聚焦（type_text 前自动点击输入框）──
+        if is_gui and self.uia_pre_focus and name in ("type_text", "type_clipboard"):
+            try:
+                edit_coords = self._find_edit_control()
+                if edit_coords:
+                    from features.registry import registry as r3
+                    r3.execute("click_target", target=f"{edit_coords[0]},{edit_coords[1]}")
+                    self._emit("log", {
+                        "level": "info",
+                        "message": f"UIA预聚焦: 自动点击输入框 ({edit_coords[0]}, {edit_coords[1]})",
+                    })
+                    time.sleep(0.15)
+            except Exception as e:
+                logger.warning("UIA pre-focus error: %s", e)
+
+        # ── 1d. 视觉定位 ──
         if is_gui and (self.auto_learn or self.multimodal):
             try:
                 args = self.apply_visual_locator(name, args)
@@ -340,29 +448,37 @@ class Supervisor:
                 except Exception:
                     pass
 
-        # ── 2b. 强制去重: 任何GUI操作前检查已知程序是否重复启动 ──
-        if is_gui and name in ("click_target", "launch_program", "hotkey"):
-            launch_hint = args.get("target", "") or args.get("text", "") or ""
-            if launch_hint:
+        # ── 2b. 强制去重: launch_program 前先找窗口，已运行则聚焦跳过 ──
+        if name == "launch_program":
+            launch_target = (args.get("target") or "").strip()
+            if launch_target and len(launch_target) >= 2:
                 try:
-                    import psutil
-                    hint_lower = launch_hint.lower()
-                    running_names = set()
-                    for p in psutil.process_iter(["name"]):
-                        try:
-                            pn = (p.info["name"] or "").lower().replace(".exe", "")
-                            if pn:
-                                running_names.add(pn)
-                        except Exception:
-                            pass
-                    # 如果尝试启动的程序名匹配已运行进程 → 聚焦
-                    for rn in running_names:
-                        if len(rn) >= 2 and (rn in hint_lower or hint_lower in rn):
-                            self._emit("log", {
-                                "level": "info",
-                                "message": f"强制去重: 「{launch_hint}」匹配运行中进程「{rn}」，转为聚焦",
-                            })
-                            return self.execute_with_type_conv("launch_program", {"target": rn})
+                    from features.registry import registry as r2
+
+                    # 先拿实际窗口列表逐个模糊匹配（窗口标题可能不含目标名）
+                    wins = r2.execute("list_windows") or []
+                    if isinstance(wins, dict):
+                        wins = wins.get("result", wins) or []
+                    if isinstance(wins, list):
+                        lt_lower = launch_target.lower()
+                        # 按匹配度排序：包含目标名的窗口优先
+                        scored = []
+                        for w in wins:
+                            if not isinstance(w, str):
+                                continue
+                            wl = w.lower()
+                            if lt_lower in wl or wl in lt_lower:
+                                scored.append((len(wl), w))  # 短标题优先（更可能是主窗口）
+                        if scored:
+                            scored.sort(key=lambda x: x[0])
+                            best = scored[0][1]
+                            focus_ok = r2.execute("focus_window", title=best)
+                            if focus_ok and isinstance(focus_ok, dict) and focus_ok.get("result", focus_ok) is True:
+                                self._emit("log", {
+                                    "level": "info",
+                                    "message": f"程序「{launch_target}」已在运行(窗口: {best})，已聚焦",
+                                })
+                                return {"success": True, "focused_existing": True}
                 except Exception:
                     pass
 
@@ -558,6 +674,50 @@ class Supervisor:
                 for child in (node.get("children", node.get("items", [])) or []):
                     if isinstance(child, dict):
                         _search(child, depth + 1)
+
+            _search(tree)
+            return best
+        except Exception:
+            return None
+
+    # ── UIA 预聚焦（找 Edit/TextBox 输入框）─────────────────────
+
+    def _find_edit_control(self) -> tuple | None:
+        """在活动窗口中搜索可用的文本输入框，返回中心坐标 (x, y)。"""
+        try:
+            from features.registry import registry
+            result = registry.execute("a11y_get_tree", depth=4)
+            if not result.get("success"):
+                return None
+            tree = result.get("result", result)
+            if isinstance(tree, dict):
+                tree = tree.get("result", tree)
+
+            best: tuple | None = None
+            best_area = 0
+
+            def _search(node):
+                nonlocal best, best_area
+                name = node.get("name", "") or node.get("text", "") or ""
+                role = node.get("control_type", node.get("role", "")) or ""
+                rect = node.get("bounding_rectangle", node.get("rect", {}))
+                if isinstance(rect, dict):
+                    x, y, w_, h_ = rect.get("x", 0), rect.get("y", 0), rect.get("w", 0), rect.get("h", 0)
+                else:
+                    x = y = w_ = h_ = 0
+
+                # 匹配 Edit / TextBox / Document 控件，最小 50×15 避免误识别
+                rl = role.lower()
+                is_input = ("edit" in rl or "text" in rl or "document" in rl or "rich edit" in rl)
+                if is_input and w_ > 50 and h_ > 15 and w_ < 3000 and h_ < 800:
+                    area = w_ * h_
+                    if area > best_area:
+                        best = (int(x + w_ // 2), int(y + h_ // 2))
+                        best_area = area
+
+                for child in (node.get("children", node.get("items", [])) or []):
+                    if isinstance(child, dict):
+                        _search(child)
 
             _search(tree)
             return best

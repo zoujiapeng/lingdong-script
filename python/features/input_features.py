@@ -55,7 +55,7 @@ def _find_target_coords(target: str, region: str = "") -> tuple:
 def right_click(target: str, region: str = "") -> bool:
     x, y = _find_target_coords(target, region)
     if x == 0 and y == 0:
-        return _do("click", button="right")
+        return False
     return _do("click", x=x, y=y, button="right")
 
 

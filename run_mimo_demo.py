@@ -5,7 +5,7 @@ import sys, os, json, time, base64
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'python'))
 os.environ['OPENAI_API_BASE'] = 'https://api.xiaomimimo.com/v1'
-os.environ['OPENAI_API_KEY'] = 'REDACTED_SILICONFLOW_KEY_2'
+os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY', '')
 os.environ['VLM_MODEL'] = 'mimo-v2-omni'
 os.environ['LLM_MULTIMODAL'] = 'true'
 

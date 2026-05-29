@@ -28,10 +28,16 @@ class AgentConfig:
     # ── Error handling strategy ──
     on_error: str = "retry"             # "retry"|"replan"|"skip"|"stop"
 
+    # ── Multimodal override ──
+    multimodal: str = "auto"            # "auto"|"true"|"false" — user override
+
     # ── Boolean toggles ──
     verify: bool = True
     fast_mode: bool = False
     image_dedup: bool = True
+    window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
+    uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
+    scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
 
     # ── Internal resolved state (set by resolve_auto()) ──
     _resolved_llm_protocol: str = ""
@@ -58,7 +64,12 @@ class AgentConfig:
           - screen_context -> "full"
         """
         from agent.agent import _is_multimodal_model
-        self._multimodal = _is_multimodal_model(model_name)
+        if self.multimodal == "true":
+            self._multimodal = True
+        elif self.multimodal == "false":
+            self._multimodal = False
+        else:
+            self._multimodal = _is_multimodal_model(model_name)
 
         resolved = {}
         if self._multimodal:
@@ -105,10 +116,13 @@ class AgentConfig:
             "planning": self.planning,
             "screen_context": self.screen_context,
             "on_error": self.on_error,
+            "multimodal": self.multimodal,
             "verify": self.verify,
             "fast_mode": self.fast_mode,
             "image_dedup": self.image_dedup,
-            "_multimodal": self._multimodal,
+            "window_aware_ocr": self.window_aware_ocr,
+            "uia_pre_focus": self.uia_pre_focus,
+            "scripted_mode": self.scripted_mode,
         }
 
     @classmethod
@@ -116,6 +130,7 @@ class AgentConfig:
         """Deserialize from dict (from IPC)."""
         return cls(
             llm_protocol=d.get("llm_protocol", "auto"),
+            multimodal=d.get("multimodal", "auto"),
             vision_mode=d.get("vision_mode", "auto"),
             planning=d.get("planning", "auto"),
             screen_context=d.get("screen_context", "auto"),
@@ -123,6 +138,9 @@ class AgentConfig:
             verify=d.get("verify", True),
             fast_mode=d.get("fast_mode", False),
             image_dedup=d.get("image_dedup", True),
+            window_aware_ocr=d.get("window_aware_ocr", True),
+            uia_pre_focus=d.get("uia_pre_focus", True),
+            scripted_mode=d.get("scripted_mode", False),
         )
 
 

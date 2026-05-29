@@ -85,8 +85,10 @@ def type_text(text: str, clear_first: bool = False, interval: float = 0) -> bool
     if clear_first:
         _do("hotkey", keys="ctrl+a")
         time.sleep(0.05)
-    _do("type", text=text)
-    return True
+    try:
+        return bool(_do("type", text=text))
+    except Exception:
+        return False
 
 
 @feature(

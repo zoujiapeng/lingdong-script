@@ -99,19 +99,13 @@ class OmniParserClient:
                     self._available = True
                     return True
 
-            # Fast dependency check — skip OmniParser if transformers >= 5.0 (incompatible)
+            # Quick import check — catch missing/too-old transformers
             try:
-                import transformers
-                tv = tuple(int(x) for x in transformers.__version__.split(".")[:2])
-                if tv >= (5, 0):
-                    logger.warning(
-                        "OmniParser requires transformers<5.0, got %s. Permanently disabled.",
-                        transformers.__version__,
-                    )
-                    self._permanently_failed = True
-                    return False
-            except Exception:
-                pass
+                from transformers import AutoProcessor, AutoModelForCausalLM
+            except Exception as exc:
+                logger.warning("OmniParser dependency check failed: %s", exc)
+                self._permanently_failed = True
+                return False
 
             # Validate paths
             if not os.path.isfile(SERVER_SCRIPT):
