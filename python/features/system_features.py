@@ -126,15 +126,15 @@ def _find_matching_pids(exe_name: str, target_name: str = "") -> set:
                 continue
             pname_stripped = pname.replace(".exe", "")
             # 2. Base is substring of process name (QQ.exe → QQNT.exe)
-            if len(base) >= 3 and base in pname:
+            if len(base) >= 2 and base in pname:
                 pids.add(p.info["pid"])
                 continue
             # 3. Process name is substring of base (QQNT.exe → QQ.exe)
-            if len(pname_stripped) >= 3 and pname_stripped in base:
+            if len(pname_stripped) >= 2 and pname_stripped in base:
                 pids.add(p.info["pid"])
                 continue
             # 4. Target name matches process name (e.g. "QQ" in "QQ.exe")
-            if len(target_lower) > 2 and target_lower in pname:
+            if len(target_lower) > 1 and target_lower in pname:
                 pids.add(p.info["pid"])
         except Exception:
             continue

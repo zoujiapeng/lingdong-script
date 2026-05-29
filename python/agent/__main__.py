@@ -28,6 +28,10 @@ import logging
 import os
 import sys
 import threading
+
+from dotenv import load_dotenv
+_env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+load_dotenv(_env_path)
 import time
 import traceback
 from datetime import datetime, timezone
@@ -141,6 +145,9 @@ def _run_agent(goal: str, config: dict | None = None,
     agent_cfg_dict = cfg.get("agent_config", {})
     if agent_cfg_dict and isinstance(agent_cfg_dict, dict):
         # 新统一路径：从前端设置面板传递的 AgentConfig
+        # 将顶层 multimodal 设置注入 agent_config（用户设置高于 auto 检测）
+        if "multimodal" in cfg and agent_cfg_dict.get("multimodal", "auto") == "auto":
+            agent_cfg_dict = {**agent_cfg_dict, "multimodal": cfg["multimodal"]}
         _log("info", f"Using unified AgentConfig from frontend: {json.dumps(agent_cfg_dict, ensure_ascii=False)}")
         agent_cfg = AgentConfig.from_dict(agent_cfg_dict)
     else:
@@ -157,6 +164,8 @@ def _run_agent(goal: str, config: dict | None = None,
         model=cfg.get("model") or os.environ.get("VLM_MODEL", "") or os.environ.get("LLM_MODEL", ""),
         event_callback=lambda d: _emit(d.pop("type", "log"), d) if callable(_emit) else None,
         stop_event=stop_event,
+        multimodal=cfg.get("multimodal") == "true",
+        auto_learn=cfg.get("auto_learn") == "true",
         omniparser_enabled=cfg.get("omniparser_enabled") == "true",
     )
 
@@ -267,6 +276,19 @@ class AgentIPC:
 # ====================================================================
 
 def main():
+    # Pre-load @feature registry in the main thread so agent thread doesn't block on import.
+    # _all.py uses lazy module registration (registry.set_lazy_modules), so we must
+    # call registry.all() to trigger actual importlib.import_module for all 43 modules.
+    _log("info", "Pre-loading feature registry...")
+    _emit("log", {"level": "info", "message": "正在加载功能模块..."})
+    try:
+        import features._all  # noqa
+        from features.registry import registry
+        registry.all()  # Trigger actual module loading
+    except Exception as e:
+        _log("warn", f"Feature pre-load failed (will retry in agent thread): {e}")
+    _log("info", "Feature registry loaded")
+
     ipc = AgentIPC()
     msg_queue: Queue = Queue()
 

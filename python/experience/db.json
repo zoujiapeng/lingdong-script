@@ -1,22 +1,22 @@
 {
   "v1": {
     "6e058c9e9571cc9b": {
-      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780027248.png",
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780049733.png",
       "method": "vlm",
-      "confidence": 0.95,
+      "confidence": 0.98,
       "bbox": {
-        "x": 100,
-        "y": 156,
-        "w": 260,
-        "h": 30,
-        "center_x": 230,
-        "center_y": 171,
-        "confidence": 0.95,
+        "x": 25,
+        "y": 139,
+        "w": 170,
+        "h": 33,
+        "center_x": 110,
+        "center_y": 155,
+        "confidence": 0.98,
         "method": "vlm",
         "label": "搜索"
       },
-      "count": 1,
-      "last_used": "2026-05-29T12:00:48",
+      "count": 2,
+      "last_used": "2026-05-29T18:15:33",
       "step_type": "click",
       "target_text": "\"搜索\"",
       "window_title": ""
@@ -211,22 +211,22 @@
       "window_title": ""
     },
     "17c739bce3a68209": {
-      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780027835.png",
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780047467.png",
       "method": "vlm",
       "confidence": 0.95,
       "bbox": {
-        "x": 100,
-        "y": 155,
-        "w": 260,
-        "h": 30,
-        "center_x": 230,
-        "center_y": 170,
+        "x": 25,
+        "y": 139,
+        "w": 172,
+        "h": 33,
+        "center_x": 111,
+        "center_y": 155,
         "confidence": 0.95,
         "method": "vlm",
         "label": "搜索"
       },
-      "count": 1,
-      "last_used": "2026-05-29T12:10:35",
+      "count": 2,
+      "last_used": "2026-05-29T17:37:47",
       "step_type": "click",
       "target_text": "搜索",
       "window_title": ""
@@ -544,6 +544,111 @@
       "last_used": "2026-05-29T14:11:14",
       "step_type": "click",
       "target_text": "(187, 727)",
+      "window_title": ""
+    },
+    "54d1d4c8f321efa5": {
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780048253.png",
+      "method": "vlm",
+      "confidence": 0.98,
+      "bbox": {
+        "x": 41,
+        "y": 146,
+        "w": 13,
+        "h": 21,
+        "center_x": 47,
+        "center_y": 156,
+        "confidence": 0.98,
+        "method": "vlm",
+        "label": "搜索框中的\"葛\"字"
+      },
+      "count": 1,
+      "last_used": "2026-05-29T17:50:54",
+      "step_type": "click",
+      "target_text": "搜索框中的\"葛\"字位置",
+      "window_title": ""
+    },
+    "3431fb666ae14a31": {
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780048380.png",
+      "method": "vlm",
+      "confidence": 0.99,
+      "bbox": {
+        "x": 26,
+        "y": 223,
+        "w": 189,
+        "h": 67,
+        "center_x": 120,
+        "center_y": 256,
+        "confidence": 0.99,
+        "method": "vlm",
+        "label": "计技25A葛瑞念"
+      },
+      "count": 1,
+      "last_used": "2026-05-29T17:53:00",
+      "step_type": "click",
+      "target_text": "计技25A葛瑞念",
+      "window_title": ""
+    },
+    "ed14c8d389275fe2": {
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780048443.png",
+      "method": "vlm",
+      "confidence": 0.98,
+      "bbox": {
+        "x": 10,
+        "y": 810,
+        "w": 970,
+        "h": 130,
+        "center_x": 495,
+        "center_y": 875,
+        "confidence": 0.98,
+        "method": "vlm",
+        "label": "输入框"
+      },
+      "count": 1,
+      "last_used": "2026-05-29T17:54:03",
+      "step_type": "click",
+      "target_text": "输入框",
+      "window_title": ""
+    },
+    "679bc0358582469f": {
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780048675.png",
+      "method": "vlm",
+      "confidence": 0.95,
+      "bbox": {
+        "x": 923,
+        "y": 942,
+        "w": 59,
+        "h": 38,
+        "center_x": 952,
+        "center_y": 961,
+        "confidence": 0.95,
+        "method": "vlm",
+        "label": "发送按钮"
+      },
+      "count": 1,
+      "last_used": "2026-05-29T17:57:55",
+      "step_type": "click",
+      "target_text": "\"950,900\"",
+      "window_title": ""
+    },
+    "27b1809d409388e6": {
+      "template_path": "C:\\Users\\zou\\Desktop\\claude\\python\\experience\\templates\\learn_click_1780048835.png",
+      "method": "vlm",
+      "confidence": 0.98,
+      "bbox": {
+        "x": 923,
+        "y": 942,
+        "w": 59,
+        "h": 36,
+        "center_x": 952,
+        "center_y": 960,
+        "confidence": 0.98,
+        "method": "vlm",
+        "label": "发送"
+      },
+      "count": 1,
+      "last_used": "2026-05-29T18:00:35",
+      "step_type": "click",
+      "target_text": "\"1800, 1050\"",
       "window_title": ""
     }
   }

@@ -7,9 +7,9 @@
 [![Electron](https://img.shields.io/badge/Electron-31-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org/)
-[![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python)](https://www.python.org/)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-296_✔-success)](https://github.com/zoujiapeng/lingdong-script)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://www.python.org/)
+[![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite)](https://vitejs.dev/)
+[![Tests](https://img.shields.io/badge/Tests-2482_✔-success)](https://github.com/zoujiapeng/lingdong-script)
 
 </div>
 
@@ -33,7 +33,7 @@ DSL 层 (批处理执行)
   │  一次性生成, 本地零 Token 执行
   ▼
 Zero-AI Runtime (引擎内核)
-      247 @feature 工具, 190 DSL 关键字, 纯本地
+      242 @feature 工具, 196 MCP 工具, 纯本地
 ```
 
 | 层 | 调用方式 | Token 成本 | 用途 |
@@ -158,14 +158,30 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **回放控制** — 支持速度调节、循环播放
 
 ### AI Agent（核心特性）
-- **统一执行引擎** — 4 种执行模式（text_protocol / langgraph / planned / direct）折叠为 1 个 `_unified_run()`，通过 `AgentConfig` dataclass 解耦所有配置轴
-- **设置面板可视化控制** — 7 项可调参数（LLM 协议、视觉模式、规划策略、屏幕上下文、错误处理、快速模式、截图去重），实时生效
-- **MIMO 全面兼容** — 多模态模型在所有规划策略（pre_plan / per_step）、所有视觉模式（direct / som / omniparser）下正常工作
-- **`resolve_auto()` 智能适配** — 多模态模型自动选择 text+direct+per_step+minimal；纯文本模型自动选择 function_calling+som+pre_plan+full
-- **向后兼容** — 旧版 IPC 协议（`mimo` + `supervise` 布尔标志）自动转换为 AgentConfig，无缝过渡
+- **统一执行引擎** — 4 种执行模式折叠为 1 个 `_unified_run()`，通过 `AgentConfig` dataclass 解耦所有配置轴，设置面板可视化控制
+- **Agent 配置项**（10 项可调，实时生效）：
+
+  | 配置 | 选项 | 说明 |
+  |------|------|------|
+  | LLM 协议 | auto / text / function_calling | 与 LLM 的通信方式 |
+  | 视觉模式 | auto / direct / som / omniparser | 如何理解屏幕 |
+  | 规划策略 | auto / per_step / pre_plan | 逐步骤决策 vs 先生成计划 |
+  | 屏幕上下文 | auto / minimal / full | 向 LLM 提供多少屏幕信息 |
+  | 错误处理 | retry / replan / skip / stop | 失败时的恢复策略 |
+  | 快速模式 | 开/关 | 跳过非必要验证 |
+  | 去重截图 | 开/关 | 相同画面不重复发送 |
+  | 窗口感知 OCR | 开/关 | OCR 限定到活动窗口区域 |
+  | UIA 预聚焦 | 开/关 | 输入前自动聚焦文本框 |
+  | 脚本模式 | 开/关 | 允许写 Python 脚本（Hermes 风格） |
+
+- **窗口感知 OCR** — 自动将 OCR 搜索限定到前景窗口区域，彻底解决"文字在不同窗口间串扰"的问题，尤其适合多窗口场景（如 QQ）
+- **UIA 预聚焦** — 通过 Windows UIA 无障碍树扫描活动窗口，type_text 前自动定位并点击文本输入框，防止输入到错误控件
+- **脚本执行模式** — 开启后 Agent 可编写 Python 脚本（pywinauto/pyautogui）一次性完成复杂流程（Hermes 风格），`run_python_script` 工具自动管理临时文件/超时/清理；简单操作仍使用 native 工具；默认关闭
+- **MIMO 全面兼容** — 多模态模型在所有规划策略、所有视觉模式下正常工作
+- **`resolve_auto()` 智能适配** — 多模态和纯文本模型各自使用最优配置组合
+- **向后兼容** — 旧版 IPC 协议（mimo/supervise 布尔标志）自动转换
 - **自主规划** — AI 分析目标，自动生成执行计划（流程图可视化展示）
-- **监督执行** — Agent stay alive 逐步执行，不再生成脚本后退出
-- **窗口焦点安全** — 每步执行前检查目标窗口，防止输入错窗口
+- **监督执行** — Agent stay alive 逐步执行，完整流水线：SoM 标号 → UIA 定位 → 窗口感知 OCR → UIA 预聚焦 → 视觉定位 → 防重复启动 → 窗口焦点安全 → 执行+重试 → 错误策略决策 → 对话框自动处理 → 屏幕稳定等待 → 失败诊断截图
 - **OCR 验证** — 执行后自动 OCR 验证结果，确保操作生效
 - **失败恢复** — LLM 决策恢复策略（重试/替代方案/跳过/终止）
 - **自然语言生成** — 用中文描述需求，AI 自动生成 DSL 并转为流程图
@@ -214,9 +230,8 @@ END
 DSL ↔ FlowScript 双向无损转换，支持往返编辑。
 
 ### @feature 工具注册表
-- **247 注册工具** — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP 接口
+- **242 注册工具**（196 活跃 MCP 工具，43 内部隐藏，3 废弃） — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP/DSL 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
-- **190 DSL 关键字** — 自动从注册表生成，含所有控制流关键字
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
 - **HTTP API 桥接** — `127.0.0.1:7880` 提供 55+ RESTful 端点
 - **Agent 自我升级** — 工具集从注册表动态加载，新增功能自动纳入 Agent 可用范围
@@ -379,20 +394,19 @@ templates/          # 工作流模板 (.flow) + skill_tree.json
 Three execution layers:
 1. **MCP Layer** (Claude Code / AI Agent) — feasibility check, DSL generation
 2. **DSL Layer** (batch execution) — one-shot generation, local zero-token execution
-3. **Zero-AI Runtime** (engine core) — 247 @feature tools, 190 DSL keywords, fully local
+3. **Zero-AI Runtime** (engine core) — 242 @feature tools, 196 MCP tools, fully local
 
 ### Key Features
 
-- **AI Agent** — Goal-oriented planning with supervised execution, OCR verification, window focus safety, failure recovery
-- **Voice Conversation** — Built-in WebSocket voice server with 5 STT engines (whisper-tiny/base/small/large-v3-turbo/paraformer), hot-switchable, TTS support (system + ElevenLabs)
-- **Camera Nodes** — camera_capture (photo), camera_record (video), camera_list, camera_detect_motion (5 @feature tools)
+- **AI Agent** — Goal-oriented planning with supervised execution (SoM → UIA → window-aware OCR → UIA pre-focus → visual locator → window focus → retry → error strategy → dialog handler → screen stabilize → failure diagnosis), **10 configurable parameters** including window-aware OCR, UIA pre-focus, and **Python scripting mode** (Hermes-style via `run_python_script`)
+- **AgentConfig System** — Unified dataclass replacing 4 legacy modes; `resolve_auto()` auto-tunes for multimodal vs text-only models; full backward compatibility
+- **Voice Conversation** — Built-in WebSocket voice server with 5 STT engines (whisper-tiny/base/small/large-v3-turbo/paraformer), hot-switchable, TTS support
+- **Visual Flow Editor** — 55 native node types, hierarchical sub-operation structure, 3 view modes
 - **Crystallization** — Auto-generate reusable templates from successful DSL executions
 - **Trigger System** — 6 trigger sources (timer/file/process/window/clipboard/network) with TriggerBar UI
-- **VLM Provider** — Pluggable vision backend (GPT-4o-mini/Local), OpenCV-first fallback
-- **Visual Flow Editor** — 55 native node types, hierarchical sub-operation structure
-- **Macro Recording** — F6 hotkey, smart filtering, visual template extraction
-- **@Feature Registry** — 247 tools (196 MCP tools, 190 DSL keywords), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL
-- **Architecture Optimized** — Code splitting (~1.3MB JS), Python process pool (max 3), async file I/O
+- **@Feature Registry** — 242 registered tools (196 active MCP), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL generation
+- **Macro Recording** — F6 hotkey, smart filtering, visual template extraction with OCR auto-naming
+- **Camera Nodes** — camera_capture, camera_record, camera_list, camera_detect_motion (5 tools)
 - **HTTP API Bridge** — 55+ endpoints on `127.0.0.1:7880` for remote control
 - **Timer Scheduling** — cron/interval/startup triggers with condition guards
 
@@ -418,7 +432,7 @@ npx electron-builder --win portable  # Portable executable
 
 ### Tech Stack
 
-React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.10+ · 247 @feature tools · MCP protocol · APScheduler
+React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.11 · 242 @feature tools · 196 MCP tools · APScheduler
 
 ---
 

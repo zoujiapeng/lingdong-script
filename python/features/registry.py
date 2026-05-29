@@ -186,13 +186,24 @@ class FeatureRegistry:
         """首次访问时按需加载所有延迟模块"""
         if not self._lazy_modules:
             return
-        modules = self._lazy_modules
+        modules = list(self._lazy_modules)
         self._lazy_modules = []  # 防止递归
         import sys as _sys
         for mod_name in modules:
             _sys.stderr.write(f"[registry] loading {mod_name}...\n")
             _sys.stderr.flush()
-            importlib.import_module(mod_name)
+            try:
+                importlib.import_module(mod_name)
+            except Exception as exc:
+                _sys.stderr.write(f"[registry] FAILED {mod_name}: {exc}\n")
+                _sys.stderr.flush()
+                # Restore modules that haven't been loaded yet so retry can catch them
+                remaining = modules[modules.index(mod_name):]
+                if not self._lazy_modules:
+                    self._lazy_modules = remaining
+                else:
+                    self._lazy_modules = remaining + self._lazy_modules
+                raise
 
     def list_features(self) -> List[FeatureSpec]:
         """列出所有已注册的功能（按注册顺序）"""

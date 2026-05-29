@@ -70,26 +70,68 @@ def _is_multimodal_model(model_name: str) -> bool:
 
 # ── 文本协议模式系统提示词 ─────────────────────────────────────
 
-SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个工具可用，在工具列表中按需选择。
+SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个工具可用。
 
-## 工作方式
-每次我给你：截图 + 屏幕状态。你选择下一个工具调用。
-完成后回复 总结。
+每轮我给你截图 + 当前窗口状态，**你必须调用工具操作屏幕**，不能只看图猜测。
 
-## 格式
+操作规则:
+- 必须调用工具来完成任务，不能仅凭截图内容推断"已完成"
+- 输入文字前：先点击目标输入框聚焦。使用 click_target(target="输入框") 或 click_target(target"输入区域")
+- 点击目标时优先用文字定位（如 button text），不要猜坐标
+- 同一目标在不同屏幕区域出现时（如联系人列表、聊天记录都有同名），务必指定 region 参数限制搜索区域，例如 click_target(target="确认", region="100,200,300,400")
+- 搜索后：必须点击搜索结果打开
+- 不要猜测。必须执行搜索、点击、输入等实际操作
+- 完成后必须确认。输入文字后需要点击发送/确认按钮提交
+- 如果没有执行任何工具就完成，会被视为幻觉
+
+格式:
 ```
-思考: <你的推理>
+思考: <推理>
 工具: <工具名>
 参数:
-  参数名1: 值1
+  参数1: 值1
 ```
-完成:
+完成后:
 ```
 总结: <结果>
 ```
 
-## 工具
+工具列表:
 {tools_text}
+"""
+
+SCRIPTED_MODE_INSTRUCTIONS = """
+[脚本执行模式已开启]
+
+你也可以编写 Python 脚本来完成桌面操作，使用 `run_python_script(script="...")` 工具。
+
+什么时候用脚本：
+- 需要启动程序 → 等待 → 操作 → 验证 的完整流程
+- 需要条件判断或循环的重复操作
+- 简单的点击/输入不适合的场景
+
+脚本注意事项：
+- 系统已预装 pywinauto, pyautogui, psutil, time, os, subprocess 等常见库，直接 import 即可
+- 不需要 pip install，系统会自动处理依赖
+- 每个脚本建议控制在 50 行以内
+- 脚本中适当加 time.sleep() 等待界面响应
+- 每个脚本执行完成后用 print() 输出结果报告
+
+示例: 打开记事本并输入文字
+```
+工具: run_python_script
+参数:
+  script: |
+    import pywinauto, time
+    app = pywinauto.Application(backend="uia").start("notepad.exe")
+    time.sleep(1)
+    edit = app.top_window().child_window(class_name="Edit")
+    edit.set_focus()
+    edit.type_keys("Hello, World!", with_spaces=True)
+    print("完成")
+```
+
+简单操作仍可用 native 工具（click_target, type_text 等），复杂流程用脚本。
 """
 
 # ── 工具描述生成 (from MimoAgent) ─────────────────────────────
@@ -486,11 +528,34 @@ class LingdongAgent:
         args = {}
         param_section = re.search(r"参数:\s*(.*?)(?:\n\s*\n|$)", content, re.DOTALL)
         if param_section:
-            for line in param_section.group(1).strip().split("\n"):
-                line = line.strip()
-                m = re.match(r"(\w+)\s*[:：]\s*(.+)", line)
+            lines = param_section.group(1).split("\n")
+            i = 0
+            while i < len(lines):
+                raw_line = lines[i]
+                m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line)
                 if m:
-                    args[m.group(1)] = m.group(2).strip()
+                    key = m.group(1)
+                    val = m.group(2).strip()
+                    # 支持 YAML 风格 | 多行值
+                    if val == "|":
+                        indent = len(raw_line) - len(raw_line.lstrip())
+                        val_lines = []
+                        i += 1
+                        while i < len(lines):
+                            if lines[i].strip() == "":
+                                i += 1
+                                continue
+                            cur_indent = len(lines[i]) - len(lines[i].lstrip())
+                            if cur_indent > indent:
+                                val_lines.append(lines[i].rstrip())
+                                i += 1
+                            else:
+                                break
+                        args[key] = "\n".join(val_lines)
+                        continue
+                    else:
+                        args[key] = val
+                i += 1
 
         return "tool", tool_name, args
 
@@ -567,12 +632,19 @@ class LingdongAgent:
                     f"\n使用 #N 指定目标，如: target: #3  或  target: #5"
                 )
 
-        # 多模态提示词：直接让模型看图
+        # ── 自动注入当前窗口列表，防止 LLM 无脑启动已运行的程序 ──
+        try:
+            from features.system_features import list_windows
+            win_list = list_windows()
+            win_info = f"\n当前已打开的窗口 ({len(win_list)} 个): {win_list}" if win_list else ""
+        except Exception:
+            win_info = ""
+
         first_prompt = (
-            f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}"
+            f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}{win_info}"
             + (som_label if vision_mode != "direct" else "")
-            + ("\n\n分析屏幕截图，执行第一步。" if vision_mode != "direct"
-               else "\n\n屏幕截图可见。请基于截图内容判断下一步操作，返回工具调用。")
+            + ("\n\n分析屏幕截图，执行第一步。必须调用工具。" if vision_mode != "direct"
+               else "\n\n屏幕截图可见。请基于截图内容执行具体操作，返回工具调用。不要猜测，必须实际操作。")
         )
         messages.append({
             "role": "user",
@@ -586,6 +658,7 @@ class LingdongAgent:
         last_tool = ""
         repeat_count = 0
 
+        self._emit("log", {"level": "info", "message": "正在调用 AI 分析屏幕并规划下一步..."})
         for loop in range(1, MAX_STEPS + 1):
             if self._stop_event and self._stop_event.is_set():
                 self._emit("log", {"level": "info", "message": "停止请求，终止循环"})
@@ -611,6 +684,13 @@ class LingdongAgent:
             action, name, args = self._parse_response(content)
 
             if action == "done":
+                if not steps:
+                    self._emit("log", {"level": "warn", "message": "LLM 未执行任何工具就声称完成，强制继续"})
+                    messages.append({
+                        "role": "user",
+                        "content": "你没有执行任何工具调用就声称完成了。这不行。必须调用工具操作屏幕。至少执行一个工具后再总结。"
+                    })
+                    continue
                 summary = args.get("summary", content)[:500]
                 self._emit("log", {"level": "info", "message": f"完成: {summary}"})
                 ok_count = sum(1 for s in steps if s.get("status") == "completed")
@@ -683,6 +763,13 @@ class LingdongAgent:
                 else:
                     last_b64_hash = cur_hash
                     screen_ctx = self._get_screen_context(minimal=context_minimal)
+                    # 重新注入窗口列表
+                    try:
+                        from features.system_features import list_windows
+                        win_list = list_windows()
+                        win_info = f"\n当前已打开的窗口 ({len(win_list)} 个): {win_list}" if win_list else ""
+                    except Exception:
+                        win_info = ""
 
                     # SoM 标号（非多模态模式才需要）
                     som_label = ""
@@ -696,7 +783,7 @@ class LingdongAgent:
                             som_label = f"\n屏幕元素编号:\n{lines}"
 
                     parts = [
-                        {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{som_label}"},
+                        {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                     ]
                     messages.append({"role": "user", "content": parts})
@@ -1073,8 +1160,15 @@ class LingdongAgent:
         """
         config.resolve_auto(self.model)
 
-        # 传播 on_error 策略到监督层
+        # 传播监督层配置
         self.supervisor.on_error = config._resolved_on_error
+        self.supervisor.window_aware_ocr = config.window_aware_ocr
+        self.supervisor.uia_pre_focus = config.uia_pre_focus
+        self.supervisor.scripted_mode = config.scripted_mode
+
+        # 脚本执行模式注入提示词
+        if config.scripted_mode:
+            self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
 
         self._emit("log", {"level": "info", "message":
             f"Unified agent: planning={config._resolved_planning}, "
@@ -1082,7 +1176,10 @@ class LingdongAgent:
             f"vision={config._resolved_vision_mode}, "
             f"context={config._resolved_screen_context}, "
             f"multimodal={config._multimodal}, "
-            f"on_error={config._resolved_on_error}"})
+            f"on_error={config._resolved_on_error}, "
+            f"window_ocr={config.window_aware_ocr}, "
+            f"uia_focus={config.uia_pre_focus}, "
+            f"scripted={config.scripted_mode}"})
 
         # ── Planning: pre_plan vs per_step ──
         if config._resolved_planning == "pre_plan":
