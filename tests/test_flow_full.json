@@ -1,0 +1,20 @@
+{
+  "script": {
+    "meta": { "name": "参数补全测试" },
+    "nodes": [
+      { "id": "s", "type": "start", "label": "开始", "params": {}, "x": 50, "y": 250 },
+      { "id": "n1", "type": "click", "label": "登录按钮", "params": {}, "x": 250, "y": 250 },
+      { "id": "n2", "type": "input_text", "label": "输入账号", "params": {}, "x": 450, "y": 250 },
+      { "id": "n3", "type": "screenshot", "label": "截图", "params": {}, "x": 650, "y": 250 },
+      { "id": "n4", "type": "image_click", "label": "点击图标", "params": {}, "x": 850, "y": 250 },
+      { "id": "e", "type": "end", "label": "结束", "params": {}, "x": 1050, "y": 250 }
+    ],
+    "edges": [
+      { "id": "e1", "from_node": "s", "to_node": "n1", "from_port": "output", "to_port": "input" },
+      { "id": "e2", "from_node": "n1", "to_node": "n2", "from_port": "output", "to_port": "input" },
+      { "id": "e3", "from_node": "n2", "to_node": "n3", "from_port": "output", "to_port": "input" },
+      { "id": "e4", "from_node": "n3", "to_node": "n4", "from_port": "output", "to_port": "input" },
+      { "id": "e5", "from_node": "n4", "to_node": "e", "from_port": "output", "to_port": "input" }
+    ]
+  }
+}

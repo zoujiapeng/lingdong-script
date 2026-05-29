@@ -53,6 +53,9 @@ class OmniParserClient:
         self._lock = threading.Lock()
         self._available = False
         self._permanently_failed = False  # 防止重复启动
+        self._start_attempts = 0
+        self._max_start_attempts = 2  # 重试上限
+        self._start_cooldown_until = 0.0  # 冷却期，避免频繁重试
 
     # ── Server lifecycle ──────────────────────────────────────────
 
@@ -69,12 +72,26 @@ class OmniParserClient:
 
         Returns True if the server is running after startup (either
         newly started or already running).
+
+        Transient failures (timeout, premature exit) do NOT permanently
+        disable the client — up to _max_start_attempts retries with cooldown.
+        Only dependency-level failures (transformers>=5.0, missing weights)
+        set _permanently_failed.
         """
         if self._permanently_failed:
             return False
+
         with self._lock:
             if self._available:
                 return True
+
+            # Cooldown + retry limit inside lock to avoid races
+            now = time.time()
+            if now < self._start_cooldown_until:
+                return False
+            if self._start_attempts >= self._max_start_attempts:
+                return False
+            self._start_attempts += 1
 
             # Already running but not yet marked available?
             if self._process and self._process.poll() is None:
@@ -110,9 +127,9 @@ class OmniParserClient:
                 )
                 return False
 
-            logger.info("Starting OmniParser server on port %d...", self.port)
+            logger.info("Starting OmniParser server on port %d (attempt %d/%d)...",
+                        self.port, self._start_attempts, self._max_start_attempts)
             try:
-                weights_dir = os.path.join(OMNIPARSER_DIR, "weights")
                 server_script = os.path.join(os.path.dirname(SERVER_SCRIPT), "omniparserserver.py")
                 self._process = subprocess.Popen(
                     [
@@ -132,6 +149,7 @@ class OmniParserClient:
                 )
             except Exception as exc:
                 logger.warning("Failed to start OmniParser server: %s", exc)
+                self._start_cooldown_until = time.time() + 30  # backoff 30s
                 return False
 
             # Wait for server to be ready
@@ -140,7 +158,7 @@ class OmniParserClient:
                 if self._process.poll() is not None:
                     logger.warning("OmniParser server exited prematurely (code %d)", self._process.returncode)
                     self._process = None
-                    self._permanently_failed = True
+                    self._start_cooldown_until = time.time() + 30
                     return False
                 if self._check_server():
                     self._available = True
@@ -149,12 +167,14 @@ class OmniParserClient:
                 time.sleep(HEALTH_CHECK_INTERVAL)
 
             logger.warning("OmniParser server failed to start within %ds", SERVER_START_TIMEOUT)
-            # 清理挂起的进程，标记为永久不可用，避免后续调用再次等待 60s
-            self._process.kill()
-            self._process.wait(timeout=3)
+            try:
+                self._process.kill()
+                self._process.wait(timeout=3)
+            except Exception:
+                pass
             self._process = None
             self._available = False
-            self._permanently_failed = True
+            self._start_cooldown_until = time.time() + 60  # 1min cooldown before retry
             return False
 
     def stop(self):

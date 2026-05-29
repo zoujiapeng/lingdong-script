@@ -1,11 +1,9 @@
 """
-LangGraph 驱动的 AI Agent — 替代自研 ReAct 循环。
+DEPRECATED — LangGraph 驱动的 AI Agent。
 
-工具集通过 @feature 注册表动态生成，LangGraph 负责状态管理/循环控制。
-包含完整的监督执行层：窗口焦点安全、指数退避重试、屏幕稳定等待、
-OCR 验证、失败恢复策略。
-
-IPC 兼容: 保持与 __main__.py 相同的 JSON stdout 事件协议。
+功能已被 LingdongAgent.run_langgraph() (agent/agent.py) 替代。
+此文件保留仅为向后兼容 (test_dialog_handler.py 集成测试)。
+新代码应直接使用 LingdongAgent。
 """
 
 import json

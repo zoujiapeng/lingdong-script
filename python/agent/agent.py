@@ -1073,12 +1073,16 @@ class LingdongAgent:
         """
         config.resolve_auto(self.model)
 
+        # 传播 on_error 策略到监督层
+        self.supervisor.on_error = config._resolved_on_error
+
         self._emit("log", {"level": "info", "message":
             f"Unified agent: planning={config._resolved_planning}, "
             f"protocol={config._resolved_llm_protocol}, "
             f"vision={config._resolved_vision_mode}, "
             f"context={config._resolved_screen_context}, "
-            f"multimodal={config._multimodal}"})
+            f"multimodal={config._multimodal}, "
+            f"on_error={config._resolved_on_error}"})
 
         # ── Planning: pre_plan vs per_step ──
         if config._resolved_planning == "pre_plan":
