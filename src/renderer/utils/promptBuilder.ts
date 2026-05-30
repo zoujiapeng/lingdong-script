@@ -313,11 +313,11 @@ interface ExampleEntry {
 
 const EXAMPLES: ExampleEntry[] = [
   {
-    title: '打开应用并输入文本',
-    description: '启动程序，等待加载，然后输入文字。展示最基本的 点击→等待→输入 时序。',
-    tags: ['basic', '启动', '输入'],
-    chinese: '按键 win+r\n等待 0.5\n输入 "notepad"\n按键 enter\n等待 1\n输入 "hello world"',
-    english: 'HOTKEY win r\nWAIT 0.5\nTYPE "notepad"\nHOTKEY enter\nWAIT 1\nTYPE "hello world"',
+    title: '打开网页搜索',
+    description: '启动浏览器，打开网页搜索内容。展示 启动→等待→点击→输入 时序。',
+    tags: ['basic', '浏览器', '搜索'],
+    chinese: '按键 win+r\n等待 0.5\n输入 "chrome"\n按键 enter\n等待 1\n点击 "搜索框"\n输入 "天气预报"\n按键 enter',
+    english: 'HOTKEY win r\nWAIT 0.5\nTYPE "chrome"\nHOTKEY enter\nWAIT 1\nCLICK "search box"\nTYPE "weather"\nHOTKEY enter',
   },
   {
     title: '条件判断 + 循环：批量处理文件',
@@ -457,18 +457,18 @@ WAIT 2`,
     title: '窗口监控（等待进程 + 场景判断）',
     description: '等待进程启动后检测窗口场景，根据场景执行不同操作。展示 进程→场景→分支 组合。',
     tags: ['进程', '窗口', '场景', '监控'],
-    chinese: `等待进程 "notepad.exe" 超时 30
-激活 "记事本"
-场景识别 "编辑界面"
-如果 场景匹配 "编辑界面":
-  输入 "hello" 位置 (100, 200)
+    chinese: `等待进程 "chrome.exe" 超时 30
+激活 "Chrome"
+场景识别 "搜索页面"
+如果 场景匹配 "搜索页面":
+  点击 (200, 300)
 否则:
   点击 (100, 100)`,
-    english: `WAIT_PROCESS notepad.exe 30
-FOCUS "notepad"
-SCENE_CONDITION "editor_view"
-IF scene_match "editor_view"
-  INPUT_TEXT 100 200 "hello"
+    english: `WAIT_PROCESS chrome.exe 30
+FOCUS "Chrome"
+SCENE_CONDITION "search_page"
+IF scene_match "search_page"
+  CLICK 200 300
 ELSE
   CLICK 100 100
 END`,
@@ -582,7 +582,7 @@ function buildCorePrompt(lang: PromptLanguage): string {
 5. 弹窗关闭、OCR 验证等非关键步骤标记为"（可选）"
 6. 复杂操作拆分为清晰的步骤序列
 7. 涉及视觉检测的步骤，如果不知道具体路径/文字，用合理描述占位
-8. 启动程序时，可以用中文名称直接启动（如 \`启动 "微信"\`、\`启动 "记事本"\`、\`启动 "微星小飞机"\`），系统会自动解析路径。无需提前查找完整路径`
+8. 启动程序时，可以用中文名称直接启动（如 \`启动 "微信"\`、\`启动 "计算器"\`、\`启动 "微星小飞机"\`），系统会自动解析路径。无需提前查找完整路径`
   } else {
     return `You are a DSL generator for desktop automation named Lingdong Script.
 Generate ONLY raw DSL code, no markdown, no explanations in the DSL portion.
@@ -596,7 +596,7 @@ Return JSON: {"pseudocode":"DSL code","explanation":"brief explanation"}
 5. Mark non-critical steps (popup close, OCR verify) with comment "optional"
 6. Break complex tasks into clear step sequences
 7. Use placeholder paths/text when specific values are unknown
-8. When launching a program, use the common name directly (e.g. \`启动 "微信"\`, \`启动 "记事本"\`, \`启动 "chrome"\`). The system auto-resolves them to full paths — no need to look up paths manually.`
+8. When launching a program, use the common name directly (e.g. \`启动 "微信"\`, \`启动 "计算器"\`, \`启动 "chrome"\`). The system auto-resolves them to full paths — no need to look up paths manually.`
   }
 }
 

@@ -14,7 +14,7 @@ from typing import Optional
 @dataclass
 class AgentConfig:
     # ── LLM protocol: how the agent communicates with the LLM ──
-    llm_protocol: str = "auto"          # "auto"|"text"|"function_calling"
+    llm_protocol: str = "auto"          # "auto"|"text"|"function_calling"|"computer_use"
 
     # ── Vision: how the agent sees the screen ──
     vision_mode: str = "auto"           # "auto"|"direct"|"som"|"omniparser"
@@ -53,7 +53,7 @@ class AgentConfig:
     llm_retries: int = 2            # LLM API 调用重试次数
 
     # ── Screenshot ──
-    screenshot_quality: int = 60    # JPEG 压缩质量 (30-95)
+    screenshot_quality: int = 50    # JPEG 压缩质量 (30-95)
 
     # ── Sliding window ──
     sliding_window_size: int = 0   # 0 = auto (8=multimodal, 12=text)
@@ -92,6 +92,23 @@ class AgentConfig:
             self._multimodal = False
         else:
             self._multimodal = _is_multimodal_model(model_name)
+
+        # computer_use protocol overrides everything
+        if self.llm_protocol == "computer_use":
+            self._multimodal = True
+            resolved = {
+                "llm_protocol": "computer_use",
+                "vision_mode": "direct",
+                "planning": "per_step",
+                "screen_context": "minimal",
+                "on_error": self.on_error if self.on_error != "auto" else "retry",
+            }
+            for field_name in ("llm_protocol", "vision_mode", "planning",
+                               "screen_context", "on_error"):
+                setattr(self, f"_resolved_{field_name}", resolved[field_name])
+            if self.fast_mode:
+                self.image_dedup = True
+            return
 
         resolved = {}
         if self._multimodal:

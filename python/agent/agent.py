@@ -99,13 +99,14 @@ SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作
 
 工作流示例:
 
-【启动程序 → 操作 → 保存】
-1. manage_app(action='launch', target='notepad.exe')  — 启动记事本
-2. wait(seconds=0.5)                                    — 等待窗口打开
-3. type_text(text='Hello World')                        — 输入文字（已聚焦在输入框）
-4. press_keys(keys='ctrl+s')                            — 保存
-5. wait(seconds=0.3)
-6. dialog(action='save', path='C:\\test.txt')           — 填写保存对话框
+【启动程序 → 操作 → 验证】
+1. manage_app(action='launch', target='calc.exe')      — 启动计算器
+2. wait(seconds=1)                                          — 等待窗口打开
+3. click(target='7')                                       — 点击数字7
+4. click(target='加')                                      — 点击加号
+5. click(target='3')                                       — 点击数字3
+6. click(target='等于')                                    — 点击等号
+7. screenshot()                                             — 截图验证结果
 
 【窗口切换】
 1. manage_window(action='focus', title='计算器')        — 聚焦到计算器窗口
@@ -131,8 +132,8 @@ SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作
 dialog(action='close')  — 自动关闭（保存确认/错误提示/覆盖询问等）
 
 【文件操作】
-1. file_ops(action='write', path='C:\\test.txt', content='Hello')
-2. file_ops(action='read', path='C:\\test.txt')
+1. file_ops(action='write', path='output.txt', content='Hello')
+2. file_ops(action='read', path='output.txt')
 
 动作列表:
 {tools_text}
@@ -155,18 +156,22 @@ SCRIPTED_MODE_INSTRUCTIONS = """
 - 脚本中适当加 time.sleep() 等待界面响应
 - 每个脚本执行完成后用 print() 输出结果报告
 
-示例: 打开记事本并输入文字
+示例: 获取活动窗口信息并截图保存
 ```
 工具: run_python_script
 参数:
   script: |
-    import pywinauto, time
-    app = pywinauto.Application(backend="uia").start("notepad.exe")
-    time.sleep(1)
-    edit = app.top_window().child_window(class_name="Edit")
-    edit.set_focus()
-    edit.type_keys("Hello, World!", with_spaces=True)
-    print("完成")
+    import pywinauto, time, os
+    desktop = pywinauto.Desktop(backend="uia")
+    active_title = desktop.window_text()
+    wins = desktop.windows()
+    logs_dir = os.path.join(os.environ["USERPROFILE"], "Desktop")
+    with open(os.path.join(logs_dir, "window_report.txt"), "w") as f:
+        f.write(f"活动窗口: {active_title}
+")
+        f.write(f"总窗口数: {len(wins)}
+")
+    print(f"已保存窗口报告: 活动={active_title}, 共{len(wins)}个窗口")
 ```
 
 简单操作仍可用 native 工具（click_target, type_text 等），复杂流程用脚本。
@@ -299,6 +304,7 @@ class LingdongAgent:
         self._screenshot_quality = screenshot_quality
         self._som_enabled = som_enabled  # SoM 标号（截图元素编号）
         self._verify_enabled = verify_enabled
+        self.sliding_window_limit = 8  # 默认 8, _unified_run 中从 config 覆盖
         self._omniparser = None  # OmniParser client (lazy init)
         self._omniparser_enabled = omniparser_enabled  # 默认关闭，可在设置中开启
 
@@ -594,6 +600,11 @@ class LingdongAgent:
     def _call_llm(self, messages: list[dict], max_retries: int | None = None) -> dict | None:
         """调用 LLM API (兼容文本和视觉消息)。"""
         import requests as _req
+
+        # 使用不信任环境代理的 Session，绕过 Clash 等本地代理干扰
+        _session = _req.Session()
+        _session.trust_env = False
+
         retries = max_retries if max_retries is not None else self._llm_retries
         payload = {
             "model": self.model,
@@ -604,7 +615,7 @@ class LingdongAgent:
         last_err = ""
         for attempt in range(1 + retries):
             try:
-                resp = _req.post(
+                resp = _session.post(
                     f"{self.api_base}/chat/completions",
                     headers={"Content-Type": "application/json",
                              "Authorization": f"Bearer {self.api_key}"},
@@ -620,7 +631,7 @@ class LingdongAgent:
                 msg = data["choices"][0]["message"]
                 content = (msg.get("content", "") or
                           msg.get("reasoning_content", "") or
-                          msg.get("reasoning", "") or "")  # MIMO 可能用 "reasoning" 字段
+                          msg.get("reasoning", "") or "")
                 if not content:
                     self._emit("log", {"level": "warn", "message": "LLM returned empty content, retry"})
                     continue
@@ -631,7 +642,8 @@ class LingdongAgent:
             except _req.exceptions.RequestException as e:
                 last_err = str(e)
                 self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}, retry {attempt+1}/{retries}"})
-                time.sleep(2 * (attempt + 1))
+                delay = 0.5 if "ConnectionReset" in str(e) or "Connection aborted" in str(e) else 2 * (attempt + 1)
+                time.sleep(delay)
         self._emit("log", {"level": "error", "message": f"LLM API failed after {retries} retries: {last_err}"})
         return None
 
@@ -1368,6 +1380,377 @@ class LingdongAgent:
         }
 
     # ══════════════════════════════════════════════════════════
+    #  Computer Use 模式 (Vision-based action loop)
+    # ══════════════════════════════════════════════════════════
+
+    def _computer_use_loop(self, goal: str, config: AgentConfig) -> dict:
+        """Computer Use 风格循环：截图 → 视觉模型分析 → 执行 → 新截图 → ...
+
+        使用 OpenAI 兼容 API 的 Vision 模型（MIMO-V2-Omni 等）。
+        模型直接看截图，输出结构化指令决定点击/输入/按键等动作。
+        不需要 SoM/OCR/UIA，端到端视觉推理（取决于模型能力）。
+        """
+        import pyautogui
+        screen_w, screen_h = pyautogui.size()
+        start = time.time()
+        steps = []
+        max_steps = config.max_steps or MAX_STEPS
+
+        self._emit("agent_start", {"goal": goal, "engine": "computer_use/vision",
+                                    "model": self.model})
+
+        SYSPROMPT = f"""你是桌面电脑操作助手。通过「看截图 → 决定动作 → 看结果 → 继续动作」的循环完成用户目标。
+
+可用动作:
+- mouse_move(x, y) — 移动鼠标到坐标
+- left_click(x, y) — 左键点击（省略坐标=点击当前位置）
+- right_click(x, y) — 右键点击
+- double_click(x, y) — 双击
+- type(text) — 输入文字
+- key(text) — 按键盘键 (Enter, Tab, Escape, Backspace, Ctrl+C, Alt+Tab 等)
+- scroll(dx, dy) — 滚动
+- cursor_position — 获取当前鼠标位置
+- done(summary) — 任务彻底完成时使用
+
+关键规则:
+1. 每轮只做一个动作，不要在一次回复中做多个动作
+2. 输入文字前必须先用 click 点击输入框确保焦点
+3. done() 只能在实际完成用户目标后使用，不要提前结束
+4. 不要猜测坐标位置 - 如果截图里看不到目标，说明需要先做其他操作（如滚动、切换窗口等）
+5. PARAMS 为空时写 {{}}，不要省略
+
+屏幕分辨率: {screen_w}x{screen_h}
+
+输出格式:
+ACTION: 动作名
+PARAMS: {{"参数名": "值"}}
+思考: 简短理由
+
+错误做法:
+ACTION: done
+PARAMS: {{"summary": "打开了浏览器"}}
+(× 用户要你操作，不是描述)
+
+正确做法:
+ACTION: left_click
+PARAMS: {{"x": 960, "y": 540}}
+思考: 点击搜索输入框准备输入查询
+"""
+        self._emit("log", {"level": "info",
+                           "message": f"Computer Use Vision: model={self.model}"})
+
+        messages = [{"role": "system", "content": SYSPROMPT}]
+        done_noop_count = 0
+
+        for loop in range(1, max_steps + 1):
+            if self._stop_event and self._stop_event.is_set():
+                break
+
+            b64 = self.supervisor.capture_b64(quality=self._screenshot_quality)
+            msg_text = "当前屏幕截图，请分析并决定下一步动作。" if loop > 1 else f"任务目标: {goal}\n\n请分析屏幕截图，执行第一步。"
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": msg_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            })
+
+            raw = self._call_llm(messages)
+            if raw is None:
+                messages.append({"role": "user", "content": "API请求失败（网络连接中断），我已重试。请基于最后一次成功的截图继续执行任务。"})
+                if loop >= 3:
+                    break
+                continue
+
+            content = raw["choices"][0]["message"].get("content", "") or ""
+            self._emit("log", {"level": "info", "message": f"思考: {content[:300]}"})
+
+            action, action_data = self._parse_computer_vision_response(content)
+
+            if action == "done":
+                if len(steps) == 0:
+                    done_noop_count += 1
+                    if done_noop_count >= 3:
+                        break
+                    # 不走 API：直接注入提示，画面没变无需截新图
+                    messages.append({"role": "user", "content": "你没有执行任何动作就完成了。必须执行至少一个动作（如 click / type / key）。先做动作，完成后才能 done。"})
+                    self._emit("log", {"level": "info", "message": "模型过早 done，已发出纠正提示"})
+                    if len(messages) > 8:
+                        messages = [messages[0]] + messages[-6:]
+                    continue
+                summary = action_data.get("summary", content)[:500]
+                self._emit("log", {"level": "info", "message": f"完成: {summary}"})
+                ok_count = sum(1 for s in steps if s.get("status") == "completed")
+                return {
+                    "success": ok_count > 0, "steps": steps,
+                    "summary": summary, "total_steps": len(steps),
+                    "elapsed_ms": round((time.time() - start) * 1000),
+                }
+
+            if action == "error":
+                self._emit("log", {"level": "warn", "message": f"无法解析: {content[:200]}"})
+                messages.append({
+                    "role": "user",
+                    "content": "格式错误。请严格使用: ACTION: 动作名\\nPARAMS: {{...}} 格式",
+                })
+                continue
+
+            action_data = {k: v for k, v in action_data.items() if v is not None}
+            step, result_content, success = self._record_computer_step(
+                steps, loop, action, action_data, screen_w, screen_h)
+
+            result_text = "成功" if success else f"失败: {result_content.get('text', '')}"
+            messages.append({"role": "user", "content": f"执行结果: {result_text}"})
+
+            if len(messages) > self.sliding_window_limit:
+                messages = [messages[0]] + messages[-(self.sliding_window_limit - 2):]
+
+        elapsed = time.time() - start
+        ok_count = sum(1 for s in steps if s.get("status") == "completed")
+        return {
+            "success": ok_count > 0, "steps": steps,
+            "summary": f"Computer Use 执行 {len(steps)} 步 ({ok_count} 成功)",
+            "total_steps": len(steps), "elapsed_ms": round(elapsed * 1000),
+        }
+
+    @staticmethod
+    def _parse_computer_vision_response(content: str) -> tuple:
+        """解析 Vision 模型的响应，返回 (action, params_dict)。
+
+        支持两种格式:
+          1. 标准: ACTION: xxx\nPARAMS: {...}
+          2. JSON: {"ACTION": "xxx", "PARAMS": {...}}
+        """
+        import re
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+
+        # 尝试 JSON 格式
+        action, params = None, None
+        if content.startswith("{"):
+            try:
+                js = json.loads(content)
+                if isinstance(js, dict):
+                    action = str(js.get("ACTION", js.get("action", ""))).strip().lower()
+                    params = js.get("PARAMS", js.get("params", js.get("arguments", {})))
+                    if isinstance(params, str):
+                        try:
+                            params = json.loads(params)
+                        except json.JSONDecodeError:
+                            params = {}
+                    if not isinstance(params, dict):
+                        params = {"value": str(params)}
+            except json.JSONDecodeError:
+                pass
+
+        if not action:
+            action_match = re.search(r"ACTION:\s*(\S+)", content)
+            if not action_match:
+                return "error", {"raw": content[:200]}
+            action = action_match.group(1).strip().lower().strip('",')
+
+        if params is None:
+            params = {}
+            params_match = re.search(r"PARAMS:\s*(\{.*?\})", content, re.DOTALL)
+            if params_match:
+                try:
+                    parsed = json.loads(params_match.group(1))
+                    if isinstance(parsed, dict):
+                        params = parsed
+                except json.JSONDecodeError:
+                    pass
+
+        if not params:
+            kv_match = re.findall(r"(\w+)\s*[:=]\s*(\S+)", content)
+            for k, v in kv_match:
+                if k.lower() != "action":
+                    params[k] = v.strip('"\'')
+            if not params:
+                kv_match = re.findall(r"(\w+)\s*[:：]\s*(.+)", content)
+                for k, v in kv_match:
+                    if k.lower() not in ("action", "思考"):
+                        params[k] = v.strip('"\'')
+        return action, params
+
+    def _record_computer_step(self, steps: list, loop: int,
+                               action: str, action_data: dict,
+                               screen_w: int, screen_h: int) -> tuple:
+        """记录步骤、执行 computer 动作、返回 (step_dict, result_content, success)。"""
+        sn = len(steps) + 1
+        self._emit("log", {"level": "info",
+                           "message": f"Computer: {action} {json.dumps(action_data, ensure_ascii=False)[:200]}"})
+        step = {
+            "step_num": sn, "tool": f"computer.{action}",
+            "args": action_data, "status": "running",
+        }
+        self._emit("step_complete", dict(step))
+        step_start = time.time()
+        try:
+            result_content = self._execute_computer_action(action, action_data, screen_w, screen_h,
+                                                             screenshot_quality=self._screenshot_quality)
+            success = True
+        except Exception as e:
+            result_content = {"type": "text", "text": f"Error: {str(e)}"}
+            success = False
+            self._emit("log", {"level": "error", "message": f"Computer action failed: {str(e)[:200]}"})
+
+        step["status"] = "completed" if success else "failed"
+        step["result"] = {"success": success, "error": "" if success else result_content.get("text", str(result_content)),
+                          "step_ms": round((time.time() - step_start) * 1000)}
+        steps.append(step)
+        self._emit("step_complete", dict(step))
+        return step, result_content, success
+
+    @staticmethod
+    def _execute_computer_action(action: str, data: dict,
+                                  screen_w: int, screen_h: int,
+                                  screenshot_quality: int = 60) -> dict:
+        """执行 computer_use 动作，返回 tool_result content block。
+
+        支持:
+          screenshot, mouse_move, left_click, right_click, middle_click,
+          double_click, left_click_drag, scroll, type, key, cursor_position
+
+        参数兼容 Anthropic 格式 (coordinate: [x, y]) 和 Vision 格式 (x: 500, y: 300)。
+        """
+        import pyautogui
+        import time as _time
+
+        def _get(d: dict, k: str, default=None):
+            v = d.get(k, default)
+            if isinstance(v, str) and v.lower() == "none":
+                return default
+            return v
+
+        def _coord(key: str = "coordinate", fallback_x: str = "x", fallback_y: str = "y"):
+            """统一取坐标：支持 coordinate:[x,y], x:500/y:300, x:[500,300] 等多种格式。"""
+            if key in data:
+                c = data[key]
+                if isinstance(c, (list, tuple)) and len(c) >= 2:
+                    return max(0, min(int(c[0]), screen_w - 1)), max(0, min(int(c[1]), screen_h - 1))
+            raw_x = _get(data, fallback_x, -1)
+            raw_y = _get(data, fallback_y, -1)
+            # 处理 x: [960, 159] 这种数组格式
+            if isinstance(raw_x, (list, tuple)) and len(raw_x) >= 2:
+                return max(0, min(int(raw_x[0]), screen_w - 1)), max(0, min(int(raw_x[1]), screen_h - 1))
+            try:
+                x = int(raw_x) if raw_x not in (None, "", -1) else -1
+                y = int(raw_y) if raw_y not in (None, "", -1) else -1
+            except (TypeError, ValueError):
+                return None
+            if x >= 0 and y >= 0:
+                return max(0, min(x, screen_w - 1)), max(0, min(y, screen_h - 1))
+            return None
+
+        pyautogui.FAILSAFE = False
+
+        # ── screenshot → 截图返回 ──
+        if action == "screenshot":
+            from agent.supervisor import Supervisor
+            sup = Supervisor(screenshot_quality=85)
+            b64 = sup.capture_b64()
+            return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
+
+        # ── mouse_move ──
+        if action == "mouse_move":
+            coord = _coord()
+            if coord:
+                pyautogui.moveTo(coord[0], coord[1])
+
+        # ── left_click / right_click / middle_click / double_click ──
+        elif action in ("left_click", "right_click", "middle_click", "double_click"):
+            click_fn = {"left_click": pyautogui.click, "right_click": pyautogui.rightClick,
+                        "middle_click": pyautogui.middleClick, "double_click": pyautogui.doubleClick}[action]
+            coord = _coord()
+            if coord:
+                click_fn(coord[0], coord[1])
+            else:
+                click_fn()
+
+        # ── left_click_drag ──
+        elif action in ("left_click_drag", "drag"):
+            start_coord = _coord("start_coordinate", "start_x", "start_y") or (0, 0)
+            end_coord = _coord("coordinate", "end_x", "end_y") or start_coord
+            pyautogui.moveTo(start_coord[0], start_coord[1])
+            pyautogui.drag(end_coord[0] - start_coord[0], end_coord[1] - start_coord[1], duration=0.3)
+
+        # ── scroll ──
+        elif action == "scroll":
+            dx = int(_get(data, "dx", _get(data, "scroll_x", 0)))
+            dy = int(_get(data, "dy", _get(data, "scroll_y", -3)))
+            pyautogui.scroll(dy)
+            if dx:
+                pyautogui.hscroll(dx)
+
+        # ── type ──
+        elif action == "type":
+            text = _get(data, "text", "")
+            if text:
+                pyautogui.write(text, interval=0.02)
+
+        # ── key ──
+        elif action == "key":
+            key_text = _get(data, "text", "")
+            if key_text:
+                # 处理组合键: Ctrl+C, Alt+Tab, Ctrl+Shift+Esc
+                if "+" in key_text or "-" in key_text:
+                    sep = "+" if "+" in key_text else "-"
+                    parts = key_text.split(sep)
+                    mods = []
+                    main_key = None
+                    key_map = {"ctrl": "ctrl", "control": "ctrl", "alt": "alt",
+                               "shift": "shift", "super": "win", "win": "win",
+                               "meta": "win"}
+                    for p in parts:
+                        pk = p.strip().lower()
+                        if pk in key_map:
+                            mods.append(key_map[pk])
+                        else:
+                            main_key = pk
+                    if main_key and mods:
+                        hotkey_str = "+".join(mods + [main_key])
+                        pyautogui.hotkey(*mods, main_key)
+                    elif main_key:
+                        pyautogui.press(main_key)
+                    else:
+                        pyautogui.hotkey(*mods)
+                else:
+                    key_map = {
+                        "Return": "enter", "Enter": "enter", "Tab": "tab", "Space": "space",
+                        "Backspace": "backspace", "Delete": "delete",
+                        "Escape": "esc", "Esc": "esc",
+                        "Super_R": "win", "Super_L": "win", "Super": "win",
+                        "Control_L": "ctrl", "Control_R": "ctrl", "Control": "ctrl",
+                        "Alt_L": "alt", "Alt_R": "alt", "Alt": "alt",
+                        "Shift_L": "shift", "Shift_R": "shift", "Shift": "shift",
+                        "CapsLock": "capslock",
+                        "PageUp": "pageup", "PageDown": "pagedown",
+                        "Home": "home", "End": "end",
+                        "Up": "up", "Down": "down", "Left": "left", "Right": "right",
+                        "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4",
+                        "F5": "f5", "F6": "f6", "F7": "f7", "F8": "f8",
+                        "F9": "f9", "F10": "f10", "F11": "f11", "F12": "f12",
+                        "PrintScreen": "printscreen",
+                        "ScrollLock": "scrolllock", "Pause": "pause",
+                        "Menu": "apps", "NumLock": "numlock",
+                    }
+                    mapped = key_map.get(key_text, key_text.lower())
+                    pyautogui.press(mapped)
+
+        # ── cursor_position ──
+        elif action == "cursor_position":
+            x, y = pyautogui.position()
+            return {"type": "text", "text": f"Cursor position: ({x}, {y})"}
+
+        else:
+            return {"type": "text", "text": f"Unknown computer action: {action}"}
+
+        # ── 非 screenshot 动作：执行后截取新截图返回 ──
+        _time.sleep(0.15)
+        from agent.supervisor import Supervisor
+        b64 = Supervisor(screenshot_quality=screenshot_quality).capture_b64()
+
+    # ══════════════════════════════════════════════════════════
     #  _unified_run — 统一执行入口
     # ══════════════════════════════════════════════════════════
 
@@ -1392,6 +1775,8 @@ class LingdongAgent:
         self._llm_retries = config.llm_retries
         self._screenshot_quality = config.screenshot_quality
         self._som_enabled = config.som_enabled
+        # 滑动窗口：auto=0 → multimodal 用 8, text 用 12
+        self.sliding_window_limit = config.sliding_window_size or (8 if config._multimodal else 12)
 
         # 脚本执行模式注入提示词
         if config.scripted_mode:
@@ -1412,6 +1797,10 @@ class LingdongAgent:
             f"temp={config.temperature}, "
             f"retries={config.llm_retries}, "
             f"quality={config.screenshot_quality}"})
+
+        # ── Computer Use protocol (Claude API with computer_use beta) ──
+        if config._resolved_llm_protocol == "computer_use":
+            return self._computer_use_loop(goal, config)
 
         # ── Planning: pre_plan vs per_step ──
         if config._resolved_planning == "pre_plan":
