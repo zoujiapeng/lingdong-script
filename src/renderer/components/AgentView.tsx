@@ -62,6 +62,8 @@ const AGENT_MAX_TOKENS_KEY = 'lingdong-agent-max-tokens';
 const AGENT_LLM_RETRIES_KEY = 'lingdong-agent-llm-retries';
 const AGENT_SLIDING_WINDOW_KEY = 'lingdong-agent-sliding-window';
 const AGENT_VISION_BACKEND_KEY = 'lingdong-agent-vision-backend';
+const AGENT_CHAT_MODE_KEY = 'lingdong-agent-chat-mode';
+const AGENT_VISUAL_STRATEGY_KEY = 'lingdong-agent-visual-strategy';
 
 // Legacy storage keys (shared with SettingsPanel)
 const KEY_STORAGE = 'lingdong-deepseek-key';
@@ -238,6 +240,8 @@ function buildAgentConfig(): Record<string, any> {
     screenshot_quality: lsGetNum(AGENT_SCREENSHOT_QUALITY_KEY, 60),
     sliding_window_size: lsGetNum(AGENT_SLIDING_WINDOW_KEY, 0),
     vision_backend: lsGet(AGENT_VISION_BACKEND_KEY, 'gpt-4o-mini'),
+    chat_mode: lsGetBool(AGENT_CHAT_MODE_KEY, false),
+    visual_strategy: lsGet(AGENT_VISUAL_STRATEGY_KEY, 'auto'),
   };
 }
 
@@ -333,6 +337,11 @@ export function AgentView() {
   const [agentLlmRetries, setAgentLlmRetries] = useState(() => lsGetNum(AGENT_LLM_RETRIES_KEY, 2));
   const [agentSlidingWindow, setAgentSlidingWindow] = useState(() => lsGetNum(AGENT_SLIDING_WINDOW_KEY, 0));
 
+  // ── Chat mode & visual strategy ──
+  const [agentChatMode, setAgentChatMode] = useState(() => lsGetBool(AGENT_CHAT_MODE_KEY, false));
+  const [agentVisualStrategy, setAgentVisualStrategy] = useState(() => lsGet(AGENT_VISUAL_STRATEGY_KEY, 'auto'));
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'agent'; text: string }[]>([]);
+
   // ── Tool explorer ──
   const loadAgentTools = async () => {
     setToolsLoading(true);
@@ -416,6 +425,11 @@ export function AgentView() {
 
         case 'user_guidance_sent':
           addEntry({ type: 'user', text: msg.text });
+          break;
+
+        case 'agent_chat_response':
+          setChatMessages(prev => [...prev, { role: 'agent', text: msg.text }]);
+          addEntry({ type: 'system', text: `🤖 AI回复: ${msg.text.slice(0, 200)}` });
           break;
 
         case 'agent_done':
@@ -555,6 +569,14 @@ export function AgentView() {
     try { await window.electronAPI!.agentGuidance(guidance.trim()); } catch {}
     setGuidance('');
   }, [guidance, running]);
+
+  const sendChatMessage = useCallback(async () => {
+    if (!guidance.trim() || !running) return;
+    setChatMessages(prev => [...prev, { role: 'user', text: guidance.trim() }]);
+    addEntry({ type: 'user', text: guidance.trim() });
+    try { await window.electronAPI!.agentChat(guidance.trim()); } catch {}
+    setGuidance('');
+  }, [guidance, running, addEntry]);
 
   const runOffline = useCallback(async () => {
     if (!goal.trim()) return;
@@ -823,6 +845,9 @@ export function AgentView() {
                 <ConfigSlider label="LLM 重试" value={agentLlmRetries}
                   min={0} max={5} step={1}
                   onChange={v => saveNum(AGENT_LLM_RETRIES_KEY, v, setAgentLlmRetries)} />
+                <ConfigToggle label="对话模式" checked={agentChatMode}
+                  onChange={v => saveBool(AGENT_CHAT_MODE_KEY, v, setAgentChatMode)}
+                  desc="开启后边执行边聊天，可实时反馈干预" badge="新" />
               </div>
             </div>
           )}
@@ -917,6 +942,16 @@ export function AgentView() {
                     resolved={_resolveAuto('screen_context', model, agentMultimodal)} />
                   <ConfigToggle label="截图去重" checked={agentDedup}
                     onChange={v => saveBool(AGENT_DEDUP_KEY, v, setAgentDedup)} />
+                  <ConfigSelect label="视觉策略" value={agentVisualStrategy}
+                    onChange={v => saveStr(AGENT_VISUAL_STRATEGY_KEY, v, setAgentVisualStrategy)}
+                    options={[
+                      { value: 'auto', label: '自动' },
+                      { value: 'som', label: 'SoM 标号 (方案4)' },
+                      { value: 'ocr_llm', label: 'OCR→LLM→点击 (方案3)' },
+                      { value: 'blind_guess', label: '自主盲猜坐标 (方案2)' },
+                      { value: 'cli_path', label: 'CLI/路径优先 (方案1)' },
+                    ]}
+                    desc="多模态操控方案" />
                 </div>
               </div>
             )}
@@ -1069,13 +1104,36 @@ export function AgentView() {
                 {renderLogEntries()}
               </div>
               {running && !offline && (
-                <div className="agent-guidance-bar" style={{ marginTop: 8 }}>
-                  <input className="agent-input" value={guidance}
-                    onChange={e => setGuidance(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && sendGuidance()}
-                    placeholder="给 agent 下达指令..." />
-                  <button className="agent-btn" onClick={sendGuidance} disabled={!guidance.trim()}>发送</button>
-                </div>
+                <>
+                  {/* ── 对话模式: 聊天消息列表 ── */}
+                  {agentChatMode && chatMessages.length > 0 && (
+                    <div className="agent-chat-box">
+                      {chatMessages.map((m, i) => (
+                        <div key={i} className={`agent-chat-msg agent-chat-msg-${m.role}`}>
+                          <span className="agent-chat-role">
+                            {m.role === 'user' ? '🧑' : '🤖'}:
+                          </span>
+                          <span className="agent-chat-text">{m.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="agent-guidance-bar" style={{ marginTop: 8 }}>
+                    <input className="agent-input" value={guidance}
+                      onChange={e => setGuidance(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          if (agentChatMode) sendChatMessage();
+                          else sendGuidance();
+                        }
+                      }}
+                      placeholder={agentChatMode ? "输入消息与 AI 对话..." : "给 agent 下达指令..."} />
+                    <button className="agent-btn" onClick={agentChatMode ? sendChatMessage : sendGuidance}
+                      disabled={!guidance.trim()}>
+                      {agentChatMode ? '对话' : '发送'}
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </div>

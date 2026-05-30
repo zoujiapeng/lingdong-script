@@ -767,6 +767,11 @@ ipcMain.handle('agent:guidance', (_, text: string) => {
   return { success: true };
 });
 
+ipcMain.handle('agent:chat', (_, text: string) => {
+  sendToAgent({ type: 'chat', text });
+  return { success: true };
+});
+
 ipcMain.handle('agent:status', () => {
   sendToAgent({ type: 'status' });
   return { success: true };

@@ -178,6 +178,9 @@ def _run_agent(goal: str, config: dict | None = None,
         agent_kw["verify_enabled"] = agent_cfg_dict.get("verify", True)
         if agent_cfg_dict.get("auto_learn"):
             agent_kw["auto_learn"] = True
+    # 传递 guidance_queue 给 agent，用于对话模式
+    if guidance_queue is not None:
+        agent_kw["guidance_queue"] = guidance_queue
     agent = LingdongAgent(**agent_kw)
 
     # ── Unified execution ──
@@ -225,6 +228,8 @@ class AgentIPC:
             self._cmd_stop()
         elif msg_type == "guidance":
             self._cmd_guidance(msg)
+        elif msg_type == "chat":
+            self._cmd_chat(msg)
         elif msg_type == "status":
             self._cmd_status()
         else:
@@ -269,10 +274,22 @@ class AgentIPC:
         if not text:
             return
         if self._guidance_queue is not None:
-            self._guidance_queue.put(text)
+            self._guidance_queue.put({"text": text, "type": "guidance"})
             _emit("user_guidance_sent", {"text": text})
         else:
             _log("warn", "No agent running to receive guidance")
+
+    def _cmd_chat(self, msg: dict):
+        """对话模式: 接收用户聊天消息并注入 agent 的 guidance_queue。"""
+        text = (msg.get("text") or "").strip()
+        if not text:
+            return
+        if self._guidance_queue is not None:
+            self._guidance_queue.put({"text": text, "type": "chat"})
+            _emit("user_guidance_sent", {"text": text, "type": "chat"})
+            _log("info", f"Chat message received: {text[:100]}")
+        else:
+            _log("warn", "No agent running to receive chat message")
 
     def _cmd_status(self):
         running = self._agent_thread is not None and self._agent_thread.is_alive()

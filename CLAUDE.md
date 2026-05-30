@@ -11,7 +11,8 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npx electron-builder --win portable` | 构建免安装便携版 |
 | `npx electron . --dev` | 在打包后强制开发模式 (loadURL) |
 | `npx electron . --minimized` | 启动后最小化到任务栏 |
-| `python -m pytest tests/` | 运行 Python 测试 (~296 tests) |
+| `python -m pytest tests/ --ignore=tests/standalone -x -q` | 运行 Python 测试 (~2550) |
+| `npx vitest run` | 运行 TypeScript 前端测试 (~16 files) |
 | `python python/mcp/server.py` | 启动 Python MCP 服务器 (stdio JSON-RPC) |
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 (5 tools, stdio) |
 | `python tools/dsl_to_flow.py < file.dsl` | DSL 转 FlowScript |
@@ -23,58 +24,72 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 ```
 ├── src/
 │   ├── main/              # Electron 主进程
-│   │   ├── main.ts        #   - 引擎管理, IPC handlers, 窗口生命周期
-│   │   ├── api.ts         #   - HTTP API 服务器 :7880 (55 端点 + /mcp)
-│   │   ├── env.ts         #   - isDev / getBaseDir 环境配置
-│   │   ├── state.ts       #   - 全局状态管理
-│   │   └── preload.ts     #   - contextBridge (40+ API 暴露)
+│   │   ├── main.ts        #   ~1650行: 引擎管理, IPC 30+ handlers, 窗口生命周期
+│   │   ├── api.ts         #   HTTP API 服务器 :7880 (55 端点 + /mcp)
+│   │   ├── env.ts         #   isDev / getBaseDir 环境配置
+│   │   ├── state.ts       #   全局状态管理 + agent token 系统
+│   │   └── preload.ts     #   contextBridge (40+ API 暴露)
 │   └── renderer/          # React 前端 (Vite)
-│       ├── App.tsx        #   - 根组件, 布局, 快捷键, HTN 注册
-│       ├── store/         #   - Zustand + immer 状态管理 (index.ts, executor.ts)
-│       ├── types/         #   - FlowNode, FlowEdge, NodeParams, FlowScript
+│       ├── App.tsx        #   根组件, 布局, 快捷键, HTN 注册
+│       ├── store/         #   Zustand + immer 状态管理 (index.ts, executor.ts)
+│       ├── types/         #   FlowNode, FlowEdge, NodeParams, FlowScript, AgentRunRecord
 │       ├── components/
-│       │   ├── Canvas/    #   - FlowCanvas, FlowNode, EdgeLayer, CanvasControls
-│       │   ├── PropertyPanel/ # - 参数编辑器 (55 种节点 × params/*.tsx)
-│       │   ├── NodeLibrary/   # - 节点库面板
-│       │   └── common/   #   - TopBar, StatusBar, LogPanel, ToolCallPanel,
-│       │                  #     TriggerBar, ParamPromptDialog, MacroPanel,
-│       │                  #     ScriptBrowser, TemplateSelector, ScheduleDialog,
-│       │                  #     VoiceConversationPanel
-│       └── utils/         #   - nodeDefinitions, pseudoParser, featureRegistry,
-│                           #     semanticMatcher, htnRegistry, textGenerator,
-│                           #     voiceConversation
+│       │   ├── Canvas/    #   FlowCanvas, FlowNode, EdgeLayer, CanvasControls
+│       │   ├── PropertyPanel/ #   参数编辑器 (65 种节点 × params/*.tsx)
+│       │   ├── NodeLibrary/   #   节点库面板
+│       │   └── common/   #   TopBar, StatusBar, LogPanel, ToolCallPanel,
+│       │                  #   TriggerBar, ParamPromptDialog, MacroPanel,
+│       │                  #   ScriptBrowser, TemplateSelector, ScheduleDialog,
+│       │                  #   VoiceConversationPanel, PlanVisualizer
+│       └── utils/         #   nodeDefinitions, pseudoParser, featureRegistry,
+│                           #   semanticMatcher, htnRegistry, textGenerator,
+│                           #   voiceConversation, scriptIngestor, promptBuilder
 ├── python/
-│   ├── agent/             # AI Agent 监督执行
-│   │   ├── __main__.py    #   IPC 入口 (stdin/stdout JSON 协议)
-│   │   ├── agent.py       #   LingdongAgent 统一入口 + text_protocol 循环
-│   │   ├── meta_actions.py    #   26 个元动作 + 注册表 + 提示词生成
-│   │   ├── supervisor.py     #   监督执行层（窗口焦点/OCR/对话框/重试）
-│   │   ├── tool_path_selector.py # 工具访问模式分类 + 路径选择器
-│   │   ├── config.py       #   AgentConfig dataclass + resolve_auto()
-│   │   ├── planner.py      #   Plan DAG 分解 + PlanExecutor
+│   ├── agent/             # AI Agent 执行系统 (~14 模块)
+│   │   ├── __main__.py    #   IPC 入口 (stdin/stdout JSON 协议, 5命令/7事件)
+│   │   ├── agent.py       #   LingdongAgent 统一入口 (5 执行模式 + chat + visual_strategy)
+│   │   ├── config.py      #   AgentConfig dataclass (~30 参数, resolve_auto)
+│   │   ├── meta_actions.py    #   26 元动作 + 注册表 + 提示词生成
+│   │   ├── supervisor.py     #   监督执行层 (窗口焦点/OCR/重试/SoM/对话框)
+│   │   ├── planner.py        #   Plan DAG 分解 + PlanExecutor (fallback 链)
+│   │   ├── tool_path_selector.py # 工具访问模式分类 (DIRECT→BROWSER→UIA→OCR→SoM)
 │   │   ├── langgraph_agent.py #   ⚠️ 已废弃，仅保留向后兼容
 │   │   ├── experience_db.py   #   经验数据库 (SHA256 签名索引)
-│   │   ├── visual_locator.py  #   语义目标→屏幕坐标定位器
+│   │   ├── visual_locator.py  #   语义目标→屏幕坐标定位器 (OpenCV/VLM)
 │   │   ├── dialog_handler.py  #   Windows 对话框检测/关闭 (win32 API)
-│   │   └── menu_handler.py    #   Windows 菜单操作
+│   │   ├── menu_handler.py    #   Windows 菜单操作
+│   │   ├── state_persistence.py # 运行历史持久化
+│   │   └── omniparser_client.py # OmniParser FastAPI 客户端
 │   ├── engine/            # Python 自动化引擎
-│   │   ├── executor.py    #   - DSL 执行器 (核心)
-│   │   ├── dsl_parser.py  #   - DSL 解析器 (190 关键字)
-│   │   ├── dsl_flow_converter.py # - DSL↔FlowScript 双向转换
-│   │   ├── engine.py      #   - stdin/stdout JSON 协议引擎入口
-│   │   ├── condition_evaluator.py # - 条件求值
-│   │   ├── crystallizer.py    # - 流程图→DSL 结晶化
-│   │   ├── triggers.py        # - 触发器引擎
-│   │   ├── scheduler.py       # - 定时调度
-│   │   └── optimizer.py       # - 流程优化
-│   ├── features/          # @feature 注册表 (246 功能, 227 MCP 工具, 43 模块)
-│   │   ├── registry.py    #   - FeatureRegistry 单例, @feature 装饰器
-│   │   ├── _all.py        #   - 导入所有 feature 模块 (43 模块, 246 @feature)
-│   │   └── camera_features.py # - 摄像头捕获/录制功能
+│   │   ├── executor.py    #   DSL 执行器 (核心)
+│   │   ├── dsl_parser.py  #   DSL 解析器 (190 关键字)
+│   │   ├── dsl_flow_converter.py # DSL↔FlowScript 双向转换
+│   │   ├── engine.py      #   stdin/stdout JSON 协议引擎入口
+│   │   ├── condition_evaluator.py # 条件求值
+│   │   ├── crystallizer.py    # 流程图→DSL 结晶化
+│   │   ├── triggers.py        # 触发器引擎
+│   │   ├── scheduler.py       # 定时调度
+│   │   └── optimizer.py       # 流程优化
+│   ├── features/          # @feature 注册表 (49 文件, 43 模块, ~246 功能)
+│   │   ├── registry.py    #   FeatureRegistry 单例, @feature 装饰器
+│   │   ├── _all.py        #   导入所有 feature 模块 (43 模块 lazy load)
+│   │   ├── camera_features.py  # 摄像头捕获/录制/运动检测
+│   │   ├── visual_macro_features.py # 视觉宏录制 (3 工具, 577 行)
+│   │   ├── macro_features.py   # 普通宏录制 (7 工具, 411 行)
+│   │   ├── system_features.py  # 系统功能 (窗口/进程/电源/音量等)
+│   │   ├── perception_features.py # 感知识别 (OCR/图像匹配/颜色)
+│   │   ├── ai_features.py      # AI 规划功能
+│   │   ├── flow_features.py    # 流程图生成/执行
+│   │   ├── action_features.py  # 交互动作 (点击/输入/滚动等)
+│   │   ├── control_features.py # 控制流 (等待/条件/循环)
+│   │   ├── browser_features.py # Playwright 浏览器自动化
+│   │   ├── dialog_features.py  # 对话框操作
+│   │   ├── a11y_features.py    # UIA 无障碍操作
+│   │   └── ... (更多模块)
 │   ├── voice/             # 语音对话服务器
-│   │   ├── server.py      #   - WebSocket 语音服务器 (动态端口)
-│   │   ├── download_models.py  # - 批量下载 STT 模型
-│   │   └── test_stt.py    #   - STT 诊断脚本
+│   │   ├── server.py      #   WebSocket 语音服务器 (动态端口)
+│   │   ├── download_models.py  # 批量下载 STT 模型
+│   │   └── test_stt.py    #   STT 诊断脚本
 │   ├── mcp/server.py      # Python MCP 服务器 (stdio JSON-RPC 2.0)
 │   ├── macros/            # 宏录制保存目录 (.json 事件文件)
 │   ├── interaction/       # 交互工具 (wheel_selector, region_picker, actions)
@@ -82,7 +97,10 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   └── experience/        # 视觉定位经验库 (db.json + templates/*.png)
 ├── tools/                 # 工具脚本 (dsl_to_flow.py 等)
 ├── templates/             # 工作流模板 (.flow / .dsl 文件)
-└── tests/                 # Python 测试套件 (~296 tests)
+├── tests/                 # Python 测试 (~2550 tests, 15 文件)
+├── src/renderer/test/     # TypeScript 测试 (~16 文件, vitest)
+├── omni_parser_repo/      # OmniParser V2 仓库 (microsoft/OmniParser-v2.0)
+└── .claude/               # Claude Code 配置 (MCP 自动注册)
 ```
 
 ## HTTP API 桥接 (Claude Code 远程控制)
@@ -137,45 +155,43 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 | `POST /api/select-all` | 全选节点 | — |
 | `POST /api/clear-selection` | 清空选择 | — |
 | `POST /api/duplicate-nodes` | 复制节点 | `{ ids: string[] }` |
-| `POST /api/agent-start` | 启动 AI Agent 监督执行 | `{ goal, config?, supervise? }` |
+| `POST /api/agent-start` | 启动 AI Agent | `{ goal, config?, supervise? }` |
 | `POST /api/features/list` | 列出所有可用 @feature 工具 | — |
 | `POST /api/features/reload` | 重新加载 @feature 注册表 | — |
 | `POST /api/features/call` | 调用任意 @feature 工具 | `{ name, params }` |
 | `POST /api/search-templates` | 语义搜索模板 | `{ query, maxResults? }` |
-| `POST /api/marks/save` | 保存指令标记 | `{ marks: Record<string, {visible?,pinned?}> }` |
-| `POST /api/marks/load` | 加载指令标记 | — |
 | `POST /api/execute-js` | 在前端执行 JS 代码 | `{ code }` |
 | `POST /mcp` | MCP over HTTP 端点 | 标准 MCP JSON-RPC |
 
 ## MCP 工具
 
-提供 **两个 MCP 服务器**：
+提供 **三个 MCP 入口**：
 
 ### 1. Python MCP (主)
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 **227 MCP 工具**（过滤 16 hidden + 3 deprecated），覆盖：
+通过 `@feature` 注册表动态生成 MCP 工具（过滤 hidden + deprecated），覆盖 7 分类：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
-| 交互动作 | 68 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
-| 感知识别 | 29 | find_image, OCR, color_detect, progress, A11y, fusion, camera... |
-| 控制流 | 25 | wait, loop, condition, timer, software control, aggregate... |
-| AI 规划 | 9 | plan, execute_plan, debug, VLM analyze, screen_understanding... |
-| 宏指令 | 10 | record, playback, list, delete, convert_to_flow, visual_macro... |
-| 系统功能 | 74 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
-| 调试诊断 | 32 | test, validate, system_info, feature introspection, healing, trigger... |
+| 交互动作 | ~68 | click, type, swipe, hotkey, scroll, browser, filedialog, menu... |
+| 感知识别 | ~29 | find_image, OCR, color_detect, progress, A11y, fusion, camera... |
+| 控制流 | ~25 | wait, loop, condition, timer, software control, aggregate... |
+| AI 规划 | ~9 | plan, execute_plan, debug, VLM analyze, screen_understanding... |
+| 宏指令 | ~10 | record, playback, list, delete, convert_to_flow, visual_macro... |
+| 系统功能 | ~74 | window, process, clipboard, file, wifi, volume, display, scheduler, vault... |
+| 调试诊断 | ~32 | test, validate, system_info, feature introspection, healing, trigger... |
 
 DSL 关键字: 190 个（自动从 @feature 注册表生成，含所有控制流关键字）
-Agent 工具集: 26 元动作（高层语义） + 227 @feature 工具（底层能力），LLM 提示词中同时暴露
+Agent 工具集: 26 元动作（高层语义） + @feature 工具（底层能力），LLM 提示词中同时暴露
 Agent 双路径执行: 元动作 → `meta_execute()`（参数校验 + 类型强制 + 直接调用），其他 → `supervisor.execute()`（完整监督流水线）
 Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能自动纳入 Agent 可用范围（重启 Agent 生效）
 
 关键工具示例：
-- `dsl_to_flow(dsl: string)` — DSL 文本转 FlowScript JSON
-- `flow_to_dsl(script: object)` — 流程图转 DSL 文本
-- `run_dsl(dsl: string)` — 本地执行 DSL（免 token, 免后端）
+- `dsl_to_flow(dsl)` — DSL 文本转 FlowScript JSON
+- `flow_to_dsl(script)` — 流程图转 DSL 文本
+- `run_dsl(dsl)` — 本地执行 DSL（免 token, 免后端）
 - `create_flow_from_dsl(dsl, name)` — DSL → 保存 .flow → 返回 JSON
 
 ### 2. TypeScript MCP (桥接)
@@ -192,9 +208,223 @@ Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能�
 | `ask_ai` | AI 问答 |
 | `screen_capture` | 截屏 |
 
+### 3. HTTP MCP 端点
+
+`POST http://127.0.0.1:7880/mcp` — 标准 MCP JSON-RPC 协议，自动注册到 `~/.claude.json`（首次启动时）。
+
+## @feature 注册表系统
+
+`python/features/` 目录包含 **49 个 .py 文件**，其中 **43 个模块**通过 `_all.py` 的 `_FEATURE_MODULES` 列表注册。核心机制：
+
+### @feature 装饰器
+
+```python
+from features.registry import feature
+
+@feature(
+    name="my_tool",
+    display_name="我的工具",
+    category=FeatureCategory.ACTION,
+    params=[
+        ParamSpec("target", "string", description="目标", required=True),
+    ],
+    dsl_keyword="MY_TOOL",
+)
+def my_tool(target: str) -> dict:
+    """工具实现"""
+    return {"success": True}
+```
+
+每个 `@feature` 自动生成：
+- **MCP 工具** (`lobster_{name}`, JSON Schema)
+- **CLI 命令** (`{name.replace("_","-")}`, argparse)
+- **HTTP 端点** (`/api/feature/{name}`)
+- **DSL 关键字** (大写 SNAKE_CASE)
+- **测试用例** (关联 TestCase, 可通过 `registry.run_tests()` 批量执行)
+
+### 懒加载机制
+
+`_all.py` 通过 `registry.set_lazy_modules()` 存储模块名，首次访问 `registry.all()` 或 `registry.get()` 时调用 `importlib.import_module()` 实际加载，避免启动时 2-8s 的导入开销。
+
+### 插件系统
+
+外部 `.py` 文件或目录可通过 `registry.load_plugin()` 在运行时动态加载，存储在 `self._plugins` 字典中。
+
+### 自动协议导出
+
+| 方法 | 用途 |
+|---|---|
+| `export_mcp_tools()` | MCP JSON Schema 列表 |
+| `export_openapi()` | OpenAPI 3.0 规范 |
+| `export_claude_context()` | Claude Code Markdown 引用 |
+| `export_dsl_reference()` | DSL 语法参考 |
+| `execute(name, **params)` | 统一执行入口（类型转换+错误处理） |
+
+## AI Agent 系统
+
+AI Agent 是灵动脚本的核心智能层，支持 **5 种执行模式** + **双离线模式** + **对话模式** + **4 种视觉策略**。
+
+### 双模式入口
+
+```
+AgentView 前端入口 (AgentView.tsx)
+  ├─ AI Agent 模式（在线）: 输入自然语言 → LLM 生成计划 → 执行
+  │   ├─ 含监督执行: 窗口焦点/OCR验证/失败恢复
+  │   └─ 含流程图模式: 生成可视化流程图后逐步骤执行
+  └─ 离线模式（离线执行）:
+       ├─ 直接运行当前画布上的流程图
+       ├─ 无需 LLM / API Key
+       ├─ 无网络也可执行
+       └─ 通过 engine:start IPC 直接调用 Python 引擎
+```
+
+**离线模式 (`offline` state, AgentView.tsx:293)**: 前端切换开关，将当前画布上的流程图直接发送到 Python 引擎执行（`engine:start`），完全不需要 AI / API Key。按钮显示「离线执行」。适用于调试和无需 LLM 的场景。
+
+### 5 种 Agent 执行模式
+
+| 模式 | 入口方法 | 说明 |
+|---|---|---|
+| **text_protocol** | `run_text_protocol()` | 文本协议循环: LLM → 解析"工具:/参数:" → 执行 → 截图反馈。适用 MIMO 等纯文本模型。支持 chat_mode + visual_strategy |
+| **langgraph** | `run_langgraph()` | LangGraph `create_react_agent`，函数调用模型（DeepSeek/GPT/Claude）。每个 @feature 工具包装为 LangChain Tool |
+| **planned** | `run_planned()` | Planner 生成 DAG → PlanExecutor 拓扑序执行（带 fallback 链）。仅需 1 次 LLM 调用，后续离线执行 |
+| **computer_use** | `_computer_use_loop()` | Vision-only 循环: 截图 → 模型分析 → 动作 → 新截图。ACTION:/PARAMS:/思考: 格式 |
+| **direct** | `_run_direct()` | 一键生成流程图: 调用 `generate_flow_script` 返回结果，不下场执行 |
+
+统一入口 `_unified_run()` 通过 `AgentConfig` 自动路由到对应模式。
+
+### 对话模式 (Chat Mode)
+
+开关 `chat_mode: bool = False`，开启后 Agent 可「边干活边聊天」：
+
+```
+Agent 执行循环 (run_text_protocol)
+  ├─ 每轮开始时: _process_chat_messages()
+  │   ├─ 从 guidance_queue 读取用户消息
+  │   ├─ 注入 LLM 消息历史: "[用户消息] ..."
+  │   └─ LLM 可自然聊天回复 / 调整策略 / 接受新任务
+  ├─ LLM 回复解析:
+  │   ├─ "工具:" → 正常执行
+  │   └─ 纯文本 (>20字) → _emit_chat_response() → 前端显示
+  └─ 前端:
+      ├─ 输入框切换为「输入消息与 AI 对话...」
+      ├─ 对话历史气泡列表
+      └─ 发送 → agent:chat IPC → _cmd_chat() → guidance_queue
+```
+
+### AgentConfig 配置系统
+
+`python/agent/config.py` — 统一配置 dataclass，~30 参数通过 IPC 序列化传输。
+
+**核心策略 (字符串, 自动解析 auto):**
+- `llm_protocol`: auto/text/function_calling/computer_use
+- `vision_mode`: auto/direct/som/omniparser
+- `planning`: auto/pre_plan/per_step
+- `screen_context`: auto/minimal/full
+- `on_error`: retry/replan/skip/stop
+- `visual_strategy`: auto/cli_path/blind_guess/ocr_llm/som
+
+**开关 (布尔值):**
+- `verify`, `fast_mode`, `image_dedup`, `window_aware_ocr`, `uia_pre_focus`
+- `scripted_mode`, `auto_learn`, `som_enabled`, `flow_chart_mode`, `chat_mode`
+
+**安全限制:**
+- `max_steps` (20), `max_consecutive_failures` (5), `min_success_rate` (0.1)
+
+**LLM 参数:**
+- `temperature` (0.1), `max_tokens` (4096), `llm_retries` (2)
+- `screenshot_quality` (60), `sliding_window_size` (0=auto)
+
+`resolve_auto()` 自动检测多模态能力并设置默认值：
+- 多模态模型 → text + direct + per_step + minimal
+- 纯文本模型 → function_calling + som + pre_plan + full
+
+### 4 种视觉策略 (Visual Strategy)
+
+通过在 AgentView 的 Perceive 节点选择，控制 Agent 如何「看」屏幕：
+
+| 方案 | visual_strategy | 原理 | 状态 |
+|---|---|---|---|
+| **方案1: CLI/路径优先** | `cli_path` | 尝试 CLI 等价操作，SoM 兜底 | 可选 |
+| **方案2: 自主盲猜** | `blind_guess` | LLM 凭经验猜坐标（原始方式） | 可选 |
+| **方案3: OCR→LLM→点击** | `ocr_llm` | OCR 截取所有文字 → LLM 语义选择 → 点坐标 | 可选 |
+| **方案4: SoM 标号** | `som` | UIA+OCR→标号截图→LLM 选 #N→转坐标 | 默认关闭(本地模型慢) |
+| **自动** | `auto` | 多模态=直接截图, 纯文本=SoM | 默认 |
+
+### 监督执行层 (Supervisor)
+
+所有执行模式共享 `python/agent/supervisor.py`，每步执行流水线：
+
+```
+supervisor.execute(name, args)
+  ├─ 1. SoM 解引用 (#N → 坐标)
+  ├─ 2. UIA 元素定位 (控件树匹配)
+  ├─ 3. 视觉定位兜底 (经验库→OpenCV→VLM)
+  ├─ 4. 窗口焦点安全 (自动聚焦目标窗口)
+  ├─ 5. 工具执行 (registry.execute / 元动作)
+  ├─ 6. 对话框自动处理 (win32 API)
+  ├─ 7. 屏幕稳定等待 (等待界面变化完成)
+  └─ 8. OCR 验证 (可选, verify=true时)
+```
+
+### 前端 AgentView 配置界面
+
+`src/renderer/components/AgentView.tsx` (~1400 行) — 流程图风格的 Agent 配置面板，8 个可折叠节点：
+
+1. **Goal Node** — 目标输入, 状态指示, 离线/语音/流程图模式切换
+2. **LLM Brain** — API Key/Base/Model, 协议/规划策略, 多模态, 温度, 对话模式
+3. **Plan Node** — PlanVisualizer, 生成计划展示, 执行/重新生成
+4. **Perceive Node** — 视觉模式, SoM/OmniParser, 截图质量, 屏幕上下文, 视觉策略
+5. **Act Node** — 窗口感知OCR, UIA预聚焦, 脚本执行, 快速模式, 自动学习
+6. **Verify Node** — OCR 验证开关
+7. **Error Handler** — 失败策略 (重试/重规划/跳过/停止), 安全限制
+8. **Exec Node** — 日志, 聊天框 (对话模式), 指令输入
+
+Tool Explorer 弹窗显示 26 元动作 + 全部 @feature 工具。
+
+## Agent IPC 协议
+
+AI Agent 子进程通过 **stdin/stdout JSON** 与 Electron 主进程通信。设计用于实时流式展示执行进度。
+
+### IPC 命令 (Electron → Agent, stdin)
+
+| 命令 | 参数 | 用途 |
+|---|---|---|
+| `{"type": "start", "goal": "...", "config": {...}}` | config 含 agent_config 字典 | 启动 Agent (5 种模式自动路由) |
+| `{"type": "stop"}` | — | 请求优雅停止 |
+| `{"type": "guidance", "text": "..."}` | text: 指令文本 | 注入用户指引 |
+| `{"type": "chat", "text": "..."}` | text: 聊天文本 | 对话模式聊天消息 |
+| `{"type": "status"}` | — | 查询当前状态 |
+
+### IPC 事件 (Agent → Electron, stdout)
+
+| 事件 | 关键字段 | 用途 |
+|---|---|---|
+| `agent_start` | goal, engine, model | Agent 启动 |
+| `step_complete` | step_num, tool, result.success/error | 每步结果 (前端实时更新) |
+| `agent_done` | status, total_steps, fail_reason | Agent 结束 |
+| `log` | level, message | 日志 |
+| `user_guidance_sent` | text | 用户指引确认 |
+| `agent_chat_response` | text | AI 聊天回复 (对话模式) |
+| `error` | message | 错误 |
+| `status_report` | running, stopped | 状态报告 |
+
+### 进程生命周期
+
+```
+main.ts startAgentProcess()
+  ├─ 杀死旧进程 (stop + timeout + kill)
+  ├─ spawn: python -u -m agent (stdin/stdout/stderr 管道)
+  ├─ 行缓存: StringDecoder UTF-8
+  ├─ 300ms 延迟后发送 start 命令
+  ├─ 标准输出: JSON → agent-message IPC → renderer
+  ├─ 非JSON: → agent-log IPC → renderer
+  ├─ 安全超时: 300s 自动 kill
+  └─ Token 系统: nextAgentToken() 防过期回调
+```
+
 ## 宏录制功能
 
-Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能过滤（<10px 跳过）、一键转换为流程图。
+内置商业级宏录制，支持 F6 全局热键启停、鼠标智能过滤（<10px 跳过）、一键转换为流程图。
 
 ### 录制方式
 
@@ -205,51 +435,26 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 | **MCP 工具** | `lobster_macro_start_recording` / `lobster_macro_stop_recording` |
 | **HTTP API** | `POST /api/macro/start-recording` / `POST /api/macro/stop-recording` |
 
-### MacroPanel 管理面板
-
-- 录制后自动弹出宏列表
-- 每个宏显示：事件数、时长、创建时间
-- 操作按钮：播放、删除、**转换为流程图**
-- 转换后生成 CLICK / INPUT_TEXT / KEYBOARD / WAIT 节点
-
 ### @feature MCP 工具
 
-| 工具名 | 用途 |
-|---|---|
-| `lobster_macro_start_recording` | 启动独立录制器（F6 热键，非阻塞） |
-| `lobster_macro_stop_recording` | 停止录制，返回事件统计和文件路径 |
-| `lobster_macro_list` | 列出所有已保存宏 |
-| `lobster_macro_playback` | 回放宏（支持 speed/loop 参数） |
-| `lobster_macro_delete` | 删除宏文件 |
-| `lobster_macro_get_events` | 读取原始事件数据 |
-| `lobster_macro_convert_to_flow` | 宏事件 → FlowScript 流程图 |
-| `lobster_macro_record` | **（已废弃）** 旧版阻塞式录制 |
-
-### 录制文件格式
-
-保存在 `python/macros/{name}.json`，格式：
-```json
-{
-  "name": "登录流程",
-  "events": [
-    {"type": "click", "time": 0.5, "x": 100, "y": 200, "button": "Button.left", "pressed": true},
-    {"type": "key",   "time": 1.2, "key": "hello", "pressed": true},
-    {"type": "key",   "time": 1.8, "key": "Key.enter", "pressed": true}
-  ],
-  "duration": 2.5,
-  "created": "2026-05-04T20:30:00",
-  "include_mouse": true,
-  "include_keys": true
-}
-```
+| 工具 | 文件 | 用途 |
+|---|---|---|
+| `lobster_macro_start_recording` | macro_features.py | AHK/pynput 独立录制进程 (F6 热键) |
+| `lobster_macro_stop_recording` | macro_features.py | 停止录制, 返回事件统计 |
+| `lobster_macro_list` | macro_features.py | 列出所有宏 |
+| `lobster_macro_playback` | macro_features.py | 回放 (speed/loop 参数) |
+| `lobster_macro_delete` | macro_features.py | 删除宏文件 |
+| `lobster_macro_get_events` | macro_features.py | 读取原始事件数据 |
+| `lobster_macro_convert_to_flow` | macro_features.py | 宏事件 → FlowScript 流程图 |
+| `lobster_macro_start_visual_recording` | visual_macro_features.py | 视觉宏录制 (点击时截全屏) |
+| `lobster_macro_stop_visual_recording` | visual_macro_features.py | 停止视觉宏录制 |
+| `lobster_macro_extract_visual_templates` | visual_macro_features.py | 从点击坐标提取按钮小图 |
 
 ### 视觉宏录制 (Visual Macro Recording)
 
 自动从录制操作中提取按钮小图，用于后续离线 OpenCV 模板匹配定位，无需视觉模型。
 
-**设计思路:**
-
-普通宏录制只记坐标，界面变化后坐标无效。视觉宏录制在每次点击时截全屏，录制结束后从截图中智能检测按钮边界，裁剪小图存入经验库，后续通过 OpenCV 模板匹配定位，与界面布局无关。
+**设计思路：** 普通宏录制只记坐标，界面变化后坐标无效。视觉宏录制在每次点击时截全屏，录制结束后从截图中智能检测按钮边界，裁剪小图存入经验库，后续通过 OpenCV 模板匹配定位，与界面布局无关。
 
 **三阶段流程:**
 
@@ -265,25 +470,81 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 2. **Canny + findContours 兜底** — 边缘检测，找包含点击点的最小轮廓
 3. **固定 40×40 裁剪兜底** — 前两者均失败时以点击点居中裁剪
 
-**OCR 自动命名:**
-
-裁剪后调用 EasyOCR 识别小图中的文字，用识别结果作为 `target_text` 存入经验库。以后直接 `visual_locator.locate("搜索", "click", ...)` 就能匹配到，完全离线。
-
-**与普通宏录制的区别:**
-
-| | 普通宏 | 视觉宏 |
-|---|---|---|
-| 录制数据 | 坐标+时间 | 坐标+时间+截图 |
-| 回放方式 | 定点点击 | OpenCV 模板匹配定位 |
-| 抗界面变化 | 否 | 是（按钮位置变了也能找到） |
-| 存储 | `macros/*.json` | `macros/*.json` + `experience/templates/*.png` |
-| VLM 依赖 | 无 | 无（OCR 可离线） |
+**OCR 自动命名:** 裁剪后调用 EasyOCR 识别小图中的文字，用识别结果作为 `target_text` 存入经验库。
 
 **关键文件:**
 - `python/features/visual_macro_features.py` — 3 个 @feature 工具（录制/停止/提取）
 - `python/agent/visual_locator.py` — 定位器，查经验库 + OpenCV 匹配
 - `python/agent/experience_db.py` — 经验数据库，JSON 索引 + PNG 模板
 - `python/experience/templates/` — 裁剪小图存储目录
+
+## 视觉定位 + 经验复用学习系统
+
+Agent 监督执行时通过 **视觉定位** 模块将语义目标（如"搜索按钮"）转为屏幕坐标，并使用 **经验数据库** 实现"越用越快"。
+
+### 架构
+
+```
+_apply_visual_locator(name, args)
+  ├─ 提取 target_text（如 "搜索按钮"）
+  ├─ 截取全屏截图
+  ├─ visual_locator.locate()
+  │    ├─ ① ExperienceDB → 有模板?
+  │    │    └─ OpenCV matchTemplate → 命中 → 返回坐标
+  │    ├─ ② VLM 兜底 (多模态开启时)
+  │    │    └─ VLM API 分析截图 → 返回坐标 → 裁剪小图 → 存入 ExperienceDB
+  │    └─ ③ 均失败 → 返回错误，走正常执行流程
+  └─ 更新 args.x / args.y → 监督执行使用坐标
+```
+
+### 控制开关
+
+| 开关 | localStorage key | 效果 |
+|---|---|---|
+| **多模态 (视觉模型)** | `lingdong-llm-multimodal` | VLM API 分析截图定位元素 |
+| **自动学习** | `lingdong-auto-learn` | 成功自动截图记录, 后续 OpenCV 匹配 |
+
+两个开关同时开启才启用 VLM 兜底；仅 auto-learn 开启时只使用 ExperienceDB + OpenCV。
+
+### 经验数据存储
+
+```
+python/experience/
+├── db.json            # 经验索引（SHA256 签名→路径/坐标/置信度）
+└── templates/         # 裁剪小图（PNG）
+```
+
+## Set-of-Mark (SoM) 标号系统
+
+Agent 在执行时对屏幕元素进行 **蓝色框 + #N 编号** 标注，纯文本模型直接用 `#3` 指定目标。
+
+### 双轨 SoM 引擎
+
+| 引擎 | 技术栈 | 定位精度 | 速度 | 状态 |
+|---|---|---|---|---|
+| **OmniParser** | YOLOv8 图标检测 + Florence-2 标题 + EasyOCR | 像素级 | ~3-8s (CPU) | 需 transformers 4.x |
+| **UIA + OCR 兜底** | Windows UIA 控件树 + EasyOCR 文字检测 | 像素级 | ~1-3s | **默认工作路径** |
+
+### 执行流程
+
+```
+_apply_som(b64_img)
+  ├─ OmniParser 优先
+  │    ├─ 启动 FastAPI 子进程 (lazy, 仅首次)
+  │    ├─ POST /parse/ → 返回 {image_b64, label_map, count}
+  │    └─ 失败 → 静默降级到 UIA+OCR
+  └─ UIA + OCR 兜底 (always available)
+       ├─ a11y_get_tree(depth=3) → UIA 控件列表
+       ├─ ocr_extract_all() → OCR 文字框
+       ├─ 去重合并 → 编号排序 (从上到下, 从左到右)
+       └─ OpenCV 画蓝色框 + #N 编号
+```
+
+### 关键文件
+- `python/agent/agent.py` — `_apply_som()` 核心方法
+- `python/agent/omniparser_client.py` — OmniParser FastAPI 客户端（子进程管理 + parse API）
+- `omni_parser_repo/` — OmniParser V2 仓库
+- `omni_parser_repo/weights/` — 模型权重（icon_detect 40MB + icon_caption 1GB）
 
 ## 语音对话 (Voice Conversation)
 
@@ -292,7 +553,7 @@ Lobster 内置商业级宏录制，支持 F6 全局热键启停、鼠标智能�
 ### 架构
 
 ```
-麦克风 → WebSocket → voice/server.py → Whisper/Paraformer STT
+麦克风 → WebSocket → voice/server.py → Whisper/Paraformer/faster-whisper STT
                                               ↓
 Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 ```
@@ -306,6 +567,7 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 | **whisper-small** | ~461MB | ✅ 高 | **默认引擎** |
 | whisper-large-v3-turbo | ~1.5GB | ✅ 最高 | 最佳质量，首次需下载 |
 | paraformer | ~40MB | ✅ 高 | 阿里达摩院中文 ASR，ONNX 推理 |
+| faster-whisper | CTranslate2 | ✅ 高 | 性能优化版 Whisper |
 
 支持一键切换引擎：设置面板选择 → 保存 → 语音面板自动重连。
 
@@ -320,8 +582,8 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 - `python/voice/server.py` — WebSocket 语音服务器 (动态端口, 通过 `voice:server-url` IPC 获取)
 - `python/voice/download_models.py` — 批量下载 openai-whisper / faster-whisper 模型
 - `python/voice/test_stt.py` — STT 诊断脚本（测试麦克风、SAPI）
-- `src/renderer/utils/voiceConversation.ts` — 前端语音客户端（641 行，状态机/音频调度/WebSocket 协议）
-- `src/renderer/components/common/VoiceConversationPanel.tsx` — 语音面板 UI（321 行）
+- `src/renderer/utils/voiceConversation.ts` — 前端语音客户端（状态机/音频调度/WebSocket 协议）
+- `src/renderer/components/common/VoiceConversationPanel.tsx` — 语音面板 UI
 
 ### WebSocket 协议
 
@@ -347,26 +609,11 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 | `tts_end` | `{}` | TTS 播放结束 |
 | `error` | `{ message }` | 错误 |
 
-**音频流:** TTS 音频块以原始二进制 ArrayBuffer 形式发送，前端通过 `AudioContext.decodeAudioData()` 解码并用精确调度消除间隙。支持 Edge TTS（默认）和 ElevenLabs（需 API Key）。
+**音频流:** TTS 音频块以原始二进制 ArrayBuffer 形式发送，前端通过 `AudioContext.decodeAudioData()` 解码并用精确调度消除间隙。
 
 ### 对话状态机
-`VoiceState = 'idle' | 'listening' | 'thinking' | 'speaking'`
-连续模式：说话 → 空闲 → 自动收听 → VAD 检测 → STT → LLM → TTS → 循环。VAD 基于 RMS 能量阈值，自适应环境噪声。
-
-### 快速测试
-```bash
-# 启动语音服务器
-python python/voice/server.py 8765
-
-# 测试 STT 引擎识别质量
-python -c "
-import whisper, soundfile as sf
-data, sr = sf.read('test_speech_16k_pcm.wav')
-model = whisper.load_model('small')
-result = model.transcribe(data.astype('float32'), language='zh')
-print(result['text'].strip())
-"
-```
+`VoiceState = 'idle' \| 'listening' \| 'thinking' \| 'speaking'`
+连续模式：说话 → 空闲 → 自动收听 → VAD 检测 → STT → LLM → TTS → 循环。VAD 基于 RMS 能量阈值（自适应环境噪声），静音 1.0s 判定结束。
 
 ## 摄像头节点
 
@@ -393,7 +640,7 @@ print(result['text'].strip())
 
 ### 创建自动化流程
 1. 在画布拖拽节点编排流程
-2. 节点类型: 55 种（点击、输入、截图、OCR、条件、循环、等待、系统操作、摄像头等）
+2. 节点类型: 65 种（基础交互/图像识别/控制流/系统操作/高级工具/聚合类型）
 3. 属性面板编辑参数 (支持区域拾取、策略选择)
 4. 文本视图可切换中文伪代码 / 英文 DSL 模式
 5. 保存为 .flow 文件, 或导出 DSL
@@ -425,204 +672,14 @@ print(result['text'].strip())
 4. 前端流程图实时高亮当前执行节点，显示成功/失败状态
 5. 执行完成或失败后汇总报告
 
-## Agent IPC 协议
+### 离线执行模式
+1. 切换离线模式（AgentView 顶部的 WiFi/离线按钮）
+2. 直接在画布上编辑流程图
+3. 点击「离线执行」按钮
+4. 引擎直接运行当前流程图，无 LLM 调用，无需 API Key
+5. 适用于调试、无需 AI 的场景、无网络环境
 
-AI Agent 子进程通过 stdin/stdout JSON 与 Electron 主进程通信。协议设计用于实时流式展示执行进度。
-
-### IPC 命令（Electron → Agent，stdin）
-
-| 命令 | 参数 | 用途 |
-|---|---|---|
-| `{"type": "start", "goal": "...", "config": {...}, "supervise": true}` | goal: 目标描述, config: api_key/api_base/model, supervise: 是否监督执行 | 启动 Agent |
-| `{"type": "stop"}` | — | 请求优雅停止（当前步骤完成后退出） |
-| `{"type": "guidance", "text": "..."}` | text: 指引文本 | 注入用户指引 |
-| `{"type": "status"}` | — | 查询当前状态 |
-
-### IPC 事件（Agent → Electron，stdout）
-
-| 事件 | 关键字段 | 用途 |
-|---|---|---|
-| `{"type": "agent_start", "goal": "..."}` | goal | Agent 启动通知 |
-| `{"type": "step_complete", "step_num": N, "tool": "...", "result": {...}}` | step_num, result.success, result.error | 每步执行结果（前端实时更新流程图） |
-| `{"type": "agent_done", "status": "completed\|failed\|stopped", "total_steps": N}` | status, total_steps, fail_reason | Agent 结束 |
-| `{"type": "log", "level": "info\|warn\|error", "message": "..."}` | level, message | 日志事件 |
-| `{"type": "user_guidance_sent", "text": "..."}` | text | 用户指引确认 |
-| `{"type": "error", "message": "..."}` | message | 错误事件 |
-
-### 监督执行流程（supervise=true）
-
-```
-Agent 主循环 (__main__.py)
-  ├─ Phase 1: generate_flow_script(goal)
-  │   └─ 生成流程图脚本 → 前端展示
-  ├─ Phase 2: parse_pseudocode(pseudocode)
-  │   └─ 解析为结构化步骤 (click/type/hotkey/wait/launch...)
-  └─ Phase 3: 逐步骤监督执行
-      ├─ 窗口焦点安全 (get_active_window)
-      ├─ 视觉定位 (visual_locator.locate → OpenCV/VLM)
-      ├─ 执行动作 (registry.execute)
-      ├─ 等待屏幕稳定 (wait_screen_stable)
-      ├─ OCR 验证 (ocr_find_text / wait_screen_change)
-      ├─ 失败恢复 (planner.decide_recovery)
-      │   ├─ retry → 重试
-      │   ├─ alternative → 替代方案
-      │   ├─ skip → 跳过
-      │   └─ fail → 终止
-      └─ 发送 step_complete 事件 → 前端高亮节点
-```
-
-## 视觉定位 + 经验复用学习系统
-
-Agent 监督执行时通过 **视觉定位** 模块将语义目标（如"搜索按钮"）转为屏幕坐标，并使用 **经验数据库** 实现"越用越快"。
-
-### 架构
-
-```
-Agent 监督层 (langgraph_agent.py supervision wrapper)
-  └─ step 0: _apply_visual_locator(name, args)
-       ├─ 提取 target_text（如 "搜索按钮"）
-       ├─ 截取全屏截图
-       ├─ visual_locator.locate()
-       │    ├─ ① ExperienceDB → 有模板?
-       │    │    └─ OpenCV matchTemplate → 命中 → 返回坐标
-       │    ├─ ② VLM 兜底 (多模态开启时)
-       │    │    └─ VLM API 分析截图 → 返回坐标 → 裁剪小图 → 存入 ExperienceDB
-       │    └─ ③ 均失败 → 返回错误，走正常执行流程
-       └─ 更新 args.x / args.y → 监督执行使用坐标
-```
-
-### 三层设计
-
-| 层 | 文件 | 功能 | 依赖 |
-|---|---|---|---|
-| **经验数据库** | `python/agent/experience_db.py` | JSON 存储经验条目，SHA256 签名（step_type\|target_text\|window_title），裁剪小图保存在 `experience/templates/` | 无外部依赖 |
-| **视觉定位器** | `python/agent/visual_locator.py` | 统一入口 `locate()`：先查经验库→OpenCV 匹配，再 VLM 兜底 | OpenCV (`cv2`)，PIL (fallback) |
-| **LangGraph 集成** | `python/agent/langgraph_agent.py` → `_apply_visual_locator()` | 在监督包装器 step 0 调用，自动注入坐标到工具参数 | `pyautogui` (截图) |
-
-### 控制开关 (设置面板)
-
-| 开关 | localStorage key | 效果 |
-|---|---|---|
-| **多模态 (视觉模型)** | `lingdong-llm-multimodal` | 开启后首次遇到新界面时调用 VLM API 分析截图定位元素。纯文本模型(如 DeepSeek)必须关闭 |
-| **自动学习** | `lingdong-auto-learn` | 开启后每次执行成功自动记录屏幕状态，后续同目标可直接用 OpenCV 匹配，无需 API 调用 |
-
-### 经验数据存储位置
-
-```
-python/experience/
-├── db.json            # 经验索引（签名→路径/坐标/置信度）
-└── templates/         # 裁剪小图（PNG）
-```
-
-### 生命周期
-
-1. **首次执行**（自动学习 ON，多模态 ON）：
-   1. Agent 需要点击"搜索按钮"
-   2. 经验库无匹配 → VLM 发送截图+描述 → 返回坐标
-   3. 执行点击 → 成功后裁剪按钮小图存入 `experience/templates/`
-   4. 经验条目写入 `db.json`（含签名、坐标、置信度）
-
-2. **再次执行同目标**（自动学习 ON，多模态 OFF）：
-   1. Agent 需要点击"搜索按钮"
-   2. 经验库命中 → 加载模板小图 → OpenCV `matchTemplate` 扫描屏幕
-   3. 找到匹配位置 → 返回坐标 → 执行点击
-   4. 整个过程无需调用任何 API，完全离线
-
-3. **手动清除**：`python -c "from agent.experience_db import clear; clear()"`
-
-### settings 面板已有开关
-
-- `lingdong-llm-multimodal`: 多模态视觉开关（默认关闭，避免纯文本模型报错）
-- `lingdong-auto-learn`: 自动学习开关（默认关闭）
-
-两个开关同时开启才启用 VLM 兜底；仅 auto-learn 开启时只使用 ExperienceDB + OpenCV。
-
-## Set-of-Mark (SoM) 标号系统
-
-Agent 在执行时对屏幕元素进行 **蓝色框 + #N 编号** 标注（Set-of-Mark），MIMO 等纯文本模型直接用 `#3` 指定目标，无需输出模糊的文字坐标描述。
-
-### 双轨 SoM 引擎
-
-| 引擎 | 技术栈 | 定位精度 | 速度 | 状态 |
-|---|---|---|---|---|
-| **OmniParser** | YOLOv8 图标检测 + Florence-2 标题 + EasyOCR | 像素级 | ~3-8s (CPU) | 需 transformers 4.x |
-| **UIA + OCR 兜底** | Windows UIA 控件树 + EasyOCR 文字检测 | 像素级 | ~1-3s | **默认工作路径** |
-
-### 执行流程
-
-```
-_apply_som(b64_img)
-  ├─ OmniParser 优先
-  │    ├─ 启动 FastAPI 子进程 (lazy, 仅首次)
-  │    ├─ POST /parse/ → 返回 {image_b64, label_map, count}
-  │    └─ 失败 → 静默降级到 UIA+OCR
-  └─ UIA + OCR 兜底 (always available)
-       ├─ a11y_get_tree(depth=3) → UIA 控件列表
-       ├─ ocr_extract_all() → OCR 文字框
-       ├─ 去重合并 → 编号排序 (从上到下, 从左到右)
-       └─ OpenCV 画蓝色框 + #N 编号
-```
-
-### 关键文件
-- `python/agent/agent.py` — `_apply_som()` 核心方法，`_supervised_execute()` 中 `#N` 解析
-- `python/agent/omniparser_client.py` — OmniParser FastAPI 客户端（子进程管理 + parse API）
-- `omni_parser_repo/` — OmniParser V2 仓库（克隆自 microsoft/OmniParser-v2.0）
-- `omni_parser_repo/weights/` — 下载的模型权重（icon_detect 40MB + icon_caption 1GB）
-
-### MIMO text_protocol SoM 集成
-
-```
-run_text_protocol(goal)
-  ├─ 系统提示词规则 8: "编号定位优先" 
-  ├─ 每步截图 → _apply_som() → 标号图 + label_map
-  ├─ 发送给 LLM: "屏幕元素编号... 使用 #N 指定目标"
-  ├─ LLM 回复: target: #3
-  └─ _supervised_execute → 解析 #3 → label_map[3] → (x, y, w, h)
-```
-
-### OmniParser 设置
-
-```bash
-# 克隆（已包含在 omni_parser_repo/）
-git clone https://github.com/microsoft/OmniParser.git omni_parser_repo
-
-# 下载权重
-python -c "
-import os; os.environ['HTTP_PROXY']='http://127.0.0.1:7897'
-from huggingface_hub import snapshot_download
-snapshot_download('microsoft/OmniParser-v2.0', local_dir='omni_parser_repo/weights')
-"
-
-# 注意: 需要 transformers < 5.0（当前 Python 3.14 + transformers 5.x 不兼容,
-# 降级方案: pip install 'transformers<5.0'）
-```
-
-## 关键约定
-
-- **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `PropertyPanel.tsx` (switch case)
-- **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册 MCP/CLI/HTTP/DSL
-- **新增 Agent 能力**: 在 `python/agent/` 添加，`__main__.py` 驱动执行循环，`langgraph_agent.py` 监督包装
-- **新增 API 端点**: 在 `src/main/api.ts` 的 `switch (url.pathname)` 中添加 case
-- **状态管理**: Zustand + immer，`useStore` hook
-- **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
-- **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
-- **Agent IPC 协议**: `python/agent/__main__.py` 通过 stdin/stdout JSON 与 Electron 通信（start/stop/guidance/status 命令，agent_start/step_complete/agent_done/log 事件）
-- **Python 协议**: `engine/engine.py` 通过 stdin/stdout JSON 与 Electron 通信
-- **测试**: `pytest tests/` ~296 tests (Python, 覆盖全部 @feature 执行, DSL 转换, 往返验证), 暂无前端测试脚本
-- **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
-- **快捷键**:
-  - **F5**: 前端画布"运行/停止"执行
-  - **F6**: 全局宏录制启停
-  - **F9**: 全局系统级 Python 引擎启停（即使应用未聚焦）
-  - **Ctrl+Z/Y**: 撤销/重做
-  - **Ctrl+C/X/V**: 复制/剪切/粘贴节点
-  - **Delete/Backspace**: 删除选中节点/连线
-  - **Tab**: 切换面板显示
-- **生产模式**: `app.isPackaged` 控制 `loadURL` (dev) 或 `loadFile` (prod)。`--dev` 标志可在打包后强制开发模式。无 `--prod` 标志。
-- **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
-- **视觉定位系统**: `agent/visual_locator.py` + `agent/experience_db.py`。语义目标→屏幕坐标的两步策略：经验库→OpenCV 匹配，VLM 兜底。`_apply_visual_locator()` 在 `langgraph_agent.py` 监督层 step 0 自动调用。所有 VLM 定位成功的坐标和按钮小图自动存入经验数据库供后续离线复用
-
-## 节点类型速查 (55 种)
+## 节点类型速查 (65 种)
 
 ### 基础交互
 | 类型 | 用途 | 主要参数 |
@@ -666,7 +723,7 @@ snapshot_download('microsoft/OmniParser-v2.0', local_dir='omni_parser_repo/weigh
 | variable_set | 设置变量 | name, value |
 | variable_get | 读取变量 | name, value |
 
-### 系统操作 (独立类型)
+### 系统操作
 | 类型 | 用途 | 主要参数 |
 |---|---|---|
 | shutdown | 关机 | delay_seconds, confirm |
@@ -715,11 +772,39 @@ snapshot_download('microsoft/OmniParser-v2.0', local_dir='omni_parser_repo/weigh
 | start | 脚本入口点 |
 | end | 脚本终止点 |
 
+## 关键约定
+
+- **新增节点类型**: `types/index.ts` + `nodeDefinitions.ts` + `params/*.tsx` + `FlowNode.tsx` (getNodeSummary) + `PropertyPanel.tsx` (switch case)
+- **新增 MCP 工具**: 在 `python/features/` 用 `@feature` 装饰器声明，自动注册 MCP/CLI/HTTP/DSL
+- **新增 Agent 能力**: 在 `python/agent/` 添加，`__main__.py` 驱动执行循环，`agent.py` 统一入口
+- **新增 API 端点**: 在 `src/main/api.ts` 的 `switch (url.pathname)` 中添加 case
+- **状态管理**: Zustand + immer，`useStore` hook
+- **Electron IPC**: `preload.ts` 暴露 → `main.ts` 处理 → Python 子进程
+- **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
+- **Agent IPC 协议**: `python/agent/__main__.py` stdin/stdout JSON（start/stop/guidance/chat/status 命令, 7 种事件）
+- **Python 引擎协议**: `engine/engine.py` stdin/stdout JSON
+- **测试**: `python -m pytest tests/ --ignore=tests/standalone` ~2550 tests (Python), `npx vitest run` ~16 文件 (TS)
+- **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
+- **快捷键**:
+  - **F5**: 前端画布"运行/停止"执行
+  - **F6**: 全局宏录制启停
+  - **F9**: 全局系统级 Python 引擎启停（即使应用未聚焦）
+  - **Ctrl+Z/Y**: 撤销/重做
+  - **Ctrl+C/X/V**: 复制/剪切/粘贴节点
+  - **Delete/Backspace**: 删除选中节点/连线
+  - **Tab**: 切换面板显示
+- **生产模式**: `app.isPackaged` 控制 `loadURL` (dev) 或 `loadFile` (prod)。`--dev` 标志可在打包后强制开发模式。
+- **对话框处理**: `agent/dialog_handler.py` 纯 win32 API 检测/关闭对话框。现代 IFileDialog (Windows 8+) 无法通过自动化保存（DirectUI 渲染），Agent 应使用 `file_write` 程序化保存文件而非触发 UI 对话框
+- **视觉定位系统**: `agent/visual_locator.py` + `agent/experience_db.py`。语义目标→屏幕坐标的两步策略：经验库→OpenCV 匹配，VLM 兜底。VLM 定位成功的坐标和按钮小图自动存入经验数据库供后续离线复用
+
 ## 常见任务
 
 ```
-# 运行测试
-python -m pytest tests/ -x -q
+# 运行 Python 测试
+python -m pytest tests/ --ignore=tests/standalone -x -q
+
+# 运行 TypeScript 测试
+npx vitest run
 
 # DSL → 流程图 往返验证
 echo "CLICK 100 200" | python tools/dsl_to_flow.py

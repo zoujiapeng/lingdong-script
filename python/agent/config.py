@@ -41,6 +41,15 @@ class AgentConfig:
     auto_learn: bool = False        # 自动学习（截图→经验库）
     som_enabled: bool = True        # SoM 标号（截图元素编号）
     flow_chart_mode: bool = False   # 流程图模式（全工具提示词 + generate_flow/execute_flow）
+    chat_mode: bool = False         # 对话模式：边执行边聊天，接收实时反馈/新任务（默认关闭保持原行为）
+
+    # ── Visual strategy: how the agent "sees" the screen ──
+    # "auto"       — 自动选择（多模态=direct，纯文本=som）
+    # "cli_path"   — 方案1: 先将软件转CLI/已探索路径，AI直接看操作逻辑
+    # "blind_guess" — 方案2: LLM自主盲猜像素坐标（原始方式）
+    # "ocr_llm"    — 方案3: 截图OCR→LLM回复最可能文字→点击对应坐标
+    # "som"        — 方案4: 截图LLM标记→标记转坐标（已实现，默认关闭因本地模型慢）
+    visual_strategy: str = "auto"   # 视觉策略选择器
 
     # ── Safety limits ──
     max_steps: int = 20              # 单次任务最大步数
@@ -143,6 +152,23 @@ class AgentConfig:
                 raw = getattr(self, field_name)
                 setattr(self, f"_resolved_{field_name}", raw)
 
+        # Resolve visual_strategy "auto"
+        if self.visual_strategy == "auto":
+            if self._multimodal:
+                self._resolved_vision_mode = "direct"
+            else:
+                self._resolved_vision_mode = "som"
+        else:
+            # Override vision_mode based on visual_strategy
+            if self.visual_strategy == "ocr_llm":
+                self._resolved_vision_mode = "ocr_llm"
+            elif self.visual_strategy == "blind_guess":
+                self._resolved_vision_mode = "direct"  # 盲猜：直接截图，无标注
+            elif self.visual_strategy == "som":
+                self._resolved_vision_mode = "som"
+            elif self.visual_strategy == "cli_path":
+                self._resolved_vision_mode = "som"  # CLI路径用SoM做兜底
+
         # Apply boolean-derived behavior
         if self.fast_mode:
             self.image_dedup = True
@@ -174,6 +200,8 @@ class AgentConfig:
             "screenshot_quality": self.screenshot_quality,
             "sliding_window_size": self.sliding_window_size,
             "vision_backend": self.vision_backend,
+            "chat_mode": self.chat_mode,
+            "visual_strategy": self.visual_strategy,
         }
 
     @classmethod
@@ -204,6 +232,8 @@ class AgentConfig:
             screenshot_quality=d.get("screenshot_quality", 60),
             sliding_window_size=d.get("sliding_window_size", 0),
             vision_backend=d.get("vision_backend", "gpt-4o-mini"),
+            chat_mode=d.get("chat_mode", False),
+            visual_strategy=d.get("visual_strategy", "auto"),
         )
 
 
