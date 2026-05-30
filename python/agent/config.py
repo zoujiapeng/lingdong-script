@@ -38,6 +38,28 @@ class AgentConfig:
     window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
     uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
     scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
+    auto_learn: bool = False        # 自动学习（截图→经验库）
+    som_enabled: bool = True        # SoM 标号（截图元素编号）
+    flow_chart_mode: bool = False   # 流程图模式（全工具提示词 + generate_flow/execute_flow）
+
+    # ── Safety limits ──
+    max_steps: int = 20              # 单次任务最大步数
+    max_consecutive_failures: int = 5  # 连续失败上限
+    min_success_rate: float = 0.1   # 最低成功率
+
+    # ── LLM parameters ──
+    temperature: float = 0.1        # LLM temperature (0.0-2.0)
+    max_tokens: int = 4096          # LLM max_tokens
+    llm_retries: int = 2            # LLM API 调用重试次数
+
+    # ── Screenshot ──
+    screenshot_quality: int = 60    # JPEG 压缩质量 (30-95)
+
+    # ── Sliding window ──
+    sliding_window_size: int = 0   # 0 = auto (8=multimodal, 12=text)
+
+    # ── Vision backend ──
+    vision_backend: str = "gpt-4o-mini"  # VLM 后端模型
 
     # ── Internal resolved state (set by resolve_auto()) ──
     _resolved_llm_protocol: str = ""
@@ -123,6 +145,18 @@ class AgentConfig:
             "window_aware_ocr": self.window_aware_ocr,
             "uia_pre_focus": self.uia_pre_focus,
             "scripted_mode": self.scripted_mode,
+            "auto_learn": self.auto_learn,
+            "som_enabled": self.som_enabled,
+            "flow_chart_mode": self.flow_chart_mode,
+            "max_steps": self.max_steps,
+            "max_consecutive_failures": self.max_consecutive_failures,
+            "min_success_rate": self.min_success_rate,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "llm_retries": self.llm_retries,
+            "screenshot_quality": self.screenshot_quality,
+            "sliding_window_size": self.sliding_window_size,
+            "vision_backend": self.vision_backend,
         }
 
     @classmethod
@@ -141,6 +175,18 @@ class AgentConfig:
             window_aware_ocr=d.get("window_aware_ocr", True),
             uia_pre_focus=d.get("uia_pre_focus", True),
             scripted_mode=d.get("scripted_mode", False),
+            auto_learn=d.get("auto_learn", False),
+            som_enabled=d.get("som_enabled", True),
+            flow_chart_mode=d.get("flow_chart_mode", False),
+            max_steps=d.get("max_steps", 20),
+            max_consecutive_failures=d.get("max_consecutive_failures", 5),
+            min_success_rate=d.get("min_success_rate", 0.1),
+            temperature=d.get("temperature", 0.1),
+            max_tokens=d.get("max_tokens", 4096),
+            llm_retries=d.get("llm_retries", 2),
+            screenshot_quality=d.get("screenshot_quality", 60),
+            sliding_window_size=d.get("sliding_window_size", 0),
+            vision_backend=d.get("vision_backend", "gpt-4o-mini"),
         )
 
 

@@ -5,6 +5,8 @@ import {
   ChevronDown, ChevronRight, Settings, Eye,
   GitBranch, FileText, AlertTriangle, Zap,
   Camera, MessageSquare, Monitor, Brain, Volume2, Terminal,
+  Shield, Sliders, Thermometer, Maximize2, Minimize2,
+  Key,
 } from 'lucide-react';
 import { VoiceConversationPanel } from './common/VoiceConversationPanel';
 import { PlanVisualizer } from './common/PlanVisualizer';
@@ -36,7 +38,7 @@ let _cachedSteps: any[] | null = null;
 
 const _STORAGE_KEY = 'lingdong-agent-goal';
 
-// Agent config storage keys (moved from SettingsPanel)
+// ── Agent config localStorage keys ──
 const AGENT_PROTOCOL_KEY = 'lingdong-agent-protocol';
 const AGENT_VISION_KEY = 'lingdong-agent-vision';
 const AGENT_PLANNING_KEY = 'lingdong-agent-planning';
@@ -47,37 +49,245 @@ const AGENT_DEDUP_KEY = 'lingdong-agent-image-dedup';
 const AGENT_WINDOW_AWARE_OCR_KEY = 'lingdong-agent-window-aware-ocr';
 const AGENT_UIA_PREFOCUS_KEY = 'lingdong-agent-uia-prefocus';
 const AGENT_SCRIPTED_MODE_KEY = 'lingdong-agent-scripted-mode';
+const AGENT_MULTIMODAL_KEY = 'lingdong-agent-multimodal';
+const AGENT_VERIFY_KEY = 'lingdong-agent-verify';
+const AGENT_AUTO_LEARN_KEY = 'lingdong-agent-auto-learn';
+const AGENT_OMNIPARSER_KEY = 'lingdong-agent-omniparser';
+const AGENT_SOM_KEY = 'lingdong-agent-som';
+const AGENT_FLOW_CHART_KEY = 'lingdong-agent-flow-chart';
+const AGENT_SCREENSHOT_QUALITY_KEY = 'lingdong-agent-screenshot-quality';
+const AGENT_MAX_STEPS_KEY = 'lingdong-agent-max-steps';
+const AGENT_MAX_CONSECUTIVE_FAILS_KEY = 'lingdong-agent-max-consecutive-fails';
+const AGENT_MIN_SUCCESS_RATE_KEY = 'lingdong-agent-min-success-rate';
+const AGENT_TEMPERATURE_KEY = 'lingdong-agent-temperature';
+const AGENT_MAX_TOKENS_KEY = 'lingdong-agent-max-tokens';
+const AGENT_LLM_RETRIES_KEY = 'lingdong-agent-llm-retries';
+const AGENT_SLIDING_WINDOW_KEY = 'lingdong-agent-sliding-window';
+const AGENT_VISION_BACKEND_KEY = 'lingdong-agent-vision-backend';
 
-function getStoredAgentProtocol(): string {
-  try { return localStorage.getItem(AGENT_PROTOCOL_KEY) || 'auto'; } catch { return 'auto'; }
+// Legacy storage keys (shared with SettingsPanel)
+const KEY_STORAGE = 'lingdong-deepseek-key';
+const BASE_STORAGE = 'lingdong-llm-base';
+const MODEL_STORAGE = 'lingdong-llm-model';
+const LLM_MULTIMODAL_STORAGE = 'lingdong-llm-multimodal';
+
+// ── Helper getters ──
+function lsGet(key: string, def: string = ''): string {
+  try { return localStorage.getItem(key) || def; } catch { return def; }
 }
-function getStoredAgentVision(): string {
-  try { return localStorage.getItem(AGENT_VISION_KEY) || 'auto'; } catch { return 'auto'; }
+function lsSet(key: string, val: string) {
+  try { localStorage.setItem(key, val); } catch {}
 }
-function getStoredAgentPlanning(): string {
-  try { return localStorage.getItem(AGENT_PLANNING_KEY) || 'auto'; } catch { return 'auto'; }
+function lsGetBool(key: string, def: boolean = false): boolean {
+  try { const v = localStorage.getItem(key); return v !== null ? v === 'true' : def; } catch { return def; }
 }
-function getStoredAgentContext(): string {
-  try { return localStorage.getItem(AGENT_CONTEXT_KEY) || 'auto'; } catch { return 'auto'; }
+function lsSetBool(key: string, val: boolean) {
+  try { localStorage.setItem(key, val ? 'true' : 'false'); } catch {}
 }
-function getStoredAgentOnError(): string {
-  try { return localStorage.getItem(AGENT_ONERROR_KEY) || 'retry'; } catch { return 'retry'; }
+function lsGetNum(key: string, def: number): number {
+  try { const v = localStorage.getItem(key); return v !== null ? parseFloat(v) : def; } catch { return def; }
 }
-function getStoredAgentFastMode(): boolean {
-  try { return localStorage.getItem(AGENT_FAST_MODE_KEY) === 'true'; } catch { return false; }
+function lsSetNum(key: string, val: number) {
+  try { localStorage.setItem(key, String(val)); } catch {}
 }
-function getStoredAgentDedup(): boolean {
-  try { return localStorage.getItem(AGENT_DEDUP_KEY) !== 'false'; } catch { return true; }
+
+// ── Inline config control components ──
+
+function ConfigSection({ title, icon, open, onToggle, children, desc }: {
+  title: string; icon: React.ReactNode; open: boolean; onToggle: () => void;
+  children: React.ReactNode; desc?: string;
+}) {
+  return (
+    <div className="agent-config-section">
+      <div className="agent-config-section-header" onClick={onToggle}>
+        <span className="agent-config-section-icon">{icon}</span>
+        <span className="agent-config-section-title">{title}</span>
+        {desc && <span className="agent-config-section-desc">{desc}</span>}
+        <span className={`agent-config-section-arrow ${open ? 'open' : ''}`}>
+          <ChevronRight size={13} />
+        </span>
+      </div>
+      {open && <div className="agent-config-section-body">{children}</div>}
+    </div>
+  );
 }
-function getStoredAgentWindowAwareOcr(): boolean {
-  try { return localStorage.getItem(AGENT_WINDOW_AWARE_OCR_KEY) !== 'false'; } catch { return true; }
+
+function ConfigSelect({ label, value, onChange, options, desc, resolved }: {
+  label: string; value: string; onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  desc?: string; resolved?: string;
+}) {
+  const isAuto = value === 'auto';
+  return (
+    <div className="agent-config-field">
+      <div className="agent-config-field-label">{label}</div>
+      <div className="agent-config-field-control">
+        <select
+          className="agent-config-select"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+        >
+          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        {isAuto && resolved && (
+          <span className="agent-config-resolved">自动 → {resolved}</span>
+        )}
+      </div>
+      {desc && <div className="agent-config-field-desc">{desc}</div>}
+    </div>
+  );
 }
-function getStoredAgentUiaPrefocus(): boolean {
-  try { return localStorage.getItem(AGENT_UIA_PREFOCUS_KEY) !== 'false'; } catch { return true; }
+
+function ConfigToggle({ label, checked, onChange, desc, badge }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void;
+  desc?: string; badge?: string;
+}) {
+  return (
+    <div className="agent-config-field">
+      <div className="agent-config-field-label-row">
+        <span className="agent-config-field-label">{label}</span>
+        {badge && <span className="agent-config-badge">{badge}</span>}
+      </div>
+      <div className="agent-config-field-control">
+        <button className={`toggle ${checked ? 'on' : ''}`}
+          onClick={() => onChange(!checked)} />
+      </div>
+      {desc && <div className="agent-config-field-desc">{desc}</div>}
+    </div>
+  );
 }
-function getStoredAgentScriptedMode(): boolean {
-  try { return localStorage.getItem(AGENT_SCRIPTED_MODE_KEY) === 'true'; } catch { return false; }
+
+function ConfigSlider({ label, value, min, max, step, onChange, unit, desc }: {
+  label: string; value: number; min: number; max: number; step: number;
+  onChange: (v: number) => void; unit?: string; desc?: string;
+}) {
+  return (
+    <div className="agent-config-field">
+      <div className="agent-config-field-label-row">
+        <span className="agent-config-field-label">{label}</span>
+        <span className="agent-config-slider-value">{value}{unit || ''}</span>
+      </div>
+      <div className="agent-config-field-control slider-control">
+        <input type="range" min={min} max={max} step={step} value={value}
+          onChange={e => onChange(parseFloat(e.target.value))}
+          className="agent-config-slider" />
+      </div>
+      {desc && <div className="agent-config-field-desc">{desc}</div>}
+    </div>
+  );
 }
+
+function ConfigInput({ label, value, onChange, type, placeholder, secret, onTest }: {
+  label: string; value: string; onChange: (v: string) => void;
+  type?: string; placeholder?: string; secret?: boolean; onTest?: () => void;
+}) {
+  const [showSecret, setShowSecret] = useState(false);
+  const inputType = secret && !showSecret ? 'password' : type || 'text';
+  return (
+    <div className="agent-config-field full-width">
+      <div className="agent-config-field-label">{label}</div>
+      <div className="agent-config-field-row">
+        <input
+          className="agent-config-input"
+          type={inputType}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder || ''}
+          spellCheck={false}
+        />
+        {secret && (
+          <button className="agent-config-icon-btn" onClick={() => setShowSecret(!showSecret)}
+            title={showSecret ? '隐藏' : '显示'}>
+            {showSecret ? <Eye size={12} /> : <Eye size={12} />}
+          </button>
+        )}
+        {onTest && (
+          <button className="agent-config-btn" onClick={onTest}>测试</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ConfigTriState({ label, value, onChange, desc, options }: {
+  label: string; value: string; onChange: (v: string) => void;
+  desc?: string; options: { value: string; label: string }[];
+}) {
+  return (
+    <div className="agent-config-field">
+      <div className="agent-config-field-label">{label}</div>
+      <div className="agent-config-field-control">
+        <div className="agent-config-segment">
+          {options.map(o => (
+            <button key={o.value}
+              className={`agent-config-segment-btn ${value === o.value ? 'active' : ''}`}
+              onClick={() => onChange(o.value)}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {desc && <div className="agent-config-field-desc">{desc}</div>}
+    </div>
+  );
+}
+
+// ── AgentConfig builder (sends all settings to the Python agent) ──
+function buildAgentConfig(): Record<string, any> {
+  return {
+    llm_protocol: lsGet(AGENT_PROTOCOL_KEY, 'auto'),
+    vision_mode: lsGet(AGENT_VISION_KEY, 'auto'),
+    planning: lsGet(AGENT_PLANNING_KEY, 'auto'),
+    screen_context: lsGet(AGENT_CONTEXT_KEY, 'auto'),
+    on_error: lsGet(AGENT_ONERROR_KEY, 'retry'),
+    multimodal: lsGet(AGENT_MULTIMODAL_KEY, 'auto'),
+    verify: lsGetBool(AGENT_VERIFY_KEY, true),
+    fast_mode: lsGetBool(AGENT_FAST_MODE_KEY, false),
+    image_dedup: lsGetBool(AGENT_DEDUP_KEY, true),
+    window_aware_ocr: lsGetBool(AGENT_WINDOW_AWARE_OCR_KEY, true),
+    uia_pre_focus: lsGetBool(AGENT_UIA_PREFOCUS_KEY, true),
+    scripted_mode: lsGetBool(AGENT_SCRIPTED_MODE_KEY, false),
+    auto_learn: lsGetBool(AGENT_AUTO_LEARN_KEY, false),
+    som_enabled: lsGetBool(AGENT_SOM_KEY, true),
+    flow_chart_mode: lsGetBool(AGENT_FLOW_CHART_KEY, false),
+    max_steps: lsGetNum(AGENT_MAX_STEPS_KEY, 20),
+    max_consecutive_failures: lsGetNum(AGENT_MAX_CONSECUTIVE_FAILS_KEY, 5),
+    min_success_rate: lsGetNum(AGENT_MIN_SUCCESS_RATE_KEY, 0.1),
+    temperature: lsGetNum(AGENT_TEMPERATURE_KEY, 0.1),
+    max_tokens: lsGetNum(AGENT_MAX_TOKENS_KEY, 4096),
+    llm_retries: lsGetNum(AGENT_LLM_RETRIES_KEY, 2),
+    screenshot_quality: lsGetNum(AGENT_SCREENSHOT_QUALITY_KEY, 60),
+    sliding_window_size: lsGetNum(AGENT_SLIDING_WINDOW_KEY, 0),
+    vision_backend: lsGet(AGENT_VISION_BACKEND_KEY, 'gpt-4o-mini'),
+  };
+}
+
+// ── Multi-modal model detection (frontend mirror) ──
+function _isMultimodalModel(model: string): boolean {
+  const m = model.toLowerCase().trim();
+  const mmPatterns = [/^gpt-4o/, /^claude/, /^gemini/, /^qwen-vl/, /^qwen2\.5-vl/,
+    /^glm-4v/, /^step-1v/, /^kimi/, /^moonshot-v/, /^reka/, /^llava/,
+    /^cogvlm/, /^internvl/, /^yi-vl/, /mimo/i, /vision/i, /multimodal/i];
+  return mmPatterns.some(p => p.test(m));
+}
+
+// ── Resolve "auto" for display ──
+function _resolveAuto(field: string, model: string, multimodalOverride: string): string {
+  const isMM = multimodalOverride === 'true'
+    ? true : multimodalOverride === 'false' ? false : _isMultimodalModel(model);
+  const map: Record<string, Record<string, string>> = {
+    llm_protocol: { true: '文本协议', false: '函数调用' },
+    vision_mode: { true: '直接截图', false: 'SoM 标号' },
+    planning: { true: '逐步骤 (ReAct)', false: '预生成计划 (DAG)' },
+    screen_context: { true: '精简', false: '完整' },
+    on_error: { true: '重试', false: '重试' },
+  };
+  return map[field]?.[String(isMM)] || '自动';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Main Component
+// ═══════════════════════════════════════════════════════════════════
 
 export function AgentView() {
   // ── Core state ──
@@ -92,8 +302,9 @@ export function AgentView() {
 
   // ── Agent tool explorer ──
   const [showTools, setShowTools] = useState(false);
-  const [agentTools, setAgentTools] = useState<string[]>([]);
+  const [agentTools, setAgentTools] = useState<any[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsViewMode, setToolsViewMode] = useState<'grouped' | 'all'>('grouped');
 
   // ── Mode state ──
   const [offline, setOffline] = useState(false);
@@ -108,27 +319,49 @@ export function AgentView() {
   const [showHistory, setShowHistory] = useState(false);
   const agentHistory = useStore((s) => s.agentHistory);
 
-  // ── Agent config (moved from SettingsPanel) ──
+  // ── Config accordion state ──
   const [configOpen, setConfigOpen] = useState(false);
-  const [agentProtocol, setAgentProtocol] = useState(() => getStoredAgentProtocol());
-  const [agentVision, setAgentVision] = useState(() => getStoredAgentVision());
-  const [agentPlanning, setAgentPlanning] = useState(() => getStoredAgentPlanning());
-  const [agentContext, setAgentContext] = useState(() => getStoredAgentContext());
-  const [agentOnError, setAgentOnError] = useState(() => getStoredAgentOnError());
-  const [agentFastMode, setAgentFastMode] = useState(() => getStoredAgentFastMode());
-  const [agentDedup, setAgentDedup] = useState(() => getStoredAgentDedup());
-  const [agentWindowAwareOcr, setAgentWindowAwareOcr] = useState(() => getStoredAgentWindowAwareOcr());
-  const [agentUiaPrefocus, setAgentUiaPrefocus] = useState(() => getStoredAgentUiaPrefocus());
-  const [agentScriptedMode, setAgentScriptedMode] = useState(() => getStoredAgentScriptedMode());
+  const [configSection, setConfigSection] = useState<string | null>(null);
+  const [showApiSection, setShowApiSection] = useState(false);
+
+  // ── Config values ──
+  const [apiKey, setApiKey] = useState(() => lsGet(KEY_STORAGE, ''));
+  const [apiBase, setApiBase] = useState(() => lsGet(BASE_STORAGE, 'https://api.deepseek.com/v1'));
+  const [model, setModel] = useState(() => lsGet(MODEL_STORAGE, 'deepseek-chat'));
+  const [agentProtocol, setAgentProtocol] = useState(() => lsGet(AGENT_PROTOCOL_KEY, 'auto'));
+  const [agentVision, setAgentVision] = useState(() => lsGet(AGENT_VISION_KEY, 'auto'));
+  const [agentPlanning, setAgentPlanning] = useState(() => lsGet(AGENT_PLANNING_KEY, 'auto'));
+  const [agentContext, setAgentContext] = useState(() => lsGet(AGENT_CONTEXT_KEY, 'auto'));
+  const [agentOnError, setAgentOnError] = useState(() => lsGet(AGENT_ONERROR_KEY, 'retry'));
+  const [agentMultimodal, setAgentMultimodal] = useState(() => lsGet(AGENT_MULTIMODAL_KEY, 'auto'));
+  const [agentFastMode, setAgentFastMode] = useState(() => lsGetBool(AGENT_FAST_MODE_KEY, false));
+  const [agentDedup, setAgentDedup] = useState(() => lsGetBool(AGENT_DEDUP_KEY, true));
+  const [agentWindowAwareOcr, setAgentWindowAwareOcr] = useState(() => lsGetBool(AGENT_WINDOW_AWARE_OCR_KEY, true));
+  const [agentUiaPrefocus, setAgentUiaPrefocus] = useState(() => lsGetBool(AGENT_UIA_PREFOCUS_KEY, true));
+  const [agentScriptedMode, setAgentScriptedMode] = useState(() => lsGetBool(AGENT_SCRIPTED_MODE_KEY, false));
+  const [agentVerify, setAgentVerify] = useState(() => lsGetBool(AGENT_VERIFY_KEY, true));
+  const [agentAutoLearn, setAgentAutoLearn] = useState(() => lsGetBool(AGENT_AUTO_LEARN_KEY, false));
+  const [agentOmniparser, setAgentOmniparser] = useState(() => lsGetBool(AGENT_OMNIPARSER_KEY, false));
+  const [agentSom, setAgentSom] = useState(() => lsGetBool(AGENT_SOM_KEY, true));
+  const [agentFlowChart, setAgentFlowChart] = useState(() => lsGetBool(AGENT_FLOW_CHART_KEY, false));
+  const [agentScreenshotQuality, setAgentScreenshotQuality] = useState(() => lsGetNum(AGENT_SCREENSHOT_QUALITY_KEY, 60));
+  const [agentMaxSteps, setAgentMaxSteps] = useState(() => lsGetNum(AGENT_MAX_STEPS_KEY, 20));
+  const [agentMaxConsecutiveFails, setAgentMaxConsecutiveFails] = useState(() => lsGetNum(AGENT_MAX_CONSECUTIVE_FAILS_KEY, 5));
+  const [agentMinSuccessRate, setAgentMinSuccessRate] = useState(() => lsGetNum(AGENT_MIN_SUCCESS_RATE_KEY, 0.1));
+  const [agentTemperature, setAgentTemperature] = useState(() => lsGetNum(AGENT_TEMPERATURE_KEY, 0.1));
+  const [agentMaxTokens, setAgentMaxTokens] = useState(() => lsGetNum(AGENT_MAX_TOKENS_KEY, 4096));
+  const [agentLlmRetries, setAgentLlmRetries] = useState(() => lsGetNum(AGENT_LLM_RETRIES_KEY, 2));
+  const [agentSlidingWindow, setAgentSlidingWindow] = useState(() => lsGetNum(AGENT_SLIDING_WINDOW_KEY, 0));
 
   // ── Tool explorer ──
   const loadAgentTools = async () => {
     setToolsLoading(true);
     try {
       const api = (window as any).electronAPI;
-      const r = await api?.callFeature?.('list_features', { category: 'agent' }) || await api?.callFeature?.('list_features', {});
+      const r = await api?.callFeature?.('list_features', {});
       const list = Array.isArray(r) ? r : r?.result || [];
-      setAgentTools(list.map((f: any) => f.name || f));
+      const filtered = list.filter((f: any) => !f.deprecated && !f.hidden);
+      setAgentTools(filtered);
     } catch { setAgentTools([]); }
     setToolsLoading(false);
   };
@@ -184,9 +417,7 @@ export function AgentView() {
                 addEntry({ type: 'script', pseudocode, explanation });
                 setGeneratedScript({ pseudocode, explanation });
                 const steps = data.structured_steps || data.result?.structured_steps || [];
-                if (Array.isArray(steps) && steps.length > 0) {
-                  _cachedSteps = steps;
-                }
+                if (Array.isArray(steps) && steps.length > 0) _cachedSteps = steps;
                 loadScriptToCanvas(pseudocode);
               } else {
                 addEntry({ type: 'system', text: '⚠️ AI 返回了空脚本，请重试或修改描述' });
@@ -266,11 +497,8 @@ export function AgentView() {
           break;
         }
         case 'execution_done':
-          if (msg.status === 'completed') {
-            addEntry({ type: 'complete', steps: 0 });
-          } else {
-            addEntry({ type: 'fail', reason: msg.error || '执行失败' });
-          }
+          if (msg.status === 'completed') addEntry({ type: 'complete', steps: 0 });
+          else addEntry({ type: 'fail', reason: msg.error || '执行失败' });
           setOfflineRunning(false);
           setRunning(false);
           _hasActiveRun = false;
@@ -282,80 +510,59 @@ export function AgentView() {
           break;
       }
     });
-
     const unsubEngineLog = api.onEngineLog?.((msg: any) => {
       if (msg.level === 'error') addEntry({ type: 'system', text: `[引擎] ${msg.message}` });
       else addEntry({ type: 'system', text: msg.message });
     });
-
     return () => { unsubEngineMsg?.(); unsubEngineLog?.(); };
   }, [addEntry]);
 
-  // ── Run agent (generate or execute) ──
+  // ── Run agent ──
   const runAgent = useCallback(async (supervise: boolean) => {
     if (!goal.trim()) return;
     _hasActiveRun = false;
-    if (supervise) {
-      _persistedLog = [];
-      setLog([]);
-    }
+    if (supervise) { _persistedLog = []; setLog([]); }
     addEntry({ type: 'system', text: supervise ? '正在启动执行...' : '正在生成流程图...' });
 
-    const rawKey = (window as any).__DEEPSEEK_KEY__ || localStorage.getItem('lingdong-deepseek-key') || '';
-    const rawBase = ((window as any).__LLM_API_BASE__ || localStorage.getItem('lingdong-llm-base') || '').replace(/\/+$/, '');
-    const rawModel = (window as any).__LLM_MODEL__ || localStorage.getItem('lingdong-llm-model') || '';
-    const multimodal = (window as any).__LLM_MULTIMODAL__ !== undefined
-      ? (window as any).__LLM_MULTIMODAL__ : localStorage.getItem('lingdong-llm-multimodal') === 'true';
-    const verifyEnabled = localStorage.getItem('lingdong-verify-enabled') === 'true';
-    const autoLearn = localStorage.getItem('lingdong-auto-learn') === 'true';
-    const omniparserEnabled = localStorage.getItem('lingdong-omniparser') === 'true';
-    const apiKey = rawKey.trim();
-    const apiBase = rawBase.trim();
-    const model = rawModel.trim();
+    const rawKey = (window as any).__DEEPSEEK_KEY__ || lsGet(KEY_STORAGE, '');
+    const rawBase = ((window as any).__LLM_API_BASE__ || lsGet(BASE_STORAGE, '')).replace(/\/+$/, '');
+    const rawModel = (window as any).__LLM_MODEL__ || lsGet(MODEL_STORAGE, '');
+    const multimodalSetting = lsGet(LLM_MULTIMODAL_STORAGE, 'false');
 
-    if (!apiKey) {
-      addEntry({ type: 'system', text: '⚠️ 请先在设置页面配置 API 密钥后重试' });
+    const apiKey_ = rawKey.trim();
+    const apiBase_ = rawBase.trim();
+    const model_ = rawModel.trim();
+
+    if (!apiKey_) {
+      addEntry({ type: 'system', text: '⚠️ 请先在下方 "API 连接" 中配置 API 密钥后重试' });
       setRunning(false);
+      setConfigOpen(true);
+      setShowApiSection(true);
       return;
     }
 
     try {
       const stepsArg = supervise ? _cachedSteps : undefined;
-      const agentConfig = {
-        llm_protocol: localStorage.getItem('lingdong-agent-protocol') ?? 'auto',
-        vision_mode: localStorage.getItem('lingdong-agent-vision') ?? 'auto',
-        planning: localStorage.getItem('lingdong-agent-planning') ?? 'auto',
-        screen_context: localStorage.getItem('lingdong-agent-context') ?? 'auto',
-        on_error: localStorage.getItem('lingdong-agent-on-error') ?? 'retry',
-        fast_mode: localStorage.getItem('lingdong-agent-fast-mode') === 'true',
-        image_dedup: localStorage.getItem('lingdong-agent-image-dedup') !== 'false',
-        window_aware_ocr: localStorage.getItem('lingdong-agent-window-aware-ocr') !== 'false',
-        uia_pre_focus: localStorage.getItem('lingdong-agent-uia-prefocus') !== 'false',
-        scripted_mode: localStorage.getItem('lingdong-agent-scripted-mode') === 'true',
-      };
+      const agentConfig = buildAgentConfig();
       await window.electronAPI!.agentStart(goal.trim(), {
-        api_key: apiKey,
-        api_base: apiBase,
-        model,
-        multimodal: multimodal ? 'true' : 'false',
-        verify_enabled: verifyEnabled ? 'true' : 'false',
-        auto_learn: autoLearn ? 'true' : 'false',
-        omniparser_enabled: omniparserEnabled ? 'true' : 'false',
+        api_key: apiKey_,
+        api_base: apiBase_,
+        model: model_,
+        multimodal: multimodalSetting,
+        verify_enabled: agentVerify ? 'true' : 'false',
+        auto_learn: agentAutoLearn ? 'true' : 'false',
+        omniparser_enabled: agentOmniparser ? 'true' : 'false',
         agent_config: agentConfig,
       }, supervise, stepsArg ?? undefined);
     } catch (err: any) {
       addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
     }
-  }, [goal, addEntry]);
+  }, [goal, addEntry, agentVerify, agentAutoLearn, agentOmniparser]);
 
   const stopAgent = useCallback(async () => {
     try {
-      if (offline) {
-        await window.electronAPI!.engineStop();
-        setOfflineRunning(false);
-      } else {
-        await window.electronAPI!.agentStop();
-      }
+      if (offline) { await window.electronAPI!.engineStop(); setOfflineRunning(false); }
+      else { await window.electronAPI!.agentStop(); }
       addEntry({ type: 'system', text: '已停止' });
       setRunning(false);
       _hasActiveRun = false;
@@ -373,53 +580,26 @@ export function AgentView() {
 
   const runOffline = useCallback(async () => {
     if (!goal.trim()) return;
-    _hasActiveRun = false;
-    _persistedLog = [];
-    setLog([]);
-    setGeneratedScript(null);
+    _hasActiveRun = false; _persistedLog = []; setLog([]); setGeneratedScript(null);
     addEntry({ type: 'system', text: '正在离线执行流程图...' });
-    setOfflineRunning(true);
-    setRunning(true);
-    try {
-      const script = useStore.getState().script;
-      window.electronAPI!.engineStart(JSON.stringify(script));
-    } catch (err: any) {
-      addEntry({ type: 'fail', reason: `离线执行失败: ${err.message}` });
-      setRunning(false);
-      setOfflineRunning(false);
-      _hasActiveRun = false;
-    }
+    setOfflineRunning(true); setRunning(true);
+    try { window.electronAPI!.engineStart(JSON.stringify(useStore.getState().script)); }
+    catch (err: any) { addEntry({ type: 'fail', reason: `离线执行失败: ${err.message}` }); setRunning(false); setOfflineRunning(false); _hasActiveRun = false; }
   }, [goal, addEntry]);
 
   const startVoiceInput = useCallback(() => {
     if (listening) return;
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      addEntry({ type: 'system', text: '⚠️ 浏览器不支持语音识别' });
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'zh-CN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { addEntry({ type: 'system', text: '⚠️ 浏览器不支持语音识别' }); return; }
+    const recognition = new SR();
+    recognition.lang = 'zh-CN'; recognition.continuous = false; recognition.interimResults = true;
     recognition.onstart = () => setListening(true);
-    recognition.onerror = (event: any) => {
-      setListening(false);
-      addEntry({ type: 'system', text: `⚠️ 语音识别失败: ${event.error === 'not-allowed' ? '请允许麦克风权限' : event.error}` });
-    };
+    recognition.onerror = (e: any) => { setListening(false); addEntry({ type: 'system', text: `⚠️ 语音识别失败: ${e.error === 'not-allowed' ? '请允许麦克风权限' : e.error}` }); };
     recognition.onend = () => setListening(false);
-    recognition.onresult = (event: any) => {
-      let finalText = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalText += event.results[i][0].transcript;
-        }
-      }
-      if (finalText) {
-        const prev = goalRef.current;
-        handleSetGoal(prev ? prev + '，' + finalText : finalText);
-      }
+    recognition.onresult = (e: any) => {
+      let final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) { if (e.results[i].isFinal) final += e.results[i][0].transcript; }
+      if (final) handleSetGoal(goalRef.current ? goalRef.current + '，' + final : final);
     };
     try { recognition.start(); } catch { setListening(false); }
   }, [listening, handleSetGoal, addEntry]);
@@ -428,15 +608,20 @@ export function AgentView() {
     try {
       const { parsePseudoToFlow } = await import('../utils/pseudoParser');
       const script = parsePseudoToFlow(pseudocode);
-      script.meta = {
-        ...script.meta,
-        id: useStore.getState().script.meta.id,
-        name: useStore.getState().script.meta.name + ' (Agent)',
-      };
+      script.meta = { ...script.meta, id: useStore.getState().script.meta.id, name: useStore.getState().script.meta.name + ' (Agent)' };
       useStore.getState().loadScript(script);
       useStore.getState().setViewMode('canvas');
     } catch {}
   }, []);
+
+  // ── Save helpers ──
+  const saveStr = (k: string, v: string, setter: (v: string) => void) => { setter(v); lsSet(k, v); };
+  const saveBool = (k: string, v: boolean, setter: (v: boolean) => void) => { setter(v); lsSetBool(k, v); };
+  const saveNum = (k: string, v: number, setter: (v: number) => void) => { setter(v); lsSetNum(k, v); };
+
+  // ── Resolve display helpers ──
+  const resolvedMM = agentMultimodal === 'true' ? true : agentMultimodal === 'false' ? false : _isMultimodalModel(lsGet(MODEL_STORAGE, ''));
+  const hasApiKey = !!apiKey.trim();
 
   // ── Render helpers ──
 
@@ -451,19 +636,14 @@ export function AgentView() {
   const renderLogEntries = () => (
     <>
       {log.length === 0 && !offline && (
-        <div className="agent-empty">
-          输入目标后点击「生成流程图」，Agent 会自动分析任务并生成可视化流程图。
-        </div>
+        <div className="agent-empty">输入目标后点击「生成流程图」，Agent 会自动分析任务并生成可视化流程图。</div>
       )}
       {log.length === 0 && offline && (
-        <div className="agent-empty">
-          离线模式：在画布上编辑好流程图，输入描述后点击「离线执行」直接运行。
-        </div>
+        <div className="agent-empty">离线模式：在画布上编辑好流程图，输入描述后点击「离线执行」直接运行。</div>
       )}
       {log.map((entry) => (
         <div key={entry._id!} className={`agent-msg agent-msg-${entry.type === 'script' ? 'system' : entry.type}`}>
           {entry.type === 'system' && <span>{entry.text}</span>}
-
           {entry.type === 'step' && (
             <>
               <span className="agent-step-num">[{entry.data.step_num}]</span>{' '}
@@ -478,21 +658,17 @@ export function AgentView() {
               )}
             </>
           )}
-
           {entry.type === 'user' && <><span className="agent-label">你：</span>{entry.text}</>}
           {entry.type === 'guidance' && <><span className="agent-label">Agent 接收：</span>{entry.text}</>}
           {entry.type === 'complete' && <strong>完成！共 {entry.steps} 步</strong>}
           {entry.type === 'fail' && <strong>失败：{entry.reason}</strong>}
-
           {entry.type === 'script' && (
             <div className="agent-result">
               {entry.explanation && <p className="agent-result-explanation">{entry.explanation}</p>}
               <pre className="agent-result-pseudo">{entry.pseudocode}</pre>
               <div className="agent-result-actions">
                 <button className="agent-btn" style={{ fontSize: 12, padding: '4px 12px' }}
-                  onClick={() => loadScriptToCanvas(entry.pseudocode)}>
-                  查看流程图
-                </button>
+                  onClick={() => loadScriptToCanvas(entry.pseudocode)}>查看流程图</button>
               </div>
             </div>
           )}
@@ -511,62 +687,66 @@ export function AgentView() {
   const showExecNode = (log.length > 0 || running) && !voiceConversationMode;
   const showResultNode = !!lastSummary && !running && !voiceConversationMode;
 
-  // ── Render ──
+  // ═══════════════════════════════════════════════════════════════════
+  //  Voice Conversation Mode
+  // ═══════════════════════════════════════════════════════════════════
 
   if (voiceConversationMode) {
     return (
       <div className="agent-view">
         <VoiceConversationPanel
-          visible={true}
-          onClose={() => setVoiceConversationMode(false)}
-          minimized={voicePanelMinimized}
-          onToggleMinimize={() => setVoicePanelMinimized(!voicePanelMinimized)}
+          visible={true} onClose={() => setVoiceConversationMode(false)}
+          minimized={voicePanelMinimized} onToggleMinimize={() => setVoicePanelMinimized(!voicePanelMinimized)}
         />
-        {/* Tool explorer modal */}
         {showTools && renderToolExplorer()}
       </div>
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  Main Layout
+  // ═══════════════════════════════════════════════════════════════════
+
   return (
     <div className="agent-view">
       <div className="agent-flowchart">
 
-        {/* ═══════ NODE 1: Goal ═══════ */}
+        {/* ═══════ NODE 1: Goal + API Status ═══════ */}
         <div className="agent-flow-node goal-node">
           <div className="agent-flow-node-header">
             <Brain size={15} />
             <span>AI Agent</span>
-            <span className={`agent-status ${offline ? 'offline' : 'online'}`}>
+            <span className={`agent-status ${offline ? 'offline' : running ? 'online' : 'online'}`}>
               ● {offline ? '离线' : running ? '运行中' : '就绪'}
             </span>
+            {!hasApiKey && (
+              <span className="agent-config-badge danger" style={{ marginLeft: 4, fontSize: 9, padding: '1px 6px' }}>
+                未配置密钥
+              </span>
+            )}
             <button className="btn btn-ghost btn-icon" onClick={() => { setShowTools(true); loadAgentTools(); }}
               style={{ width: 22, height: 22 }} title="可用 Agent 工具">
               <List size={12} />
             </button>
             <button className={`btn btn-ghost btn-icon ${offline ? 'offline' : ''}`}
-              onClick={() => setOffline(!offline)}
-              style={{ width: 22, height: 22 }} title={offline ? '切换为在线模式' : '切换为离线模式'}>
+              onClick={() => setOffline(!offline)} style={{ width: 22, height: 22 }}
+              title={offline ? '切换为在线模式' : '切换为离线模式'}>
               {offline ? <WifiOff size={12} /> : <Wifi size={12} />}
             </button>
             {voiceSupported && (
               <button className={`btn btn-ghost btn-icon ${voiceConversationMode ? 'voice-mode-active' : ''}`}
-                onClick={() => setVoiceConversationMode(true)}
-                style={{ width: 22, height: 22 }} title="语音对话">
+                onClick={() => setVoiceConversationMode(true)} style={{ width: 22, height: 22 }} title="语音对话">
                 <Volume2 size={12} />
               </button>
             )}
           </div>
           <div className="agent-flow-node-body">
             <div className="agent-goal-row">
-              <input
-                className="agent-input"
-                value={goal}
+              <input className="agent-input" value={goal}
                 onChange={e => { handleSetGoal(e.target.value); setGeneratedScript(null); }}
                 onKeyDown={e => e.key === 'Enter' && !running && (offline ? runOffline() : runAgent(false))}
                 placeholder={offline ? '输入描述后按 Enter 直接执行当前流程图' : '输入需求后按 Enter 生成流程图'}
-                disabled={running}
-              />
+                disabled={running} />
               {voiceSupported && (
                 <button className={`btn btn-ghost btn-icon ${listening ? 'listening' : ''}`}
                   onClick={startVoiceInput} disabled={running}
@@ -597,79 +777,192 @@ export function AgentView() {
 
         <FlowArrow />
 
-        {/* ═══════ NODE 2: Agent Config ═══════ */}
+        {/* ═══════ NODE 2: Complete Agent Configuration ═══════ */}
         <div className="agent-flow-node config-node">
           <div className="agent-flow-node-header config-toggle" onClick={() => setConfigOpen(!configOpen)}>
             <Settings size={14} />
-            <span>Agent 配置</span>
+            <span>Agent 全部配置</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>
+              ({agentMaxSteps}步 · {agentOnError} · {agentMultimodal === 'auto' ? (resolvedMM ? '视觉' : 'SoM') : agentMultimodal === 'true' ? '视觉' : 'SoM'})
+            </span>
             {configOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </div>
           {configOpen && (
-            <div className="agent-flow-node-body">
-              <div className="agent-config-grid">
-                <div className="agent-config-item">
-                  <label><MessageSquare size={13} /> LLM 协议</label>
-                  <select value={agentProtocol} onChange={e => { setAgentProtocol(e.target.value); localStorage.setItem(AGENT_PROTOCOL_KEY, e.target.value); }}>
-                    <option value="auto">自动</option>
-                    <option value="text">文本协议</option>
-                    <option value="function_calling">函数调用</option>
-                  </select>
+            <div className="agent-flow-node-body config-node-body">
+
+              {/* ── Section 1: API 连接 ── */}
+              <ConfigSection title="API 连接" icon={<Key size={13} />}
+                open={showApiSection} onToggle={() => setShowApiSection(!showApiSection)}
+                desc="LLM API 密钥与模型">
+                <ConfigInput label="API Key" value={apiKey} onChange={v => saveStr(KEY_STORAGE, v, setApiKey)}
+                  secret placeholder="sk-..." />
+                <ConfigInput label="API Base" value={apiBase} onChange={v => saveStr(BASE_STORAGE, v, setApiBase)}
+                  placeholder="https://api.deepseek.com/v1" />
+                <ConfigInput label="模型" value={model} onChange={v => saveStr(MODEL_STORAGE, v, setModel)}
+                  placeholder="deepseek-chat" />
+              </ConfigSection>
+
+              {/* ── Section 2: LLM 策略 ── */}
+              <ConfigSection title="LLM 策略" icon={<MessageSquare size={13} />}
+                open={configSection === 'llm'} onToggle={() => setConfigSection(configSection === 'llm' ? null : 'llm')}
+                desc="协议、规划方式、参数">
+                <ConfigSelect label="LLM 协议" value={agentProtocol} onChange={v => saveStr(AGENT_PROTOCOL_KEY, v, setAgentProtocol)}
+                  options={[
+                    { value: 'auto', label: '自动' },
+                    { value: 'text', label: '文本协议' },
+                    { value: 'function_calling', label: '函数调用' },
+                  ]}
+                  resolved={_resolveAuto('llm_protocol', model, agentMultimodal)}
+                  desc="文本协议：LLM 输出文字，Agent 解析执行。函数调用：LLM 直接调用工具函数。" />
+                <ConfigSelect label="规划策略" value={agentPlanning} onChange={v => saveStr(AGENT_PLANNING_KEY, v, setAgentPlanning)}
+                  options={[
+                    { value: 'auto', label: '自动' },
+                    { value: 'pre_plan', label: '预生成计划 (DAG)' },
+                    { value: 'per_step', label: '逐步骤 (ReAct)' },
+                  ]}
+                  resolved={_resolveAuto('planning', model, agentMultimodal)}
+                  desc="预生成计划：先生成完整步骤再执行。逐步骤：每步询问 LLM 动态决策。" />
+                <ConfigTriState label="多模态覆盖" value={agentMultimodal}
+                  onChange={v => saveStr(AGENT_MULTIMODAL_KEY, v, setAgentMultimodal)}
+                  options={[
+                    { value: 'auto', label: '自动' },
+                    { value: 'true', label: '开启' },
+                    { value: 'false', label: '关闭' },
+                  ]}
+                  desc={agentMultimodal === 'auto'
+                    ? `自动 → ${resolvedMM ? '开启' : '关闭'}（${model || '当前模型'}）`
+                    : agentMultimodal === 'true'
+                      ? '强制开启多模态，Agent 使用视觉能力分析屏幕。需模型支持。'
+                      : '强制关闭多模态，Agent 使用 SoM 标号 + OCR 定位。'} />
+                <ConfigSlider label="温度 (Temperature)" value={agentTemperature}
+                  min={0} max={2} step={0.05}
+                  onChange={v => saveNum(AGENT_TEMPERATURE_KEY, v, setAgentTemperature)} />
+                <ConfigSlider label="最大 Token" value={agentMaxTokens}
+                  min={512} max={16384} step={512}
+                  onChange={v => saveNum(AGENT_MAX_TOKENS_KEY, v, setAgentMaxTokens)} />
+                <ConfigSlider label="LLM 重试次数" value={agentLlmRetries}
+                  min={0} max={5} step={1}
+                  onChange={v => saveNum(AGENT_LLM_RETRIES_KEY, v, setAgentLlmRetries)} />
+              </ConfigSection>
+
+              {/* ── Section 3: 视觉配置 ── */}
+              <ConfigSection title="视觉配置" icon={<Eye size={13} />}
+                open={configSection === 'vision'} onToggle={() => setConfigSection(configSection === 'vision' ? null : 'vision')}
+                desc="截图、SoM、OCR、OmniParser">
+                <ConfigSelect label="视觉模式" value={agentVision} onChange={v => saveStr(AGENT_VISION_KEY, v, setAgentVision)}
+                  options={[
+                    { value: 'auto', label: '自动' },
+                    { value: 'direct', label: '直接截图' },
+                    { value: 'som', label: 'SoM 标号' },
+                    { value: 'omniparser', label: 'OmniParser ⚠️' },
+                  ]}
+                  resolved={_resolveAuto('vision_mode', model, agentMultimodal)}
+                  desc="直接截图：多模态模型直接分析。SoM：截图标号 + #N 定位。OmniParser：YOLOv8 图标检测。" />
+                <ConfigToggle label="OmniParser" checked={agentOmniparser}
+                  onChange={v => saveBool(AGENT_OMNIPARSER_KEY, v, setAgentOmniparser)}
+                  desc="YOLOv8 + Florence-2 图标检测和描述（首次加载约 60s）。默认关闭，UIA+OCR 已满足大多数场景。"
+                  badge={agentOmniparser ? '需要模型' : undefined} />
+                <ConfigToggle label="SoM 标号" checked={agentSom}
+                  onChange={v => saveBool(AGENT_SOM_KEY, v, setAgentSom)}
+                  desc="Set-of-Mark：在截图上用蓝色框 + #N 编号标注可交互元素，LLM 直接用 #N 定位。"
+                  badge={!agentSom ? '未启用' : undefined} />
+                <ConfigSlider label="截图质量" value={agentScreenshotQuality}
+                  min={30} max={95} step={5}
+                  onChange={v => saveNum(AGENT_SCREENSHOT_QUALITY_KEY, v, setAgentScreenshotQuality)}
+                  unit="%" />
+                <ConfigSelect label="屏幕上下文" value={agentContext} onChange={v => saveStr(AGENT_CONTEXT_KEY, v, setAgentContext)}
+                  options={[
+                    { value: 'auto', label: '自动' },
+                    { value: 'minimal', label: '精简' },
+                    { value: 'full', label: '完整' },
+                  ]}
+                  resolved={_resolveAuto('screen_context', model, agentMultimodal)}
+                  desc="精简：仅窗口标题 + 鼠标位置（适合多模态模型）。完整：含 UIA 树 + 进程列表。" />
+                <ConfigToggle label="截图去重" checked={agentDedup}
+                  onChange={v => saveBool(AGENT_DEDUP_KEY, v, setAgentDedup)}
+                  desc="前后截图无变化时跳过重复截图，节省 Token。"
+                  badge={!agentDedup ? '未启用' : undefined} />
+              </ConfigSection>
+
+              {/* ── Section 4: 执行配置 ── */}
+              <ConfigSection title="执行配置" icon={<Zap size={13} />}
+                open={configSection === 'exec'} onToggle={() => setConfigSection(configSection === 'exec' ? null : 'exec')}
+                desc="错误处理、验证、UI 增强">
+                <ConfigSelect label="错误处理" value={agentOnError} onChange={v => saveStr(AGENT_ONERROR_KEY, v, setAgentOnError)}
+                  options={[
+                    { value: 'retry', label: '重试' },
+                    { value: 'replan', label: '重新规划' },
+                    { value: 'skip', label: '跳过' },
+                    { value: 'stop', label: '停止' },
+                  ]}
+                  desc="出错时重试当前步骤 / 重新生成计划 / 跳过该步 / 立即停止。" />
+                <ConfigToggle label="快速模式" checked={agentFastMode}
+                  onChange={v => saveBool(AGENT_FAST_MODE_KEY, v, setAgentFastMode)}
+                  desc="减少历史消息窗口，加快执行速度但可能降低质量。"
+                  badge={!agentFastMode ? '未启用' : undefined} />
+                <ConfigToggle label="窗口感知 OCR" checked={agentWindowAwareOcr}
+                  onChange={v => saveBool(AGENT_WINDOW_AWARE_OCR_KEY, v, setAgentWindowAwareOcr)}
+                  desc="OCR 搜索时限定到活动窗口区域，减少误识别。"
+                  badge={!agentWindowAwareOcr ? '未启用' : undefined} />
+                <ConfigToggle label="UIA 预聚焦" checked={agentUiaPrefocus}
+                  onChange={v => saveBool(AGENT_UIA_PREFOCUS_KEY, v, setAgentUiaPrefocus)}
+                  desc="输入文字前自动用 UIA 检测并聚焦输入框。"
+                  badge={!agentUiaPrefocus ? '未启用' : undefined} />
+                <ConfigToggle label="脚本执行模式" checked={agentScriptedMode}
+                  onChange={v => saveBool(AGENT_SCRIPTED_MODE_KEY, v, setAgentScriptedMode)}
+                  desc="Agent 可编写 Python 脚本完成复杂操作（条件判断、循环等）。"
+                  badge={!agentScriptedMode ? '未启用' : undefined} />
+                <ConfigToggle label="执行验证" checked={agentVerify}
+                  onChange={v => saveBool(AGENT_VERIFY_KEY, v, setAgentVerify)}
+                  desc="执行步骤后验证结果是否正确。关闭后更快但不检测结果。"
+                  badge={!agentVerify ? '未启用' : undefined} />
+                <ConfigToggle label="自动学习" checked={agentAutoLearn}
+                  onChange={v => saveBool(AGENT_AUTO_LEARN_KEY, v, setAgentAutoLearn)}
+                  desc="记录屏幕状态到经验库，后续相同目标可直接离线复用。"
+                  badge={!agentAutoLearn ? '未启用' : undefined} />
+              </ConfigSection>
+
+              {/* ── Section 5: 安全限制 ── */}
+              <ConfigSection title="安全限制" icon={<Shield size={13} />}
+                open={configSection === 'safety'} onToggle={() => setConfigSection(configSection === 'safety' ? null : 'safety')}
+                desc="步数、失败率保护">
+                <ConfigSlider label="最大步数" value={agentMaxSteps}
+                  min={3} max={100} step={1}
+                  onChange={v => saveNum(AGENT_MAX_STEPS_KEY, v, setAgentMaxSteps)} />
+                <ConfigSlider label="连续失败上限" value={agentMaxConsecutiveFails}
+                  min={1} max={20} step={1}
+                  onChange={v => saveNum(AGENT_MAX_CONSECUTIVE_FAILS_KEY, v, setAgentMaxConsecutiveFails)} />
+                <ConfigSlider label="最低成功率" value={agentMinSuccessRate}
+                  min={0.01} max={0.5} step={0.01}
+                  onChange={v => saveNum(AGENT_MIN_SUCCESS_RATE_KEY, v, setAgentMinSuccessRate)} />
+                <ConfigSlider label="滑动窗口大小" value={agentSlidingWindow}
+                  min={0} max={30} step={1}
+                  onChange={v => saveNum(AGENT_SLIDING_WINDOW_KEY, v, setAgentSlidingWindow)}
+                  unit={agentSlidingWindow === 0 ? ' (自动)' : ''}
+                  desc="历史消息窗口大小。0 = 自动（快速模式=4，多模态=8，纯文本=12）。" />
+              </ConfigSection>
+
+              {/* ── Section 6: 高级 ── */}
+              <ConfigSection title="高级" icon={<Terminal size={13} />}
+                open={configSection === 'advanced'} onToggle={() => setConfigSection(configSection === 'advanced' ? null : 'advanced')}
+                desc="流程图模式、VLM 后端">
+                <ConfigToggle label="流程图模式" checked={agentFlowChart}
+                  onChange={v => saveBool(AGENT_FLOW_CHART_KEY, v, setAgentFlowChart)}
+                  desc="启用完整工具提示词 + generate_flow/execute_flow 动作。默认关闭，使用元动作 + @feature 紧凑列表。"
+                  badge={!agentFlowChart ? '未启用' : undefined} />
+                <div className="agent-config-field">
+                  <div className="agent-config-field-label">VLM 后端</div>
+                  <div className="agent-config-field-control">
+                    <select className="agent-config-select" value={lsGet(AGENT_VISION_BACKEND_KEY, 'gpt-4o-mini')}
+                      onChange={e => { lsSet(AGENT_VISION_BACKEND_KEY, e.target.value); }}>
+                      <option value="gpt-4o-mini">GPT-4o-mini（默认）</option>
+                      <option value="local">本地模型 (llama-server)</option>
+                    </select>
+                  </div>
+                  <div className="agent-config-field-desc">视觉定位时使用的 VLM 后端。需对应模型可用。</div>
                 </div>
-                <div className="agent-config-item">
-                  <label><Eye size={13} /> 视觉模式</label>
-                  <select value={agentVision} onChange={e => { setAgentVision(e.target.value); localStorage.setItem(AGENT_VISION_KEY, e.target.value); }}>
-                    <option value="auto">自动</option>
-                    <option value="direct">直接截图</option>
-                    <option value="som">SoM 标号</option>
-                    <option value="omniparser">OmniParser</option>
-                  </select>
-                </div>
-                <div className="agent-config-item">
-                  <label><GitBranch size={13} /> 规划策略</label>
-                  <select value={agentPlanning} onChange={e => { setAgentPlanning(e.target.value); localStorage.setItem(AGENT_PLANNING_KEY, e.target.value); }}>
-                    <option value="auto">自动</option>
-                    <option value="per_step">逐步骤 (ReAct)</option>
-                    <option value="pre_plan">预生成计划 (DAG)</option>
-                  </select>
-                </div>
-                <div className="agent-config-item">
-                  <label><FileText size={13} /> 屏幕上下文</label>
-                  <select value={agentContext} onChange={e => { setAgentContext(e.target.value); localStorage.setItem(AGENT_CONTEXT_KEY, e.target.value); }}>
-                    <option value="auto">自动</option>
-                    <option value="minimal">精简</option>
-                    <option value="full">完整</option>
-                  </select>
-                </div>
-                <div className="agent-config-item">
-                  <label><AlertTriangle size={13} /> 错误处理</label>
-                  <select value={agentOnError} onChange={e => { setAgentOnError(e.target.value); localStorage.setItem(AGENT_ONERROR_KEY, e.target.value); }}>
-                    <option value="retry">重试</option>
-                    <option value="replan">重新规划</option>
-                    <option value="skip">跳过</option>
-                    <option value="stop">停止</option>
-                  </select>
-                </div>
-                <div className="agent-config-item">
-                  <label><Zap size={13} /> 快速模式</label>
-                  <button className={`toggle ${agentFastMode ? 'on' : ''}`} onClick={() => { const v = !agentFastMode; setAgentFastMode(v); localStorage.setItem(AGENT_FAST_MODE_KEY, v.toString()); }} />
-                </div>
-                <div className="agent-config-item">
-                  <label><Camera size={13} /> 去重截图</label>
-                  <button className={`toggle ${agentDedup ? 'on' : ''}`} onClick={() => { const v = !agentDedup; setAgentDedup(v); localStorage.setItem(AGENT_DEDUP_KEY, v.toString()); }} />
-                </div>
-                <div className="agent-config-item">
-                  <label><Eye size={13} /> 窗口感知 OCR</label>
-                  <button className={`toggle ${agentWindowAwareOcr ? 'on' : ''}`} onClick={() => { const v = !agentWindowAwareOcr; setAgentWindowAwareOcr(v); localStorage.setItem(AGENT_WINDOW_AWARE_OCR_KEY, v.toString()); }} />
-                </div>
-                <div className="agent-config-item">
-                  <label><Monitor size={13} /> 输入框预聚焦</label>
-                  <button className={`toggle ${agentUiaPrefocus ? 'on' : ''}`} onClick={() => { const v = !agentUiaPrefocus; setAgentUiaPrefocus(v); localStorage.setItem(AGENT_UIA_PREFOCUS_KEY, v.toString()); }} />
-                </div>
-                <div className="agent-config-item">
-                  <label><Terminal size={13} /> 脚本模式</label>
-                  <button className={`toggle ${agentScriptedMode ? 'on' : ''}`} onClick={() => { const v = !agentScriptedMode; setAgentScriptedMode(v); localStorage.setItem(AGENT_SCRIPTED_MODE_KEY, v.toString()); }} />
-                </div>
-              </div>
+              </ConfigSection>
+
             </div>
           )}
         </div>
@@ -720,13 +1013,10 @@ export function AgentView() {
               </div>
               {running && !offline && (
                 <div className="agent-guidance-bar" style={{ marginTop: 8 }}>
-                  <input
-                    className="agent-input"
-                    value={guidance}
+                  <input className="agent-input" value={guidance}
                     onChange={e => setGuidance(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && sendGuidance()}
-                    placeholder="给 agent 下达指令..."
-                  />
+                    placeholder="给 agent 下达指令..." />
                   <button className="agent-btn" onClick={sendGuidance} disabled={!guidance.trim()}>发送</button>
                 </div>
               )}
@@ -739,11 +1029,9 @@ export function AgentView() {
         {showResultNode && (
           <div className="agent-flow-node result-node">
             <div className="agent-flow-node-header">
-              {lastSummary.status === 'completed' ? (
-                <span style={{ color: '#4CAF50', fontSize: 16 }}>✓</span>
-              ) : (
-                <span style={{ color: '#F44336', fontSize: 16 }}>✗</span>
-              )}
+              {lastSummary.status === 'completed'
+                ? <span style={{ color: '#4CAF50', fontSize: 16 }}>✓</span>
+                : <span style={{ color: '#F44336', fontSize: 16 }}>✗</span>}
               <span>结果</span>
               <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '40%' }}>
                 {lastSummary.goal}
@@ -817,8 +1105,7 @@ export function AgentView() {
                   <div className="agent-history-panel" style={{ border: 'none', borderRadius: 0, maxHeight: 200 }}>
                     {agentHistory.slice(0, 20).map((h: AgentRunRecord) => (
                       <div key={h.id} className="agent-history-item"
-                        onClick={() => { handleSetGoal(h.goal); setShowHistory(false); }}
-                        title="点击填入目标">
+                        onClick={() => { handleSetGoal(h.goal); setShowHistory(false); }} title="点击填入目标">
                         <div className={`agent-history-status ${h.status}`} />
                         <span className="agent-history-goal" title={h.goal}>{h.goal || '(无目标)'}</span>
                         <span className="agent-history-meta">
@@ -834,16 +1121,60 @@ export function AgentView() {
           </>
         )}
 
-        {/* Bottom spacer */}
         <div style={{ height: 40, flexShrink: 0 }} />
       </div>
 
-      {/* Tool Explorer Modal */}
       {showTools && renderToolExplorer()}
     </div>
   );
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  Tool Explorer Modal
+  // ═══════════════════════════════════════════════════════════════════
+
   function renderToolExplorer() {
+    const CAT_LABELS: Record<string, string> = {
+      action: '交互动作', perception: '感知识别', control: '控制流',
+      ai: 'AI 规划', macro: '宏指令', system: '系统功能', debug: '调试诊断',
+    };
+    const CAT_ORDER = ['action', 'perception', 'control', 'ai', 'macro', 'system', 'debug'];
+
+    const grouped: Record<string, any[]> = {};
+    for (const t of agentTools) {
+      const cat = t.category || 'other';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(t);
+    }
+
+    const metaActions = [
+      { name: 'click', desc: '点击屏幕目标（文字/坐标/编号）' },
+      { name: 'type_text', desc: '向输入框输入文字' },
+      { name: 'press_keys', desc: '键盘快捷键组合' },
+      { name: 'scroll', desc: '滚动鼠标滚轮' },
+      { name: 'hover', desc: '悬停到目标位置' },
+      { name: 'drag', desc: '拖拽元素' },
+      { name: 'read_text', desc: 'OCR 识别屏幕文字' },
+      { name: 'read_ui', desc: '读取 UIA 控件树' },
+      { name: 'screenshot', desc: '截取屏幕' },
+      { name: 'get_cursor', desc: '获取鼠标位置' },
+      { name: 'manage_window', desc: '窗口管理（聚焦/移动/调整）' },
+      { name: 'list_windows', desc: '列出所有打开窗口' },
+      { name: 'manage_app', desc: '启动/停止应用' },
+      { name: 'control_audio', desc: '音量控制' },
+      { name: 'system_info', desc: '系统信息查询' },
+      { name: 'set_brightness', desc: '设置屏幕亮度' },
+      { name: 'lock_screen', desc: '锁定屏幕' },
+      { name: 'notify', desc: '发送系统通知' },
+      { name: 'dialog', desc: '处理对话框（保存/关闭/确认）' },
+      { name: 'browser_do', desc: '浏览器自动化操作' },
+      { name: 'network', desc: '网络/WiFi 管理' },
+      { name: 'run_command', desc: '执行系统命令' },
+      { name: 'file_ops', desc: '文件操作（读写/复制/删除）' },
+      { name: 'wait', desc: '等待指定时间' },
+      { name: 'generate_flow', desc: '用 LLM 生成流程图脚本（需开启流程图模式）' },
+      { name: 'execute_flow', desc: '执行已生成的流程图（需开启流程图模式）' },
+    ];
+
     return (
       <div style={{
         position: 'fixed', inset: 0, zIndex: 1100,
@@ -853,7 +1184,7 @@ export function AgentView() {
         <div onClick={e => e.stopPropagation()} style={{
           background: 'var(--bg-primary)', borderRadius: 12,
           boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-          width: 440, maxHeight: '70vh', display: 'flex', flexDirection: 'column',
+          width: 520, maxHeight: '80vh', display: 'flex', flexDirection: 'column',
         }}>
           <div style={{
             padding: '14px 16px', borderBottom: '1px solid var(--border-primary)',
@@ -865,27 +1196,84 @@ export function AgentView() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
             </button>
           </div>
-          <div style={{ padding: '8px 16px', fontSize: 11, color: 'var(--text-muted)', borderBottom: '1px solid var(--border-primary)' }}>
-            Agent 在执行任务时可调用以下后端工具
+          <div style={{
+            padding: '8px 16px', fontSize: 11, color: 'var(--text-muted)',
+            borderBottom: '1px solid var(--border-primary)',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span>Agent 在执行任务时可调用以下工具</span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button className={`btn btn-ghost ${toolsViewMode === 'grouped' ? 'active' : ''}`}
+                onClick={() => setToolsViewMode('grouped')} style={{ fontSize: 11, padding: '2px 8px' }}>分类</button>
+              <button className={`btn btn-ghost ${toolsViewMode === 'all' ? 'active' : ''}`}
+                onClick={() => setToolsViewMode('all')} style={{ fontSize: 11, padding: '2px 8px' }}>全部</button>
+            </div>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: 8 }}>
             {toolsLoading ? (
               <div style={{ textAlign: 'center', padding: 20, fontSize: 12, color: 'var(--text-muted)' }}>加载中...</div>
-            ) : agentTools.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 20, fontSize: 12, color: 'var(--text-muted)' }}>
-                暂无数据<br />
-                <span style={{ fontSize: 11 }}>可通过 MCP: <code>list_features</code> 获取完整工具列表</span>
-              </div>
-            ) : (
+            ) : toolsViewMode === 'all' ? (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
-                {agentTools.map((name: string) => (
-                  <span key={name} style={{
+                {agentTools.map((t: any) => (
+                  <span key={t.name} title={t.description || ''} style={{
                     fontSize: 11, padding: '2px 8px', borderRadius: 4,
                     background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
                     color: 'var(--text-primary)',
-                  }}>{name}</span>
+                  }}>{t.name}</span>
                 ))}
               </div>
+            ) : (
+              <>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, padding: '4px 0', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                    元动作（常用，推荐优先使用）
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>{metaActions.length} 个</span>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, paddingLeft: 4 }}>
+                    {metaActions.map(m => {
+                      const isFlowOnly = m.name === 'generate_flow' || m.name === 'execute_flow';
+                      return (
+                        <span key={m.name} title={m.desc} style={{
+                          fontSize: 11, padding: '2px 8px', borderRadius: 4,
+                          background: isFlowOnly ? '#fff3e0' : '#e8f5e9',
+                          border: isFlowOnly ? '1px solid #ffe0b2' : '1px solid #c8e6c9',
+                          color: isFlowOnly ? '#e65100' : '#2e7d32',
+                          cursor: 'default',
+                        }}>{m.name}{isFlowOnly ? ' 🔒' : ''}</span>
+                      );
+                    })}
+                  </div>
+                </div>
+                {CAT_ORDER.map(cat => {
+                  const tools = grouped[cat];
+                  if (!tools || tools.length === 0) return null;
+                  return (
+                    <div key={cat} style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, padding: '4px 0', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {CAT_LABELS[cat] || cat}
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>{tools.length} 个</span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 4 }}>
+                        {tools.sort((a: any, b: any) => a.name.localeCompare(b.name)).map((t: any) => (
+                          <div key={t.name} style={{
+                            fontSize: 11, padding: '3px 8px', borderRadius: 4,
+                            background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
+                            color: 'var(--text-primary)',
+                          }} title={t.description || ''}>
+                            <span style={{ fontWeight: 500, fontFamily: 'monospace' }}>{t.name}</span>
+                            {t.description && (
+                              <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 10 }}>
+                                — {t.description.slice(0, 120)}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
             )}
           </div>
         </div>

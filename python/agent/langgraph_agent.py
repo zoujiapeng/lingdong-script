@@ -268,16 +268,10 @@ class LangGraphAgent:
                 self._last_launched or ""
             )
             from features.registry import registry as r
-            result = r.execute("get_active_window")
-            active_data = result
-            if isinstance(result, dict):
-                active_data = result.get("result", result)
-            active_title = ""
-            if isinstance(active_data, dict):
-                nested = active_data
-                if isinstance(active_data.get("result"), dict):
-                    nested = active_data["result"]
-                active_title = nested.get("title", "")
+            raw = r.execute("get_active_window")
+            # @feature execute() 返回 {"success": bool, "result": ...}
+            data = raw.get("result", raw) if isinstance(raw, dict) else raw
+            active_title = data.get("title", "") if isinstance(data, dict) else ""
 
             if not target_hint:
                 return {"success": True, "focused": True}
@@ -295,45 +289,6 @@ class LangGraphAgent:
     def _wait_screen_stable(self, timeout: float = 1.5):
         """Wait for screen to settle after an action."""
         time.sleep(min(timeout, 1.5))
-
-    def _decide_recovery(self, tool_name: str, args: dict,
-                         error: str, retry_count: int = 0) -> dict:
-        """Decide recovery strategy for a failed step (rules-based, no LLM)."""
-        error_lower = error.lower()
-
-        # Window/access errors — can't recover
-        if any(kw in error_lower for kw in
-               ["access denied", "permission denied", "forbidden"]):
-            return {"action": "fail"}
-
-        # Focus errors — retry
-        if any(kw in error_lower for kw in
-               ["cannot focus", "window not found", "not active", "focus failed"]):
-            return {"action": "retry"}
-
-        # Element visibility — wait and retry
-        if any(kw in error_lower for kw in
-               ["not visible", "not found", "element not", "no such"]):
-            return {"action": "retry"}
-
-        # Timeout — retry with backoff
-        if "timeout" in error_lower:
-            return {"action": "retry"}
-
-        # Connection/network errors — retry
-        if any(kw in error_lower for kw in ["connection", "network", "timed out"]):
-            return {"action": "retry"}
-
-        # Max retries exceeded
-        if retry_count >= 2:
-            if tool_name in _GUI_ACTIONS:
-                return {"action": "skip"}
-            return {"action": "fail"}
-
-        # Default: retry once
-        if retry_count < 1:
-            return {"action": "retry"}
-        return {"action": "skip"}
 
     def _auto_handle_dialogs(self):
         """Auto-dismiss any visible dialogs after a tool execution.

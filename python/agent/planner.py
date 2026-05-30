@@ -650,7 +650,15 @@ class PlanExecutor:
 
         # ── 特殊节点处理 ──
         if node.tool == "__agent_decide__":
-            # 让 LLM 自行决策（兜底）
+            # 递归深度守卫：防止 __agent_decide__ → run_text_protocol → 再次进入 __agent_decide__
+            depth = getattr(self, '_agent_decide_depth', 0)
+            if depth >= 2:
+                node.status = "failed"
+                node.error = "__agent_decide__ 递归深度超限 (>=2)"
+                self._log("error", f"[{node.id}] __agent_decide__ recursion limit exceeded")
+                self._emit_step(node, "failed", {"error": node.error})
+                return
+            self._agent_decide_depth = depth + 1
             try:
                 result = self.agent.run_text_protocol(node.params.get("goal", ""))
                 node.result = result
@@ -661,6 +669,8 @@ class PlanExecutor:
                 node.result = {"success": False, "error": str(e)}
                 node.status = "failed"
                 node.error = str(e)
+            finally:
+                self._agent_decide_depth = depth  # 恢复深度计数
             self._emit_step(node, node.status, node.result)
             return
 

@@ -49,7 +49,8 @@ class Supervisor:
                  api_key: str = "",
                  api_base: str = "",
                  model: str = "",
-                 on_error: str = ""):
+                 on_error: str = "",
+                 screenshot_quality: int = 60):
         self._emit = emit_event or (lambda e, d: None)
         self._stop_event = stop_event or threading.Event()
         self.auto_learn = auto_learn
@@ -58,16 +59,17 @@ class Supervisor:
         self.api_base = api_base
         self.model = model
         self.on_error = on_error  # "retry"|"replan"|"skip"|"stop" — "" 表示使用默认行为
+        self.screenshot_quality = screenshot_quality
 
         # ── 增强型动作开关 ──
         self.window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
         self.uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
         self.scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
+        self.verify: bool = True             # 执行验证
 
         # Runtime state
         self._last_launched: str = ""
         self._last_som_map: dict[int, dict] = {}
-        self._last_som_ts: float = 0.0
 
     # ── 窗口焦点安全 ──────────────────────────────────────────
 
@@ -113,10 +115,10 @@ class Supervisor:
     def auto_handle_dialogs(self) -> bool:
         """自动关闭可见对话框。"""
         try:
-            time.sleep(0.3)
             from agent.dialog_handler import handle_any_dialog
             result = handle_any_dialog()
             if result != "not_found":
+                time.sleep(0.3)
                 logger.info("Dialog handled: %s", result)
                 return True
         except Exception:
@@ -238,31 +240,37 @@ class Supervisor:
         from features.registry import registry
         spec = registry.get(name)
         if spec:
+            # LangChain 保留字回避: 当 @feature 参数名为 args/kwargs 时，
+            # 与 Python **kwargs 解包冲突，需重命名。
+            _rename = {"args": "v_args", "kwargs": "v_kwargs"}
             converted = {}
             for p in spec.params:
+                param_name = _rename.get(p.name, p.name)
+                # 查参数字典时用原名查，存时用可能重命名后的名字
                 val = args.get(p.name)
                 if val is None:
                     continue
                 if p.type in ("number", "int"):
                     try:
-                        converted[p.name] = int(val) if p.type == "int" else float(val)
+                        converted[param_name] = int(val) if p.type == "int" else float(val)
                     except (ValueError, TypeError):
-                        converted[p.name] = val
+                        converted[param_name] = val
                 elif p.type == "boolean":
                     if isinstance(val, str):
-                        converted[p.name] = val.lower() in ("true", "1", "yes")
+                        converted[param_name] = val.lower() in ("true", "1", "yes")
                     else:
-                        converted[p.name] = bool(val)
+                        converted[param_name] = bool(val)
                 elif p.type == "array":
                     if isinstance(val, str):
                         try:
-                            converted[p.name] = json.loads(val)
+                            converted[param_name] = json.loads(val)
                         except json.JSONDecodeError:
-                            converted[p.name] = [v.strip() for v in val.split(",") if v.strip()]
+                            converted[param_name] = [v.strip() for v in val.split(",") if v.strip()]
                     else:
-                        converted[p.name] = val
+                        converted[param_name] = val
                 else:
-                    converted[p.name] = str(val).strip("\"'") if not isinstance(val, str) else val.strip("\"'")
+                    val = str(val).strip("\"'") if not isinstance(val, str) else val.strip("'\"")
+                    converted[param_name] = val
         else:
             converted = args
         return registry.execute(name, **converted)

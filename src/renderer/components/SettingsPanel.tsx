@@ -64,6 +64,52 @@ function getStoredOmniparser(): boolean {
 function storeOmniparser(val: boolean) {
   try { localStorage.setItem(OMNIPARSER_STORAGE, val ? 'true' : 'false'); } catch {}
 }
+
+// ── Agent 模式选择存储 ──
+const AGENT_PROTOCOL_STORAGE = 'lingdong-agent-protocol';
+const AGENT_VISION_STORAGE = 'lingdong-agent-vision';
+const AGENT_PLANNING_STORAGE = 'lingdong-agent-planning';
+const AGENT_ONERROR_STORAGE = 'lingdong-agent-on-error';
+const AGENT_MULTIMODAL_STORAGE = 'lingdong-agent-multimodal';
+const AGENT_FASTMODE_STORAGE = 'lingdong-agent-fast-mode';
+
+function getStoredAgentMode(key: string, def: string): string {
+  try { return localStorage.getItem(key) || def; } catch { return def; }
+}
+function storeAgentMode(key: string, val: string) {
+  try { localStorage.setItem(key, val); } catch {}
+}
+function getStoredAgentBool(key: string, def: boolean): boolean {
+  try { const v = localStorage.getItem(key); return v !== null ? v === 'true' : def; } catch { return def; }
+}
+function storeAgentBool(key: string, val: boolean) {
+  try { localStorage.setItem(key, val ? 'true' : 'false'); } catch {}
+}
+// 判断模型是否支持多模态（前端简化版，镜像 Python agent.agent._is_multimodal_model）
+function _isMultimodalModelFrontend(model: string): boolean {
+  const m = model.toLowerCase().trim();
+  // 多模态模型关键词
+  const mmPatterns = [/^gpt-4o/, /^claude/, /^gemini/, /^qwen-vl/, /^qwen2\.5-vl/,
+    /^glm-4v/, /^step-1v/, /^kimi/, /^moonshot-v/, /^reka/, /^llava/,
+    /^cogvlm/, /^internvl/, /^yi-vl/, /mimo/i, /vision/i, /multimodal/i];
+  if (mmPatterns.some(p => p.test(m))) return true;
+  // 明确纯文本模型
+  const textPatterns = [/^deepseek/, /^gpt-3/, /^gpt-4$/, /^gpt-4-0/, /^llama/, /^mistral/, /^mixtral/, /^phi-/];
+  if (textPatterns.some(p => p.test(m))) return false;
+  return false; // 默认保守，视为纯文本
+}
+function _getResolvedAgentLabel(field: string, model: string, multimodalSetting: string): string {
+  const mm = multimodalSetting === 'true' || (multimodalSetting === 'auto' && _isMultimodalModelFrontend(model));
+  const map: Record<string, string> = {
+    llm_protocol: mm ? 'text 文本协议' : 'function_calling 函数调用',
+    vision_mode: mm ? 'direct 直接视觉' : 'som 标号定位',
+    planning: mm ? 'per_step 逐步决策' : 'pre_plan 预先规划',
+    screen_context: mm ? 'minimal 简洁' : 'full 完整',
+    on_error: 'retry 重试',
+  };
+  return map[field] || field;
+}
+
 const ELEVENLABS_KEY_STORAGE = 'lingdong-elevenlabs-key';
 const ELEVENLABS_VOICE_STORAGE = 'lingdong-elevenlabs-voice';
 function getStoredElevenlabsKey(): string {
@@ -111,6 +157,13 @@ export function SettingsPanel() {
   const [verifyEnabled, setVerifyEnabled] = useState(() => getStoredVerify());
   const [autoLearn, setAutoLearn] = useState(() => getStoredAutoLearn());
   const [omniparserEnabled, setOmniparserEnabled] = useState(() => getStoredOmniparser());
+  // Agent 模式状态
+  const [agentProtocol, setAgentProtocol] = useState(() => getStoredAgentMode(AGENT_PROTOCOL_STORAGE, 'auto'));
+  const [agentVision, setAgentVision] = useState(() => getStoredAgentMode(AGENT_VISION_STORAGE, 'auto'));
+  const [agentPlanning, setAgentPlanning] = useState(() => getStoredAgentMode(AGENT_PLANNING_STORAGE, 'auto'));
+  const [agentOnError, setAgentOnError] = useState(() => getStoredAgentMode(AGENT_ONERROR_STORAGE, 'retry'));
+  const [agentMultimodal, setAgentMultimodal] = useState(() => getStoredAgentMode(AGENT_MULTIMODAL_STORAGE, 'auto'));
+  const [agentFastMode, setAgentFastMode] = useState(() => getStoredAgentBool(AGENT_FASTMODE_STORAGE, false));
   const [elevenlabsKey, setElevenlabsKey] = useState(() => getStoredElevenlabsKey());
   const [elevenlabsVoiceId, setElevenlabsVoiceId] = useState(() => getStoredElevenlabsVoice());
   const [elevenlabsSaved, setElevenlabsSaved] = useState(false);
@@ -551,6 +604,50 @@ export function SettingsPanel() {
               首次启用时 Agent 会自动启动 OmniParser 服务器（~60s 模型加载）。CPU 解析每帧约 25s，GPU 大幅加速。
             </div>
           )}
+        </section>
+
+        {/* Agent 执行模式 — 现已整合到 AgentView 设置面板 */}
+        <section className="settings-section">
+          <h3 className="settings-section-title">
+            <Brain size={15} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+            Agent 配置
+          </h3>
+          <div style={{
+            padding: '14px 16px',
+            background: 'rgba(99, 102, 241, 0.04)',
+            border: '1px solid rgba(99, 102, 241, 0.12)',
+            borderRadius: 8,
+            fontSize: 12,
+            lineHeight: 1.6,
+            color: 'var(--text-secondary)',
+          }}>
+            <p style={{ marginBottom: 8, fontWeight: 500, color: 'var(--text-primary)' }}>
+              所有 Agent 配置已整合到 Agent 面板
+            </p>
+            <p style={{ marginBottom: 8 }}>
+              Agent 的全部 26+ 项配置参数（LLM 协议、视觉模式、规划策略、安全限制、截图质量、温度等）
+              现已在 <strong>AI Agent 面板 → 「全部配置」</strong> 中统一管理。
+            </p>
+            <p style={{ marginBottom: 0 }}>
+              切换到 Agent 视图即可展开配置面板，所有修改自动保存。
+            </p>
+            <div style={{
+              marginTop: 10, paddingTop: 10,
+              borderTop: '1px solid rgba(99, 102, 241, 0.12)',
+              display: 'flex', flexWrap: 'wrap', gap: '4px 8px',
+              fontSize: 11, color: 'var(--text-muted)',
+            }}>
+              <span>协议: {agentProtocol === 'auto' ? _getResolvedAgentLabel('llm_protocol', model, agentMultimodal) : agentProtocol}</span>
+              <span>·</span>
+              <span>视觉: {agentVision === 'auto' ? _getResolvedAgentLabel('vision_mode', model, agentMultimodal) : agentVision}</span>
+              <span>·</span>
+              <span>规划: {agentPlanning === 'auto' ? _getResolvedAgentLabel('planning', model, agentMultimodal) : agentPlanning}</span>
+              <span>·</span>
+              <span>错误: {agentOnError}</span>
+              <span>·</span>
+              <span>快速: {agentFastMode ? '开' : '关'}</span>
+            </div>
+          </div>
         </section>
 
         {/* TTS 语音 */}

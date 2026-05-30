@@ -51,7 +51,7 @@ def _show_window(title: str, cmd: int) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_minimize(title: str = "") -> bool:
     try:
@@ -76,7 +76,7 @@ def window_minimize(title: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_maximize(title: str = "") -> bool:
     try:
@@ -101,7 +101,7 @@ def window_maximize(title: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_restore(title: str = "") -> bool:
     try:
@@ -129,7 +129,7 @@ def window_restore(title: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_resize(width: int, height: int, title: str = "") -> bool:
     try:
@@ -161,7 +161,7 @@ def window_resize(width: int, height: int, title: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_snap(position: str, title: str = "") -> bool:
     try:
@@ -209,7 +209,7 @@ def window_snap(position: str, title: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["window", "win32"],
-    hidden=True,
+    hidden=False,
 )
 def window_close(title: str = "", force: bool = False) -> bool:
     try:

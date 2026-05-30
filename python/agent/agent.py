@@ -30,7 +30,9 @@ logger = logging.getLogger("agent.lingdong")
 
 DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2-omni"
-MAX_STEPS = 50
+MAX_STEPS = 20          # 单次任务最大步数，过高会导致失控循环
+MAX_CONSECUTIVE_FAILURES = 5  # 连续失败上限 → 自动终止
+_MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 / 总步数）
 
 # ── 已知多模态模型列表（可直接"看"截图，不需要 SoM 标号）──
 _MULTIMODAL_MODELS = frozenset({
@@ -70,24 +72,23 @@ def _is_multimodal_model(model_name: str) -> bool:
 
 # ── 文本协议模式系统提示词 ─────────────────────────────────────
 
-SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个工具可用。
+SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作可用。
 
-每轮我给你截图 + 当前窗口状态，**你必须调用工具操作屏幕**，不能只看图猜测。
+每轮我给你截图 + 当前窗口状态，**你必须调用动作操作屏幕**，不能只看图猜测。
 
 操作规则:
-- 必须调用工具来完成任务，不能仅凭截图内容推断"已完成"
-- 输入文字前：先点击目标输入框聚焦。使用 click_target(target="输入框") 或 click_target(target"输入区域")
-- 点击目标时优先用文字定位（如 button text），不要猜坐标
-- 同一目标在不同屏幕区域出现时（如联系人列表、聊天记录都有同名），务必指定 region 参数限制搜索区域，例如 click_target(target="确认", region="100,200,300,400")
-- 搜索后：必须点击搜索结果打开
+- 必须调用动作来完成任务，不能仅凭截图内容推断"已完成"
+- 输入文字前：必须先用 click 点击目标输入框聚焦
+- 点击目标时优先用文字描述（如 "确认"、"保存"），不要猜坐标
+- 同一目标在不同屏幕区域出现时，使用 region 限制搜索区域
 - 不要猜测。必须执行搜索、点击、输入等实际操作
 - 完成后必须确认。输入文字后需要点击发送/确认按钮提交
-- 如果没有执行任何工具就完成，会被视为幻觉
+- 如果没有执行任何动作就完成，会被视为幻觉
 
 格式:
 ```
 思考: <推理>
-工具: <工具名>
+工具: <动作名>
 参数:
   参数1: 值1
 ```
@@ -96,7 +97,44 @@ SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个工具
 总结: <结果>
 ```
 
-工具列表:
+工作流示例:
+
+【启动程序 → 操作 → 保存】
+1. manage_app(action='launch', target='notepad.exe')  — 启动记事本
+2. wait(seconds=0.5)                                    — 等待窗口打开
+3. type_text(text='Hello World')                        — 输入文字（已聚焦在输入框）
+4. press_keys(keys='ctrl+s')                            — 保存
+5. wait(seconds=0.3)
+6. dialog(action='save', path='C:\\test.txt')           — 填写保存对话框
+
+【窗口切换】
+1. manage_window(action='focus', title='计算器')        — 聚焦到计算器窗口
+2. 如果失败: press_keys(keys='alt+tab')                 — 切换窗口
+
+【点击按钮】
+1. click(target='确认')                                 — 点击"确认"按钮
+2. click(target='#3')                                   — 点击截图编号3的元素
+3. click(x=500, y=400)                                  — 点击坐标(500,400)
+
+【读取屏幕内容】
+1. read_ui()                    — 读取窗口无障碍控件树（精确获取按钮名）
+2. read_text(target='错误提示')  — OCR 查找特定文字位置
+3. screenshot()                 — 截图
+
+【浏览器操作】
+1. browser_do(action='navigate', url='https://www.baidu.com')
+2. browser_do(action='click', selector='#search-input')
+3. browser_do(action='type', selector='#search-input', text='天气预报')
+
+【处理弹窗】
+每次操作后如果出现弹窗:
+dialog(action='close')  — 自动关闭（保存确认/错误提示/覆盖询问等）
+
+【文件操作】
+1. file_ops(action='write', path='C:\\test.txt', content='Hello')
+2. file_ops(action='read', path='C:\\test.txt')
+
+动作列表:
 {tools_text}
 """
 
@@ -136,10 +174,78 @@ SCRIPTED_MODE_INSTRUCTIONS = """
 
 # ── 工具描述生成 (from MimoAgent) ─────────────────────────────
 
+_USE_FLOW_CHART_MODE = False  # Set True to use full tool prompt + flow chart
+_FLOW_CHART_MODE_LOCK = threading.Lock()  # Thread safety for mode switching
+
+def set_flow_chart_mode(enabled: bool = True):
+    """Enable/disable flow chart mode (full tools + generate_flow/execute_flow)."""
+    global _USE_FLOW_CHART_MODE
+    with _FLOW_CHART_MODE_LOCK:
+        _USE_FLOW_CHART_MODE = enabled
+    from agent.meta_actions import set_flow_chart_mode as _set_meta_fc
+    _set_meta_fc(enabled)
+
+def _build_feature_tools_compact() -> str:
+    """构建 @feature 工具紧凑列表（一行一个，组织分类）。
+
+    供非流程图模式的 text_protocol 使用，让 LLM 知道所有可用工具。
+    """
+    from features.registry import registry, FeatureCategory
+    import features._all  # noqa: F401
+
+    cat_labels = {
+        FeatureCategory.ACTION: "交互动作",
+        FeatureCategory.PERCEPTION: "感知识别",
+        FeatureCategory.CONTROL: "控制流",
+        FeatureCategory.AI: "AI 规划",
+        FeatureCategory.MACRO: "宏指令",
+        FeatureCategory.SYSTEM: "系统功能",
+        FeatureCategory.DEBUG: "调试诊断",
+    }
+
+    grouped: dict = {}
+    for spec in registry.all():
+        if spec.deprecated or spec.hidden:
+            continue
+        cat = spec.category
+        grouped.setdefault(cat, []).append(spec)
+
+    lines = [
+        "\n\n## @feature 高级工具（按分类）",
+        "",
+        "除上述元动作外，还有以下底层工具可直接调用。元动作不够用时按需使用：",
+        "",
+    ]
+    for cat in FeatureCategory:
+        specs = grouped.get(cat, [])
+        if not specs:
+            continue
+        label = cat_labels.get(cat, cat.value)
+        lines.append(f"### {label}（{len(specs)} 个）")
+        for s in sorted(specs, key=lambda x: x.name):
+            desc = (s.description or "")[:120].replace("\n", " ")
+            lines.append(f"  - **{s.name}** — {desc}")
+        lines.append("")
+
+    lines.append("使用方式与元动作相同：在「工具:」行写工具名，参数写在参数行。")
+    lines.append("元动作和 @feature 工具可混合使用。")
+
+    return "\n".join(lines)
+
+
 def _build_tools_text() -> str:
-    """生成按访问模式分组的工具描述文本（替代旧的按场景平铺分组）。"""
-    from agent.tool_path_selector import build_path_prompt
-    return build_path_prompt()
+    """生成工具描述文本。
+
+    非流程图模式: 元动作 + @feature 工具紧凑列表，LLM 知道所有可用工具。
+    Flow chart mode: 按访问模式分组的完整工具列表。
+    """
+    if _USE_FLOW_CHART_MODE:
+        from agent.tool_path_selector import build_path_prompt
+        return build_path_prompt()
+    from agent.meta_actions import get_prompt
+    meta = get_prompt(use_flow_chart=_USE_FLOW_CHART_MODE)
+    tools = _build_feature_tools_compact()
+    return meta + tools
 
 
 # ====================================================================
@@ -168,7 +274,13 @@ class LingdongAgent:
                  stop_event: Optional[threading.Event] = None,
                  multimodal: bool = False,
                  auto_learn: bool = False,
-                 omniparser_enabled: bool = False):
+                 omniparser_enabled: bool = False,
+                 temperature: float = 0.1,
+                 max_tokens: int = 4096,
+                 llm_retries: int = 2,
+                 screenshot_quality: int = 60,
+                 som_enabled: bool = True,
+                 verify_enabled: bool = True):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         self.api_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
                          or os.environ.get("LLM_API_BASE", "")
@@ -181,7 +293,12 @@ class LingdongAgent:
         self._tools_text: str = ""
         self._system_prompt: str = ""
         self._registry_loaded = False
-        self._som_enabled = True  # SoM 标号（截图元素编号）
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._llm_retries = llm_retries
+        self._screenshot_quality = screenshot_quality
+        self._som_enabled = som_enabled  # SoM 标号（截图元素编号）
+        self._verify_enabled = verify_enabled
         self._omniparser = None  # OmniParser client (lazy init)
         self._omniparser_enabled = omniparser_enabled  # 默认关闭，可在设置中开启
 
@@ -194,6 +311,7 @@ class LingdongAgent:
             api_key=self.api_key,
             api_base=self.api_base,
             model=self.model,
+            screenshot_quality=self._screenshot_quality,
         )
 
         # Load run history for context continuity
@@ -220,12 +338,20 @@ class LingdongAgent:
         import features._all  # noqa
 
         self._registry_loaded = True
-        count = len([s for s in registry.all() if not s.deprecated and not s.hidden])
+        all_count = len([s for s in registry.all() if not s.deprecated and not s.hidden])
         self._tools_text = _build_tools_text()
-        self._system_prompt = SYSTEM_PROMPT_TEXT.format(
-            tool_count=count, tools_text=self._tools_text
-        )
-        logger.info("Registry loaded: %d tools, prompt: %d chars", count, len(self._system_prompt))
+
+        if _USE_FLOW_CHART_MODE:
+            self._system_prompt = SYSTEM_PROMPT_TEXT.format(
+                tool_count=all_count, tools_text=self._tools_text
+            )
+        else:
+            from agent.meta_actions import META_ACTIONS
+            meta_count = len(META_ACTIONS)
+            self._system_prompt = SYSTEM_PROMPT_TEXT.format(
+                tool_count=meta_count, tools_text=self._tools_text
+            )
+        logger.info("Registry: %d tools total, prompt: %d chars", all_count, len(self._system_prompt))
 
     def _ensure_registry(self):
         if not self._registry_loaded:
@@ -465,17 +591,18 @@ class LingdongAgent:
 
         return {"image_b64": result_b64, "label_map": label_map, "count": len(label_map)}
 
-    def _call_llm(self, messages: list[dict], max_retries: int = 2) -> dict | None:
+    def _call_llm(self, messages: list[dict], max_retries: int | None = None) -> dict | None:
         """调用 LLM API (兼容文本和视觉消息)。"""
         import requests as _req
+        retries = max_retries if max_retries is not None else self._llm_retries
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 4096,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
         }
         last_err = ""
-        for attempt in range(1 + max_retries):
+        for attempt in range(1 + retries):
             try:
                 resp = _req.post(
                     f"{self.api_base}/chat/completions",
@@ -485,7 +612,7 @@ class LingdongAgent:
                     timeout=120,
                 )
                 if resp.status_code == 429:
-                    self._emit("log", {"level": "warn", "message": f"API rate limited, retry {attempt+1}/{max_retries}"})
+                    self._emit("log", {"level": "warn", "message": f"API rate limited, retry {attempt+1}/{retries}"})
                     time.sleep(3 * (attempt + 1))
                     continue
                 resp.raise_for_status()
@@ -500,12 +627,12 @@ class LingdongAgent:
                 return data
             except _req.exceptions.Timeout:
                 last_err = "API timeout (120s)"
-                self._emit("log", {"level": "warn", "message": f"API timeout, retry {attempt+1}/{max_retries}"})
+                self._emit("log", {"level": "warn", "message": f"API timeout, retry {attempt+1}/{retries}"})
             except _req.exceptions.RequestException as e:
                 last_err = str(e)
-                self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}, retry {attempt+1}/{max_retries}"})
+                self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}, retry {attempt+1}/{retries}"})
                 time.sleep(2 * (attempt + 1))
-        self._emit("log", {"level": "error", "message": f"LLM API failed after {max_retries} retries: {last_err}"})
+        self._emit("log", {"level": "error", "message": f"LLM API failed after {retries} retries: {last_err}"})
         return None
 
     @staticmethod
@@ -526,7 +653,7 @@ class LingdongAgent:
 
         tool_name = tool_match.group(1).strip()
         args = {}
-        param_section = re.search(r"参数:\s*(.*?)(?:\n\s*\n|$)", content, re.DOTALL)
+        param_section = re.search(r"参数:\s*(.*?)(?:\n\s*\n|\n\s*总结:|$)", content, re.DOTALL)
         if param_section:
             lines = param_section.group(1).split("\n")
             i = 0
@@ -559,30 +686,116 @@ class LingdongAgent:
 
         return "tool", tool_name, args
 
-    def run_text_protocol(self, goal: str, _agent_config: Optional[AgentConfig] = None) -> dict:
-        """文本协议模式：循环 调用 LLM → 解析 → 监督执行 → 截图。
+    # ══════════════════════════════════════════════════════════
+    #  文本协议模式 — 核心循环
+    # ══════════════════════════════════════════════════════════
 
-        适用于 MIMO V2 Omni 等不支持 function calling 的纯文本模型。
+    def _resolve_text_protocol_config(self, agent_config: Optional[AgentConfig]) -> dict:
+        """提取或自动检测文本协议的配置参数。"""
+        if agent_config is not None:
+            return {
+                "multimodal": agent_config._multimodal,
+                "vision_mode": agent_config._resolved_vision_mode,
+                "context_minimal": agent_config._resolved_screen_context == "minimal",
+                "use_dedup": agent_config.image_dedup,
+                "use_fast": agent_config.fast_mode,
+                "on_error": agent_config._resolved_on_error,
+                "max_steps": agent_config.max_steps,
+                "max_consecutive_failures": agent_config.max_consecutive_failures,
+                "min_success_rate": agent_config.min_success_rate,
+                "som_enabled": agent_config.som_enabled,
+                "flow_chart_mode": agent_config.flow_chart_mode,
+                "screenshot_quality": agent_config.screenshot_quality,
+                "sliding_window_size": agent_config.sliding_window_size,
+                "verify": agent_config.verify,
+            }
+        multimodal = _is_multimodal_model(self.model)
+        return {
+            "multimodal": multimodal,
+            "vision_mode": "direct" if multimodal else "som",
+            "context_minimal": multimodal,
+            "use_dedup": multimodal,
+            "use_fast": False,
+            "on_error": "retry",
+            "max_steps": MAX_STEPS,
+            "max_consecutive_failures": MAX_CONSECUTIVE_FAILURES,
+            "min_success_rate": _MIN_SUCCESS_RATE,
+            "som_enabled": True,
+            "flow_chart_mode": False,
+            "screenshot_quality": 60,
+            "sliding_window_size": 0,
+            "verify": True,
+        }
 
-        参数:
-            goal: 自然语言目标
-            _agent_config: 统一配置（由 _unified_run 传入），None 时自动检测
-        """
-        self._ensure_registry()
+    def _append_step_feedback(self, messages: list, result: dict, name: str,
+                               success: bool, content: str, cfg: dict,
+                               last_b64_hash: str) -> tuple:
+        """添加执行结果到消息历史，包含截图/SoM/去重/窗口列表。"""
+        from agent.meta_actions import NO_SS_AFTER_META
 
-        # ── 从 AgentConfig 或自动检测确定多模态状态 ──
-        if _agent_config is not None:
-            multimodal = _agent_config._multimodal
-            vision_mode = _agent_config._resolved_vision_mode
-            context_minimal = _agent_config._resolved_screen_context == "minimal"
-            use_dedup = _agent_config.image_dedup
-            use_fast = _agent_config.fast_mode
+        messages.append({"role": "assistant", "content": content})
+        hint = "\n\n(如果任务目标已达成，请直接回复 总结: 结束，不要继续多余操作)" if success else ""
+        messages.append({
+            "role": "user",
+            "content": json.dumps(result, ensure_ascii=False)[:1500] + hint,
+        })
+
+        multimodal = cfg["multimodal"]
+        status_txt = "成功" if success else f"失败: {result.get('error', 'unknown')}"
+        skip_screenshot = (
+            name in Supervisor.NO_SCREENSHOT_TOOLS
+            or (not _USE_FLOW_CHART_MODE and name in NO_SS_AFTER_META)
+        )
+        if skip_screenshot:
+            messages.append({
+                "role": "user",
+                "content": f"执行{status_txt}。{hint}",
+            })
         else:
-            multimodal = _is_multimodal_model(self.model)
-            vision_mode = "direct" if multimodal else "som"
-            context_minimal = multimodal
-            use_dedup = multimodal
-            use_fast = False
+            sq = cfg.get("screenshot_quality", 50 if multimodal else 60)
+            raw_b64 = self.supervisor.capture_b64(quality=sq)
+            cur_hash = hashlib.md5(raw_b64.encode()).hexdigest()[:16]
+            if cur_hash == last_b64_hash and cfg["use_dedup"]:
+                messages.append({
+                    "role": "user",
+                    "content": f"执行{status_txt} (截图未变化，沿用上一帧)。{hint}",
+                })
+            else:
+                last_b64_hash = cur_hash
+                screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
+                try:
+                    from features.system_features import list_windows
+                    win_list = list_windows()
+                    win_info = f"\n当前已打开的窗口 ({len(win_list)} 个): {win_list}" if win_list else ""
+                except Exception:
+                    win_info = ""
+
+                som_label = ""
+                b64 = raw_b64
+                if self._som_enabled:
+                    som_result = self._apply_som(raw_b64, multimodal=multimodal)
+                    self.supervisor._last_som_map = som_result["label_map"]
+                    if cfg["vision_mode"] != "direct" and som_result["count"] > 0:
+                        b64 = som_result["image_b64"]
+                        lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
+                        som_label = f"\n屏幕元素编号:\n{lines}"
+
+                parts = [
+                    {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ]
+                messages.append({"role": "user", "content": parts})
+
+        if not success:
+            time.sleep(1.0)
+        return messages, last_b64_hash
+
+    def run_text_protocol(self, goal: str, _agent_config: Optional[AgentConfig] = None) -> dict:
+        """文本协议模式：循环 调用 LLM → 解析 → 监督执行 → 截图。"""
+        self._ensure_registry()
+        cfg = self._resolve_text_protocol_config(_agent_config)
+        multimodal = cfg["multimodal"]
+        vision_mode = cfg["vision_mode"]
 
         if multimodal:
             self._emit("log", {
@@ -590,15 +803,14 @@ class LingdongAgent:
                 "message": f"多模态快速路径: {self.model} 可直接理解截图，跳过 SoM 标注",
             })
 
-        self._emit("agent_start", {"goal": goal, "engine": "text_protocol", "model": self.model, "multimodal": multimodal})
-
+        self._emit("agent_start", {"goal": goal, "engine": "text_protocol",
+                                    "model": self.model, "multimodal": multimodal})
         start = time.time()
         steps = []
-        last_b64_hash = ""  # 用于截图去重
+        last_b64_hash = ""
 
+        # ── 系统提示词 + 路径建议 ──
         messages = [{"role": "system", "content": self._system_prompt}]
-
-        # ── 路径提示：为目标选择合适的工具访问模式 ──
         try:
             from agent.tool_path_selector import select_best_path
             suggested = select_best_path(goal)
@@ -613,11 +825,9 @@ class LingdongAgent:
         except Exception:
             pass
 
-        # ── 首次截图 + 上下文 ──
-        # 多模态: 原始截图 + minimal 上下文
-        # 非多模态: SoM 标注 + 完整上下文
+        # ── 首次截图 + 第 1 条用户消息 ──
         raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
-        screen_ctx = self._get_screen_context(minimal=context_minimal)
+        screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
 
         som_label = ""
         b64 = raw_b64
@@ -632,7 +842,6 @@ class LingdongAgent:
                     f"\n使用 #N 指定目标，如: target: #3  或  target: #5"
                 )
 
-        # ── 自动注入当前窗口列表，防止 LLM 无脑启动已运行的程序 ──
         try:
             from features.system_features import list_windows
             win_list = list_windows()
@@ -655,15 +864,27 @@ class LingdongAgent:
         })
 
         consecutive_fails = 0
+        consecutive_step_fails = 0
+        total_success = 0
         last_tool = ""
         repeat_count = 0
+        done_no_tool_count = 0
 
         self._emit("log", {"level": "info", "message": "正在调用 AI 分析屏幕并规划下一步..."})
-        for loop in range(1, MAX_STEPS + 1):
+        _max_steps = cfg.get("max_steps", MAX_STEPS)
+        _max_consecutive_failures = cfg.get("max_consecutive_failures", MAX_CONSECUTIVE_FAILURES)
+        _min_success_rate = cfg.get("min_success_rate", _MIN_SUCCESS_RATE)
+        _som_enabled = cfg.get("som_enabled", True)
+        _slide_window = cfg.get("sliding_window_size", 0)
+        self._som_enabled = _som_enabled
+        if cfg.get("flow_chart_mode"):
+            set_flow_chart_mode(True)
+        for loop in range(1, _max_steps + 1):
             if self._stop_event and self._stop_event.is_set():
                 self._emit("log", {"level": "info", "message": "停止请求，终止循环"})
                 break
 
+            # ── LLM 调用 ──
             raw = self._call_llm(messages)
             if raw is None:
                 consecutive_fails += 1
@@ -671,21 +892,27 @@ class LingdongAgent:
                     self._emit("log", {"level": "error", "message": "LLM 连续失败，终止"})
                     break
                 continue
-
             consecutive_fails = 0
+
             msg = raw["choices"][0]["message"]
             content = msg.get("content", "") or msg.get("reasoning_content", "") or ""
             reasoning = (msg.get("reasoning_content", "") or
-                        msg.get("reasoning", "") or "")  # MIMO 兼容
-
+                        msg.get("reasoning", "") or "")
             if reasoning:
                 self._emit("log", {"level": "info", "message": f"思考: {reasoning[:300]}"})
 
+            # ── 解析回复 ──
             action, name, args = self._parse_response(content)
 
             if action == "done":
                 if not steps:
-                    self._emit("log", {"level": "warn", "message": "LLM 未执行任何工具就声称完成，强制继续"})
+                    done_no_tool_count += 1
+                    if done_no_tool_count >= 3:
+                        self._emit("log", {"level": "error",
+                                           "message": "LLM 连续 3 次声称完成但未执行任何工具，终止"})
+                        break
+                    self._emit("log", {"level": "warn",
+                                       "message": "LLM 未执行任何工具就声称完成，强制继续"})
                     messages.append({
                         "role": "user",
                         "content": "你没有执行任何工具调用就声称完成了。这不行。必须调用工具操作屏幕。至少执行一个工具后再总结。"
@@ -701,95 +928,85 @@ class LingdongAgent:
                 }
 
             if action == "error":
-                self._emit("log", {"level": "warn", "message": f"无法解析: {args.get('raw', content)[:200]}"})
+                self._emit("log", {"level": "warn",
+                                   "message": f"无法解析: {args.get('raw', content)[:200]}"})
                 messages.append({
                     "role": "user",
                     "content": "格式错误。请用:\n思考: ...\n工具: 工具名\n参数:\n  参数1: 值1\n或任务完成时用: 总结: ..."
                 })
                 continue
 
-            # ── 执行工具 (带监督层) ──
+            # ── 执行工具 ──
             sn = len(steps) + 1
-            self._emit("log", {"level": "info", "message": f"调用: {name}({json.dumps(args, ensure_ascii=False)[:200]})"})
-
+            self._emit("log", {"level": "info",
+                               "message": f"调用: {name}({json.dumps(args, ensure_ascii=False)[:200]})"})
             step = {"step_num": sn, "tool": name, "args": args,
                     "thought": reasoning[:300] if reasoning else "", "status": "running"}
             self._emit("step_complete", dict(step))
 
             step_start = time.time()
             try:
-                result = self.supervisor.execute(name, args)
+                if not _USE_FLOW_CHART_MODE:
+                    from agent.meta_actions import execute as meta_execute, META_ACTIONS
+                    if name in META_ACTIONS:
+                        result = meta_execute(name, args)
+                    else:
+                        result = self.supervisor.execute(name, args)
+                else:
+                    result = self.supervisor.execute(name, args)
                 success = result.get("success", False)
             except Exception as e:
                 result = {"success": False, "error": str(e)}
                 success = False
-            step_elapsed = round((time.time() - step_start) * 1000)
 
             step["status"] = "completed" if success else "failed"
             step["result"] = {
-                "success": result.get("success", False),
+                "success": success,
                 "error": result.get("error", ""),
-                "step_ms": step_elapsed,
+                "step_ms": round((time.time() - step_start) * 1000),
             }
             if args:
                 step["args_resolved"] = {k: str(v)[:80] for k, v in args.items()}
             steps.append(step)
             self._emit("step_complete", dict(step))
 
-            # ── 更新消息历史 ──
-            messages.append({"role": "assistant", "content": content})
-            hint = "\n\n(如果任务目标已达成，请直接回复 总结: 结束，不要继续多余操作)" if success else ""
-            messages.append({
-                "role": "user",
-                "content": json.dumps(result, ensure_ascii=False)[:1500] + hint,
-            })
+            # ── 安全计数器 ──
+            if success:
+                total_success += 1
+                consecutive_step_fails = 0
+            else:
+                consecutive_step_fails += 1
 
-            status_txt = "成功" if success else f"失败: {result.get('error', 'unknown')}"
-            if name in Supervisor.NO_SCREENSHOT_TOOLS:
+            # ── 连续失败终止 ──
+            if consecutive_step_fails >= _max_consecutive_failures:
+                self._emit("log", {
+                    "level": "error",
+                    "message": f"连续 {_max_consecutive_failures} 步执行失败（最后一步: {name}），终止循环"
+                })
                 messages.append({
                     "role": "user",
-                    "content": f"执行{status_txt}。{hint}",
+                    "content": f"连续 {_max_consecutive_failures} 步执行失败，请总结已完成的步骤并结束。"
                 })
-            else:
-                raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
+                raw = self._call_llm(messages)
+                if raw:
+                    content = raw["choices"][0]["message"].get("content", "") or ""
+                    if "总结:" in content:
+                        summary = content.split("总结:", 1)[-1].strip()[:500]
+                        steps[-1]["early_exit_reason"] = f"consecutive_failures_{_max_consecutive_failures}"
+                break
 
-                # ── 截图去重：如果截图内容没变，跳过发送 ──
-                cur_hash = hashlib.md5(raw_b64.encode()).hexdigest()[:16]
-                if cur_hash == last_b64_hash and use_dedup:
-                    messages.append({
-                        "role": "user",
-                        "content": f"执行{status_txt} (截图未变化，沿用上一帧)。{hint}",
-                    })
-                else:
-                    last_b64_hash = cur_hash
-                    screen_ctx = self._get_screen_context(minimal=context_minimal)
-                    # 重新注入窗口列表
-                    try:
-                        from features.system_features import list_windows
-                        win_list = list_windows()
-                        win_info = f"\n当前已打开的窗口 ({len(win_list)} 个): {win_list}" if win_list else ""
-                    except Exception:
-                        win_info = ""
+            # ── 低成功率终止 ──
+            if len(steps) >= 8 and total_success / len(steps) < _min_success_rate:
+                self._emit("log", {
+                    "level": "error",
+                    "message": f"成功率过低 ({total_success}/{len(steps)})，终止循环"
+                })
+                break
 
-                    # SoM 标号（非多模态模式才需要）
-                    som_label = ""
-                    b64 = raw_b64
-                    if self._som_enabled:
-                        som_result = self._apply_som(raw_b64, multimodal=multimodal)
-                        self.supervisor._last_som_map = som_result["label_map"]
-                        if vision_mode != "direct" and som_result["count"] > 0:
-                            b64 = som_result["image_b64"]
-                            lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
-                            som_label = f"\n屏幕元素编号:\n{lines}"
-
-                    parts = [
-                        {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    ]
-                    messages.append({"role": "user", "content": parts})
-
-            if not success:
-                time.sleep(1.0)
+            # ── 执行后反馈（消息历史 + 截图/SoM）──
+            messages, last_b64_hash = self._append_step_feedback(
+                messages, result, name, success, content, cfg, last_b64_hash,
+            )
 
             # ── 重复工具检测 ──
             if name == last_tool:
@@ -799,22 +1016,23 @@ class LingdongAgent:
                 last_tool = name
             if repeat_count >= 3:
                 total_repeats = repeat_count + 1
-                self._emit("log", {"level": "warn", "message": f"工具 '{name}' 重复 {total_repeats} 次，强制换策略"})
+                self._emit("log", {"level": "warn",
+                                   "message": f"工具 '{name}' 重复 {total_repeats} 次，强制换策略"})
                 repeat_count = 0
                 messages.append({
                     "role": "user",
                     "content": f"你已连续 {total_repeats} 次使用 {name}，未取得进展。请换完全不同的策略，不要重复同一工具。"
                 })
 
-            # ── 滑动窗口：减少历史大小以加速 LLM 处理 ──
-            # 多模态：每步都带大图，保留更少历史
-            # 快速模式：保留最少历史（4条）
-            if use_fast:
-                MAX_HISTORY = 4
+            # ── 滑动窗口 ──
+            if _slide_window > 0:
+                max_hist = _slide_window
+            elif cfg["use_fast"]:
+                max_hist = 4
             else:
-                MAX_HISTORY = 8 if multimodal else 12
-            if len(messages) > MAX_HISTORY:
-                messages = [messages[0], messages[1]] + messages[-(MAX_HISTORY - 2):]
+                max_hist = 8 if multimodal else 12
+            if len(messages) > max_hist:
+                messages = [messages[0]] + messages[-(max_hist - 1):]
 
         elapsed = time.time() - start
         ok_count = sum(1 for s in steps if s.get("status") == "completed")
@@ -990,7 +1208,8 @@ class LingdongAgent:
 
         self._emit("agent_start", {"goal": goal, "engine": "langgraph", "model": self.model})
 
-        thread_config = {"recursion_limit": MAX_STEPS}
+        max_steps_lg = _agent_config.max_steps if _agent_config else MAX_STEPS
+        thread_config = {"recursion_limit": max_steps_lg}
         if config:
             thread_config.update(config)
 
@@ -1165,6 +1384,14 @@ class LingdongAgent:
         self.supervisor.window_aware_ocr = config.window_aware_ocr
         self.supervisor.uia_pre_focus = config.uia_pre_focus
         self.supervisor.scripted_mode = config.scripted_mode
+        self.supervisor.verify = config.verify
+
+        # 同步 LLM 参数到实例
+        self._temperature = config.temperature
+        self._max_tokens = config.max_tokens
+        self._llm_retries = config.llm_retries
+        self._screenshot_quality = config.screenshot_quality
+        self._som_enabled = config.som_enabled
 
         # 脚本执行模式注入提示词
         if config.scripted_mode:
@@ -1179,7 +1406,12 @@ class LingdongAgent:
             f"on_error={config._resolved_on_error}, "
             f"window_ocr={config.window_aware_ocr}, "
             f"uia_focus={config.uia_pre_focus}, "
-            f"scripted={config.scripted_mode}"})
+            f"scripted={config.scripted_mode}, "
+            f"max_steps={config.max_steps}, "
+            f"som={config.som_enabled}, "
+            f"temp={config.temperature}, "
+            f"retries={config.llm_retries}, "
+            f"quality={config.screenshot_quality}"})
 
         # ── Planning: pre_plan vs per_step ──
         if config._resolved_planning == "pre_plan":
@@ -1201,6 +1433,7 @@ class LingdongAgent:
 
     def _run_per_step_function_calling(self, goal: str, config: AgentConfig) -> dict:
         """Per-step mode with function calling LLM (LangGraph)."""
+        self._emit("log", {"level": "info", "message": f"LangGraph max_steps set to {config.max_steps}"})
         return self.run_langgraph(goal, _agent_config=config)
 
     # ══════════════════════════════════════════════════════════
@@ -1293,7 +1526,12 @@ class LingdongAgent:
                 "status": "completed" if success else "failed",
                 "total_steps": 1, "summary": "Flow script generated" if success else "Generation failed",
             })
-            return {"success": success, "steps": [], "total_steps": 1,
+            return {"success": success, "steps": [{
+                    "step_num": 1, "tool": "generate_flow_script",
+                    "args": {"goal": goal},
+                    "status": "completed" if success else "failed",
+                    "result": result.get("result", result),
+                }], "total_steps": 1,
                     "summary": "Flow script generated" if success else "Generation failed"}
         except Exception as exc:
             self._emit("error", {"message": f"generate_flow_script failed: {exc}"})

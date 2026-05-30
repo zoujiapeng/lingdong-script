@@ -449,6 +449,70 @@ def _parse_template_metadata(filepath: str) -> dict:
     return meta
 
 
+def _parse_flow_metadata(filepath: str) -> dict:
+    """Extract metadata from a .flow JSON file (from script.meta)."""
+    meta = {"name": "", "description": "", "aliases": [], "tags": [], "keywords": [], "category": ""}
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        script_meta = data.get("meta", {}) if isinstance(data, dict) else {}
+        meta["name"] = script_meta.get("name", script_meta.get("title", os.path.splitext(os.path.basename(filepath))[0]))
+        meta["description"] = script_meta.get("description", "")
+        meta["aliases"] = script_meta.get("aliases", [])
+        meta["tags"] = script_meta.get("tags", [])
+        meta["keywords"] = script_meta.get("keywords", [])
+        meta["category"] = script_meta.get("category", "")
+        # Count node types for preview
+        nodes = data.get("nodes", []) if isinstance(data, dict) else []
+        meta["node_count"] = len(nodes)
+        type_counts: dict[str, int] = {}
+        for n in nodes:
+            t = n.get("type", "unknown")
+            type_counts[t] = type_counts.get(t, 0) + 1
+        meta["node_types"] = type_counts
+    except (FileNotFoundError, IOError, json.JSONDecodeError):
+        pass
+    return meta
+
+
+def _collect_templates():
+    """Scan templates/ for both .dsl and .flow files, return unified metadata list."""
+    if not os.path.isdir(TEMPLATES_DIR):
+        return []
+    templates = []
+    for f in sorted(os.listdir(TEMPLATES_DIR)):
+        path = os.path.join(TEMPLATES_DIR, f)
+        if f.endswith('.dsl'):
+            meta = _parse_template_metadata(path)
+            templates.append({
+                "name": meta.get("name", f.replace('.dsl', '')),
+                "filename": f,
+                "filetype": "dsl",
+                "description": meta.get("description", ""),
+                "aliases": meta.get("aliases", []),
+                "tags": meta.get("tags", []),
+                "keywords": meta.get("keywords", []),
+                "category": meta.get("category", ""),
+                "node_count": 0,
+                "node_types": {},
+            })
+        elif f.endswith('.flow'):
+            meta = _parse_flow_metadata(path)
+            templates.append({
+                "name": meta.get("name", f.replace('.flow', '')),
+                "filename": f,
+                "filetype": "flow",
+                "description": meta.get("description", ""),
+                "aliases": meta.get("aliases", []),
+                "tags": meta.get("tags", []),
+                "keywords": meta.get("keywords", []),
+                "category": meta.get("category", ""),
+                "node_count": meta.get("node_count", 0),
+                "node_types": meta.get("node_types", {}),
+            })
+    return templates
+
+
 @feature(
     name="list_templates",
     display_name="列出工作流模板",
@@ -458,54 +522,62 @@ def _parse_template_metadata(filepath: str) -> dict:
     returns="list[dict{name, description, aliases, tags, keywords, category}]",
 )
 def list_templates() -> list:
-    """列出所有可用的工作流模板（含元数据）。"""
-    if not os.path.isdir(TEMPLATES_DIR):
-        return []
-    templates = []
-    for f in sorted(os.listdir(TEMPLATES_DIR)):
-        if f.endswith('.dsl'):
-            path = os.path.join(TEMPLATES_DIR, f)
-            meta = _parse_template_metadata(path)
-            templates.append({
-                "name": meta.get("name", f.replace('.dsl', '')),
-                "filename": f,
-                "description": meta.get("description", ""),
-                "aliases": meta.get("aliases", []),
-                "tags": meta.get("tags", []),
-                "keywords": meta.get("keywords", []),
-                "category": meta.get("category", ""),
-            })
-    return templates
+    """列出所有可用的工作流模板（含元数据）。同时扫描 .dsl 和 .flow 文件。"""
+    return _collect_templates()
 
 
 @feature(
     name="load_template",
     display_name="加载工作流模板",
-    description="加载 templates/ 目录下的 DSL 模板文件内容，返回 DSL 文本、名称和元数据",
+    description="加载 templates/ 目录下的模板文件内容（支持 .dsl 和 .flow），返回 DSL 文本或 FlowScript JSON、名称和元数据",
     category=F.DEBUG,
     params=[
-        P("name", "str", "模板名称（不含 .dsl 后缀）", example="screenshot-workflow"),
+        P("name", "str", "模板名称（不含后缀）", example="screenshot-workflow"),
     ],
-    returns="dict{name, dsl, exists, aliases, tags, keywords, category}",
+    returns="dict{name, dsl_or_json, filetype, exists, description, category, tags, node_count}",
 )
 def load_template(name: str) -> dict:
-    """加载指定名称的 DSL 模板文件内容。"""
-    path = os.path.join(TEMPLATES_DIR, f"{name}.dsl")
-    if not os.path.isfile(path):
-        return {"name": name, "dsl": "", "exists": False, "error": f"模板 '{name}' 未找到"}
-    with open(path, 'r', encoding='utf-8') as f:
-        dsl = f.read()
-    meta = _parse_template_metadata(path)
-    return {
-        "name": meta.get("name", name),
-        "dsl": dsl,
-        "exists": True,
-        "description": meta.get("description", ""),
-        "aliases": meta.get("aliases", []),
-        "tags": meta.get("tags", []),
-        "keywords": meta.get("keywords", []),
-        "category": meta.get("category", ""),
-    }
+    """加载指定名称的模板文件。优先 .dsl，其次 .flow。"""
+    dsl_path = os.path.join(TEMPLATES_DIR, f"{name}.dsl")
+    flow_path = os.path.join(TEMPLATES_DIR, f"{name}.flow")
+
+    # Try .dsl first
+    if os.path.isfile(dsl_path):
+        with open(dsl_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        meta = _parse_template_metadata(dsl_path)
+        return {
+            "name": meta.get("name", name),
+            "dsl_or_json": content,
+            "filetype": "dsl",
+            "exists": True,
+            "description": meta.get("description", ""),
+            "aliases": meta.get("aliases", []),
+            "tags": meta.get("tags", []),
+            "keywords": meta.get("keywords", []),
+            "category": meta.get("category", ""),
+            "node_count": 0,
+        }
+
+    # Try .flow as fallback
+    if os.path.isfile(flow_path):
+        with open(flow_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        meta = _parse_flow_metadata(flow_path)
+        return {
+            "name": meta.get("name", name),
+            "dsl_or_json": content,
+            "filetype": "flow",
+            "exists": True,
+            "description": meta.get("description", ""),
+            "aliases": meta.get("aliases", []),
+            "tags": meta.get("tags", []),
+            "keywords": meta.get("keywords", []),
+            "category": meta.get("category", ""),
+            "node_count": meta.get("node_count", 0),
+        }
+
+    return {"name": name, "dsl_or_json": "", "filetype": "", "exists": False, "error": f"模板 '{name}' 未找到"}
 
 
 @feature(
@@ -520,21 +592,18 @@ def load_template(name: str) -> dict:
     returns="list[dict{name, description, aliases, tags, keywords, category, match_score}]",
 )
 def search_templates(query: str, limit: int = 5) -> list:
-    """搜索模板，按名称、描述、别名、标签、关键词匹配度排序。"""
-    if not os.path.isdir(TEMPLATES_DIR):
+    """搜索模板，按名称、描述、别名、标签、关键词匹配度排序。同时搜索 .dsl 和 .flow 文件。"""
+    templates = _collect_templates()
+    if not templates:
         return []
     results = []
     q = query.lower().strip()
-    for f in sorted(os.listdir(TEMPLATES_DIR)):
-        if not f.endswith('.dsl'):
-            continue
-        path = os.path.join(TEMPLATES_DIR, f)
-        meta = _parse_template_metadata(path)
-        name = meta.get("name", "")
-        desc = meta.get("description", "")
-        aliases = meta.get("aliases", [])
-        tags = meta.get("tags", [])
-        keywords = meta.get("keywords", [])
+    for t in templates:
+        name = t.get("name", "")
+        desc = t.get("description", "")
+        aliases = t.get("aliases", [])
+        tags = t.get("tags", [])
+        keywords = t.get("keywords", [])
 
         score = 0
         if name.lower() == q: score = 100
@@ -551,16 +620,100 @@ def search_templates(query: str, limit: int = 5) -> list:
         if score > 0:
             results.append({
                 "name": name,
-                "filename": f,
+                "filename": t.get("filename", ""),
+                "filetype": t.get("filetype", ""),
                 "description": desc,
                 "aliases": aliases,
                 "tags": tags,
                 "keywords": keywords,
-                "category": meta.get("category", ""),
+                "category": t.get("category", ""),
+                "node_count": t.get("node_count", 0),
                 "match_score": score,
             })
     results.sort(key=lambda x: x["match_score"], reverse=True)
     return results[:limit]
+
+
+@feature(
+    name="export_template_to_file",
+    display_name="导出模板到文件",
+    description="将当前工作流模板导出为 .flow 文件（含元数据），保存到指定路径。支持分类、标签等元数据编辑。",
+    category=F.DEBUG,
+    params=[
+        P("filepath", "str", "导出目标路径（含 .flow 后缀）", example="C:/Users/me/Desktop/my-flow.flow"),
+        P("name", "str", "模板名称", example="我的自动流程"),
+        P("description", "str", "模板描述", required=False, default=""),
+        P("category", "str", "模板分类: app|system|image|web|custom", required=False, default="custom"),
+        P("tags", "str", "标签（英文逗号分隔）", required=False, default=""),
+        P("aliases", "str", "别名（英文逗号分隔）", required=False, default=""),
+        P("flow_json", "str", "可选的完整 FlowScript JSON 字符串。为空时提示前端提供当前脚本。", required=False, default=""),
+    ],
+    returns="dict{success, path, error}",
+)
+def export_template_to_file(filepath: str, name: str = "", description: str = "", category: str = "custom",
+                            tags: str = "", aliases: str = "", flow_json: str = "") -> dict:
+    """导出模板到 .flow 文件。"""
+    try:
+        # If flow_json provided, parse it; otherwise create a minimal shell
+        if flow_json:
+            script = json.loads(flow_json)
+        else:
+            script = {"nodes": [], "edges": [], "meta": {}}
+        if isinstance(script, dict):
+            if "meta" not in script:
+                script["meta"] = {}
+            script["meta"]["name"] = name or os.path.splitext(os.path.basename(filepath))[0]
+            script["meta"]["description"] = description
+            script["meta"]["category"] = category
+            script["meta"]["tags"] = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+            script["meta"]["aliases"] = [a.strip() for a in aliases.split(",") if a.strip()] if aliases else []
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)) or ".", exist_ok=True)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(script, f, ensure_ascii=False, indent=2)
+        return {"success": True, "path": filepath, "error": ""}
+    except Exception as e:
+        return {"success": False, "path": "", "error": str(e)}
+
+
+@feature(
+    name="import_template_from_file",
+    display_name="从文件导入模板",
+    description="从 .flow 文件导入模板到 templates/ 目录。读取文件并复制到 templates/ 下，返回元数据。",
+    category=F.DEBUG,
+    params=[
+        P("filepath", "str", "源文件路径（.flow 格式）", example="C:/Users/me/Desktop/my-flow.flow"),
+        P("copy_to_templates", "boolean", "是否复制到 templates/ 目录", required=False, default=True),
+    ],
+    returns="dict{success, name, description, category, tags, node_count, error}",
+)
+def import_template_from_file(filepath: str, copy_to_templates: bool = True) -> dict:
+    """从 .flow 文件导入模板。"""
+    try:
+        if not os.path.isfile(filepath):
+            return {"success": False, "error": f"文件未找到: {filepath}"}
+        with open(filepath, 'r', encoding='utf-8') as f:
+            script = json.load(f)
+        meta = script.get("meta", {}) if isinstance(script, dict) else {}
+        name = meta.get("name", os.path.splitext(os.path.basename(filepath))[0])
+
+        if copy_to_templates and os.path.isdir(TEMPLATES_DIR):
+            dest = os.path.join(TEMPLATES_DIR, f"{name}.flow")
+            import shutil
+            shutil.copy2(filepath, dest)
+
+        nodes = script.get("nodes", []) if isinstance(script, dict) else []
+        return {
+            "success": True,
+            "name": name,
+            "description": meta.get("description", ""),
+            "category": meta.get("category", ""),
+            "tags": meta.get("tags", []),
+            "aliases": meta.get("aliases", []),
+            "node_count": len(nodes),
+            "error": "",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @feature(

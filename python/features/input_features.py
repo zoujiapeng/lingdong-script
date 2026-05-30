@@ -50,7 +50,7 @@ def _find_target_coords(target: str, region: str = "") -> tuple:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
-    hidden=True,
+    hidden=False,
 )
 def right_click(target: str, region: str = "") -> bool:
     x, y = _find_target_coords(target, region)
@@ -70,7 +70,7 @@ def right_click(target: str, region: str = "") -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "hover"],
-    hidden=True,
+    hidden=False,
 )
 def hover(target: str, duration: float = 0.5) -> bool:
     x, y = _find_target_coords(target)
@@ -96,7 +96,7 @@ def hover(target: str, duration: float = 0.5) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse"],
-    hidden=True,
+    hidden=False,
 )
 def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = "") -> bool:
     if target:
@@ -119,7 +119,7 @@ def mouse_move(x: int = 0, y: int = 0, human_like: bool = True, target: str = ""
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
-    hidden=True,
+    hidden=False,
 )
 def triple_click(target: str) -> bool:
     x, y = _find_target_coords(target)
@@ -139,7 +139,7 @@ def triple_click(target: str) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "text"],
-    hidden=True,
+    hidden=False,
 )
 def select_text(target: str, extend_to_line: bool = False) -> bool:
     x, y = _find_target_coords(target)
@@ -164,10 +164,42 @@ def select_text(target: str, extend_to_line: bool = False) -> bool:
     ],
     returns="bool - 是否成功",
     tags=["mouse", "click"],
-    hidden=True,
+    hidden=False,
 )
 def middle_click(target: str) -> bool:
     x, y = _find_target_coords(target)
     if x == 0 and y == 0:
         return _do("click", button="middle")
     return _do("click", x=x, y=y, button="middle")
+
+
+@feature(
+    name="get_cursor_pos",
+    display_name="获取鼠标位置",
+    description="【鼠标】获取当前鼠标光标在屏幕上的坐标 (x, y) 和所在窗口信息。用于了解鼠标当前位置、验证点击坐标、或保存位置供后续使用",
+    category=F.SYSTEM,
+    params=[],
+    returns="dict{x, y, window_title} - 鼠标位置和所在窗口",
+    tags=["mouse", "cursor"],
+)
+def get_cursor_pos() -> dict:
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        pt = POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        result = {"x": pt.x, "y": pt.y}
+        # Get window under cursor
+        try:
+            import win32gui
+            hwnd = win32gui.WindowFromPoint((pt.x, pt.y))
+            if hwnd:
+                result["window_handle"] = hwnd
+                result["window_title"] = win32gui.GetWindowText(hwnd) or ""
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        return {"error": str(e)}

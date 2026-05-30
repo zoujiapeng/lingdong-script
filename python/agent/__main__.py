@@ -156,18 +156,29 @@ def _run_agent(goal: str, config: dict | None = None,
         _log("info", f"Legacy flags converted: mimo={mimo}, supervise={supervise} → "
                       f"planning={agent_cfg.planning}, protocol={agent_cfg.llm_protocol}")
 
-    # ── Create unified LingdongAgent ──
+    # ── Create unified LingdongAgent (config from agent_config dict) ──
     from agent.agent import LingdongAgent
-    agent = LingdongAgent(
+    agent_kw = dict(
         api_key=cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", ""),
         api_base=cfg.get("api_base") or os.environ.get("OPENAI_API_BASE", "") or os.environ.get("LLM_API_BASE", ""),
         model=cfg.get("model") or os.environ.get("VLM_MODEL", "") or os.environ.get("LLM_MODEL", ""),
-        event_callback=lambda d: _emit(d.pop("type", "log"), d) if callable(_emit) else None,
+        event_callback=lambda d: _emit(d.get("type", "log"), {k: v for k, v in d.items() if k != "type"}) if callable(_emit) else None,
         stop_event=stop_event,
         multimodal=cfg.get("multimodal") == "true",
         auto_learn=cfg.get("auto_learn") == "true",
         omniparser_enabled=cfg.get("omniparser_enabled") == "true",
     )
+    # Inject new config values from AgentConfig (if provided via agent_config dict)
+    if agent_cfg_dict and isinstance(agent_cfg_dict, dict):
+        agent_kw["temperature"] = agent_cfg_dict.get("temperature", 0.1)
+        agent_kw["max_tokens"] = agent_cfg_dict.get("max_tokens", 4096)
+        agent_kw["llm_retries"] = agent_cfg_dict.get("llm_retries", 2)
+        agent_kw["screenshot_quality"] = agent_cfg_dict.get("screenshot_quality", 60)
+        agent_kw["som_enabled"] = agent_cfg_dict.get("som_enabled", True)
+        agent_kw["verify_enabled"] = agent_cfg_dict.get("verify", True)
+        if agent_cfg_dict.get("auto_learn"):
+            agent_kw["auto_learn"] = True
+    agent = LingdongAgent(**agent_kw)
 
     # ── Unified execution ──
     # agent.run(agent_config=...) → _unified_run() → 根据 config 自动选择执行策略

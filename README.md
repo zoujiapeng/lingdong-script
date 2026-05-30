@@ -9,7 +9,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://www.python.org/)
 [![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-2482_✔-success)](https://github.com/zoujiapeng/lingdong-script)
+[![Tests](https://img.shields.io/badge/Tests-2518_✔-success)](https://github.com/zoujiapeng/lingdong-script)
 
 </div>
 
@@ -17,28 +17,50 @@
 
 灵动脚本是一款**可视化桌面自动化流程编辑器**，通过拖拽节点编排流程图来创建自动化脚本。无需编程经验，即可完成屏幕点击、文字输入、OCR 识别、图片检测、进度条监控、条件分支、循环等桌面自动化操作。
 
-**核心理念：一次 AI 生成，永久零 Token 执行。** MCP 只判断"能不能做"，DSL 一次生成后本地批量执行，不消耗任何 API token。
+**核心理念：一次 AI 生成即可永久零 Token 执行，同时也支持像通用 Agent 一样实时操控万物。** 
+流程图模式将 LLM 的推理结晶为可复用的自动化脚本，直接执行模式则让 AI 即时调度 26 元动作 + 196 底层工具实时操作屏幕。
+两者共享同一套 @feature 工具注册表，互不冲突。
 
 ---
 
 ## 架构哲学
 
+### 三模式 Agent 执行
+
+```
+AI Agent (统一入口)
+  │
+  ├─ 模式 1: 生成流程图
+  │   LLM 分析目标 → 生成 DSL → 转为流程图（可视化）
+  │   用户确认后按「执行」按钮运行，零 Token 可重复
+  │
+  ├─ 模式 2: 生成可监督流程图
+  │   LLM 生成 DSL → 转为流程图 → Agent 逐步骤监督执行
+  │   每步：窗口聚焦 → 执行 → OCR 验证 → 失败恢复
+  │   执行完毕可保存为模板复用
+  │
+  └─ 模式 3: 实时直接执行
+       LLM 循环调度 26 元动作 + 196 @feature 工具
+       像通用 Agent 一样实时操作电脑，善于运用项目全部工具
+       元动作自动路由到 UIA/OCR/图像匹配/坐标执行
+```
+
 ### 三执行层
 
 ```
-MCP 层 (Claude Code / AI Agent)
-  │  判断可行性, 生成 DSL
+AI Agent (LLM 驱动)
+  │  26 元动作 + 227 @feature 工具
   ▼
-DSL 层 (批处理执行)
-  │  一次性生成, 本地零 Token 执行
+DSL 批处理 (零 Token)
+  │  一次性生成, 本地执行, 可反复运行
   ▼
 Zero-AI Runtime (引擎内核)
-      242 @feature 工具, 196 MCP 工具, 纯本地
+      246 @feature 工具, 纯本地
 ```
 
 | 层 | 调用方式 | Token 成本 | 用途 |
 |---|---|---|---|
-| **MCP 轮询** | 单步调用 `callFeature` | 高（每步都走 AI） | 判断可行性、生成 DSL |
+| **AI Agent** | LLM 循环 + 196 工具 | 有（可复用流程图降本） | 通用桌面自动化 |
 | **DSL 批处理** | `run_dsl` 一次性执行 | **零 Token** | 执行自动化流程 |
 | **@feature 直调** | 直接调用 Python 工具 | **零 Token** | 确定需要的功能直接调用 |
 
@@ -158,7 +180,8 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **回放控制** — 支持速度调节、循环播放
 
 ### AI Agent（核心特性）
-- **统一执行引擎** — 4 种执行模式折叠为 1 个 `_unified_run()`，通过 `AgentConfig` dataclass 解耦所有配置轴，设置面板可视化控制
+- **统一执行引擎** — 3 种执行策略通过 `AgentConfig` dataclass 统一分发（text_protocol 文本协议 / function_calling 函数调用 / pre_plan 预生成计划），设置面板可视化控制
+- **双工具集暴露** — LLM 同时可见 26 个元动作（高层语义动作，推荐优先使用）+ 196 个 @feature 底层工具（按访问模式分组），根据场景灵活选择
 - **Agent 配置项**（10 项可调，实时生效）：
 
   | 配置 | 选项 | 说明 |
@@ -181,11 +204,29 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **`resolve_auto()` 智能适配** — 多模态和纯文本模型各自使用最优配置组合
 - **向后兼容** — 旧版 IPC 协议（mimo/supervise 布尔标志）自动转换
 - **自主规划** — AI 分析目标，自动生成执行计划（流程图可视化展示）
-- **监督执行** — Agent stay alive 逐步执行，完整流水线：SoM 标号 → UIA 定位 → 窗口感知 OCR → UIA 预聚焦 → 视觉定位 → 防重复启动 → 窗口焦点安全 → 执行+重试 → 错误策略决策 → 对话框自动处理 → 屏幕稳定等待 → 失败诊断截图
+- **元动作系统** — 26 个高层语义动作（click / type_text / manage_window / browser_do 等），每个自动在内部选择最佳执行路径（UIA 无障碍树 → OCR 文字识别 → 图像模板匹配 → 直接坐标），LLM 只需描述"做什么"无需关心"怎么做"
+- **双工具集** — LLM 同时可见 26 元动作（推荐优先）+ 196 个 @feature 底层工具（按 7 种访问模式分组）。`_build_tools_text()` 生成约 25K 字符提示词，元动作不够用时 LLM 直接调用底层 @feature 工具
+- **监督执行** — Agent stay alive 逐步执行，工具按类型走不同路径：元动作 → `meta_execute()`（参数校验+类型强制），其他 → `supervisor.execute()`（GUI 动作前窗口焦点安全 → UIA 定位 → 窗口感知 OCR → UIA 预聚焦 → 执行+重试 → 对话框自动处理 → 屏幕稳定等待 → 截图反馈）
 - **OCR 验证** — 执行后自动 OCR 验证结果，确保操作生效
 - **失败恢复** — LLM 决策恢复策略（重试/替代方案/跳过/终止）
 - **自然语言生成** — 用中文描述需求，AI 自动生成 DSL 并转为流程图
 - **多种 LLM** — 支持 DeepSeek、MIMO、OpenAI 等兼容接口
+
+### 工具访问路径选择器（Tool Path Selector）
+
+Agent 不再平铺 196 个工具，而是按访问模式组织，LLM 根据场景智能选择最优路径：
+
+| 优先级 | 模式 | 成本 | 适用场景 |
+|--------|------|------|----------|
+| **L0** | 直接 API | 最低 | 文件操作、剪贴板、进程管理、WiFi 控制 |
+| **L1** | 浏览器 CDP | 低 | 浏览器内自动化（导航、点击、填表） |
+| **L2** | Windows UIA | 中 | 窗口控件操作（按钮、菜单、列表） |
+| **L3** | 视觉 OCR | 高 | 文字定位、屏幕文字读取 |
+| **L4** | SoM 标号 | 高 | 元素检测 + 编号标注 |
+| **L5** | 宏录制/回放 | 中 | 录制回放、视觉宏 |
+| **L6** | DSL 脚本 | 高 | 可复用流程图生成 |
+
+`classify_tool()` 通过规则将每个 @feature 工具分配到对应模式，`select_best_path()` 从目标文本自动推荐路径，`build_path_prompt()` 约 29K 字符。
 
 ### 语音对话
 - **内置语音服务器** — 基于 WebSocket 的实时语音识别与合成
@@ -230,7 +271,7 @@ END
 DSL ↔ FlowScript 双向无损转换，支持往返编辑。
 
 ### @feature 工具注册表
-- **242 注册工具**（196 活跃 MCP 工具，43 内部隐藏，3 废弃） — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP/DSL 接口
+- **246 注册工具**（227 活跃 MCP 工具，16 内部隐藏，3 废弃） — 通过 `@feature` 装饰器声明，自动生成 MCP/CLI/HTTP/DSL 接口
 - **懒加载** — 首次访问时才按需加载模块，冷启动 20ms
 - **MCP 协议支持** — 同时提供 Python 和 TypeScript 双 MCP 服务器
 - **HTTP API 桥接** — `127.0.0.1:7880` 提供 55+ RESTful 端点
@@ -352,7 +393,13 @@ src/
 python/
 ├── agent/          # AI Agent (规划/监督执行/OCR验证/失败恢复)
 │   ├── __main__.py #   IPC 入口 (stdin/stdout JSON 协议)
-│   ├── langgraph_agent.py # LangGraph 监督执行 + 视觉定位集成
+│   ├── agent.py    #   LingdongAgent 统一入口 + text_protocol 循环
+│   ├── meta_actions.py # 26 个元动作（LLM 高层接口）+ 动作注册表
+│   ├── supervisor.py   # 监督执行层（窗口焦点/OCR/重试/屏幕稳定）
+│   ├── tool_path_selector.py # 工具访问模式分类 + 路径选择器
+│   ├── config.py    #   AgentConfig dataclass + resolve_auto()
+│   ├── langgraph_agent.py # ⚠️ 已废弃，保留为向后兼容
+│   ├── planner.py   #   Plan DAG 分解 + PlanExecutor
 │   ├── visual_locator.py # 视觉定位器 (经验库→OpenCV→VLM)
 │   ├── experience_db.py  # 经验数据库 (模板裁剪小图存储)
 │   ├── dialog_handler.py # win32 API 对话框自动化处理
@@ -366,8 +413,10 @@ python/
 │   ├── triggers.py #   TriggerEngine (6 种 watcher)
 │   ├── crystallizer.py # 结晶化 (执行成功→模板)
 │   └── scheduler_daemon.py # APScheduler 守护进程
-├── features/       # @feature 注册表 (247 工具, 懒加载)
-│   └── camera_features.py #   摄像头捕获/录制功能
+├── features/       # @feature 注册表 (246 工具, 懒加载, 43 模块)
+│   ├── camera_features.py #   摄像头捕获/录制功能
+│   ├── notification_features.py # Windows 通知管理
+│   └── ... 共 43 模块
 ├── providers/      # VLM Provider 抽象 (GPT-4o-mini/Local)
 ├── mcp/            # Python MCP 服务器
 ├── macros/         # 宏录制文件保存
@@ -392,19 +441,21 @@ templates/          # 工作流模板 (.flow) + skill_tree.json
 **Lingdong Script** is a visual desktop automation flow editor. The core philosophy: **one AI generation, zero-token execution forever.**
 
 Three execution layers:
-1. **MCP Layer** (Claude Code / AI Agent) — feasibility check, DSL generation
+1. **AI Agent** (meta-actions + 227 @feature tools, LLM-driven)
 2. **DSL Layer** (batch execution) — one-shot generation, local zero-token execution
-3. **Zero-AI Runtime** (engine core) — 242 @feature tools, 196 MCP tools, fully local
+3. **@Feature Runtime** (246 registered tools, fully local)
 
 ### Key Features
 
-- **AI Agent** — Goal-oriented planning with supervised execution (SoM → UIA → window-aware OCR → UIA pre-focus → visual locator → window focus → retry → error strategy → dialog handler → screen stabilize → failure diagnosis), **10 configurable parameters** including window-aware OCR, UIA pre-focus, and **Python scripting mode** (Hermes-style via `run_python_script`)
-- **AgentConfig System** — Unified dataclass replacing 4 legacy modes; `resolve_auto()` auto-tunes for multimodal vs text-only models; full backward compatibility
+- **AI Agent** — Unified execution with 3 strategies (text_protocol / function_calling / pre_plan) via `AgentConfig`. **Dual toolset**: 26 meta-actions (high-level semantic actions) + 227 @feature tools. Supervised execution pipeline: SoM → UIA → window-aware OCR → UIA pre-focus → visual locator → window focus → retry → error strategy → dialog handler → screen stabilize → failure diagnosis. **10 configurable parameters** including window-aware OCR, UIA pre-focus, and **Python scripting mode**
+- **Meta-Action System** — 26 LLM-facing high-level actions (click, type_text, manage_window, browser_do, etc.), each auto-routing through UIA/OCR/image-matching/coordinate execution. Flow-chart mode adds generate_flow/execute_flow for reusable script crystallization
+- **AgentConfig** — Unified dataclass replacing 3 legacy modes; `resolve_auto()` auto-tunes for multimodal vs text-only models; full backward compatibility
+- **Tool Path Selector** — 196 @feature tools grouped into 7 access patterns (DIRECT_API → BROWSER_CDP → WINDOWS_UIA → VISUAL_OCR → VISUAL_SOM → MACRO → DSL_GEN), priority-ordered by cost/reliability
 - **Voice Conversation** — Built-in WebSocket voice server with 5 STT engines (whisper-tiny/base/small/large-v3-turbo/paraformer), hot-switchable, TTS support
 - **Visual Flow Editor** — 55 native node types, hierarchical sub-operation structure, 3 view modes
 - **Crystallization** — Auto-generate reusable templates from successful DSL executions
 - **Trigger System** — 6 trigger sources (timer/file/process/window/clipboard/network) with TriggerBar UI
-- **@Feature Registry** — 242 registered tools (196 active MCP), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL generation
+- **@Feature Registry** — 246 registered tools (227 active MCP), lazy-loaded (20ms cold start), auto MCP/CLI/HTTP/DSL generation
 - **Macro Recording** — F6 hotkey, smart filtering, visual template extraction with OCR auto-naming
 - **Camera Nodes** — camera_capture, camera_record, camera_list, camera_detect_motion (5 tools)
 - **HTTP API Bridge** — 55+ endpoints on `127.0.0.1:7880` for remote control
@@ -432,7 +483,7 @@ npx electron-builder --win portable  # Portable executable
 
 ### Tech Stack
 
-React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.11 · 242 @feature tools · 196 MCP tools · APScheduler
+React 18 · TypeScript · Zustand + immer · React Flow · Vite 5 (code splitting) · Electron 31 · Python 3.11 · 246 @feature tools (227 active MCP) · 26 meta-actions · APScheduler
 
 ---
 

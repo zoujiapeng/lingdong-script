@@ -2909,6 +2909,357 @@ textarea.form-input {
 }
 
 /* ============================================================
+   AGENT CONFIG UI (accordion sections inside config node)
+   ============================================================ */
+
+.config-node-body {
+  padding: 0 !important;
+}
+
+.agent-config-section {
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.agent-config-section:last-child {
+  border-bottom: none;
+}
+
+/* ── Section Header ── */
+
+.agent-config-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition-fast);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.agent-config-section-header:hover {
+  background: var(--accent-light);
+}
+
+.agent-config-section-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.agent-config-section-title {
+  flex: 1;
+  color: var(--text-primary);
+}
+
+.agent-config-section-desc {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-right: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.agent-config-section-arrow {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.agent-config-section-arrow.open {
+  transform: rotate(90deg);
+}
+
+/* ── Section Body ── */
+
+.agent-config-section-body {
+  padding: 4px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: fadeIn 0.12s ease;
+}
+
+/* ── Field Row ── */
+
+.agent-config-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+}
+
+.agent-config-field.full-width {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.agent-config-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-config-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-config-field-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.agent-config-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-config-field-desc {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding: 0 2px;
+}
+
+/* ── Select ── */
+
+.agent-config-select {
+  padding: 4px 24px 4px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath fill='%2394a3b8' d='M5 7L1 3h8z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  transition: border-color var(--transition-fast);
+  max-width: 160px;
+  min-width: 90px;
+}
+
+.agent-config-select:focus {
+  border-color: var(--accent);
+}
+
+.agent-config-select:hover {
+  border-color: var(--border-hover);
+}
+
+/* ── Resolved indicator ── */
+
+.agent-config-resolved {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 1px 6px;
+  background: rgba(99, 102, 241, 0.06);
+  border-radius: 4px;
+  font-weight: 400;
+}
+
+/* ── Badge ── */
+
+.agent-config-badge {
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.agent-config-badge.danger {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--error);
+}
+
+/* ── Slider ── */
+
+.agent-config-slider-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 36px;
+  text-align: right;
+}
+
+.slider-control {
+  min-width: 100px;
+}
+
+.agent-config-slider {
+  width: 100%;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  appearance: auto;
+}
+
+/* ── Input ── */
+
+.agent-config-input {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--transition-fast);
+  min-width: 0;
+}
+
+.agent-config-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12);
+}
+
+.agent-config-input::placeholder {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ── Buttons ── */
+
+.agent-config-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.agent-config-icon-btn:hover {
+  background: var(--accent-light);
+  color: var(--accent);
+  border-color: var(--border-hover);
+}
+
+.agent-config-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.agent-config-btn:hover {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Segmented Control ── */
+
+.agent-config-segment {
+  display: flex;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.agent-config-segment-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 500;
+  border: none;
+  border-right: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.agent-config-segment-btn:last-child {
+  border-right: none;
+}
+
+.agent-config-segment-btn:hover {
+  background: rgba(99, 102, 241, 0.06);
+  color: var(--text-primary);
+}
+
+.agent-config-segment-btn.active {
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+
+/* ── Node-type overrides ── */
+
+.goal-node .agent-flow-node-header {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.06), rgba(139, 92, 246, 0.04));
+}
+
+.plan-node .agent-flow-node-header {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.06), rgba(99, 102, 241, 0.04));
+}
+
+.exec-node .agent-flow-node-header {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06), rgba(16, 185, 129, 0.04));
+}
+
+.result-node .agent-flow-node-header {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.06), rgba(139, 92, 246, 0.04));
+}
+
+.history-node .agent-flow-node-header {
+  background: var(--bg-secondary);
+}
+
+/* ── Config toggle header arrow rotation ── */
+
+.agent-flow-node-header.config-toggle .chevron-right {
+  transition: transform var(--transition-fast);
+}
+
+.agent-flow-node-header.config-toggle .chevron-right.open {
+  transform: rotate(90deg);
+}
+
+/* ============================================================
    TRIGGER BAR
    ============================================================ */
 .trigger-bar {
