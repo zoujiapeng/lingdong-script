@@ -19,6 +19,8 @@ class TestAgentConfig:
         assert cfg.verify is True
         assert cfg.fast_mode is False
         assert cfg.image_dedup is True
+        assert cfg.chat_mode is False
+        assert cfg.visual_strategy == "auto"
 
     def test_resolve_auto_multimodal(self):
         """Multimodal model (MIMO) → text + direct + per_step + minimal"""
@@ -61,11 +63,77 @@ class TestAgentConfig:
         cfg.resolve_auto("deepseek-chat")
         assert cfg.image_dedup is True
 
+    def test_chat_mode_default_false(self):
+        """chat_mode should default to False (backward compatible)"""
+        cfg = AgentConfig()
+        assert cfg.chat_mode is False
+        cfg2 = AgentConfig(chat_mode=True)
+        assert cfg2.chat_mode is True
+
+    def test_chat_mode_roundtrip(self):
+        """chat_mode survives to_dict/from_dict"""
+        cfg = AgentConfig(chat_mode=True)
+        d = cfg.to_dict()
+        assert d.get("chat_mode") is True
+        restored = AgentConfig.from_dict(d)
+        assert restored.chat_mode is True
+
+    def test_visual_strategy_default_auto(self):
+        """visual_strategy defaults to auto"""
+        cfg = AgentConfig()
+        assert cfg.visual_strategy == "auto"
+
+    def test_visual_strategy_roundtrip(self):
+        """visual_strategy survives to_dict/from_dict"""
+        for strategy in ("auto", "som", "ocr_llm", "blind_guess", "cli_path"):
+            cfg = AgentConfig(visual_strategy=strategy)
+            d = cfg.to_dict()
+            assert d.get("visual_strategy") == strategy
+            restored = AgentConfig.from_dict(d)
+            assert restored.visual_strategy == strategy
+
+    def test_visual_strategy_auto_multimodal_direct(self):
+        """auto + multimodal → resolved vision_mode = direct"""
+        cfg = AgentConfig(multimodal="true")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "direct"
+
+    def test_visual_strategy_auto_text_only_som(self):
+        """auto + text-only → resolved vision_mode = som"""
+        cfg = AgentConfig(multimodal="false")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "som"
+
+    def test_visual_strategy_ocr_llm(self):
+        """ocr_llm strategy → resolved vision_mode = ocr_llm"""
+        cfg = AgentConfig(visual_strategy="ocr_llm", multimodal="true")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "ocr_llm"
+
+    def test_visual_strategy_blind_guess(self):
+        """blind_guess → resolved vision_mode = direct"""
+        cfg = AgentConfig(visual_strategy="blind_guess")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "direct"
+
+    def test_visual_strategy_cli_path(self):
+        """cli_path → resolved vision_mode = som"""
+        cfg = AgentConfig(visual_strategy="cli_path")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "som"
+
+    def test_visual_strategy_som(self):
+        """som strategy → resolved vision_mode = som"""
+        cfg = AgentConfig(visual_strategy="som")
+        cfg.resolve_auto("deepseek-chat")
+        assert cfg._resolved_vision_mode == "som"
+
     def test_to_dict_from_dict_roundtrip(self):
         original = AgentConfig(
             llm_protocol="text", vision_mode="direct",
             planning="per_step", screen_context="minimal",
             on_error="skip", verify=False, fast_mode=True, image_dedup=False,
+            chat_mode=True, visual_strategy="ocr_llm",
         )
         d = original.to_dict()
         restored = AgentConfig.from_dict(d)
@@ -77,6 +145,8 @@ class TestAgentConfig:
         assert restored.verify is False
         assert restored.fast_mode is True
         assert restored.image_dedup is False
+        assert restored.chat_mode is True
+        assert restored.visual_strategy == "ocr_llm"
 
     def test_from_dict_partial(self):
         cfg = AgentConfig.from_dict({"llm_protocol": "text"})

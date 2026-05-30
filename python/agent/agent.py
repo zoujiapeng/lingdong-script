@@ -24,6 +24,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
+from queue import Queue, Empty
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("agent.lingdong")
@@ -177,6 +178,23 @@ SCRIPTED_MODE_INSTRUCTIONS = """
 简单操作仍可用 native 工具（click_target, type_text 等），复杂流程用脚本。
 """
 
+CHAT_MODE_INSTRUCTIONS = """
+[对话模式已开启]
+
+你可以边执行任务边与用户对话。当用户发来消息时：
+- 如果是询问状态 → 简洁回答当前进展
+- 如果是指引反馈 → 调整执行策略后继续
+- 如果是新任务 → 完成当前步骤后执行新任务
+
+对话模式下，你可以用自然语言回复用户，不需要每次都用工具。
+用户消息在「执行结果」之后出现。按需处理即可。
+
+回复格式:
+- 需要执行操作时 → 照常用「工具: 工具名」格式
+- 只是想聊天 → 直接回复文字（不带工具: 前缀）
+- 想展示截图 → 用 screenshot() 工具
+"""
+
 # ── 工具描述生成 (from MimoAgent) ─────────────────────────────
 
 _USE_FLOW_CHART_MODE = False  # Set True to use full tool prompt + flow chart
@@ -285,7 +303,8 @@ class LingdongAgent:
                  llm_retries: int = 2,
                  screenshot_quality: int = 60,
                  som_enabled: bool = True,
-                 verify_enabled: bool = True):
+                 verify_enabled: bool = True,
+                 guidance_queue: Optional[Queue] = None):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         self.api_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
                          or os.environ.get("LLM_API_BASE", "")
@@ -295,6 +314,8 @@ class LingdongAgent:
         self.auto_learn = auto_learn
         self._event_cb = event_callback
         self._stop_event = stop_event or threading.Event()
+        self._guidance_queue: Optional[Queue] = guidance_queue
+        self._chat_mode: bool = False
         self._tools_text: str = ""
         self._system_prompt: str = ""
         self._registry_loaded = False
@@ -699,6 +720,155 @@ class LingdongAgent:
         return "tool", tool_name, args
 
     # ══════════════════════════════════════════════════════════
+    #  对话模式（聊天 + 执行 并行）
+    # ══════════════════════════════════════════════════════════
+
+    def _process_chat_messages(self, messages: list) -> bool:
+        """检查 guidance_queue，将用户消息注入消息历史。
+
+        返回 True 表示有新的用户消息被处理。
+        """
+        if self._guidance_queue is None:
+            return False
+        processed = False
+        try:
+            while True:
+                msg = self._guidance_queue.get_nowait()
+                text = (msg.get("text", msg) if isinstance(msg, dict) else str(msg)).strip()
+                if text:
+                    messages.append({
+                        "role": "user",
+                        "content": f"[用户消息] {text}\n\n请根据这条消息回应：如果是聊天就自然回复，如果是指引就调整策略，如果是新任务就在当前工作完成后执行。"
+                    })
+                    self._emit("log", {"level": "info", "message": f"收到用户消息: {text[:100]}"})
+                    processed = True
+        except Empty:
+            pass
+        return processed
+
+    def _emit_chat_response(self, text: str):
+        """发送 AI 聊天响应事件到前端。"""
+        self._emit("log", {"level": "info", "message": f"AI回复: {text[:200]}"})
+        if self._event_cb:
+            try:
+                self._event_cb({"type": "agent_chat_response", "text": text})
+            except Exception:
+                pass
+
+    # ══════════════════════════════════════════════════════════
+    #  视觉策略（方案3: OCR → LLM → 点击）
+    # ══════════════════════════════════════════════════════════
+
+    def _visual_strategy_ocr_llm(self, tool_name: str, args: dict) -> dict:
+        """方案3: OCR截取所有文字 → LLM选择最匹配目标 → 定位坐标 → 点击。
+
+        适用于 click/right_click/hover/mouse_move 等定位操作。
+        当 UIA 无法精确匹配时，用 LLM 从 OCR 文字列表中做语义选择。
+        """
+        if tool_name not in ("click_target", "right_click", "hover", "mouse_move"):
+            return args
+
+        target = args.get("target", "") or args.get("from_target", "")
+        if not target or not isinstance(target, str):
+            return args
+        # 跳过已有坐标
+        if re.match(r'^-?\d+\s*,\s*-?\d+$', target.strip()):
+            return args
+
+        # 1. OCR 获取屏幕上所有文字
+        try:
+            from features.registry import registry
+            ocr_r = registry.execute("ocr_extract_all")
+            raw = ocr_r.get("result", ocr_r)
+            if isinstance(raw, dict):
+                raw = raw.get("result", raw.get("items", raw.get("data", [])))
+            items = raw if isinstance(raw, list) else []
+        except Exception:
+            return args
+
+        if not items:
+            return args
+
+        # 构建文字列表
+        text_entries = []
+        for item in items:
+            text = (item.get("text", "") or "").strip()[:60]
+            if not text:
+                continue
+            box = item.get("box", item.get("bbox", item.get("bounding_box", item)))
+            x, y = 0, 0
+            if isinstance(box, dict):
+                x = int(box.get("x", box.get("left", 0)))
+                y = int(box.get("y", box.get("top", 0)))
+            elif isinstance(box, (list, tuple)) and len(box) >= 2:
+                x, y = int(box[0]), int(box[1])
+            text_entries.append({"text": text, "x": x, "y": y})
+
+        if not text_entries:
+            return args
+
+        # 2. 如果文字数量少（≤5），直接尝试精确匹配
+        if len(text_entries) <= 5:
+            target_lower = target.lower().strip().strip("'\"")
+            for entry in text_entries:
+                if target_lower in entry["text"].lower():
+                    args = dict(args)
+                    args["target"] = f"{entry['x']},{entry['y']}"
+                    self._emit("log", {"level": "info", "message": f"OCR精确匹配: 「{target}」→ ({entry['x']},{entry['y']})"})
+                    return args
+            # 没有精确匹配，走 LLM 选择
+            if not self.api_key:
+                return args
+
+        # 3. 文字较多 → 调用 LLM 做语义选择
+        text_list = "\n".join(f"{i+1}. 「{e['text']}」" for i, e in enumerate(text_entries))
+        prompt = (
+            f"屏幕上的文字列表:\n{text_list}\n\n"
+            f"用户想点击的目标: 「{target}」\n"
+            f"请从上述列表中选出语义最匹配的一个，只回复编号（数字），不要解释。"
+            f"如果没有匹配的回复 0。"
+        )
+
+        try:
+            chat_messages = [
+                {"role": "system", "content": "你是一个文字匹配助手。从文字列表中选择与目标最匹配的项，只回复数字编号。"},
+                {"role": "user", "content": prompt},
+            ]
+            raw = self._call_llm(chat_messages, max_retries=0)
+            if raw:
+                reply = raw["choices"][0]["message"].get("content", "").strip()
+                match = re.search(r'\d+', reply)
+                if match:
+                    idx = int(match.group()) - 1
+                    if 0 <= idx < len(text_entries):
+                        matched = text_entries[idx]
+                        args = dict(args)
+                        args["target"] = f"{matched['x']},{matched['y']}"
+                        self._emit("log", {
+                            "level": "info",
+                            "message": f"OCR→LLM选择: 「{target}」→ 「{matched['text']}」({matched['x']},{matched['y']})"
+                        })
+                        return args
+        except Exception as exc:
+            logger.debug("LLM OCR selection failed: %s", exc)
+
+        return args
+
+    def _apply_visual_strategy(self, tool_name: str, args: dict, strategy: str) -> dict:
+        """根据当前视觉策略修改工具参数。
+
+        策略:
+        - "ocr_llm": 方案3, OCR→LLM→点击
+        - "cli_path": 方案1, 优先尝试CLI等价操作（在supervisor中处理）
+        - 其他: 不修改，走原有SoM/UIA路径
+        """
+        if strategy == "ocr_llm":
+            return self._visual_strategy_ocr_llm(tool_name, args)
+        # cli_path 策略在 supervisor 执行时处理（检查是否有CLI等价命令）
+        # blind_guess 和 som 走原有路径
+        return args
+
+    # ══════════════════════════════════════════════════════════
     #  文本协议模式 — 核心循环
     # ══════════════════════════════════════════════════════════
 
@@ -720,6 +890,8 @@ class LingdongAgent:
                 "screenshot_quality": agent_config.screenshot_quality,
                 "sliding_window_size": agent_config.sliding_window_size,
                 "verify": agent_config.verify,
+                "chat_mode": agent_config.chat_mode,
+                "visual_strategy": agent_config.visual_strategy,
             }
         multimodal = _is_multimodal_model(self.model)
         return {
@@ -802,12 +974,19 @@ class LingdongAgent:
             time.sleep(1.0)
         return messages, last_b64_hash
 
-    def run_text_protocol(self, goal: str, _agent_config: Optional[AgentConfig] = None) -> dict:
-        """文本协议模式：循环 调用 LLM → 解析 → 监督执行 → 截图。"""
+    def run_text_protocol(self, goal: str, _agent_config: Optional[AgentConfig] = None,
+                           guidance_queue: Optional[Queue] = None) -> dict:
+        """文本协议模式：循环 调用 LLM → 解析 → 监督执行 → 截图。
+
+        guidance_queue: 对话模式，从中读取用户消息注入对话。
+            当 chat_mode=True 时，Agent 边执行边聊天，接收实时反馈/新任务。
+        """
         self._ensure_registry()
+        self._guidance_queue = guidance_queue
         cfg = self._resolve_text_protocol_config(_agent_config)
         multimodal = cfg["multimodal"]
         vision_mode = cfg["vision_mode"]
+        visual_strategy = cfg.get("visual_strategy", "auto")
 
         if multimodal:
             self._emit("log", {
@@ -836,6 +1015,13 @@ class LingdongAgent:
                 self._emit("log", {"level": "info", "message": f"路径建议: {suggested.label_cn} (L{suggested.value})"})
         except Exception:
             pass
+
+        # ── 对话模式: 注入聊天指令到系统提示词 ──
+        if cfg.get("chat_mode"):
+            self._chat_mode = True
+            current_content = messages[0]["content"]
+            messages[0] = {"role": "system", "content": current_content + CHAT_MODE_INSTRUCTIONS}
+            self._emit("log", {"level": "info", "message": "对话模式已开启 — 可边执行边聊天"})
 
         # ── 首次截图 + 第 1 条用户消息 ──
         raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
@@ -896,6 +1082,10 @@ class LingdongAgent:
                 self._emit("log", {"level": "info", "message": "停止请求，终止循环"})
                 break
 
+            # ── 对话模式: 执行前检查用户消息 ──
+            if cfg.get("chat_mode"):
+                self._process_chat_messages(messages)
+
             # ── LLM 调用 ──
             raw = self._call_llm(messages)
             if raw is None:
@@ -940,6 +1130,15 @@ class LingdongAgent:
                 }
 
             if action == "error":
+                # ── 对话模式: LLM 的纯文本回复当作聊天响应 ──
+                chat_mode_on = cfg.get("chat_mode", False)
+                if chat_mode_on and len(content) > 20:
+                    self._emit_chat_response(content[:500])
+                    messages.append({"role": "assistant", "content": content})
+                    # 检查是否有新的用户消息
+                    self._process_chat_messages(messages)
+                    continue
+
                 self._emit("log", {"level": "warn",
                                    "message": f"无法解析: {args.get('raw', content)[:200]}"})
                 messages.append({
@@ -947,6 +1146,13 @@ class LingdongAgent:
                     "content": "格式错误。请用:\n思考: ...\n工具: 工具名\n参数:\n  参数1: 值1\n或任务完成时用: 总结: ..."
                 })
                 continue
+
+            # ── 视觉策略预处理（在工具执行前修改参数）──
+            if visual_strategy and visual_strategy not in ("auto",):
+                try:
+                    args = self._apply_visual_strategy(name, args, visual_strategy)
+                except Exception as e:
+                    logger.debug("Visual strategy %s error: %s", visual_strategy, e)
 
             # ── 执行工具 ──
             sn = len(steps) + 1
@@ -1796,7 +2002,9 @@ PARAMS: {{"x": 960, "y": 540}}
             f"som={config.som_enabled}, "
             f"temp={config.temperature}, "
             f"retries={config.llm_retries}, "
-            f"quality={config.screenshot_quality}"})
+            f"quality={config.screenshot_quality}, "
+            f"chat_mode={config.chat_mode}, "
+            f"visual={config.visual_strategy}"})
 
         # ── Computer Use protocol (Claude API with computer_use beta) ──
         if config._resolved_llm_protocol == "computer_use":
@@ -1808,12 +2016,14 @@ PARAMS: {{"x": 960, "y": 540}}
 
         elif config._resolved_planning == "per_step":
             if config._resolved_llm_protocol == "text":
-                return self.run_text_protocol(goal, _agent_config=config)
+                return self.run_text_protocol(goal, _agent_config=config,
+                                               guidance_queue=self._guidance_queue)
             elif config._resolved_llm_protocol == "function_calling":
                 return self._run_per_step_function_calling(goal, config)
 
         # Fallback
-        return self.run_text_protocol(goal, _agent_config=config)
+        return self.run_text_protocol(goal, _agent_config=config,
+                                       guidance_queue=self._guidance_queue)
 
     def _run_pre_plan(self, goal: str, steps: Optional[list],
                       config: AgentConfig) -> dict:

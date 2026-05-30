@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('agent:stop'),
   agentGuidance: (text: string) =>
     ipcRenderer.invoke('agent:guidance', text),
+  agentChat: (text: string) =>
+    ipcRenderer.invoke('agent:chat', text),
   agentStatus: () =>
     ipcRenderer.invoke('agent:status'),
 
