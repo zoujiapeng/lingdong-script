@@ -120,12 +120,25 @@ def _uia_available() -> bool:
         return False
 
 
+def _ensure_com():
+    """确保当前线程 COM 已初始化（uiautomation 需要）。"""
+    try:
+        import pythoncom
+        pythoncom.CoInitializeEx(0)
+    except Exception:
+        pass
+
+
 def _uia_get_buttons(hwnd: int) -> list[dict]:
     """使用 uiautomation 获取窗口内的 ButtonControl 列表。
 
     能检测到 DirectUI 渲染的按钮（win32 Button class 找不到的）。
     """
     import uiautomation as uia
+
+    # 确保 COM 已初始化（子线程中调用此函数需要）
+    _ensure_com()
+
     buttons = []
 
     def _search(ctrl, depth=0):
@@ -190,6 +203,7 @@ def _uia_click_button(btn_info: dict) -> bool:
 def _uia_get_window_title(hwnd: int) -> str:
     """获取 UIA 窗口标题（对某些 DirectUI 窗口比 win32 更准确）。"""
     import uiautomation as uia
+    _ensure_com()
     try:
         root = uia.GetRootControl()
         target = _uia_find_window_by_hwnd(root, hwnd)
@@ -209,6 +223,7 @@ def _uia_has_only_panes(hwnd: int) -> Optional[bool]:
         None — 无法在 UIA 树中找到该窗口
     """
     import uiautomation as uia
+    _ensure_com()
     found_button = False
     found_edit = False
     found_combo = False

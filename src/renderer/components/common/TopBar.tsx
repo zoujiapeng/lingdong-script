@@ -6,7 +6,7 @@ import {
 import { useStore, loadCustomTemplates, saveCustomTemplates, loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut } from '../../store';
 import { MacroPanel } from './MacroPanel';
 import { LearnedTargetPanel } from './LearnedTargetPanel';
-import { TemplateMarketDialog } from './TemplateMarketDialog';
+import { TemplateBrowser } from './TemplateBrowser';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
@@ -602,7 +602,7 @@ export const TopBar = React.memo(function TopBar() {
       <LearnedTargetPanel />
 
       {/* ── 模板市场对话框 ── */}
-      {marketOpen && <TemplateMarketDialog onClose={() => setMarketOpen(false)} />}
+      {marketOpen && <TemplateBrowser onClose={() => setMarketOpen(false)} />}
     </div>
   );
 });

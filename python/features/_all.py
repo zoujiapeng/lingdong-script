@@ -47,5 +47,6 @@ _FEATURE_MODULES = [
     "features.aggregate_features",
     "features.test_flow_features",
     "features.camera_features",
+    "features.notification_features",
 ]
 registry.set_lazy_modules(_FEATURE_MODULES)

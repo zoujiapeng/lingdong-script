@@ -85,7 +85,7 @@ class OmniParserClient:
             if self._available:
                 return True
 
-            # Cooldown + retry limit inside lock to avoid races
+            # Cooldown + retry limit
             now = time.time()
             if now < self._start_cooldown_until:
                 return False
@@ -99,7 +99,7 @@ class OmniParserClient:
                     self._available = True
                     return True
 
-            # Quick import check — catch missing/too-old transformers
+            # Quick import check
             try:
                 from transformers import AutoProcessor, AutoModelForCausalLM
             except Exception as exc:
@@ -143,33 +143,36 @@ class OmniParserClient:
                 )
             except Exception as exc:
                 logger.warning("Failed to start OmniParser server: %s", exc)
-                self._start_cooldown_until = time.time() + 30  # backoff 30s
+                self._start_cooldown_until = time.time() + 30
                 return False
 
-            # Wait for server to be ready
-            deadline = time.time() + SERVER_START_TIMEOUT
-            while time.time() < deadline:
-                if self._process.poll() is not None:
-                    logger.warning("OmniParser server exited prematurely (code %d)", self._process.returncode)
+        # ── Wait for server (lock released — won't block parse()) ──
+        deadline = time.time() + SERVER_START_TIMEOUT
+        while time.time() < deadline:
+            if self._process.poll() is not None:
+                logger.warning("OmniParser server exited prematurely (code %d)", self._process.returncode)
+                with self._lock:
                     self._process = None
                     self._start_cooldown_until = time.time() + 30
-                    return False
-                if self._check_server():
+                return False
+            if self._check_server():
+                with self._lock:
                     self._available = True
-                    logger.info("OmniParser server ready on port %d", self.port)
-                    return True
-                time.sleep(HEALTH_CHECK_INTERVAL)
+                logger.info("OmniParser server ready on port %d", self.port)
+                return True
+            time.sleep(HEALTH_CHECK_INTERVAL)
 
-            logger.warning("OmniParser server failed to start within %ds", SERVER_START_TIMEOUT)
-            try:
-                self._process.kill()
-                self._process.wait(timeout=3)
-            except Exception:
-                pass
+        logger.warning("OmniParser server failed to start within %ds", SERVER_START_TIMEOUT)
+        try:
+            self._process.kill()
+            self._process.wait(timeout=3)
+        except Exception:
+            pass
+        with self._lock:
             self._process = None
             self._available = False
-            self._start_cooldown_until = time.time() + 60  # 1min cooldown before retry
-            return False
+            self._start_cooldown_until = time.time() + 60
+        return False
 
     def stop(self):
         """Stop the OmniParser server."""

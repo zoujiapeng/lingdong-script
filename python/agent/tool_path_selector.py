@@ -164,6 +164,198 @@ def classify_tool(tool_name: str, category: str = "", description: str = "") -> 
     return AccessPattern.DIRECT_API
 
 
+# ── 从 agent 提示词中隐藏的工具（调试/内部/开发用）──
+_AGENT_HIDDEN = frozenset({
+    "debug_generate_test_flow", "debug_get_logs", "debug_list_features",
+    "debug_run_tests", "debug_system_info", "debug_validate_dsl",
+    "exec_delete_checkpoint", "exec_get_checkpoint", "exec_list_checkpoints",
+    "exec_telemetry_stats", "exec_vault_get", "exec_vault_list", "exec_vault_set",
+    "crystallized_list", "export_template_to_file", "save_test_flow",
+    "ai_plan_history", "ai_plan_list",
+    "dsl_optimize_analyze",
+})
+
+# ── 关键工具的"适用场景"提示 ──
+_AGENT_HINTS = {
+    "hotkey": (
+        "Use for keyboard shortcuts: Ctrl+S save, Alt+Tab switch windows, "
+        "Ctrl+C copy, Ctrl+V paste, Esc close menu, Alt+F4 close window, "
+        "Win+D show desktop. Format: single key 'esc'/'tab', combo 'ctrl+s'/'alt+tab'."
+    ),
+    "handle_dialog": (
+        "Call AFTER click/type/hotkey when a popup/dialog appears "
+        "(save confirm, overwrite confirm, error alert, permission request). "
+        "Auto-detects and closes all visible dialogs. No params needed."
+    ),
+    "fill_save_dialog": (
+        "Use AFTER hotkey(ctrl+s) shows a save-file dialog. "
+        "Path param = full path like C:\\Users\\name\\Desktop\\file.txt. "
+        "timeout = seconds to wait for dialog to appear."
+    ),
+    "click_target": (
+        "Click screen text/icon/button by description. target = button text "
+        "like 'OK', 'Save', 'Search'. region optional: 'x,y,w,h'. "
+        "Uses OCR + image matching internally."
+    ),
+    "type_clipboard": (
+        "Paste text via clipboard (bypasses input method issues). "
+        "More reliable than type_text for Chinese/special chars. Prefer this."
+    ),
+    "type_text": (
+        "Type text character by character. May have IME issues with Chinese. "
+        "If Chinese input fails, switch to type_clipboard."
+    ),
+    "focus_window": (
+        "Bring window to front by title (partial match supported). "
+        "If this fails repeatedly, try hotkey(alt+tab) or click_target on taskbar icon."
+    ),
+    "launch_program": (
+        "Start program or open file/URL. target = 'notepad.exe' or full path. "
+        "wait=true waits for window. If already running, activates existing window."
+    ),
+    "menu_click": (
+        "Click Windows app menu bar. path format: 'File>Save As', 'Edit>Replace'. "
+        "Works via Win32/UIA. Use menu_structure first to discover available menus."
+    ),
+    "menu_structure": (
+        "Read menu structure of target window. Returns full menu tree. "
+        "Call before menu_click to discover available menu items."
+    ),
+    "list_windows": (
+        "List all visible windows. Call before launch_program to avoid "
+        "re-launching already running apps."
+    ),
+    "get_active_window": (
+        "Get current foreground window title, position, and process name."
+    ),
+    "screenshot": (
+        "Save screen image for verification or later OCR. Full screen or region."
+    ),
+    "ocr_extract_all": (
+        "Read all text from screen (dialog messages, error text, search results). "
+        "Returns text blocks with positions."
+    ),
+    "ocr_find_text": (
+        "Find specific text on screen and return its coordinates. "
+        "Use before click_target to locate elements by text."
+    ),
+    # ── Mouse operations ──
+    "right_click": (
+        "Open context menu at target location. target = button text like "
+        "'Refresh', 'Properties'. Uses OCR + image matching to find target."
+    ),
+    "hover": (
+        "Hover cursor over element without clicking. Use to trigger tooltips, "
+        "hover effects, or preview links. duration = seconds to hover."
+    ),
+    "mouse_move": (
+        "Move cursor to target position or coordinates. Use for precise cursor "
+        "positioning without clicking. target param recommended over raw coordinates."
+    ),
+    "select_text": (
+        "Select text at target location for copy/delete. Double-clicks to select word. "
+        "extend_to_line=true selects full line. Use before hotkey(ctrl+c) to copy."
+    ),
+    "middle_click": (
+        "Middle-click target. In browsers this opens links in new tabs. "
+        "In other apps may enable canvas panning/auto-scroll."
+    ),
+    "triple_click": (
+        "Triple-click to select full paragraph or line of text. "
+        "Use before hotkey(ctrl+c) to copy entire paragraph."
+    ),
+    # ── Window management ──
+    "window_minimize": (
+        "Minimize window to taskbar. title optional (empty = current active window). "
+        "Use before switching to another app to keep desktop clean."
+    ),
+    "window_maximize": (
+        "Maximize window to full screen. title optional (empty = current active window). "
+        "Use for full-screen work or before taking screenshots."
+    ),
+    "window_restore": (
+        "Restore minimized/maximized window to normal size. "
+        "title optional (empty = current active window)."
+    ),
+    "window_close": (
+        "Close window by sending close signal. title optional (empty = current window). "
+        "force=true terminates the process. Safer than hotkey(alt+f4) for specific windows."
+    ),
+    "window_resize": (
+        "Resize window to exact width x height pixels. "
+        "title optional (empty = current active window). Use for precise layout control."
+    ),
+    "window_snap": (
+        "Snap window to screen region: left/right/top/bottom or quadrant. "
+        "Use for side-by-side multitasking. title optional (empty = current window)."
+    ),
+    # ── System control ──
+    "volume_set": (
+        "Set system master volume to percentage (0-100). "
+        "Use for audio control without opening any settings panel."
+    ),
+    "volume_mute": (
+        "Toggle system mute. mute=true to mute, mute=false to unmute, "
+        "omit to toggle. Returns current muted state and volume level."
+    ),
+    "display_brightness": (
+        "Set display brightness percentage (0-100) for laptop screens. "
+        "display_index=0 for main monitor. Uses WMI API."
+    ),
+    "lock_workstation": (
+        "Lock the workstation immediately (equivalent to Win+L). "
+        "Use when stepping away from computer. No parameters needed."
+    ),
+    "battery_status": (
+        "Get battery percentage, charging status, and remaining time. "
+        "Returns dict with percentage/charging/remaining_sec. No parameters needed."
+    ),
+    # ── Accessibility (UIA) ──
+    "a11y_get_tree": (
+        "Read full accessibility tree of active window. Returns element hierarchy "
+        "with names, roles, and bounds. More precise than OCR for standard controls."
+    ),
+    "a11y_find_element": (
+        "Find UI element by name and/or role in accessibility tree. "
+        "Use before a11y_click_element to verify the target exists."
+    ),
+    "a11y_click_element": (
+        "Click UI element by name via accessibility API. Most reliable method for "
+        "standard Windows controls (buttons, checkboxes, menus). No OCR needed."
+    ),
+    # ── Network ──
+    "wifi_list": (
+        "Scan and list available WiFi networks with SSID and signal strength. "
+        "Use before wifi_connect to discover available networks."
+    ),
+    "wifi_connect": (
+        "Connect to WiFi network by SSID. password required for secured networks. "
+        "Automatically creates WLAN profile if password given."
+    ),
+    "wifi_disconnect": (
+        "Disconnect from current WiFi network. "
+        "Use before connecting to a different network."
+    ),
+    # ── Process ──
+    "detect_process": (
+        "Check if a process is running. Returns true/false. "
+        "Use before launch_program to avoid re-launching, or before kill_process."
+    ),
+    "find_processes": (
+        "Find all matching processes with PID, CPU, memory details. "
+        "More detailed than detect_process. Use for monitoring and diagnostics."
+    ),
+    "get_cursor_pos": (
+        "Get current mouse cursor screen coordinates (x, y) and the window "
+        "under the cursor. Use before mouse_move or click to verify position."
+    ),
+    "send_notification": (
+        "Show a Windows taskbar balloon notification with title and message. "
+        "Use to alert user when a long task completes or an error occurs."
+    ),
+}
+
+
 def get_tools_by_pattern() -> Dict[AccessPattern, List[dict]]:
     """从注册表加载所有工具并按访问模式分组。
 
@@ -177,13 +369,19 @@ def get_tools_by_pattern() -> Dict[AccessPattern, List[dict]]:
     for spec in registry.all():
         if spec.deprecated or spec.hidden:
             continue
+        if spec.name in _AGENT_HIDDEN:
+            continue
         pattern = classify_tool(
             spec.name, spec.category.value if spec.category else "",
             spec.description
         )
+        desc = spec.description or ""
+        hint = _AGENT_HINTS.get(spec.name)
+        if hint:
+            desc = desc.rstrip(".。") + ". " + hint
         result[pattern].append({
             "name": spec.name,
-            "desc": spec.description,
+            "desc": desc,
             "params": [{"name": p.name, "type": p.type, "required": p.required, "desc": p.description}
                        for p in spec.params],
         })
@@ -253,9 +451,9 @@ def build_path_prompt() -> str:
                 for pp in t["params"][:4]
             )
             if t["params"]:
-                lines.append(f"  - **{t['name']}**({params_str}) — {t['desc'][:80]}")
+                lines.append(f"  - **{t['name']}**({params_str}) — {t['desc'][:300]}")
             else:
-                lines.append(f"  - **{t['name']}** — {t['desc'][:80]}")
+                lines.append(f"  - **{t['name']}** — {t['desc'][:300]}")
 
     lines.append("")
     lines.append(f"---")
@@ -287,7 +485,11 @@ def select_best_path(goal: str) -> Optional[AccessPattern]:
         "百度", "谷歌", "bing", "网址", "上网", "浏览",
         "下载", "上传", "登录", "注册", "表单", "提交",
     ]
-    if any(kw in goal_lower for kw in browser_keywords):
+    # 排除桌面/文件搜索场景
+    desktop_search_hints = ["文件搜索", "搜索文件", "搜索桌面", "本地搜索", "硬盘搜索"]
+    if any(kw in goal_lower for kw in desktop_search_hints):
+        pass  # 不走浏览器
+    elif any(kw in goal_lower for kw in browser_keywords):
         return AccessPattern.BROWSER_CDP
 
     # 系统设置 — 直接 API
@@ -327,51 +529,72 @@ def select_best_path(goal: str) -> Optional[AccessPattern]:
 
 
 def build_system_prompt() -> str:
-    """构建完整的 Agent 系统提示词。
-
-    包含:
-      1. 角色定义
-      2. 工作方式
-      3. 路径优先级系统（替代平的"可用工具"部分）
-      4. 决策规则
-    """
     path_prompt = build_path_prompt()
     prompt = f"""你是灵动脚本 (Lingdong Script) 的 AI Agent，可以通过大量工具操控 Windows 电脑完成任何桌面自动化任务。
 
 ## 工作方式
 
-1. 接到目标后，先判断任务属于哪个**访问模式**（见下方路径概览）
+1. 接到目标后，先判断任务属于哪个访问模式
 2. 按优先级选择路径：先用最快的 DIRECT API，不行再降级到视觉方法
 3. 在选定的路径分组中选择合适的工具
 4. 执行工具，验证结果，必要时调整路径
 
 ## 核心原则
 
-- **能直接 API 的绝不视觉定位**: 系统设置、文件操作、进程管理等有直接 API
-- **能 CDP 的绝不截图点击**: 浏览器操作必须用 browser_* 工具
-- **能 UIA 的绝不 OCR**: Windows 标准控件用无障碍树定位
-- **先试最快路径，失败再降级**: 不要一开始就用 SoM/VLM
+- 能直接 API 的绝不视觉定位: 系统设置、文件操作、进程管理等有直接 API
+- 能 CDP 的绝不截图点击: 浏览器操作必须用 browser_* 工具
+- 能 UIA 的绝不 OCR: Windows 标准控件用无障碍树定位
+- 先试最快路径，失败再降级
 
 {path_prompt}
 
 ## 决策规则
 
-1. **分类优先**: 接到目标先用关键词判断属于哪类任务（系统/文件/浏览器/桌面GUI），再选路径
-2. **路径降级**: 如果当前路径执行失败，降级到下一优先级路径重试
-3. **浏览器必须用 CDP**: 涉及搜索/浏览/网页操作，必须用 browser_* 工具，绝不截图点击
-4. **工具调用后必须验证**: 每次工具调用后检查返回的 success 字段
-5. **连续失败换路径**: 同一工具连续 2 次失败 → 换路径，不重复尝试
-6. **回复格式**:
-```
-思考: 当前任务分析 / 选择了什么路径 / 为什么选这个工具
-工具: 工具名
-参数:
-  参数1: 值1
-  参数2: 值2
-```
-7. **任务完成**:
-```
-总结: 完成了什么, 结果如何
-```
+1. 分类优先: 接到目标先用关键词判断属于哪类任务，再选路径
+2. 路径降级: 如果当前路径执行失败，降级到下一优先级路径重试
+3. 浏览器必须用 CDP: 涉及网页操作，必须用 browser_* 工具
+4. 工具调用后必须验证: 每次检查返回的 success 字段
+5. 连续失败换路径: 同一工具连续 2 次失败则换路径
+
+6. 回复格式:
+
+
+7. 任务完成:
+
+
+## 常见桌面操作工作流
+
+### 启动程序并操作
+launch_program -> wait -> focus_window -> type_clipboard/click_target
+示例: 打开记事本输入文字 -> launch_program("notepad.exe") -> wait -> type_clipboard("Hello")
+
+### 窗口切换
+如果 focus_window 失败，按顺序尝试:
+1. hotkey("alt+tab") - 切换到上一个窗口
+2. click_target(target="窗口标题") - 点击任务栏图标
+3. 再次 focus_window
+
+### 保存文件
+1. hotkey("ctrl+s") - 触发保存快捷键
+2. fill_save_dialog(path="完整保存路径", timeout=10) - 填写保存对话框
+如果 fill_save_dialog 不可用，用 filedialog_save 或 handle_dialog
+
+### 处理弹窗
+每次 click/type/hotkey 操作后，如果可能出现了弹窗:
+- 调用 handle_dialog() 自动关闭确认/错误/警告弹窗
+- 然后继续下一步
+
+### 点菜单
+需要点击应用菜单时:
+1. menu_structure(title="窗口标题") - 查看可用菜单项
+2. menu_click(title="窗口标题", path="文件>另存为") - 执行菜单命令
+
+### 浏览器操作
+涉及网页时，必须用 browser_* 工具，不要截图点击:
+1. browser_connect() - 连接/启动 Chrome
+2. browser_navigate(url) - 导航到目标网页
+3. browser_type(selector="#search", text="关键词") - 输入搜索
+4. browser_click(selector="#search-btn") - 点击搜索按钮
 """
     return prompt
+

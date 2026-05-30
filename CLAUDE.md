@@ -46,7 +46,13 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 ├── python/
 │   ├── agent/             # AI Agent 监督执行
 │   │   ├── __main__.py    #   IPC 入口 (stdin/stdout JSON 协议)
-│   │   ├── langgraph_agent.py #   LangGraph 监督包装器 + _apply_visual_locator
+│   │   ├── agent.py       #   LingdongAgent 统一入口 + text_protocol 循环
+│   │   ├── meta_actions.py    #   26 个元动作 + 注册表 + 提示词生成
+│   │   ├── supervisor.py     #   监督执行层（窗口焦点/OCR/对话框/重试）
+│   │   ├── tool_path_selector.py # 工具访问模式分类 + 路径选择器
+│   │   ├── config.py       #   AgentConfig dataclass + resolve_auto()
+│   │   ├── planner.py      #   Plan DAG 分解 + PlanExecutor
+│   │   ├── langgraph_agent.py #   ⚠️ 已废弃，仅保留向后兼容
 │   │   ├── experience_db.py   #   经验数据库 (SHA256 签名索引)
 │   │   ├── visual_locator.py  #   语义目标→屏幕坐标定位器
 │   │   ├── dialog_handler.py  #   Windows 对话框检测/关闭 (win32 API)
@@ -61,9 +67,9 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── triggers.py        # - 触发器引擎
 │   │   ├── scheduler.py       # - 定时调度
 │   │   └── optimizer.py       # - 流程优化
-│   ├── features/          # @feature 注册表 (247 功能, 196 MCP 工具)
+│   ├── features/          # @feature 注册表 (246 功能, 227 MCP 工具, 43 模块)
 │   │   ├── registry.py    #   - FeatureRegistry 单例, @feature 装饰器
-│   │   ├── _all.py        #   - 导入所有 feature 模块 (43 模块, 247 @feature)
+│   │   ├── _all.py        #   - 导入所有 feature 模块 (43 模块, 246 @feature)
 │   │   └── camera_features.py # - 摄像头捕获/录制功能
 │   ├── voice/             # 语音对话服务器
 │   │   ├── server.py      #   - WebSocket 语音服务器 (动态端口)
@@ -149,7 +155,7 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 
 启动: `python python/mcp/server.py`
 
-通过 `@feature` 注册表动态生成 **196 MCP 工具**（过滤 48 hidden + 3 deprecated），覆盖：
+通过 `@feature` 注册表动态生成 **227 MCP 工具**（过滤 16 hidden + 3 deprecated），覆盖：
 
 | 分类 | 工具数 | 功能 |
 |---|---|---|
@@ -162,7 +168,8 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 | 调试诊断 | 32 | test, validate, system_info, feature introspection, healing, trigger... |
 
 DSL 关键字: 190 个（自动从 @feature 注册表生成，含所有控制流关键字）
-Agent 工具集: 196 MCP 工具（过滤弃用和隐藏功能后全部可用）
+Agent 工具集: 26 元动作（高层语义） + 227 @feature 工具（底层能力），LLM 提示词中同时暴露
+Agent 双路径执行: 元动作 → `meta_execute()`（参数校验 + 类型强制 + 直接调用），其他 → `supervisor.execute()`（完整监督流水线）
 Agent 自我升级: 工具集从 @feature 注册表动态加载，新增功能自动纳入 Agent 可用范围（重启 Agent 生效）
 
 关键工具示例：

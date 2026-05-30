@@ -23,7 +23,7 @@ logger = logging.getLogger("features.dialog")
         "lobster call handle-dialog",
     ],
     tags=["dialog", "windows", "popup"],
-    hidden=True,
+    hidden=False,
 )
 def handle_dialog(timeout: float = 0) -> str:
     import time, importlib
@@ -156,7 +156,7 @@ def dialog_take_action(action: str, timeout: float = 3) -> bool:
     ],
     returns="bool - 是否保存成功",
     tags=["dialog", "save", "windows"],
-    hidden=True,
+    hidden=False,
 )
 def fill_save_dialog(filepath: str, timeout: float = 8) -> bool:
     try:

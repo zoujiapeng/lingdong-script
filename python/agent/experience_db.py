@@ -12,6 +12,7 @@
 import hashlib
 import json
 import os
+import threading
 import time
 from typing import Optional
 
@@ -21,20 +22,24 @@ _TEMPLATES_DIR = os.path.join(_EXP_DIR, "templates")
 
 os.makedirs(_TEMPLATES_DIR, exist_ok=True)
 
+_db_lock = threading.RLock()  # 可重入锁，store() 跨 load→save 持有
+
 
 def _load_db() -> dict:
-    if os.path.exists(_DB_PATH):
-        try:
-            with open(_DB_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {"v1": {}}
-    return {"v1": {}}
+    with _db_lock:
+        if os.path.exists(_DB_PATH):
+            try:
+                with open(_DB_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                return {"v1": {}}
+        return {"v1": {}}
 
 
 def _save_db(db: dict):
-    with open(_DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+    with _db_lock:
+        with open(_DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(db, f, ensure_ascii=False, indent=2)
 
 
 def _signature(step_type: str, target_text: str, window_title: str = "") -> str:
@@ -61,21 +66,22 @@ def store(step_type: str, target_text: str, template_path: str,
         The signature key
     """
     sig = _signature(step_type, target_text, window_title)
-    db = _load_db()
-    entry = db.setdefault("v1", {}).get(sig, {})
-    entry.update({
-        "template_path": template_path,
-        "method": method,
-        "confidence": max(confidence, entry.get("confidence", 0)),
-        "bbox": bbox,
-        "count": entry.get("count", 0) + 1,
-        "last_used": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "step_type": step_type,
-        "target_text": target_text,
-        "window_title": window_title,
-    })
-    db["v1"][sig] = entry
-    _save_db(db)
+    with _db_lock:  # 跨 read→modify→write 原子操作
+        db = _load_db()
+        entry = db.setdefault("v1", {}).get(sig, {})
+        entry.update({
+            "template_path": template_path,
+            "method": method,
+            "confidence": max(confidence, entry.get("confidence", 0)),
+            "bbox": bbox,
+            "count": entry.get("count", 0) + 1,
+            "last_used": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "step_type": step_type,
+            "target_text": target_text,
+            "window_title": window_title,
+        })
+        db["v1"][sig] = entry
+        _save_db(db)
     return sig
 
 
