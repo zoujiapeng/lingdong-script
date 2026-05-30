@@ -1,0 +1,357 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2026-05-31T10:00:00.000Z" version="21.6.5">
+  <diagram id="agent-arch" name="Agent 架构总览">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══════════════ SECTION 1: IPC Layer ═══════════════ -->
+        <mxCell id="2" value="&lt;b&gt;1. IPC 通信协议层&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;Electron 主进程 ↔ Agent 子进程 (stdin/stdout JSON)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#90CAF9;fontColor=#1565C0;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="20" width="1640" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="10" value="&lt;b&gt;Electron 主进程&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;main.ts / api.ts / preload.ts&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;启动管理 · IPC 桥接 · HTTP API :7880&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1565C0;fontSize=11;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="240" y="40" width="210" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="&lt;b&gt;stdin/stdout JSON 协议&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;命令: start(goal+config) / stop / guidance / status&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;事件: agent_start / step_complete / agent_done / log / error&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="530" y="40" width="250" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="12" value="&lt;b&gt;Agent 子进程 __main__.py&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;stdin事件循环 · 后台线程执行 · 优雅停止机制&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;spawn: LingdongAgent → _run_agent() 线程&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1565C0;fontSize=11;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="860" y="40" width="230" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="101" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F9A825;strokeWidth=1.5;" edge="1" parent="1" source="10" target="11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="102" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F9A825;strokeWidth=1.5;" edge="1" parent="1" source="11" target="12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="103" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F9A825;strokeWidth=1.5;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="12" target="11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="104" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F9A825;strokeWidth=1.5;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="11" target="10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 2: Entry & Config ═══════════════ -->
+        <mxCell id="3" value="&lt;b&gt;2. Agent 入口与配置解析&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;统一入口 → AgentConfig 自动解析 → 执行模式分派&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#CE93D8;fontColor=#6A1B9A;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="130" width="1640" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="13" value="&lt;b&gt;LingdongAgent.run()&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;接收 goal + mode(旧) / AgentConfig(新)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;持久化 RunSummary → 返回 {success,steps,summary}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;fontSize=11;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="160" width="240" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="14" value="&lt;b&gt;AgentConfig.resolve_auto()&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;23配置字段 · 自动解析 &quot;auto&quot; 值&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;规则: 多模态模型→text+direct+per_step+minimal&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;     纯文本模型→function_calling+som+pre_plan+full&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6A1B9A;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="430" y="160" width="280" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="15" value="&lt;b&gt;解析关键维度 (4个)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;1. llm_protocol: text / function_calling / computer_use&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;2. planning: per_step / pre_plan (LLM每步/预生成全计划)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;3. vision_mode: text / multimodal / som (纯文本/多模态/标号)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;4. screen_context: minimal(每N步) / full(每步)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1BEE7;strokeColor=#6A1B9A;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="820" y="158" width="380" height="67" as="geometry" />
+        </mxCell>
+        <mxCell id="16" value="&lt;b&gt;_unified_run()&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;传播监督层配置&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;按解析结果分派执行&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#CE93D8;strokeColor=#6A1B9A;fontSize=11;arcSize=8;fontColor=#FFFFFF;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="162" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="105" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6A1B9A;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="12" target="13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="106" value="goal + config" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#6A1B9A;" edge="1" parent="1" source="13" target="14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="107" value="解析后维度" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#6A1B9A;" edge="1" parent="1" source="14" target="15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="108" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6A1B9A;" edge="1" parent="1" source="15" target="16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 3: 4 Execution Modes ═══════════════ -->
+        <mxCell id="4" value="&lt;b&gt;3. 四种执行模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;统一调度入口 _unified_run() 根据 AgentConfig 解析结果自动选择&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#A5D6A7;fontColor=#1B5E20;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="260" width="1640" height="135" as="geometry" />
+        </mxCell>
+
+        <mxCell id="20" value="&lt;b&gt;📝 text_protocol (MIMO风格)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;适用: 纯文本模型(DeepSeek/MIMO)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;循环: LLM调用→解析回复→监督执行→截图→反馈&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;SYSTEM_PROMPT_TEXT + 工具描述 + 工作流示例&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1B5E20;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="290" width="370" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="&lt;b&gt;🔗 langgraph (函数调用)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;适用: GPT/Claude 等支持函数调用的模型&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;create_react_agent + 全部注册工具 + 监督执行&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;带 sliding_window 历史窗口 + 自动截图验证&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1B5E20;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="460" y="290" width="370" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="&lt;b&gt;📋 planned (pre_plan DAG)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;适用: 多步骤复杂流程&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;规则分类→LLM分解→Plan DAG→PlanExecutor拓扑执行&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;每步: tool+params+fallback_tools+critical+depends_on&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1B5E20;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="865" y="290" width="370" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="&lt;b&gt;🖥️ computer_use (视觉循环)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;适用: 多模态视觉模型&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;截图→视觉模型分析→执行动作→新截图→...&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;端到端视觉推理, 无需SoM/OCR/UIA, 自带独立SYSPROMPT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1B5E20;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="290" width="370" height="85" as="geometry" />
+        </mxCell>
+
+        <!-- dispatch edges from _unified_run to modes -->
+        <mxCell id="109" value="pre_plan" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#1B5E20;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="16" target="22">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="110" value="text" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#1B5E20;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="16" target="20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="111" value="function_calling" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#1B5E20;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="16" target="21">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="112" value="computer_use" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#1B5E20;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="16" target="23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 4: Core Engine ═══════════════ -->
+        <mxCell id="5" value="&lt;b&gt;4. 核心执行引擎&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;元动作层 (22个LLM可见高层动作) → 监督流水线 Supervisor (所有模式共享) → @feature 工具注册表 (227个底层工具)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#FFE082;fontColor=#E65100;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="410" width="1640" height="310" as="geometry" />
+        </mxCell>
+
+        <!-- Meta Actions big box -->
+        <mxCell id="30" value="&lt;b&gt;元动作层 (22个)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;LLM可见的高层动作，每个内部路由到最适合的 @feature 工具&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;meta_actions.py · execute(name,args) · 类型强制&lt;/font&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;点击 click · 输入 type_text · 快捷键 press_keys&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;滚动 scroll · 悬停 hover · 拖拽 drag&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;OCR read_text · 无障碍 read_ui · 截图 screenshot&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;窗口 manage_window · 应用 manage_app&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;浏览器 browser_do · 弹窗 dialog&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;文件 file_ops · 命令 run_command · 音频 control_audio&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;系统 system_info · 网络 network · 通知 notify · 等&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#E65100;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="440" width="280" height="260" as="geometry" />
+        </mxCell>
+
+        <!-- Supervisor Pipeline - individual steps -->
+        <mxCell id="32" value="&lt;b&gt;① SoM 解引用&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;#N → 坐标映射&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="370" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="33" value="&lt;b&gt;② UIA 语义定位&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;无障碍树解析目标&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="490" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="34" value="&lt;b&gt;③ 视觉定位&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;经验库→VLM兜底&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="610" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="35" value="&lt;b&gt;④ 窗口焦点安全&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;ensure_safe_window&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="730" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="36" value="&lt;b&gt;⑤ 执行 + 重试&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;GUI:2次 / 其他:1次&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="850" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="37" value="&lt;b&gt;⑥ 对话框处理&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;auto_handle_dialogs&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="970" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="38" value="&lt;b&gt;⑦ 屏幕稳定&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;wait_screen_stable&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="530" width="90" height="44" as="geometry" />
+        </mxCell>
+
+        <!-- Pipeline special: UIA pre-focus + Window-aware OCR -->
+        <mxCell id="39" value="&lt;b&gt;⑧ 失败诊断截图&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;capture_b64 + a11y_summary&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE0B2;strokeColor=#E65100;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="530" width="100" height="44" as="geometry" />
+        </mxCell>
+
+        <!-- Special annotations below pipeline -->
+        <mxCell id="40" value="&lt;b&gt;UIA 预聚焦&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;type_text前自动点击输入框&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFECB3;strokeColor=#E65100;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="440" y="590" width="100" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="41" value="&lt;b&gt;窗口感知OCR&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;OCR限定到活动窗口区域&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFECB3;strokeColor=#E65100;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="560" y="590" width="100" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="42" value="&lt;b&gt;防重复启动&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;已运行程序→聚焦跳过&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFECB3;strokeColor=#E65100;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="680" y="590" width="100" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="43" value="&lt;b&gt;脚本执行模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Python脚本代替逐工具调用&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFECB3;strokeColor=#E65100;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="930" y="590" width="120" height="34" as="geometry" />
+        </mxCell>
+
+        <!-- Pipeline connectors -->
+        <mxCell id="120" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="32" target="33">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="121" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="33" target="34">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="122" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="34" target="35">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="123" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="35" target="36">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="124" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="36" target="37">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="125" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=2;" edge="1" parent="1" source="37" target="38">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="126" value="失败时" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#E65100;" edge="1" parent="1" source="36" target="39">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- @feature Registry -->
+        <mxCell id="50" value="&lt;b&gt;@feature 注册表 (227工具)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;@feature 装饰器 · 43个模块&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;registry.py · 单例 FeatureRegistry&lt;/font&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;交互动作(68): click/type/hotkey/scroll/drag/swipe&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;感知识别(29): OCR/find_image/color/a11y/fusion&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;控制流(25): wait/loop/condition/timer/software&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;AI规划(9): plan/exec_plan/VLM analyze/debug&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;宏指令(10): record/playback/convert/list&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;系统功能(74): window/process/clipboard/fiile/volume&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;调试诊断(32): test/validate/system_info/feature_intro&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#E65100;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="440" width="320" height="260" as="geometry" />
+        </mxCell>
+
+        <!-- arrows: Meta Actions → Supervisor → Registry -->
+        <mxCell id="127" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=1.5;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="30" target="32">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="128" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;strokeWidth=1.5;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="38" target="50">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- arrows: modes → meta actions -->
+        <mxCell id="129" value="各模式均调用" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#E65100;" edge="1" parent="1" source="20" target="30">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="130" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;" edge="1" parent="1" source="21" target="30">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="131" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E65100;" edge="1" parent="1" source="22" target="30">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 5: Support Systems ═══════════════ -->
+        <mxCell id="6" value="&lt;b&gt;5. 支持系统&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;任务规划 · 工具路径选择 · 经验学习 · 对话框处理&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0F7FA;strokeColor=#80DEEA;fontColor=#006064;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="735" width="1640" height="170" as="geometry" />
+        </mxCell>
+
+        <!-- Planner DAG -->
+        <mxCell id="60" value="&lt;b&gt;Planner (任务规划器)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;规则分类→LLM分解→Plan DAG&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;PlanNode: id/description/tool/params&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;  depends_on/fallback_tools/critical/timeout&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;PlanExecutor: 拓扑序→就绪节点→执行+重试→fallback&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;特殊: __agent_decide__ / __condition__ / __wait_until__&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#006064;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="765" width="360" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Tool Path Selector -->
+        <mxCell id="61" value="&lt;b&gt;Tool Path Selector (路径选择器)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;7级访问模式（数字越小优先级越高）:&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;L0 DIRECT_API(系统/文件/进程) → L1 BROWSER_CDP&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;L2 WINDOWS_UIA(无障碍) → L3 VISUAL_OCR&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;L4 VISUAL_SOM(标号/图像) → L5 MACRO → L6 DSL_GEN&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;classify_tool() + select_best_path(goal) + build_path_prompt()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#006064;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="445" y="765" width="370" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Experience DB -->
+        <mxCell id="62" value="&lt;b&gt;Experience DB + Visual Locator (经验库+视觉定位)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;两步定位: ①经验库查SHA256签名→OpenCV模板匹配&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;        ②VLM兜底→裁剪小图→自动存入经验库&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;experience_db.py: db.json(templates/裁剪小图)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;visual_locator.py: locate(target_text) + vlm_locate() + crop_and_save()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#006064;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="845" y="765" width="400" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Dialog Handler -->
+        <mxCell id="63" value="&lt;b&gt;Dialog Handler (对话框处理)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;4层降级: ①UIA ButtonControl→Click()&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;        ②win32 BM_CLICK→③键盘Escape/Enter/Alt+F4→④WM_CLOSE&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;7类对话框: SAVE/OVERWRITE/NOTEPAD/ERROR/CONFIRM/MESSAGE/ELECTRON&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;后台监控: 0.5s轮询 + 自动处理 + 冷却缓存 + 自绘界面(UNHANDLABLE)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#006064;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1275" y="765" width="370" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 6: Safety ═══════════════ -->
+        <mxCell id="7" value="&lt;b&gt;6. 安全与容错机制&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#EF9A9A;fontColor=#B71C1C;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="920" width="1640" height="115" as="geometry" />
+        </mxCell>
+
+        <mxCell id="70" value="&lt;b&gt;安全限制 (Safety Limits)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;MAX_STEPS=20 — 单次任务最大步数(防止失控循环)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;MAX_CONSECUTIVE_FAILURES=5 — 连续失败上限→自动终止&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;MIN_SUCCESS_RATE=0.1 — 成功率低于此值时终止(已完成/总步数)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;sliding_window — 历史窗口裁剪(多模态8轮/文本12轮)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B71C1C;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="65" y="950" width="520" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="71" value="&lt;b&gt;错误处理策略 (on_error)&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;① retry: 执行失败→退避重试(GUI 2次,其他1次)→仍失败则检查on_error策略&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;② skip: 标记为跳过(配置on_error=skip), 返回success=但含original_error&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;③ stop: 设置stop_event终止执行, 不再继续后续步骤&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;④ replan: 返回replan_needed信号, 上游LLM重新规划步骤&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B71C1C;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="625" y="950" width="640" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="72" value="&lt;b&gt;VLM 自动禁用&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;VLM连续3次异常→_vl_disabled=True&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#B71C1C;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="950" width="170" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="73" value="&lt;b&gt;防重复启动&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;launch_program前检测进程&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;click_target匹配→转聚焦&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFCDD2;strokeColor=#B71C1C;fontSize=9;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="950" width="145" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════ SECTION 7: Frontend AgentView ═══════════════ -->
+        <mxCell id="8" value="&lt;b&gt;7. 前端架构流程图 AgentView.tsx&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;8节点架构流程图 + 执行循环 + 设置控件内联显示&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#9FA8DA;fontColor=#283593;fontSize=12;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1050" width="1640" height="470" as="geometry" />
+        </mxCell>
+
+        <!-- AgentView 8 node layout - Row 1: Goal → LLM → Vision → Plan -->
+        <mxCell id="80" value="&lt;b&gt;🎯 Goal/Input&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;目标输入框 + 运行/停止/语音&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;流程图模式切换 + 离线按钮&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0E0F8;strokeColor=#6366f1;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="65" y="1090" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="81" value="&lt;b&gt;🧠 LLM/API 设置&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;API Key/Base/Model/Protocol&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Temperature/MaxTokens/Retries&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0E0F8;strokeColor=#6366f1;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="265" y="1090" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="82" value="&lt;b&gt;👁️ Vision 设置&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Vision Mode/SoM/OmniParser&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Screenshot Quality/Screen Context&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DBEAFE;strokeColor=#3b82f6;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="465" y="1090" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="83" value="&lt;b&gt;📋 Planning 设置&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Planning Strategy&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Multimodal Override&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF3C7;strokeColor=#f59e0b;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="665" y="1090" width="140" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="84" value="&lt;b&gt;├▶ PlanVisualizer&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;内联显示计划DAG&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF3C7;strokeColor=#f59e0b;fontSize=10;arcSize=6;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="665" y="1165" width="140" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Row 1 connectors -->
+        <mxCell id="150" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6366f1;strokeWidth=2;" edge="1" parent="1" source="80" target="81">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="151" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6366f1;strokeWidth=2;" edge="1" parent="1" source="81" target="82">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="152" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#f59e0b;strokeWidth=2;" edge="1" parent="1" source="82" target="83">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Supervisor Node (large, center) -->
+        <mxCell id="85" value="&lt;b&gt;🔄 Supervisor 监督执行循环&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Error Handling · Fast Mode · Window-Aware OCR&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;UIA Prefocus · Scripted Mode · Verify · Auto Learn&lt;/font&gt;&lt;hr&gt;&lt;font style=&quot;font-size:8px&quot;&gt;┌─ SoM解引用 ─ UIA定位 ─ 视觉定位 ─ 窗口焦点 ─┐&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;│  → 执行+重试 → 对话框处理 → 屏幕稳定 → 诊断截图 │&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;└──────────────────────────────────────────────┘&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCFCE7;strokeColor=#22c55e;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="65" y="1220" width="500" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Safety Node (branching from Supervisor) -->
+        <mxCell id="86" value="&lt;b&gt;🛡️ Safety 安全约束&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Max Steps · Consecutive Failures&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;Min Success Rate · Sliding Window&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEE2E2;strokeColor=#ef4444;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="625" y="1220" width="200" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Exec Log Node -->
+        <mxCell id="87" value="&lt;b&gt;📊 Exec Log 执行日志&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;实时显示执行日志&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;step_complete 事件流&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;指引输入框&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E8FF;strokeColor=#a855f7;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="890" y="1220" width="170" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Result Node -->
+        <mxCell id="88" value="&lt;b&gt;✅ Result 执行结果&lt;/b&gt;&lt;hr&gt;&lt;font style=&quot;font-size:9px&quot;&gt;摘要统计&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;成功/失败步数&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;重新执行/清除按钮&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0E0F8;strokeColor=#6366f1;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="1220" width="170" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Flow chart mode node (additional) -->
+        <mxCell id="89" value="&lt;b&gt;📐 流程图模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;generate_flow(goal)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;→ PlanVisualizer 展示计划DAG&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;→ PlanExecutor 拓扑序执行&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E0F2FE;strokeColor=#0ea5e9;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="1220" width="200" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Plan → Supervisor -->
+        <mxCell id="153" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#22c55e;strokeWidth=2;" edge="1" parent="1" source="83" target="85">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Supervisor → Safety (branch) -->
+        <mxCell id="154" value="约束" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#ef4444;strokeWidth=1.5;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="85" target="86">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Supervisor → Exec Log -->
+        <mxCell id="155" value="执行事件" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#a855f7;strokeWidth=1.5;" edge="1" parent="1" source="85" target="87">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Exec Log → Result -->
+        <mxCell id="156" value="完成汇总" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#6366f1;strokeWidth=2;" edge="1" parent="1" source="87" target="88">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Plan → Flow Chart mode -->
+        <mxCell id="157" value="流程图模式" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#0ea5e9;strokeWidth=1.5;" edge="1" parent="1" source="83" target="89">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Voice Conversation Panel -->
+        <mxCell id="90" value="&lt;b&gt;🎤 语音对话模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;VoiceConversationPanel&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;WebSocket ↔ voice/server.py&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;STT → LLM → TTS 循环&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCE7F3;strokeColor=#ec4899;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="1090" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- Connector: Goal → Voice -->
+        <mxCell id="158" value="语音切换" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fontSize=9;strokeColor=#ec4899;strokeWidth=1.5;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="80" target="90">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Bottom: Settings representation -->
+        <mxCell id="91" value="&lt;b&gt;设置存储: localStorage (32个key)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;AGENT_FLOW_CHART_KEY · KEY/BASE/MODEL/PROTOCOL/TEMPERATURE/MAX_TOKENS/LLM_RETRIES&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;AGENT_VISION_MODE/SOM/OMNI/SCREENSHOT_QUALITY/SCREEN_CONTEXT/IMAGE_DEDUP/VISION_BACKEND&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;AGENT_PLANNING_KEY/AGENT_MULTIMODAL_KEY · AGENT_SUPERVISE/FAST_MODE/WINDOW_OCR/UIA_PREFOCUS/SCRIPTED/VERIFY/AUTO_LEARN&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;AGENT_MAX_STEPS/CONSECUTIVE_FAILURES/MIN_SUCCESS_RATE/SLIDING_WINDOW&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#7986CB;fontSize=9;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="65" y="1380" width="1500" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- IPC event flow indicator -->
+        <mxCell id="92" value="&lt;b&gt;IPC 事件流 (Agent → 前端)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;agent_start {goal} → step_complete {step_num, tool, result} → agent_done {status, total_steps}&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;log {level, message} · plan_state {plan} · step_attempt {node_id, tool}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="65" y="1460" width="1100" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="99" value="&lt;b&gt;图例&lt;/b&gt;&lt;hr&gt;&lt;table&gt;&lt;tr&gt;&lt;td bgcolor=&quot;#6366f1&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;LLM/API/Result&lt;/td&gt;&lt;td bgcolor=&quot;#3b82f6&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Vision&lt;/td&gt;&lt;td bgcolor=&quot;#f59e0b&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Planning&lt;/td&gt;&lt;td bgcolor=&quot;#22c55e&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Supervisor&lt;/td&gt;&lt;td bgcolor=&quot;#ef4444&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Safety&lt;/td&gt;&lt;td bgcolor=&quot;#a855f7&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Exec Log&lt;/td&gt;&lt;td bgcolor=&quot;#0ea5e9&quot; width=&quot;12&quot;&gt;&amp;nbsp;&lt;/td&gt;&lt;td&gt;Flow Chart&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#BDBDBD;fontSize=10;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="1455" width="400" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Arch flow: IPC→Entry→Modes→Engine arrows -->
+        <mxCell id="160" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=2;" edge="1" parent="1" source="12" target="13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

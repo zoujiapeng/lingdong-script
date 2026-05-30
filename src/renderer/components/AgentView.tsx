@@ -1,12 +1,10 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import {
-  List, Wifi, WifiOff, Mic, MicOff, Clock,
-  ChevronDown, ChevronRight, Settings, Eye,
-  GitBranch, FileText, AlertTriangle, Zap,
-  Camera, MessageSquare, Monitor, Brain, Volume2, Terminal,
-  Shield, Sliders, Thermometer, Maximize2, Minimize2,
-  Key,
+  List, Wifi, WifiOff, Mic, MicOff, Clock, RefreshCw,
+  Eye, GitBranch, Zap,
+  MessageSquare, Monitor, Brain, Volume2,
+  Shield,
 } from 'lucide-react';
 import { VoiceConversationPanel } from './common/VoiceConversationPanel';
 import { PlanVisualizer } from './common/PlanVisualizer';
@@ -92,25 +90,6 @@ function lsSetNum(key: string, val: number) {
 }
 
 // ── Inline config control components ──
-
-function ConfigSection({ title, icon, open, onToggle, children, desc }: {
-  title: string; icon: React.ReactNode; open: boolean; onToggle: () => void;
-  children: React.ReactNode; desc?: string;
-}) {
-  return (
-    <div className="agent-config-section">
-      <div className="agent-config-section-header" onClick={onToggle}>
-        <span className="agent-config-section-icon">{icon}</span>
-        <span className="agent-config-section-title">{title}</span>
-        {desc && <span className="agent-config-section-desc">{desc}</span>}
-        <span className={`agent-config-section-arrow ${open ? 'open' : ''}`}>
-          <ChevronRight size={13} />
-        </span>
-      </div>
-      {open && <div className="agent-config-section-body">{children}</div>}
-    </div>
-  );
-}
 
 function ConfigSelect({ label, value, onChange, options, desc, resolved }: {
   label: string; value: string; onChange: (v: string) => void;
@@ -319,10 +298,11 @@ export function AgentView() {
   const [showHistory, setShowHistory] = useState(false);
   const agentHistory = useStore((s) => s.agentHistory);
 
-  // ── Config accordion state ──
-  const [configOpen, setConfigOpen] = useState(false);
-  const [configSection, setConfigSection] = useState<string | null>(null);
-  const [showApiSection, setShowApiSection] = useState(false);
+  // ── Node expand/collapse state ──
+  const [nodeExpanded, setNodeExpanded] = useState<Record<string, boolean>>({
+    llm: true, perceive: true, act: true, safety: true,
+  });
+  const toggleNode = (name: string) => setNodeExpanded(prev => ({ ...prev, [name]: !prev[name] }));
 
   // ── Config values ──
   const [apiKey, setApiKey] = useState(() => lsGet(KEY_STORAGE, ''));
@@ -534,10 +514,8 @@ export function AgentView() {
     const model_ = rawModel.trim();
 
     if (!apiKey_) {
-      addEntry({ type: 'system', text: '⚠️ 请先在下方 "API 连接" 中配置 API 密钥后重试' });
+      addEntry({ type: 'system', text: '⚠️ 请先在 "LLM / API" 节点中配置 API 密钥后重试' });
       setRunning(false);
-      setConfigOpen(true);
-      setShowApiSection(true);
       return;
     }
 
@@ -623,6 +601,16 @@ export function AgentView() {
   const resolvedMM = agentMultimodal === 'true' ? true : agentMultimodal === 'false' ? false : _isMultimodalModel(lsGet(MODEL_STORAGE, ''));
   const hasApiKey = !!apiKey.trim();
 
+  const modeLabel = (val: string, label: string): string => {
+    const map: Record<string, string> = {
+      auto: '⚡自动', text: '◉文本', function_calling: '◉函数', computer_use: '◉CU',
+      direct: '◉截图', som: '◉SoM', omniparser: '◉Omni',
+      pre_plan: '◉DAG', per_step: '◉ReAct',
+      retry: '◉重试', replan: '◉重规划', skip: '◉跳过', stop: '◉停止',
+    };
+    return `${map[val] || val}`;
+  };
+
   // ── Render helpers ──
 
   const FlowArrow = () => (
@@ -632,6 +620,8 @@ export function AgentView() {
       </svg>
     </div>
   );
+
+  // (BranchSplit/BranchMerge/BranchLabel/BranchRow removed — replaced by execution loop)
 
   const renderLogEntries = () => (
     <>
@@ -728,6 +718,11 @@ export function AgentView() {
               style={{ width: 22, height: 22 }} title="可用 Agent 工具">
               <List size={12} />
             </button>
+            <label className="agent-mini-toggle" title="流程图模式：Agent 可调用 generate_flow / execute_flow">
+              <input type="checkbox" checked={agentFlowChart}
+                onChange={e => saveBool(AGENT_FLOW_CHART_KEY, e.target.checked, setAgentFlowChart)} />
+              <span>流程图</span>
+            </label>
             <button className={`btn btn-ghost btn-icon ${offline ? 'offline' : ''}`}
               onClick={() => setOffline(!offline)} style={{ width: 22, height: 22 }}
               title={offline ? '切换为在线模式' : '切换为离线模式'}>
@@ -777,223 +772,285 @@ export function AgentView() {
 
         <FlowArrow />
 
-        {/* ═══════ NODE 2: Complete Agent Configuration ═══════ */}
-        <div className="agent-flow-node config-node">
-          <div className="agent-flow-node-header config-toggle" onClick={() => setConfigOpen(!configOpen)}>
-            <Settings size={14} />
-            <span>Agent 全部配置</span>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>
-              ({agentMaxSteps}步 · {agentOnError} · {agentMultimodal === 'auto' ? (resolvedMM ? '视觉' : 'SoM') : agentMultimodal === 'true' ? '视觉' : 'SoM'})
-            </span>
-            {configOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {/* ═══════ NODE 2: LLM Brain ═══════ */}
+        <div className={`agent-flow-node compact llm-node ${nodeExpanded.llm ? 'expanded' : ''}`}>
+          <div className="agent-flow-node-header clickable" onClick={() => toggleNode('llm')}>
+            <MessageSquare size={13} />
+            <span>LLM Brain</span>
+            <span className="agent-mode-status">{modeLabel(agentProtocol, '协议')}</span>
+            {agentPlanning !== 'auto' && (
+              <span className="agent-mode-status" style={{ marginLeft: 2 }}>{modeLabel(agentPlanning, '')}</span>
+            )}
+            <span className={`agent-expand-arrow ${nodeExpanded.llm ? 'open' : ''}`}>▶</span>
           </div>
-          {configOpen && (
-            <div className="agent-flow-node-body config-node-body">
-
-              {/* ── Section 1: API 连接 ── */}
-              <ConfigSection title="API 连接" icon={<Key size={13} />}
-                open={showApiSection} onToggle={() => setShowApiSection(!showApiSection)}
-                desc="LLM API 密钥与模型">
+          {nodeExpanded.llm && (
+            <div className="agent-flow-node-body">
+              <div className="agent-node-settings">
                 <ConfigInput label="API Key" value={apiKey} onChange={v => saveStr(KEY_STORAGE, v, setApiKey)}
                   secret placeholder="sk-..." />
                 <ConfigInput label="API Base" value={apiBase} onChange={v => saveStr(BASE_STORAGE, v, setApiBase)}
                   placeholder="https://api.deepseek.com/v1" />
                 <ConfigInput label="模型" value={model} onChange={v => saveStr(MODEL_STORAGE, v, setModel)}
                   placeholder="deepseek-chat" />
-              </ConfigSection>
-
-              {/* ── Section 2: LLM 策略 ── */}
-              <ConfigSection title="LLM 策略" icon={<MessageSquare size={13} />}
-                open={configSection === 'llm'} onToggle={() => setConfigSection(configSection === 'llm' ? null : 'llm')}
-                desc="协议、规划方式、参数">
-                <ConfigSelect label="LLM 协议" value={agentProtocol} onChange={v => saveStr(AGENT_PROTOCOL_KEY, v, setAgentProtocol)}
+                <ConfigSelect label="协议" value={agentProtocol} onChange={v => saveStr(AGENT_PROTOCOL_KEY, v, setAgentProtocol)}
                   options={[
                     { value: 'auto', label: '自动' },
                     { value: 'text', label: '文本协议' },
                     { value: 'function_calling', label: '函数调用' },
+                    { value: 'computer_use', label: 'Computer Use' },
                   ]}
-                  resolved={_resolveAuto('llm_protocol', model, agentMultimodal)}
-                  desc="文本协议：LLM 输出文字，Agent 解析执行。函数调用：LLM 直接调用工具函数。" />
+                  resolved={_resolveAuto('llm_protocol', model, agentMultimodal)} />
                 <ConfigSelect label="规划策略" value={agentPlanning} onChange={v => saveStr(AGENT_PLANNING_KEY, v, setAgentPlanning)}
                   options={[
                     { value: 'auto', label: '自动' },
-                    { value: 'pre_plan', label: '预生成计划 (DAG)' },
+                    { value: 'pre_plan', label: '预生成 (DAG)' },
                     { value: 'per_step', label: '逐步骤 (ReAct)' },
                   ]}
-                  resolved={_resolveAuto('planning', model, agentMultimodal)}
-                  desc="预生成计划：先生成完整步骤再执行。逐步骤：每步询问 LLM 动态决策。" />
-                <ConfigTriState label="多模态覆盖" value={agentMultimodal}
+                  resolved={_resolveAuto('planning', model, agentMultimodal)} />
+                <ConfigTriState label="多模态" value={agentMultimodal}
                   onChange={v => saveStr(AGENT_MULTIMODAL_KEY, v, setAgentMultimodal)}
                   options={[
                     { value: 'auto', label: '自动' },
                     { value: 'true', label: '开启' },
                     { value: 'false', label: '关闭' },
-                  ]}
-                  desc={agentMultimodal === 'auto'
-                    ? `自动 → ${resolvedMM ? '开启' : '关闭'}（${model || '当前模型'}）`
-                    : agentMultimodal === 'true'
-                      ? '强制开启多模态，Agent 使用视觉能力分析屏幕。需模型支持。'
-                      : '强制关闭多模态，Agent 使用 SoM 标号 + OCR 定位。'} />
-                <ConfigSlider label="温度 (Temperature)" value={agentTemperature}
+                  ]} />
+                <ConfigSlider label="温度" value={agentTemperature}
                   min={0} max={2} step={0.05}
                   onChange={v => saveNum(AGENT_TEMPERATURE_KEY, v, setAgentTemperature)} />
-                <ConfigSlider label="最大 Token" value={agentMaxTokens}
+                <ConfigSlider label="Max Tokens" value={agentMaxTokens}
                   min={512} max={16384} step={512}
                   onChange={v => saveNum(AGENT_MAX_TOKENS_KEY, v, setAgentMaxTokens)} />
-                <ConfigSlider label="LLM 重试次数" value={agentLlmRetries}
+                <ConfigSlider label="LLM 重试" value={agentLlmRetries}
                   min={0} max={5} step={1}
                   onChange={v => saveNum(AGENT_LLM_RETRIES_KEY, v, setAgentLlmRetries)} />
-              </ConfigSection>
-
-              {/* ── Section 3: 视觉配置 ── */}
-              <ConfigSection title="视觉配置" icon={<Eye size={13} />}
-                open={configSection === 'vision'} onToggle={() => setConfigSection(configSection === 'vision' ? null : 'vision')}
-                desc="截图、SoM、OCR、OmniParser">
-                <ConfigSelect label="视觉模式" value={agentVision} onChange={v => saveStr(AGENT_VISION_KEY, v, setAgentVision)}
-                  options={[
-                    { value: 'auto', label: '自动' },
-                    { value: 'direct', label: '直接截图' },
-                    { value: 'som', label: 'SoM 标号' },
-                    { value: 'omniparser', label: 'OmniParser ⚠️' },
-                  ]}
-                  resolved={_resolveAuto('vision_mode', model, agentMultimodal)}
-                  desc="直接截图：多模态模型直接分析。SoM：截图标号 + #N 定位。OmniParser：YOLOv8 图标检测。" />
-                <ConfigToggle label="OmniParser" checked={agentOmniparser}
-                  onChange={v => saveBool(AGENT_OMNIPARSER_KEY, v, setAgentOmniparser)}
-                  desc="YOLOv8 + Florence-2 图标检测和描述（首次加载约 60s）。默认关闭，UIA+OCR 已满足大多数场景。"
-                  badge={agentOmniparser ? '需要模型' : undefined} />
-                <ConfigToggle label="SoM 标号" checked={agentSom}
-                  onChange={v => saveBool(AGENT_SOM_KEY, v, setAgentSom)}
-                  desc="Set-of-Mark：在截图上用蓝色框 + #N 编号标注可交互元素，LLM 直接用 #N 定位。"
-                  badge={!agentSom ? '未启用' : undefined} />
-                <ConfigSlider label="截图质量" value={agentScreenshotQuality}
-                  min={30} max={95} step={5}
-                  onChange={v => saveNum(AGENT_SCREENSHOT_QUALITY_KEY, v, setAgentScreenshotQuality)}
-                  unit="%" />
-                <ConfigSelect label="屏幕上下文" value={agentContext} onChange={v => saveStr(AGENT_CONTEXT_KEY, v, setAgentContext)}
-                  options={[
-                    { value: 'auto', label: '自动' },
-                    { value: 'minimal', label: '精简' },
-                    { value: 'full', label: '完整' },
-                  ]}
-                  resolved={_resolveAuto('screen_context', model, agentMultimodal)}
-                  desc="精简：仅窗口标题 + 鼠标位置（适合多模态模型）。完整：含 UIA 树 + 进程列表。" />
-                <ConfigToggle label="截图去重" checked={agentDedup}
-                  onChange={v => saveBool(AGENT_DEDUP_KEY, v, setAgentDedup)}
-                  desc="前后截图无变化时跳过重复截图，节省 Token。"
-                  badge={!agentDedup ? '未启用' : undefined} />
-              </ConfigSection>
-
-              {/* ── Section 4: 执行配置 ── */}
-              <ConfigSection title="执行配置" icon={<Zap size={13} />}
-                open={configSection === 'exec'} onToggle={() => setConfigSection(configSection === 'exec' ? null : 'exec')}
-                desc="错误处理、验证、UI 增强">
-                <ConfigSelect label="错误处理" value={agentOnError} onChange={v => saveStr(AGENT_ONERROR_KEY, v, setAgentOnError)}
-                  options={[
-                    { value: 'retry', label: '重试' },
-                    { value: 'replan', label: '重新规划' },
-                    { value: 'skip', label: '跳过' },
-                    { value: 'stop', label: '停止' },
-                  ]}
-                  desc="出错时重试当前步骤 / 重新生成计划 / 跳过该步 / 立即停止。" />
-                <ConfigToggle label="快速模式" checked={agentFastMode}
-                  onChange={v => saveBool(AGENT_FAST_MODE_KEY, v, setAgentFastMode)}
-                  desc="减少历史消息窗口，加快执行速度但可能降低质量。"
-                  badge={!agentFastMode ? '未启用' : undefined} />
-                <ConfigToggle label="窗口感知 OCR" checked={agentWindowAwareOcr}
-                  onChange={v => saveBool(AGENT_WINDOW_AWARE_OCR_KEY, v, setAgentWindowAwareOcr)}
-                  desc="OCR 搜索时限定到活动窗口区域，减少误识别。"
-                  badge={!agentWindowAwareOcr ? '未启用' : undefined} />
-                <ConfigToggle label="UIA 预聚焦" checked={agentUiaPrefocus}
-                  onChange={v => saveBool(AGENT_UIA_PREFOCUS_KEY, v, setAgentUiaPrefocus)}
-                  desc="输入文字前自动用 UIA 检测并聚焦输入框。"
-                  badge={!agentUiaPrefocus ? '未启用' : undefined} />
-                <ConfigToggle label="脚本执行模式" checked={agentScriptedMode}
-                  onChange={v => saveBool(AGENT_SCRIPTED_MODE_KEY, v, setAgentScriptedMode)}
-                  desc="Agent 可编写 Python 脚本完成复杂操作（条件判断、循环等）。"
-                  badge={!agentScriptedMode ? '未启用' : undefined} />
-                <ConfigToggle label="执行验证" checked={agentVerify}
-                  onChange={v => saveBool(AGENT_VERIFY_KEY, v, setAgentVerify)}
-                  desc="执行步骤后验证结果是否正确。关闭后更快但不检测结果。"
-                  badge={!agentVerify ? '未启用' : undefined} />
-                <ConfigToggle label="自动学习" checked={agentAutoLearn}
-                  onChange={v => saveBool(AGENT_AUTO_LEARN_KEY, v, setAgentAutoLearn)}
-                  desc="记录屏幕状态到经验库，后续相同目标可直接离线复用。"
-                  badge={!agentAutoLearn ? '未启用' : undefined} />
-              </ConfigSection>
-
-              {/* ── Section 5: 安全限制 ── */}
-              <ConfigSection title="安全限制" icon={<Shield size={13} />}
-                open={configSection === 'safety'} onToggle={() => setConfigSection(configSection === 'safety' ? null : 'safety')}
-                desc="步数、失败率保护">
-                <ConfigSlider label="最大步数" value={agentMaxSteps}
-                  min={3} max={100} step={1}
-                  onChange={v => saveNum(AGENT_MAX_STEPS_KEY, v, setAgentMaxSteps)} />
-                <ConfigSlider label="连续失败上限" value={agentMaxConsecutiveFails}
-                  min={1} max={20} step={1}
-                  onChange={v => saveNum(AGENT_MAX_CONSECUTIVE_FAILS_KEY, v, setAgentMaxConsecutiveFails)} />
-                <ConfigSlider label="最低成功率" value={agentMinSuccessRate}
-                  min={0.01} max={0.5} step={0.01}
-                  onChange={v => saveNum(AGENT_MIN_SUCCESS_RATE_KEY, v, setAgentMinSuccessRate)} />
-                <ConfigSlider label="滑动窗口大小" value={agentSlidingWindow}
-                  min={0} max={30} step={1}
-                  onChange={v => saveNum(AGENT_SLIDING_WINDOW_KEY, v, setAgentSlidingWindow)}
-                  unit={agentSlidingWindow === 0 ? ' (自动)' : ''}
-                  desc="历史消息窗口大小。0 = 自动（快速模式=4，多模态=8，纯文本=12）。" />
-              </ConfigSection>
-
-              {/* ── Section 6: 高级 ── */}
-              <ConfigSection title="高级" icon={<Terminal size={13} />}
-                open={configSection === 'advanced'} onToggle={() => setConfigSection(configSection === 'advanced' ? null : 'advanced')}
-                desc="流程图模式、VLM 后端">
-                <ConfigToggle label="流程图模式" checked={agentFlowChart}
-                  onChange={v => saveBool(AGENT_FLOW_CHART_KEY, v, setAgentFlowChart)}
-                  desc="启用完整工具提示词 + generate_flow/execute_flow 动作。默认关闭，使用元动作 + @feature 紧凑列表。"
-                  badge={!agentFlowChart ? '未启用' : undefined} />
-                <div className="agent-config-field">
-                  <div className="agent-config-field-label">VLM 后端</div>
-                  <div className="agent-config-field-control">
-                    <select className="agent-config-select" value={lsGet(AGENT_VISION_BACKEND_KEY, 'gpt-4o-mini')}
-                      onChange={e => { lsSet(AGENT_VISION_BACKEND_KEY, e.target.value); }}>
-                      <option value="gpt-4o-mini">GPT-4o-mini（默认）</option>
-                      <option value="local">本地模型 (llama-server)</option>
-                    </select>
-                  </div>
-                  <div className="agent-config-field-desc">视觉定位时使用的 VLM 后端。需对应模型可用。</div>
-                </div>
-              </ConfigSection>
-
+              </div>
             </div>
           )}
         </div>
 
-        {/* ═══════ NODE 3: Plan ═══════ */}
-        {showPlanNode && <FlowArrow />}
+        {/* PlanVisualizer (after LLM generates a plan) */}
         {showPlanNode && (
-          <div className="agent-flow-node plan-node">
-            <div className="agent-flow-node-header">
-              <GitBranch size={14} />
-              <span>计划</span>
-              {running && !lastSummary && <span className="agent-node-badge running">● 运行中</span>}
+          <>
+            <FlowArrow />
+            <div className="agent-flow-node compact plan-node">
+              <div className="agent-flow-node-header" style={{ background: 'linear-gradient(135deg, rgba(245,158,11,0.08), rgba(245,158,11,0.02))' }}>
+                <GitBranch size={13} />
+                <span>生成计划</span>
+                {running && <span className="agent-node-badge running">● 运行中</span>}
+              </div>
+              <div className="agent-flow-node-body" style={{ padding: '8px 10px' }}>
+                <PlanVisualizer />
+                {generatedScript && !running && !lastSummary && (
+                  <div className="agent-plan-actions" style={{ marginTop: 8 }}>
+                    <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)} style={{ gap: 6 }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      执行计划
+                    </button>
+                    <button className="agent-btn" onClick={() => { setGeneratedScript(null); }} style={{ gap: 6 }}>
+                      重新生成
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="agent-flow-node-body">
-              <PlanVisualizer />
-              {generatedScript && !running && !lastSummary && (
-                <div className="agent-plan-actions">
-                  <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)} style={{ gap: 6 }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    执行
-                  </button>
-                  <button className="agent-btn" onClick={() => { setGeneratedScript(null); }} style={{ gap: 6 }}>
-                    重新生成
-                  </button>
+          </>
+        )}
+
+        <FlowArrow />
+
+        {/* ═══════ EXECUTION LOOP ═══════ */}
+        <div className="agent-loop-container">
+          <div className="agent-loop-header">
+            <RefreshCw size={12} />
+            <span>执行循环</span>
+            {running && <span className="agent-spinner" style={{ marginLeft: 'auto', fontSize: 10 }} />}
+          </div>
+
+          {/* ── Decision: 还有步骤? ── */}
+          <div className="agent-loop-decision">
+            <div className="agent-loop-decision-shape">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2L22 12L12 22L2 12Z" />
+              </svg>
+            </div>
+            <span className="agent-loop-decision-text">还有步骤?</span>
+            <div className="agent-loop-decision-tags">
+              <span className="agent-loop-branch-tag no">NO → 结束</span>
+              <span className="agent-loop-branch-tag yes">YES ↓</span>
+            </div>
+          </div>
+
+          <FlowArrow />
+
+          {/* ── Perceive 感知 ── */}
+          <div className={`agent-flow-node compact vision-node ${nodeExpanded.perceive ? 'expanded' : ''}`}>
+            <div className="agent-flow-node-header clickable" onClick={() => toggleNode('perceive')}>
+              <Eye size={13} />
+              <span>Perceive 感知</span>
+              <span className="agent-mode-status">{modeLabel(agentVision, '模式')}</span>
+              <span className={`agent-expand-arrow ${nodeExpanded.perceive ? 'open' : ''}`}>▶</span>
+            </div>
+            {nodeExpanded.perceive && (
+              <div className="agent-flow-node-body">
+                <div className="agent-node-settings">
+                  <ConfigSelect label="视觉模式" value={agentVision} onChange={v => saveStr(AGENT_VISION_KEY, v, setAgentVision)}
+                    options={[
+                      { value: 'auto', label: '自动' },
+                      { value: 'direct', label: '直接截图' },
+                      { value: 'som', label: 'SoM 标号' },
+                      { value: 'omniparser', label: 'OmniParser' },
+                    ]}
+                    resolved={_resolveAuto('vision_mode', model, agentMultimodal)} />
+                  <ConfigToggle label="SoM 标号" checked={agentSom}
+                    onChange={v => saveBool(AGENT_SOM_KEY, v, setAgentSom)} />
+                  <ConfigToggle label="OmniParser" checked={agentOmniparser}
+                    onChange={v => saveBool(AGENT_OMNIPARSER_KEY, v, setAgentOmniparser)} />
+                  <ConfigSlider label="截图质量" value={agentScreenshotQuality}
+                    min={30} max={95} step={5}
+                    onChange={v => saveNum(AGENT_SCREENSHOT_QUALITY_KEY, v, setAgentScreenshotQuality)} unit="%" />
+                  <ConfigSelect label="屏幕上下文" value={agentContext} onChange={v => saveStr(AGENT_CONTEXT_KEY, v, setAgentContext)}
+                    options={[
+                      { value: 'auto', label: '自动' },
+                      { value: 'minimal', label: '精简' },
+                      { value: 'full', label: '完整' },
+                    ]}
+                    resolved={_resolveAuto('screen_context', model, agentMultimodal)} />
+                  <ConfigToggle label="截图去重" checked={agentDedup}
+                    onChange={v => saveBool(AGENT_DEDUP_KEY, v, setAgentDedup)} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <FlowArrow />
+
+          {/* ── Act 执行 ── */}
+          <div className={`agent-flow-node compact supervisor-node ${nodeExpanded.act ? 'expanded' : ''}`}>
+            <div className="agent-flow-node-header clickable" onClick={() => toggleNode('act')}>
+              <Zap size={13} />
+              <span>Act 执行</span>
+              <span className="agent-mode-status">{agentScriptedMode ? '脚本模式' : '工具模式'}</span>
+              <span className={`agent-expand-arrow ${nodeExpanded.act ? 'open' : ''}`}>▶</span>
+            </div>
+            {nodeExpanded.act && (
+              <div className="agent-flow-node-body">
+                <div className="agent-node-settings">
+                  <ConfigToggle label="窗口感知 OCR" checked={agentWindowAwareOcr}
+                    onChange={v => saveBool(AGENT_WINDOW_AWARE_OCR_KEY, v, setAgentWindowAwareOcr)} />
+                  <ConfigToggle label="UIA 预聚焦" checked={agentUiaPrefocus}
+                    onChange={v => saveBool(AGENT_UIA_PREFOCUS_KEY, v, setAgentUiaPrefocus)} />
+                  <ConfigToggle label="脚本执行" checked={agentScriptedMode}
+                    onChange={v => saveBool(AGENT_SCRIPTED_MODE_KEY, v, setAgentScriptedMode)} />
+                  <ConfigToggle label="快速模式" checked={agentFastMode}
+                    onChange={v => saveBool(AGENT_FAST_MODE_KEY, v, setAgentFastMode)} />
+                  <ConfigToggle label="自动学习" checked={agentAutoLearn}
+                    onChange={v => saveBool(AGENT_AUTO_LEARN_KEY, v, setAgentAutoLearn)} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <FlowArrow />
+
+          {/* ── Verify 验证 ── */}
+          <div className="agent-flow-node compact verify-node">
+            <div className="agent-flow-node-header">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                <polyline points="22 4 12 14.01 9 11.01" />
+              </svg>
+              <span>Verify 验证</span>
+              <label className="agent-mini-toggle" style={{ marginLeft: 'auto' }}>
+                <input type="checkbox" checked={agentVerify}
+                  onChange={e => saveBool(AGENT_VERIFY_KEY, e.target.checked, setAgentVerify)} />
+                <span>{agentVerify ? '开启' : '关闭'}</span>
+              </label>
+            </div>
+          </div>
+
+          {/* ── Decision: 验证成功? ── */}
+          <div className="agent-loop-decision">
+            <div className="agent-loop-decision-shape">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2L22 12L12 22L2 12Z" />
+              </svg>
+            </div>
+            <span className="agent-loop-decision-text">验证成功?</span>
+            <div className="agent-loop-decision-tags">
+              <span className="agent-loop-branch-tag yes">YES ↑ 继续</span>
+              <span className="agent-loop-branch-tag no">NO ↓ 错误处理</span>
+            </div>
+          </div>
+
+          <FlowArrow />
+
+          {/* ── Error Handler + Safety ── */}
+          <div className="agent-error-section">
+            <div className="agent-error-header">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <span>错误处理</span>
+            </div>
+            <div className="agent-error-branch-row">
+              <div className={`agent-error-card ${agentOnError === 'retry' ? 'active' : ''}`}
+                onClick={() => saveStr(AGENT_ONERROR_KEY, 'retry', setAgentOnError)}>
+                <span className="agent-error-card-label">重试</span>
+                <span className="agent-error-card-arrow">↻ Act</span>
+              </div>
+              <div className={`agent-error-card ${agentOnError === 'replan' ? 'active' : ''}`}
+                onClick={() => saveStr(AGENT_ONERROR_KEY, 'replan', setAgentOnError)}>
+                <span className="agent-error-card-label">重规划</span>
+                <span className="agent-error-card-arrow">↰ LLM</span>
+              </div>
+              <div className={`agent-error-card ${agentOnError === 'skip' ? 'active' : ''}`}
+                onClick={() => saveStr(AGENT_ONERROR_KEY, 'skip', setAgentOnError)}>
+                <span className="agent-error-card-label">跳过</span>
+                <span className="agent-error-card-arrow">→ 下一步</span>
+              </div>
+              <div className={`agent-error-card ${agentOnError === 'stop' ? 'active' : ''}`}
+                onClick={() => saveStr(AGENT_ONERROR_KEY, 'stop', setAgentOnError)}>
+                <span className="agent-error-card-label">停止</span>
+                <span className="agent-error-card-arrow">■ 结束</span>
+              </div>
+            </div>
+
+            {/* Safety limits inline */}
+            <div className={`agent-flow-node compact safety-node ${nodeExpanded.safety ? 'expanded' : ''}`}
+              style={{ maxWidth: '100%', border: 'none', borderTop: '1px solid var(--border-primary)', borderRadius: 0, boxShadow: 'none' }}>
+              <div className="agent-flow-node-header clickable" onClick={() => toggleNode('safety')}
+                style={{ background: 'transparent', padding: '6px 4px' }}>
+                <Shield size={11} />
+                <span style={{ fontSize: 11 }}>安全限制</span>
+                <span className="agent-mode-status" style={{ fontSize: 8 }}>{agentMaxSteps}步/{agentMaxConsecutiveFails}次失败</span>
+                <span className={`agent-expand-arrow ${nodeExpanded.safety ? 'open' : ''}`}>▶</span>
+              </div>
+              {nodeExpanded.safety && (
+                <div className="agent-flow-node-body" style={{ padding: '6px 4px' }}>
+                  <div className="agent-node-settings">
+                    <ConfigSlider label="最大步数" value={agentMaxSteps}
+                      min={3} max={100} step={1}
+                      onChange={v => saveNum(AGENT_MAX_STEPS_KEY, v, setAgentMaxSteps)} />
+                    <ConfigSlider label="连续失败上限" value={agentMaxConsecutiveFails}
+                      min={1} max={20} step={1}
+                      onChange={v => saveNum(AGENT_MAX_CONSECUTIVE_FAILS_KEY, v, setAgentMaxConsecutiveFails)} />
+                    <ConfigSlider label="最低成功率" value={agentMinSuccessRate}
+                      min={0.01} max={0.5} step={0.01}
+                      onChange={v => saveNum(AGENT_MIN_SUCCESS_RATE_KEY, v, setAgentMinSuccessRate)} />
+                    <ConfigSlider label="滑动窗口" value={agentSlidingWindow}
+                      min={0} max={30} step={1}
+                      onChange={v => saveNum(AGENT_SLIDING_WINDOW_KEY, v, setAgentSlidingWindow)}
+                      unit={agentSlidingWindow === 0 ? ' (自动)' : ''} />
+                  </div>
                 </div>
               )}
             </div>
           </div>
-        )}
+        </div>
 
-        {/* ═══════ NODE 4: Execution ═══════ */}
+        {/* ═══════ NODE 7: Execution ═══════ */}
         {showExecNode && <FlowArrow />}
         {showExecNode && (
           <div className="agent-flow-node exec-node">
@@ -1024,7 +1081,7 @@ export function AgentView() {
           </div>
         )}
 
-        {/* ═══════ NODE 5: Result ═══════ */}
+        {/* ═══════ NODE 8: Result ═══════ */}
         {showResultNode && <FlowArrow />}
         {showResultNode && (
           <div className="agent-flow-node result-node">

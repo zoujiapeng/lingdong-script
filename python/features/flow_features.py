@@ -156,10 +156,10 @@ IMPORTANT RULES:
 3. Do NOT use numbering (1. 2. 3.) in the pseudocode. Each step on its own line, no prefixes.
 4. If the user specifies explicit time delays (like "N秒后" "等N秒" "隔N秒") — strictly follow them by adding a `等待 N` step before the corresponding action
 5. After launching a GUI app, always add a `等待 1-2秒` step to let it open, then optionally `聚焦 "title"` to ensure focus.
-6. For window titles in `聚焦`, use a fuzzy keyword that works across locales. E.g. `聚焦 "记事本"` instead of `聚焦 "无标题 - 记事本"`, and `聚焦 "计算器"` instead of `聚焦 "Calculator"`.
+6. For window titles in `聚焦`, use a fuzzy keyword that works across locales. E.g. `聚焦 "Chrome"` instead of `聚焦 "Chrome"` (using full process name), and `聚焦 "计算器"` instead of `聚焦 "Calculator"`.
 7. Use specific click targets that appear as visible text on screen. Never use vague descriptions like "空白处" or "当前位置" — use a concrete nearby text target instead.
 8. When using `双击` or `右键单击`, do NOT wrap the target in quotes in the pseudocode. Write `双击 回收站` not `双击 '回收站'`. (Quotes are optional in structured_steps targets.)
-9. When launching a program, you can use Chinese names directly (e.g. `启动 "微信"`, `启动 "记事本"`, `启动 "微星小飞机"`). The system will auto-resolve them to full paths. Do NOT use `运行命令 "where 程序名"` for program path lookup — just use the Chinese or common name directly.
+9. When launching a program, you can use Chinese names directly (e.g. `启动 "微信"`, `启动 "计算器"`, `启动 "微星小飞机"`). The system will auto-resolve them to full paths. Do NOT use `运行命令 "where 程序名"` for program path lookup — just use the Chinese or common name directly.
 10. NEVER make up placeholder usernames, passwords, or credentials. If the user's goal mentions "登录" (login) but doesn't specify credentials, DO NOT fabricate example values like "your_username" or "your_password". Instead, generate steps that ask the user to enter their credentials manually, or skip the login step if credentials are not provided.
 11. For ALL web/website/browser tasks: use the BROWSER AUTOMATION commands (浏览器导航, 浏览器点击, 浏览器输入 etc.) which control the browser via CDP (Playwright) for precise element targeting. Do NOT use generic keyboard/mouse automation for browsing the web.
 12. When the goal involves multiple phases (wait → do A → do B), generate the steps in the exact order specified by the user, preserving all delays and dependencies between phases.
@@ -241,32 +241,29 @@ BASIC DSL SYNTAX (common commands):
 + ALL commands below are also available as DSL keywords (use the keyword as the first token):
 {dsl_reference}
 
-━━━ EXAMPLE 1: Browser workflow (flat, no condition) — for "5秒后打开浏览器搜索deepseek然后在里面登录，完成后5秒打开记事本":
+━━━ EXAMPLE 1: Browser workflow (flat, no condition) — for "打开浏览器搜索deepseek并登录，完成后截图验证":
 
 {{
-  "explanation": "等待5秒后打开浏览器，导航到deepseek官网，进行登录操作（由于未提供具体凭据，仅点击登录按钮并等待用户输入），完成后等待5秒再打开记事本。",
-  "pseudocode": "等待 5
-浏览器导航 https://www.deepseek.com
+  "explanation": "打开浏览器，导航到deepseek官网，进行登录操作（由于未提供具体凭据，仅点击登录按钮并等待用户输入），完成后截图验证登录成功。",
+  "pseudocode": "浏览器导航 https://www.deepseek.com
 浏览器等待 .login-btn
 浏览器点击 .login-btn
 浏览器等待 #username-input
 浏览器输入 #username-input 等待用户输入凭据
 浏览器点击 .submit-btn
 浏览器等待 .user-center
-等待 5
-启动 记事本",
-  "dsl": "WAIT 5
-BROWSER_NAV https://www.deepseek.com
+等待 1
+截图",
+  "dsl": "BROWSER_NAV https://www.deepseek.com
 BROWSER_WAIT .login-btn
 BROWSER_CLICK .login-btn
 BROWSER_WAIT #username-input
 BROWSER_TYPE #username-input 等待用户输入凭据
 BROWSER_CLICK .submit-btn
 BROWSER_WAIT .user-center
-WAIT 5
-LAUNCH 记事本",
+WAIT 1
+SCREENSHOT",
   "structured_steps": [
-    {{"type": "wait", "duration": 5}},
     {{"type": "browser_navigate", "url": "https://www.deepseek.com", "path_level": 1}},
     {{"type": "browser_wait_element", "selector": ".login-btn", "timeout": 10}},
     {{"type": "browser_click", "selector": ".login-btn", "path_level": 1}},
@@ -274,31 +271,22 @@ LAUNCH 记事本",
     {{"type": "browser_type", "selector": "#username-input", "text": "等待用户输入凭据", "path_level": 1}},
     {{"type": "browser_click", "selector": ".submit-btn"}},
     {{"type": "browser_wait_element", "selector": ".user-center", "timeout": 15}},
-    {{"type": "wait", "duration": 5}},
-    {{"type": "launch", "target": "记事本", "path_level": 0}}
+    {{"type": "wait", "duration": 1}},
+    {{"type": "screenshot"}}
   ]
 }}
 
-━━━ EXAMPLE 2: Conditional branching — for "3秒后打开记事本写'hello'然后判断屏幕是否变化,变化就锁屏":
+━━━ EXAMPLE 2: Conditional branching — for "检测屏幕变化,变化就锁屏":
 
 {{
-  "explanation": "等待3秒，打开记事本并输入hello，然后判断屏幕是否变化——变化则按下Win+L锁屏，否则不做额外操作。",
-  "pseudocode": "等待 3
-启动 记事本
-输入 hello
-如果 屏幕是否变化
+  "explanation": "检测屏幕是否发生变化，变化则按下Win+L锁屏，否则不做额外操作。",
+  "pseudocode": "如果 屏幕是否变化
   按键 win+l
 结束",
-  "dsl": "WAIT 3
-LAUNCH 记事本
-TYPE hello
-IF 屏幕是否变化
+  "dsl": "IF 屏幕是否变化
 HOTKEY win+l
 END",
   "structured_steps": [
-    {{"type": "wait", "duration": 3}},
-    {{"type": "launch", "target": "记事本"}},
-    {{"type": "type", "text": "hello"}},
     {{"type": "condition", "condition": "屏幕是否变化",
       "true_branch": [
         {{"type": "hotkey", "keys": ["win", "l"]}}
@@ -596,7 +584,7 @@ def _steps_to_pseudocode(steps: list) -> str:
     description="【Agent 内部】将自然语言目标转为可执行的流程图脚本（伪代码）。适用于需要多步骤操作、定时任务、条件判断的复杂场景。返回生成的伪代码",
     category=F.SYSTEM,
     params=[
-        P("goal", "str", "目标描述", example="每天早上9点打开记事本输入当天日期"),
+        P("goal", "str", "目标描述", example="每天早上9点打开计算器计算总和"),
     ],
     returns="dict{success, pseudocode, explanation} - 生成的脚本",
     tags=["agent", "flow", "generation"],
