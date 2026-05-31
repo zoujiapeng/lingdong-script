@@ -105,6 +105,8 @@ SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作
 **何时用：** 用户说要操作某个程序。"打开记事本输入 Hello"→ launch → click → type_text。
 不要用 file_ops 替代打开记事本操作——用户说的是操作程序，不是要文件结果。
 
+**点击技巧：** 普通按钮用 click(target='按钮名')。列表项（联系人/文件/聊天记录）单击只选中，要双击才能打开。如果 click 没反应，试试 click(target='...', button='double')。
+
 ### 判断方法
 
 | 用户任务 | 意图 | 该怎么做 |
