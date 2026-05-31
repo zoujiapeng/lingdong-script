@@ -583,6 +583,7 @@ META_ACTIONS["click"] = (
     "点击屏幕上的目标。普通按钮用 click(target='按钮名') 即可。"
     "对于列表中的项目（联系人、文件、聊天记录等），单击通常只选中不打开，需要用 button='double' 双击才能进入。"
     "target 可以是按钮文字('确认'、'保存')、元素名称、截图编号('#3')或坐标'100,200'。"
+    "桌面背景、画布空白等没有控件名的区域，只能用 x,y 坐标点击，根据截图估算位置。"
     "自动用 UIA 无障碍树 → OCR 文字识别 → 图像匹配定位目标。如果目标唯一可以直接点，"
     "如果多个同名目标用 region 参数限定搜索区域。"
     "常用: click(target='确认'), click(target='#3'), click(x=500,y=400), click(target='联系人名', button='double')",
@@ -1029,6 +1030,7 @@ def get_prompt(use_flow_chart: bool = False) -> str:
 - 操作后加 wait(0.2-0.5) 让界面稳定
 - 输入文字前必须先 click 点击输入框
 - 列表项（联系人/聊天/文件列表）需要双击才能打开，用 button='double'
+- 桌面背景/空白区域没有控件名，用坐标点击 click(x=..., y=..., button='right')
 """)
 
     lines.append(f"\n共 {len(META_ACTIONS)} 个动作注册，默认展示 {len(META_ACTIONS) - (0 if use_flow_chart else 2)} 个。")
