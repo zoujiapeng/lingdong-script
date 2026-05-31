@@ -1072,8 +1072,8 @@ class LingdongAgent:
                 "content": f"执行{status_txt}。{hint}",
             })
         else:
-            sq = cfg.get("screenshot_quality", 50 if multimodal else 60)
-            raw_b64 = self.supervisor.capture_b64(quality=sq)
+            sq = cfg.get("screenshot_quality", 35 if multimodal else 60)
+            raw_b64 = self.supervisor.capture_b64(quality=sq, max_size=1920)
             cur_hash = hashlib.md5(raw_b64.encode()).hexdigest()[:16]
             if cur_hash == last_b64_hash and cfg["use_dedup"]:
                 messages.append({
@@ -1160,7 +1160,7 @@ class LingdongAgent:
             self._emit("log", {"level": "info", "message": "对话模式已开启 — 可边执行边聊天"})
 
         # ── 首次截图 + 第 1 条用户消息 ──
-        raw_b64 = self.supervisor.capture_b64(quality=50 if multimodal else 60)
+        raw_b64 = self.supervisor.capture_b64(quality=35 if multimodal else 60, max_size=1920)
         screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
 
         som_label = ""
@@ -1186,7 +1186,9 @@ class LingdongAgent:
         first_prompt = (
             f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}{win_info}"
             + (som_label if vision_mode != "direct" else "")
-            + ("\n\n分析屏幕截图，执行第一步。必须调用工具。" if vision_mode != "direct"
+            + ("\n\n分析屏幕截图，规划2-3步连续操作，用多个「工具:」块一次输出。\n\n"
+               "例如:\n工具: click\n参数:\n  target: 7\n\n工具: click\n参数:\n  target: +\n\n"
+               "然后等执行结果截图再做下一步规划。" if vision_mode != "direct"
                else "\n\n先判断是否有直接工具（file_ops/manage_app/run_command 等）可用。有就直接用，不需要操作屏幕。没有再用视觉工具点击操作。截图主要用于验证结果。")
         )
         messages.append({
@@ -2144,7 +2146,7 @@ PARAMS: {{"x": 960, "y": 540}}
         # ── 非 screenshot 动作：执行后截取新截图返回 ──
         _time.sleep(0.15)
         from agent.supervisor import Supervisor
-        b64 = Supervisor(screenshot_quality=screenshot_quality).capture_b64()
+        b64 = Supervisor(screenshot_quality=screenshot_quality).capture_b64(max_size=1920)
 
     # ══════════════════════════════════════════════════════════
     #  _unified_run — 统一执行入口
