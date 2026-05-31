@@ -171,6 +171,40 @@ def _win32_hotkey(*keys):
 
 # ── uiautomation Helpers ────────────────────────────────────────
 
+# UIA control name aliases: common symbols → UIA display names
+# When _uia_find_control fails to find a control by exact symbol,
+# it retries with each alias in this list. The UIA names come from
+# common Windows apps (Calculator, Notepad, File Explorer, etc.).
+_UIA_NAME_ALIASES = {
+    "+": ["Plus"],
+    "-": ["Minus"],
+    "×": ["Multiply"],
+    "*": ["Multiply"],
+    "÷": ["Divide"],
+    "/": ["Divide"],
+    "=": ["Equals"],
+    ".": ["Decimal"],
+    ",": ["Decimal"],
+    "%": ["Percent"],
+    "√": ["Square root"],
+    "±": ["Positive negative", "Negate"],
+    "←": ["Backspace"],
+    "(": ["Left parenthesis", "Open parenthesis"],
+    ")": ["Right parenthesis", "Close parenthesis"],
+    # 数字 → 英文名（优先匹配 ButtonControl 而非内部 TextControl）
+    "0": ["Zero"],
+    "1": ["One"],
+    "2": ["Two"],
+    "3": ["Three"],
+    "4": ["Four"],
+    "5": ["Five"],
+    "6": ["Six"],
+    "7": ["Seven"],
+    "8": ["Eight"],
+    "9": ["Nine"],
+}
+
+
 def _uia_get_foreground_root():
     """Get the UIA control for the foreground window, or None."""
     import win32gui
@@ -190,9 +224,16 @@ def _uia_find_control(name, ctrl_type=None, timeout=3, scope_to_fg=True):
     When scope_to_fg is True (default), searches only within the foreground
     window's control tree. This prevents clicking controls in background
     windows when multiple instances are stacked.
+
+    Automatically retries with UIA name aliases when the direct name
+    fails (e.g., "+" → "Plus", "=" → "Equals").
     """
     uia = _ensure_uia()
-    condition = lambda c, d: c.Name and name in c.Name
+    search_names = [name]
+    alias = _UIA_NAME_ALIASES.get(name)
+    if alias:
+        # 别名优先（ButtonControl 名如 "Five" 比内部 TextControl "5" 更可靠）
+        search_names = alias + [name]
 
     if scope_to_fg:
         root = _uia_get_foreground_root()
@@ -202,12 +243,14 @@ def _uia_find_control(name, ctrl_type=None, timeout=3, scope_to_fg=True):
     if not root:
         return None
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        ctrl = uia.FindControl(root, condition)
-        if ctrl:
-            return ctrl
-        time.sleep(0.2)
+    for attempt_name in search_names:
+        condition = lambda c, d, n=attempt_name: c.Name and n in c.Name
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ctrl = uia.FindControl(root, condition)
+            if ctrl:
+                return ctrl
+            time.sleep(0.2)
     return None
 
 
