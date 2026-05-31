@@ -25,7 +25,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from queue import Queue, Empty
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Set
 
 logger = logging.getLogger("agent.lingdong")
 
@@ -1504,8 +1504,42 @@ class LingdongAgent:
 
     _langgraph_tools_cache: Optional[list] = None
 
+    AGENT_TOOLS: Set[str] = {
+        # ---- 交互动作 ----
+        "click_target", "right_click", "hover", "mouse_move",
+        "type_text", "type_clipboard",
+        "hotkey", "scroll", "drag", "swipe",
+        "triple_click", "middle_click", "select_text",
+        # ---- 浏览器 ----
+        "browser_connect", "browser_navigate", "browser_click", "browser_type",
+        "browser_list_tabs", "browser_close_tab", "browser_screenshot",
+        "browser_get_url", "browser_get_text", "browser_find_elements",
+        "browser_wait_element", "browser_wait_page_load", "browser_execute_js",
+        "browser_refresh", "browser_go_back", "browser_new_tab", "browser_switch_tab",
+        # ---- 感知识别 ----
+        "screenshot", "find_image", "ocr_find_text", "ocr_extract_all",
+        "region_select", "color_check", "popup_close",
+        "a11y_get_tree", "find_element", "wait_element",
+        # ---- 系统控制 ----
+        "launch_program", "run_command", "program_resolve", "program_list",
+        "focus_window", "get_active_window", "list_windows",
+        # ---- 窗口管理 ----
+        "window_minimize", "window_maximize", "window_close",
+        "window_resize", "window_restore", "show_desktop",
+        # ---- 进程 ----
+        "detect_process", "find_processes", "kill_process",
+        # ---- 系统功能 ----
+        "volume_set", "volume_mute", "display_brightness",
+        "battery_status", "lock_workstation",
+        "wifi_list", "wifi_connect", "wifi_disconnect",
+        # ---- 等待 ----
+        "wait_action", "wait_screen_stable", "wait_screen_change",
+        # ---- 元动作 ----
+        "run_python_script",
+    }
+
     def _load_langgraph_tools(self) -> list:
-        """从 @feature 注册表加载所有可用工具（类级缓存，首次后复用）。"""
+        """从 @feature 注册表加载可用工具（过滤 + 类级缓存）。"""
         if self._langgraph_tools_cache is not None:
             return self._langgraph_tools_cache
 
@@ -1515,6 +1549,8 @@ class LingdongAgent:
         tools = []
         for spec in registry.all():
             if spec.deprecated or spec.hidden:
+                continue
+            if spec.name not in self.AGENT_TOOLS:
                 continue
             tools.append(self._make_tool_func(spec))
         LingdongAgent._langgraph_tools_cache = tools
@@ -1546,21 +1582,27 @@ class LingdongAgent:
              for sn in schema_names],
             return_annotation=str,
         )
+        tool_fn.__name__ = spec.name
+        tool_fn.__qualname__ = spec.name
         tool_fn.__signature__ = sig
+        tool_fn.__doc__ = f"{spec.display_name}: {spec.description}\n\n参数: {[p.name for p in spec.params]}"
         return tool_fn
 
     def _make_supervision_wrapper(self):
         """创建 LangGraph ToolNode 监督包装器。
 
-        委托给 _supervised_execute，消除监督逻辑重复。
-        LangGraph 的 ToolNode 要求返回 JSON 字符串。
+        适配 LangGraph 1.x ToolCallWrapper 协议，必须返回 ToolMessage。
         """
+        from langchain_core.messages import ToolMessage
+
         def wrapper(call_req, execute):
             tool_call = call_req.tool_call
             name = tool_call.get("name", "")
             args = tool_call.get("args", {})
+            tool_call_id = tool_call.get("id", "")
             result = self.supervisor.execute(name, args)
-            return json.dumps(result, ensure_ascii=False, default=str)
+            content = json.dumps(result, ensure_ascii=False, default=str)
+            return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
 
         return wrapper
 
