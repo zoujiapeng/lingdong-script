@@ -580,9 +580,12 @@ META_ACTIONS: dict[str, tuple] = {}
 
 # Core desktop actions
 META_ACTIONS["click"] = (
-    "点击屏幕上的目标。target 可以是按钮文字('确认'、'保存')、元素名称、截图编号('#3')或坐标'100,200'。"
+    "点击屏幕上的目标。普通按钮用 click(target='按钮名') 即可。"
+    "对于列表中的项目（联系人、文件、聊天记录等），单击通常只选中不打开，需要用 button='double' 双击才能进入。"
+    "target 可以是按钮文字('确认'、'保存')、元素名称、截图编号('#3')或坐标'100,200'。"
     "自动用 UIA 无障碍树 → OCR 文字识别 → 图像匹配定位目标。如果目标唯一可以直接点，"
-    "如果多个同名目标用 region 参数限定搜索区域。常用方式: click(target='确认'), click(target='#3'), click(x=500,y=400)",
+    "如果多个同名目标用 region 参数限定搜索区域。"
+    "常用: click(target='确认'), click(target='#3'), click(x=500,y=400), click(target='联系人名', button='double')",
     {
         "target": "str - 目标文字/元素名/截图编号#N/坐标'x,y'",
         "button": "str? - 鼠标键: 'left'(默认), 'right'右键, 'middle'中键, 'double'双击",
@@ -1011,7 +1014,10 @@ def get_prompt(use_flow_chart: bool = False) -> str:
    click(target='文件')
    click(target='另存为')
 
-6. 浏览器操作
+6. 打开列表项（联系人/文件/聊天）
+   click(target='目标名', button='double')  — 双击打开，单击只选中
+
+7. 浏览器操作
    browser_do(action='navigate', url='https://www.baidu.com')
    browser_do(action='type', selector='#kw', text='天气')
    browser_do(action='click', selector='#su')
@@ -1022,6 +1028,7 @@ def get_prompt(use_flow_chart: bool = False) -> str:
 - 描述目标用文字（按钮名称），不要猜坐标
 - 操作后加 wait(0.2-0.5) 让界面稳定
 - 输入文字前必须先 click 点击输入框
+- 列表项（联系人/聊天/文件列表）需要双击才能打开，用 button='double'
 """)
 
     lines.append(f"\n共 {len(META_ACTIONS)} 个动作注册，默认展示 {len(META_ACTIONS) - (0 if use_flow_chart else 2)} 个。")
