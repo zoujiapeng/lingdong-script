@@ -11,7 +11,9 @@ Commands (stdin, one JSON object per line):
   {"type": "start", "goal": "...", "config": {"api_key":"...","api_base":"...","model":"..."}}
   {"type": "stop"}            — request graceful stop after current step
   {"type": "guidance", "text":"..."} — inject user guidance for next step
+  {"type": "chat", "text":"..."} — inject chat message (conversation mode)
   {"type": "status"}          — reply with current agent state
+  {"type": "memory_query"}    — query current memory snapshot
 
 Events (stdout, one JSON object per line, flush()ed):
   {"type": "log", "level": "info|warn|error", "message": "..."}
@@ -20,6 +22,9 @@ Events (stdout, one JSON object per line, flush()ed):
        "parameters":{...}, "result": {"success": bool, "confidence": float, ...}}
   {"type": "agent_done", "status": "completed|failed|stopped",
        "total_steps": N, "fail_reason": "..."}
+  {"type": "agent_reflection", "step_num": N, "insight":"...", "rule":"..."}
+  {"type": "agent_learned", "rules_count": N, "prefs_count": N, "insights":[...], "mistakes":[...]}
+  {"type": "memory_snapshot", "preferences": N, "rules": N, "episodes": N}
   {"type": "error", "message": "..."}
 """
 
@@ -232,6 +237,8 @@ class AgentIPC:
             self._cmd_chat(msg)
         elif msg_type == "status":
             self._cmd_status()
+        elif msg_type == "memory_query":
+            self._cmd_memory_query()
         else:
             _log("warn", f"Unknown command type: {msg_type}")
 
@@ -297,6 +304,17 @@ class AgentIPC:
             "running": running,
             "stopped": self._stop_event is not None and self._stop_event.is_set(),
         })
+
+    def _cmd_memory_query(self):
+        """查询内存快照 (从 MemoryStore)."""
+        try:
+            from agent.memory import MemoryStore
+            mem = MemoryStore()
+            _emit("memory_snapshot", mem.stats())
+            _log("info", f"Memory stats: {mem.stats()}")
+        except Exception as e:
+            _emit("error", {"message": f"Memory query failed: {e}"})
+            _log("warn", f"Memory query error: {e}")
 
 
 # ====================================================================

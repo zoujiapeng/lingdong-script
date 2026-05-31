@@ -171,13 +171,37 @@ def _win32_hotkey(*keys):
 
 # ── uiautomation Helpers ────────────────────────────────────────
 
-def _uia_find_control(name, ctrl_type=None, timeout=3):
-    """Find a UI control by name. Returns control or None."""
+def _uia_get_foreground_root():
+    """Get the UIA control for the foreground window, or None."""
+    import win32gui
     uia = _ensure_uia()
-    root = uia.GetRootControl()
+    fg_hwnd = win32gui.GetForegroundWindow()
+    if not fg_hwnd:
+        return None
+    try:
+        return uia.ControlFromHandle(fg_hwnd)
+    except Exception:
+        return None
+
+
+def _uia_find_control(name, ctrl_type=None, timeout=3, scope_to_fg=True):
+    """Find a UI control by name. Returns control or None.
+
+    When scope_to_fg is True (default), searches only within the foreground
+    window's control tree. This prevents clicking controls in background
+    windows when multiple instances are stacked.
+    """
+    uia = _ensure_uia()
+    condition = lambda c, d: c.Name and name in c.Name
+
+    if scope_to_fg:
+        root = _uia_get_foreground_root()
+    else:
+        root = uia.GetRootControl()
+
     if not root:
         return None
-    condition = lambda c, d: c.Name and name in c.Name
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         ctrl = uia.FindControl(root, condition)
@@ -188,12 +212,24 @@ def _uia_find_control(name, ctrl_type=None, timeout=3):
 
 
 def _uia_click_by_name(name, timeout=3):
-    """Find control by name and click it via uiautomation."""
+    """Find control by name and click it via uiautomation.
+
+    Scopes search to the foreground window to prevent clicking controls
+    in background windows when multiple instances are stacked.
+
+    Returns True only if the control has a valid bounding rectangle and
+    the click was executed. BoundingRectangle (0,0,0,0) means the control
+    is off-screen or structural — clicking it would do nothing.
+    """
     ctrl = _uia_find_control(name, timeout=timeout)
     if ctrl:
         try:
-            ctrl.Click()
-            return True
+            rect = ctrl.BoundingRectangle
+            if rect and (rect.right - rect.left > 0) and (rect.bottom - rect.top > 0):
+                ctrl.Click()
+                return True
+            logger.warning("_uia_click_by_name(%r) -> skipping: BoundingRectangle is %s",
+                           name, rect)
         except Exception:
             pass
     return False
@@ -232,23 +268,23 @@ class ActionHandler:
     def _exec_click(self, target=None, x=None, y=None, button="left", **kw):
         learn_target_id = kw.get("learn_target_id") or kw.get("target_id")
         learn_label = kw.get("learn_label") or (target if isinstance(target, str) else "")
-        # Priority 1: uiautomation click by target name
-        if target and isinstance(target, str) and not target.startswith("("):
-            if _uia_click_by_name(target):
-                self._learn_click_target(learn_target_id, learn_label or target, action="click", uia_name=target, button=button)
-                return True
-        # Priority 2: win32api coordinate click
+        # Priority 1: if coordinates provided, use them directly (no UIA)
         cx, cy = None, None
         if x is not None and y is not None:
             cx, cy = int(x), int(y)
         elif target is not None and isinstance(target, (list, tuple)) and len(target) >= 2:
             cx, cy = int(target[0]), int(target[1])
-        if cx is not None:
+        if cx is not None and cy is not None:
             ok = _win32_click(cx, cy, button)
             if ok:
                 self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
             return ok
-        # Fallback: current position (only when no target specified — otherwise UIA already failed)
+        # Priority 2: uiautomation click by target name (only when no coordinates)
+        if target and isinstance(target, str) and not target.startswith("("):
+            if _uia_click_by_name(target):
+                self._learn_click_target(learn_target_id, learn_label or target, action="click", uia_name=target, button=button)
+                return True
+        # Fallback: current position (only when no target specified)
         if not target:
             cx, cy = _get_cursor_pos()
             ok = _win32_click(cx, cy, button)

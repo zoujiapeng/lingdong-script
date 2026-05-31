@@ -29,9 +29,13 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("agent.lingdong")
 
+# ── Self-evolving agent modules ──
+from agent.memory import MemoryStore
+from agent.reflection import ReflectionEngine
+
 DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2-omni"
-MAX_STEPS = 20          # 单次任务最大步数，过高会导致失控循环
+MAX_STEPS = 50          # 单次任务最大步数
 MAX_CONSECUTIVE_FAILURES = 5  # 连续失败上限 → 自动终止
 _MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 / 总步数）
 
@@ -73,70 +77,77 @@ def _is_multimodal_model(model_name: str) -> bool:
 
 # ── 文本协议模式系统提示词 ─────────────────────────────────────
 
-SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作可用。
+SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作可用，分直接路径和视觉路径。
 
-每轮我给你截图 + 当前窗口状态，**你必须调用动作操作屏幕**，不能只看图猜测。
+选择规则：看用户意图——要的是「结果」还是「操作程序」？
 
-操作规则:
-- 必须调用动作来完成任务，不能仅凭截图内容推断"已完成"
-- 输入文字前：必须先用 click 点击目标输入框聚焦
-- 点击目标时优先用文字描述（如 "确认"、"保存"），不要猜坐标
-- 同一目标在不同屏幕区域出现时，使用 region 限制搜索区域
-- 不要猜测。必须执行搜索、点击、输入等实际操作
-- 完成后必须确认。输入文字后需要点击发送/确认按钮提交
-- 如果没有执行任何动作就完成，会被视为幻觉
+### 直接路径（要结果时使用 — 不操作屏幕，直接返回结果）
+- file_ops — 文件读写（创建/写入/读取/删除）
+- manage_app — 启动/关闭/检测应用程序
+- run_command — 执行命令/脚本
+- system_info — 获取系统信息
+- notify — 发送通知
+- network — 管理网络连接
+- control_audio — 音量控制
 
-格式:
-```
-思考: <推理>
+**何时用：** 用户只关心结果。"保存文件"→ file_ops，"启动计算器"→ manage_app，"查电量"→ system_info。
+
+### 视觉路径（要操作程序时使用 — 启动程序→界面操作→验证）
+- screenshot — 截图验证结果/检查进度（每轮自动附截图，不需手动调用）
+- click — 点击按钮或坐标
+- type_text — 在已聚焦输入框输入文字（先用 click 聚焦）
+- press_keys — 键盘快捷键
+- read_ui — 读取窗口控件树
+- read_text — OCR 识别文字
+- manage_window — 窗口管理（聚焦/移动/缩放）
+- browser_do — 浏览器自动化
+
+**何时用：** 用户说要操作某个程序。"打开记事本输入 Hello"→ launch → click → type_text。
+不要用 file_ops 替代打开记事本操作——用户说的是操作程序，不是要文件结果。
+
+### 判断方法
+
+| 用户任务 | 意图 | 该怎么做 |
+|---------|------|---------|
+| "创建 test.txt 内容 Hello" | 要结果 | file_ops 直接写文件 |
+| "打开记事本输入 Hello" | 操作程序 | manage_app 启动 → click 聚焦 → type_text |
+| "计算 7+3" | 要结果 | 打开计算器 → click 按钮 |
+| "保存文件到桌面" | 要结果 | file_ops 直接写 |
+| "在记事本里保存文件" | 操作程序 | 启动记事本 → type_text → click 菜单保存 |
+| "查一下电池电量" | 要结果 | system_info |
+
+**重要：当用户说「打开/启动某个程序」时，必须用 manage_app 来启动该程序，不能用 file_ops 替代。**
+**"打开记事本"=启动应用（操作程序），不是创建文件（要结果）。**
+
+### 执行流程
+
+1. **判断意图**：用户要结果还是操作程序？
+2. **要结果** → 用直接路径工具一步完成
+3. **操作程序** → 启动程序 → 界面操作（click/type_text）→ 截图验证
+4. **每步验证**：截图确认操作结果正确
+
+### 关键规则
+
+**工具执行结果必须如实反映。** 如果工具返回错误（拒绝访问、路径不存在等），必须在总结中如实报告失败原因，绝不能声称成功。错误信息示例：「file_ops 返回错误：[WinError 5] 拒绝访问」。如果遇到错误，尝试更换路径或方法后重试。
+
+**文件路径必须使用正确的用户目录。** 不要硬编码用户名。桌面路径固定为 `C:\\Users\\zou\\Desktop\\`。
+
+**点击失败时换用坐标。** 如果 `click(target="按钮名")` 第一次失败，换用 `click(x=数字, y=数字)` 坐标点击。坐标可以从截图中的按钮位置估算。
+
+**完成任务后必须验证。** 创建文件后检查文件是否存在，计算后检查结果是否正确。
+
+必须严格按照以下格式输出，不要省略：
+
+思考: <推理过程>
 工具: <动作名>
 参数:
   参数1: 值1
-```
-完成后:
-```
-总结: <结果>
-```
 
-工作流示例:
+任务完全完成后，输出:
 
-【启动程序 → 操作 → 验证】
-1. manage_app(action='launch', target='calc.exe')      — 启动计算器
-2. wait(seconds=1)                                          — 等待窗口打开
-3. click(target='7')                                       — 点击数字7
-4. click(target='加')                                      — 点击加号
-5. click(target='3')                                       — 点击数字3
-6. click(target='等于')                                    — 点击等号
-7. screenshot()                                             — 截图验证结果
+总结: <结果描述>
 
-【窗口切换】
-1. manage_window(action='focus', title='计算器')        — 聚焦到计算器窗口
-2. 如果失败: press_keys(keys='alt+tab')                 — 切换窗口
-
-【点击按钮】
-1. click(target='确认')                                 — 点击"确认"按钮
-2. click(target='#3')                                   — 点击截图编号3的元素
-3. click(x=500, y=400)                                  — 点击坐标(500,400)
-
-【读取屏幕内容】
-1. read_ui()                    — 读取窗口无障碍控件树（精确获取按钮名）
-2. read_text(target='错误提示')  — OCR 查找特定文字位置
-3. screenshot()                 — 截图
-
-【浏览器操作】
-1. browser_do(action='navigate', url='https://www.baidu.com')
-2. browser_do(action='click', selector='#search-input')
-3. browser_do(action='type', selector='#search-input', text='天气预报')
-
-【处理弹窗】
-每次操作后如果出现弹窗:
-dialog(action='close')  — 自动关闭（保存确认/错误提示/覆盖询问等）
-
-【文件操作】
-1. file_ops(action='write', path='output.txt', content='Hello')
-2. file_ops(action='read', path='output.txt')
-
-动作列表:
+动作列表（完整详情）:
 {tools_text}
 """
 
@@ -236,7 +247,8 @@ def _build_feature_tools_compact() -> str:
     lines = [
         "\n\n## @feature 高级工具（按分类）",
         "",
-        "除上述元动作外，还有以下底层工具可直接调用。元动作不够用时按需使用：",
+        "除上述元动作外，还有以下底层工具。元动作不够用时按需使用：",
+        "同样遵循直接路径优先原则 — 能直接用工具完成就不要操作屏幕。",
         "",
     ]
     for cat in FeatureCategory:
@@ -347,6 +359,15 @@ class LingdongAgent:
             self._history = load_history(limit=10)
         except Exception:
             pass
+
+        # ── Self-evolving agent: memory + reflection ──
+        self._memory_store = MemoryStore()
+        self._reflection_engine = ReflectionEngine(
+            call_llm_fn=self._call_llm,
+            emit_fn=self._emit,
+        )
+        self._step_reflections: list[dict] = []
+        self._reflection_enabled: bool = True
 
         # Export env vars for downstream features
         if self.api_key:
@@ -686,16 +707,16 @@ class LingdongAgent:
 
         tool_name = tool_match.group(1).strip()
         args = {}
-        param_section = re.search(r"参数:\s*(.*?)(?:\n\s*\n|\n\s*总结:|$)", content, re.DOTALL)
+        param_section = re.search(r"参数:[ \t]*(.*?)(?:\n\s*\n|\n\s*总结:|$)", content, re.DOTALL)
         if param_section:
             lines = param_section.group(1).split("\n")
             i = 0
             while i < len(lines):
                 raw_line = lines[i]
-                m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line)
+                m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line.strip())
                 if m:
                     key = m.group(1)
-                    val = m.group(2).strip()
+                    val = m.group(2).strip().strip("'\"")
                     # 支持 YAML 风格 | 多行值
                     if val == "|":
                         indent = len(raw_line) - len(raw_line.lstrip())
@@ -719,12 +740,91 @@ class LingdongAgent:
 
         return "tool", tool_name, args
 
+    @staticmethod
+    def _parse_params_section(text: str) -> dict:
+        """解析 参数: 块内容为字典。"""
+        args = {}
+        lines = text.split("\n")
+        i = 0
+        while i < len(lines):
+            raw_line = lines[i]
+            m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line.strip())
+            if m:
+                key = m.group(1)
+                val = m.group(2).strip().strip("'\"")
+                if val == "|":
+                    indent = len(raw_line) - len(raw_line.lstrip())
+                    val_lines = []
+                    i += 1
+                    while i < len(lines):
+                        if lines[i].strip() == "":
+                            i += 1
+                            continue
+                        cur_indent = len(lines[i]) - len(lines[i].lstrip())
+                        if cur_indent > indent:
+                            val_lines.append(lines[i].rstrip())
+                            i += 1
+                        else:
+                            break
+                    args[key] = "\n".join(val_lines)
+                    continue
+                else:
+                    args[key] = val
+            i += 1
+        return args
+
+    @staticmethod
+    def _parse_all_tools(content: str) -> list[tuple[str, dict]]:
+        """解析文本协议回复中所有 工具: 块，返回 [(name, args), ...] 列表。
+
+        支持一次 LLM 回复包含多个工具调用。
+        """
+        if not content:
+            return []
+        if "总结:" in content and "工具:" not in content:
+            return []
+
+        results = []
+        blocks = re.split(r'\n(?=工具:\s*\S+)', content)
+        for block in blocks:
+            if not block.strip():
+                continue
+            tool_match = re.search(r"工具:\s*(\S+)", block)
+            if not tool_match:
+                continue
+            tool_name = tool_match.group(1).strip()
+            args = {}
+            param_section = re.search(r"参数:[ \t]*(.*?)(?:\n\s*\n|\n\s*总结:|$)", block, re.DOTALL)
+            if param_section:
+                args = LingdongAgent._parse_params_section(param_section.group(1))
+            results.append((tool_name, args))
+        return results
+
+    # ══════════════════════════════════════════════════════════
+    #  记忆注入统一入口
+    # ══════════════════════════════════════════════════════════
+
+    def _inject_memory_prompt(self, goal: str) -> bool:
+        """注入历史记忆到 system_prompt。所有入口路径统一使用此方法。"""
+        if not self._reflection_enabled:
+            return False
+        try:
+            memory_prompt = self._memory_store.build_context_prompt(goal)
+            if memory_prompt:
+                self._system_prompt = self._system_prompt + "\n\n" + memory_prompt
+                self._emit("log", {"level": "info", "message": "已注入历史记忆到上下文"})
+                return True
+        except Exception:
+            pass
+        return False
+
     # ══════════════════════════════════════════════════════════
     #  对话模式（聊天 + 执行 并行）
     # ══════════════════════════════════════════════════════════
 
     def _process_chat_messages(self, messages: list) -> bool:
         """检查 guidance_queue，将用户消息注入消息历史。
+        同时用 PatternAnalyzer 提取学习信号 (零 LLM 成本)。
 
         返回 True 表示有新的用户消息被处理。
         """
@@ -735,13 +835,49 @@ class LingdongAgent:
             while True:
                 msg = self._guidance_queue.get_nowait()
                 text = (msg.get("text", msg) if isinstance(msg, dict) else str(msg)).strip()
-                if text:
-                    messages.append({
-                        "role": "user",
-                        "content": f"[用户消息] {text}\n\n请根据这条消息回应：如果是聊天就自然回复，如果是指引就调整策略，如果是新任务就在当前工作完成后执行。"
-                    })
-                    self._emit("log", {"level": "info", "message": f"收到用户消息: {text[:100]}"})
-                    processed = True
+                if not text:
+                    continue
+
+                messages.append({
+                    "role": "user",
+                    "content": f"[用户消息] {text}\n\n请根据这条消息回应：如果是聊天就自然回复，如果是指引就调整策略，如果是新任务就在当前工作完成后执行。"
+                })
+                self._emit("log", {"level": "info", "message": f"收到用户消息: {text[:100]}"})
+                processed = True
+
+                # ── 实时信号提取 (零 LLM 成本) ──
+                if self._reflection_enabled:
+                    try:
+                        from agent.memory import PatternAnalyzer
+                        signal = PatternAnalyzer.analyze(text)
+                        if signal["type"] == "correction" and signal["confidence"] >= 0.7:
+                            self._memory_store.add_rule(
+                                rule_text=f"用户反馈: {text[:200]}",
+                                trigger_context="general",
+                                confidence=signal["confidence"] * 0.8,
+                                category="approach",
+                                is_guardrail=False,
+                                evidence=text[:300],
+                            )
+                            self._emit("log", {
+                                "level": "info",
+                                "message": f"[学习] 从用户反馈中提取纠正信号 (confidence: {signal['confidence']:.0%})"
+                            })
+                        elif signal["type"] == "guardrail":
+                            self._memory_store.add_rule(
+                                rule_text=f"约束: {text[:200]}",
+                                trigger_context="general",
+                                confidence=signal["confidence"] * 0.9,
+                                category="guardrail",
+                                is_guardrail=True,
+                                evidence=text[:300],
+                            )
+                            self._emit("log", {
+                                "level": "info",
+                                "message": f"[学习] 从用户反馈中提取约束规则 (confidence: {signal['confidence']:.0%})"
+                            })
+                    except Exception:
+                        pass
         except Empty:
             pass
         return processed
@@ -1051,7 +1187,7 @@ class LingdongAgent:
             f"任务目标: {goal}\n\n当前状态:\n{screen_ctx}{win_info}"
             + (som_label if vision_mode != "direct" else "")
             + ("\n\n分析屏幕截图，执行第一步。必须调用工具。" if vision_mode != "direct"
-               else "\n\n屏幕截图可见。请基于截图内容执行具体操作，返回工具调用。不要猜测，必须实际操作。")
+               else "\n\n先判断是否有直接工具（file_ops/manage_app/run_command 等）可用。有就直接用，不需要操作屏幕。没有再用视觉工具点击操作。截图主要用于验证结果。")
         )
         messages.append({
             "role": "user",
@@ -1105,6 +1241,7 @@ class LingdongAgent:
 
             # ── 解析回复 ──
             action, name, args = self._parse_response(content)
+            tool_blocks = self._parse_all_tools(content)
 
             if action == "done":
                 if not steps:
@@ -1147,91 +1284,143 @@ class LingdongAgent:
                 })
                 continue
 
-            # ── 视觉策略预处理（在工具执行前修改参数）──
-            if visual_strategy and visual_strategy not in ("auto",):
+            # ── 支持多工具: 一次 LLM 回复中执行所有工具块 ──
+            if not tool_blocks:
+                tool_blocks = [(name, args)]
+
+            last_success = False
+            last_result = {"success": False, "error": "no_execution"}
+            last_tool_name = name
+
+            hash_same_count = 0  # Fix 5: 截图变化检测
+
+            for ti, (tool_name, tool_args) in enumerate(tool_blocks):
+                # ── 视觉策略预处理（在工具执行前修改参数）──
+                if visual_strategy and visual_strategy not in ("auto",):
+                    try:
+                        tool_args = self._apply_visual_strategy(tool_name, tool_args, visual_strategy)
+                    except Exception as e:
+                        logger.debug("Visual strategy %s error: %s", visual_strategy, e)
+
+                # ── 执行工具 ──
+                sn = len(steps) + 1
+                self._emit("log", {"level": "info",
+                                   "message": f"调用: {tool_name}({json.dumps(tool_args, ensure_ascii=False)[:200]})"})
+                step = {"step_num": sn, "tool": tool_name, "args": tool_args,
+                        "thought": reasoning[:300] if reasoning else "",
+                        "llm_response": content[:800], "status": "running"}
+                self._emit("step_complete", dict(step))
+
+                step_start = time.time()
                 try:
-                    args = self._apply_visual_strategy(name, args, visual_strategy)
-                except Exception as e:
-                    logger.debug("Visual strategy %s error: %s", visual_strategy, e)
-
-            # ── 执行工具 ──
-            sn = len(steps) + 1
-            self._emit("log", {"level": "info",
-                               "message": f"调用: {name}({json.dumps(args, ensure_ascii=False)[:200]})"})
-            step = {"step_num": sn, "tool": name, "args": args,
-                    "thought": reasoning[:300] if reasoning else "", "status": "running"}
-            self._emit("step_complete", dict(step))
-
-            step_start = time.time()
-            try:
-                if not _USE_FLOW_CHART_MODE:
-                    from agent.meta_actions import execute as meta_execute, META_ACTIONS
-                    if name in META_ACTIONS:
-                        result = meta_execute(name, args)
+                    if not _USE_FLOW_CHART_MODE:
+                        from agent.meta_actions import execute as meta_execute, META_ACTIONS
+                        if tool_name in META_ACTIONS:
+                            step_result = meta_execute(tool_name, tool_args)
+                        else:
+                            step_result = self.supervisor.execute(tool_name, tool_args)
                     else:
-                        result = self.supervisor.execute(name, args)
+                        step_result = self.supervisor.execute(tool_name, tool_args)
+                    step_success = step_result.get("success", False)
+                except Exception as e:
+                    step_result = {"success": False, "error": str(e)}
+                    step_success = False
+
+                step["status"] = "completed" if step_success else "failed"
+                step["result"] = {
+                    "success": step_success,
+                    "error": step_result.get("error", ""),
+                    "step_ms": round((time.time() - step_start) * 1000),
+                }
+                if tool_args:
+                    step["args_resolved"] = {k: str(v)[:80] for k, v in tool_args.items()}
+                steps.append(step)
+                self._emit("step_complete", dict(step))
+
+                # ── Per-step 反思 (best-effort) ──
+                if self._reflection_enabled:
+                    try:
+                        reflection = self._reflection_engine.reflect_step(step, goal)
+                        if reflection and reflection.get("insight"):
+                            self._step_reflections.append(reflection)
+                            self._emit("agent_reflection", {
+                                "step_num": sn,
+                                "insight": reflection.get("insight", ""),
+                                "rule": reflection.get("rule"),
+                            })
+                    except Exception:
+                        pass
+
+                # ── 安全计数器 ──
+                if step_success:
+                    total_success += 1
+                    consecutive_step_fails = 0
                 else:
-                    result = self.supervisor.execute(name, args)
-                success = result.get("success", False)
-            except Exception as e:
-                result = {"success": False, "error": str(e)}
-                success = False
+                    consecutive_step_fails += 1
 
-            step["status"] = "completed" if success else "failed"
-            step["result"] = {
-                "success": success,
-                "error": result.get("error", ""),
-                "step_ms": round((time.time() - step_start) * 1000),
-            }
-            if args:
-                step["args_resolved"] = {k: str(v)[:80] for k, v in args.items()}
-            steps.append(step)
-            self._emit("step_complete", dict(step))
+                last_success = step_success
+                last_result = step_result
+                last_tool_name = tool_name
 
-            # ── 安全计数器 ──
-            if success:
-                total_success += 1
-                consecutive_step_fails = 0
-            else:
-                consecutive_step_fails += 1
+                # ── 连续失败终止（多工具批处理中立即终止）──
+                if consecutive_step_fails >= _max_consecutive_failures:
+                    self._emit("log", {
+                        "level": "error",
+                        "message": f"连续 {_max_consecutive_failures} 步执行失败（最后一步: {tool_name}），终止循环"
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": f"连续 {_max_consecutive_failures} 步执行失败，请总结已完成的步骤并结束。"
+                    })
+                    raw = self._call_llm(messages)
+                    if raw:
+                        content = raw["choices"][0]["message"].get("content", "") or ""
+                        if "总结:" in content:
+                            summary = content.split("总结:", 1)[-1].strip()[:500]
+                            steps[-1]["early_exit_reason"] = f"consecutive_failures_{_max_consecutive_failures}"
+                    break
 
-            # ── 连续失败终止 ──
-            if consecutive_step_fails >= _max_consecutive_failures:
-                self._emit("log", {
-                    "level": "error",
-                    "message": f"连续 {_max_consecutive_failures} 步执行失败（最后一步: {name}），终止循环"
-                })
-                messages.append({
-                    "role": "user",
-                    "content": f"连续 {_max_consecutive_failures} 步执行失败，请总结已完成的步骤并结束。"
-                })
-                raw = self._call_llm(messages)
-                if raw:
-                    content = raw["choices"][0]["message"].get("content", "") or ""
-                    if "总结:" in content:
-                        summary = content.split("总结:", 1)[-1].strip()[:500]
-                        steps[-1]["early_exit_reason"] = f"consecutive_failures_{_max_consecutive_failures}"
-                break
+                # ── 低成功率终止（多工具批处理中立即终止）──
+                if len(steps) >= 8 and total_success / len(steps) < _min_success_rate:
+                    self._emit("log", {
+                        "level": "error",
+                        "message": f"成功率过低 ({total_success}/{len(steps)})，终止循环"
+                    })
+                    break
 
-            # ── 低成功率终止 ──
-            if len(steps) >= 8 and total_success / len(steps) < _min_success_rate:
-                self._emit("log", {
-                    "level": "error",
-                    "message": f"成功率过低 ({total_success}/{len(steps)})，终止循环"
-                })
+            # 如果多工具批处理中被中断，跳出外层循环
+            if consecutive_step_fails >= _max_consecutive_failures or \
+               (len(steps) >= 8 and total_success / len(steps) < _min_success_rate):
                 break
 
             # ── 执行后反馈（消息历史 + 截图/SoM）──
+            old_hash = last_b64_hash
             messages, last_b64_hash = self._append_step_feedback(
-                messages, result, name, success, content, cfg, last_b64_hash,
+                messages, last_result, last_tool_name, last_success, content, cfg, last_b64_hash,
             )
 
-            # ── 重复工具检测 ──
-            if name == last_tool:
-                repeat_count += 1
+            # ── Fix 5: 截图哈希变化检测（防幻觉）──
+            if old_hash and last_b64_hash and old_hash == last_b64_hash and last_success:
+                hash_same_count += 1
+                if hash_same_count >= 3:
+                    self._emit("log", {"level": "warn",
+                                       "message": "连续 3 步截图未变化，操作可能未生效。强制 LLM 更换策略。"})
+                    messages.append({
+                        "role": "user",
+                        "content": "[系统] 警告：连续 3 步截图未发生变化，之前的操作可能未生效。请更换策略，不要重复相同操作。如果点不中目标，尝试用坐标点击或用 run_python_script 编写 Python 脚本来完成任务。"
+                    })
+                    hash_same_count = 0
             else:
-                repeat_count = 0
-                last_tool = name
+                hash_same_count = 0
+
+            # ── 重复工具检测（基于第一批次的首个工具）──
+            if tool_blocks:
+                first_tool = tool_blocks[0][0]
+                if first_tool == last_tool:
+                    repeat_count += 1
+                else:
+                    repeat_count = 0
+                    last_tool = first_tool
             if repeat_count >= 3:
                 total_repeats = repeat_count + 1
                 self._emit("log", {"level": "warn",
@@ -1552,6 +1741,7 @@ class LingdongAgent:
 
         if not plan.nodes:
             self._emit("log", {"level": "warn", "message": "Empty plan, falling back to text_protocol"})
+            self._inject_memory_prompt(goal)
             return self.run_text_protocol(goal)
 
         # ── 执行 Plan DAG ──
@@ -1984,9 +2174,8 @@ PARAMS: {{"x": 960, "y": 540}}
         # 滑动窗口：auto=0 → multimodal 用 8, text 用 12
         self.sliding_window_limit = config.sliding_window_size or (8 if config._multimodal else 12)
 
-        # 脚本执行模式注入提示词
-        if config.scripted_mode:
-            self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
+        # 脚本执行模式注入提示词（始终注入，run_python_script 已注册为通用元动作）
+        self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
 
         self._emit("log", {"level": "info", "message":
             f"Unified agent: planning={config._resolved_planning}, "
@@ -2005,6 +2194,19 @@ PARAMS: {{"x": 960, "y": 540}}
             f"quality={config.screenshot_quality}, "
             f"chat_mode={config.chat_mode}, "
             f"visual={config.visual_strategy}"})
+
+        # ── 反思/学习开关 ──
+        self._reflection_enabled = getattr(config, "reflection_enabled", True)
+        self._step_reflections.clear()
+
+        # ── 历史记忆注入 (统一入口) ──
+        self._inject_memory_prompt(goal)
+
+        # Emit memory stats for frontend display (pre-run)
+        try:
+            self._emit("memory_snapshot", self._memory_store.stats())
+        except Exception:
+            pass
 
         # ── Computer Use protocol (Claude API with computer_use beta) ──
         if config._resolved_llm_protocol == "computer_use":
@@ -2060,39 +2262,105 @@ PARAMS: {{"x": 960, "y": 540}}
 
         # ── 新统一路径：AgentConfig 提供时直接使用 ──
         agent_config = kwargs.get("agent_config")
-        if agent_config is not None:
-            return self._unified_run(goal, agent_config, steps=kwargs.get("steps"))
-
-        # ── 旧 4 路 dispatch（向后兼容）──
-        # 自动检测模式
-        if mode == "auto":
-            model_lower = self.model.strip().lower()
-            if "mimo" in model_lower:
-                mode = "text_protocol"
-            elif self._check_langgraph():
-                mode = "langgraph"
-            else:
-                # 无 langgraph → 回退到 planned (最便宜: 1次LLM调用, 然后离线执行)
-                self._emit("log", {"level": "info", "message": "LangGraph not available, falling back to planned"})
-                mode = "planned"
-
-        if mode == "text_protocol":
-            result = self.run_text_protocol(goal)
-        elif mode == "planned":
-            steps = kwargs.get("steps")
-            result = self.run_planned(goal, steps=steps)
-        elif mode == "langgraph":
-            result = self.run_langgraph(goal)
-        elif mode == "direct":
-            result = self._run_direct(goal)
+        agent_config_provided = agent_config is not None
+        if agent_config_provided:
+            result = self._unified_run(goal, agent_config, steps=kwargs.get("steps"))
+            exec_mode = agent_config._resolved_planning or "unified"
         else:
-            raise ValueError(f"Unknown mode: {mode}")
+            # ── 旧 4 路 dispatch（向后兼容）──
+            # 自动检测模式
+            if mode == "auto":
+                model_lower = self.model.strip().lower()
+                if "mimo" in model_lower:
+                    mode = "text_protocol"
+                elif self._check_langgraph():
+                    mode = "langgraph"
+                else:
+                    # 无 langgraph → 回退到 planned (最便宜: 1次LLM调用, 然后离线执行)
+                    self._emit("log", {"level": "info", "message": "LangGraph not available, falling back to planned"})
+                    mode = "planned"
 
-        # Persist run summary
+            if mode == "text_protocol":
+                self._inject_memory_prompt(goal)
+                result = self.run_text_protocol(goal)
+            elif mode == "planned":
+                self._inject_memory_prompt(goal)
+                steps = kwargs.get("steps")
+                result = self.run_planned(goal, steps=steps)
+            elif mode == "langgraph":
+                self._inject_memory_prompt(goal)
+                result = self.run_langgraph(goal)
+            elif mode == "direct":
+                result = self._run_direct(goal)
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+            exec_mode = mode
+
+        # ── Post-task reflection + memory update ──
+        rules_count = 0
+        prefs_count = 0
+        if self._reflection_enabled:
+            try:
+                steps_data = result.get("steps", [])
+                if steps_data:
+                    task_reflection = self._reflection_engine.reflect_task(
+                        goal=goal, steps=steps_data,
+                        success=result.get("success", False),
+                        elapsed_ms=result.get("elapsed_ms", 0),
+                    )
+                    if task_reflection and (task_reflection.get("rules") or task_reflection.get("preferences")):
+                        run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                        rules_count = len(task_reflection.get("rules", []))
+                        prefs_count = len(task_reflection.get("preferences", []))
+
+                        for rule_data in task_reflection.get("rules", []):
+                            self._memory_store.add_rule(
+                                rule_text=rule_data["rule"],
+                                trigger_context=rule_data.get("trigger", "general"),
+                                confidence=rule_data.get("confidence", 0.5),
+                                category=rule_data.get("category", "approach"),
+                                source_run_id=run_id,
+                            )
+
+                        for pref in task_reflection.get("preferences", []):
+                            self._memory_store.add_preference(
+                                key=pref["key"],
+                                value=pref["value"],
+                                confidence=pref.get("confidence", 0.5),
+                                source_run_id=run_id,
+                            )
+
+                        from agent.memory import Episode
+                        self._memory_store.add_episode(Episode(
+                            run_id=run_id,
+                            goal=goal[:200],
+                            success=result.get("success", False),
+                            total_steps=result.get("total_steps", 0),
+                            summary=task_reflection.get("overall_assessment", "")[:300],
+                            insights=task_reflection.get("insights", [])[:5],
+                            mistakes=task_reflection.get("mistakes", [])[:5],
+                            tools_used=list(set(
+                                s.get("tool", "") for s in steps_data
+                            )),
+                            elapsed_ms=result.get("elapsed_ms", 0),
+                        ))
+
+                        self._emit("agent_learned", {
+                            "rules_count": rules_count,
+                            "prefs_count": prefs_count,
+                            "insights": task_reflection.get("insights", [])[:3],
+                            "mistakes": task_reflection.get("mistakes", [])[:3],
+                        })
+            except Exception as e:
+                logger.warning("Post-task reflection failed: %s", e)
+            finally:
+                self._step_reflections.clear()
+
+        # Persist run summary (after reflection so we capture rules/prefs counts)
         try:
             save_run(RunSummary(
                 goal=goal[:200],
-                mode=mode,
+                mode=exec_mode,
                 model=self.model,
                 success=result.get("success", False),
                 total_steps=result.get("total_steps", 0),
@@ -2100,9 +2368,17 @@ PARAMS: {{"x": 960, "y": 540}}
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 summary=(result.get("summary") or "")[:500],
                 error=result.get("error", ""),
+                rules_extracted=rules_count,
+                preferences_updated=prefs_count,
             ))
         except Exception as e:
             logger.warning("Failed to persist run summary: %s", e)
+
+        # Emit memory snapshot for frontend
+        try:
+            self._emit("memory_snapshot", self._memory_store.stats())
+        except Exception:
+            pass
 
         return result
 

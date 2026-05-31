@@ -30,6 +30,8 @@ class RunSummary:
     timestamp: str
     summary: str = ""
     error: str = ""
+    rules_extracted: int = 0          # 本次任务提取的行为规则数
+    preferences_updated: int = 0      # 本次任务更新/新增的偏好数
 
 
 def _ensure_dir():

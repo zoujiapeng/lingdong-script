@@ -302,6 +302,14 @@ export function AgentView() {
   const [showHistory, setShowHistory] = useState(false);
   const agentHistory = useStore((s) => s.agentHistory);
 
+  // ── Self-evolving agent: reflection + learning ──
+  const [lastLearning, setLastLearning] = useState<{
+    insights: string[]; mistakes: string[]; rulesCount: number; prefsCount: number;
+  } | null>(null);
+  const [memoryStats, setMemoryStats] = useState<{
+    preferences: number; rules: number; episodes: number;
+  } | null>(null);
+
   // ── Node expand/collapse state ──
   const [nodeExpanded, setNodeExpanded] = useState<Record<string, boolean>>({
     llm: true, perceive: true, act: true, safety: true,
@@ -430,6 +438,33 @@ export function AgentView() {
         case 'agent_chat_response':
           setChatMessages(prev => [...prev, { role: 'agent', text: msg.text }]);
           addEntry({ type: 'system', text: `🤖 AI回复: ${msg.text.slice(0, 200)}` });
+          break;
+
+        case 'agent_reflection':
+          addEntry({ type: 'system', text: `[反思] ${msg.insight?.slice(0, 200)}` });
+          if (msg.rule) {
+            addEntry({ type: 'system', text: `[学习] 规则: ${msg.rule.slice(0, 200)}` });
+          }
+          break;
+
+        case 'agent_learned':
+          setLastLearning({
+            insights: Array.isArray(msg.insights) ? msg.insights : [],
+            mistakes: Array.isArray(msg.mistakes) ? msg.mistakes : [],
+            rulesCount: typeof msg.rules_count === 'number' ? msg.rules_count : 0,
+            prefsCount: typeof msg.prefs_count === 'number' ? msg.prefs_count : 0,
+          });
+          if (Array.isArray(msg.insights) && msg.insights.length > 0) {
+            addEntry({ type: 'system', text: `[学习] 提取了 ${msg.rules_count} 条规则, ${msg.prefs_count} 个偏好` });
+          }
+          break;
+
+        case 'memory_snapshot':
+          setMemoryStats({
+            preferences: typeof msg.preferences === 'number' ? msg.preferences : 0,
+            rules: typeof msg.rules === 'number' ? msg.rules : 0,
+            episodes: typeof msg.episodes === 'number' ? msg.episodes : 0,
+          });
           break;
 
         case 'agent_done':
@@ -1185,6 +1220,34 @@ export function AgentView() {
                   );
                 })()}
               </div>
+
+              {/* ── 本任务学到的 (learning section) ── */}
+              {lastLearning && (lastLearning.insights.length > 0 || lastLearning.mistakes.length > 0) && (
+                <div className="agent-learning-section">
+                  <div className="agent-learning-header">
+                    <span className="agent-learning-icon">🧠</span>
+                    <span>本任务学到的</span>
+                  </div>
+                  {lastLearning.insights.length > 0 && (
+                    <div className="agent-learning-list">
+                      {lastLearning.insights.map((insight: string, i: number) => (
+                        <div key={i} className="agent-learning-item insight">{insight}</div>
+                      ))}
+                    </div>
+                  )}
+                  {lastLearning.mistakes.length > 0 && (
+                    <div className="agent-learning-list">
+                      {lastLearning.mistakes.map((mistake: string, i: number) => (
+                        <div key={i} className="agent-learning-item mistake">{mistake}</div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="agent-learning-meta">
+                    提取了 {lastLearning.rulesCount} 条规则 · 更新了 {lastLearning.prefsCount} 个偏好
+                  </div>
+                </div>
+              )}
+
               <div className="agent-summary-footer" style={{ padding: '8px 0 0', borderTop: 'none', background: 'transparent' }}>
                 <button className="agent-btn" style={{ fontSize: 11, padding: '4px 12px' }}
                   onClick={() => { setLastSummary(null); const g = goalRef.current; if (g.trim()) runAgent(true); }}>
@@ -1232,6 +1295,39 @@ export function AgentView() {
                   </div>
                 </div>
               )}
+            </div>
+          </>
+        )}
+
+        {/* ── Memory (长期记忆节点) ── */}
+        {memoryStats && !running && (
+          <>
+            <div className="agent-flow-arrow" style={{ opacity: 0.25 }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M12 5v14" />
+              </svg>
+            </div>
+            <div className="agent-flow-node memory-node">
+              <div className="agent-flow-node-header">
+                <span style={{ fontSize: 13 }}>🧠</span>
+                <span>长期记忆</span>
+              </div>
+              <div className="agent-flow-node-body">
+                <div className="agent-memory-stats">
+                  <div className="agent-memory-stat">
+                    <span className="agent-memory-stat-value">{memoryStats.preferences}</span>
+                    <span className="agent-memory-stat-label">偏好</span>
+                  </div>
+                  <div className="agent-memory-stat">
+                    <span className="agent-memory-stat-value">{memoryStats.rules}</span>
+                    <span className="agent-memory-stat-label">规则</span>
+                  </div>
+                  <div className="agent-memory-stat">
+                    <span className="agent-memory-stat-value">{memoryStats.episodes}</span>
+                    <span className="agent-memory-stat-label">经验</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </>
         )}

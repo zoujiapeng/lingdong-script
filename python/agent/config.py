@@ -42,6 +42,7 @@ class AgentConfig:
     som_enabled: bool = True        # SoM 标号（截图元素编号）
     flow_chart_mode: bool = False   # 流程图模式（全工具提示词 + generate_flow/execute_flow）
     chat_mode: bool = False         # 对话模式：边执行边聊天，接收实时反馈/新任务（默认关闭保持原行为）
+    reflection_enabled: bool = True  # 自我反思与学习：任务后分析提取规则/偏好/经验（默认开启）
 
     # ── Visual strategy: how the agent "sees" the screen ──
     # "auto"       — 自动选择（多模态=direct，纯文本=som）
@@ -173,6 +174,22 @@ class AgentConfig:
         if self.fast_mode:
             self.image_dedup = True
 
+    def get_resolved(self) -> dict:
+        """Return resolved configuration as a public dict.
+
+        After resolve_auto() is called, this exposes the effective values
+        that the agent will actually use, regardless of whether each field
+        was "auto" or explicitly set.
+        """
+        return {
+            "llm_protocol": self._resolved_llm_protocol,
+            "vision_mode": self._resolved_vision_mode,
+            "planning": self._resolved_planning,
+            "screen_context": self._resolved_screen_context,
+            "on_error": self._resolved_on_error,
+            "multimodal": self._multimodal,
+        }
+
     def to_dict(self) -> dict:
         """Serialize to dict for IPC transmission."""
         return {
@@ -202,6 +219,7 @@ class AgentConfig:
             "vision_backend": self.vision_backend,
             "chat_mode": self.chat_mode,
             "visual_strategy": self.visual_strategy,
+            "reflection_enabled": self.reflection_enabled,
         }
 
     @classmethod
@@ -234,6 +252,7 @@ class AgentConfig:
             vision_backend=d.get("vision_backend", "gpt-4o-mini"),
             chat_mode=d.get("chat_mode", False),
             visual_strategy=d.get("visual_strategy", "auto"),
+            reflection_enabled=d.get("reflection_enabled", True),
         )
 
 

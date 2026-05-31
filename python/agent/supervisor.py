@@ -70,12 +70,24 @@ class Supervisor:
         # Runtime state
         self._last_launched: str = ""
         self._last_som_map: dict[int, dict] = {}
+        self._last_focused_window: str = ""
+        self._last_focus_time: float = 0
+
+    # 只读工具集——不需要预聚焦
+    READ_ONLY_TOOLS = frozenset({
+        "screenshot", "read_text", "read_ui", "get_cursor",
+        "list_windows", "get_active_window",
+    })
 
     # ── 窗口焦点安全 ──────────────────────────────────────────
 
     def ensure_safe_window(self, tool_name: str, args: dict) -> dict:
         """GUI 操作前确认目标窗口已激活。"""
         try:
+            # 只读工具跳过预聚焦——不改变窗口状态
+            if tool_name in self.READ_ONLY_TOOLS:
+                return {"success": True, "focused": True, "skipped": True}
+
             target_hint = (
                 args.get("target_window") or
                 args.get("target") or
@@ -84,6 +96,11 @@ class Supervisor:
             )
             if not target_hint:
                 return {"success": True, "focused": True}
+
+            # 去重: 同一窗口在 3 秒内不再重复聚焦
+            now = time.time()
+            if target_hint == self._last_focused_window and (now - self._last_focus_time) < 3.0:
+                return {"success": True, "focused": True, "cached": True}
 
             from features.registry import registry as r
             result = r.execute("get_active_window")
@@ -97,6 +114,8 @@ class Supervisor:
                 return {"success": True, "focused": True}
 
             r.execute("focus_window", title=target_hint)
+            self._last_focused_window = target_hint
+            self._last_focus_time = now
             time.sleep(0.3)
             return {"success": True, "focused": True}
         except Exception as e:
