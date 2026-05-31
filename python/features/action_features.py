@@ -49,7 +49,7 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     is_coord = re.match(r"^\s*\d+\s*,\s*\d+\s*$", target) if target else False
     if is_coord:
         parts = [p.strip() for p in target.split(",")]
-        return handler("click", x=int(parts[0]), y=int(parts[1]))
+        return handler("click", x=int(parts[0]), y=int(parts[1]), double=double)
     # Semantic target: try OCR + UIA
     try:
         x, y = _find_target_coords(target, region=region)
@@ -58,8 +58,8 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     # (0,0) means OCR didn't find the target — don't force-click at top-left
     if x == 0 and y == 0:
         # UIA-only attempt (skip coordinate click which would be at (0,0))
-        return handler("click", target=target)
-    return handler("click", target=target, x=x, y=y)
+        return handler("click", target=target, double=double)
+    return handler("click", target=target, x=x, y=y, double=double)
 
 
 @feature(

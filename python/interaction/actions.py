@@ -13,6 +13,19 @@ Files originally based on pywinauto removed per 2026-05-16 refactoring:
 import logging
 import os
 import time
+
+# Screen coordinate scale factor — set by supervisor.capture_b64 when resizing screenshots.
+# The LLM sees a resized image and picks coordinates in that virtual space;
+# _exec_click rescales them to actual screen coordinates before clicking.
+_screen_scale_x = 1.0
+_screen_scale_y = 1.0
+
+def set_screen_scale(scale_x: float, scale_y: float):
+    """Set coordinate scale ratio (actual/virtual) for LLM-estimated clicks."""
+    global _screen_scale_x, _screen_scale_y
+    _screen_scale_x = scale_x
+    _screen_scale_y = scale_y
+
 from pathlib import Path
 import tempfile
 
@@ -72,6 +85,13 @@ def _win32_set_cursor(x, y):
 def _win32_click(x, y, button="left"):
     w32 = _ensure_win32()
     _win32_set_cursor(x, y)
+    if button == "double":
+        for _ in range(2):
+            w32['api'].mouse_event(w32['con'].MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.01)
+            w32['api'].mouse_event(w32['con'].MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.05)
+        return True
     if button == "left":
         down, up = w32['con'].MOUSEEVENTF_LEFTDOWN, w32['con'].MOUSEEVENTF_LEFTUP
     elif button == "right":
@@ -311,6 +331,9 @@ class ActionHandler:
     def _exec_click(self, target=None, x=None, y=None, button="left", **kw):
         learn_target_id = kw.get("learn_target_id") or kw.get("target_id")
         learn_label = kw.get("learn_label") or (target if isinstance(target, str) else "")
+        # Normalize double flag: accept double=True kwarg or button="double"
+        if kw.get("double") or button == "double":
+            button = "double"
         # Priority 1: if coordinates provided, use them directly (no UIA)
         cx, cy = None, None
         if x is not None and y is not None:
@@ -318,6 +341,10 @@ class ActionHandler:
         elif target is not None and isinstance(target, (list, tuple)) and len(target) >= 2:
             cx, cy = int(target[0]), int(target[1])
         if cx is not None and cy is not None:
+            # Rescale from virtual screenshot space to actual screen coordinates
+            if _screen_scale_x != 1.0 or _screen_scale_y != 1.0:
+                cx = int(cx * _screen_scale_x)
+                cy = int(cy * _screen_scale_y)
             ok = _win32_click(cx, cy, button)
             if ok:
                 self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
@@ -325,6 +352,9 @@ class ActionHandler:
         # Priority 2: uiautomation click by target name (only when no coordinates)
         if target and isinstance(target, str) and not target.startswith("("):
             if _uia_click_by_name(target):
+                if button == "double":
+                    time.sleep(0.06)
+                    _uia_click_by_name(target)
                 self._learn_click_target(learn_target_id, learn_label or target, action="click", uia_name=target, button=button)
                 return True
         # Fallback: current position (only when no target specified)

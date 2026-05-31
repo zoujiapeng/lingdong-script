@@ -598,6 +598,9 @@ class Supervisor:
 
         quality: JPEG 压缩质量（50=快速但略模糊，60=默认，85=高质量）
         多模态模型对压缩不敏感，可以用 50 提升速度。
+
+        当 max_size 导致截图缩放时，同步更新全局屏幕缩放比，
+        使 _exec_click 能把 LLM 估算的虚拟坐标换算为实际屏幕坐标。
         """
         import cv2
         from perception.vision import ScreenCapture
@@ -608,6 +611,8 @@ class Supervisor:
                 scale = max_size / max(h, w)
                 new_w, new_h = int(w * scale), int(h * scale)
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                from interaction.actions import set_screen_scale
+                set_screen_scale(w / new_w, h / new_h)
         q = min(max(quality, 30), 95)
         _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, q])
         return base64.b64encode(buf).decode()

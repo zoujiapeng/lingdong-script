@@ -581,12 +581,16 @@ META_ACTIONS: dict[str, tuple] = {}
 # Core desktop actions
 META_ACTIONS["click"] = (
     "点击屏幕上的目标。普通按钮用 click(target='按钮名') 即可。"
-    "对于列表中的项目（联系人、文件、聊天记录等），单击通常只选中不打开，需要用 button='double' 双击才能进入。"
+    "桌面图标和列表项（联系人、文件、聊天记录等）单击只选中不打开，必须用 button='double' 双击。"
     "target 可以是按钮文字('确认'、'保存')、元素名称、截图编号('#3')或坐标'100,200'。"
     "桌面背景、画布空白等没有控件名的区域，只能用 x,y 坐标点击，根据截图估算位置。"
     "自动用 UIA 无障碍树 → OCR 文字识别 → 图像匹配定位目标。如果目标唯一可以直接点，"
     "如果多个同名目标用 region 参数限定搜索区域。"
-    "常用: click(target='确认'), click(target='#3'), click(x=500,y=400), click(target='联系人名', button='double')",
+    "如果一次点击没有反应，先截图看看是否点偏了，然后调整坐标重试；如果目标没打开（如图标、列表项），"
+    "试试 button='double' 双击。右键菜单用 button='right'。"
+    "桌面图标可以先截图上让 AI 看清图标位置，再用坐标点击 click(x=约数,y=约数,button='double')。"
+    "坐标是实际屏幕像素，截图经过缩放但 AI 会自动换算。"
+    "常用: click(target='确认'), click(target='#3'), click(x=500,y=400), click(target='QQ', button='double')",
     {
         "target": "str - 目标文字/元素名/截图编号#N/坐标'x,y'",
         "button": "str? - 鼠标键: 'left'(默认), 'right'右键, 'middle'中键, 'double'双击",
@@ -1029,8 +1033,9 @@ def get_prompt(use_flow_chart: bool = False) -> str:
 - 描述目标用文字（按钮名称），不要猜坐标
 - 操作后加 wait(0.2-0.5) 让界面稳定
 - 输入文字前必须先 click 点击输入框
-- 列表项（联系人/聊天/文件列表）需要双击才能打开，用 button='double'
+- 桌面图标和列表项必须双击 button='double' 才能打开，单击只选中
 - 桌面背景/空白区域没有控件名，用坐标点击 click(x=..., y=..., button='right')
+- 如果点击没有效果（界面无变化），换用不同的点击方式：坐标偏了就调坐标，单击不行试双击，左键不行试右键
 """)
 
     lines.append(f"\n共 {len(META_ACTIONS)} 个动作注册，默认展示 {len(META_ACTIONS) - (0 if use_flow_chart else 2)} 个。")
