@@ -612,6 +612,21 @@ export interface LogEntry {
 
 // --- IPC Messages (Electron <-> Python) ---
 
+/** Agent learning/reflection data */
+export interface AgentLearning {
+  insights: string[];
+  mistakes: string[];
+  rulesCount: number;
+  prefsCount: number;
+}
+
+/** Agent memory snapshot */
+export interface AgentMemorySnapshot {
+  preferences: number;
+  rules: number;
+  episodes: number;
+}
+
 /** Agent execution history record */
 export interface AgentRunRecord {
   id: string;

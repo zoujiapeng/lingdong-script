@@ -408,6 +408,50 @@ def run_command(command: str, timeout: float = 30) -> dict:
     return r.execute("run_command", command=command, timeout=timeout)
 
 
+def run_python_script(script: str, timeout: int = 120) -> dict:
+    """Execute Python code directly. Uses subprocess for isolation.
+
+    Pre-installed: pywinauto, pyautogui, psutil, os, subprocess, time, json, math, random.
+    """
+    import subprocess, tempfile, os, time, sys
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="lg_script_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(script)
+        except Exception:
+            os.unlink(tmp_path)
+            return {"success": False, "error": "failed to write script"}
+
+        start = time.time()
+        proc = subprocess.run(
+            [sys.executable, tmp_path],
+            capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        elapsed = time.time() - start
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+        success = proc.returncode == 0
+
+        return {
+            "success": success,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": proc.returncode,
+            "elapsed": round(elapsed, 1),
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": f"Script timed out after {timeout}s"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 def file_ops(action: str, path: str, content: str = "",
              pattern: str = "", recursive: bool = False) -> dict:
     """File operations.
@@ -765,6 +809,18 @@ META_ACTIONS["run_command"] = (
         "timeout": "num? - 超时秒数（默认30）",
     },
     run_command,
+)
+
+META_ACTIONS["run_python_script"] = (
+    "直接执行 Python 代码。用于复杂桌面操作、条件逻辑、批量处理。"
+    "已预装 pywinauto, pyautogui, psutil, os, subprocess, time, json, math, random 等库。"
+    "代码中适当加 print() 输出结果和时间。"
+    "常用: run_python_script(script='import pyautogui\\npyautogui.click(100, 200)')",
+    {
+        "script": "str - 要执行的 Python 代码",
+        "timeout": "num? - 超时秒数（默认120）",
+    },
+    run_python_script,
 )
 
 META_ACTIONS["file_ops"] = (

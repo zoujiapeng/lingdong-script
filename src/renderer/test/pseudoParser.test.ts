@@ -12,21 +12,21 @@ describe('pseudoParser', () => {
 
   it('parses simple click', () => {
     const flow = parsePseudoToFlow('click (100, 200)');
-    const clickNodes = flow.nodes.filter(n => n.type === 'click');
+    const clickNodes = flow.nodes.filter(n => n.type === 'mouse_operation');
     expect(clickNodes).toHaveLength(1);
     expect(clickNodes[0].params).toMatchObject({ x: 100, y: 200, method: 'single' });
   });
 
   it('parses Chinese click', () => {
     const flow = parsePseudoToFlow('点击 (300, 400)');
-    const clickNodes = flow.nodes.filter(n => n.type === 'click');
+    const clickNodes = flow.nodes.filter(n => n.type === 'mouse_operation');
     expect(clickNodes).toHaveLength(1);
     expect(clickNodes[0].params).toMatchObject({ x: 300, y: 400 });
   });
 
   it('parses click with double method', () => {
     const flow = parsePseudoToFlow('click (100, 200) double');
-    const n = flow.nodes.find(n => n.type === 'click');
+    const n = flow.nodes.find(n => n.type === 'mouse_operation');
     expect(n?.params).toMatchObject({ x: 100, y: 200, method: 'double' });
   });
 
@@ -87,7 +87,7 @@ describe('pseudoParser', () => {
     const loopNodes = flow.nodes.filter(n => n.type === 'loop');
     expect(loopNodes).toHaveLength(1);
     expect(loopNodes[0].params).toMatchObject({ loop_type: 'count', count: 3 });
-    const clickNodes = flow.nodes.filter(n => n.type === 'click');
+    const clickNodes = flow.nodes.filter(n => n.type === 'mouse_operation');
     expect(clickNodes).toHaveLength(1);
   });
 
@@ -108,7 +108,7 @@ describe('pseudoParser', () => {
     const condNodes = flow.nodes.filter(n => n.type === 'condition');
     expect(condNodes).toHaveLength(1);
     // Both branches should have nodes
-    expect(flow.nodes.filter(n => n.type === 'click')).toHaveLength(1);
+    expect(flow.nodes.filter(n => n.type === 'mouse_operation')).toHaveLength(1);
     expect(flow.nodes.filter(n => n.type === 'wait')).toHaveLength(1);
   });
 
@@ -132,7 +132,7 @@ describe('pseudoParser', () => {
       等待 3
       截图`;
     const flow = parsePseudoToFlow(pseudo);
-    const clickNodes = flow.nodes.filter(n => n.type === 'click');
+    const clickNodes = flow.nodes.filter(n => n.type === 'mouse_operation');
     const inputNodes = flow.nodes.filter(n => n.type === 'input_text');
     const keyboardNodes = flow.nodes.filter(n => n.type === 'keyboard');
     const waitNodes = flow.nodes.filter(n => n.type === 'wait');
@@ -160,7 +160,7 @@ describe('pseudoParser', () => {
       click (100, 200)
       # 另一个注释`;
     const flow = parsePseudoToFlow(pseudo);
-    const clickNodes = flow.nodes.filter(n => n.type === 'click');
+    const clickNodes = flow.nodes.filter(n => n.type === 'mouse_operation');
     expect(clickNodes).toHaveLength(1);
     // start + click + end = 3
     expect(flow.nodes).toHaveLength(3);
@@ -168,7 +168,7 @@ describe('pseudoParser', () => {
 
   it('parses image_click', () => {
     const flow = parsePseudoToFlow('click image "icon.png" similarity=85 timeout=3');
-    const n = flow.nodes.find(n => n.type === 'image_click');
+    const n = flow.nodes.find(n => n.type === 'mouse_operation');
     expect(n).toBeDefined();
     expect((n!.params as any).targets).toHaveLength(1);
     expect((n!.params as any).targets[0].path).toBe('icon.png');
@@ -178,7 +178,7 @@ describe('pseudoParser', () => {
 
   it('parses Chinese image_click', () => {
     const flow = parsePseudoToFlow('点击图片 "button.png" 相似度=90');
-    const n = flow.nodes.find(n => n.type === 'image_click');
+    const n = flow.nodes.find(n => n.type === 'mouse_operation');
     expect(n).toBeDefined();
     expect((n!.params as any).targets[0].path).toBe('button.png');
   });
@@ -199,7 +199,7 @@ describe('pseudoParser', () => {
 
   it('parses click_text', () => {
     const flow = parsePseudoToFlow('click_text "提交" similarity=90');
-    const n = flow.nodes.find(n => n.type === 'click_text');
+    const n = flow.nodes.find(n => n.type === 'mouse_operation');
     expect((n?.params as any).text).toBe('提交');
     expect((n?.params as any).similarity).toBe(90);
   });
@@ -217,8 +217,8 @@ describe('pseudoParser', () => {
 
   it('parses launch and focus', () => {
     const flow = parsePseudoToFlow('launch "notepad"\nfocus "无标题 - 记事本"');
-    expect(flow.nodes.some(n => n.type === 'launch_program')).toBe(true);
-    expect(flow.nodes.some(n => n.type === 'focus_window')).toBe(true);
+    expect(flow.nodes.some(n => n.type === 'process_action' && (n.params as any)?.action === 'launch')).toBe(true);
+    expect(flow.nodes.some(n => n.type === 'process_action' && (n.params as any)?.action === 'focus')).toBe(true);
   });
 
   it('handles mixed Chinese and English', () => {
@@ -228,7 +228,7 @@ describe('pseudoParser', () => {
       按键 enter
       截图`;
     const flow = parsePseudoToFlow(pseudo);
-    expect(flow.nodes.filter(n => n.type === 'click')).toHaveLength(1);
+    expect(flow.nodes.filter(n => n.type === 'mouse_operation')).toHaveLength(1);
     expect(flow.nodes.filter(n => n.type === 'wait')).toHaveLength(1);
     expect(flow.nodes.filter(n => n.type === 'input_text')).toHaveLength(1);
     expect(flow.nodes.filter(n => n.type === 'keyboard')).toHaveLength(1);

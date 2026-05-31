@@ -2437,6 +2437,74 @@ textarea.form-input {
   white-space: nowrap;
 }
 
+/* ── Learning section (post-task reflection display) ── */
+.agent-learning-section {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-primary);
+  animation: fadeIn 0.3s ease;
+}
+.agent-learning-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+.agent-learning-icon {
+  font-size: 13px;
+}
+.agent-learning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.agent-learning-item {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.agent-learning-item.insight {
+  background: rgba(52, 211, 153, 0.08);
+  border-left: 2px solid #34d399;
+  color: var(--text-primary);
+}
+.agent-learning-item.mistake {
+  background: rgba(239, 68, 68, 0.08);
+  border-left: 2px solid #ef4444;
+  color: var(--text-secondary);
+}
+.agent-learning-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+  padding-top: 2px;
+}
+
+/* ── Memory node (long-term memory stats) ── */
+.agent-memory-stats {
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  font-size: 11px;
+}
+.agent-memory-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.agent-memory-stat-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+.agent-memory-stat-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
 
 /* ============================================================
    AGENT FLOWCHART LAYOUT (redesigned pipeline UI)
@@ -2875,6 +2943,9 @@ textarea.form-input {
 }
 .history-node .agent-flow-node-header {
   background: var(--bg-secondary);
+}
+.memory-node .agent-flow-node-header {
+  background: linear-gradient(135deg, rgba(255, 183, 77, 0.08), rgba(255, 152, 0, 0.04));
 }
 
 /* ── Node-type accent color bars ── */
