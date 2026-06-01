@@ -212,6 +212,26 @@ mouse_operation   ├─ click(坐标/图片/OCR三种模式)
 - **自然语言生成** — 用中文描述需求，AI 自动生成 DSL 并转为流程图
 - **多种 LLM** — 支持 DeepSeek、MIMO、OpenAI 等兼容接口
 
+### 本地视觉引擎（Local Vision Engine）— 让纯文本模型也能"看"屏幕
+
+DeepSeek 这类纯文本模型（便宜、速度快）本来不能看图，本地视觉引擎在电脑本地用 GPU 帮它"看"：
+
+```
+截图 → YOLO(144ms)检测图标 + MobileNet(10ms)分类 + RapidOCR(3s)读文字
+      → SoM标号（#1: 「我的手机」坐标913,263）
+      → 纯文本LLM直接选 #N 或文字点击
+```
+
+- **零 API 成本** — 截图、检测、OCR 全部本地 GPU 完成，不花 token
+- **默认关闭** — 不影响原来的 MIMO 多模态路径
+- **开即用** — AgentView → Perceive 节点 → 开「本地视觉引擎(YOLO GPU)」
+- **自动降级** — 模型找不到就回退到原来的 UIA+OCR 方式
+- **YOLO + ONNX DirectML** — 检测 UI 图标按钮，AMD 780M 上 144ms
+- **MobileNet V3** — 图标分类（"envelope"、"wall clock"），10ms/个
+- **RapidOCR** — 全屏文字识别 ~3s，附精确坐标
+- **SoM 文字匹配** — LLM 说 `click(target="我的手机")`，自动查 SoM 坐标
+- **聊天模式智能提示** — 自动教 LLM：先进输入框 → type_text → 回车发送
+
 ### 工具访问路径选择器（Tool Path Selector）
 
 Agent 不再平铺 196 个工具，而是按访问模式组织，LLM 根据场景智能选择最优路径：
