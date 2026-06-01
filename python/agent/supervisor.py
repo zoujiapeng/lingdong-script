@@ -371,7 +371,7 @@ class Supervisor:
             timeout = int(args.get("timeout", 120))
             return self.run_python_script(script, timeout)
 
-        # ── 0. SoM 编号解引用（#N → 坐标） ──
+        # ── 0. SoM 编号解引用（#N → 坐标）──
         if is_gui and self._last_som_map:
             som_target = args.get("target", "") or args.get("text", "") or args.get("from_target", "")
             if isinstance(som_target, str) and som_target.startswith("#"):

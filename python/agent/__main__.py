@@ -181,6 +181,7 @@ def _run_agent(goal: str, config: dict | None = None,
         agent_kw["screenshot_quality"] = agent_cfg_dict.get("screenshot_quality", 60)
         agent_kw["som_enabled"] = agent_cfg_dict.get("som_enabled", True)
         agent_kw["verify_enabled"] = agent_cfg_dict.get("verify", True)
+        agent_kw["local_vision_enabled"] = agent_cfg_dict.get("local_vision", False)
         if agent_cfg_dict.get("auto_learn"):
             agent_kw["auto_learn"] = True
     # 传递 guidance_queue 给 agent，用于对话模式
