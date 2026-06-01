@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import {
   List, Wifi, WifiOff, Mic, MicOff, Clock, RefreshCw,
-  Eye, GitBranch, Zap,
+  Eye, EyeOff, GitBranch, Zap,
   MessageSquare, Monitor, Brain, Volume2,
   Shield,
 } from 'lucide-react';
@@ -52,6 +52,7 @@ const AGENT_VERIFY_KEY = 'lingdong-agent-verify';
 const AGENT_AUTO_LEARN_KEY = 'lingdong-agent-auto-learn';
 const AGENT_OMNIPARSER_KEY = 'lingdong-agent-omniparser';
 const AGENT_SOM_KEY = 'lingdong-agent-som';
+const AGENT_LOCAL_VISION_KEY = 'lingdong-agent-local-vision';
 const AGENT_FLOW_CHART_KEY = 'lingdong-agent-flow-chart';
 const AGENT_SCREENSHOT_QUALITY_KEY = 'lingdong-agent-screenshot-quality';
 const AGENT_MAX_STEPS_KEY = 'lingdong-agent-max-steps';
@@ -67,6 +68,7 @@ const AGENT_VISUAL_STRATEGY_KEY = 'lingdong-agent-visual-strategy';
 
 // Legacy storage keys (shared with SettingsPanel)
 const KEY_STORAGE = 'lingdong-deepseek-key';
+const PROFILE_HISTORY_STORAGE = 'lingdong-api-profiles';
 const BASE_STORAGE = 'lingdong-llm-base';
 const MODEL_STORAGE = 'lingdong-llm-model';
 const LLM_MULTIMODAL_STORAGE = 'lingdong-llm-multimodal';
@@ -190,6 +192,143 @@ function ConfigInput({ label, value, onChange, type, placeholder, secret, onTest
   );
 }
 
+interface ApiProfile {
+  key: string;
+  base: string;
+  model: string;
+  label: string;
+}
+
+// 常用 LLM 服务商预设
+const PROVIDER_PRESETS: ApiProfile[] = [
+  { label: '🐋 DeepSeek',   key: '', base: 'https://api.deepseek.com/v1',        model: 'deepseek-chat' },
+  { label: '🔮 MIMO',       key: '', base: 'https://api.xiaomimimo.com/v1',     model: 'mimo-v2-omni' },
+  { label: '🟢 OpenAI',     key: '', base: 'https://api.openai.com/v1',         model: 'gpt-4o' },
+  { label: '🔴 Claude',     key: '', base: 'https://api.anthropic.com/v1',      model: 'claude-sonnet-4-20250514' },
+  { label: '🔵 Gemini',     key: '', base: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.0-flash' },
+  { label: '🟣 SiliconFlow', key: '', base: 'https://api.siliconflow.cn/v1',     model: 'deepseek-ai/DeepSeek-V3' },
+];
+function getProfiles(): ApiProfile[] {
+  try { return JSON.parse(localStorage.getItem(PROFILE_HISTORY_STORAGE) || '[]').slice(0, 10); } catch { return []; }
+}
+function saveProfile(key: string, base: string, model: string) {
+  if (!key || key.length < 8) return;
+  const label = model || base.replace(/https?:\/\//, '').split('/')[0] || 'custom';
+  const profiles = [{ key, base, model, label }, ...getProfiles().filter(p => p.key !== key)].slice(0, 10);
+  localStorage.setItem(PROFILE_HISTORY_STORAGE, JSON.stringify(profiles));
+}
+function maskKey(key: string): string {
+  if (key.length <= 12) return key.slice(0, 4) + '...' + key.slice(-4);
+  return key.slice(0, 6) + '...' + key.slice(-4);
+}
+
+function ConfigApiKey({ label, value, onKeyChange, onSelectProfile, onPresetSelect }: {
+  label: string; value: string;
+  onKeyChange: (v: string) => void;
+  onSelectProfile: (p: ApiProfile) => void;
+  onPresetSelect: (base: string, model: string) => void;
+}) {
+  const [showSecret, setShowSecret] = useState(false);
+  const profiles = getProfiles();
+  const [showDropdown, setShowDropdown] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node) &&
+          inputRef.current && !inputRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  // 找出当前 key 对应的 profile 信息
+  const activeProfile = profiles.find(p => p.key === value);
+
+  return (
+    <div className="agent-config-field full-width" style={{ position: 'relative' }}>
+      <div className="agent-config-field-label">{label}</div>
+      <div className="agent-config-field-row">
+        <input
+          ref={inputRef}
+          className="agent-config-input"
+          type={showSecret ? 'text' : 'password'}
+          value={value}
+          onChange={e => onKeyChange(e.target.value)}
+          placeholder="sk-..."
+          spellCheck={false}
+          onFocus={() => setShowDropdown(true)}
+        />
+        <button className="agent-config-icon-btn" onClick={() => setShowSecret(!showSecret)}
+          title={showSecret ? '隐藏' : '显示'}>
+          {showSecret ? <EyeOff size={12} /> : <Eye size={12} />}
+        </button>
+        {profiles.length > 0 && (
+          <button className="agent-config-icon-btn" onClick={() => setShowDropdown(!showDropdown)}
+            title="切换配置档案" style={{ fontSize: 10 }}>
+            ▼
+          </button>
+        )}
+      </div>
+      {activeProfile && (
+        <div style={{ fontSize: 10, color: '#888', marginTop: 2, paddingLeft: 2 }}>
+          {activeProfile.label} · {maskKey(value)}
+        </div>
+      )}
+      {showDropdown && (
+        <div ref={dropdownRef} style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+          background: '#2a2a2a', border: '1px solid #444', borderRadius: 4,
+          maxHeight: 300, overflowY: 'auto', marginTop: 2,
+        }}>
+          {/* ── 快捷预设 ── */}
+          <div style={{ padding: '4px 10px', fontSize: 10, color: '#666', fontWeight: 600 }}>快捷选择</div>
+          {PROVIDER_PRESETS.map(p => (
+            <div key={p.label} onClick={() => {
+              onKeyChange(p.key);
+              onPresetSelect(p.base, p.model);
+              setShowDropdown(false);
+            }}
+              style={{ padding: '7px 10px', cursor: 'pointer', fontSize: 12, borderBottom: '1px solid #333' }}
+              onMouseEnter={e => (e.currentTarget.style.background = '#333')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <div style={{ fontWeight: 600 }}>{p.label}</div>
+              <div style={{ fontSize: 10, color: '#999' }}>{p.model}</div>
+            </div>
+          ))}
+          {/* ── 历史配置 ── */}
+          {profiles.length > 0 && (
+            <>
+              <div style={{ padding: '4px 10px', fontSize: 10, color: '#666', fontWeight: 600, borderTop: '1px solid #444' }}>
+                历史配置
+              </div>
+              {profiles.map((p, i) => (
+                <div key={p.key} onClick={() => { onSelectProfile(p); setShowDropdown(false); }}
+                  style={{
+                    padding: '7px 10px', cursor: 'pointer', fontSize: 12,
+                    borderBottom: i < profiles.length - 1 ? '1px solid #333' : 'none',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#333')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 1 }}>{p.label}</div>
+                  <div style={{ fontSize: 10, color: '#999', fontFamily: 'monospace' }}>
+                    {maskKey(p.key)} · {p.base.replace(/https?:\/\//, '').split('/')[0]}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConfigTriState({ label, value, onChange, desc, options }: {
   label: string; value: string; onChange: (v: string) => void;
   desc?: string; options: { value: string; label: string }[];
@@ -242,6 +381,7 @@ function buildAgentConfig(): Record<string, any> {
     vision_backend: lsGet(AGENT_VISION_BACKEND_KEY, 'gpt-4o-mini'),
     chat_mode: lsGetBool(AGENT_CHAT_MODE_KEY, false),
     visual_strategy: lsGet(AGENT_VISUAL_STRATEGY_KEY, 'auto'),
+    local_vision: lsGetBool(AGENT_LOCAL_VISION_KEY, false),
   };
 }
 
@@ -273,6 +413,18 @@ function _resolveAuto(field: string, model: string, multimodalOverride: string):
 // ═══════════════════════════════════════════════════════════════════
 
 export function AgentView() {
+  // ── 迁移旧 key 到配置档案 ──
+  useEffect(() => {
+    const profiles = getProfiles();
+    const oldKey = localStorage.getItem(KEY_STORAGE);
+    if (oldKey && oldKey.length > 8 && !profiles.some(p => p.key === oldKey)) {
+      const oldBase = localStorage.getItem(BASE_STORAGE) || 'https://api.deepseek.com/v1';
+      const oldModel = localStorage.getItem(MODEL_STORAGE) || 'deepseek-chat';
+      profiles.unshift({ key: oldKey, base: oldBase, model: oldModel, label: oldModel });
+      localStorage.setItem(PROFILE_HISTORY_STORAGE, JSON.stringify(profiles.slice(0, 10)));
+    }
+  }, []);
+
   // ── Core state ──
   const [goal, setGoal] = useState(() => sessionStorage.getItem(_STORAGE_KEY) || '');
   const [running, setRunning] = useState(false);
@@ -335,6 +487,7 @@ export function AgentView() {
   const [agentAutoLearn, setAgentAutoLearn] = useState(() => lsGetBool(AGENT_AUTO_LEARN_KEY, false));
   const [agentOmniparser, setAgentOmniparser] = useState(() => lsGetBool(AGENT_OMNIPARSER_KEY, false));
   const [agentSom, setAgentSom] = useState(() => lsGetBool(AGENT_SOM_KEY, true));
+  const [agentLocalVision, setAgentLocalVision] = useState(() => lsGetBool(AGENT_LOCAL_VISION_KEY, false));
   const [agentFlowChart, setAgentFlowChart] = useState(() => lsGetBool(AGENT_FLOW_CHART_KEY, false));
   const [agentScreenshotQuality, setAgentScreenshotQuality] = useState(() => lsGetNum(AGENT_SCREENSHOT_QUALITY_KEY, 60));
   const [agentMaxSteps, setAgentMaxSteps] = useState(() => lsGetNum(AGENT_MAX_STEPS_KEY, 20));
@@ -567,6 +720,8 @@ export function AgentView() {
       setRunning(false);
       return;
     }
+    // Save full profile for dropdown reuse
+    saveProfile(apiKey_, apiBase_, model_);
 
     try {
       const stepsArg = supervise ? _cachedSteps : undefined;
@@ -843,12 +998,30 @@ export function AgentView() {
           {nodeExpanded.llm && (
             <div className="agent-flow-node-body">
               <div className="agent-node-settings">
-                <ConfigInput label="API Key" value={apiKey} onChange={v => saveStr(KEY_STORAGE, v, setApiKey)}
-                  secret placeholder="sk-..." />
-                <ConfigInput label="API Base" value={apiBase} onChange={v => saveStr(BASE_STORAGE, v, setApiBase)}
-                  placeholder="https://api.deepseek.com/v1" />
-                <ConfigInput label="模型" value={model} onChange={v => saveStr(MODEL_STORAGE, v, setModel)}
-                  placeholder="deepseek-chat" />
+                <ConfigApiKey label="API Key" value={apiKey}
+                  onKeyChange={v => {
+                    saveStr(KEY_STORAGE, v, setApiKey);
+                    // key 变化时自动保存配置档案
+                    saveProfile(v, apiBase, model);
+                  }}
+                  onSelectProfile={p => {
+                    saveStr(KEY_STORAGE, p.key, setApiKey);
+                    saveStr(BASE_STORAGE, p.base, setApiBase);
+                    saveStr(MODEL_STORAGE, p.model, setModel);
+                  }}
+                  onPresetSelect={(base, mdl) => {
+                    saveStr(BASE_STORAGE, base, setApiBase);
+                    saveStr(MODEL_STORAGE, mdl, setModel);
+                    if (apiKey) saveProfile(apiKey, base, mdl);
+                  }} />
+                <ConfigInput label="API Base" value={apiBase} onChange={v => {
+                    saveStr(BASE_STORAGE, v, setApiBase);
+                    if (apiKey) saveProfile(apiKey, v, model);
+                  }} placeholder="https://api.deepseek.com/v1" />
+                <ConfigInput label="模型" value={model} onChange={v => {
+                    saveStr(MODEL_STORAGE, v, setModel);
+                    if (apiKey) saveProfile(apiKey, apiBase, v);
+                  }} placeholder="deepseek-chat" />
                 <ConfigSelect label="协议" value={agentProtocol} onChange={v => saveStr(AGENT_PROTOCOL_KEY, v, setAgentProtocol)}
                   options={[
                     { value: 'auto', label: '自动' },
@@ -965,6 +1138,14 @@ export function AgentView() {
                     onChange={v => saveBool(AGENT_SOM_KEY, v, setAgentSom)} />
                   <ConfigToggle label="OmniParser" checked={agentOmniparser}
                     onChange={v => saveBool(AGENT_OMNIPARSER_KEY, v, setAgentOmniparser)} />
+                  <ConfigToggle label="本地视觉引擎(YOLO GPU)" checked={agentLocalVision}
+                    onChange={v => {
+                      if (v && _isMultimodalModel(model)) {
+                        alert('本地视觉引擎只对纯文本模型(如 DeepSeek)生效。\n当前使用多模态模型时此项无效，视觉将走直接截图路径。');
+                      }
+                      saveBool(AGENT_LOCAL_VISION_KEY, v, setAgentLocalVision);
+                    }}
+                    desc="YOLO + MobileNet + RapidOCR，离线 GPU 加速" />
                   <ConfigSlider label="截图质量" value={agentScreenshotQuality}
                     min={30} max={95} step={5}
                     onChange={v => saveNum(AGENT_SCREENSHOT_QUALITY_KEY, v, setAgentScreenshotQuality)} unit="%" />

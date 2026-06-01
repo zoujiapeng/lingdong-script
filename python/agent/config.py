@@ -43,6 +43,7 @@ class AgentConfig:
     flow_chart_mode: bool = False   # 流程图模式（全工具提示词 + generate_flow/execute_flow）
     chat_mode: bool = False         # 对话模式：边执行边聊天，接收实时反馈/新任务（默认关闭保持原行为）
     reflection_enabled: bool = True  # 自我反思与学习：任务后分析提取规则/偏好/经验（默认开启）
+    local_vision: bool = False      # 本地视觉引擎（YOLO + MobileNet + RapidOCR），仅对纯文本模型生效
 
     # ── Visual strategy: how the agent "sees" the screen ──
     # "auto"       — 自动选择（多模态=direct，纯文本=som）
@@ -220,6 +221,7 @@ class AgentConfig:
             "chat_mode": self.chat_mode,
             "visual_strategy": self.visual_strategy,
             "reflection_enabled": self.reflection_enabled,
+            "local_vision": self.local_vision,
         }
 
     @classmethod
@@ -253,6 +255,7 @@ class AgentConfig:
             chat_mode=d.get("chat_mode", False),
             visual_strategy=d.get("visual_strategy", "auto"),
             reflection_enabled=d.get("reflection_enabled", True),
+            local_vision=d.get("local_vision", False),
         )
 
 

@@ -319,6 +319,7 @@ class LingdongAgent:
                  screenshot_quality: int = 60,
                  som_enabled: bool = True,
                  verify_enabled: bool = True,
+                 local_vision_enabled: bool = False,
                  guidance_queue: Optional[Queue] = None):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
         self.api_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
@@ -343,6 +344,8 @@ class LingdongAgent:
         self.sliding_window_limit = 8  # 默认 8, _unified_run 中从 config 覆盖
         self._omniparser = None  # OmniParser client (lazy init)
         self._omniparser_enabled = omniparser_enabled  # 默认关闭，可在设置中开启
+        self._local_vision_enabled = local_vision_enabled  # 本地视觉引擎（默认关闭）
+        self._local_vision = None  # LocalVisionEngine (lazy init)
 
         # 监督层 (Supervisor) — 被所有三种执行模式共享
         self.supervisor = Supervisor(
@@ -515,6 +518,31 @@ class LingdongAgent:
         if multimodal:
             return {"image_b64": b64_img, "label_map": {}, "count": 0, "_mode": "direct"}
 
+        # ── 本地视觉引擎（YOLO ONNX DirectML + UIA 合并）──
+        # 仅对纯文本模型（如 DeepSeek）生效，多模态模型走上面 direct 路径。
+        if self._local_vision_enabled and not multimodal:
+            try:
+                if self._local_vision is None:
+                    from agent.local_vision_engine import LocalVisionEngine
+                    self._local_vision = LocalVisionEngine(enabled=True)
+                if self._local_vision.available:
+                    # Collect UIA elements for text labels
+                    uia_items = self._collect_uia_elements()
+                    lv_result = self._local_vision.parse(b64_img, uia_elements=uia_items)
+                    if lv_result and lv_result["count"] > 0:
+                        msg = f"本地视觉引擎: {lv_result['count']} 个元素 (YOLO DirectML)"
+                        if lv_result.get("caption"):
+                            msg += f" | {lv_result['caption'][:60]}"
+                        self._emit("log", {"level": "info", "message": msg})
+                        return lv_result
+                    else:
+                        self._emit("log", {
+                            "level": "debug",
+                            "message": "本地视觉引擎未检出元素，降级到 OmniParser/UIA+OCR",
+                        })
+            except Exception as exc:
+                logger.debug("Local vision engine unavailable, falling back: %s", exc)
+
         # ── OmniParser（YOLOv8 图标检测 + Florence-2 描述 + OCR）──
         if self._omniparser_enabled and (self._omniparser is not None or self._som_enabled):
             try:
@@ -641,6 +669,48 @@ class LingdongAgent:
         result_b64 = base64.b64encode(buf).decode()
 
         return {"image_b64": result_b64, "label_map": label_map, "count": len(label_map)}
+
+    # ── 本地视觉引擎辅助 ──────────────────────────────────────────
+
+    def _collect_uia_elements(self, max_depth: int = 3) -> list[dict]:
+        """Collect UIA control tree elements for local vision engine text labels.
+
+        Returns list of {text, x, y, w, h} for merge with YOLO detections.
+        Returns empty list on failure (non-fatal, YOLO will run without text labels).
+        """
+        try:
+            from features.registry import registry
+            result = registry.execute("a11y_get_tree", depth=max_depth)
+            tree = result.get("result", result)
+            if isinstance(tree, dict):
+                tree = tree.get("result", tree)
+
+            items: list[dict] = []
+            seen_positions: set = set()
+
+            def _collect(node, depth=0):
+                if depth > 4:
+                    return
+                name = (node.get("name", "") or node.get("text", "") or "").strip()
+                role = node.get("control_type", node.get("role", ""))
+                rect = node.get("bounding_rectangle", node.get("rect", {}))
+                x = int(rect.get("x", 0)) if isinstance(rect, dict) else 0
+                y = int(rect.get("y", 0)) if isinstance(rect, dict) else 0
+                w = int(rect.get("w", 0)) if isinstance(rect, dict) else 0
+                h = int(rect.get("h", 0)) if isinstance(rect, dict) else 0
+                if name and role and 10 < w < 1500 and 8 < h < 500:
+                    key = (x // 10, y // 10)
+                    if key not in seen_positions:
+                        seen_positions.add(key)
+                        items.append({"text": f"[{role}] {name}", "x": x, "y": y, "w": w, "h": h})
+                for child in (node.get("children", node.get("items", [])) or []):
+                    if isinstance(child, dict):
+                        _collect(child, depth + 1)
+
+            _collect(tree)
+            return items
+        except Exception:
+            return []
 
     def _call_llm(self, messages: list[dict], max_retries: int | None = None) -> dict | None:
         """调用 LLM API (兼容文本和视觉消息)。"""
@@ -914,7 +984,20 @@ class LingdongAgent:
         if re.match(r'^-?\d+\s*,\s*-?\d+$', target.strip()):
             return args
 
-        # 1. OCR 获取屏幕上所有文字
+        # 0. 优先用 SoM 标号中的 RapidOCR 文字坐标
+        if self.supervisor._last_som_map:
+            target_clean = target.strip().strip("'\"")
+            for idx, m in self.supervisor._last_som_map.items():
+                if target_clean in m.get("text", ""):
+                    args = dict(args)
+                    args["target"] = f"{m['x']},{m['y']}"
+                    self._emit("log", {
+                        "level": "info",
+                        "message": f"SoM文字: 「{target_clean}」→ #{idx}「{m['text']}」→ {m['x']},{m['y']}",
+                    })
+                    return args
+
+        # 1. OCR 获取屏幕上所有文字（兜底）
         try:
             from features.registry import registry
             ocr_r = registry.execute("ocr_extract_all")
@@ -1031,6 +1114,7 @@ class LingdongAgent:
                 "verify": agent_config.verify,
                 "chat_mode": agent_config.chat_mode,
                 "visual_strategy": agent_config.visual_strategy,
+                "local_vision": agent_config.local_vision,
             }
         multimodal = _is_multimodal_model(self.model)
         return {
@@ -1048,6 +1132,7 @@ class LingdongAgent:
             "screenshot_quality": 60,
             "sliding_window_size": 0,
             "verify": True,
+            "local_vision": False,
         }
 
     def _append_step_feedback(self, messages: list, result: dict, name: str,
@@ -1100,14 +1185,21 @@ class LingdongAgent:
                     self.supervisor._last_som_map = som_result["label_map"]
                     if cfg["vision_mode"] != "direct" and som_result["count"] > 0:
                         b64 = som_result["image_b64"]
-                        lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
-                        som_label = f"\n屏幕元素编号:\n{lines}"
+                        lines = "\n".join(
+                            f"  #{i}: 「{e['text']}」 坐标({e['x']},{e['y']})"
+                            for i, e in som_result["label_map"].items()
+                        )
+                        som_label = f"\n屏幕元素编号:\n{lines}\n使用 #N 或坐标点击"
 
-                parts = [
-                    {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ]
-                messages.append({"role": "user", "content": parts})
+                if multimodal:
+                    parts = [
+                        {"type": "text", "text": f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ]
+                    messages.append({"role": "user", "content": parts})
+                else:
+                    text = f"执行{status_txt}。{hint}\n\n当前状态:\n{screen_ctx}{win_info}{som_label}"
+                    messages.append({"role": "user", "content": text})
 
         if not success:
             time.sleep(1.0)
@@ -1162,6 +1254,25 @@ class LingdongAgent:
             messages[0] = {"role": "system", "content": current_content + CHAT_MODE_INSTRUCTIONS}
             self._emit("log", {"level": "info", "message": "对话模式已开启 — 可边执行边聊天"})
 
+        # ── 本地视觉引擎提示 ──
+        if cfg.get("local_vision", False) and not multimodal:
+            som_trust = """
+【重要】屏幕元素已用 #N 标号完整标注，含坐标和文字。
+
+每次操作后必须截图验证界面是否变了。
+如果截图后看到的和操作前一样，说明操作没生效，换一种方式重试。
+
+用 click(target="屏幕上看到的准确文字") 来点击，不要调 read_text、read_ui。
+
+【聊天操作流程】进了聊天界面后：
+1. 先点输入框（标号里有 [Edit] 的就是）
+2. 再用 type_text 输入文字
+3. 最后 press_keys(keys="enter") 发送
+"""
+            current_content = messages[0]["content"]
+            messages[0] = {"role": "system", "content": current_content + som_trust}
+            self._emit("log", {"level": "info", "message": "已启用 SoM 信任模式"})
+
         # ── 首次截图 + 第 1 条用户消息 ──
         raw_b64 = self.supervisor.capture_b64(quality=30 if multimodal else 60, max_size=1600)
         screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
@@ -1173,10 +1284,14 @@ class LingdongAgent:
             self.supervisor._last_som_map = som_result["label_map"]
             if vision_mode != "direct" and som_result["count"] > 0:
                 b64 = som_result["image_b64"]
-                lines = "\n".join(f"  #{i}: 「{e['text']}」" for i, e in som_result["label_map"].items())
+                lines = "\n".join(
+                    f"  #{i}: 「{e['text']}」 坐标({e['x']},{e['y']})"
+                    for i, e in som_result["label_map"].items()
+                )
                 som_label = (
                     f"\n屏幕元素编号（元素上有蓝色框和编号）:\n{lines}\n"
-                    f"\n使用 #N 指定目标，如: target: #3  或  target: #5"
+                    f"\n使用 #N 指定目标，如: target: #3 或 target: #5"
+                    f"\n也可以直接用坐标: click(x=坐标x, y=坐标y)"
                 )
 
         try:
@@ -1194,13 +1309,19 @@ class LingdongAgent:
                "然后等执行结果截图再做下一步规划。" if vision_mode != "direct"
                else "\n\n先判断是否有直接工具（file_ops/manage_app/run_command 等）可用。有就直接用，不需要操作屏幕。没有再用视觉工具点击操作。截图主要用于验证结果。")
         )
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": first_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ],
-        })
+        if multimodal:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": first_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            })
+        else:
+            messages.append({
+                "role": "user",
+                "content": first_prompt,
+            })
 
         consecutive_fails = 0
         consecutive_step_fails = 0
@@ -1315,6 +1436,22 @@ class LingdongAgent:
                         "thought": reasoning[:300] if reasoning else "",
                         "llm_response": content[:800], "status": "running"}
                 self._emit("step_complete", dict(step))
+
+                # SoM 文字匹配: 在执行前将文字 target 转为 SoM 坐标
+                if tool_name in ("click",) and tool_args.get("target", "") and self.supervisor._last_som_map:
+                    som_target = tool_args["target"].strip().strip("'\"")
+                    if not re.match(r'^-?\d+\s*,\s*-?\d+$', som_target):
+                        matched = False
+                        for idx, m in self.supervisor._last_som_map.items():
+                            if som_target in m.get("text", ""):
+                                tool_args = dict(tool_args)
+                                tool_args["target"] = f"{m['x']},{m['y']}"
+                                self._emit("log", {
+                                    "level": "info",
+                                    "message": f"SoM点击: 「{som_target}」→ #{idx}「{m['text']}」→ {m['x']},{m['y']}",
+                                })
+                                matched = True
+                                break
 
                 step_start = time.time()
                 try:
@@ -2218,6 +2355,7 @@ PARAMS: {{"x": 960, "y": 540}}
         self._llm_retries = config.llm_retries
         self._screenshot_quality = config.screenshot_quality
         self._som_enabled = config.som_enabled
+        self._local_vision_enabled = config.local_vision
         # 滑动窗口：auto=0 → multimodal 用 8, text 用 12
         self.sliding_window_limit = config.sliding_window_size or (8 if config._multimodal else 12)
 
@@ -2240,7 +2378,8 @@ PARAMS: {{"x": 960, "y": 540}}
             f"retries={config.llm_retries}, "
             f"quality={config.screenshot_quality}, "
             f"chat_mode={config.chat_mode}, "
-            f"visual={config.visual_strategy}"})
+            f"visual={config.visual_strategy}, "
+            f"local_vision={config.local_vision}"})
 
         # ── 反思/学习开关 ──
         self._reflection_enabled = getattr(config, "reflection_enabled", True)
