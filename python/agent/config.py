@@ -7,7 +7,6 @@ AgentConfig — 4 种执行模式的统一配置
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 # ── 模式 1: 流程图模式 ─────────────────────────────────────────

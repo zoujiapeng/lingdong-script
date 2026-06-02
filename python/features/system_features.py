@@ -3,7 +3,7 @@
 进程检测 / 窗口管理 / 剪贴板输入
 """
 import logging
-import time
+# import time
 
 from features.registry import feature, P, TC, FeatureCategory as F
 

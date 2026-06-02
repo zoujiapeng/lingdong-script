@@ -1018,7 +1018,7 @@ def handle_save_dialog(dlg: DialogInfo, save_path: str = "") -> bool:
         def _enum_all(h, _):
             try:
                 all_kids.append((h, win32gui.GetClassName(h), win32gui.GetWindowText(h)))
-            except:
+            except Exception:
                 pass
             return True
         win32gui.EnumChildWindows(hwnd, _enum_all, 0)
@@ -1358,6 +1358,6 @@ def _monitor_loop() -> None:
 if __name__ == "__main__":
     import json
     logging.basicConfig(level=logging.DEBUG)
-    print("=== Current dialogs ===")
-    for info in dump_all_dialogs():
-        print(json.dumps(info, ensure_ascii=False, indent=2))
+    dialogs = dump_all_dialogs()
+    for info in dialogs:
+        pass  # debug use: print(json.dumps(info, ensure_ascii=False, indent=2))
