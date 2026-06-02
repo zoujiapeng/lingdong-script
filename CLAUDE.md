@@ -95,9 +95,9 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── deepseek.py        #   DeepSeek API 客户端
 │   │   ├── openai.py          #   OpenAI 兼容客户端
 │   │   └── vlm.py             #   视觉语言模型客户端
-│   ├── features/              # @feature 注册表 (49 文件, 43 模块)
+│   ├── features/              # @feature 注册表 (50 文件, 42 模块)
 │   │   ├── registry.py        #   FeatureRegistry 单例, @feature 装饰器
-│   │   ├── _all.py            #   导入所有 feature 模块 (43 模块 lazy load)
+│   │   ├── _all.py            #   导入所有 feature 模块 (42 模块 lazy load)
 │   │   ├── action_features.py, perception_features.py, system_features.py,
 │   │   │   ai_plan_features.py, ai_debug_features.py, flow_features.py,
 │   │   │   macro_features.py, visual_macro_features.py, camera_features.py,
@@ -394,7 +394,7 @@ supervisor.execute(name, args)
   +-- 8. OCR 验证 (可选, verify=true时)
 ```
 
-元动作（26 个）走 `meta_execute()` 快速路径，绕过部分验证步骤。
+元动作（27 个）走 `meta_execute()` 快速路径，绕过部分验证步骤。
 
 ### 自我反思与学习
 
@@ -838,7 +838,7 @@ ECA 模型: Event-Condition-Action 触发架构。
 
 ## DSL 脚本语言
 
-内置 DSL（领域特定语言），190 个关键字，支持文本编辑模式：
+内置 DSL（领域特定语言），~130 个关键字，支持文本编辑模式：
 
 ```
 CLICK 500 400

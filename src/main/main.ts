@@ -520,13 +520,13 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 <div class="section"><div class="section-title">核心能力</div>
 <div class="tags">
 <span class="tag">流程图编排</span>
-<span class="tag">200+ 自动化工具</span>
+<span class="tag">243 @feature 工具</span>
 <span class="tag">AI Agent 监督执行</span>
 <span class="tag">OCR / 视觉定位</span>
 <span class="tag">@feature 注册表</span>
 <span class="tag">5 种 Agent 模式</span>
 <span class="tag">宏录制 (支持视觉)</span>
-<span class="tag">DSL 引擎 (190 关键字)</span>
+<span class="tag">DSL 引擎 (~130 关键字)</span>
 <span class="tag">MCP / HTTP API / CLI</span>
 <span class="tag">摄像头监控</span>
 <span class="tag">计划可视化 (HTN)</span>

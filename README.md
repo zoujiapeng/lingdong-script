@@ -53,7 +53,7 @@ npm run dev
 
 LLM 在同一提示词中看到两层工具：
 
-- **26 元动作** — 高层语义操作（click、type_text、manage_window、browser_do、scroll_to 等），每个元动作自动路由到最佳底层路径（UIA 无障碍树 → OCR 文字 → 图像模板匹配 → 直接坐标），LLM 只需说"做什么"，不用管"怎么做"
+- **27 元动作** — 高层语义操作（click、type_text、manage_window、browser_do、scroll_to 等），每个元动作自动路由到最佳底层路径（UIA 无障碍树 → OCR 文字 → 图像模板匹配 → 直接坐标），LLM 只需说"做什么"，不用管"怎么做"
 - **243 @feature 工具** — 底层原子能力，按 7 级访问模式分组（直接 API → 浏览器 → UIA → OCR → SoM → 宏 → DSL），元动作不够用时 LLM 直接调用底层工具
 
 ### 监督执行流水线
@@ -194,7 +194,7 @@ Agent 的辅助工具之一，用于可视化和编排流程：
 
 - **55 种节点类型** — 交互动作、图像识别、控制流、系统操作、摄像头、AI 规划等
 - **聚合节点** — clipboard_action / window_control / mouse_operation 等通过 sub_operation 折叠多操作为一入口
-- **DSL ↔ FlowScript** — 190 关键字 DSL 与可视化流程图双向无损转换
+- **DSL ↔ FlowScript** — ~130 关键字 DSL 与可视化流程图双向无损转换
 - **三视图** — 流程图 / 伪代码 / Agent 面板
 
 ---
