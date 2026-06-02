@@ -1,18 +1,19 @@
 <div align="center">
 
-# 灵动脚本
+# 灵动脚本 (Lingdong Script)
 
-**可视化桌面自动化流程编辑器 — AI Agent · DSL 批处理 · 万物可控**
+**桌面自动化从未如此灵活 — AI 驱动的流程编辑器 · 5 种 Agent 模式 · 200+ 开箱即用工具**
 
 [![Electron](https://img.shields.io/badge/Electron-33-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org/)
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python)](https://www.python.org/)
 [![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite)](https://vitejs.dev/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
 
-灵动脚本是一款 **Electron + React + Python** 桌面自动化流程编辑器。通过可视化编排流程图，即可完成屏幕点击、OCR识别、图像检测、条件分支、循环等桌面自动化操作。核心设计理念：**一次 AI 生成即可永久零 Token 执行**，同时支持像通用 Agent 一样实时操控电脑。
+灵动脚本是一款 **AI 驱动的桌面自动化流程编辑器**，将可视化流程图编排与 AI Agent 深度融合。你可以拖拽节点搭建自动化流程，也可以让 AI 理解你的需求后自动生成并执行。核心设计理念：**AI 辅助生成，零 Token 反复执行**，兼顾灵活性与经济性。
 
 ---
 
