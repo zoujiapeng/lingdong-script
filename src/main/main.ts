@@ -494,20 +494,21 @@ function buildAppMenu() {
         { label: '关于灵动脚本', click: () => {
           const { BrowserWindow } = require("electron");
           const w = new BrowserWindow({
-            width: 420, height: 520, parent: mainWindow, modal: true,
+            width: 440, height: 580, parent: mainWindow, modal: true,
             resizable: false, frame: true, title: "关于灵动脚本",
             webPreferences: { nodeIntegration: false, contextIsolation: true },
           });
           const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><style>
-body{margin:0;padding:40px 32px;font-family:-apple-system,Segoe UI,sans-serif;background:#202020;color:#ccc;display:flex;flex-direction:column;align-items:center;text-align:center}
+body{margin:0;padding:32px 28px;font-family:-apple-system,Segoe UI,sans-serif;background:#202020;color:#ccc;display:flex;flex-direction:column;align-items:center;text-align:center}
 h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
-.sub{font-size:13px;color:#888;margin-bottom:24px}
-.section{font-size:12px;color:#999;line-height:1.8;margin-bottom:16px}
-.section-title{color:#4f8cff;font-weight:500;margin-bottom:4px}
-.line{width:60px;height:1px;background:#444;margin:16px 0}
-.tag{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;background:#2d2d2d;color:#aaa;margin:2px 4px;white-space:nowrap}
+.sub{font-size:13px;color:#888;margin-bottom:20px}
+.section{font-size:12px;color:#999;line-height:1.8;margin-bottom:14px;width:100%}
+.section-title{color:#4f8cff;font-weight:500;margin-bottom:6px}
+.tags{display:flex;flex-wrap:wrap;justify-content:center;gap:4px}
+.line{width:60px;height:1px;background:#444;margin:14px 0}
+.tag{display:inline-block;padding:3px 10px;border-radius:10px;font-size:11px;background:#2d2d2d;color:#aaa;white-space:nowrap}
 </style></head>
 <body>
 <h1>灵动脚本</h1>
@@ -516,15 +517,27 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 <div class="line"></div>
 <div class="section"><div class="section-title">技术栈</div>Electron + React + Python</div>
 <div class="line"></div>
-<div class="section"><div class="section-title">功能特性</div>
+<div class="section"><div class="section-title">核心能力</div>
+<div class="tags">
 <span class="tag">流程图编排</span>
-<span class="tag">65+ 节点类型</span>
-<span class="tag">OCR 识别</span>
-<span class="tag">AI 生成</span>
-<span class="tag">宏录制</span>
-<span class="tag">MCP 协议</span>
-<span class="tag">HTTP API</span>
-<span class="tag">CLI 工具</span></div>
+<span class="tag">200+ 自动化工具</span>
+<span class="tag">AI Agent 监督执行</span>
+<span class="tag">语音对话 (STT/TTS)</span>
+<span class="tag">OCR / 视觉定位</span>
+<span class="tag">@feature 注册表</span>
+<span class="tag">5 种 Agent 模式</span>
+<span class="tag">宏录制 (支持视觉)</span>
+<span class="tag">DSL 引擎 (190 关键字)</span>
+<span class="tag">MCP / HTTP API / CLI</span>
+<span class="tag">摄像头监控</span>
+<span class="tag">计划可视化 (HTN)</span>
+<span class="tag">条件 / 循环 / 分支</span>
+<span class="tag">流程模板库</span>
+<span class="tag">触发器 / 定时调度</span>
+<span class="tag">在线 / 离线双模式</span>
+<span class="tag">SoM 标号系统</span>
+<span class="tag">经验复用学习</span>
+</div></div>
 <div class="line"></div>
 <div class="section" style="font-size:11px;color:#666">Lingdong Script © 2026</div>
 </body></html>`;
