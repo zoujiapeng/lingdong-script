@@ -35,7 +35,7 @@ from agent.reflection import ReflectionEngine
 
 DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2-omni"
-MAX_STEPS = 50          # 单次任务最大步数
+MAX_STEPS = 20          # 单次任务最大步数（新配置默认20，旧路径兼容）
 MAX_CONSECUTIVE_FAILURES = 5  # 连续失败上限 → 自动终止
 _MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 / 总步数）
 
@@ -328,7 +328,14 @@ class LingdongAgent:
         self._step_reflections: list[dict] = []
         self._reflection_enabled: bool = True
 
-        # Export env vars for downstream features
+        # 导出环境变量供下游模块使用
+        self._export_env_vars()
+
+    # ── 工具加载 ──────────────────────────────────────────────
+
+
+    def _export_env_vars(self):
+        """导出 API 配置到环境变量，供下游模块（如 generate_flow_script）使用。"""
         if self.api_key:
             os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
             os.environ.setdefault("OPENAI_API_KEY", self.api_key)
@@ -336,9 +343,6 @@ class LingdongAgent:
             os.environ.setdefault("LLM_API_BASE", self.api_base)
         if self.model:
             os.environ.setdefault("LLM_MODEL", self.model)
-
-    # ── 工具加载 ──────────────────────────────────────────────
-
     def load_tools(self):
         """加载 @feature 注册表，生成工具描述文本。"""
         from features.registry import registry
@@ -728,7 +732,7 @@ class LingdongAgent:
                 resp_body = ""
                 if hasattr(e, 'response') and e.response is not None:
                     try: resp_body = e.response.text[:200]
-                    except: pass
+                    except Exception: pass
                 self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}. Body: {resp_body}"})
                 delay = 0.5 if "ConnectionReset" in str(e) or "Connection aborted" in str(e) else 2 * (attempt + 1)
                 time.sleep(delay)
@@ -2623,14 +2627,8 @@ PARAMS: {{"x": 960, "y": 540}}
         self._ensure_registry()
         self._emit("agent_start", {"goal": goal, "engine": "direct"})
 
-        # 传递 API 配置给 generate_flow_script（它只从环境变量读）
-        if self.api_key:
-            os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
-            os.environ.setdefault("OPENAI_API_KEY", self.api_key)
-        if self.api_base:
-            os.environ.setdefault("LLM_API_BASE", self.api_base)
-        if self.model:
-            os.environ.setdefault("LLM_MODEL", self.model)
+        # 导出环境变量供下游模块使用
+        self._export_env_vars()
 
         try:
             from features.flow_features import generate_flow_script
