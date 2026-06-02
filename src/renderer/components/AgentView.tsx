@@ -288,7 +288,7 @@ function ConfigApiKey({ label, value, onKeyChange, onSelectProfile, onPresetSele
           <div style={{ padding: '4px 10px', fontSize: 10, color: '#666', fontWeight: 600 }}>快捷选择</div>
           {PROVIDER_PRESETS.map(p => (
             <div key={p.label} onClick={() => {
-              onKeyChange(p.key);
+              if (p.key) onKeyChange(p.key);  // 预设带key才覆盖，否则保留已有key
               onPresetSelect(p.base, p.model);
               setShowDropdown(false);
             }}
@@ -1013,6 +1013,11 @@ export function AgentView() {
                     saveStr(BASE_STORAGE, base, setApiBase);
                     saveStr(MODEL_STORAGE, mdl, setModel);
                     if (apiKey) saveProfile(apiKey, base, mdl);
+                    // 切换预设时自动加载该模型对应的 key（如果存过）
+                    const savedKey = lsGet('lingdong-key-' + mdl.replace(/[^a-zA-Z0-9_-]/g, '_'), '');
+                    if (savedKey && savedKey.length > 8) {
+                      saveStr(KEY_STORAGE, savedKey, setApiKey);
+                    }
                   }} />
                 <ConfigInput label="API Base" value={apiBase} onChange={v => {
                     saveStr(BASE_STORAGE, v, setApiBase);

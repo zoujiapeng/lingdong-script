@@ -64,6 +64,7 @@ class Supervisor:
         # ── 增强型动作开关 ──
         self.window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
         self.uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
+        self.uia_enabled: bool = True        # UIA 控件树解析开关（False=纯视觉模式）
         self.scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
         self.verify: bool = True             # 执行验证
 
@@ -387,9 +388,20 @@ class Supervisor:
                         })
                 except (ValueError, TypeError):
                     pass
+            # SoM 文字→坐标匹配：在 label map 中查找目标文字
+            elif isinstance(som_target, str) and not re.match(r'^-?\d+\s*,\s*-?\d+$', som_target.strip()):
+                for idx, m in self._last_som_map.items():
+                    if som_target in m.get("text", ""):
+                        args = dict(args)
+                        args["target"] = f"{m['x']},{m['y']}"
+                        self._emit("log", {
+                            "level": "info",
+                            "message": f"SoM文字: 「{som_target}」→ #{idx}「{m['text']}」→ {m['x']},{m['y']}",
+                        })
+                        break
 
-        # ── 1a. UIA 语义定位 ──
-        if is_gui and name in ("click_target", "right_click", "hover",
+        # ── 1a. UIA 语义定位（uia_enabled=False 时跳过）──
+        if self.uia_enabled and is_gui and name in ("click_target", "right_click", "hover",
                                 "mouse_move", "drag"):
             target = args.get("target", "") or args.get("from_target", "")
             if target and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
@@ -427,8 +439,8 @@ class Supervisor:
                     except Exception:
                         pass
 
-        # ── 1c. UIA 预聚焦（type_text 前自动点击输入框）──
-        if is_gui and self.uia_pre_focus and name in ("type_text", "type_clipboard"):
+        # ── 1c. UIA 预聚焦（type_text 前自动点击输入框，uia_enabled=False 时跳过）──
+        if self.uia_enabled and is_gui and self.uia_pre_focus and name in ("type_text", "type_clipboard"):
             try:
                 edit_coords = self._find_edit_control()
                 if edit_coords:
@@ -451,9 +463,10 @@ class Supervisor:
 
         # ── 2a. 防重复启动拦截 ──
         # click_target 目标匹配已运行程序 → 转 launch_program 聚焦
+        # 仅当目标文字 >= 3 个字符才检查（避免误拦截数字/符号等短文字）
         if name == "click_target":
             target = args.get("target", "") or ""
-            if target and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
+            if target and len(target.strip()) >= 3 and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
                 try:
                     from features.program_registry import get_program_registry
                     reg = get_program_registry()
