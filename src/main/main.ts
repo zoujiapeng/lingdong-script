@@ -494,7 +494,7 @@ function buildAppMenu() {
         { label: '关于灵动脚本', click: () => {
           const { BrowserWindow } = require("electron");
           const w = new BrowserWindow({
-            width: 440, height: 580, parent: mainWindow, modal: true,
+            width: 440, height: 640, parent: mainWindow, modal: true,
             resizable: false, frame: true, title: "关于灵动脚本",
             webPreferences: { nodeIntegration: false, contextIsolation: true },
           });
