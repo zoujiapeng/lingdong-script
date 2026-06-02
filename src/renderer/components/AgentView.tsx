@@ -226,6 +226,13 @@ export function AgentView() {
     } catch { }
   }, [offline]);
 
+  const loadScriptToCanvas = useCallback((script: any) => {
+    try { fetch('http://127.0.0.1:7880/api/load-script', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ script: typeof script === 'string' ? { pseudocode: script } : script }),
+    }); } catch {}
+  }, []);
+
   const runOffline = useCallback(async () => {
     if (!goal.trim()) return;
     _persistedLog = []; setLog([]); setGeneratedScript(null);
@@ -269,6 +276,7 @@ export function AgentView() {
               setGeneratedScript({ pseudocode: pseudo, explanation: data.explanation || '' });
               const steps = data.structured_steps || data.result?.structured_steps || [];
               if (Array.isArray(steps) && steps.length > 0) _cachedSteps = steps;
+              loadScriptToCanvas(pseudo);
             }
           }
           break;
