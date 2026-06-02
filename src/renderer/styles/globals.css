@@ -2127,6 +2127,18 @@ textarea.form-input {
   word-break: break-word;
 }
 
+.agent-view-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary, #0a0a1a);
+}
+
+.agent-view-section {
+  background: var(--bg-secondary, #111);
+  border-bottom: 1px solid #1a1a2e;
+}
+
 .agent-input {
   flex: 1;
   padding: 8px 14px;

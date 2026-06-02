@@ -1,9 +1,8 @@
 """
-AgentConfig — unified agent execution configuration.
+AgentConfig — 4 种执行模式的统一配置
 
-All fields use string enums for JSON-serializability across the IPC boundary.
-"auto" values are resolved at runtime based on model capability detection
-via _is_multimodal_model().
+每种模式有独立的子配置，默认值 = 已验证成功的配置。
+模式切换时只暴露该模式相关的字段。
 """
 from __future__ import annotations
 
@@ -11,68 +10,111 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# ── 模式 1: 流程图模式 ─────────────────────────────────────────
+
+@dataclass
+class FlowChartConfig:
+    """模式1: 生成流程图 → 用户决定执行。"""
+    supervise: bool = True          # 监督执行开关
+
+
+# ── 模式 2: 多模态模式 ─────────────────────────────────────────
+
+@dataclass
+class MultimodalConfig:
+    """模式2: 多模态模型直接截图→思考→执行 (MIMO 成功路径)。"""
+    screenshot_quality: int = 60    # 唯一可配参数
+
+
+# ── 模式 3: 非多模态模式 ───────────────────────────────────────
+
+@dataclass
+class TextVisionConfig:
+    """模式3: 纯文本模型 + 本地视觉 (DeepSeek 成功路径)。
+
+    默认值 = 上次验证成功的配置 (2026-06-02):
+      - UIA 关闭，纯视觉 (YOLO+OCR+SoM)
+      - 窗口限定开启，只扫活动窗口
+      - 记忆/反思关闭
+    """
+    # ── 感知层开关 ──
+    uia_enabled: bool = False       # UIA 控件树
+    ocr_enabled: bool = True        # OCR 文字检测
+    yolo_enabled: bool = False      # YOLO 图标检测
+    som_enabled: bool = True        # SoM 标号
+    window_aware_ocr: bool = True   # 窗口限定（只扫活动窗口）
+    local_vision: bool = False      # 本地视觉引擎 (YOLO ONNX)
+
+    # ── 视觉策略 ──
+    visual_strategy: str = "som"    # som | ocr_llm | blind_guess | cli_path
+
+    # ── 执行协议 ──
+    llm_protocol: str = "text"      # text | function_calling
+    planning: str = "per_step"      # per_step | pre_plan
+
+
+# ── 模式 4: 离线模式 ───────────────────────────────────────────
+
+@dataclass
+class OfflineConfig:
+    """模式4: 全离线，直接执行流程图 (预留)。"""
+    pass
+
+
+# ── 主配置 ─────────────────────────────────────────────────────
+
 @dataclass
 class AgentConfig:
-    # ── LLM protocol: how the agent communicates with the LLM ──
-    llm_protocol: str = "auto"          # "auto"|"text"|"function_calling"|"computer_use"
+    """Agent 统一配置，4 种执行模式。
 
-    # ── Vision: how the agent sees the screen ──
-    vision_mode: str = "auto"           # "auto"|"direct"|"som"|"omniparser"
+    用法:
+        cfg = AgentConfig(execution_mode="text")
+        cfg.text_vision_cfg.uia_enabled = False  # example
+        resolved = cfg.resolve()  # → 运行时扁平字典
+    """
+    execution_mode: str = "flow_chart"  # flow_chart | multimodal | text | offline
 
-    # ── Planning: when and how the agent plans ──
-    planning: str = "auto"              # "auto"|"pre_plan"|"per_step"
+    # ── 全局 ──
+    memory_enabled: bool = False    # 记忆系统 (默认关闭)
+    max_steps: int = 20
+    max_consecutive_failures: int = 5
+    min_success_rate: float = 0.1
+    temperature: float = 0.1
+    max_tokens: int = 4096
+    llm_retries: int = 2
+    screenshot_quality: int = 60
+    sliding_window_size: int = 0    # 0=auto
+    on_error: str = "retry"         # retry | replan | skip | stop
 
-    # ── Screen context verbosity ──
-    screen_context: str = "auto"        # "auto"|"minimal"|"full"
+    # ── 各模式子配置（用 _cfg 后缀避免与旧字段名冲突）──
+    flow_chart_cfg: FlowChartConfig = field(default_factory=FlowChartConfig)
+    multimodal_cfg: MultimodalConfig = field(default_factory=MultimodalConfig)
+    text_vision_cfg: TextVisionConfig = field(default_factory=TextVisionConfig)
+    offline_cfg: OfflineConfig = field(default_factory=OfflineConfig)
 
-    # ── Error handling strategy ──
-    on_error: str = "retry"             # "retry"|"replan"|"skip"|"stop"
-
-    # ── Multimodal override ──
-    multimodal: str = "auto"            # "auto"|"true"|"false" — user override
-
-    # ── Boolean toggles ──
+    # ── 已弃用: 旧扁平字段 (仅向后兼容, 新代码勿用) ──
+    # 以下字段保留供 agent_config_from_legacy() 使用，resolve() 不再读取
+    llm_protocol: str = "auto"
+    vision_mode: str = "auto"
+    planning: str = "auto"
+    screen_context: str = "auto"
+    multimodal: str = "auto"
     verify: bool = True
     fast_mode: bool = False
     image_dedup: bool = True
-    window_aware_ocr: bool = True   # OCR 搜索时限定到活动窗口区域
-    uia_pre_focus: bool = True      # type_text 前 UIA 自动聚焦输入框
-    scripted_mode: bool = False     # 脚本执行模式：写 Python 脚本代替逐工具调用
-    auto_learn: bool = False        # 自动学习（截图→经验库）
-    som_enabled: bool = True        # SoM 标号（截图元素编号）
-    flow_chart_mode: bool = False   # 流程图模式（全工具提示词 + generate_flow/execute_flow）
-    chat_mode: bool = False         # 对话模式：边执行边聊天，接收实时反馈/新任务（默认关闭保持原行为）
-    reflection_enabled: bool = True  # 自我反思与学习：任务后分析提取规则/偏好/经验（默认开启）
-    local_vision: bool = False      # 本地视觉引擎（YOLO + MobileNet + RapidOCR），仅对纯文本模型生效
+    window_aware_ocr: bool = True
+    uia_pre_focus: bool = True
+    scripted_mode: bool = False
+    auto_learn: bool = False
+    som_enabled: bool = True
+    flow_chart_mode: bool = False
+    chat_mode: bool = False
+    reflection_enabled: bool = True
+    local_vision: bool = False
+    visual_strategy: str = "auto"
+    vision_backend: str = "gpt-4o-mini"
 
-    # ── Visual strategy: how the agent "sees" the screen ──
-    # "auto"       — 自动选择（多模态=direct，纯文本=som）
-    # "cli_path"   — 方案1: 先将软件转CLI/已探索路径，AI直接看操作逻辑
-    # "blind_guess" — 方案2: LLM自主盲猜像素坐标（原始方式）
-    # "ocr_llm"    — 方案3: 截图OCR→LLM回复最可能文字→点击对应坐标
-    # "som"        — 方案4: 截图LLM标记→标记转坐标（已实现，默认关闭因本地模型慢）
-    visual_strategy: str = "auto"   # 视觉策略选择器
-
-    # ── Safety limits ──
-    max_steps: int = 20              # 单次任务最大步数
-    max_consecutive_failures: int = 5  # 连续失败上限
-    min_success_rate: float = 0.1   # 最低成功率
-
-    # ── LLM parameters ──
-    temperature: float = 0.1        # LLM temperature (0.0-2.0)
-    max_tokens: int = 4096          # LLM max_tokens
-    llm_retries: int = 2            # LLM API 调用重试次数
-
-    # ── Screenshot ──
-    screenshot_quality: int = 50    # JPEG 压缩质量 (30-95)
-
-    # ── Sliding window ──
-    sliding_window_size: int = 0   # 0 = auto (8=multimodal, 12=text)
-
-    # ── Vision backend ──
-    vision_backend: str = "gpt-4o-mini"  # VLM 后端模型
-
-    # ── Internal resolved state (set by resolve_auto()) ──
+    # ── 内部解析状态 ──
     _resolved_llm_protocol: str = ""
     _resolved_vision_mode: str = ""
     _resolved_planning: str = ""
@@ -80,21 +122,80 @@ class AgentConfig:
     _resolved_on_error: str = ""
     _multimodal: bool = False
 
+    def resolve(self) -> dict:
+        """根据 execution_mode 展平成运行时字典。
+
+        替代旧 resolve_auto()。返回的字典包含 supervisor 和 LLM 需要的所有参数。
+        """
+        base = {
+            "memory_enabled": self.memory_enabled,
+            "max_steps": self.max_steps,
+            "max_consecutive_failures": self.max_consecutive_failures,
+            "min_success_rate": self.min_success_rate,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "llm_retries": self.llm_retries,
+            "screenshot_quality": self.screenshot_quality,
+            "sliding_window_size": self.sliding_window_size,
+            "on_error": self.on_error,
+            "verify": True,
+            "image_dedup": True,
+            "fast_mode": False,
+            "chat_mode": False,
+            "flow_chart_mode": False,
+        }
+
+        if self.execution_mode == "flow_chart":
+            return {**base,
+                "supervise": self.flow_chart_cfg.supervise,
+            }
+
+        elif self.execution_mode == "multimodal":
+            return {**base,
+                "multimodal": True,
+                "screenshot_quality": self.multimodal_cfg.screenshot_quality,
+                "llm_protocol": "text",
+                "planning": "per_step",
+                "vision_mode": "direct",
+                "screen_context": "minimal",
+                "som_enabled": False,
+                "uia_enabled": False,
+                "window_aware_ocr": False,
+                "visual_strategy": "direct",
+            }
+
+        elif self.execution_mode == "text":
+            tv = self.text_vision_cfg
+            return {**base,
+                "multimodal": False,
+                "uia_enabled": tv.uia_enabled,
+                "uia_pre_focus": tv.uia_enabled,   # UIA 预聚焦跟随 uia_enabled
+                "ocr_enabled": tv.ocr_enabled,
+                "yolo_enabled": tv.yolo_enabled,
+                "som_enabled": tv.som_enabled,
+                "window_aware_ocr": tv.window_aware_ocr,
+                "local_vision": tv.local_vision,
+                "visual_strategy": tv.visual_strategy,
+                "llm_protocol": tv.llm_protocol,
+                "planning": tv.planning,
+                "vision_mode": tv.visual_strategy,
+                "screen_context": "full",
+            }
+
+        else:  # offline
+            return {**base,
+                "multimodal": False,
+                "llm_protocol": "text",
+                "planning": "pre_plan",
+            }
+
+    # ── 已弃用: 旧 resolve_auto (保留向后兼容) ──
+
     def resolve_auto(self, model_name: str) -> None:
-        """Resolve all "auto" fields based on the model's capabilities.
+        """已弃用: 请使用 resolve() 替代。
 
-        For multimodal models (MIMO, GPT-4o, Claude 3.5+, Gemini, Qwen-VL, etc.):
-          - llm_protocol -> "text"
-          - vision_mode -> "direct"
-          - planning -> "per_step"
-          - screen_context -> "minimal"
-          - image_dedup -> True
-
-        For text-only models (DeepSeek-chat, GPT-3.5, etc.):
-          - llm_protocol -> "function_calling"
-          - vision_mode -> "som"
-          - planning -> "pre_plan"
-          - screen_context -> "full"
+        旧版自动检测逻辑，仅用于 agent_config_from_legacy() 向后兼容。
+        新代码直接设置 execution_mode + 子配置，调用 resolve()。
         """
         from agent.agent import _is_multimodal_model
         if self.multimodal == "true":
@@ -104,7 +205,6 @@ class AgentConfig:
         else:
             self._multimodal = _is_multimodal_model(model_name)
 
-        # computer_use protocol overrides everything
         if self.llm_protocol == "computer_use":
             self._multimodal = True
             resolved = {
@@ -114,9 +214,8 @@ class AgentConfig:
                 "screen_context": "minimal",
                 "on_error": self.on_error if self.on_error != "auto" else "retry",
             }
-            for field_name in ("llm_protocol", "vision_mode", "planning",
-                               "screen_context", "on_error"):
-                setattr(self, f"_resolved_{field_name}", resolved[field_name])
+            for fn in ("llm_protocol", "vision_mode", "planning", "screen_context", "on_error"):
+                setattr(self, f"_resolved_{fn}", resolved[fn])
             if self.fast_mode:
                 self.image_dedup = True
             return
@@ -145,48 +244,36 @@ class AgentConfig:
             if self.on_error == "auto":
                 resolved["on_error"] = "retry"
 
-        # Set resolved values
-        for field_name in ("llm_protocol", "vision_mode", "planning",
-                           "screen_context", "on_error"):
-            if field_name in resolved:
-                setattr(self, f"_resolved_{field_name}", resolved[field_name])
+        for fn in ("llm_protocol", "vision_mode", "planning", "screen_context", "on_error"):
+            if fn in resolved:
+                setattr(self, f"_resolved_{fn}", resolved[fn])
             else:
-                raw = getattr(self, field_name)
-                setattr(self, f"_resolved_{field_name}", raw)
+                raw = getattr(self, fn)
+                setattr(self, f"_resolved_{fn}", raw)
 
-        # Resolve visual_strategy "auto"
         if self.visual_strategy == "auto":
             if self._multimodal:
                 self._resolved_vision_mode = "direct"
             else:
                 self._resolved_vision_mode = "som"
         else:
-            # Override vision_mode based on visual_strategy
             if self.visual_strategy == "ocr_llm":
                 self._resolved_vision_mode = "ocr_llm"
-                # ocr_llm 策略需要走 text protocol + per_step planning
-                # 这样才能 OCR→LLM→点击 的闭环
                 if self._resolved_llm_protocol != "text":
                     self._resolved_llm_protocol = "text"
                     self._resolved_planning = "per_step"
             elif self.visual_strategy == "blind_guess":
-                self._resolved_vision_mode = "direct"  # 盲猜：直接截图，无标注
+                self._resolved_vision_mode = "direct"
             elif self.visual_strategy == "som":
                 self._resolved_vision_mode = "som"
             elif self.visual_strategy == "cli_path":
-                self._resolved_vision_mode = "som"  # CLI路径用SoM做兜底
+                self._resolved_vision_mode = "som"
 
-        # Apply boolean-derived behavior
         if self.fast_mode:
             self.image_dedup = True
 
     def get_resolved(self) -> dict:
-        """Return resolved configuration as a public dict.
-
-        After resolve_auto() is called, this exposes the effective values
-        that the agent will actually use, regardless of whether each field
-        was "auto" or explicitly set.
-        """
+        """已弃用: 返回旧版已解析字段 (向后兼容)。"""
         return {
             "llm_protocol": self._resolved_llm_protocol,
             "vision_mode": self._resolved_vision_mode,
@@ -196,9 +283,13 @@ class AgentConfig:
             "multimodal": self._multimodal,
         }
 
+    # ── 序列化 ──
+
     def to_dict(self) -> dict:
-        """Serialize to dict for IPC transmission."""
+        """序列化为 IPC 传输用的扁平字典 (含所有旧字段兼容)。"""
         return {
+            "execution_mode": self.execution_mode,
+            "memory_enabled": self.memory_enabled,
             "llm_protocol": self.llm_protocol,
             "vision_mode": self.vision_mode,
             "planning": self.planning,
@@ -214,6 +305,10 @@ class AgentConfig:
             "auto_learn": self.auto_learn,
             "som_enabled": self.som_enabled,
             "flow_chart_mode": self.flow_chart_mode,
+            "chat_mode": self.chat_mode,
+            "reflection_enabled": self.reflection_enabled,
+            "local_vision": self.local_vision,
+            "visual_strategy": self.visual_strategy,
             "max_steps": self.max_steps,
             "max_consecutive_failures": self.max_consecutive_failures,
             "min_success_rate": self.min_success_rate,
@@ -223,31 +318,14 @@ class AgentConfig:
             "screenshot_quality": self.screenshot_quality,
             "sliding_window_size": self.sliding_window_size,
             "vision_backend": self.vision_backend,
-            "chat_mode": self.chat_mode,
-            "visual_strategy": self.visual_strategy,
-            "reflection_enabled": self.reflection_enabled,
-            "local_vision": self.local_vision,
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> AgentConfig:
-        """Deserialize from dict (from IPC)."""
-        return cls(
-            llm_protocol=d.get("llm_protocol", "auto"),
-            multimodal=d.get("multimodal", "auto"),
-            vision_mode=d.get("vision_mode", "auto"),
-            planning=d.get("planning", "auto"),
-            screen_context=d.get("screen_context", "auto"),
-            on_error=d.get("on_error", "retry"),
-            verify=d.get("verify", True),
-            fast_mode=d.get("fast_mode", False),
-            image_dedup=d.get("image_dedup", True),
-            window_aware_ocr=d.get("window_aware_ocr", True),
-            uia_pre_focus=d.get("uia_pre_focus", True),
-            scripted_mode=d.get("scripted_mode", False),
-            auto_learn=d.get("auto_learn", False),
-            som_enabled=d.get("som_enabled", True),
-            flow_chart_mode=d.get("flow_chart_mode", False),
+    def from_dict(cls, d: dict) -> "AgentConfig":
+        """从 IPC 字典反序列化。"""
+        cfg = cls(
+            execution_mode=d.get("execution_mode", "flow_chart"),
+            memory_enabled=d.get("memory_enabled", False),
             max_steps=d.get("max_steps", 20),
             max_consecutive_failures=d.get("max_consecutive_failures", 5),
             min_success_rate=d.get("min_success_rate", 0.1),
@@ -256,22 +334,50 @@ class AgentConfig:
             llm_retries=d.get("llm_retries", 2),
             screenshot_quality=d.get("screenshot_quality", 60),
             sliding_window_size=d.get("sliding_window_size", 0),
-            vision_backend=d.get("vision_backend", "gpt-4o-mini"),
-            chat_mode=d.get("chat_mode", False),
-            visual_strategy=d.get("visual_strategy", "auto"),
-            reflection_enabled=d.get("reflection_enabled", True),
-            local_vision=d.get("local_vision", False),
+            on_error=d.get("on_error", "retry"),
         )
+        # 填入子配置
+        mode = cfg.execution_mode
+        if mode == "flow_chart":
+            cfg.flow_chart_cfg.supervise = d.get("supervise", True)
+        elif mode == "multimodal":
+            cfg.multimodal_cfg.screenshot_quality = d.get("screenshot_quality", 60)
+        elif mode == "text":
+            tv = cfg.text_vision_cfg
+            tv.uia_enabled = d.get("uia_enabled", False)
+            tv.ocr_enabled = d.get("ocr_enabled", True)
+            tv.yolo_enabled = d.get("yolo_enabled", False)
+            tv.som_enabled = d.get("som_enabled", True)
+            tv.window_aware_ocr = d.get("window_aware_ocr", True)
+            tv.local_vision = d.get("local_vision", False)
+            tv.visual_strategy = d.get("visual_strategy", "som")
+            tv.llm_protocol = d.get("llm_protocol", "text")
+            tv.planning = d.get("planning", "per_step")
+        # offline 模式无子配置
 
+        # ── 旧版扁平字段向后兼容 ──
+        for field in ("llm_protocol", "vision_mode", "planning", "screen_context",
+                      "on_error", "verify", "fast_mode", "image_dedup",
+                      "window_aware_ocr", "uia_pre_focus", "scripted_mode",
+                      "auto_learn", "som_enabled", "flow_chart_mode", "chat_mode",
+                      "reflection_enabled", "local_vision", "visual_strategy",
+                      "multimodal", "vision_backend"):
+            if field in d and hasattr(cfg, field):
+                setattr(cfg, field, d[field])
+
+        return cfg
+
+
+# ── 已弃用: 旧版转换函数 ───────────────────────────────────────
 
 def agent_config_from_legacy(mimo: bool, supervise: bool, model_name: str = "") -> AgentConfig:
-    """Convert legacy mimo/supervise flags to AgentConfig.
+    """已弃用: 旧 mimo/supervise 标志 → AgentConfig 转换。
 
-    This ensures backward compatibility for existing IPC messages
-    that use the old boolean flag dispatch.
+    仅向后兼容旧版 IPC 消息，新代码应直接构建 AgentConfig。
     """
     if mimo:
         cfg = AgentConfig(
+            execution_mode="multimodal",
             llm_protocol="text",
             vision_mode="auto",
             planning="per_step",
@@ -281,15 +387,15 @@ def agent_config_from_legacy(mimo: bool, supervise: bool, model_name: str = "") 
         return cfg
 
     if not supervise:
-        # "direct" mode — generate only
         return AgentConfig(
+            execution_mode="flow_chart",
             planning="pre_plan",
             fast_mode=True,
             verify=False,
         )
 
-    # supervise=True, text-only model
     return AgentConfig(
+        execution_mode="text",
         llm_protocol="function_calling",
         planning="pre_plan",
     )
