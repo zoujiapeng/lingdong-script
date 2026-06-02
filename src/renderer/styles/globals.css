@@ -1334,72 +1334,6 @@ textarea.form-input {
 /* ============================================================
    STATUS BAR
    ============================================================ */
-.status-bar {
-  height: 26px;
-  border-top: 1px solid var(--border-primary);
-  display: flex;
-  align-items: center;
-  padding: 0 14px;
-  gap: 16px;
-  font-size: 11.5px;
-  color: var(--text-muted);
-  background: var(--bg-primary);
-  flex-shrink: 0;
-}
-
-.status-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.status-spacer {
-  flex: 1;
-}
-
-.status-bar-divider {
-  width: 1px;
-  height: 14px;
-  background: var(--border-primary);
-  margin: 0 4px;
-}
-
-.status-bar-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 22px;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--text-muted);
-  transition: all var(--transition-fast);
-}
-
-.status-bar-btn:hover {
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--success);
-}
-
-.status-dot.idle { background: var(--text-muted); }
-.status-dot.running { background: var(--info); animation: blink 1s ease-in-out infinite; }
-.status-dot.paused { background: var(--warning); }
-.status-dot.error { background: var(--error); }
-
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
 
 @keyframes recording-pulse {
   0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
@@ -1958,19 +1892,9 @@ textarea.form-input {
   opacity: 0;
 }
 
-.canvas-view .status-bar {
-  transform: translateY(100%);
-  opacity: 0;
-}
-
 /* Panel visibility: Tab key shows all panels */
 .canvas-view.panels-visible .topbar,
 .canvas-view.panels-visible .view-tabs {
-  transform: translateY(0);
-  opacity: 1;
-}
-
-.canvas-view.panels-visible .status-bar {
   transform: translateY(0);
   opacity: 1;
 }
@@ -2014,12 +1938,6 @@ textarea.form-input {
 .view-tabs {
   transition: transform 0.25s ease, opacity 0.25s ease;
 }
-
-/* StatusBar: slide up from bottom */
-.status-bar {
-  transition: transform 0.25s ease, opacity 0.25s ease;
-}
-
 
 /* ============================================================
    AGENT VIEW

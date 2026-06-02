@@ -3,7 +3,7 @@ import { NodeLibrary } from './components/NodeLibrary/NodeLibrary';
 import { FlowCanvas } from './components/Canvas/FlowCanvas';
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
 import { TopBar } from './components/common/TopBar';
-import { StatusBar } from './components/common/StatusBar';
+
 import { TriggerBar } from './components/common/TriggerBar';
 import { TriggerConfigPanel } from './components/common/TriggerConfigPanel';
 import { LogPanel } from './components/common/LogPanel';
@@ -326,7 +326,6 @@ export default function App() {
         )}
       </div>
       <div className="bottom-wrapper">
-        <StatusBar />
         {showToolCallPanel && <ToolCallPanel />}
       </div>
       <ParamPromptDialog />
