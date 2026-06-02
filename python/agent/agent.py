@@ -2323,10 +2323,72 @@ PARAMS: {{"x": 960, "y": 540}}
 
     def _unified_run(self, goal: str, config: AgentConfig,
                      steps: Optional[list] = None) -> dict:
-        """统一执行入口。根据 AgentConfig 自动选择执行策略。
+        """统一执行入口。根据 AgentConfig.execution_mode 直接分发。
 
-        替代旧的 4 路 dispatch（text_protocol / langgraph / planned / direct）。
+        新路径 (execution_mode 非空):
+          直接调用 config.resolve() 获取运行时参数, 根据 mode 分发。
+        旧路径 (无 execution_mode):
+          回退到 resolve_auto() 自动检测。
         """
+        # ── 检测使用新还是旧路径 ──
+        execution_mode = getattr(config, "execution_mode", "")
+        if execution_mode and execution_mode in ("flow_chart", "multimodal", "text", "offline"):
+            # ── 新路径: mode-based dispatch ──
+            resolved = config.resolve()
+
+            # 传播监督层配置
+            self.supervisor.on_error = resolved.get("on_error", "retry")
+            self.supervisor.window_aware_ocr = resolved.get("window_aware_ocr", False)
+            self.supervisor.uia_pre_focus = resolved.get("uia_pre_focus", False)
+            self.supervisor.uia_enabled = resolved.get("uia_enabled", True)
+            self.supervisor.scripted_mode = resolved.get("scripted_mode", False)
+            self.supervisor.verify = resolved.get("verify", True)
+
+            # 同步 LLM 参数
+            self._temperature = resolved.get("temperature", 0.1)
+            self._max_tokens = resolved.get("max_tokens", 4096)
+            self._llm_retries = resolved.get("llm_retries", 2)
+            self._screenshot_quality = resolved.get("screenshot_quality", 60)
+            self._som_enabled = resolved.get("som_enabled", True)
+            self._local_vision_enabled = resolved.get("local_vision", False)
+            self.sliding_window_limit = resolved.get("sliding_window_size", 0) or 12
+
+            # 记忆系统
+            self._reflection_enabled = resolved.get("memory_enabled", False)
+
+            # 脚本模式注入
+            self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
+
+            self._emit("log", {"level": "info", "message":
+                f"Unified agent: mode={execution_mode}, "
+                f"memory={resolved.get('memory_enabled')}, "
+                f"supervise={resolved.get('supervise', True)}, "
+                f"uia={resolved.get('uia_enabled')}, "
+                f"som={resolved.get('som_enabled')}, "
+                f"win_ocr={resolved.get('window_aware_ocr')}, "
+                f"visual={resolved.get('visual_strategy')}, "
+                f"max_steps={resolved.get('max_steps')}"})
+
+            # ── Dispatch ──
+            if execution_mode == "flow_chart":
+                self.supervisor.supervise = resolved.get("supervise", True)
+                return self._run_pre_plan(goal, steps, config)
+
+            elif execution_mode == "multimodal":
+                # 多模态: 走 text_protocol + 图片(不是 computer_use)
+                return self.run_text_protocol(goal, _agent_config=config,
+                                               guidance_queue=self._guidance_queue)
+
+            elif execution_mode == "text":
+                return self.run_text_protocol(goal, _agent_config=config,
+                                               guidance_queue=self._guidance_queue)
+
+            else:  # offline
+                return {"success": True, "steps": [], "summary": "离线模式 (预留)", "total_steps": 0}
+
+        # ══════════════════════════════════════════════════════
+        # 旧路径: resolve_auto 自动检测 (向后兼容)
+        # ══════════════════════════════════════════════════════
         config.resolve_auto(self.model)
 
         # 传播监督层配置
