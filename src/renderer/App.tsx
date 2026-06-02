@@ -8,6 +8,7 @@ import { TriggerBar } from './components/common/TriggerBar';
 import { TriggerConfigPanel } from './components/common/TriggerConfigPanel';
 import { LogPanel } from './components/common/LogPanel';
 import { ToolCallPanel } from './components/common/ToolCallPanel';
+import { ParamPromptDialog } from './components/common/ParamPromptDialog';
 import { PseudoPanel } from './components/PseudoPanel';
 import { AgentView } from './components/AgentView';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -328,6 +329,7 @@ export default function App() {
         <StatusBar />
         {showToolCallPanel && <ToolCallPanel />}
       </div>
+      <ParamPromptDialog />
     </div>
   );
 }

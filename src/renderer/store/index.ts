@@ -686,6 +686,81 @@ const MAX_HISTORY = 50;
 let history: { nodes: FlowNode[]; edges: FlowEdge[] }[] = [];
 let historyIndex = -1;
 
+/**
+ * Build a param prompt queue by scanning all nodes for missing required params.
+ * Mirrors the logic in api.ts check-params endpoint.
+ */
+function _buildParamPromptQueue(nodes: FlowNode[]): ParamPromptItem[] {
+  const required: Record<string, Array<{ key: string; label: string; group: 'region' | 'text' | 'file' }>> = {
+    click: [
+      { key: 'x', label: 'X 坐标', group: 'region' },
+      { key: 'y', label: 'Y 坐标', group: 'region' },
+    ],
+    input_text: [{ key: 'text', label: '输入文字', group: 'text' }],
+    image_click: [{ key: 'targets', label: '目标图片', group: 'file' }],
+    click_text: [{ key: 'text', label: '目标文字', group: 'text' }],
+    keyboard: [{ key: 'keys', label: '按键', group: 'text' }],
+    swipe: [
+      { key: 'start_x', label: '起点 X', group: 'region' },
+      { key: 'start_y', label: '起点 Y', group: 'region' },
+      { key: 'end_x', label: '终点 X', group: 'region' },
+      { key: 'end_y', label: '终点 Y', group: 'region' },
+    ],
+    color_check: [{ key: 'expected_color', label: '期望颜色', group: 'text' }],
+    region_wait: [{ key: 'region', label: '监控区域', group: 'region' }],
+    progress_wait: [{ key: 'region', label: '进度条区域', group: 'region' }],
+    variable_set: [
+      { key: 'name', label: '变量名', group: 'text' },
+      { key: 'value', label: '变量值', group: 'text' },
+    ],
+    tool_call: [{ key: 'feature_name', label: '工具名称', group: 'text' }],
+    sub_script: [{ key: 'script_id', label: '子流程 ID', group: 'text' }],
+    wait: [{ key: 'duration', label: '等待秒数', group: 'text' }],
+  };
+
+  const queue: ParamPromptItem[] = [];
+  for (const node of nodes) {
+    const p = node.params as any;
+    const needed = required[node.type as keyof typeof required];
+    if (!needed) continue;
+
+    // Special handling: wait node's required param depends on wait_type
+    if (node.type === 'wait') {
+      const waitType = p?.wait_type || 'time';
+      if (waitType === 'time' && (p?.duration === undefined || p?.duration === null || p?.duration === '')) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['duration'], labels: ['等待秒数'], groupType: 'text' });
+      } else if (waitType === 'window' && !p?.window_title) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['window_title'], labels: ['窗口标题'], groupType: 'text' });
+      } else if (waitType === 'image' && !p?.image_path && !p?.template_name) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['image_path'], labels: ['图片路径'], groupType: 'file' });
+      }
+      continue;
+    }
+
+    const missing = needed.filter(pd => {
+      const val = p[pd.key];
+      return val === undefined || val === null || val === '' ||
+             (Array.isArray(val) && val.length === 0);
+    });
+    if (missing.length === 0) continue;
+
+    const regionKeys = missing.filter(m => m.group === 'region');
+    const textKeys = missing.filter(m => m.group === 'text');
+    const fileKeys = missing.filter(m => m.group === 'file');
+
+    if (regionKeys.length > 0) {
+      queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: regionKeys.map(m => m.key), labels: ['位置坐标'], groupType: 'region' });
+    }
+    if (textKeys.length > 0) {
+      queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: textKeys.map(m => m.key), labels: textKeys.map(m => m.label), groupType: 'text' });
+    }
+    if (fileKeys.length > 0) {
+      queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: fileKeys.map(m => m.key), labels: fileKeys.map(m => m.label), groupType: 'file' });
+    }
+  }
+  return queue;
+}
+
 function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
   history = history.slice(0, historyIndex + 1);
   history.push({ nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) });
@@ -1165,6 +1240,17 @@ export const useStore = create<AppStore>()(
       if (state._executor) {
         state._executor.stop();
         set((s) => { s._executor = null; });
+      }
+
+      // ── Check missing params before running ──
+      const paramQueue = _buildParamPromptQueue(state.script.nodes);
+      if (paramQueue.length > 0) {
+        set((s) => {
+          s.showParamPrompt = true;
+          s.paramPromptQueue = paramQueue;
+        });
+        get().addLog({ level: 'warn', message: `⚠️ 有 ${paramQueue.length} 个参数未填写，请补全后再运行` });
+        return; // Don't start engine — wait for user to fill params
       }
 
       // Reset node states
