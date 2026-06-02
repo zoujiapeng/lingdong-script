@@ -1,13 +1,12 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import {
-  List, Wifi, WifiOff, Mic, MicOff, Clock, RefreshCw,
+  List, Wifi, WifiOff, Clock, RefreshCw,
   Eye, EyeOff, GitBranch, Zap,
-  MessageSquare, Monitor, Brain, Volume2,
+  MessageSquare, Monitor, Brain,
   Shield, Settings, Sliders, ToggleLeft,
   ChevronDown, ChevronRight,
 } from 'lucide-react';
-import { VoiceConversationPanel } from './common/VoiceConversationPanel';
 import { PlanVisualizer } from './common/PlanVisualizer';
 import type { AgentRunRecord } from '../types';
 
@@ -141,9 +140,6 @@ export function AgentView() {
   // ── Chat & guidance ──
   const [guidance, setGuidance] = useState('');
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'agent'; text: string }[]>([]);
-  const [voiceConversationMode, setVoiceConversationMode] = useState(false);
-  const [listening, setListening] = useState(false);
-
   const preset = PRESETS.find(p => p.label === activePreset) || PRESETS[0];
 
   // ── Apply preset when selected ──
@@ -457,7 +453,7 @@ export function AgentView() {
       )}
 
       {/* ── Log / Execution ── */}
-      {(log.length > 0 || running) && !voiceConversationMode && (
+      {(log.length > 0 || running) && (
         <div className="agent-view-section" style={{ flex: 1, overflow: 'auto', padding: 8 }}>
           {log.map((entry, i) => {
             if (entry.type === 'step' && 'data' in entry) {

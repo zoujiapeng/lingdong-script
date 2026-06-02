@@ -132,7 +132,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scheduleDelete: (id: string) => ipcRenderer.invoke('schedule:delete', id),
 
   // Voice server
-  getVoiceServerUrl: () => ipcRenderer.invoke('voice:server-url'),
 
   // Notice: built-in actions
   showNotification: (title: string, body: string) => ipcRenderer.invoke('notification:show', title, body),
