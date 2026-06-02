@@ -91,7 +91,7 @@ function Select({ label, value, options, onChange }: {
     <div style={{ padding: '6px 0' }}>
       <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
       <select value={value} onChange={e => onChange(e.target.value)}
-        style={{ width: '100%', padding: '6px 8px', background: '#1a1a2e', color: '#ccc', border: '1px solid #333', borderRadius: 4, fontSize: 13 }}>
+        style={{ width: '100%', padding: '6px 8px', background: '#333', color: '#ccc', border: '1px solid #333', borderRadius: 4, fontSize: 13 }}>
         {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
@@ -377,10 +377,10 @@ export function AgentView() {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <input className="agent-input" value={goal} onChange={e => { setGoal(e.target.value); sessionStorage.setItem(_STORAGE_KEY, e.target.value); }}
             placeholder="输入目标，如「打开计算器，计算 7÷99」"
-            style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid #333', background: '#0d0d1a', color: '#ccc', fontSize: 14 }}
+            style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid #333', background: '#202020', color: '#ccc', fontSize: 14 }}
             onKeyDown={e => { if (e.key === 'Enter' && !running) { if (offline) runOffline(); else runAgent(executionMode !== 'flow_chart'); } }} />
           <select value={activePreset} onChange={e => applyPreset(e.target.value)}
-            style={{ padding: '8px 10px', borderRadius: 6, border: '1px solid #333', background: '#0d0d1a', color: '#ccc', fontSize: 13, cursor: 'pointer' }}>
+            style={{ padding: '8px 10px', borderRadius: 6, border: '1px solid #333', background: '#202020', color: '#ccc', fontSize: 13, cursor: 'pointer' }}>
             {PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
           </select>
           <button className="agent-btn agent-btn-primary" onClick={() => { if (offline) runOffline(); else runAgent(executionMode !== 'flow_chart'); }}
@@ -398,7 +398,7 @@ export function AgentView() {
           <span>|</span>
           {showKey ? (
             <input value={preset.key} onChange={e => {}}
-              style={{ width: 240, padding: '2px 6px', background: '#1a1a2e', border: '1px solid #333', borderRadius: 3, color: '#888', fontSize: 11 }}
+              style={{ width: 240, padding: '2px 6px', background: '#333', border: '1px solid #333', borderRadius: 3, color: '#888', fontSize: 11 }}
               onBlur={() => setShowKey(false)} />
           ) : (
             <span style={{ cursor: 'pointer' }} onClick={() => setShowKey(true)}>
@@ -427,7 +427,7 @@ export function AgentView() {
           <button key={tab.id} onClick={() => setExecutionMode(tab.id)}
             style={{
               flex: 1, padding: '10px 8px', cursor: 'pointer', border: 'none', borderBottom: executionMode === tab.id ? '2px solid #4f8cff' : '2px solid transparent',
-              background: executionMode === tab.id ? '#111' : 'transparent', color: executionMode === tab.id ? '#fff' : '#666',
+              background: executionMode === tab.id ? '#2d2d2d' : 'transparent', color: executionMode === tab.id ? '#fff' : '#666',
               fontSize: 13, fontWeight: executionMode === tab.id ? 600 : 400, transition: 'all 0.15s',
             }}>
             <div>{tab.label}</div>
@@ -437,7 +437,7 @@ export function AgentView() {
       </div>
 
       {/* ── Mode config panel ── */}
-      <div className="agent-view-section" style={{ padding: 12, borderBottom: '1px solid #1a1a2e' }}>
+      <div className="agent-view-section" style={{ padding: 12, borderBottom: '1px solid #444' }}>
         {renderModePanel()}
       </div>
 
@@ -459,7 +459,7 @@ export function AgentView() {
             if (entry.type === 'step' && 'data' in entry) {
               const d = (entry as any).data;
               return (
-                <div key={entry._id || i} style={{ padding: '6px 8px', fontSize: 12, borderBottom: '1px solid #1a1a2e' }}>
+                <div key={entry._id || i} style={{ padding: '6px 8px', fontSize: 12, borderBottom: '1px solid #444' }}>
                   <span style={{ color: '#4f8cff' }}>#{d.step_num}</span>
                   {' '}<span style={{ color: '#e8c84a' }}>{d.tool}</span>
                   {d.args && <span style={{ color: '#888' }}> {JSON.stringify(d.args).slice(0, 100)}</span>}

@@ -35,7 +35,7 @@ from agent.reflection import ReflectionEngine
 
 DEFAULT_API_BASE = "https://api.xiaomimimo.com/v1"
 DEFAULT_MODEL = "mimo-v2-omni"
-MAX_STEPS = 20          # 单次任务最大步数（新配置默认20，旧路径兼容）
+MAX_STEPS = 50          # 单次任务最大步数
 MAX_CONSECUTIVE_FAILURES = 5  # 连续失败上限 → 自动终止
 _MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 / 总步数）
 
