@@ -492,36 +492,44 @@ function buildAppMenu() {
       label: '帮助',
       submenu: [
         { label: '关于灵动脚本', click: () => {
-          dialog.showMessageBox(mainWindow!, {
-            type: 'info',
-            title: '关于灵动脚本',
-            message: '灵动脚本 v1.0.0',
-            detail: [
-              '高级可视化桌面自动化脚本编辑器',
-              '',
-              '开发者：邹嘉鹏',
-              '技术栈：Electron + React + Python',
-              '',
-              '功能特性：',
-              '• 可视化流程图编排自动化流程',
-              '• 127+ 节点类型（点击、输入、OCR、条件、循环等）',
-              '• DSL 脚本语言，可文本编辑和 AI 生成',
-              '• 宏录制（F6 热键），一键转流程图',
-              '• 图片识别、颜色检测、进度条监控',
-              '• @feature 工具注册表（120+ 工具）',
-              '• MCP 协议支持（Python + TypeScript 双服务器）',
-              '• CLI 命令行工具（run/ask/create/serve）',
-              `• HTTP API 桥接（127.0.0.1:${parseInt(process.env.API_PORT || '7880', 10)}）`,
-              '• 区域选择 / 滚轮选择器 / OCR 识别',
-              '',
-              '目录结构：',
-              '  src/main/     Electron 主进程',
-              '  src/renderer/ React 前端',
-              '  python/       自动化引擎 + 工具',
-              '  cli/          CLI 命令行',
-              '  tests/        Python 测试',
-            ].join('\n'),
+          const { BrowserWindow } = require("electron");
+          const w = new BrowserWindow({
+            width: 420, height: 520, parent: mainWindow, modal: true,
+            resizable: false, frame: true, title: "关于灵动脚本",
+            webPreferences: { nodeIntegration: false, contextIsolation: true },
           });
+          const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><style>
+body{margin:0;padding:40px 32px;font-family:-apple-system,Segoe UI,sans-serif;background:#202020;color:#ccc;display:flex;flex-direction:column;align-items:center;text-align:center}
+h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
+.sub{font-size:13px;color:#888;margin-bottom:24px}
+.section{font-size:12px;color:#999;line-height:1.8;margin-bottom:16px}
+.section-title{color:#4f8cff;font-weight:500;margin-bottom:4px}
+.line{width:60px;height:1px;background:#444;margin:16px 0}
+.tag{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;background:#2d2d2d;color:#aaa;margin:2px 4px;white-space:nowrap}
+</style></head>
+<body>
+<h1>灵动脚本</h1>
+<div class="sub">v1.0.0</div>
+<div class="section"><div class="section-title">开发者</div>邹嘉鹏</div>
+<div class="line"></div>
+<div class="section"><div class="section-title">技术栈</div>Electron + React + Python</div>
+<div class="line"></div>
+<div class="section"><div class="section-title">功能特性</div>
+<span class="tag">流程图编排</span>
+<span class="tag">65+ 节点类型</span>
+<span class="tag">OCR 识别</span>
+<span class="tag">AI 生成</span>
+<span class="tag">宏录制</span>
+<span class="tag">MCP 协议</span>
+<span class="tag">HTTP API</span>
+<span class="tag">CLI 工具</span></div>
+<div class="line"></div>
+<div class="section" style="font-size:11px;color:#666">Lingdong Script © 2026</div>
+</body></html>`;
+          w.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+          w.setMenu(null);
         }},
       ],
     },
