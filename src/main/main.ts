@@ -501,7 +501,7 @@ function buildAppMenu() {
           const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><style>
-body{margin:0;padding:32px 28px;font-family:-apple-system,Segoe UI,sans-serif;background:#202020;color:#ccc;display:flex;flex-direction:column;align-items:center;text-align:center}
+body{margin:0;padding:32px 28px;font-family:-apple-system,Segoe UI,sans-serif;background:#202020;color:#ccc;display:flex;flex-direction:column;align-items:center;text-align:center;overflow:hidden}
 h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 .sub{font-size:13px;color:#888;margin-bottom:20px}
 .section{font-size:12px;color:#999;line-height:1.8;margin-bottom:14px;width:100%}
