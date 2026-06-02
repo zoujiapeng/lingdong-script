@@ -11,7 +11,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 | `npx electron-builder --win portable` | 构建免安装便携版 |
 | `npx electron . --dev` | 在打包后强制开发模式 (loadURL) |
 | `npx electron . --minimized` | 启动后最小化到任务栏 |
-| `python -m pytest tests/ --ignore=tests/standalone -x -q` | 运行 Python 测试 (~2550) |
+| `python -m pytest tests/ -x -q` | 运行 Python 测试 (~2550) |
 | `npx vitest run` | 运行 TypeScript 前端测试 (~16 files) |
 | `python python/mcp/server.py` | 启动 Python MCP 服务器 (stdio JSON-RPC) |
 | `npm run ai:mcp` | 启动 TypeScript MCP 服务器 (5 tools, stdio) |
@@ -783,7 +783,7 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 - **DSL 格式**: 大写关键字 `CLICK 100 200` / `LOOP 5 ... END` / `IF cond ... ELSE ... END`
 - **Agent IPC 协议**: `python/agent/__main__.py` stdin/stdout JSON（start/stop/guidance/chat/status 命令, 7 种事件）
 - **Python 引擎协议**: `engine/engine.py` stdin/stdout JSON
-- **测试**: `python -m pytest tests/ --ignore=tests/standalone` ~2550 tests (Python), `npx vitest run` ~16 文件 (TS)
+- **测试**: `python -m pytest tests/` ~2550 tests (Python), `npx vitest run` ~16 文件 (TS)
 - **中文编码**: 所有 Python 子进程通过 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`
 - **快捷键**:
   - **F5**: 前端画布"运行/停止"执行
@@ -801,7 +801,7 @@ Edge TTS / ElevenLabs ← LLM (DeepSeek) ← 识别文本
 
 ```
 # 运行 Python 测试
-python -m pytest tests/ --ignore=tests/standalone -x -q
+python -m pytest tests/ -x -q
 
 # 运行 TypeScript 测试
 npx vitest run
