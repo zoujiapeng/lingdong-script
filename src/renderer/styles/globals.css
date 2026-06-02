@@ -26,10 +26,8 @@
   --slate-900: #0f172a;
 
   /* Semantic */
-  --bg-primary: rgba(248, 250, 252, 0.95);
-  --bg-secondary: rgba(255, 255, 255, 0.85);
-  --bg-glass: rgba(255, 255, 255, 0.7);
-  --bg-glass-strong: rgba(255, 255, 255, 0.9);
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
   --bg-canvas: #eef2f8;
 
   --text-primary: #0f172a;
@@ -69,10 +67,8 @@
 
 /* Dark mode */
 .dark {
-  --bg-primary: rgba(32, 32, 32, 0.97);
-  --bg-secondary: rgba(45, 45, 45, 0.9);
-  --bg-glass: rgba(32, 32, 32, 0.7);
-  --bg-glass-strong: rgba(32, 32, 32, 0.95);
+  --bg-primary: #202020;
+  --bg-secondary: #2d2d2d;
   --bg-canvas: #202020;
 
   --text-primary: #f1f5f9;
@@ -199,9 +195,6 @@ html, body, #root {
    ============================================================ */
 .topbar {
   height: 52px;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
   border-bottom: 1px solid var(--border-primary);
   display: flex;
   align-items: center;
@@ -211,6 +204,7 @@ html, body, #root {
   position: relative;
   z-index: 100;
   box-shadow: var(--shadow-sm);
+  background: var(--bg-primary);
 }
 
 .topbar-title-area {
@@ -266,9 +260,6 @@ html, body, #root {
   top: 100%;
   left: 0;
   margin-top: 6px;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
@@ -348,7 +339,6 @@ html, body, #root {
 }
 
 .btn-ghost:hover {
-  background: var(--bg-glass);
   color: var(--text-primary);
   border-color: var(--border-hover);
 }
@@ -379,12 +369,10 @@ html, body, #root {
 }
 
 .btn-secondary {
-  background: var(--bg-glass);
   border: 1px solid var(--border-primary);
   color: var(--text-secondary);
 }
 .btn-secondary:hover {
-  background: var(--bg-glass-strong);
   border-color: var(--text-muted);
 }
 
@@ -400,13 +388,11 @@ html, body, #root {
 .node-library {
   width: 260px;
   flex-shrink: 0;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
   border-right: 1px solid var(--border-primary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--bg-primary);
 }
 
 .node-library-header {
@@ -427,7 +413,6 @@ html, body, #root {
 }
 
 .search-box:focus-within {
-  background: var(--bg-glass);
   border-color: var(--border-hover);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
@@ -500,7 +485,6 @@ html, body, #root {
 }
 
 .node-item:hover {
-  background: var(--bg-glass);
   border-color: var(--border-primary);
   transform: translateX(3px);
   box-shadow: var(--shadow-sm);
@@ -586,8 +570,6 @@ html, body, #root {
 .canvas-controls-group {
   display: flex;
   flex-direction: column;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(16px);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -619,9 +601,6 @@ html, body, #root {
   width: 220px;
   min-height: 72px;
   border-radius: var(--radius-lg);
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(16px) saturate(150%);
-  -webkit-backdrop-filter: blur(16px) saturate(150%);
   border: 1.5px solid var(--border-primary);
   box-shadow: var(--shadow-md);
   cursor: pointer;
@@ -790,13 +769,11 @@ html, body, #root {
 .property-panel {
   width: 320px;
   flex-shrink: 0;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
   border-left: 1px solid var(--border-primary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--bg-primary);
 }
 
 .property-panel-header {
@@ -915,7 +892,6 @@ html, body, #root {
 }
 
 .form-input:focus {
-  background: var(--bg-glass);
   border-color: var(--border-active);
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
 }
@@ -1335,7 +1311,6 @@ textarea.form-input {
   border-radius: 6px;
   padding: 3px;
   min-width: 120px;
-  backdrop-filter: blur(12px);
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 .log-context-item {
@@ -1361,8 +1336,6 @@ textarea.form-input {
    ============================================================ */
 .status-bar {
   height: 26px;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(16px);
   border-top: 1px solid var(--border-primary);
   display: flex;
   align-items: center;
@@ -1464,8 +1437,6 @@ textarea.form-input {
    ============================================================ */
 .context-menu {
   position: fixed;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(20px);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xl);
@@ -1516,8 +1487,6 @@ textarea.form-input {
   right: 16px;
   width: 160px;
   height: 100px;
-  background: var(--bg-glass-strong);
-  backdrop-filter: blur(16px);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   overflow: hidden;

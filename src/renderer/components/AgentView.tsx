@@ -1,6 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { ToggleLeft } from 'lucide-react';
 import { PlanVisualizer } from './common/PlanVisualizer';
 import type { AgentRunRecord } from '../types';
 
@@ -396,11 +395,10 @@ export function AgentView() {
               onBlur={() => setShowKey(false)} />
           ) : (
             <span style={{ cursor: 'pointer' }} onClick={() => setShowKey(true)}>
-              {maskKey(preset.key)} ✏️
+              ●●● {maskKey(preset.key)}
             </span>
           )}
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <ToggleLeft size={14} />
             <label style={{ fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
               <input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)}
                 style={{ accentColor: '#4f8cff' }} />
