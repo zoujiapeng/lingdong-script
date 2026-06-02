@@ -110,38 +110,6 @@ function _getResolvedAgentLabel(field: string, model: string, multimodalSetting:
   return map[field] || field;
 }
 
-const ELEVENLABS_KEY_STORAGE = 'lingdong-elevenlabs-key';
-const ELEVENLABS_VOICE_STORAGE = 'lingdong-elevenlabs-voice';
-function getStoredElevenlabsKey(): string {
-  try { return localStorage.getItem(ELEVENLABS_KEY_STORAGE) || ''; } catch { return ''; }
-}
-function getStoredElevenlabsVoice(): string {
-  try { return localStorage.getItem(ELEVENLABS_VOICE_STORAGE) || ''; } catch { return ''; }
-}
-function storeElevenlabsKey(key: string) {
-  try { localStorage.setItem(ELEVENLABS_KEY_STORAGE, key); } catch {}
-}
-function storeElevenlabsVoice(id: string) {
-  try { localStorage.setItem(ELEVENLABS_VOICE_STORAGE, id); } catch {}
-}
-
-const STT_ENGINE_STORAGE = 'lingdong-stt-engine';
-function getStoredSttEngine(): string {
-  try { return localStorage.getItem(STT_ENGINE_STORAGE) || 'whisper-small'; } catch { return 'whisper-small'; }
-}
-function storeSttEngine(engine: string) {
-  try { localStorage.setItem(STT_ENGINE_STORAGE, engine); } catch {}
-}
-
-const STT_ENGINES: { value: string; label: string; desc: string }[] = [
-  { value: 'whisper-tiny', label: 'Whisper Tiny', desc: '~75MB，快速，准确率一般（中文欠佳）' },
-  { value: 'whisper-base', label: 'Whisper Base', desc: '~139MB，较准确（中文有少量错误）' },
-  { value: 'whisper-small', label: 'Whisper Small', desc: '~461MB，准确率高（推荐）' },
-  { value: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo', desc: '~1.5GB，准确率最高（首次需下载）' },
-  { value: 'faster-whisper', label: 'Faster Whisper', desc: 'CTranslate2 加速，兼容性更好（需联网下载）' },
-  { value: 'paraformer', label: 'Paraformer', desc: '阿里达摩院中文ASR，CPU快速（~40MB）' },
-];
-
 export function SettingsPanel() {
   const store = useStore();
   const script = store.script;
@@ -164,12 +132,7 @@ export function SettingsPanel() {
   const [agentOnError, setAgentOnError] = useState(() => getStoredAgentMode(AGENT_ONERROR_STORAGE, 'retry'));
   const [agentMultimodal, setAgentMultimodal] = useState(() => getStoredAgentMode(AGENT_MULTIMODAL_STORAGE, 'auto'));
   const [agentFastMode, setAgentFastMode] = useState(() => getStoredAgentBool(AGENT_FASTMODE_STORAGE, false));
-  const [elevenlabsKey, setElevenlabsKey] = useState(() => getStoredElevenlabsKey());
-  const [elevenlabsVoiceId, setElevenlabsVoiceId] = useState(() => getStoredElevenlabsVoice());
-  const [elevenlabsSaved, setElevenlabsSaved] = useState(false);
   const [apiKeySaved, setApiKeySaved] = useState(false);
-  const [sttEngine, setSttEngine] = useState(() => getStoredSttEngine());
-  const [sttSaved, setSttSaved] = useState(false);
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMessage, setTestMessage] = useState('');
 
@@ -339,28 +302,6 @@ export function SettingsPanel() {
       setTestStatus('error');
       setTestMessage(e.message);
     }
-  };
-
-  const handleSaveElevenlabs = () => {
-    storeElevenlabsKey(elevenlabsKey);
-    storeElevenlabsVoice(elevenlabsVoiceId);
-    setElevenlabsSaved(true);
-    setTimeout(() => setElevenlabsSaved(false), 2000);
-  };
-
-  const handleSaveStt = () => {
-    storeSttEngine(sttEngine);
-    (window as any).__STT_ENGINE__ = sttEngine;
-    setSttSaved(true);
-    setTimeout(() => setSttSaved(false), 2000);
-    // Notify voice panel to reconnect with new engine
-    window.dispatchEvent(new CustomEvent('stt-engine-changed'));
-  };
-
-  const handleRedownloadModel = () => {
-    if (!confirm(`确定重新下载 ${sttEngine} 模型？这将删除已缓存的模型文件并重新下载。`)) return;
-    localStorage.setItem('lingdong-stt-redownload', 'true');
-    alert('已标记重新下载。请刷新页面并重新连接语音对话后自动生效。');
   };
 
   return (
@@ -646,76 +587,6 @@ export function SettingsPanel() {
               <span>错误: {agentOnError}</span>
               <span>·</span>
               <span>快速: {agentFastMode ? '开' : '关'}</span>
-            </div>
-          </div>
-        </section>
-
-        {/* TTS 语音 */}
-        <section className="settings-section">
-          <h3 className="settings-section-title">
-            <Volume2 size={15} style={{ marginRight: 6, verticalAlign: 'middle' }} />
-            TTS 语音（语音对话朗读）
-          </h3>
-          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-            <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              ElevenLabs API 密钥（留空则使用 edge-tts）
-            </label>
-            <input
-              type="password"
-              className="settings-input"
-              value={elevenlabsKey}
-              onChange={(e) => setElevenlabsKey(e.target.value)}
-              placeholder="sk_..."
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-            <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              ElevenLabs Voice ID（在 elevenlabs.io 创建音色后获取）
-            </label>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                className="settings-input"
-                value={elevenlabsVoiceId}
-                onChange={(e) => setElevenlabsVoiceId(e.target.value)}
-                placeholder="21m00Tcm4TlvDq8ikWAM"
-                style={{ flex: 1, fontSize: 12 }}
-              />
-              <button className="btn btn-primary" onClick={handleSaveElevenlabs} style={{ padding: '6px 14px', fontSize: 12 }}>
-                {elevenlabsSaved ? '已保存' : '保存'}
-              </button>
-            </div>
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', padding: '4px 0', lineHeight: 1.5 }}>
-            配置后在语音对话面板中，AI 回复将使用你定制的 ElevenLabs 音色朗读。语音对话服务器启动时会读取此配置。
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <h3>语音识别引擎（语音对话输入）</h3>
-          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 12 }}>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <select
-                className="settings-input"
-                value={sttEngine}
-                onChange={(e) => setSttEngine(e.target.value)}
-                style={{ flex: 1, minWidth: 200, fontSize: 12 }}
-              >
-                {STT_ENGINES.map((e) => (
-                  <option key={e.value} value={e.value}>{e.label} — {e.desc}</option>
-                ))}
-              </select>
-              <button className="btn btn-primary" onClick={handleSaveStt} style={{ padding: '6px 14px', fontSize: 12 }}>
-                {sttSaved ? '已保存' : '保存'}
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <button className="btn btn-ghost" onClick={handleRedownloadModel} style={{ padding: '6px 12px', fontSize: 11 }}>
-                重新下载模型
-              </button>
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                当前引擎切换后需刷新页面或重新连接语音对话生效
-              </span>
             </div>
           </div>
         </section>
