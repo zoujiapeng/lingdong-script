@@ -1621,7 +1621,7 @@ textarea.form-input {
   resize: none;
   border: none;
   outline: none;
-  background: #1a1b26;
+  background: #202020;
   color: #c9d1d9;
   position: absolute;
   top: 0;
@@ -1636,7 +1636,7 @@ textarea.form-input {
 }
 
 .code-display {
-  background: #1a1b26;
+  background: #202020;
   color: #c9d1d9;
   pointer-events: none;
 }
@@ -1903,7 +1903,7 @@ textarea.form-input {
 
 .ai-pseudocode {
   padding: 16px 18px;
-  background: #1a1b26;
+  background: #202020;
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
@@ -2131,11 +2131,16 @@ textarea.form-input {
   display: flex;
   flex-direction: column;
   height: 100%;
+  max-width: 800px;
+  margin: 0 auto;
   background: var(--bg-primary, #202020);
 }
 
 .agent-view-section {
   background: var(--bg-secondary, #2d2d2d);
+}
+
+.agent-view-section:not(:last-of-type) {
   border-bottom: 1px solid #333;
 }
 

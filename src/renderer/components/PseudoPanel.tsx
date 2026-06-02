@@ -209,7 +209,7 @@ export function PseudoPanel() {
 
       {/* Error banner */}
       {errorMessage && isEditing && (
-        <div style={{ background: '#fbbf24', color: '#1a1b26', padding: '8px 16px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ background: '#fbbf24', color: '#202020', padding: '8px 16px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
           <AlertTriangle size={14} />
           <span>解析错误: {errorMessage}</span>
         </div>
