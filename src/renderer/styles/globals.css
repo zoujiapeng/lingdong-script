@@ -1539,8 +1539,8 @@ textarea.form-input {
   resize: none;
   border: none;
   outline: none;
-  background: #202020;
-  color: #c9d1d9;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   position: absolute;
   top: 0;
   left: 0;
@@ -1554,8 +1554,8 @@ textarea.form-input {
 }
 
 .code-display {
-  background: #202020;
-  color: #c9d1d9;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   pointer-events: none;
 }
 
@@ -1821,7 +1821,7 @@ textarea.form-input {
 
 .ai-pseudocode {
   padding: 16px 18px;
-  background: #202020;
+  background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
@@ -2043,7 +2043,7 @@ textarea.form-input {
 }
 
 .agent-view-section:not(:last-of-type) {
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .agent-input {
