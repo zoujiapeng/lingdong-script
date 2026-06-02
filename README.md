@@ -2,7 +2,7 @@
 
 # 灵动脚本
 
-**AI Agent 桌面操控系统 — 5 种执行模式 · 200+ 原生工具 · 可视化流程编排**
+**AI Agent 桌面操控系统 — 5 种执行模式 · 27 个元动作 · 243 个工具 · 55 种节点**
 
 [![Electron](https://img.shields.io/badge/Electron-33-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
@@ -35,7 +35,7 @@ npm run dev
 
 ### AI Agent：系统的核心
 
-整个系统的中心是一个 **AI Agent**，它接收自然语言目标，通过 `AgentConfig`（约 30 个参数）决定执行策略，然后调度 26 个元动作 + 200+ 原生工具完成任务。
+整个系统的中心是一个 **AI Agent**，它接收自然语言目标，通过 `AgentConfig`（约 30 个参数）决定执行策略，然后调度 27 个元动作 + 243 个 @feature 原生工具完成任务。
 
 **5 种执行模式**通过 `_unified_run()` 统一路由：
 
@@ -54,7 +54,7 @@ npm run dev
 LLM 在同一提示词中看到两层工具：
 
 - **26 元动作** — 高层语义操作（click、type_text、manage_window、browser_do、scroll_to 等），每个元动作自动路由到最佳底层路径（UIA 无障碍树 → OCR 文字 → 图像模板匹配 → 直接坐标），LLM 只需说"做什么"，不用管"怎么做"
-- **200+ @feature 工具** — 底层原子能力，按 7 级访问模式分组（直接 API → 浏览器 → UIA → OCR → SoM → 宏 → DSL），元动作不够用时 LLM 直接调用底层工具
+- **243 @feature 工具** — 底层原子能力，按 7 级访问模式分组（直接 API → 浏览器 → UIA → OCR → SoM → 宏 → DSL），元动作不够用时 LLM 直接调用底层工具
 
 ### 监督执行流水线
 
@@ -125,7 +125,7 @@ LLM 分析目标 → 生成 Plan DAG（节点间可并行+fallback链）
 
 ## @feature 工具注册表
 
-`python/features/` 目录 **49 个文件，43 个模块**，通过 `@feature` 装饰器声明，自动生成 MCP 工具、CLI 命令、HTTP 端点、DSL 关键字。
+`python/features/` 目录 **50 个文件，42 个模块**，通过 `@feature` 装饰器声明，自动生成 MCP 工具、CLI 命令、HTTP 端点、DSL 关键字。
 
 ```python
 @feature(name="my_tool", category=FeatureCategory.ACTION,
@@ -192,7 +192,7 @@ Agent 将语义目标（"搜索按钮"）转为屏幕坐标，越用越快：
 
 Agent 的辅助工具之一，用于可视化和编排流程：
 
-- **65+ 节点类型** — 交互动作、图像识别、控制流、系统操作、摄像头、AI 规划等
+- **55 种节点类型** — 交互动作、图像识别、控制流、系统操作、摄像头、AI 规划等
 - **聚合节点** — clipboard_action / window_control / mouse_operation 等通过 sub_operation 折叠多操作为一入口
 - **DSL ↔ FlowScript** — 190 关键字 DSL 与可视化流程图双向无损转换
 - **三视图** — 流程图 / 伪代码 / Agent 面板
@@ -201,7 +201,7 @@ Agent 的辅助工具之一，用于可视化和编排流程：
 
 ## HTTP API
 
-Electron 主进程内置 HTTP 服务器 `127.0.0.1:7880`，55+ 端点，支持 Claude Code 等外部工具远程控制：
+Electron 主进程内置 HTTP 服务器 `127.0.0.1:7880`，54 端点，支持 Claude Code 等外部工具远程控制：
 
 ```bash
 # AI Agent

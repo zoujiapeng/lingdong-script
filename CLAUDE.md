@@ -24,7 +24,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 ├── src/
 │   ├── main/                  # Electron 主进程
 │   │   ├── main.ts            #   ~1590行: 窗口生命周期, IPC 30+ handlers, Agent进程管理, 菜单
-│   │   ├── api.ts             #   HTTP API 服务器 :7880 (55+ 端点 + /mcp)
+│   │   ├── api.ts             #   HTTP API 服务器 :7880 (54 端点 + /mcp)
 │   │   ├── engine.ts          #   Python 引擎桥接 (spawn/stop/pause/resume)
 │   │   ├── env.ts             #   isDev / getBaseDir 环境配置
 │   │   ├── state.ts           #   全局状态管理 + agent token 系统
@@ -58,7 +58,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   ├── __main__.py        #   IPC 入口 (stdin/stdout JSON 协议, 5命令)
 │   │   ├── agent.py           #   LingdongAgent 统一入口 (5 执行模式)
 │   │   ├── config.py          #   AgentConfig dataclass (~30 参数, resolve_auto)
-│   │   ├── meta_actions.py    #   26 元动作 + 注册表 + 提示词生成
+│   │   ├── meta_actions.py    #   27 元动作 + 注册表 + 提示词生成
 │   │   ├── supervisor.py      #   监督执行层 (窗口焦点/OCR/重试/SoM/对话框)
 │   │   ├── planner.py         #   Plan DAG 分解 + PlanExecutor (fallback 链)
 │   │   ├── tool_path_selector.py # 工具访问模式分类 (DIRECT->BROWSER->UIA->OCR->SoM)
@@ -74,7 +74,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 │   │   └── state_persistence.py   # 运行历史持久化
 │   ├── engine/                # Python 自动化引擎
 │   │   ├── executor.py        #   DSL 执行器 (核心)
-│   │   ├── dsl_parser.py      #   DSL 解析器 (190 关键字)
+│   │   ├── dsl_parser.py      #   DSL 解析器 (78 关键字 + 51 @feature 注册)
 │   │   ├── dsl_flow_converter.py # DSL<->FlowScript 双向转换
 │   │   ├── engine.py          #   stdin/stdout JSON 协议引擎入口
 │   │   ├── condition_evaluator.py # 条件求值
@@ -212,8 +212,8 @@ Electron 主进程内置 HTTP 服务器 `http://127.0.0.1:7880`（仅 localhost�
 | 系统功能 | ~74 | window, process, clipboard, file, wifi, volume, display, scheduler... |
 | 调试诊断 | ~32 | test, validate, system_info, feature introspection, healing, trigger... |
 
-DSL 关键字: 190 个（自动从 @feature 注册表生成，含所有控制流关键字）
-Agent 工具集: 26 元动作（高层语义） + @feature 工具（底层能力），LLM 提示词中同时暴露
+DSL 关键字: ~130 个（78 个解析器内置 + 51 个 @feature 注册））
+Agent 工具集: 27 元动作（高层语义） + @feature 工具（底层能力），LLM 提示词中同时暴露
 Agent 双路径执行: 元动作 -> `meta_execute()`（参数校验 + 类型强制 + 直接调用），其他 -> `supervisor.execute()`（完整监督流水线）
 
 关键工具示例：
@@ -242,7 +242,7 @@ Agent 双路径执行: 元动作 -> `meta_execute()`（参数校验 + 类型强�
 
 ## @feature 注册表系统
 
-`python/features/` 目录包含 **49 个 .py 文件**，其中 **43 个模块**通过 `_all.py` 的 `_FEATURE_MODULES` 列表注册。
+`python/features/` 目录包含 **50 个 .py 文件**，其中 **42 个模块**通过 `_all.py` 的 `_FEATURE_MODULES` 列表注册。
 
 ### @feature 装饰器
 
@@ -453,7 +453,7 @@ Agent 按优先级选择最优执行路径：
 7. **Error Handler** -- 失败策略 (重试/重规划/跳过/停止), 安全限制
 8. **Exec Node** -- 日志, 聊天框 (对话模式), 指令输入
 
-Tool Explorer 弹窗显示 26 元动作 + 全部 @feature 工具。
+Tool Explorer 弹窗显示 27 元动作 + 全部 @feature 工具。
 
 ## Agent IPC 协议
 
