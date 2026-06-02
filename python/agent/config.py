@@ -148,6 +148,8 @@ class AgentConfig:
         if self.execution_mode == "flow_chart":
             return {**base,
                 "supervise": self.flow_chart_cfg.supervise,
+                "flow_chart_mode": True,
+                "multimodal": False,
             }
 
         elif self.execution_mode == "multimodal":

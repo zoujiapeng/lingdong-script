@@ -2371,11 +2371,11 @@ PARAMS: {{"x": 960, "y": 540}}
 
             # ── Dispatch ──
             if execution_mode == "flow_chart":
-                self.supervisor.supervise = resolved.get("supervise", True)
-                return self._run_pre_plan(goal, steps, config)
+                # 流程图模式: 仅调用 LLM 生成流程图/伪代码, 不操作屏幕
+                # 生成 → 前端展示 → 用户决定是否执行
+                return self._run_direct(goal)
 
             elif execution_mode == "multimodal":
-                # 多模态: 走 text_protocol + 图片(不是 computer_use)
                 return self.run_text_protocol(goal, _agent_config=config,
                                                guidance_queue=self._guidance_queue)
 
@@ -2622,6 +2622,15 @@ PARAMS: {{"x": 960, "y": 540}}
         """直接模式：仅调用 generate_flow_script 生成流程图。"""
         self._ensure_registry()
         self._emit("agent_start", {"goal": goal, "engine": "direct"})
+
+        # 传递 API 配置给 generate_flow_script（它只从环境变量读）
+        if self.api_key:
+            os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
+            os.environ.setdefault("OPENAI_API_KEY", self.api_key)
+        if self.api_base:
+            os.environ.setdefault("LLM_API_BASE", self.api_base)
+        if self.model:
+            os.environ.setdefault("LLM_MODEL", self.model)
 
         try:
             from features.flow_features import generate_flow_script
