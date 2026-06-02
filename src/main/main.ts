@@ -522,7 +522,6 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 <span class="tag">流程图编排</span>
 <span class="tag">200+ 自动化工具</span>
 <span class="tag">AI Agent 监督执行</span>
-<span class="tag">语音对话 (STT/TTS)</span>
 <span class="tag">OCR / 视觉定位</span>
 <span class="tag">@feature 注册表</span>
 <span class="tag">5 种 Agent 模式</span>
