@@ -737,6 +737,19 @@ function _buildParamPromptQueue(nodes: FlowNode[]): ParamPromptItem[] {
       continue;
     }
 
+    // Special handling: mouse_operation depends on sub_operation + mode
+    if (node.type === 'mouse_operation') {
+      const mode = p?.mode || 'coordinate';
+      if (mode === 'image' && (!p?.targets || !Array.isArray(p.targets) || p.targets.length === 0)) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['targets'], labels: ['目标图片'], groupType: 'file' });
+      } else if (mode === 'coordinate' && (p?.x === undefined || p?.x === null || p?.x === '' || p?.y === undefined || p?.y === null || p?.y === '')) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['x', 'y'], labels: ['点击坐标'], groupType: 'region' });
+      } else if (mode === 'text' && (!p?.text || p.text === '')) {
+        queue.push({ nodeId: node.id, nodeType: node.type, nodeLabel: node.type, params: ['text'], labels: ['目标文字'], groupType: 'text' });
+      }
+      continue;
+    }
+
     const missing = needed.filter(pd => {
       const val = p[pd.key];
       return val === undefined || val === null || val === '' ||
