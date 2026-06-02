@@ -1,12 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import {
-  List, Wifi, WifiOff, Clock, RefreshCw,
-  Eye, EyeOff, GitBranch, Zap,
-  MessageSquare, Monitor, Brain,
-  Shield, Settings, Sliders, ToggleLeft,
-  ChevronDown, ChevronRight,
-} from 'lucide-react';
+import { ToggleLeft } from 'lucide-react';
 import { PlanVisualizer } from './common/PlanVisualizer';
 import type { AgentRunRecord } from '../types';
 
@@ -47,9 +41,9 @@ function maskKey(key: string): string {
 
 // ── Presets ──
 const PRESETS = [
-  { label: '🤖 DeepSeek', model: 'deepseek-chat', base: 'https://api.deepseek.com/v1',
+  { label: 'DeepSeek', model: 'deepseek-chat', base: 'https://api.deepseek.com/v1',
     key: 'sk-142b38e2eb334f02929cd5bb00dd7aa0', mode: 'text' as const },
-  { label: '🖼️ MIMO', model: 'mimo-v2-omni', base: 'https://api.xiaomimimo.com/v1',
+  { label: 'MIMO', model: 'mimo-v2-omni', base: 'https://api.xiaomimimo.com/v1',
     key: 'sk-cpyx85d9nzuhh3s9p2ddnyw2svvf7iff1owf1wzguhsrxe0g', mode: 'multimodal' as const },
 ];
 
@@ -310,10 +304,10 @@ export function AgentView() {
 
   // ── Tabs ──
   const TABS = [
-    { id: 'flow_chart' as const, label: '📋 流程图', desc: '生成流程图，用户决定执行' },
-    { id: 'multimodal' as const, label: '🖼️ 多模态', desc: 'MIMO 直接看截图操作' },
-    { id: 'text' as const, label: '🤖 非多模态', desc: 'DeepSeek + SoM+OCR 纯视觉' },
-    { id: 'offline' as const, label: '💻 离线', desc: '直接执行当前流程图' },
+    { id: 'flow_chart' as const, label: '流程图', desc: '生成流程图，用户决定执行' },
+    { id: 'multimodal' as const, label: '多模态', desc: 'MIMO 直接看截图操作' },
+    { id: 'text' as const, label: '非多模态', desc: 'DeepSeek + SoM+OCR 纯视觉' },
+    { id: 'offline' as const, label: '离线', desc: '直接执行当前流程图' },
   ];
 
   const renderModePanel = () => {
@@ -363,7 +357,7 @@ export function AgentView() {
     // offline
     return (
       <div style={{ padding: 20, textAlign: 'center', color: '#666', fontSize: 14 }}>
-        ⏳ 离线模式 — 待开发<br />
+        离线模式 — 待开发<br />
         <span style={{ fontSize: 12 }}>将支持不依赖 LLM 的本地执行</span>
       </div>
     );
@@ -446,15 +440,15 @@ export function AgentView() {
         <div className="agent-view-section" style={{ padding: 12 }}>
           <PlanVisualizer />
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)}>▶ 执行计划</button>
-            <button className="agent-btn" onClick={() => runAgent(false)}>🔄 重新生成</button>
+            <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)}>执行计划</button>
+            <button className="agent-btn" onClick={() => runAgent(false)}>重新生成</button>
           </div>
         </div>
       )}
 
       {/* ── Log / Execution ── */}
       {(log.length > 0 || running) && (
-        <div className="agent-view-section" style={{ flex: 1, overflow: 'auto', padding: 8 }}>
+        <div className="agent-view-section" style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: 8 }}>
           {log.map((entry, i) => {
             if (entry.type === 'step' && 'data' in entry) {
               const d = (entry as any).data;
