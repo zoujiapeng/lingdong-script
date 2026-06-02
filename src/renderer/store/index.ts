@@ -721,8 +721,6 @@ function _buildParamPromptQueue(nodes: FlowNode[]): ParamPromptItem[] {
   const queue: ParamPromptItem[] = [];
   for (const node of nodes) {
     const p = node.params as any;
-    const needed = required[node.type as keyof typeof required];
-    if (!needed) continue;
 
     // Special handling: wait node's required param depends on wait_type
     if (node.type === 'wait') {
@@ -749,6 +747,9 @@ function _buildParamPromptQueue(nodes: FlowNode[]): ParamPromptItem[] {
       }
       continue;
     }
+
+    const needed = required[node.type as keyof typeof required];
+    if (!needed) continue;
 
     const missing = needed.filter(pd => {
       const val = p[pd.key];
