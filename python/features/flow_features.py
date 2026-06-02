@@ -138,6 +138,11 @@ def _get_generation_prompt() -> str:
     global _GEN_PROMPT_CACHE
     if _GEN_PROMPT_CACHE is not None:
         return _GEN_PROMPT_CACHE
+    # 确保注册表已加载（让 DSL 参考包含所有工具）
+    try:
+        import features._all  # noqa: F401
+    except Exception:
+        pass
     _GEN_PROMPT_CACHE = _BUILD_GEN_PROMPT_TEMPLATE.format(
         commands_section=_build_commands_section(),
         dsl_reference=_build_dsl_reference(),
