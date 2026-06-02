@@ -77,81 +77,34 @@ def _is_multimodal_model(model_name: str) -> bool:
 
 # ── 文本协议模式系统提示词 ─────────────────────────────────────
 
-SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。你有 {tool_count} 个动作可用，分直接路径和视觉路径。
+SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。通过操作鼠标键盘控制电脑。
 
-选择规则：看用户意图——要的是「结果」还是「操作程序」？
+### 可用工具
+- **click** — 点击屏幕元素（target="按钮文字" 或 x=坐标, y=坐标）。文字点不中就换坐标。
+- **type_text** — 在已聚焦的输入框输入文字
+- **press_keys** — 键盘快捷键（如 ctrl+s, enter, tab）
+- **manage_app** — 启动/关闭程序（如 manage_app(action="launch", target="calc.exe")）
+- **run_command** — 执行命令/脚本
+- **screenshot** — 截图验证结果（每轮自动附截图，无需手动调用）
+- **wait** — 等待指定秒数
+- **manage_window** — 窗口管理（聚焦/移动）
 
-### 直接路径（要结果时使用 — 不操作屏幕，直接返回结果）
-- file_ops — 文件读写（创建/写入/读取/删除）
-- manage_app — 启动/关闭/检测应用程序
-- run_command — 执行命令/脚本
-- system_info — 获取系统信息
-- notify — 发送通知
-- network — 管理网络连接
-- control_audio — 音量控制
+### 规则
+- 用 manage_app 启动程序，不要用 file_ops 替代
+- 文件操作用 run_command 或 file_ops
+- 点击失败就换坐标（从截图估算位置）
+- 如实报告执行结果，不要捏造成功
+- 能用一步完成的不要分多步
+- 完成后截图验证
 
-**何时用：** 用户只关心结果。"保存文件"→ file_ops，"启动计算器"→ manage_app，"查电量"→ system_info。
-
-### 视觉路径（要操作程序时使用 — 启动程序→界面操作→验证）
-- screenshot — 截图验证结果/检查进度（每轮自动附截图，不需手动调用）
-- click — 点击按钮或坐标
-- type_text — 在已聚焦输入框输入文字（先用 click 聚焦）
-- press_keys — 键盘快捷键
-- read_ui — 读取窗口控件树
-- read_text — OCR 识别文字
-- manage_window — 窗口管理（聚焦/移动/缩放）
-- browser_do — 浏览器自动化
-
-**何时用：** 用户说要操作某个程序。"打开记事本输入 Hello"→ launch → click → type_text。
-不要用 file_ops 替代打开记事本操作——用户说的是操作程序，不是要文件结果。
-
-**点击技巧：** 普通按钮用 click(target='按钮名')。列表项（联系人/文件/聊天记录）单击只选中，要双击才能打开。如果 click 没反应，试试 click(target='...', button='double')。
-**桌面/空白区域：** 桌面背景、画布空白等没有控件名，不能用 target 定位。根据截图估算坐标用 click(x=960, y=540)。
-
-### 判断方法
-
-| 用户任务 | 意图 | 该怎么做 |
-|---------|------|---------|
-| "创建 test.txt 内容 Hello" | 要结果 | file_ops 直接写文件 |
-| "打开记事本输入 Hello" | 操作程序 | manage_app 启动 → click 聚焦 → type_text |
-| "计算 7+3" | 要结果 | 打开计算器 → click 按钮 |
-| "保存文件到桌面" | 要结果 | file_ops 直接写 |
-| "在记事本里保存文件" | 操作程序 | 启动记事本 → type_text → click 菜单保存 |
-| "查一下电池电量" | 要结果 | system_info |
-
-**重要：当用户说「打开/启动某个程序」时，必须用 manage_app 来启动该程序，不能用 file_ops 替代。**
-**"打开记事本"=启动应用（操作程序），不是创建文件（要结果）。**
-
-### 执行流程
-
-1. **判断意图**：用户要结果还是操作程序？
-2. **要结果** → 用直接路径工具一步完成
-3. **操作程序** → 启动程序 → 界面操作（click/type_text）→ 截图验证
-4. **每步验证**：截图确认操作结果正确
-
-### 关键规则
-
-**工具执行结果必须如实反映。** 如果工具返回错误（拒绝访问、路径不存在等），必须在总结中如实报告失败原因，绝不能声称成功。错误信息示例：「file_ops 返回错误：[WinError 5] 拒绝访问」。如果遇到错误，尝试更换路径或方法后重试。
-
-**文件路径必须使用正确的用户目录。** 不要硬编码用户名。桌面路径固定为 `C:\\Users\\zou\\Desktop\\`。
-
-**点击失败时换用坐标。** 如果 `click(target="按钮名")` 第一次失败，换用 `click(x=数字, y=数字)` 坐标点击。坐标可以从截图中的按钮位置估算。
-
-**完成任务后必须验证。** 创建文件后检查文件是否存在，计算后检查结果是否正确。
-
-必须严格按照以下格式输出，不要省略：
-
-思考: <推理过程>
-工具: <动作名>
+### 输出格式
+思考: 推理过程
+工具: 工具名
 参数:
-  参数1: 值1
+  参数名: 值
 
-任务完全完成后，输出:
-
-总结: <结果描述>
-
-动作列表（完整详情）:
-{tools_text}
+完成后:
+总结: 结果描述
 """
 
 SCRIPTED_MODE_INSTRUCTIONS = """
@@ -518,7 +471,7 @@ class LingdongAgent:
         if multimodal:
             return {"image_b64": b64_img, "label_map": {}, "count": 0, "_mode": "direct"}
 
-        # ── 本地视觉引擎（YOLO ONNX DirectML + UIA 合并）──
+        # ── 本地视觉引擎（YOLO ONNX DirectML + OCR 合并）──
         # 仅对纯文本模型（如 DeepSeek）生效，多模态模型走上面 direct 路径。
         if self._local_vision_enabled and not multimodal:
             try:
@@ -526,8 +479,8 @@ class LingdongAgent:
                     from agent.local_vision_engine import LocalVisionEngine
                     self._local_vision = LocalVisionEngine(enabled=True)
                 if self._local_vision.available:
-                    # Collect UIA elements for text labels
-                    uia_items = self._collect_uia_elements()
+                    # UIA 启用时才收集 UIA 元素，否则纯视觉（YOLO+OCR）
+                    uia_items = self._collect_uia_elements() if self.supervisor.uia_enabled else None
                     lv_result = self._local_vision.parse(b64_img, uia_elements=uia_items)
                     if lv_result and lv_result["count"] > 0:
                         msg = f"本地视觉引擎: {lv_result['count']} 个元素 (YOLO DirectML)"
@@ -570,36 +523,37 @@ class LingdongAgent:
         elements: list[dict] = []
         seen_positions: set = set()
 
-        # 1. UIA 控件树
-        try:
-            from features.registry import registry
-            result = registry.execute("a11y_get_tree", depth=3)
-            tree = result.get("result", result)
-            if isinstance(tree, dict):
-                tree = tree.get("result", tree)
+        # 1. UIA 控件树（uia_enabled=False 时跳过，纯视觉模式）
+        if self.supervisor.uia_enabled:
+            try:
+                from features.registry import registry
+                result = registry.execute("a11y_get_tree", depth=3)
+                tree = result.get("result", result)
+                if isinstance(tree, dict):
+                    tree = tree.get("result", tree)
 
-            def _collect_uia(node, depth=0):
-                if depth > 4:
-                    return
-                name = (node.get("name", "") or node.get("text", "") or "").strip()
-                role = node.get("control_type", node.get("role", ""))
-                rect = node.get("bounding_rectangle", node.get("rect", {}))
-                x = int(rect.get("x", 0)) if isinstance(rect, dict) else 0
-                y = int(rect.get("y", 0)) if isinstance(rect, dict) else 0
-                w = int(rect.get("w", 0)) if isinstance(rect, dict) else 0
-                h = int(rect.get("h", 0)) if isinstance(rect, dict) else 0
-                if name and role and 10 < w < 1500 and 8 < h < 500:
-                    key = (x // 10, y // 10)
-                    if key not in seen_positions:
-                        seen_positions.add(key)
-                        elements.append({"text": f"[{role}] {name}", "x": x, "y": y, "w": w, "h": h})
-                for child in (node.get("children", node.get("items", [])) or []):
-                    if isinstance(child, dict):
-                        _collect_uia(child, depth + 1)
+                def _collect_uia(node, depth=0):
+                    if depth > 4:
+                        return
+                    name = (node.get("name", "") or node.get("text", "") or "").strip()
+                    role = node.get("control_type", node.get("role", ""))
+                    rect = node.get("bounding_rectangle", node.get("rect", {}))
+                    x = int(rect.get("x", 0)) if isinstance(rect, dict) else 0
+                    y = int(rect.get("y", 0)) if isinstance(rect, dict) else 0
+                    w = int(rect.get("w", 0)) if isinstance(rect, dict) else 0
+                    h = int(rect.get("h", 0)) if isinstance(rect, dict) else 0
+                    if name and role and 10 < w < 1500 and 8 < h < 500:
+                        key = (x // 10, y // 10)
+                        if key not in seen_positions:
+                            seen_positions.add(key)
+                            elements.append({"text": f"[{role}] {name}", "x": x, "y": y, "w": w, "h": h})
+                    for child in (node.get("children", node.get("items", [])) or []):
+                        if isinstance(child, dict):
+                            _collect_uia(child, depth + 1)
 
-            _collect_uia(tree)
-        except Exception:
-            pass
+                _collect_uia(tree)
+            except Exception:
+                pass
 
         # 2. OCR 文字区域（补充 UIA 未覆盖的控件）
         try:
@@ -641,6 +595,21 @@ class LingdongAgent:
 
         if not elements:
             return {"image_b64": b64_img, "label_map": {}, "count": 0}
+
+        # 窗口限定：window_aware_ocr 开启时只保留活动窗口内的元素
+        if self.supervisor.window_aware_ocr:
+            try:
+                import win32gui
+                hwnd = win32gui.GetForegroundWindow()
+                if hwnd:
+                    rect = win32gui.GetWindowRect(hwnd)
+                    wx, wy, wr, wb = rect[0], rect[1], rect[2], rect[3]
+                    before = len(elements)
+                    elements = [el for el in elements if wx <= el["x"] + el["w"]//2 <= wr and wy <= el["y"] + el["h"]//2 <= wb]
+                    if elements:
+                        self._emit("log", {"level": "info", "message": f"窗口限定: {before}→{len(elements)}个元素"})
+            except Exception:
+                pass
 
         elements.sort(key=lambda e: (e["y"] // 25, e["x"]))
 
@@ -756,7 +725,11 @@ class LingdongAgent:
                 self._emit("log", {"level": "warn", "message": f"API timeout, retry {attempt+1}/{retries}"})
             except _req.exceptions.RequestException as e:
                 last_err = str(e)
-                self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}, retry {attempt+1}/{retries}"})
+                resp_body = ""
+                if hasattr(e, 'response') and e.response is not None:
+                    try: resp_body = e.response.text[:200]
+                    except: pass
+                self._emit("log", {"level": "warn", "message": f"API error: {str(e)[:100]}. Body: {resp_body}"})
                 delay = 0.5 if "ConnectionReset" in str(e) or "Connection aborted" in str(e) else 2 * (attempt + 1)
                 time.sleep(delay)
         self._emit("log", {"level": "error", "message": f"LLM API failed after {retries} retries: {last_err}"})
@@ -1780,20 +1753,34 @@ class LingdongAgent:
         except Exception:
             pass
 
-        system_prompt = f"""你是一个桌面自动化助手。可用工具已全部注册。
+        system_prompt = """你是一个桌面自动化助手。用下面的工具操作电脑。
 
-## 工具选择策略
+## 工具
+- click_target - 点击屏幕元素（target="按钮文字" 或 "x,y" 坐标）
+- type_text - 输入文字
+- hotkey - 键盘快捷键
+- launch_program - 启动程序
+- run_command - 执行命令
+- screenshot - 截图
+- wait_action - 等待
 
-{path_prompt}{path_hint}
+## 规则
+1. 文字点不中就换坐标
+2. 完成后直接结束，无需额外标记
+3. 坐标是屏幕绝对坐标
+"""
 
-## 执行规则
-1. 先判断工具访问模式（DIRECT < BROWSER < UIA < OCR < SoM），从对应分组选工具
-2. 浏览器操作必须用 browser_* 工具，不走其他路径
-3. 对于多步骤工作流，先用 generate_flow_script 生成流程，然后按步骤执行
-4. 遇到失败时按路径降级重试（L0→L1→L2→...）
-5. 工具调用完成后无需额外标记，直接结束即可
-6. 所有坐标默认为屏幕绝对坐标
-7. 浏览器通过 CDP 自动连接，首次 browser_navigate 等会自动启动 Chrome"""
+        # ── SoM 预扫描: 首次截图并标注元素，供后续工具执行使用 ──
+        try:
+            if self._som_enabled:
+                raw_b64 = self.supervisor.capture_b64(quality=60, max_size=1600)
+                som_result = self._apply_som(raw_b64, multimodal=False)
+                self.supervisor._last_som_map = som_result["label_map"]
+                count = som_result.get("count", 0)
+                if count > 0:
+                    self._emit("log", {"level": "info", "message": f"SoM预扫描: {count}个元素"})
+        except Exception as e:
+            logger.warning("SoM pre-scan failed: %s", e)
 
         graph = create_react_agent(model=llm, tools=tool_node, prompt=system_prompt)
 
@@ -2346,6 +2333,7 @@ PARAMS: {{"x": 960, "y": 540}}
         self.supervisor.on_error = config._resolved_on_error
         self.supervisor.window_aware_ocr = config.window_aware_ocr
         self.supervisor.uia_pre_focus = config.uia_pre_focus
+        self.supervisor.uia_enabled = getattr(config, 'uia_enabled', True)
         self.supervisor.scripted_mode = config.scripted_mode
         self.supervisor.verify = config.verify
 

@@ -164,6 +164,11 @@ class AgentConfig:
             # Override vision_mode based on visual_strategy
             if self.visual_strategy == "ocr_llm":
                 self._resolved_vision_mode = "ocr_llm"
+                # ocr_llm 策略需要走 text protocol + per_step planning
+                # 这样才能 OCR→LLM→点击 的闭环
+                if self._resolved_llm_protocol != "text":
+                    self._resolved_llm_protocol = "text"
+                    self._resolved_planning = "per_step"
             elif self.visual_strategy == "blind_guess":
                 self._resolved_vision_mode = "direct"  # 盲猜：直接截图，无标注
             elif self.visual_strategy == "som":
