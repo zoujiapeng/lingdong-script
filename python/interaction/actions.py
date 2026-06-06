@@ -20,6 +20,17 @@ import time
 _screen_scale_x = 1.0
 _screen_scale_y = 1.0
 
+# Global UIA toggle. When False, ALL uiautomation calls are skipped.
+# Agent set this from AgentConfig.uia_enabled at startup.
+_uia_global_enabled = True
+
+def set_uia_enabled(enabled: bool):
+    global _uia_global_enabled
+    _uia_global_enabled = enabled
+
+def is_uia_enabled() -> bool:
+    return _uia_global_enabled
+
 def set_screen_scale(scale_x: float, scale_y: float):
     """Set coordinate scale ratio (actual/virtual) for LLM-estimated clicks."""
     global _screen_scale_x, _screen_scale_y
@@ -331,6 +342,7 @@ class ActionHandler:
     def _exec_click(self, target=None, x=None, y=None, button="left", **kw):
         learn_target_id = kw.get("learn_target_id") or kw.get("target_id")
         learn_label = kw.get("learn_label") or (target if isinstance(target, str) else "")
+        allow_uia = kw.get("allow_uia", True)
         # Normalize double flag: accept double=True kwarg or button="double"
         if kw.get("double") or button == "double":
             button = "double"
@@ -342,7 +354,7 @@ class ActionHandler:
             cx, cy = int(target[0]), int(target[1])
         if cx is not None and cy is not None:
             # Rescale from virtual screenshot space to actual screen coordinates
-            if _screen_scale_x != 1.0 or _screen_scale_y != 1.0:
+            if not kw.get("physical") and (_screen_scale_x != 1.0 or _screen_scale_y != 1.0):
                 cx = int(cx * _screen_scale_x)
                 cy = int(cy * _screen_scale_y)
             ok = _win32_click(cx, cy, button)
@@ -350,7 +362,7 @@ class ActionHandler:
                 self._learn_click_target(learn_target_id, learn_label, x=cx, y=cy, action="click", button=button)
             return ok
         # Priority 2: uiautomation click by target name (only when no coordinates)
-        if target and isinstance(target, str) and not target.startswith("("):
+        if allow_uia and is_uia_enabled() and target and isinstance(target, str) and not target.startswith("("):
             if _uia_click_by_name(target):
                 if button == "double":
                     time.sleep(0.06)
@@ -391,11 +403,12 @@ class ActionHandler:
     def _exec_type(self, text="", **kw):
         if not text:
             return True
-        # uiautomation SendKeys handles Unicode
-        try:
-            return _uia_send_keys(text)
-        except Exception:
-            pass
+        # uiautomation SendKeys handles Unicode (skip when globally disabled)
+        if is_uia_enabled():
+            try:
+                return _uia_send_keys(text)
+            except Exception:
+                pass
         # Fallback: clipboard paste
         return self._clipboard_type(text)
 
@@ -424,7 +437,9 @@ class ActionHandler:
                     pass
             return True
         except ImportError:
-            return _uia_send_keys(text)
+            if is_uia_enabled():
+                return _uia_send_keys(text)
+            return False
 
     # ── Wait / Delay ────────────────────────────────────────────
 
