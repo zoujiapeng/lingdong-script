@@ -31,8 +31,29 @@ class ScreenCapture:
     _cache_ttl: float = 0.1          # 100ms 缓存
 
     @classmethod
+    def _capture_dxgi(cls, region=None):
+        """DXGI 截图（能捕获 DirectX/UWP 应用），mss 失败时备用"""
+        try:
+            import mss
+            import mss.dxgi as dxgi
+            with dxgi.DXGI() as sct:
+                if region:
+                    x, y, w, h = region
+                    monitor = {"left": x, "top": y, "width": w, "height": h}
+                else:
+                    monitor = sct.monitors[0]
+                shot = sct.grab(monitor)
+                img = np.array(shot)
+                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        except Exception:
+            return None
+
+    @classmethod
     def capture(cls, region: Optional[BBox] = None) -> np.ndarray:
-        """截图，返回 BGR numpy array"""
+        """截图，返回 BGR numpy array。
+        先用 mss（GDI），如果结果太暗（可能是 UWP/DirectX 窗口）
+        则自动降级到 DXGI 方式重试。
+        """
         with mss.mss() as sct:
             if region:
                 x, y, w, h = region
@@ -41,7 +62,15 @@ class ScreenCapture:
                 monitor = sct.monitors[0]
             shot = sct.grab(monitor)
             img = np.array(shot)
-            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        # 检测是否全黑（UWP/DirectX 窗口无法用 GDI 捕获）
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if gray.mean() < 30:
+            dxgi_img = cls._capture_dxgi(region)
+            if dxgi_img is not None:
+                return dxgi_img
+        return img
 
     @classmethod
     def capture_cached(cls, region: Optional[BBox] = None) -> np.ndarray:
