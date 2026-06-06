@@ -311,30 +311,45 @@ class OCREngine:
         except Exception:
             pass
 
-        self._detect_backend()
         offset = region[:2] if region else (0, 0)
-        if self._backend_name == "win_ocr":
-            results = self._win_ocr.extract_all(img)
-            if offset != (0, 0):
-                ox, oy = offset
-                for r in results:
-                    x, y, w, h = r.bbox
-                    r.bbox = (x + ox, y + oy, w, h)
-        elif self._backend_name == "paddle":
-            results = self._run_paddle(img, offset)
-        elif self._backend_name == "easyocr":
-            results = self._run_easyocr(img, offset)
-        elif self._backend_name == "rapid":
-            results = self._run_rapid(img, offset)
-        elif self._backend_name == "umi":
-            results = self._umi.extract_all(img)
-            if offset != (0, 0):
-                ox, oy = offset
-                for r in results:
-                    x, y, w, h = r.bbox
-                    r.bbox = (x + ox, y + oy, w, h)
-        else:
-            results = self._run_ocr(img, offset=offset)
+
+        # 按优先级依次尝试后端，直到返回足够多的结果
+        backend_chain = [
+            ("win_ocr", lambda: self._win_ocr.extract_all(img)),
+            ("rapid", lambda: self._run_rapid(img, (0, 0))),
+            ("easyocr", lambda: self._run_easyocr(img, (0, 0))),
+            ("paddle", lambda: self._run_paddle(img, (0, 0))),
+            ("umi", lambda: self._umi.extract_all(img)),
+        ]
+
+        results = []
+        for name, extract_fn in backend_chain:
+            if name == "win_ocr" and not self._win_ocr.available:
+                continue
+            if name == "rapid" and not self._init_rapid():
+                continue
+            if name == "easyocr" and not self._init_easyocr():
+                continue
+            if name == "paddle" and not self._init_paddle():
+                continue
+            if name == "umi" and not self._umi.available:
+                continue
+            try:
+                candidate = extract_fn()
+                if candidate and len(candidate) > len(results):
+                    results = candidate
+                # 10+ 个结果就够好了，不再继续试
+                if len(results) >= 10:
+                    break
+            except Exception:
+                continue
+
+        # 偏移修正：从区域坐标 → 全局屏幕坐标
+        if offset != (0, 0):
+            ox, oy = offset
+            for r in results:
+                x, y, w, h = r.bbox
+                r.bbox = (x + ox, y + oy, w, h)
 
         if use_cache:
             self._cache[cache_key] = (time.time(), results)
