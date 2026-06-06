@@ -2878,6 +2878,9 @@ PARAMS: {{"x": 960, "y": 540}}
             self.supervisor.window_aware_ocr = resolved.get("window_aware_ocr", False)
             self.supervisor.uia_pre_focus = resolved.get("uia_pre_focus", False)
             self.supervisor.uia_enabled = resolved.get("uia_enabled", True)
+            # 同步 UIA 全局开关到 interaction 层，确保 @feature 级别的 UIA 也被禁用
+            from interaction.actions import set_uia_enabled as _set_uia
+            _set_uia(resolved.get("uia_enabled", True))
             self.supervisor.scripted_mode = resolved.get("scripted_mode", False)
             self.supervisor.verify = resolved.get("verify", True)
 

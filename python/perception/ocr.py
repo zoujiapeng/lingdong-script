@@ -302,6 +302,15 @@ class OCREngine:
 
         img = ScreenCapture.capture(region)
 
+        # 增强对比度：直方图均衡化（解决暗色主题下 OCR 读不到字的问题）
+        try:
+            if img.ndim == 3:
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                lab[:,:,0] = cv2.equalizeHist(lab[:,:,0])
+                img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        except Exception:
+            pass
+
         self._detect_backend()
         offset = region[:2] if region else (0, 0)
         if self._backend_name == "win_ocr":

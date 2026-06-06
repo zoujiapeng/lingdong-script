@@ -236,7 +236,8 @@ def ocr_extract_all(region: str = ""):
         engine = OCREngine()
         reg = parse_region(region)
         results = engine.extract_all(reg)
-        return [{"text": r.text, "x": r.bbox[0], "y": r.bbox[1], "confidence": r.confidence}
+        return [{"text": r.text, "x": r.bbox[0], "y": r.bbox[1],
+                 "w": r.bbox[2], "h": r.bbox[3], "confidence": r.confidence}
                 for r in results]
     except ImportError:
         return []

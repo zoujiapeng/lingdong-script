@@ -27,13 +27,38 @@ def _find_target_coords(target: str, region: str = "") -> tuple:
         from features.perception_features import ocr_find_text
         reg = parse_region(region)
         ocr_result = ocr_find_text(query=target, region=region, fuzzy_threshold=0.7)
-        if isinstance(ocr_result, dict) and ocr_result.get("success"):
-            boxes = ocr_result.get("result", [])
-            if boxes:
-                box = boxes[0]
-                x = box.get("center_x") or (box["x"] + box["w"] // 2)
-                y = box.get("center_y") or (box["y"] + box["h"] // 2)
-                return x, y
+        if isinstance(ocr_result, dict):
+            # ocr_find_text 有两种返回路径：
+            # 1) 直接调用: {"found": True, "text": "...", "x": ..., "y": ..., "center_x": ..., "center_y": ...}
+            # 2) registry.execute() 包装: {"success": True, "result": <同上>}
+            data = ocr_result.get("result") or ocr_result
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            # 检查是否有有效结果：found=True 或 success=True 或实际有坐标数据
+            is_valid = (
+                data.get("found") or data.get("success") or
+                data.get("center_x") is not None
+            )
+            if isinstance(data, dict) and is_valid:
+                cx = data.get("center_x")
+                cy = data.get("center_y")
+                if cx is not None and cy is not None:
+                    return int(cx), int(cy)
+                ex = data.get("x")
+                ey = data.get("y")
+                if ex is not None and ey is not None:
+                    if "w" in data and "h" in data:
+                        return int(ex) + int(data["w"]) // 2, int(ey) + int(data["h"]) // 2
+                    return int(ex) + 15, int(ey) + 10
+                if "x" in data and "y" in data:
+                    ex, ey = int(data["x"]), int(data["y"])
+                    if "w" in data and "h" in data:
+                        ex += int(data["w"]) // 2
+                        ey += int(data["h"]) // 2
+                    else:
+                        ex += 15  # 无宽高时轻微偏移避免点边缘
+                        ey += 10
+                    return ex, ey
     except Exception:
         pass
     return 0, 0
