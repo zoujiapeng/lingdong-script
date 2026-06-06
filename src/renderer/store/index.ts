@@ -1,34 +1,23 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { nanoid } from 'nanoid';
-import {
-  FlowScript,
-  FlowNode,
-  FlowEdge,
-  NodeType,
-  UIState,
-  ExecutionState,
-  CanvasTransform,
-  ScriptMeta,
-  LogEntry,
-  FeatureDefinition,
-  ToolCallEntry,
-  MacroEvent,
-  MacroInfo,
-  RecordingState,
-  LearnedTarget,
-  ParamPromptItem,
-  AgentRunRecord,
-  PlanNodeState,
-  PlanDAGState,
+import type {
+  FlowScript, FlowNode, FlowEdge, NodeType,
+  UIState, ExecutionState, CanvasTransform, ScriptMeta,
+  LogEntry, FeatureDefinition, ToolCallEntry,
+  MacroEvent, MacroInfo, RecordingState,
+  LearnedTarget, ParamPromptItem, AgentRunRecord,
+  PlanNodeState, PlanDAGState, SubFlowNavState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { getNodeDimensions } from '../utils/constants';
 import { templateRegistry } from '../utils/templateRegistry';
 import { matchExact } from '../utils/templateMatcher';
-import { SubFlowNavState } from '../types';
-import { createFlowExecutor, ExecutionController } from './executor';
+import { createFlowExecutor } from './executor';
+import type { ExecutionController } from './executor';
 import { generateText } from '../utils/textGenerator';
+import { DEFAULT_SETTINGS, DEFAULT_UI_STATE, PRESET_TEMPLATES, PRESET_TEMPLATE_META, STORAGE_KEY, MAX_HISTORY } from './defaults';
+import { loadCustomTemplates, saveCustomTemplates, loadAgentHistory, saveAgentHistory } from './persistence';
 
 const DEFAULT_SETTINGS = {
   default_delay: 0.5,

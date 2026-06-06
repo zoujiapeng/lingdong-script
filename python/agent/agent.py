@@ -21,8 +21,10 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from queue import Queue, Empty
 from typing import Any, Callable, Optional, Set
@@ -40,129 +42,15 @@ MAX_CONSECUTIVE_FAILURES = 5  # 连续失败上限 → 自动终止
 _MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 / 总步数）
 
 # ── 已知多模态模型列表（可直接"看"截图，不需要 SoM 标号）──
-_MULTIMODAL_MODELS = frozenset({
-    "mimo-v2-omni", "mimo-omni", "mimo-v2", "mimo-pro",
-    "gpt-4o", "gpt-4o-mini", "gpt-4v", "gpt-4-vision",
-    "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
-    "claude-3.5-sonnet", "claude-3.5-haiku",
-    "claude-4", "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
-    "gemini-pro-vision", "gemini-1.5-pro", "gemini-1.5-flash",
-    "qwen-vl", "qwen2-vl", "glm-4v", "glm-4v-plus",
-    "deepseek-vl2", "deepseek-vl",
-})
-
-_MULTIMODAL_PREFIXES = ("mimo-", "gpt-4", "claude-3", "claude-4", "claude-opus", "claude-sonnet", "claude-haiku", "gemini-", "qwen-vl", "qwen2-vl", "glm-4v", "deepseek-vl")
+# ── Imports from extracted modules ──
+from agent.prompts import (
+    AGENT_CORE_FEATURES, is_multimodal_model,
+    SCRIPTED_MODE_INSTRUCTIONS, CHAT_MODE_INSTRUCTIONS,
+    TEXT_PROTOCOL_FORMAT_INSTRUCTIONS,
+)
 
 
-def _is_multimodal_model(model_name: str) -> bool:
-    """检测模型是否支持图像理解（多模态视觉能力）。
-
-    多模态模型可以直接从截图中读取按钮文字、识别界面元素，
-    不需要 SoM 标号或 OCR 文本注入。
-    """
-    name = model_name.strip().lower()
-    if name in _MULTIMODAL_MODELS:
-        return True
-    for prefix in _MULTIMODAL_PREFIXES:
-        if name.startswith(prefix):
-            return True
-    # DeepSeek 纯文本模型排除
-    if "deepseek" in name and not any(vl in name for vl in ("vl", "vision")):
-        return False
-    # 包含 vision/multimodal 关键词
-    if "vision" in name or "multimodal" in name or "omni" in name:
-        return True
-    return False
-
-
-# ── 文本协议模式系统提示词 ─────────────────────────────────────
-
-SYSTEM_PROMPT_TEXT = """你是桌面自动化 AI。通过操作鼠标键盘控制电脑。
-
-### 可用工具
-- **click** — 点击屏幕元素（target="按钮文字" 或 x=坐标, y=坐标）。文字点不中就换坐标。
-- **type_text** — 在已聚焦的输入框输入文字
-- **press_keys** — 键盘快捷键（如 ctrl+s, enter, tab）
-- **manage_app** — 启动/关闭程序（如 manage_app(action="launch", target="calc.exe")）
-- **run_command** — 执行命令/脚本
-- **screenshot** — 截图验证结果（每轮自动附截图，无需手动调用）
-- **wait** — 等待指定秒数
-- **manage_window** — 窗口管理（聚焦/移动）
-
-### 规则
-- 用 manage_app 启动程序，不要用 file_ops 替代
-- 文件操作用 run_command 或 file_ops
-- 点击失败就换坐标（从截图估算位置）
-- 如实报告执行结果，不要捏造成功
-- 能用一步完成的不要分多步
-- 完成后截图验证
-
-### 输出格式
-思考: 推理过程
-工具: 工具名
-参数:
-  参数名: 值
-
-完成后:
-总结: 结果描述
-"""
-
-SCRIPTED_MODE_INSTRUCTIONS = """
-[脚本执行模式已开启]
-
-你也可以编写 Python 脚本来完成桌面操作，使用 `run_python_script(script="...")` 工具。
-
-什么时候用脚本：
-- 需要启动程序 → 等待 → 操作 → 验证 的完整流程
-- 需要条件判断或循环的重复操作
-- 简单的点击/输入不适合的场景
-
-脚本注意事项：
-- 系统已预装 pywinauto, pyautogui, psutil, time, os, subprocess 等常见库，直接 import 即可
-- 不需要 pip install，系统会自动处理依赖
-- 每个脚本建议控制在 50 行以内
-- 脚本中适当加 time.sleep() 等待界面响应
-- 每个脚本执行完成后用 print() 输出结果报告
-
-示例: 获取活动窗口信息并截图保存
-```
-工具: run_python_script
-参数:
-  script: |
-    import pywinauto, time, os
-    desktop = pywinauto.Desktop(backend="uia")
-    active_title = desktop.window_text()
-    wins = desktop.windows()
-    logs_dir = os.path.join(os.environ["USERPROFILE"], "Desktop")
-    with open(os.path.join(logs_dir, "window_report.txt"), "w") as f:
-        f.write(f"活动窗口: {active_title}
-")
-        f.write(f"总窗口数: {len(wins)}
-")
-    print(f"已保存窗口报告: 活动={active_title}, 共{len(wins)}个窗口")
-```
-
-简单操作仍可用 native 工具（click_target, type_text 等），复杂流程用脚本。
-"""
-
-CHAT_MODE_INSTRUCTIONS = """
-[对话模式已开启]
-
-你可以边执行任务边与用户对话。当用户发来消息时：
-- 如果是询问状态 → 简洁回答当前进展
-- 如果是指引反馈 → 调整执行策略后继续
-- 如果是新任务 → 完成当前步骤后执行新任务
-
-对话模式下，你可以用自然语言回复用户，不需要每次都用工具。
-用户消息在「执行结果」之后出现。按需处理即可。
-
-回复格式:
-- 需要执行操作时 → 照常用「工具: 工具名」格式
-- 只是想聊天 → 直接回复文字（不带工具: 前缀）
-- 想展示截图 → 用 screenshot() 工具
-"""
-
-# ── 工具描述生成 (from MimoAgent) ─────────────────────────────
+# ── Prompt constants imported from agent.prompts ──
 
 _USE_FLOW_CHART_MODE = False  # Set True to use full tool prompt + flow chart
 _FLOW_CHART_MODE_LOCK = threading.Lock()  # Thread safety for mode switching
@@ -176,9 +64,11 @@ def set_flow_chart_mode(enabled: bool = True):
     _set_meta_fc(enabled)
 
 def _build_feature_tools_compact() -> str:
-    """构建 @feature 工具紧凑列表（一行一个，组织分类）。
+    """构建运行时 Agent 补充 @feature 工具列表。
 
-    供非流程图模式的 text_protocol 使用，让 LLM 知道所有可用工具。
+    非流程图模式的 text_protocol 使用。只展示 AGENT_CORE_FEATURES 白名单
+    中的工具（元动作未覆盖的补充能力），而非全部 ~200 个 @feature 工具。
+    流程图模式不受此限制，使用 build_path_prompt() 展示全部工具。
     """
     from features.registry import registry, FeatureCategory
     import features._all  # noqa: F401
@@ -193,18 +83,27 @@ def _build_feature_tools_compact() -> str:
         FeatureCategory.DEBUG: "调试诊断",
     }
 
-    grouped: dict = {}
+    # 只收集白名单内的工具
+    core_specs = []
     for spec in registry.all():
         if spec.deprecated or spec.hidden:
             continue
+        if spec.name in AGENT_CORE_FEATURES:
+            core_specs.append(spec)
+
+    # 按分类分组
+    grouped: dict = {}
+    for spec in core_specs:
         cat = spec.category
         grouped.setdefault(cat, []).append(spec)
 
+    hidden_count = len([s for s in registry.all() if not s.deprecated and not s.hidden]) - len(core_specs)
+
     lines = [
-        "\n\n## @feature 高级工具（按分类）",
+        "\n\n## 补充工具（元动作不够用时使用）",
         "",
-        "除上述元动作外，还有以下底层工具。元动作不够用时按需使用：",
-        "同样遵循直接路径优先原则 — 能直接用工具完成就不要操作屏幕。",
+        f"元动作已覆盖大部分场景。以下 {len(core_specs)} 个工具是元动作未直接包装的补充能力。",
+        f"另有 {hidden_count} 个 DSL 构建/调试/测试专用工具仅在流程图生成时使用，运行时无需关注。",
         "",
     ]
     for cat in FeatureCategory:
@@ -218,8 +117,9 @@ def _build_feature_tools_compact() -> str:
             lines.append(f"  - **{s.name}** — {desc}")
         lines.append("")
 
-    lines.append("使用方式与元动作相同：在「工具:」行写工具名，参数写在参数行。")
-    lines.append("元动作和 @feature 工具可混合使用。")
+    if core_specs:
+        lines.append("使用方式与元动作相同：在「工具:」行写工具名，参数写在参数行。")
+        lines.append("优先使用元动作，元动作不够用时再选用这些补充工具。")
 
     return "\n".join(lines)
 
@@ -237,6 +137,38 @@ def _build_tools_text() -> str:
     meta = get_prompt(use_flow_chart=_USE_FLOW_CHART_MODE)
     tools = _build_feature_tools_compact()
     return meta + tools
+
+
+def _build_clean_system_prompt(tools_text: str) -> str:
+    """Return a compact, encoding-safe system prompt for text-only desktop control."""
+    return f"""You are a general desktop automation agent controlling the computer with mouse and keyboard.
+
+Core rules:
+- Be honest. Do not report success until you have verified it from screen state, files, process/window state, URL, or other observable evidence.
+- Prefer fast structured state when it exists: active window, processes, files, browser URL/tabs, clipboard, and screen size.
+- In text-only mode, you cannot see images semantically. Treat OCR/SoM/YOLO as noisy structured hints, not as full visual understanding.
+- UIA may be unavailable or misleading in custom-rendered apps. When UIA is disabled or weak, use active-window-limited OCR, SoM labels, YOLO boxes, generic visual input/control candidates, coordinates, clipboard typing, hotkeys, and verification.
+- Do not create app-specific rules. Use generic strategies that work across desktop software.
+- For text entry, prefer clipboard paste or type_clipboard over slow per-key typing. After clicking a likely input field, verify focus by caret/typed text/screen change when possible.
+- For search boxes, a magnifier can be OCR'd as Q/O/0. Labels such as search/find, Chinese search terms, Q-search-like text, or a long rectangular control can all be search/input candidates.
+- A blinking caret can be OCR'd as I/l/|. Treat a narrow vertical mark inside a control as possible focused input, but verify after typing.
+- If an action fails, adapt using another generic route rather than repeating the same click.
+- Use browser tools for browser-only tasks and verify with URL/tab state.
+- Finish with done only after observable verification.
+
+Output protocol:
+Thought: concise reasoning
+Tool: tool_name
+Args:
+  key: value
+
+When finished:
+Done:
+Summary: verified result
+
+Available tools:
+{tools_text}
+"""
 
 
 # ====================================================================
@@ -257,6 +189,8 @@ class LingdongAgent:
         event_callback: IPC 事件回调
         stop_event: 停止信号
     """
+
+    _glyph_templates_cache: list[tuple[str, object]] | None = None
 
     # ── 初始化 ────────────────────────────────────────────────
 
@@ -299,6 +233,10 @@ class LingdongAgent:
         self._omniparser_enabled = omniparser_enabled  # 默认关闭，可在设置中开启
         self._local_vision_enabled = local_vision_enabled  # 本地视觉引擎（默认关闭）
         self._local_vision = None  # LocalVisionEngine (lazy init)
+        self._last_focus_window: dict[str, Any] = {}
+        self._intended_focus_window: dict[str, Any] = {}
+        self._trace_dir = ""
+        self._llm_call_index = 0
 
         # 监督层 (Supervisor) — 被所有三种执行模式共享
         self.supervisor = Supervisor(
@@ -351,18 +289,33 @@ class LingdongAgent:
         self._registry_loaded = True
         all_count = len([s for s in registry.all() if not s.deprecated and not s.hidden])
         self._tools_text = _build_tools_text()
-
-        if _USE_FLOW_CHART_MODE:
-            self._system_prompt = SYSTEM_PROMPT_TEXT.format(
-                tool_count=all_count, tools_text=self._tools_text
-            )
-        else:
-            from agent.meta_actions import META_ACTIONS
-            meta_count = len(META_ACTIONS)
-            self._system_prompt = SYSTEM_PROMPT_TEXT.format(
-                tool_count=meta_count, tools_text=self._tools_text
-            )
+        self._system_prompt = _build_clean_system_prompt(self._tools_text) + TEXT_PROTOCOL_FORMAT_INSTRUCTIONS
         logger.info("Registry: %d tools total, prompt: %d chars", all_count, len(self._system_prompt))
+
+    def _begin_prompt_trace(self, goal: str):
+        if self._trace_dir:
+            return
+        root = os.path.join(tempfile.gettempdir(), "lingdong_agent_prompt_trace")
+        safe_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._trace_dir = os.path.join(root, f"run_{safe_ts}_{os.getpid()}")
+        try:
+            os.makedirs(self._trace_dir, exist_ok=True)
+            with open(os.path.join(self._trace_dir, "goal.txt"), "w", encoding="utf-8") as f:
+                f.write(goal)
+            self._emit("log", {"level": "info", "message": f"Prompt trace: {self._trace_dir}"})
+        except Exception:
+            self._trace_dir = ""
+
+    def _trace_llm(self, kind: str, data: Any):
+        if not self._trace_dir:
+            return
+        try:
+            self._llm_call_index += 1
+            path = os.path.join(self._trace_dir, f"{self._llm_call_index:03d}_{kind}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _ensure_registry(self):
         if not self._registry_loaded:
@@ -461,6 +414,439 @@ class LingdongAgent:
     #  文本协议模式 (MIMO V2 Omni 等纯文本模型)
     # ══════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _title_matches(actual: str, expected: str) -> bool:
+        a = LingdongAgent._clean_visual_label(actual).lower()
+        e = LingdongAgent._clean_visual_label(expected).lower()
+        if not a or not e:
+            return False
+        return a == e or e in a or a in e
+
+    def _find_window_by_title(self, title: str) -> dict[str, Any] | None:
+        if not title:
+            return None
+        try:
+            import win32gui
+            matches: list[dict[str, Any]] = []
+
+            def enum_cb(hwnd, _):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    text = win32gui.GetWindowText(hwnd) or ""
+                    if not self._title_matches(text, title):
+                        return
+                    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                    if right - left < 80 or bottom - top < 80:
+                        return
+                    matches.append({
+                        "hwnd": hwnd,
+                        "title": self._clean_visual_label(text),
+                        "class_name": win32gui.GetClassName(hwnd) or "",
+                        "rect": (int(left), int(top), int(right), int(bottom)),
+                    })
+                except Exception:
+                    return
+
+            win32gui.EnumWindows(enum_cb, None)
+            if not matches:
+                return None
+            matches.sort(key=lambda m: (
+                0 if self._title_matches(str(m.get("title", "")), title) else 1,
+                -len(str(m.get("title", ""))),
+            ))
+            return matches[0]
+        except Exception:
+            return None
+
+    def _remember_intended_focus(self, title: str, ttl: float = 8.0) -> None:
+        title = self._clean_visual_label(title)
+        if not title:
+            return
+        found = self._find_window_by_title(title)
+        self._intended_focus_window = {
+            "title": found.get("title", title) if found else title,
+            "class_name": found.get("class_name", "") if found else "",
+            "rect": found.get("rect") if found else None,
+            "expires_at": time.time() + ttl,
+        }
+
+    @staticmethod
+    def _som_text_matches(target: str, text: str) -> bool:
+        t = LingdongAgent._clean_visual_label(target).lower()
+        s = LingdongAgent._clean_visual_label(text).lower()
+        if not t or not s:
+            return False
+        aliases = {
+            "*": {"*", "x", "×"},
+            "x": {"*", "x", "×"},
+            "×": {"*", "x", "×"},
+            "/": {"/", "÷"},
+            "÷": {"/", "÷"},
+        }
+        if len(t) == 1:
+            return s in aliases.get(t, {t})
+        return t in s
+
+    def _active_window_rect(self) -> tuple[int, int, int, int] | None:
+        try:
+            import win32gui
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return None
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            if right - left < 80 or bottom - top < 80:
+                return None
+            fg_title = self._clean_visual_label(win32gui.GetWindowText(hwnd) or "")
+            intended = self._intended_focus_window if isinstance(self._intended_focus_window, dict) else {}
+            if intended and time.time() <= float(intended.get("expires_at", 0) or 0):
+                intended_title = str(intended.get("title", "") or "")
+                if intended_title and not self._title_matches(fg_title, intended_title):
+                    refreshed = self._find_window_by_title(intended_title)
+                    if refreshed:
+                        self._intended_focus_window.update({
+                            "title": refreshed.get("title", intended_title),
+                            "class_name": refreshed.get("class_name", ""),
+                            "rect": refreshed.get("rect"),
+                        })
+                        self._last_focus_window = {
+                            "title": refreshed.get("title", intended_title),
+                            "class_name": refreshed.get("class_name", ""),
+                            "rect": refreshed.get("rect"),
+                        }
+                        return refreshed.get("rect")
+                    rect = intended.get("rect")
+                    if isinstance(rect, (tuple, list)) and len(rect) == 4:
+                        return int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+            elif intended:
+                self._intended_focus_window = {}
+            self._last_focus_window = {
+                "title": fg_title,
+                "class_name": win32gui.GetClassName(hwnd) or "",
+                "rect": (int(left), int(top), int(right), int(bottom)),
+            }
+            return int(left), int(top), int(right), int(bottom)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _clean_visual_label(text: str) -> str:
+        s = re.sub(r"\s+", " ", str(text or "").strip())
+        s = "".join(ch for ch in s if unicodedata.category(ch) not in ("So", "Co", "Cs"))
+        return s.strip(" '\"`|:;,.")
+
+    @staticmethod
+    def _looks_corrupt_label(text: str) -> bool:
+        s = str(text or "").strip()
+        if not s:
+            return False
+        if "?" in s and any(ord(ch) > 127 for ch in s):
+            return True
+        if any(unicodedata.category(ch) in ("Co", "Cs") for ch in s):
+            return True
+        return any(marker in s for marker in ("锟", "�", "閹", "閸", "閻", "閺", "鈧", "閿", "鎷", "鉅"))
+
+    @staticmethod
+    def _is_search_like_label(text: str) -> bool:
+        s = str(text or "").strip().lower().replace(" ", "")
+        return any(token in s for token in (
+            "search", "find", "qsearch",
+            "\u641c\u7d22", "\u641c\u7d20", "\u641c\u5bfb", "\u67e5\u627e",
+            "q\u641c", "0\u641c", "o\u641c",
+        ))
+
+    @staticmethod
+    def _is_caret_like_label(text: str, w: int, h: int) -> bool:
+        s = str(text or "").strip()
+        return s in ("I", "l", "|", "丨") and h >= 10 and w <= 12
+
+    def _redraw_som_overlay(self, source_b64: str, label_map: dict) -> str:
+        try:
+            import cv2
+            import numpy as np
+            img = cv2.imdecode(np.frombuffer(base64.b64decode(source_b64), np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return source_b64
+            h_img, w_img = img.shape[:2]
+            overlaid = img.copy()
+            for idx, elem in label_map.items():
+                cx = int(elem.get("x", 0) or 0)
+                cy = int(elem.get("y", 0) or 0)
+                ew = int(elem.get("w", 24) or 24)
+                eh = int(elem.get("h", 24) or 24)
+                x = max(0, min(w_img - 1, cx - ew // 2))
+                y = max(0, min(h_img - 1, cy - eh // 2))
+                x2 = max(0, min(w_img - 1, x + ew))
+                y2 = max(0, min(h_img - 1, y + eh))
+                cv2.rectangle(overlaid, (x, y), (x2, y2), (66, 133, 244), 2)
+                label = str(idx)
+                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                cv2.rectangle(overlaid, (x, max(0, y - lh - 8)), (x + lw + 6, max(0, y - 1)), (66, 133, 244), -1)
+                cv2.putText(overlaid, label, (x + 2, max(lh, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            _, buf = cv2.imencode(".jpg", overlaid, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return base64.b64encode(buf).decode()
+        except Exception:
+            return source_b64
+
+    def _augment_active_window_controls(self, source_b64: str, rect: tuple[int, int, int, int],
+                                        elements: list[dict], max_new: int = 24) -> list[dict]:
+        try:
+            import cv2
+            import numpy as np
+            img = cv2.imdecode(np.frombuffer(base64.b64decode(source_b64), np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return elements
+            h_img, w_img = img.shape[:2]
+            left, top, right, bottom = rect
+            left, top = max(0, left), max(0, top)
+            right, bottom = min(w_img, right), min(h_img, bottom)
+            if right - left < 120 or bottom - top < 120:
+                return elements
+            roi = img[top:bottom, left:right]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))
+            small_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+            edges = cv2.Canny(gray, 35, 90)
+            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            bg = float(np.median(gray))
+            bright = cv2.inRange(gray, int(min(255, bg + 5)), int(min(255, bg + 85)))
+            bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=2)
+            bright_contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            mid_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            midtone = cv2.inRange(gray, max(0, int(bg - 10)), int(min(255, bg + 70)))
+            midtone = cv2.morphologyEx(midtone, cv2.MORPH_OPEN, mid_kernel, iterations=1)
+            midtone = cv2.morphologyEx(midtone, cv2.MORPH_CLOSE, mid_kernel, iterations=1)
+            midtone_contours, _ = cv2.findContours(midtone, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Generic button candidates: many custom-rendered apps expose square-ish
+            # controls without UIA names, while the previous pass only kept long fields.
+            smooth = cv2.GaussianBlur(gray, (3, 3), 0)
+            button_edges = cv2.Canny(smooth, 20, 70)
+            button_edges = cv2.morphologyEx(button_edges, cv2.MORPH_CLOSE, small_kernel, iterations=1)
+            button_contours, _ = cv2.findContours(button_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            def _single_glyph_label(crop) -> str:
+                try:
+                    from PIL import Image, ImageDraw, ImageFont
+                    if LingdongAgent._glyph_templates_cache is None:
+                        chars = "0123456789+-=.%×÷*/"
+                        font_paths = [
+                            r"C:\Windows\Fonts\segoeui.ttf",
+                            r"C:\Windows\Fonts\seguisym.ttf",
+                            r"C:\Windows\Fonts\arial.ttf",
+                        ]
+                        templates = []
+                        for fp in font_paths:
+                            if not os.path.exists(fp):
+                                continue
+                            for size in (22, 24, 26, 28, 30, 32, 36, 40):
+                                try:
+                                    font = ImageFont.truetype(fp, size)
+                                except Exception:
+                                    continue
+                                for ch in chars:
+                                    canvas = Image.new("L", (80, 80), 0)
+                                    draw = ImageDraw.Draw(canvas)
+                                    bbox = draw.textbbox((0, 0), ch, font=font)
+                                    tx = (80 - (bbox[2] - bbox[0])) // 2 - bbox[0]
+                                    ty = (80 - (bbox[3] - bbox[1])) // 2 - bbox[1]
+                                    draw.text((tx, ty), ch, fill=255, font=font)
+                                    arr = np.array(canvas)
+                                    cnts, _ = cv2.findContours(arr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    if not cnts:
+                                        continue
+                                    x0, y0, tw, th = cv2.boundingRect(np.vstack(cnts))
+                                    if tw <= 0 or th <= 0:
+                                        continue
+                                    tmpl = cv2.resize(arr[y0:y0 + th, x0:x0 + tw], (32, 32), interpolation=cv2.INTER_AREA)
+                                    templates.append((ch, tmpl))
+                        LingdongAgent._glyph_templates_cache = templates
+                    templates = LingdongAgent._glyph_templates_cache or []
+                    if not templates:
+                        return ""
+                    crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+                    med = float(np.median(crop_gray))
+                    if med < 128:
+                        mask = cv2.inRange(crop_gray, max(0, int(med + 25)), 255)
+                    else:
+                        mask = cv2.inRange(crop_gray, 0, min(255, int(med - 25)))
+                    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    boxes = []
+                    for c2 in cnts:
+                        gx, gy, gw, gh = cv2.boundingRect(c2)
+                        if 2 <= gw <= 70 and 6 <= gh <= 70:
+                            boxes.append((gx, gy, gw, gh))
+                    if not boxes:
+                        return ""
+                    gx = min(bx[0] for bx in boxes)
+                    gy = min(bx[1] for bx in boxes)
+                    gx2 = max(bx[0] + bx[2] for bx in boxes)
+                    gy2 = max(bx[1] + bx[3] for bx in boxes)
+                    glyph = cv2.resize(mask[gy:gy2, gx:gx2], (32, 32), interpolation=cv2.INTER_AREA)
+                    best_score = 0.0
+                    best_char = ""
+                    for ch, tmpl in templates:
+                        score = float(cv2.matchTemplate(glyph, tmpl, cv2.TM_CCOEFF_NORMED)[0][0])
+                        if score > best_score:
+                            best_score = score
+                            best_char = ch
+                    return best_char if best_score >= 0.72 else ""
+                except Exception:
+                    return ""
+
+            def _near_existing(cx: int, cy: int, bw: int, bh: int) -> bool:
+                for elem in elements:
+                    ex = int(elem.get("x", 0) or 0)
+                    ey = int(elem.get("y", 0) or 0)
+                    ew = int(elem.get("w", 0) or 0)
+                    eh = int(elem.get("h", 0) or 0)
+                    ecx = ex if ex > left else ex + ew // 2
+                    ecy = ey if ey > top else ey + eh // 2
+                    if abs(ecx - cx) <= max(bw, ew, 24) // 2 and abs(ecy - cy) <= max(bh, eh, 24) // 2:
+                        return True
+                return False
+
+            candidates = []
+            roi_w = right - left
+            for c in list(contours) + list(bright_contours):
+                x, y, bw, bh = cv2.boundingRect(c)
+                if bw < 70 or bh < 16 or bh > 90:
+                    continue
+                if bw > roi_w * 0.96 or bw / max(bh, 1) < 2.0:
+                    continue
+                area = bw * bh
+                if area < 1400:
+                    continue
+                cx = left + x + bw // 2
+                cy = top + y + bh // 2
+                if _near_existing(cx, cy, bw, bh):
+                    continue
+                rel_y = y / max(bottom - top, 1)
+                text = "input/search field" if rel_y < 0.4 and bw >= roi_w * 0.32 else "visual control"
+                candidates.append({"text": text, "x": cx, "y": cy, "w": bw, "h": bh, "_area": area})
+
+            for c in list(button_contours) + list(midtone_contours):
+                x, y, bw, bh = cv2.boundingRect(c)
+                if bw < 28 or bh < 20 or bw > 260 or bh > 130:
+                    continue
+                ratio = bw / max(bh, 1)
+                if ratio < 0.45 or ratio > 8.0:
+                    continue
+                area = bw * bh
+                if area < 650:
+                    continue
+                if bw > roi_w * 0.97 and bh > (bottom - top) * 0.25:
+                    continue
+                cx = left + x + bw // 2
+                cy = top + y + bh // 2
+                if _near_existing(cx, cy, bw, bh):
+                    continue
+                rel_y = y / max(bottom - top, 1)
+                text = "input/search field" if rel_y < 0.4 and bw >= roi_w * 0.32 else "visual control"
+                if text == "visual control":
+                    crop = roi[max(0, y):min(roi.shape[0], y + bh), max(0, x):min(roi.shape[1], x + bw)]
+                    glyph = _single_glyph_label(crop) if crop.size else ""
+                    if glyph:
+                        text = glyph
+                candidates.append({"text": text, "x": cx, "y": cy, "w": bw, "h": bh, "_area": area})
+
+            caret_mask = cv2.inRange(gray, 180, 255)
+            caret_contours, _ = cv2.findContours(caret_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in caret_contours:
+                x, y, bw, bh = cv2.boundingRect(c)
+                if bw <= 6 and 12 <= bh <= 40:
+                    cx = left + x
+                    cy = top + y + bh // 2
+                    if not _near_existing(cx, cy, 160, 32):
+                        candidates.append({"text": "focused input field", "x": cx + 80, "y": cy, "w": 180, "h": max(28, bh), "_area": 99999})
+
+            candidates.sort(key=lambda e: (-int(e.get("_area", 0)), int(e.get("y", 0)), int(e.get("x", 0))))
+            for cand in candidates[:max_new]:
+                cand.pop("_area", None)
+                elements.append(cand)
+            return elements
+        except Exception:
+            return elements
+
+    def _filter_som_to_active_window(self, som_result: dict, source_b64: str) -> dict:
+        if not self.supervisor.window_aware_ocr:
+            return som_result
+        rect = self._active_window_rect()
+        label_map = som_result.get("label_map") if isinstance(som_result, dict) else None
+        if not rect or not isinstance(label_map, dict) or not label_map:
+            return som_result
+        left, top, right, bottom = rect
+        kept = []
+        for _, elem in label_map.items():
+            try:
+                cx = int(elem.get("x", 0) or 0)
+                cy = int(elem.get("y", 0) or 0)
+            except Exception:
+                continue
+            if left <= cx <= right and top <= cy <= bottom:
+                kept.append(dict(elem))
+        if not kept:
+            return som_result
+        kept = self._augment_active_window_controls(source_b64, rect, kept)
+        kept.sort(key=lambda e: (int(e.get("y", 0) or 0), int(e.get("x", 0) or 0)))
+        filtered = {i + 1: elem for i, elem in enumerate(kept[:40])}
+        before = len(label_map)
+        after = len(filtered)
+        if after != before:
+            self._emit("log", {"level": "info", "message": f"Window-aware vision targets: {before}->{after}"})
+        return {**som_result, "image_b64": self._redraw_som_overlay(source_b64, filtered), "label_map": filtered, "count": after}
+
+    @staticmethod
+    def _visual_label_rank(text: str, w: int, h: int) -> int:
+        if LingdongAgent._is_search_like_label(text) or text in ("focused input field", "input/search field"):
+            return 0
+        if not text or text == "[icon]" or text.lower().startswith("[icon]"):
+            return 1
+        if LingdongAgent._looks_corrupt_label(text):
+            return 5
+        compact = text.replace(" ", "")
+        area = max(0, w) * max(0, h)
+        if re.fullmatch(r"[0-9:+-]{2,5}", compact) or LingdongAgent._is_caret_like_label(compact, w, h):
+            return 4
+        if len(compact) > 18 and h <= 22:
+            return 3
+        if area >= 1600:
+            return 1
+        return 2
+
+    @staticmethod
+    def _compact_som_label(label_map: dict, max_items: int = 30) -> str:
+        if not label_map:
+            return ""
+        def _score(item: tuple) -> tuple:
+            idx, elem = item
+            text = LingdongAgent._clean_visual_label(elem.get("text", ""))
+            w = int(elem.get("w", 0) or 0)
+            h = int(elem.get("h", 0) or 0)
+            rank = LingdongAgent._visual_label_rank(text, w, h)
+            area = w * h
+            return (rank, -min(area, 50000), int(elem.get("y", 0) or 0), int(elem.get("x", 0) or 0), int(idx))
+        selected = sorted(label_map.items(), key=_score)[:max_items]
+        selected.sort(key=lambda kv: int(kv[0]))
+        lines = []
+        for idx, elem in selected:
+            text = LingdongAgent._clean_visual_label(elem.get("text", ""))
+            if LingdongAgent._is_search_like_label(text):
+                text = f"search field ({text})"
+            elif LingdongAgent._is_caret_like_label(text, int(elem.get("w", 0) or 0), int(elem.get("h", 0) or 0)):
+                text = "focused input field"
+            elif not text or text == "[icon]":
+                text = "icon/button"
+            elif LingdongAgent._looks_corrupt_label(text):
+                text = "visual target"
+            text = re.sub(r"\s+", " ", text)[:36]
+            x = int(elem.get("x", 0) or 0)
+            y = int(elem.get("y", 0) or 0)
+            lines.append(f"#{idx} {text} ({x},{y})")
+        hidden = max(0, len(label_map) - len(selected))
+        suffix = f"\n... {hidden} lower-priority targets omitted" if hidden else ""
+        return "\nVisible targets (use #N):\n" + "\n".join(lines) + suffix
+
     def _apply_som(self, b64_img: str, multimodal: bool = False) -> dict:
         """Set-of-Mark 标号：检测屏幕元素（UIA+OCR），画框编号。
 
@@ -479,18 +865,39 @@ class LingdongAgent:
         # 仅对纯文本模型（如 DeepSeek）生效，多模态模型走上面 direct 路径。
         if self._local_vision_enabled and not multimodal:
             try:
+                lv_start = time.time()
+                self._emit("log", {"level": "info", "message": "Local vision parse started"})
                 if self._local_vision is None:
                     from agent.local_vision_engine import LocalVisionEngine
                     self._local_vision = LocalVisionEngine(enabled=True)
                 if self._local_vision.available:
                     # UIA 启用时才收集 UIA 元素，否则纯视觉（YOLO+OCR）
-                    uia_items = self._collect_uia_elements() if self.supervisor.uia_enabled else None
+                    prefer_local_vision = False
+                    if hasattr(self.supervisor, "should_prefer_local_vision"):
+                        try:
+                            prefer_local_vision = self.supervisor.should_prefer_local_vision()
+                        except Exception:
+                            prefer_local_vision = False
+                    uia_items = None
+                    if self.supervisor.uia_enabled and not prefer_local_vision:
+                        uia_items = self._collect_uia_elements()
                     lv_result = self._local_vision.parse(b64_img, uia_elements=uia_items)
+                    self._emit("log", {
+                        "level": "info",
+                        "message": f"Local vision parse finished in {time.time() - lv_start:.1f}s",
+                    })
+                    if lv_result and self.supervisor.window_aware_ocr:
+                        lv_result = self._filter_som_to_active_window(lv_result, b64_img)
                     if lv_result and lv_result["count"] > 0:
                         msg = f"本地视觉引擎: {lv_result['count']} 个元素 (YOLO DirectML)"
                         if lv_result.get("caption"):
                             msg += f" | {lv_result['caption'][:60]}"
                         self._emit("log", {"level": "info", "message": msg})
+                        if prefer_local_vision:
+                            self._emit("log", {
+                                "level": "debug",
+                                "message": "UIA-poor window: local vision is running without UIA labels",
+                            })
                         return lv_result
                     else:
                         self._emit("log", {
@@ -614,8 +1021,15 @@ class LingdongAgent:
                         self._emit("log", {"level": "info", "message": f"窗口限定: {before}→{len(elements)}个元素"})
             except Exception:
                 pass
+            rect = self._active_window_rect()
+            if rect:
+                elements = self._augment_active_window_controls(b64_img, rect, elements)
 
-        elements.sort(key=lambda e: (e["y"] // 25, e["x"]))
+        elements.sort(key=lambda e: (
+            self._visual_label_rank(str(e.get("text", "")), int(e.get("w", 0) or 0), int(e.get("h", 0) or 0)),
+            int(e.get("y", 0) or 0) // 25,
+            int(e.get("x", 0) or 0),
+        ))
 
         label_map: dict = {}
         overlaid = img.copy()
@@ -700,6 +1114,7 @@ class LingdongAgent:
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
         }
+        self._trace_llm("request", payload)
         last_err = ""
         for attempt in range(1 + retries):
             try:
@@ -723,6 +1138,7 @@ class LingdongAgent:
                 if not content:
                     self._emit("log", {"level": "warn", "message": "LLM returned empty content, retry"})
                     continue
+                self._trace_llm("response", data)
                 return data
             except _req.exceptions.Timeout:
                 last_err = "API timeout (120s)"
@@ -745,110 +1161,14 @@ class LingdongAgent:
 
         action: 'tool' | 'done' | 'error'
         """
-        if not content:
-            return "error", "", {}
-
-        if "总结:" in content and "工具:" not in content:
-            return "done", "", {"summary": content}
-
-        tool_match = re.search(r"工具:\s*(\S+)", content)
-        if not tool_match:
-            return "error", "", {"raw": content[:200]}
-
-        tool_name = tool_match.group(1).strip()
-        args = {}
-        param_section = re.search(r"参数:[ \t]*(.*?)(?:\n\s*\n|\n\s*总结:|$)", content, re.DOTALL)
-        if param_section:
-            lines = param_section.group(1).split("\n")
-            i = 0
-            while i < len(lines):
-                raw_line = lines[i]
-                m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line.strip())
-                if m:
-                    key = m.group(1)
-                    val = m.group(2).strip().strip("'\"")
-                    # 支持 YAML 风格 | 多行值
-                    if val == "|":
-                        indent = len(raw_line) - len(raw_line.lstrip())
-                        val_lines = []
-                        i += 1
-                        while i < len(lines):
-                            if lines[i].strip() == "":
-                                i += 1
-                                continue
-                            cur_indent = len(lines[i]) - len(lines[i].lstrip())
-                            if cur_indent > indent:
-                                val_lines.append(lines[i].rstrip())
-                                i += 1
-                            else:
-                                break
-                        args[key] = "\n".join(val_lines)
-                        continue
-                    else:
-                        args[key] = val
-                i += 1
-
-        return "tool", tool_name, args
-
-    @staticmethod
-    def _parse_params_section(text: str) -> dict:
-        """解析 参数: 块内容为字典。"""
-        args = {}
-        lines = text.split("\n")
-        i = 0
-        while i < len(lines):
-            raw_line = lines[i]
-            m = re.match(r"(\w+)\s*[:：]\s*(.+)", raw_line.strip())
-            if m:
-                key = m.group(1)
-                val = m.group(2).strip().strip("'\"")
-                if val == "|":
-                    indent = len(raw_line) - len(raw_line.lstrip())
-                    val_lines = []
-                    i += 1
-                    while i < len(lines):
-                        if lines[i].strip() == "":
-                            i += 1
-                            continue
-                        cur_indent = len(lines[i]) - len(lines[i].lstrip())
-                        if cur_indent > indent:
-                            val_lines.append(lines[i].rstrip())
-                            i += 1
-                        else:
-                            break
-                    args[key] = "\n".join(val_lines)
-                    continue
-                else:
-                    args[key] = val
-            i += 1
-        return args
+        from agent.text_protocol import parse_response
+        return parse_response(content)
 
     @staticmethod
     def _parse_all_tools(content: str) -> list[tuple[str, dict]]:
-        """解析文本协议回复中所有 工具: 块，返回 [(name, args), ...] 列表。
-
-        支持一次 LLM 回复包含多个工具调用。
-        """
-        if not content:
-            return []
-        if "总结:" in content and "工具:" not in content:
-            return []
-
-        results = []
-        blocks = re.split(r'\n(?=工具:\s*\S+)', content)
-        for block in blocks:
-            if not block.strip():
-                continue
-            tool_match = re.search(r"工具:\s*(\S+)", block)
-            if not tool_match:
-                continue
-            tool_name = tool_match.group(1).strip()
-            args = {}
-            param_section = re.search(r"参数:[ \t]*(.*?)(?:\n\s*\n|\n\s*总结:|$)", block, re.DOTALL)
-            if param_section:
-                args = LingdongAgent._parse_params_section(param_section.group(1))
-            results.append((tool_name, args))
-        return results
+        """解析文本协议回复中所有 工具: 块，返回 [(name, args), ...] 列表。"""
+        from agent.text_protocol import parse_tool_blocks
+        return parse_tool_blocks(content)
 
     # ══════════════════════════════════════════════════════════
     #  记忆注入统一入口
@@ -1093,7 +1413,7 @@ class LingdongAgent:
                 "visual_strategy": agent_config.visual_strategy,
                 "local_vision": agent_config.local_vision,
             }
-        multimodal = _is_multimodal_model(self.model)
+        multimodal = is_multimodal_model(self.model)
         return {
             "multimodal": multimodal,
             "vision_mode": "direct" if multimodal else "som",
@@ -1120,9 +1440,25 @@ class LingdongAgent:
 
         messages.append({"role": "assistant", "content": content})
         hint = "\n\n(如果任务目标已达成，请直接回复 总结: 结束，不要继续多余操作)" if success else ""
+        safe_result = result
+        try:
+            safe_result = json.loads(json.dumps(result, ensure_ascii=False))
+            def _strip_binary(obj):
+                if isinstance(obj, dict):
+                    for key in list(obj.keys()):
+                        if key.lower() in ("base64", "image_b64") and isinstance(obj.get(key), str):
+                            obj[key] = f"<omitted {len(obj[key])} base64 chars>"
+                        else:
+                            _strip_binary(obj[key])
+                elif isinstance(obj, list):
+                    for item in obj:
+                        _strip_binary(item)
+            _strip_binary(safe_result)
+        except Exception:
+            safe_result = result
         messages.append({
             "role": "user",
-            "content": json.dumps(result, ensure_ascii=False)[:1500] + hint,
+            "content": json.dumps(safe_result, ensure_ascii=False)[:1500] + hint,
         })
 
         multimodal = cfg["multimodal"]
@@ -1138,7 +1474,7 @@ class LingdongAgent:
             })
         else:
             sq = cfg.get("screenshot_quality", 30 if multimodal else 60)
-            raw_b64 = self.supervisor.capture_b64(quality=sq, max_size=1600)
+            raw_b64 = self.supervisor.capture_b64(quality=sq, max_size=1600 if multimodal else 0)
             cur_hash = hashlib.md5(raw_b64.encode()).hexdigest()[:16]
             if cur_hash == last_b64_hash and cfg["use_dedup"]:
                 messages.append({
@@ -1162,11 +1498,8 @@ class LingdongAgent:
                     self.supervisor._last_som_map = som_result["label_map"]
                     if cfg["vision_mode"] != "direct" and som_result["count"] > 0:
                         b64 = som_result["image_b64"]
-                        lines = "\n".join(
-                            f"  #{i}: 「{e['text']}」 坐标({e['x']},{e['y']})"
-                            for i, e in som_result["label_map"].items()
-                        )
-                        som_label = f"\n屏幕元素编号:\n{lines}\n使用 #N 或坐标点击"
+                        # 紧凑版比详细版更适合 LLM 消费，优先使用
+                        som_label = self._compact_som_label(som_result["label_map"])
 
                 if multimodal:
                     parts = [
@@ -1190,6 +1523,7 @@ class LingdongAgent:
             当 chat_mode=True 时，Agent 边执行边聊天，接收实时反馈/新任务。
         """
         self._ensure_registry()
+        self._begin_prompt_trace(goal)
         self._guidance_queue = guidance_queue
         cfg = self._resolve_text_protocol_config(_agent_config)
         multimodal = cfg["multimodal"]
@@ -1234,24 +1568,24 @@ class LingdongAgent:
         # ── 本地视觉引擎提示 ──
         if cfg.get("local_vision", False) and not multimodal:
             som_trust = """
-【重要】屏幕元素已用 #N 标号完整标注，含坐标和文字。
+[Local vision guidance]
+Screen elements are exposed as compact #N targets with text and coordinates.
+Prefer click(target="#N") when the target appears in Visible targets. If only a
+generic visual control is available, use its #N or coordinates and verify after
+the action. OCR/YOLO labels can be noisy; do not assume success from a tool
+return alone. After GUI actions, use the refreshed state to check whether the
+screen, focused window, text, URL, file, or process state actually changed.
 
-每次操作后必须截图验证界面是否变了。
-如果截图后看到的和操作前一样，说明操作没生效，换一种方式重试。
-
-用 click(target="屏幕上看到的准确文字") 来点击，不要调 read_text、read_ui。
-
-【聊天操作流程】进了聊天界面后：
-1. 先点输入框（标号里有 [Edit] 的就是）
-2. 再用 type_text 输入文字
-3. 最后 press_keys(keys="enter") 发送
+Do not use app-specific operating recipes. For custom-rendered or UIA-poor
+software, combine active-window-limited visual targets, OCR text, process/window
+state, keyboard shortcuts, clipboard typing, and screenshot-change verification.
 """
             current_content = messages[0]["content"]
             messages[0] = {"role": "system", "content": current_content + som_trust}
             self._emit("log", {"level": "info", "message": "已启用 SoM 信任模式"})
 
         # ── 首次截图 + 第 1 条用户消息 ──
-        raw_b64 = self.supervisor.capture_b64(quality=30 if multimodal else 60, max_size=1600)
+        raw_b64 = self.supervisor.capture_b64(quality=30 if multimodal else 60, max_size=1600 if multimodal else 0)
         screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
 
         som_label = ""
@@ -1261,15 +1595,11 @@ class LingdongAgent:
             self.supervisor._last_som_map = som_result["label_map"]
             if vision_mode != "direct" and som_result["count"] > 0:
                 b64 = som_result["image_b64"]
-                lines = "\n".join(
-                    f"  #{i}: 「{e['text']}」 坐标({e['x']},{e['y']})"
-                    for i, e in som_result["label_map"].items()
-                )
-                som_label = (
-                    f"\n屏幕元素编号（元素上有蓝色框和编号）:\n{lines}\n"
-                    f"\n使用 #N 指定目标，如: target: #3 或 target: #5"
-                    f"\n也可以直接用坐标: click(x=坐标x, y=坐标y)"
-                )
+                # 紧凑版过滤出最高优先级的元素，更适合 LLM 消费
+                som_label = self._compact_som_label(som_result["label_map"])
+
+        if self._som_enabled and som_result and som_result.get("label_map"):
+            screen_ctx = self._get_screen_context(minimal=cfg["context_minimal"])
 
         try:
             from features.system_features import list_windows
@@ -1316,6 +1646,44 @@ class LingdongAgent:
         self._som_enabled = _som_enabled
         if cfg.get("flow_chart_mode"):
             set_flow_chart_mode(True)
+
+        def _runtime_snapshot(include_screen: bool = True) -> dict:
+            """Small state snapshot used around GUI actions in text protocol."""
+            snap: dict[str, object] = {}
+            try:
+                from features.system_features import get_active_window
+                aw_data = get_active_window()
+                if isinstance(aw_data, dict):
+                    snap["active_window"] = {
+                        "title": aw_data.get("title", ""),
+                        "left": aw_data.get("left"),
+                        "top": aw_data.get("top"),
+                        "width": aw_data.get("width"),
+                        "height": aw_data.get("height"),
+                    }
+            except Exception:
+                pass
+            if include_screen:
+                try:
+                    b64 = self.supervisor.capture_b64(quality=35, max_size=900, update_scale=False)
+                    snap["screen_hash"] = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:12]
+                except Exception:
+                    pass
+            return snap
+
+        def _strip_trace_binary(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for key, value in obj.items():
+                    if key in ("base64", "image_b64", "b64"):
+                        out[key] = f"<omitted {len(str(value))} chars>"
+                    else:
+                        out[key] = _strip_trace_binary(value)
+                return out
+            if isinstance(obj, list):
+                return [_strip_trace_binary(item) for item in obj]
+            return obj
+
         for loop in range(1, _max_steps + 1):
             if self._stop_event and self._stop_event.is_set():
                 self._emit("log", {"level": "info", "message": "停止请求，终止循环"})
@@ -1419,8 +1787,22 @@ class LingdongAgent:
                     som_target = tool_args["target"].strip().strip("'\"")
                     if not re.match(r'^-?\d+\s*,\s*-?\d+$', som_target):
                         matched = False
+                        id_match = re.match(r"^#?(\d+)$", som_target)
+                        if id_match:
+                            idx = int(id_match.group(1))
+                            m = self.supervisor._last_som_map.get(idx)
+                            if m:
+                                tool_args = dict(tool_args)
+                                tool_args["target"] = f"{m['x']},{m['y']}"
+                                self._emit("log", {
+                                    "level": "info",
+                                    "message": f"SoM click: #{idx} -> {m['x']},{m['y']}",
+                                })
+                                matched = True
                         for idx, m in self.supervisor._last_som_map.items():
-                            if som_target in m.get("text", ""):
+                            if matched:
+                                break
+                            if self._som_text_matches(som_target, m.get("text", "")):
                                 tool_args = dict(tool_args)
                                 tool_args["target"] = f"{m['x']},{m['y']}"
                                 self._emit("log", {
@@ -1430,9 +1812,50 @@ class LingdongAgent:
                                 matched = True
                                 break
 
+                if tool_name == "click":
+                    click_target = str(tool_args.get("target", "") or "").strip().strip("'\"")
+                    click_button = str(tool_args.get("button", "left") or "left").strip().lower()
+                    if re.match(r'^-?\d+\s*,\s*-?\d+$', click_target) and click_button in ("", "left", "double"):
+                        normalized = {"target": click_target}
+                        if click_button == "double" or int(tool_args.get("clicks", 1) or 1) >= 2:
+                            normalized["double"] = True
+                        if not self.supervisor.uia_enabled:
+                            normalized["allow_uia"] = False
+                        normalized["physical"] = True
+                        tool_name = "click_target"
+                        tool_args = normalized
+
+                verify_before = None
+                verify_after = None
+                verify_actions = {
+                    "click", "click_target", "right_click", "double_click",
+                    "middle_click", "type", "type_text", "type_clipboard",
+                    "hotkey", "press_keys", "scroll", "drag",
+                }
+                if tool_name in verify_actions:
+                    verify_before = _runtime_snapshot(include_screen=False)
+
                 step_start = time.time()
                 try:
-                    if not _USE_FLOW_CHART_MODE:
+                    self._trace_llm("exec_before", {
+                        "step": sn,
+                        "tool": tool_name,
+                        "args": _strip_trace_binary(tool_args),
+                    })
+                    if (
+                        tool_name == "click_target"
+                        and tool_args.get("physical")
+                        and re.match(r'^-?\d+\s*,\s*-?\d+$', str(tool_args.get("target", "")).strip())
+                    ):
+                        from features.action_features import click_target as _direct_click_target
+                        ok = _direct_click_target(
+                            str(tool_args.get("target", "")),
+                            double=bool(tool_args.get("double", False)),
+                            allow_uia=bool(tool_args.get("allow_uia", False)),
+                            physical=True,
+                        )
+                        step_result = {"success": bool(ok), "result": bool(ok), "fast_path": "physical_click"}
+                    elif not _USE_FLOW_CHART_MODE:
                         from agent.meta_actions import execute as meta_execute, META_ACTIONS
                         if tool_name in META_ACTIONS:
                             step_result = meta_execute(tool_name, tool_args)
@@ -1444,6 +1867,17 @@ class LingdongAgent:
                 except Exception as e:
                     step_result = {"success": False, "error": str(e)}
                     step_success = False
+                finally:
+                    try:
+                        self._trace_llm("exec_after", {
+                            "step": sn,
+                            "tool": tool_name,
+                            "args": _strip_trace_binary(tool_args),
+                            "result": _strip_trace_binary(step_result),
+                            "elapsed_ms": round((time.time() - step_start) * 1000, 1),
+                        })
+                    except Exception:
+                        pass
 
                 step["status"] = "completed" if step_success else "failed"
                 step["result"] = {
@@ -1451,6 +1885,24 @@ class LingdongAgent:
                     "error": step_result.get("error", ""),
                     "step_ms": round((time.time() - step_start) * 1000),
                 }
+                if verify_before is not None:
+                    verify_after = _runtime_snapshot()
+                    before_title = ""
+                    after_title = ""
+                    if isinstance(verify_before.get("active_window"), dict):
+                        before_title = str(verify_before["active_window"].get("title", ""))
+                    if isinstance(verify_after.get("active_window"), dict):
+                        after_title = str(verify_after["active_window"].get("title", ""))
+                    step["result"]["verification"] = {
+                        "before": verify_before,
+                        "after": verify_after,
+                        "screen_changed": bool(
+                            verify_before.get("screen_hash")
+                            and verify_after.get("screen_hash")
+                            and verify_before.get("screen_hash") != verify_after.get("screen_hash")
+                        ),
+                        "active_window_changed": before_title != after_title,
+                    }
                 if tool_args:
                     step["args_resolved"] = {k: str(v)[:80] for k, v in tool_args.items()}
                 steps.append(step)
@@ -1480,6 +1932,50 @@ class LingdongAgent:
                 last_success = step_success
                 last_result = step_result
                 last_tool_name = tool_name
+
+                if step_success and isinstance(tool_args, dict):
+                    action_name_for_focus = str(tool_args.get("action", "") or "").lower()
+                    focus_hint = ""
+                    if tool_name == "manage_window" and action_name_for_focus in ("focus", "restore", "maximize"):
+                        focus_hint = str(
+                            tool_args.get("title")
+                            or tool_args.get("target")
+                            or tool_args.get("window")
+                            or tool_args.get("name")
+                            or ""
+                        )
+                    elif tool_name == "focus_window":
+                        focus_hint = str(tool_args.get("title") or tool_args.get("target") or "")
+                    if focus_hint:
+                        self._remember_intended_focus(focus_hint)
+
+                if verify_after is not None:
+                    before_title = ""
+                    after_title = ""
+                    if isinstance(verify_before, dict) and isinstance(verify_before.get("active_window"), dict):
+                        before_title = str(verify_before["active_window"].get("title", ""))
+                    if isinstance(verify_after, dict) and isinstance(verify_after.get("active_window"), dict):
+                        after_title = str(verify_after["active_window"].get("title", ""))
+                    self._emit("log", {
+                        "level": "info",
+                        "message": (
+                            f"验证: active_window '{before_title}' -> '{after_title}', "
+                            f"screen_changed={step['result'].get('verification', {}).get('screen_changed', False)}"
+                        ),
+                    })
+
+                if step_success and ti < len(tool_blocks) - 1:
+                    action_name = str(tool_args.get("action", "")).lower() if isinstance(tool_args, dict) else ""
+                    if (
+                        (tool_name == "manage_window" and action_name in ("focus", "restore", "maximize"))
+                        or (tool_name == "manage_app" and action_name in ("launch", "open"))
+                        or tool_name in ("focus_window", "launch_program")
+                    ):
+                        self._emit("log", {
+                            "level": "info",
+                            "message": "窗口上下文已变化，刷新感知后再继续执行后续点击",
+                        })
+                        break
 
                 # ── 连续失败终止（多工具批处理中立即终止）──
                 if consecutive_step_fails >= _max_consecutive_failures:
@@ -2013,6 +2509,30 @@ PARAMS: {{"x": 960, "y": 540}}
         messages = [{"role": "system", "content": SYSPROMPT}]
         done_noop_count = 0
 
+        def _runtime_snapshot(include_screen: bool = True) -> dict:
+            """Capture a small generic state snapshot for post-action verification."""
+            snap: dict[str, object] = {}
+            try:
+                from features.system_features import get_active_window
+                aw_data = get_active_window()
+                if isinstance(aw_data, dict):
+                    snap["active_window"] = {
+                        "title": aw_data.get("title", ""),
+                        "left": aw_data.get("left"),
+                        "top": aw_data.get("top"),
+                        "width": aw_data.get("width"),
+                        "height": aw_data.get("height"),
+                    }
+            except Exception:
+                pass
+            if include_screen:
+                try:
+                    b64 = self.supervisor.capture_b64(quality=35, max_size=900, update_scale=False)
+                    snap["screen_hash"] = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:12]
+                except Exception:
+                    pass
+            return snap
+
         for loop in range(1, max_steps + 1):
             if self._stop_event and self._stop_event.is_set():
                 break
@@ -2072,7 +2592,20 @@ PARAMS: {{"x": 960, "y": 540}}
                 steps, loop, action, action_data, screen_w, screen_h)
 
             result_text = "成功" if success else f"失败: {result_content.get('text', '')}"
-            messages.append({"role": "user", "content": f"执行结果: {result_text}"})
+            if verify_after is not None:
+                before_title = ""
+                after_title = ""
+                if isinstance(verify_before, dict) and isinstance(verify_before.get("active_window"), dict):
+                    before_title = str(verify_before["active_window"].get("title", ""))
+                if isinstance(verify_after, dict) and isinstance(verify_after.get("active_window"), dict):
+                    after_title = str(verify_after["active_window"].get("title", ""))
+                verification_text = (
+                    f"\n验证: active_window '{before_title}' -> '{after_title}', "
+                    f"screen_changed={step['result'].get('verification', {}).get('screen_changed', False)}"
+                )
+            else:
+                verification_text = ""
+            messages.append({"role": "user", "content": f"执行结果: {result_text}{verification_text}"})
 
             if len(messages) > self.sliding_window_limit:
                 messages = [messages[0]] + messages[-(self.sliding_window_limit - 2):]

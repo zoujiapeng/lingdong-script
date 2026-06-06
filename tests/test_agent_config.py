@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import pytest
 from agent.config import AgentConfig, agent_config_from_legacy
-from agent.agent import _is_multimodal_model
+from agent.prompts import is_multimodal_model as _is_multimodal_model
 
 
 # ═══════════════════════════════════════════════════════════════════

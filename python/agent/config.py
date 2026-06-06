@@ -39,10 +39,10 @@ class TextVisionConfig:
     # ── 感知层开关 ──
     uia_enabled: bool = False       # UIA 控件树
     ocr_enabled: bool = True        # OCR 文字检测
-    yolo_enabled: bool = False      # YOLO 图标检测
+    yolo_enabled: bool = False      # YOLO 图标检测（默认关闭，需 GPU/ONNX）
     som_enabled: bool = True        # SoM 标号
     window_aware_ocr: bool = True   # 窗口限定（只扫活动窗口）
-    local_vision: bool = False      # 本地视觉引擎 (YOLO ONNX)
+    local_vision: bool = False      # 本地视觉引擎 (YOLO ONNX，默认关闭)
 
     # ── 视觉策略 ──
     visual_strategy: str = "som"    # som | ocr_llm | blind_guess | cli_path
@@ -198,13 +198,13 @@ class AgentConfig:
         旧版自动检测逻辑，仅用于 agent_config_from_legacy() 向后兼容。
         新代码直接设置 execution_mode + 子配置，调用 resolve()。
         """
-        from agent.agent import _is_multimodal_model
+        from agent.prompts import is_multimodal_model
         if self.multimodal == "true":
             self._multimodal = True
         elif self.multimodal == "false":
             self._multimodal = False
         else:
-            self._multimodal = _is_multimodal_model(model_name)
+            self._multimodal = is_multimodal_model(model_name)
 
         if self.llm_protocol == "computer_use":
             self._multimodal = True

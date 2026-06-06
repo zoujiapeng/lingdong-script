@@ -14,9 +14,9 @@ from queue import Queue, Empty
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agent.agent import (
-    LingdongAgent,
-    _is_multimodal_model,
+from agent.agent import LingdongAgent
+from agent.prompts import (
+    is_multimodal_model as _is_multimodal_model,
     CHAT_MODE_INSTRUCTIONS,
 )
 
