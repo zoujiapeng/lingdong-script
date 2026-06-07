@@ -9,28 +9,29 @@
 
 ```mermaid
 graph TB
-    User["用户自然语言目标"] --> Run["LingdongAgent.run()"]
-    Run --> Unified["_unified_run()"]
-    Unified --> Resolved["config.resolve()"]
-    Resolved --> Router{"execution_mode 匹配"}
-    
-    Router --> |flow_chart| Direct["_run_direct()<br/>generate_flow_script<br/>返回流程图JSON<br/>不下场执行"]
-    Router --> |multimodal| TextProto["run_text_protocol()<br/>多模态版<br/>截图直接送LLM"]
-    Router --> |text| TextProto2["run_text_protocol()<br/>纯文本版<br/>SoM标号+UIA+OCR"]
-    Router --> |offline| Offline["直接返回成功<br/>不调用LLM"]
+    User["用户自然语言目标"] --> Run["agent.run(goal)"]
 
-    subgraph PostExec["执行后"]
-        Reflection["reflection.py<br/>self-reflect_task()"]
-        Memory["memory.py<br/>MemoryStore 更新"]
-        Persistence["state_persistence.py<br/>save_run()"]
+    subgraph UR["_unified_run(goal, config) — 执行体"]
+        S["config.resolve()<br/>展平配置 → sync 参数 → 注入记忆"]
+        D{"execution_mode"}
+        S --> D
+        D -->|flow_chart| FC["_run_direct()<br/>→ generate_flow_script()<br/>返回流程图 JSON，不下场执行"]
+        D -->|multimodal| MM["run_text_protocol()<br/>截图直接送 LLM（多模态视觉理解）"]
+        D -->|text| TX["run_text_protocol()<br/>SoM 标号 + UIA + OCR（本地视觉定位）"]
+        D -->|offline| OFF["直接返回 {success: true}<br/>不调 LLM，不截屏"]
     end
 
-    TextProto --> PostExec
-    TextProto2 --> PostExec
-    Direct --> PostExec
+    subgraph PT["run() 统一后处理（所有模式共享）"]
+        P1["reflection.reflect_task()<br/>错误分析 → 改进建议"]
+        P2["memory 更新<br/>add_rule / add_preference / add_episode"]
+        P3["state_persistence.save_run()<br/>运行摘要持久化"]
+        P1 --> P2 --> P3
+    end
+
+    Run --> UR -.-> |返回 result| PT
 ```
 
-> **旧路由已移除**: 之前有 `resolve_auto()` / `agent_config_from_legacy()` / `LangGraph` / `Planned` / `ComputerUse` 等 5 种旧执行模式。现在统一通过 `AgentConfig.execution_mode` + `resolve()` 分发，仅保留上述 4 种模式。
+> **旧路由已移除**: 之前有 `resolve_auto()` / `agent_config_from_legacy()` / `LangGraph` / `Planned` / `ComputerUse` 等 5 种旧执行模式。现改为 `_unified_run()` 统一入口：内部 `config.resolve()` 展平配置 → `execution_mode` 4 种分发，所有模式共享 `run()` 的后处理管道（反思 + 记忆 + 持久化）。
 
 ---
 
@@ -215,17 +216,17 @@ graph TB
     Frontend --> |localStorage| IPC
     
     subgraph IPC["IPC 传输"]
-        Config["agent_config dict<br/>(mode + 全局参数 +<br/>子配置字段)"]
+        Config["agent_config dict<br/>(execution_mode + 全局参数 + 子配置)"]
     end
 
-    Config --> Resolve
+    Config --> AgentCfg["agent/config.py<br/>AgentConfig.from_dict()"]
+    AgentCfg --> Flat["config.resolve()<br/>→ 扁平 dict（参数合并覆盖）"]
     
-    subgraph AgentConfig["agent/config.py"]
-        Resolve["resolve()"] --> |flow_chart| FC["{supervise,<br/>flow_chart_mode=True}"]
-        Resolve --> |multimodal| MM["{multimodal=True,<br/>screenshot_quality,<br/>vision_mode=direct}"]
-        Resolve --> |text| TX["{multimodal=False,<br/>uia_enabled, ocr,<br/>yolo, som, ...}"]
-        Resolve --> |offline| OFF["{multimodal=False,<br/>llm_protocol=text,<br/>planning=pre_plan}"]
-    end
+    Flat --> Dispatch{"_unified_run()<br/>按 execution_mode"}
+    Dispatch --> |flow_chart| FC["_run_direct()"]
+    Dispatch --> |multimodal| MM["run_text_protocol()<br/>多模态"]
+    Dispatch --> |text| TX["run_text_protocol()<br/>纯文本"]
+    Dispatch --> |offline| OFF["直接返回"]
 ```
 
 ### config.py — AgentConfig 数据结构
@@ -326,14 +327,20 @@ __main__.py: _run_agent()
   +-- cfg["agent_config"] → AgentConfig.from_dict()
   |   +-- execution_mode 指定 4 种之一
   |   +-- 子配置由 from_dict() 自动填入
-  +-- agent.run(agent_config=cfg) → _unified_run()
-  |   +-- config.resolve() → 展平成扁平 dict
-  |   +-- 更新 supervisor / LLM 参数
-  |   +-- _inject_memory_prompt() + _emit("memory_snapshot")
-  |   +-- 按 execution_mode 分发:
-  |   |   flow_chart → _run_direct()
-  |   |   multimodal → run_text_protocol()
-  |   |   text      → run_text_protocol()
-  |   |   offline   → 直接返回
-  +-- post-task: reflection + memory + persistence
+  +-- agent.run(agent_config=cfg)
+  |   +-- _unified_run(goal, config)
+  |   |   +-- config.resolve() → 扁平 dict
+  |   |   +-- 更新 supervisor / LLM 参数
+  |   |   +-- _inject_memory_prompt()
+  |   |   +-- 按 execution_mode 分发:
+  |   |   |   flow_chart → _run_direct()
+  |   |   |   multimodal → run_text_protocol()
+  |   |   |   text       → run_text_protocol()
+  |   |   |   offline    → 直接返回
+  |   |   +-- return result
+  |   +-- post-task (统一，所有模式)
+  |   |   +-- reflection.reflect_task()
+  |   |   +-- memory 更新 (rule / preference / episode)
+  |   |   +-- state_persistence.save_run()
+  |   +-- return result
 ```
