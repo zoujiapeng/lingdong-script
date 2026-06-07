@@ -273,11 +273,13 @@ graph LR
     local_vision --> ocr
 
     %% 交叉依赖
-    agent --> engine          # Agent 可以生成 DSL 执行
-    meta_actions --> registry # 元动作内部调用 @feature
+    agent --> engine
+    meta_actions --> registry
     healing --> registry
     visual_locator --> experience_db["agent/experience_db"]
     visual_locator --> providers["providers/vlm"]
+    %% Agent 可以生成 DSL 执行
+    %% 元动作内部调用 @feature
 
     %% 前端-后端桥接
     ipc["src/main/main.ts"] --> agent
