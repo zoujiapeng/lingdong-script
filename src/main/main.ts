@@ -682,7 +682,7 @@ ipcMain.handle('engine:status', () => {
 
 function sendToAgent(message: any) {
   if (agentProcess && agentProcess.stdin) {
-    agentProcess.stdin.write(JSON.stringify(message) + '\n');
+    agentProcess.stdin.write(Buffer.from(JSON.stringify(message) + '\n', 'utf8'));
   }
 }
 

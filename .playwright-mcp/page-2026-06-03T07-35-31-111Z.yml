@@ -1,0 +1,381 @@
+- generic [ref=e3]:
+  - generic:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - button "撤销 (Ctrl+Z)" [ref=e6] [cursor=pointer]:
+          - img [ref=e7]
+        - button "重做 (Ctrl+Y)" [ref=e10] [cursor=pointer]:
+          - img [ref=e11]
+        - textbox [ref=e15]: 桌面图标监控
+        - button [ref=e16] [cursor=pointer]:
+          - img [ref=e17]
+      - generic [ref=e19]:
+        - button "搜索" [ref=e21] [cursor=pointer]:
+          - img [ref=e22]
+          - text: 搜索
+        - button "模板" [ref=e26] [cursor=pointer]:
+          - img [ref=e27]
+          - text: 模板
+          - img [ref=e30]
+        - button "自动布局" [ref=e32] [cursor=pointer]:
+          - img [ref=e33]
+        - button "适应屏幕" [ref=e38] [cursor=pointer]:
+          - img [ref=e39]
+        - button "打开" [ref=e42] [cursor=pointer]:
+          - img [ref=e43]
+        - button "保存 (Ctrl+S)" [ref=e46] [cursor=pointer]:
+          - img [ref=e47]
+        - button "运行" [ref=e51] [cursor=pointer]:
+          - img [ref=e52]
+          - text: 运行
+        - button "宏录制" [ref=e55] [cursor=pointer]:
+          - img [ref=e56]
+        - button "已学习目标" [ref=e58] [cursor=pointer]:
+          - img [ref=e59]
+        - button "定时/触发配置" [ref=e69] [cursor=pointer]:
+          - img [ref=e70]
+        - button "跟随系统" [ref=e72] [cursor=pointer]:
+          - img [ref=e73]
+    - generic [ref=e75]:
+      - button "流程图" [ref=e76] [cursor=pointer]:
+        - img [ref=e77]
+        - text: 流程图
+      - button "伪代码" [ref=e82] [cursor=pointer]:
+        - img [ref=e83]
+        - text: 伪代码
+      - button "Agent" [ref=e86] [cursor=pointer]:
+        - img [ref=e87]
+        - text: Agent
+      - button "设置" [ref=e91] [cursor=pointer]:
+        - img [ref=e92]
+        - text: 设置
+  - generic [ref=e95]:
+    - generic [ref=e96]:
+      - generic [ref=e97]:
+        - generic [ref=e98]:
+          - generic [ref=e99]: 指令库
+          - generic [ref=e100]: 加载中...
+        - generic [ref=e101]:
+          - img [ref=e102]
+          - textbox "搜索指令…" [ref=e105]
+      - generic [ref=e106]:
+        - button "全部" [ref=e107] [cursor=pointer]
+        - button "常用" [ref=e108] [cursor=pointer]
+        - button "图像" [ref=e109] [cursor=pointer]
+        - button "控制" [ref=e110] [cursor=pointer]
+        - button "设备" [ref=e111] [cursor=pointer]
+        - button "数据" [ref=e112] [cursor=pointer]
+        - button "系统" [ref=e113] [cursor=pointer]
+        - button "工具" [ref=e114] [cursor=pointer]
+      - generic [ref=e115]:
+        - generic "拖拽到画布 或 双击添加 等待指定时间或条件成立（图片/窗口/文件/进程）" [ref=e116]:
+          - img [ref=e118]
+          - generic [ref=e121]:
+            - generic [ref=e122]: 等待
+            - generic [ref=e123]: 等待指定时间或条件成立（图片/窗口/文件/进程）
+          - generic "未测试 — 点击标记为已测试" [ref=e124] [cursor=pointer]:
+            - img [ref=e125]
+        - generic "拖拽到画布 或 双击添加 在指定位置输入文字（支持自动聚焦和清空）" [ref=e127]:
+          - img [ref=e129]
+          - generic [ref=e131]:
+            - generic [ref=e132]: 输入文本
+            - generic [ref=e133]: 在指定位置输入文字（支持自动聚焦和清空）
+          - generic "未测试 — 点击标记为已测试" [ref=e134] [cursor=pointer]:
+            - img [ref=e135]
+        - generic "拖拽到画布 或 双击添加 模拟键盘按键（支持组合键和修饰键）" [ref=e137]:
+          - img [ref=e139]
+          - generic [ref=e141]:
+            - generic [ref=e142]: 键盘事件
+            - generic [ref=e143]: 模拟键盘按键（支持组合键和修饰键）
+          - generic "未测试 — 点击标记为已测试" [ref=e144] [cursor=pointer]:
+            - img [ref=e145]
+        - generic "拖拽到画布 或 双击添加 在屏幕上滑动或拖拽" [ref=e147]:
+          - img [ref=e149]
+          - generic [ref=e152]:
+            - generic [ref=e153]: 滑动拖拽
+            - generic [ref=e154]: 在屏幕上滑动或拖拽
+          - generic "未测试 — 点击标记为已测试" [ref=e155] [cursor=pointer]:
+            - img [ref=e156]
+        - generic "拖拽到画布 或 双击添加 根据条件选择不同路径" [ref=e158]:
+          - img [ref=e160]
+          - generic [ref=e164]:
+            - generic [ref=e165]: 条件判断
+            - generic [ref=e166]: 根据条件选择不同路径
+          - generic "未测试 — 点击标记为已测试" [ref=e167] [cursor=pointer]:
+            - img [ref=e168]
+        - generic "拖拽到画布 或 双击添加 循环执行一系列操作" [ref=e170]:
+          - img [ref=e172]
+          - generic [ref=e177]:
+            - generic [ref=e178]: 循环
+            - generic [ref=e179]: 循环执行一系列操作
+          - generic "未测试 — 点击标记为已测试" [ref=e180] [cursor=pointer]:
+            - img [ref=e181]
+        - generic "拖拽到画布 或 双击添加 调用其他 .flow 脚本作为子流程执行" [ref=e183]:
+          - img [ref=e185]
+          - generic [ref=e190]:
+            - generic [ref=e191]: 运行子脚本
+            - generic [ref=e192]: 调用其他 .flow 脚本作为子流程执行
+          - generic "未测试 — 点击标记为已测试" [ref=e193] [cursor=pointer]:
+            - img [ref=e194]
+        - generic "拖拽到画布 或 双击添加 截取屏幕图像（支持全屏/区域截图，PNG/JPG/BMP格式）" [ref=e196]:
+          - img [ref=e198]
+          - generic [ref=e201]:
+            - generic [ref=e202]: 截图
+            - generic [ref=e203]: 截取屏幕图像（支持全屏/区域截图，PNG/JPG/BMP格式）
+          - generic "未测试 — 点击标记为已测试" [ref=e204] [cursor=pointer]:
+            - img [ref=e205]
+        - generic "拖拽到画布 或 双击添加 通过 Playwright 操控网页：导航、点击、输入、截图、提取内容" [ref=e207]:
+          - img [ref=e209]
+          - generic [ref=e212]:
+            - generic [ref=e213]: 浏览器操作
+            - generic [ref=e214]: 通过 Playwright 操控网页：导航、点击、输入、截图、提取内容
+          - generic "未测试 — 点击标记为已测试" [ref=e215] [cursor=pointer]:
+            - img [ref=e216]
+        - generic "拖拽到画布 或 双击添加 自动检测并关闭弹窗对话框" [ref=e218]:
+          - img [ref=e220]
+          - generic [ref=e224]:
+            - generic [ref=e225]: 关闭弹窗
+            - generic [ref=e226]: 自动检测并关闭弹窗对话框
+          - generic "未测试 — 点击标记为已测试" [ref=e227] [cursor=pointer]:
+            - img [ref=e228]
+        - generic "拖拽到画布 或 双击添加 检测指定区域的颜色值" [ref=e230]:
+          - img [ref=e232]
+          - generic [ref=e238]:
+            - generic [ref=e239]: 颜色检测
+            - generic [ref=e240]: 检测指定区域的颜色值
+          - generic "未测试 — 点击标记为已测试" [ref=e241] [cursor=pointer]:
+            - img [ref=e242]
+        - generic "拖拽到画布 或 双击添加 等待进度条完成或变化" [ref=e244]:
+          - img [ref=e246]
+          - generic [ref=e250]:
+            - generic [ref=e251]: 等待进度
+            - generic [ref=e252]: 等待进度条完成或变化
+          - generic "未测试 — 点击标记为已测试" [ref=e253] [cursor=pointer]:
+            - img [ref=e254]
+        - generic "拖拽到画布 或 双击添加 等待屏幕区域稳定或发生变化" [ref=e256]:
+          - img [ref=e258]
+          - generic [ref=e263]:
+            - generic [ref=e264]: 等待区域变化
+            - generic [ref=e265]: 等待屏幕区域稳定或发生变化
+          - generic "未测试 — 点击标记为已测试" [ref=e266] [cursor=pointer]:
+            - img [ref=e267]
+        - generic "拖拽到画布 或 双击添加 通过 AI 识别当前屏幕场景" [ref=e269]:
+          - img [ref=e271]
+          - generic [ref=e276]:
+            - generic [ref=e277]: 场景识别
+            - generic [ref=e278]: 通过 AI 识别当前屏幕场景
+          - generic "未测试 — 点击标记为已测试" [ref=e279] [cursor=pointer]:
+            - img [ref=e280]
+        - generic "拖拽到画布 或 双击添加 设置全局变量的值（支持字符串/数字/布尔/JSON）" [ref=e282]:
+          - img [ref=e284]
+          - generic [ref=e289]:
+            - generic [ref=e290]: 设置变量
+            - generic [ref=e291]: 设置全局变量的值（支持字符串/数字/布尔/JSON）
+          - generic "未测试 — 点击标记为已测试" [ref=e292] [cursor=pointer]:
+            - img [ref=e293]
+        - generic "拖拽到画布 或 双击添加 读取全局变量的值（字符串/数字/布尔/JSON）" [ref=e295]:
+          - img [ref=e297]
+          - generic [ref=e301]:
+            - generic [ref=e302]: 读取变量
+            - generic [ref=e303]: 读取全局变量的值（字符串/数字/布尔/JSON）
+          - generic "未测试 — 点击标记为已测试" [ref=e304] [cursor=pointer]:
+            - img [ref=e305]
+        - generic "拖拽到画布 或 双击添加 启动程序/终止进程/等待进程/激活窗口" [ref=e307]:
+          - img [ref=e309]
+          - generic [ref=e311]:
+            - generic [ref=e312]: 进程操作
+            - generic [ref=e313]: 启动程序/终止进程/等待进程/激活窗口
+          - generic "未测试 — 点击标记为已测试" [ref=e314] [cursor=pointer]:
+            - img [ref=e315]
+        - generic "拖拽到画布 或 双击添加 获取电池电量和充电状态" [ref=e317]:
+          - img [ref=e319]
+          - generic [ref=e321]:
+            - generic [ref=e322]: 获取电池状态
+            - generic [ref=e323]: 获取电池电量和充电状态
+          - generic "未测试 — 点击标记为已测试" [ref=e324] [cursor=pointer]:
+            - img [ref=e325]
+        - generic "拖拽到画布 或 双击添加 设置显示器亮度 (0-100)" [ref=e327]:
+          - img [ref=e329]
+          - generic [ref=e335]:
+            - generic [ref=e336]: 设置亮度
+            - generic [ref=e337]: 设置显示器亮度 (0-100)
+          - generic "未测试 — 点击标记为已测试" [ref=e338] [cursor=pointer]:
+            - img [ref=e339]
+        - generic "拖拽到画布 或 双击添加 最小化/最大化/还原/关闭/调整大小/贴靠窗口" [ref=e341]:
+          - img [ref=e343]
+          - generic [ref=e345]:
+            - generic [ref=e346]: 窗口操作
+            - generic [ref=e347]: 最小化/最大化/还原/关闭/调整大小/贴靠窗口
+          - generic "未测试 — 点击标记为已测试" [ref=e348] [cursor=pointer]:
+            - img [ref=e349]
+        - generic "拖拽到画布 或 双击添加 关机/重启/注销/休眠/锁定/睡眠/关闭显示器" [ref=e351]:
+          - img [ref=e353]
+          - generic [ref=e355]:
+            - generic [ref=e356]: 系统电源
+            - generic [ref=e357]: 关机/重启/注销/休眠/锁定/睡眠/关闭显示器
+          - generic "未测试 — 点击标记为已测试" [ref=e358] [cursor=pointer]:
+            - img [ref=e359]
+        - generic "拖拽到画布 或 双击添加 设置音量或切换静音" [ref=e361]:
+          - img [ref=e363]
+          - generic [ref=e367]:
+            - generic [ref=e368]: 音频控制
+            - generic [ref=e369]: 设置音量或切换静音
+          - generic "未测试 — 点击标记为已测试" [ref=e370] [cursor=pointer]:
+            - img [ref=e371]
+        - generic "拖拽到画布 或 双击添加 显示桌面/设置壁纸/清空回收站" [ref=e373]:
+          - img [ref=e375]
+          - generic [ref=e378]:
+            - generic [ref=e379]: 桌面操作
+            - generic [ref=e380]: 显示桌面/设置壁纸/清空回收站
+          - generic "未测试 — 点击标记为已测试" [ref=e381] [cursor=pointer]:
+            - img [ref=e382]
+        - generic "拖拽到画布 或 双击添加 写入/读取/获取图片/获取文件/清空剪贴板" [ref=e384]:
+          - img [ref=e386]
+          - generic [ref=e389]:
+            - generic [ref=e390]: 剪贴板操作
+            - generic [ref=e391]: 写入/读取/获取图片/获取文件/清空剪贴板
+          - generic "未测试 — 点击标记为已测试" [ref=e392] [cursor=pointer]:
+            - img [ref=e393]
+        - generic "拖拽到画布 或 双击添加 鼠标综合操作：点击（坐标/图片/OCR）/滚轮/悬停/移动" [ref=e395]:
+          - img [ref=e397]
+          - generic [ref=e399]:
+            - generic [ref=e400]: 鼠标操作
+            - generic [ref=e401]: 鼠标综合操作：点击（坐标/图片/OCR）/滚轮/悬停/移动
+          - generic "未测试 — 点击标记为已测试" [ref=e402] [cursor=pointer]:
+            - img [ref=e403]
+        - generic "拖拽到画布 或 双击添加 处理/列出/填写系统对话框（保存、确认、错误弹窗等）" [ref=e405]:
+          - img [ref=e407]
+          - generic [ref=e409]:
+            - generic [ref=e410]: 对话框操作
+            - generic [ref=e411]: 处理/列出/填写系统对话框（保存、确认、错误弹窗等）
+          - generic "未测试 — 点击标记为已测试" [ref=e412] [cursor=pointer]:
+            - img [ref=e413]
+        - generic "拖拽到画布 或 双击添加 获取无障碍树/查找元素/点击元素（UIA 接口）" [ref=e415]:
+          - img [ref=e417]
+          - generic [ref=e423]:
+            - generic [ref=e424]: 无障碍操作
+            - generic [ref=e425]: 获取无障碍树/查找元素/点击元素（UIA 接口）
+          - generic "未测试 — 点击标记为已测试" [ref=e426] [cursor=pointer]:
+            - img [ref=e427]
+        - generic "拖拽到画布 或 双击添加 列出附近网络/连接 WiFi/断开 WiFi" [ref=e429]:
+          - img [ref=e431]
+          - generic [ref=e435]:
+            - generic [ref=e436]: WiFi 操作
+            - generic [ref=e437]: 列出附近网络/连接 WiFi/断开 WiFi
+          - generic "未测试 — 点击标记为已测试" [ref=e438] [cursor=pointer]:
+            - img [ref=e439]
+        - generic "拖拽到画布 或 双击添加 调用注册表中的自动化功能（120+ 工具）" [ref=e441]:
+          - img [ref=e443]
+          - generic [ref=e445]:
+            - generic [ref=e446]: 调用工具
+            - generic [ref=e447]: 调用注册表中的自动化功能（120+ 工具）
+          - generic "未测试 — 点击标记为已测试" [ref=e448] [cursor=pointer]:
+            - img [ref=e449]
+        - generic "拖拽到画布 或 双击添加 从摄像头抓拍一帧图像，保存到文件或返回 Base64" [ref=e451]:
+          - img [ref=e453]
+          - generic [ref=e456]:
+            - generic [ref=e457]: 摄像头抓拍
+            - generic [ref=e458]: 从摄像头抓拍一帧图像，保存到文件或返回 Base64
+          - generic "未测试 — 点击标记为已测试" [ref=e459] [cursor=pointer]:
+            - img [ref=e460]
+        - generic "拖拽到画布 或 双击添加 从摄像头录制视频到文件，支持设置时长和分辨率" [ref=e462]:
+          - img [ref=e464]
+          - generic [ref=e467]:
+            - generic [ref=e468]: 摄像头录像
+            - generic [ref=e469]: 从摄像头录制视频到文件，支持设置时长和分辨率
+          - generic "未测试 — 点击标记为已测试" [ref=e470] [cursor=pointer]:
+            - img [ref=e471]
+      - generic [ref=e473]:
+        - generic [ref=e474]: 最近使用
+        - generic [ref=e475]:
+          - generic [ref=e476]:
+            - img [ref=e478]
+            - generic [ref=e480]: 鼠标操作
+          - generic [ref=e481]:
+            - img [ref=e483]
+            - generic [ref=e486]: 等待
+          - generic [ref=e487]:
+            - img [ref=e489]
+            - generic [ref=e493]: 条件判断
+    - generic [ref=e495]:
+      - generic:
+        - img
+        - generic [ref=e499] [cursor=pointer]:
+          - img [ref=e501]
+          - text: 开始
+        - generic:
+          - generic [ref=e504] [cursor=pointer]:
+            - generic [ref=e505]:
+              - img [ref=e507]
+              - generic [ref=e512]:
+                - generic [ref=e513]: 循环
+                - generic [ref=e514]: 循环检测
+            - generic [ref=e515]: 无限循环
+          - generic "输入端口" [ref=e517]
+          - generic [ref=e518]:
+            - 'generic "输出端口: 循环体" [ref=e519]'
+            - generic: 循环体
+          - generic [ref=e520]:
+            - 'generic "输出端口: 结束后" [ref=e521]'
+            - generic: 结束后
+        - generic:
+          - generic [ref=e522] [cursor=pointer]:
+            - generic [ref=e523]:
+              - img [ref=e525]
+              - generic [ref=e527]:
+                - generic [ref=e528]: 点击图片
+                - generic [ref=e529]: 目标图片 1
+            - generic [ref=e530]: 未设置目标图片
+          - generic "输入端口" [ref=e532]
+          - generic [ref=e533]:
+            - 'generic "输出端口: 成功" [ref=e534]'
+            - generic: 成功
+          - generic [ref=e535]:
+            - 'generic "输出端口: 失败" [ref=e536]'
+            - generic: 失败
+        - generic:
+          - generic [ref=e537] [cursor=pointer]:
+            - generic [ref=e538]:
+              - img [ref=e540]
+              - generic [ref=e542]:
+                - generic [ref=e543]: 点击图片
+                - generic [ref=e544]: 目标图片 2
+            - generic [ref=e545]: 未设置目标图片
+          - generic "输入端口" [ref=e547]
+          - generic [ref=e548]:
+            - 'generic "输出端口: 成功" [ref=e549]'
+            - generic: 成功
+          - generic [ref=e550]:
+            - 'generic "输出端口: 失败" [ref=e551]'
+            - generic: 失败
+        - generic:
+          - generic [ref=e552] [cursor=pointer]:
+            - generic [ref=e553]:
+              - img [ref=e555]
+              - generic [ref=e557]:
+                - generic [ref=e558]: 点击图片
+                - generic [ref=e559]: 目标图片 3
+            - generic [ref=e560]: 未设置目标图片
+          - generic "输入端口" [ref=e562]
+          - generic [ref=e563]:
+            - 'generic "输出端口: 成功" [ref=e564]'
+            - generic: 成功
+          - generic [ref=e565]:
+            - 'generic "输出端口: 失败" [ref=e566]'
+            - generic: 失败
+      - img
+      - generic [ref=e572]:
+        - button "适应屏幕" [ref=e573] [cursor=pointer]:
+          - img [ref=e574]
+        - button "显示/隐藏网格" [ref=e579] [cursor=pointer]:
+          - img [ref=e580]
+        - button "网格吸附" [ref=e582] [cursor=pointer]:
+          - img [ref=e583]
+      - generic:
+        - img
+    - generic [ref=e588]:
+      - img [ref=e590]
+      - generic [ref=e592]: 未选择节点
+      - generic [ref=e593]:
+        - text: 点击画布中的节点
+        - text: 来编辑其参数

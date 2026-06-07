@@ -1,0 +1,208 @@
+<mxfile host="65bd71144e">
+    <diagram id="agent-analysis" name="Agent 架构分析">
+        <mxGraphModel dx="2012" dy="908" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2000" pageHeight="2200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="n1" value="用户" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1588" y="960" width="90" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="n2" value="纯agent&#xa;少量元动作&#xa;最少的工具完成更多的任务" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1300" y="1195" width="141" height="94" as="geometry"/>
+                </mxCell>
+                <mxCell id="n4" value="agent自动路由系统" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="1608" y="1084" width="128" height="31" as="geometry"/>
+                </mxCell>
+                <mxCell id="n5" value="边执行边聊天&#xa;可反馈&#xa;可干预&#xa;可下发新任务" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="1833" y="1052" width="259" height="102" as="geometry"/>
+                </mxCell>
+                <mxCell id="n6" value="skill 与 mcp" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=0;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="1845" y="1237" width="85" height="49" as="geometry"/>
+                </mxCell>
+                <mxCell id="n7" value="三:普通多模态 (mimo)&lt;br&gt;直接依赖LLM循环:&lt;br&gt;截图→分析→执行" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1265" y="1346" width="130" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="n8" value="四:非多模态 (deepseek)&lt;br&gt;需" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1458" y="1366" width="150" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="n9" value="五:有标记的多模态 (claude)&lt;br&gt;computer use 风格&lt;br&gt;一步到位" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1662" y="1355" width="180" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="n10" value="一:deepseek + DSL" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="951" y="1366" width="105" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="n11" value="慢" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="2292" y="1515" width="80" height="41" as="geometry"/>
+                </mxCell>
+                <mxCell id="n14" value="重复工作可靠性最高&#xa;可复用性强" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d5e8d4;strokeColor=#82b366;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="583" y="1334" width="169" height="49" as="geometry"/>
+                </mxCell>
+                <mxCell id="n15" value="最笨&#xa;需要人工修正" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="657" y="1390" width="105" height="51" as="geometry"/>
+                </mxCell>
+                <mxCell id="n16" value="能解决指令库臃肿&#xa;agent调用灵活差的问题的话&#xa;其实是最优解&#xa;但难度最大" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="386" y="1463" width="355" height="68" as="geometry"/>
+                </mxCell>
+                <mxCell id="n17" value="&lt;br&gt;无视觉理解,感知差" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1319" y="1653" width="120" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="12" value="" style="edgeStyle=none;html=1;" parent="1" source="n18" target="n17" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="n18" value="&lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;SoM/UIA等结构化方案&lt;/span&gt;&lt;br style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251);&quot;&gt;&lt;span style=&quot;color: rgb(0, 0, 0);&quot;&gt;弥补视觉缺陷&lt;/span&gt;" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1321" y="1581" width="120" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="n19" value="像QQ这类UI技术栈&lt;br&gt;结构化以及其他" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1536" y="1568" width="150" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="n21" value="其他多种UI技术栈&#xa;结构化(难度大)" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1541" y="1655.5" width="150" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="n22" value="自定义更多标记维度&#xa;比如标记多一点同类型的&#xa;比如搜索框&#xa;减轻LLM压力&#xa;极致压缩感知模块与agent之间&#xa;的提示词或者完全结构化" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="1103" y="1589" width="176" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="n23" value="需要避免把每个软件都全部适配的&#xa;古法标记模式&#xa;工作量爆炸得不偿失&#xa;用于演示可还行" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#f8cecc;strokeColor=#b85450;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1203" y="1755" width="189" height="94" as="geometry"/>
+                </mxCell>
+                <mxCell id="n24" value="需要抽象化每一类软件UI的&#xa;每一类组件&#xa;工作量不小" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#d80073;strokeColor=#A50040;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;fontColor=#ffffff;" parent="1" vertex="1">
+                    <mxGeometry x="932" y="1760" width="244" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" value="用户提示词" style="edgeStyle=none;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;dashed=1;endArrow=none;endFill=0;startArrow=classic;startFill=1;exitX=0.596;exitY=0.122;exitDx=0;exitDy=0;exitPerimeter=0;" parent="1" source="n4" target="n1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" value="方便人" style="edgeStyle=none;html=1;dashed=1;endArrow=none;endFill=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.584;entryY=0.027;entryDx=0;entryDy=0;entryPerimeter=0;" parent="1" source="5" target="8" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1490" y="1086" as="sourcePoint"/>
+                        <mxPoint x="1365.132075471698" y="1180" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e3" value="系统提示词3" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n2" target="n7" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e4" value="系统提示词4" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n2" target="n8" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e5" value="自带的提示词" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n2" target="n9" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" value="" style="html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" parent="1" source="n7" target="n11" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="2055" y="1526"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e8" value="更高级的结构化类似UIA&lt;br&gt;解决方案" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n8" target="n19" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e9" value="弥补视觉缺陷" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n8" target="n18" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e10" value="deepseek+其他VLM" style="html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" parent="1" source="n8" target="n11" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1022.6000000000004" y="1744" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="19" value="慢,贵&#xa;浪费LLM与VLM间交流的token与时间" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="e10" vertex="1" connectable="0">
+                    <mxGeometry x="0.5321" y="-1" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e12" value="" style="edgeStyle=none;html=1;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n10" target="n14" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e13" value="" style="edgeStyle=none;html=1;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n10" target="n15" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e14" value="最优解但难度最大" style="edgeStyle=none;html=1;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n10" target="n16" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e15" value="" style="html=1;exitX=1;exitY=0.75;exitDx=0;exitDy=0;dashed=1;shape=link;" parent="1" source="n16" target="n22" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="13" value="与高级宏录制高度相似" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="e15" vertex="1" connectable="0">
+                    <mxGeometry x="-0.6061" y="-3" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e16" value="" style="edgeStyle=none;html=1;" parent="1" source="n4" target="n5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e17" value="" style="edgeStyle=none;html=1;dashed=1;" parent="1" source="n6" target="n8" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e19" value="" style="edgeStyle=none;html=1;" parent="1" source="n19" target="n21" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e22" value="媲美VLM的&#xa;世界模型" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n8" target="n22" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e23" value="" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="n22" target="n23" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e24" value="" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" parent="1" source="n22" target="n24" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="2" value="" style="edgeStyle=none;html=1;dashed=1;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n6" target="n7" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1844.85" y="1301.57" as="sourcePoint"/>
+                        <mxPoint x="1674.85" y="1381.57" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="3" value="" style="edgeStyle=none;html=1;dashed=1;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="n6" target="n9" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1805.91" y="1297" as="sourcePoint"/>
+                        <mxPoint x="1666.91" y="1375" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="5" value="agent手动选择路由" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1313" y="1084" width="128" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="6" value="用户提示词" style="edgeStyle=none;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;dashed=1;endArrow=none;endFill=0;startArrow=classic;startFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="5" target="n1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1784" y="1089.22" as="sourcePoint"/>
+                        <mxPoint x="1667" y="1007.22" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="7" value="&lt;span style=&quot;color: rgb(0, 0, 0); font-size: 12px; text-align: left; text-wrap-mode: wrap;&quot;&gt;方便AI&lt;/span&gt;" style="edgeStyle=none;html=1;dashed=1;endArrow=none;endFill=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="5" target="n2" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1559" y="1151" as="sourcePoint"/>
+                        <mxPoint x="1309" y="1222" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="8" value="纯agent&#xa;少量元动作&#xa;最少的工具完成更多的任务" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1032" y="1195" width="141" height="94" as="geometry"/>
+                </mxCell>
+                <mxCell id="9" value="系统提示词1" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="8" target="n10" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1362" y="1264" as="sourcePoint"/>
+                        <mxPoint x="1184" y="1362" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="10" value="二:离线DSL" style="whiteSpace=wrap;html=1;align=left;verticalAlign=top;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;spacingLeft=12;spacingTop=8;arcSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1083" y="1366" width="111" height="39" as="geometry"/>
+                </mxCell>
+                <mxCell id="11" value="系统提示词1" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="8" target="10" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1239.5" y="1299" as="sourcePoint"/>
+                        <mxPoint x="1153.5" y="1379" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="15" value="" style="html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" parent="1" source="n9" target="n11" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="1509" y="1485" as="sourcePoint"/>
+                        <mxPoint x="1409" y="2106" as="targetPoint"/>
+                        <Array as="points">
+                            <mxPoint x="2329" y="1424"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="17" value="又贵又慢且不可复用" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" parent="15" vertex="1" connectable="0">
+                    <mxGeometry x="0.8015" y="4" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import pytest
-from agent.config import AgentConfig, agent_config_from_legacy
+from agent.config import AgentConfig
 from agent.reflection import ReflectionEngine
 from agent.memory import MemoryStore, Episode
 import agent.memory as _mem
@@ -43,16 +43,15 @@ def store():
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  1. Config → get_resolved()  public API
+#  1. Config → resolve()  public API
 # ═══════════════════════════════════════════════════════════════════
 
 class TestConfigResolution:
-    """AgentConfig.resolve_auto() → get_resolved() contract."""
+    """AgentConfig.resolve() contract for all 4 execution modes."""
 
-    def test_multimodal_config_produces_expected_resolved_values(self):
-        cfg = AgentConfig(multimodal="true")
-        cfg.resolve_auto("irrelevant")
-        r = cfg.get_resolved()
+    def test_multimodal_produces_expected_values(self):
+        cfg = AgentConfig(execution_mode="multimodal")
+        r = cfg.resolve()
         assert r["llm_protocol"] == "text"
         assert r["vision_mode"] == "direct"
         assert r["planning"] == "per_step"
@@ -60,32 +59,29 @@ class TestConfigResolution:
         assert r["on_error"] == "retry"
         assert r["multimodal"] is True
 
-    def test_text_only_config_produces_expected_resolved_values(self):
-        cfg = AgentConfig(multimodal="false")
-        cfg.resolve_auto("irrelevant")
-        r = cfg.get_resolved()
-        assert r["llm_protocol"] == "function_calling"
+    def test_text_mode_produces_expected_values(self):
+        cfg = AgentConfig(execution_mode="text")
+        r = cfg.resolve()
+        assert r["llm_protocol"] == "text"
         assert r["vision_mode"] == "som"
-        assert r["planning"] == "pre_plan"
+        assert r["planning"] == "per_step"
         assert r["screen_context"] == "full"
         assert r["on_error"] == "retry"
         assert r["multimodal"] is False
 
-    def test_visual_strategy_overrides_vision_mode(self):
-        cfg = AgentConfig(visual_strategy="ocr_llm", multimodal="true")
-        cfg.resolve_auto("any")
-        assert cfg.get_resolved()["vision_mode"] == "ocr_llm"
+    def test_text_subconfig_affects_resolve(self):
+        cfg = AgentConfig(execution_mode="text")
+        cfg.text_vision_cfg.uia_enabled = True
+        cfg.text_vision_cfg.visual_strategy = "ocr_llm"
+        r = cfg.resolve()
+        assert r["uia_enabled"] is True
+        assert r["visual_strategy"] == "ocr_llm"
 
-    def test_explicit_values_are_reflected_in_resolved(self):
-        cfg = AgentConfig(llm_protocol="computer_use", multimodal="false")
-        cfg.resolve_auto("any")
-        assert cfg.get_resolved()["llm_protocol"] == "computer_use"
-        assert cfg.get_resolved()["vision_mode"] == "direct"
-
-    def test_legacy_mimo_resolved_values(self):
-        cfg = agent_config_from_legacy(mimo=True, supervise=True)
-        assert cfg.get_resolved()["llm_protocol"] == "text"
-        assert cfg.get_resolved()["planning"] == "per_step"
+    def test_flow_chart_resolve(self):
+        cfg = AgentConfig(execution_mode="flow_chart")
+        r = cfg.resolve()
+        assert r["flow_chart_mode"] is True
+        assert r["multimodal"] is False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -97,27 +93,22 @@ class TestConfigSerializationChain:
 
     def test_roundtrip_then_resolve(self):
         original = AgentConfig(
-            multimodal="true",
-            visual_strategy="ocr_llm",
+            execution_mode="text",
             on_error="replan",
         )
+        original.text_vision_cfg.visual_strategy = "ocr_llm"
         serialized = original.to_dict()
         deserialized = AgentConfig.from_dict(serialized)
-        deserialized.resolve_auto("any")
-        r = deserialized.get_resolved()
-        assert r["llm_protocol"] == "text"
-        assert r["vision_mode"] == "ocr_llm"
+        r = deserialized.resolve()
         assert r["on_error"] == "replan"
-        assert r["multimodal"] is True
+        assert r["visual_strategy"] == "ocr_llm"
 
     def test_partial_config_re_resolve(self):
-        """Partial dict → from_dict → resolve_auto should still work."""
-        cfg = AgentConfig.from_dict({"llm_protocol": "text"})
-        cfg.resolve_auto("unknown-model")
-        r = cfg.get_resolved()
-        assert r["llm_protocol"] == "text"
-        # unknown model defaults to text-only → function_calling for auto
-        assert r["vision_mode"] == "som"
+        """Partial dict → from_dict → resolve should still work."""
+        cfg = AgentConfig.from_dict({"execution_mode": "multimodal"})
+        r = cfg.resolve()
+        assert r["multimodal"] is True
+        assert r["vision_mode"] == "direct"
 
 
 # ═══════════════════════════════════════════════════════════════════

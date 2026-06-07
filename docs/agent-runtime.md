@@ -1,7 +1,7 @@
 # Agent Runtime 深度分析
 
 > **文档**: `docs/agent-runtime.md`
-> **核心文件**: `python/agent/agent.py` (~2850行), `prompts.py` (80行), `__main__.py` (398行), `supervisor.py` (856行), `config.py` (403行)
+> **核心文件**: `python/agent/agent.py`, `prompts.py`, `__main__.py`, `supervisor.py`, `config.py`
 
 ---
 
@@ -11,20 +11,13 @@
 graph TB
     User["用户自然语言目标"] --> Run["LingdongAgent.run()"]
     Run --> Unified["_unified_run()"]
-    
-    Unified --> |execution_mode 匹配| Router{执行模式选择}
+    Unified --> Resolved["config.resolve()"]
+    Resolved --> Router{"execution_mode 匹配"}
     
     Router --> |flow_chart| Direct["_run_direct()<br/>generate_flow_script<br/>返回流程图JSON<br/>不下场执行"]
     Router --> |multimodal| TextProto["run_text_protocol()<br/>多模态版<br/>截图直接送LLM"]
     Router --> |text| TextProto2["run_text_protocol()<br/>纯文本版<br/>SoM标号+UIA+OCR"]
     Router --> |offline| Offline["直接返回成功<br/>不调用LLM"]
-
-    subgraph Legacy["旧版路由 (向后兼容)"]
-        LegacyR["resolve_auto()"] --> |computer_use| CompUse["_computer_use_loop()<br/>ACTION:/PARAMS: 格式<br/>pyautogui执行"]
-        LegacyR --> |pre_plan + func_call| Planned["run_planned()<br/>Planner+PlanExecutor<br/>1次LLM调用+离线执行"]
-        LegacyR --> |per_step + text| TextProto3["run_text_protocol()"]
-        LegacyR --> |per_step + func_call| LangGraph["run_langgraph()<br/>LangGraph create_react_agent<br/>工具函数调用"]
-    end
 
     subgraph PostExec["执行后"]
         Reflection["reflection.py<br/>self-reflect_task()"]
@@ -34,29 +27,29 @@ graph TB
 
     TextProto --> PostExec
     TextProto2 --> PostExec
-    CompUse --> PostExec
-    Planned --> PostExec
-    LangGraph --> PostExec
+    Direct --> PostExec
 ```
+
+> **旧路由已移除**: 之前有 `resolve_auto()` / `agent_config_from_legacy()` / `LangGraph` / `Planned` / `ComputerUse` 等 5 种旧执行模式。现在统一通过 `AgentConfig.execution_mode` + `resolve()` 分发，仅保留上述 4 种模式。
 
 ---
 
-## 2. 5 种执行模式对比
+## 2. 4 种执行模式对比
 
-| 特性 | text_protocol | langgraph | planned | computer_use | direct |
-|------|--------------|-----------|---------|-------------|--------|
-| **适用模型** | 纯文本 (DeepSeek, MIMO) | 函数调用 (GPT-4, Claude, Gemini) | 任意 (仅1次LLM调用) | 视觉模型 (GPT-4o, Claude Vision) | 任意 |
-| **通信协议** | Tool:/Args:/Done: 文本块 | 原生 function calling | LLM 生成 Plan DAG | ACTION:/PARAMS: 格式 | generate_flow_script |
-| **循环方式** | LLM→解析→执行→截图→重复 | LangGraph 图执行 | 1次LLM→PlanExecutor拓扑序 | 截图→模型→执行→截图 | 无循环，立即返回 |
-| **视觉方案** | SoM/UIA/OCR/多模态直传 | SoM 预扫描 | Supervisor 按步处理 | 模型直接"看"截图 | N/A |
-| **LLM 调用** | 每步1次 | 每工具1次 | 仅1次 | 每截图1次 | 仅1次 |
-| **执行成本** | 多次LLM调用 | 多次LLM调用 | 1次LLM + 免费离线执行 | 多次视觉LLM调用 | 1次LLM |
-| **截图** | 每步1张 (SoM) | 仅 SoM 预扫描 | Supervisor 按步处理 | 每步1张 (送模型) | 无 |
-| **错误处理** | 重试/停止/跳过 + 去重 | Supervisor 工具包装 | PlanExecutor fallback 链 | API 失败后重试 | N/A |
-| **对话模式** | ✅ guidance_queue | ❌ | ❌ | ❌ | ❌ |
-| **记忆/反思** | ✅ | ❌ | ✅ (fallback前) | ❌ | ❌ |
-| **最佳场景** | 纯文本模型 | 函数调用模型 | 低成本离线执行 | 视觉原生模型 | 仅流程图生成 |
-| **入口方法** | `run_text_protocol()` | `run_langgraph()` | `run_planned()` | `_computer_use_loop()` | `_run_direct()` |
+| 特性 | text_protocol (多模态) | text_protocol (纯文本) | flow_chart | offline |
+|------|----------------------|----------------------|------------|---------|
+| **适用模型** | 多模态 (GPT-4o, Claude Vision) | 纯文本 (DeepSeek, MIMO) | 任意 | 任意 |
+| **通信协议** | Tool:/Args:/Done: 文本块 | Tool:/Args:/Done: 文本块 | generate_flow_script | 无 LLM |
+| **循环方式** | LLM→解析→执行→截图→重复 | LLM→解析→执行→截图→重复 | 无循环，立即返回 | 无循环 |
+| **视觉方案** | 多模态直传 (截图送LLM) | SoM/UIA/OCR | N/A | N/A |
+| **LLM 调用** | 每步1次 | 每步1次 | 仅1次 | 0次 |
+| **执行成本** | 多次LLM调用 | 多次LLM调用 | 1次LLM | 免费离线 |
+| **截图** | 每步1张 (送模型) | 每步1张 (SoM) | 无 | 无 |
+| **错误处理** | 重试/停止/跳过 + 去重 | 重试/停止/跳过 + 去重 | N/A | N/A |
+| **对话模式** | ✅ guidance_queue | ✅ guidance_queue | ❌ | ❌ |
+| **记忆/反思** | ✅ | ✅ | ❌ | ❌ |
+| **最佳场景** | 多模态模型 | 纯文本模型 + SoM | 仅流程图生成 | 调试/无网络 |
+| **入口方法** | `run_text_protocol()` | `run_text_protocol()` | `_run_direct()` | — |
 
 ---
 
@@ -111,9 +104,7 @@ sequenceDiagram
             Sup->>Sup: 1. UIA 语义定位/窗口限定/预聚焦
             Sup->>Sup: 2. 视觉定位兜底 (经验库+VLM)
             Sup->>Sup: 3. 窗口焦点安全
-            Sup->>Registry: execute("click_target", x=100, y=200)
-            Registry-->>Sup: {success: true}
-            Sup->>Sup: 4. 失败重试 (GUI动作2次)
+            Sup->>Sup: 4. 执行+重试
             Sup->>Sup: 5. 自动对话框处理
             Sup->>Sup: 6. 屏幕稳定等待
             Sup->>Sup: 7. 失败诊断截图
@@ -175,11 +166,6 @@ flowchart TD
     K --> L["6. 屏幕稳定等待<br/>wait_screen_stable()"]
     L --> M["7. 失败诊断截图<br/>GUI失败时"]
     M --> N["8. 记录最后启动程序<br/>_last_launched"]
-    K --> L
-    L --> M
-    M --> M1
-    M --> N
-    M1 --> N
 ```
 
 ---
@@ -190,7 +176,7 @@ flowchart TD
 
 | 命令 | 字段 | 说明 |
 |------|------|------|
-| `start` | `goal`, `config`, `supervise`, `steps` | 启动 Agent |
+| `start` | `goal`, `config` (含 `agent_config` dict) | 启动 Agent |
 | `stop` | — | 优雅停止 |
 | `guidance` | `text` | 注入用户指引 |
 | `chat` | `text` | 对话模式消息 |
@@ -229,7 +215,7 @@ graph TB
     Frontend --> |localStorage| IPC
     
     subgraph IPC["IPC 传输"]
-        Config["agent_config dict"]
+        Config["agent_config dict<br/>(mode + 全局参数 +<br/>子配置字段)"]
     end
 
     Config --> Resolve
@@ -238,15 +224,54 @@ graph TB
         Resolve["resolve()"] --> |flow_chart| FC["{supervise,<br/>flow_chart_mode=True}"]
         Resolve --> |multimodal| MM["{multimodal=True,<br/>screenshot_quality,<br/>vision_mode=direct}"]
         Resolve --> |text| TX["{multimodal=False,<br/>uia_enabled, ocr,<br/>yolo, som, ...}"]
-        Resolve --> |offline| OFF["{llm_protocol=text,<br/>planning=pre_plan}"]
-    end
-
-    subgraph OldPath["旧版 resolve_auto()"]
-        Auto["resolve_auto()"] --> Multi{"多模态?"}
-        Multi -->|是| AM["multimodal=True<br/>text protocol<br/>direct vision<br/>per_step planning"]
-        Multi -->|否| AN["multimodal=False<br/>func_calling protocol<br/>som vision<br/>pre_plan planning<br/>visual_strategy 覆盖"]
+        Resolve --> |offline| OFF["{multimodal=False,<br/>llm_protocol=text,<br/>planning=pre_plan}"]
     end
 ```
+
+### config.py — AgentConfig 数据结构
+
+```python
+@dataclass
+class AgentConfig:
+    execution_mode: str = "flow_chart"  # flow_chart | multimodal | text | offline
+    
+    # 全局
+    memory_enabled: bool = False
+    max_steps: int = 20
+    max_consecutive_failures: int = 5
+    min_success_rate: float = 0.1
+    temperature: float = 0.1
+    max_tokens: int = 4096
+    llm_retries: int = 2
+    screenshot_quality: int = 60
+    sliding_window_size: int = 0
+    on_error: str = "retry"
+    
+    # 子配置（mode-specific）
+    flow_chart_cfg: FlowChartConfig
+    multimodal_cfg: MultimodalConfig
+    text_vision_cfg: TextVisionConfig
+    offline_cfg: OfflineConfig
+
+    def resolve() -> dict:   # 展平成运行时扁平字典
+```
+
+**子配置一: FlowChartConfig**
+- `supervise: bool` — 监督执行开关
+
+**子配置二: MultimodalConfig**
+- `screenshot_quality: int` — 唯一可配参数 (default 60)
+
+**子配置三: TextVisionConfig** (纯文本模型成功路径)
+- `uia_enabled: bool` — UIA 控件树 (default False)
+- `ocr_enabled: bool` — OCR 文字检测 (default True)
+- `yolo_enabled: bool` — YOLO 图标检测 (default False)
+- `som_enabled: bool` — SoM 标号 (default True)
+- `window_aware_ocr: bool` — 窗口限定 (default True)
+- `local_vision: bool` — 本地视觉引擎 (default False)
+- `visual_strategy: str` — som | ocr_llm | blind_guess | cli_path
+- `llm_protocol: str` — text | function_calling
+- `planning: str` — per_step | pre_plan
 
 ---
 
@@ -266,10 +291,11 @@ sequenceDiagram
     
     Agent-->>Electron: (等待300ms启动完成)
     
-    Electron->>Agent: {"type": "start", "goal": "...", "config": {...}}
+    Electron->>Agent: {"type": "start", "goal": "...", "config": {"agent_config": {...}}}
     
-    Note over Agent: 预加载 feature 注册表<br/>(~8s 主线程)
+    Note over Agent: 预加载 feature 注册表 (~8s 主线程)
     Note over Agent: 创建 LingdongAgent
+    Note over Agent: AgentConfig.from_dict() → resolve() → _unified_run()
     Note over Agent: 启动执行线程
     
     loop 执行循环
@@ -291,4 +317,23 @@ sequenceDiagram
         Agent->>Agent: set stop_event
         Agent-->>Electron: agent_done (stopped)
     end
+```
+
+### 统一路由流程
+
+```
+__main__.py: _run_agent()
+  +-- cfg["agent_config"] → AgentConfig.from_dict()
+  |   +-- execution_mode 指定 4 种之一
+  |   +-- 子配置由 from_dict() 自动填入
+  +-- agent.run(agent_config=cfg) → _unified_run()
+  |   +-- config.resolve() → 展平成扁平 dict
+  |   +-- 更新 supervisor / LLM 参数
+  |   +-- _inject_memory_prompt() + _emit("memory_snapshot")
+  |   +-- 按 execution_mode 分发:
+  |   |   flow_chart → _run_direct()
+  |   |   multimodal → run_text_protocol()
+  |   |   text      → run_text_protocol()
+  |   |   offline   → 直接返回
+  +-- post-task: reflection + memory + persistence
 ```
