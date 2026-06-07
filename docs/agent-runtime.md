@@ -62,7 +62,6 @@ graph TB
     START["run_text_protocol(goal)"] --> INIT
 
     subgraph INIT["阶段1: 初始化"]
-        direction TB
         I1["_begin_prompt_trace(goal)"] --> I2["_ensure_registry()"]
         I2 --> I3["构建系统提示词 + 注入记忆"]
         I3 --> I4["capture_b64() 全屏截图"]
@@ -77,8 +76,6 @@ graph TB
     FIRST_R --> STEP
 
     subgraph STEP["阶段2: 每步执行循环"]
-        direction TB
-
         PARSE["parse_response(content)<br/>→ (tool_type, name, args)"]
         TYPE{"回复类型?"}
         PARSE --> TYPE
@@ -89,28 +86,22 @@ graph TB
         SNAP["_runtime_snapshot() → verify_before"]
 
         TOOL{"还有未执行<br/>工具块?"}
-        EXEC["Supervisor.execute(name, args)"]
-
-        subgraph SUP["监督流水线 (Supervisor)"]
-            direction TB
-            S1["0. SoM 解引用 (#N→坐标)"]
-            S2["1. UIA 语义定位 + 窗口限定"]
-            S3["   预聚焦 (type/clipboard)"]
-            S4["2. 视觉定位兜底 (经验库+VLM)"]
-            S5["3. 窗口焦点安全"]
-            S6["4. 执行 + 指数退避重试"]
-            S7["5. 自动对话框处理"]
-            S8["6. 屏幕稳定等待"]
-            S9["7. 失败诊断截图"]
-            S1 --> S2 --> S3 --> S4 --> S5
-            S5 --> S6 --> S7 --> S8 --> S9
-        end
-
+        EXEC["Supervisor.execute(name, args)<br/>→ 详见第4节监督流水线"]
         WCHG{"窗口 title<br/>发生变化?"}
         BREAK["break 跳出<br/>刷新感知"]
 
-        FB["_append_step_feedback()"]
-        STRIP["_strip_binary() 去除 base64"]
+        MULTI -->|是| BATCH
+        MULTI -->|否| SNAP
+        BATCH --> SNAP
+        SNAP --> TOOL
+        TOOL -->|有| EXEC
+        EXEC --> WCHG
+        WCHG -->|变化| BREAK
+        BREAK --> TOOL
+        WCHG -->|无变化| TOOL
+
+        TOOL -->|无| FB["_append_step_feedback()"]
+        FB --> STRIP["_strip_binary() 去除 base64"]
 
         CHAT{"对话模式?"}
         CHAT_P["_process_chat_messages()"]
@@ -121,19 +112,7 @@ graph TB
         FAIL{"连续失败<br/>≥ max_failures?"}
         TERM["终止"]
 
-        MULTI -->|是| BATCH
-        MULTI -->|否| SNAP
-        BATCH --> SNAP
-        SNAP --> TOOL
-        TOOL -->|有| EXEC
-        EXEC --> S1
-        S9 --> WCHG
-        WCHG -->|变化| BREAK
-        BREAK --> TOOL
-        WCHG -->|无变化| TOOL
-
-        TOOL -->|无| FB
-        FB --> STRIP --> CHAT
+        STRIP --> CHAT
         CHAT -->|是| CHAT_P
         CHAT_P --> SS
         CHAT -->|否| SS
@@ -147,7 +126,6 @@ graph TB
     TERM --> POST
 
     subgraph POST["阶段3: 后处理"]
-        direction TB
         P1["reflection.reflect_task()<br/>错误分析 + 改进建议"]
         P2["memory 更新<br/>add_rule / add_preference / add_episode"]
         P3["state_persistence.save_run()<br/>运行摘要持久化"]
@@ -305,7 +283,7 @@ sequenceDiagram
     
     Agent-->>Electron: (等待300ms启动完成)
     
-    Electron->>Agent: {"type": "start", "goal": "...", "config": {"agent_config": {...}}}
+    Electron->>Agent: start 命令 (goal + config)
     
     Note over Agent: 预加载 feature 注册表 (~8s 主线程)
     Note over Agent: 创建 LingdongAgent
@@ -327,7 +305,7 @@ sequenceDiagram
     Agent-->>Electron: agent_done 事件
     
     alt 用户停止
-        Electron->>Agent: {"type": "stop"}
+        Electron->>Agent: stop 命令
         Agent->>Agent: set stop_event
         Agent-->>Electron: agent_done (stopped)
     end
