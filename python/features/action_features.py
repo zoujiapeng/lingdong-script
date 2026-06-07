@@ -29,6 +29,8 @@ def _do(action, **kw):
         P("timeout", "number", "超时秒数", required=False, default=10),
         P("human_like", "boolean", "是否模拟人类行为", required=False, default=True),
         P("double", "boolean", "是否双击", required=False, default=False),
+        P("allow_uia", "boolean", "Allow UIA fallback when OCR/coordinates fail", required=False, default=True),
+        P("physical", "boolean", "Coordinates are already physical screen pixels; do not apply screenshot scaling", required=False, default=False),
     ],
     returns="bool - 点击是否成功",
     dsl_keyword="CLICK",
@@ -41,7 +43,8 @@ def _do(action, **kw):
     ],
 )
 def click_target(target: str, region: str = "", timeout: float = 10,
-                 human_like: bool = True, double: bool = False) -> bool:
+                 human_like: bool = True, double: bool = False,
+                 allow_uia: bool = True, physical: bool = False) -> bool:
     from interaction.actions import ActionHandler
     handler = ActionHandler()
     # If target is plain text (not "x,y" coordinates), resolve via OCR first
@@ -49,7 +52,7 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     is_coord = re.match(r"^\s*\d+\s*,\s*\d+\s*$", target) if target else False
     if is_coord:
         parts = [p.strip() for p in target.split(",")]
-        return handler("click", x=int(parts[0]), y=int(parts[1]), double=double)
+        return handler("click", x=int(parts[0]), y=int(parts[1]), double=double, allow_uia=allow_uia, physical=physical)
     # Semantic target: try OCR + UIA
     try:
         x, y = _find_target_coords(target, region=region)
@@ -58,8 +61,8 @@ def click_target(target: str, region: str = "", timeout: float = 10,
     # (0,0) means OCR didn't find the target — don't force-click at top-left
     if x == 0 and y == 0:
         # UIA-only attempt (skip coordinate click which would be at (0,0))
-        return handler("click", target=target, double=double)
-    return handler("click", target=target, x=x, y=y, double=double)
+        return handler("click", target=target, double=double, allow_uia=allow_uia)
+    return handler("click", target=target, x=x, y=y, double=double, allow_uia=allow_uia, physical=physical)
 
 
 @feature(

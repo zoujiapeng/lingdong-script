@@ -848,7 +848,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
         else emit(state, `${opDsl[p.operation] || 'MINIMIZE'}${title ? ' ' + title : ''}`);
       } else {
         if (p.operation === 'snap') emit(state, `窗口贴靠${p.snap_position||'左'}${title ? ' ' + title : ''}`);
-        else emit(state, `窗口${opLabels[p.operation] || '最小化'}${title ? ' ' + title : ''}`);
+        else emit(state, `${opLabels[p.operation] || '最小化'}窗口${title ? ' ' + title : ''}`);
       }
       forward(nodeId, 'output', state, gens, convergence);
       break;

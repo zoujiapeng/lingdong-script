@@ -492,14 +492,9 @@ class LocalVisionEngine:
             if os.path.isfile(_MOBILENET_PATH):
                 self._mobilenet = MobileNetClassifier(_MOBILENET_PATH, providers=self._providers)
 
-            # Florence-2 optional (CPU only, slower)
-            f_dir = self._model_paths.get("florence_dir")
-            if f_dir:
-                try:
-                    self._florence = Florence2Engine(f_dir, device="cpu")
-                    self._florence._load()
-                except Exception as exc:
-                    logger.debug("Florence-2 unavailable (optional): %s", exc)
+            # Florence-2 is intentionally not loaded during first-pass perception.
+            # It is CPU-heavy and is only useful for explicit caption/OCR fallback, while
+            # generic input/control targeting needs YOLO/OCR/CV candidates to return fast.
 
             if not self._yolo:
                 logger.warning("LocalVision: no YOLO model, disabling")
@@ -551,6 +546,18 @@ class LocalVisionEngine:
         except Exception:
             return None
 
+        img_full = img
+        h_full, w_full = img_full.shape[:2]
+        scale = 1.0
+        max_edge = max(h_full, w_full)
+        if max_edge > 1280:
+            scale = 1280.0 / float(max_edge)
+            img = cv2.resize(
+                img_full,
+                (max(1, int(w_full * scale)), max(1, int(h_full * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+
         h_img, w_img = img.shape[:2]
         t_start = time.time()
 
@@ -580,13 +587,23 @@ class LocalVisionEngine:
                 if result:
                     for box, text, conf in result:
                         conf_val = float(conf) if not isinstance(conf, (int, float)) else conf
-                        if text and len(text.strip()) > 1 and conf_val > 0.3:
+                        clean_text = text.strip() if text else ""
+                        if not clean_text:
+                            continue
+                        # Text-only agents need single-character controls too: keypad digits,
+                        # operators, hotkey letters, toolbar glyph OCR, etc. Keep them when OCR
+                        # is reasonably confident instead of dropping all len==1 text.
+                        if len(clean_text) == 1 and conf_val < 0.45:
+                            continue
+                        if len(clean_text) > 1 and conf_val <= 0.3:
+                            continue
+                        if text:
                             xs = [int(p[0]) for p in box]
                             ys = [int(p[1]) for p in box]
                             x1, x2 = min(xs), max(xs)
                             y1, y2 = min(ys), max(ys)
                             ocr_elements.append({
-                                "text": text.strip()[:60],
+                                "text": clean_text[:60],
                                 "x": x1, "y": y1,
                                 "w": max(1, x2 - x1), "h": max(1, y2 - y1),
                             })
@@ -642,16 +659,22 @@ class LocalVisionEngine:
 
         # ── Draw SoM boxes + numbers ──
         label_map: dict = {}
-        overlaid = img.copy()
+        overlaid = img_full.copy()
         max_elements = 40
+        inv_scale = 1.0 / scale if scale > 0 else 1.0
 
         for i, elem in enumerate(merged[:max_elements]):
             idx = i + 1
-            x, y, w, h = elem["x"], elem["y"], elem["w"], elem["h"]
-            cx = min(w_img - 1, max(0, x + w // 2))
-            cy = min(h_img - 1, max(0, y + h // 2))
-            ow = min(w_img - x, w)
-            oh = min(h_img - y, h)
+            x = int(elem["x"] * inv_scale)
+            y = int(elem["y"] * inv_scale)
+            w = max(1, int(elem["w"] * inv_scale))
+            h = max(1, int(elem["h"] * inv_scale))
+            x = min(w_full - 1, max(0, x))
+            y = min(h_full - 1, max(0, y))
+            cx = min(w_full - 1, max(0, x + w // 2))
+            cy = min(h_full - 1, max(0, y + h // 2))
+            ow = min(w_full - x, w)
+            oh = min(h_full - y, h)
 
             label_map[idx] = {"text": elem["text"][:60], "x": cx, "y": cy, "w": ow, "h": oh}
 
@@ -659,7 +682,7 @@ class LocalVisionEngine:
             lbl = str(idx)
             (lbl_w, lbl_h), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
             bg_x1, bg_y1 = max(0, x - 1), max(0, y - lbl_h - 8)
-            bg_x2, bg_y2 = min(w_img, x + lbl_w + 5), max(0, y - 1)
+            bg_x2, bg_y2 = min(w_full, x + lbl_w + 5), max(0, y - 1)
             cv2.rectangle(overlaid, (bg_x1, bg_y1), (bg_x2, bg_y2), (66, 133, 244), -1)
             cv2.putText(overlaid, lbl, (x, max(lbl_h, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
@@ -667,8 +690,8 @@ class LocalVisionEngine:
         result_b64 = base64.b64encode(buf).decode()
 
         elapsed = time.time() - t_start
-        logger.info("LocalVision: %d elements (YOLO %.2fs, total %.2fs)",
-                     len(label_map), t_yolo - t_start, elapsed)
+        logger.info("LocalVision: %d elements (scale %.2f, YOLO %.2fs, OCR %.2fs, total %.2fs)",
+                     len(label_map), scale, t_yolo - t_start, t_ocr - t_yolo, elapsed)
 
         return {
             "image_b64": result_b64,

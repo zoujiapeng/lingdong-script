@@ -24,6 +24,11 @@ class Supervisor:
     """工具执行监督层，封装重试、视觉定位、窗口焦点、对话框处理等。"""
 
     # GUI 动作集合 (受益于窗口焦点 + 重试 + 屏幕稳定)
+    UIA_POOR_WINDOW_HINTS = frozenset({
+        "electron", "webview", "webview2", "cef", "chromium", "qt",
+        "custom", "embeddedbrowser",
+    })
+
     GUI_ACTIONS = frozenset({
         "click_target", "right_click", "hover", "mouse_move",
         "type_text", "type_clipboard",
@@ -131,6 +136,69 @@ class Supervisor:
         time.sleep(min(timeout, 0.5))
 
     # ── 对话框自动处理 ────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_window_blob(*parts: object) -> str:
+        """Combine window metadata into a lower-case searchable blob."""
+        items = []
+        for part in parts:
+            if part is None:
+                continue
+            text = str(part).strip().lower()
+            if text:
+                items.append(text)
+        return " ".join(items)
+
+    @classmethod
+    def _is_uia_poor_window_text(cls, blob: str) -> bool:
+        """Return True for windows that are commonly UIA-poor or custom drawn."""
+        if not blob:
+            return False
+        text = blob.lower()
+        for hint in cls.UIA_POOR_WINDOW_HINTS:
+            if hint in text:
+                return True
+        return False
+
+    def _active_window_blob(self) -> str:
+        """Collect current active window metadata as a single searchable string."""
+        try:
+            from features.registry import registry as r
+            result = r.execute("get_active_window")
+            data = result if isinstance(result, dict) else {}
+            data = data.get("result", data)
+            if isinstance(data, dict):
+                return self._normalize_window_blob(
+                    data.get("title", ""),
+                    data.get("process_name", ""),
+                    data.get("class_name", ""),
+                    data.get("exe", ""),
+                )
+        except Exception:
+            pass
+        return ""
+
+    def should_prefer_local_vision(self, target_hint: str = "") -> bool:
+        """Decide whether the current window should lean on YOLO/SoM/OCR."""
+        blob = self._normalize_window_blob(target_hint, self._active_window_blob(), self._last_launched)
+        return self._is_uia_poor_window_text(blob)
+
+    @staticmethod
+    def _som_text_matches(target: str, text: str) -> bool:
+        t = re.sub(r"\s+", " ", str(target or "").strip().strip("'\"`|:;,.")).lower()
+        s = re.sub(r"\s+", " ", str(text or "").strip().strip("'\"`|:;,.")).lower()
+        if not t or not s:
+            return False
+        aliases = {
+            "*": {"*", "x", "×"},
+            "x": {"*", "x", "×"},
+            "×": {"*", "x", "×"},
+            "/": {"/", "÷"},
+            "÷": {"/", "÷"},
+        }
+        if len(t) == 1:
+            return s in aliases.get(t, {t})
+        return t in s
 
     def auto_handle_dialogs(self) -> bool:
         """自动关闭可见对话框。"""
@@ -365,6 +433,16 @@ class Supervisor:
           8. 失败诊断截图
         """
         is_gui = name in self.GUI_ACTIONS
+        prefer_local_vision = False
+        if is_gui:
+            prefer_local_vision = self.should_prefer_local_vision(
+                args.get("target_window") or args.get("target") or args.get("title") or self._last_launched or ""
+            )
+            if prefer_local_vision:
+                self._emit("log", {
+                    "level": "debug",
+                    "message": "UIA-poor window detected; prefer YOLO/SoM/OCR over UIA for this step",
+                })
 
         # ── S. 脚本执行模式（跳过 SoM/UIA/OCR 管道） ──
         if name in self.SCRIPT_TOOLS:
@@ -382,6 +460,7 @@ class Supervisor:
                         m = self._last_som_map[idx]
                         args = dict(args)
                         args["target"] = f"{m['x']},{m['y']}"
+                        args["physical"] = True
                         self._emit("log", {
                             "level": "info",
                             "message": f"SoM#{idx}: 「{m['text']}」→ {m['x']},{m['y']}",
@@ -391,9 +470,10 @@ class Supervisor:
             # SoM 文字→坐标匹配：在 label map 中查找目标文字
             elif isinstance(som_target, str) and not re.match(r'^-?\d+\s*,\s*-?\d+$', som_target.strip()):
                 for idx, m in self._last_som_map.items():
-                    if som_target in m.get("text", ""):
+                    if self._som_text_matches(som_target, m.get("text", "")):
                         args = dict(args)
                         args["target"] = f"{m['x']},{m['y']}"
+                        args["physical"] = True
                         self._emit("log", {
                             "level": "info",
                             "message": f"SoM文字: 「{som_target}」→ #{idx}「{m['text']}」→ {m['x']},{m['y']}",
@@ -401,7 +481,7 @@ class Supervisor:
                         break
 
         # ── 1a. UIA 语义定位（uia_enabled=False 时跳过）──
-        if self.uia_enabled and is_gui and name in ("click_target", "right_click", "hover",
+        if self.uia_enabled and is_gui and not prefer_local_vision and name in ("click_target", "right_click", "hover",
                                 "mouse_move", "drag"):
             target = args.get("target", "") or args.get("from_target", "")
             if target and not re.match(r'^-?\d+\s*,\s*-?\d+$', str(target).strip()):
@@ -440,7 +520,7 @@ class Supervisor:
                         pass
 
         # ── 1c. UIA 预聚焦（type_text 前自动点击输入框，uia_enabled=False 时跳过）──
-        if self.uia_enabled and is_gui and self.uia_pre_focus and name in ("type_text", "type_clipboard"):
+        if self.uia_enabled and is_gui and self.uia_pre_focus and not prefer_local_vision and name in ("type_text", "type_clipboard"):
             try:
                 edit_coords = self._find_edit_control()
                 if edit_coords:
@@ -489,6 +569,10 @@ class Supervisor:
                     pass
 
         # ── 2b. 强制去重: launch_program 前先找窗口，已运行则聚焦跳过 ──
+        if name == "click_target" and not self.uia_enabled:
+            args = dict(args)
+            args["allow_uia"] = False
+
         if name == "launch_program":
             launch_target = (args.get("target") or "").strip()
             if launch_target and len(launch_target) >= 2:
@@ -606,7 +690,7 @@ class Supervisor:
 
     # ── 截图 ──────────────────────────────────────────────────
 
-    def capture_b64(self, max_size: int = 0, quality: int = 60) -> str:
+    def capture_b64(self, max_size: int = 0, quality: int = 60, update_scale: bool = True) -> str:
         """全屏截图 → base64 JPEG。
 
         quality: JPEG 压缩质量（50=快速但略模糊，60=默认，85=高质量）
@@ -624,8 +708,9 @@ class Supervisor:
                 scale = max_size / max(h, w)
                 new_w, new_h = int(w * scale), int(h * scale)
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-                from interaction.actions import set_screen_scale
-                set_screen_scale(w / new_w, h / new_h)
+                if update_scale:
+                    from interaction.actions import set_screen_scale
+                    set_screen_scale(w / new_w, h / new_h)
         q = min(max(quality, 30), 95)
         _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, q])
         return base64.b64encode(buf).decode()

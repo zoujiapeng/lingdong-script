@@ -9,6 +9,32 @@ from features.registry import feature, P, TC, FeatureCategory as F
 
 logger = logging.getLogger(__name__)
 
+_DPI_AWARENESS_SET = False
+
+
+def _ensure_dpi_awareness():
+    """Align Win32 coordinates with screenshot pixels on scaled displays."""
+    global _DPI_AWARENESS_SET
+    if _DPI_AWARENESS_SET:
+        return
+    _DPI_AWARENESS_SET = True
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+_ensure_dpi_awareness()
+
 
 @feature(
     name="detect_process",
@@ -70,9 +96,111 @@ def find_processes(name: str) -> list:
 )
 def focus_window(title: str, exact: bool = False) -> bool:
     try:
-        from system.window import WindowManager
+        import time
+        import win32api
+        import win32con
+        import win32gui
+        import win32process
+
+        needle = (title or "").strip().lower()
+        if not needle:
+            return False
+
+        def matches(text: str) -> bool:
+            value = (text or "").strip().lower()
+            if not value:
+                return False
+            return value == needle if exact else (needle in value or value in needle)
+
+        candidates = []
+
+        def enum_cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            text = win32gui.GetWindowText(hwnd).strip()
+            if matches(text):
+                rect = win32gui.GetWindowRect(hwnd)
+                width = rect[2] - rect[0]
+                height = rect[3] - rect[1]
+                if width > 0 and height > 0:
+                    candidates.append(hwnd)
+
+        win32gui.EnumWindows(enum_cb, None)
+        if not candidates:
+            return False
+
+        hwnd = candidates[0]
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        else:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+            screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+            new_left = min(max(rect[0], 0), max(0, screen_w - min(width, screen_w)))
+            new_top = min(max(rect[1], 0), max(0, screen_h - min(height, screen_h)))
+            if new_left != rect[0] or new_top != rect[1]:
+                win32gui.SetWindowPos(
+                    hwnd, None, new_left, new_top, width, height,
+                    win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+                )
+        except Exception:
+            pass
+
+        foreground = win32gui.GetForegroundWindow()
+        current_thread = win32api.GetCurrentThreadId()
+        target_thread, _ = win32process.GetWindowThreadProcessId(hwnd)
+        foreground_thread = 0
+        if foreground:
+            foreground_thread, _ = win32process.GetWindowThreadProcessId(foreground)
+
+        attached = []
+        try:
+            for thread_id in {target_thread, foreground_thread}:
+                if thread_id and thread_id != current_thread:
+                    try:
+                        win32process.AttachThreadInput(current_thread, thread_id, True)
+                        attached.append(thread_id)
+                    except Exception:
+                        pass
+            for op in (
+                lambda: win32gui.BringWindowToTop(hwnd),
+                lambda: win32gui.SetForegroundWindow(hwnd),
+                lambda: win32gui.SetActiveWindow(hwnd),
+            ):
+                try:
+                    op()
+                except Exception:
+                    pass
+        finally:
+            for thread_id in attached:
+                try:
+                    win32process.AttachThreadInput(current_thread, thread_id, False)
+                except Exception:
+                    pass
+
+        for _ in range(10):
+            active = win32gui.GetForegroundWindow()
+            if active and matches(win32gui.GetWindowText(active)):
+                return True
+            try:
+                win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                      win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+                win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                                      win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return False
+    except Exception:
+        pass
+    try:
         return WindowManager().focus_window(title, exact=exact)
-    except ImportError:
+    except Exception:
         return False
 
 
@@ -85,10 +213,29 @@ def focus_window(title: str, exact: bool = False) -> bool:
     returns="list[str] - 窗口标题列表",
 )
 def list_windows() -> list:
+    return _get_visible_window_titles()
+
+
+def _get_visible_window_titles() -> list[str]:
+    """Return visible window titles with a Win32 fallback."""
     try:
-        from system.window import WindowManager
-        return WindowManager().get_all_window_titles()
-    except ImportError:
+        titles = WindowManager().get_all_window_titles()
+        if titles:
+            return titles
+    except Exception:
+        pass
+    try:
+        import win32gui
+        titles = []
+        def cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd).strip()
+            if title:
+                titles.append(title)
+        win32gui.EnumWindows(cb, None)
+        return titles
+    except Exception:
         return []
 
 
@@ -102,7 +249,21 @@ def list_windows() -> list:
 )
 def get_active_window() -> dict:
     try:
-        from system.window import WindowManager
+        import win32gui
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd:
+            title = win32gui.GetWindowText(hwnd)
+            rect = win32gui.GetWindowRect(hwnd)
+            return {
+                "title": title,
+                "left": rect[0],
+                "top": rect[1],
+                "width": rect[2] - rect[0],
+                "height": rect[3] - rect[1],
+            }
+    except Exception:
+        pass
+    try:
         result = WindowManager().get_active_window()
         return result or {"error": "无法获取窗口信息"}
     except ImportError:
@@ -192,12 +353,13 @@ def _try_focus_existing(exe_name: str, target_name: str = "") -> bool:
 )
 def launch_program(target: str, args: str = "", wait: bool = False, force_new: bool = False) -> dict:
     try:
-        import subprocess, os, re
+        import subprocess, os, re, time
 
         # Resolve via program registry first (PATH + App Paths + cached aliases)
         from features.program_registry import get_program_registry
         reg = get_program_registry()  # 确保注册表已加载
         resolved = reg.resolve(target) or target
+        before_titles = set(_get_visible_window_titles())
 
         # If the name wasn't resolved and looks like Chinese text, give a helpful hint
         if resolved == target and re.search(r'[一-鿿]', target):
@@ -205,7 +367,7 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
             close = [i for i in all_items if target.lower() in i["name"] or i["name"] in target.lower()][:5]
             hint = ""
             if close:
-                hint = f"，你是不是想启动: {' / '.join(f'『{c["name"]}』' for c in close)}"
+                    hint = f"，你是不是想启动: {' / '.join(f'「{c["name"]}」' for c in close)}"
             return {"success": False, "error": f"未找到程序「{target}」{hint}"}
 
         # If resolved target is a URL, open it with the default browser
@@ -213,7 +375,7 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
             os.startfile(resolved)
             return {"success": True, "pid": None, "resolved_path": resolved}
 
-        # Non-executable path — return error instead of calling os.startfile
+        # Non-executable path - return error instead of calling os.startfile
         # (os.startfile on an unresolvable program name opens Microsoft Store on Win11)
         if not any(resolved.lower().endswith(ext) for ext in (".exe", ".com", ".bat", ".cmd", ".msi")):
             return {"success": False, "error": f"程序「{target}」解析为非可执行文件: {resolved}，请使用完整 .exe 路径"}
@@ -224,12 +386,86 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
             if _try_focus_existing(exe_name, target):
                 logger.info("程序 %s 已在运行，已聚焦窗口", exe_name)
                 return {"success": True, "focused_existing": True, "resolved_path": resolved}
+            title_candidates = []
+            for cand in [target, resolved, exe_name, os.path.splitext(exe_name)[0]]:
+                cand = (cand or "").strip()
+                if cand and cand not in title_candidates:
+                    title_candidates.append(cand)
+            try:
+                titles = _get_visible_window_titles()
+                for title in titles:
+                    low = title.lower()
+                    if any((c.lower() in low or low in c.lower()) for c in title_candidates if c):
+                        try:
+                            import win32gui, win32con
+                            def enum_cb(hwnd, _):
+                                if not win32gui.IsWindowVisible(hwnd):
+                                    return
+                                if win32gui.GetWindowText(hwnd).strip() == title:
+                                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                                    try:
+                                        win32gui.SetForegroundWindow(hwnd)
+                                    except Exception:
+                                        pass
+                            win32gui.EnumWindows(enum_cb, None)
+                        except Exception:
+                            pass
+                        return {"success": True, "focused_existing": True, "resolved_path": resolved, "window_title": title}
+            except Exception:
+                pass
 
         full_args = [resolved] + (args.split() if args else [])
         proc = subprocess.Popen(full_args, shell=False)
         if wait:
             proc.wait()
-        return {"success": True, "pid": proc.pid, "resolved_path": resolved}
+        result = {"success": True, "pid": proc.pid, "resolved_path": resolved}
+
+        window_title = ""
+        try:
+            import win32gui, win32con, win32process
+            start_time = time.time()
+            while time.time() - start_time < 5.0:
+                found_hwnd = None
+                def enum_cb(hwnd, _):
+                    nonlocal found_hwnd
+                    if found_hwnd is not None:
+                        return
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    except Exception:
+                        return
+                    if pid != proc.pid:
+                        return
+                    title = win32gui.GetWindowText(hwnd).strip()
+                    if title:
+                        found_hwnd = hwnd
+                try:
+                    win32gui.EnumWindows(enum_cb, None)
+                except Exception:
+                    pass
+                if found_hwnd is not None:
+                    try:
+                        win32gui.ShowWindow(found_hwnd, win32con.SW_RESTORE)
+                        try:
+                            win32gui.SetForegroundWindow(found_hwnd)
+                        except Exception:
+                            pass
+                        window_title = win32gui.GetWindowText(found_hwnd).strip()
+                    except Exception:
+                        pass
+                    break
+                time.sleep(0.25)
+        except Exception:
+            pass
+        if window_title:
+            result["window_title"] = window_title
+            result["visible_window"] = True
+        else:
+            result["visible_window"] = False
+            result["verify_pending"] = True
+        return result
     except FileNotFoundError:
         try:
             import subprocess

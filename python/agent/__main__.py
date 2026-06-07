@@ -34,6 +34,28 @@ import os
 import sys
 import threading
 
+
+def _enable_dpi_awareness():
+    """Make Win32 window rectangles match physical screenshot pixels."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+_enable_dpi_awareness()
+
 from dotenv import load_dotenv
 _env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
 load_dotenv(_env_path)
@@ -129,39 +151,24 @@ def _stdin_reader(queue: Queue):
 def _run_agent(goal: str, config: dict | None = None,
                stop_event: threading.Event = None,
                guidance_queue: Queue = None,
-               supervise: bool = True,
-               steps: list | None = None,
-               mimo: bool = False):
+               steps: list | None = None):
     """Run agent in a background thread, streaming events to stdout.
 
-    Uses unified AgentConfig dispatch. Supports both new (agent_config dict)
-    and legacy (mimo/supervise bools) config formats.
+    Uses unified AgentConfig dispatch from frontend settings.
     """
     cfg = config or {}
     model_name = (cfg.get("model") or os.environ.get("VLM_MODEL", "")).strip().lower()
 
-    # Auto-detect MIMO for backward compatibility
-    if not mimo and "mimo" in model_name:
-        mimo = True
-
     # ── Build AgentConfig from IPC config ──
-    from agent.config import AgentConfig, agent_config_from_legacy
+    from agent.config import AgentConfig
 
     agent_cfg_dict = cfg.get("agent_config", {})
-    if agent_cfg_dict and isinstance(agent_cfg_dict, dict):
-        # 新统一路径：从前端设置面板传递的 AgentConfig
-        # 将顶层 multimodal 设置注入 agent_config（用户设置高于 auto 检测）
-        if "multimodal" in cfg and agent_cfg_dict.get("multimodal", "auto") == "auto":
-            agent_cfg_dict = {**agent_cfg_dict, "multimodal": cfg["multimodal"]}
-        _log("info", f"Using unified AgentConfig from frontend: {json.dumps(agent_cfg_dict, ensure_ascii=False)}")
-        agent_cfg = AgentConfig.from_dict(agent_cfg_dict)
-    else:
-        # 旧路径：从 mimo/supervise 标志转换
-        agent_cfg = agent_config_from_legacy(mimo, supervise, model_name)
-        _log("info", f"Legacy flags converted: mimo={mimo}, supervise={supervise} → "
-                      f"planning={agent_cfg.planning}, protocol={agent_cfg.llm_protocol}")
+    if "multimodal" in cfg and agent_cfg_dict.get("multimodal", "auto") == "auto":
+        agent_cfg_dict = {**agent_cfg_dict, "multimodal": cfg["multimodal"]}
+    _log("info", f"Using AgentConfig from frontend: {json.dumps(agent_cfg_dict, ensure_ascii=False)}")
+    agent_cfg = AgentConfig.from_dict(agent_cfg_dict)
 
-    # ── Create unified LingdongAgent (config from agent_config dict) ──
+    # ── Create unified LingdongAgent ──
     from agent.agent import LingdongAgent
     agent_kw = dict(
         api_key=cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -173,8 +180,8 @@ def _run_agent(goal: str, config: dict | None = None,
         auto_learn=cfg.get("auto_learn") == "true",
         omniparser_enabled=cfg.get("omniparser_enabled") == "true",
     )
-    # Inject new config values from AgentConfig (if provided via agent_config dict)
-    if agent_cfg_dict and isinstance(agent_cfg_dict, dict):
+    # Inject config values from AgentConfig
+    if agent_cfg_dict:
         agent_kw["temperature"] = agent_cfg_dict.get("temperature", 0.1)
         agent_kw["max_tokens"] = agent_cfg_dict.get("max_tokens", 4096)
         agent_kw["llm_retries"] = agent_cfg_dict.get("llm_retries", 2)
@@ -184,14 +191,12 @@ def _run_agent(goal: str, config: dict | None = None,
         agent_kw["local_vision_enabled"] = agent_cfg_dict.get("local_vision", False)
         if agent_cfg_dict.get("auto_learn"):
             agent_kw["auto_learn"] = True
-    # 传递 guidance_queue 给 agent，用于对话模式
     if guidance_queue is not None:
         agent_kw["guidance_queue"] = guidance_queue
     agent = LingdongAgent(**agent_kw)
 
     # ── Unified execution ──
-    # agent.run(agent_config=...) → _unified_run() → 根据 config 自动选择执行策略
-    _emit("agent_start", {"goal": goal, "engine": agent_cfg._resolved_planning or "unified",
+    _emit("agent_start", {"goal": goal, "engine": agent_cfg.execution_mode,
                           "model": model_name})
     result = {}
     try:
@@ -257,7 +262,6 @@ class AgentIPC:
             return
 
         config = msg.get("config", {})
-        supervise = msg.get("supervise", True)
         steps = msg.get("steps")  # pre-generated structured_steps from frontend
         self._stop_event = threading.Event()
         self._guidance_queue = Queue()
@@ -265,7 +269,7 @@ class AgentIPC:
         self._agent_thread = threading.Thread(
             target=_run_agent,
             args=(goal, config, self._stop_event, self._guidance_queue),
-            kwargs={"supervise": supervise, "steps": steps, "mimo": config.get("mimo", False)},
+            kwargs={"steps": steps},
             daemon=True,
         )
         self._agent_thread.start()

@@ -41,6 +41,41 @@ export function startApiServer(deps: ApiDeps): http.Server {
       res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
     };
+    if (req.method === 'GET') {
+      try {
+        switch (url.pathname) {
+          case '/api/ping':
+            send(200, { ok: true });
+            return;
+          case '/api/get-state':
+            send(200, deps.getCachedRendererState() || { error: '渲染器状态未就绪' });
+            return;
+          case '/api/set-view-mode':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            deps.mainWindow.webContents.send('api-command', { action: 'setViewMode', payload: { mode: url.searchParams.get('mode') || '' } });
+            send(200, { ok: true });
+            return;
+          case '/api/fit-screen':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            deps.mainWindow.webContents.send('api-command', { action: 'fitScreen', payload: {} });
+            send(200, { ok: true });
+            return;
+          case '/api/execute-js':
+            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
+            {
+              const code = url.searchParams.get('code') || '';
+              if (!code) { send(400, { error: '缺少 code' }); return; }
+              deps.mainWindow.webContents.executeJavaScript(code, true)
+                .then(result => send(200, { ok: true, result }))
+                .catch((e: any) => send(500, { error: e.message }));
+              return;
+            }
+        }
+      } catch (e: any) {
+        send(500, { error: e.message });
+        return;
+      }
+    }
     if (req.method !== 'POST') { send(405, { error: 'Method not allowed' }); return; }
 
     const chunks: Buffer[] = [];

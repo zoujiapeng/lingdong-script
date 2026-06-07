@@ -1,135 +1,123 @@
 """
-Meta-Actions — Computer Use 风格的高层动作层
+Meta-Actions — 桌面自动化的高层动作层
 
-默认只暴露 ~22 个元动作，每个内部路由到最合适的 @feature 工具。
-流程图模式 (generate_flow) 默认隐藏，通过 use_flow_chart=True 开启。
+每个元动作 = 一件明确的事，最多 3 个参数，无 action 分发器。
+LLM 直接选择动作名和参数，内部路由到 @feature 工具。
 
-架构：
-  LLM 看到 → 元动作 (click, type_text, manage_window...)
-  系统执行 → 路由到 @feature 工具 (click_target, a11y_click_element, hotkey...)
+架构:
+  LLM 选择 → click_text/type_text/launch_app...
+  系统执行 → 路由到 @feature 工具 + 参数类型强制 + 重试
 """
 
 from __future__ import annotations
 import time
 import logging
+import re
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("agent.meta_actions")
 
-# ── 元动作注册表 ──────────────────────────────────────────────
-
-MetaHandler = Callable[..., dict]
-
+# ── 辅助 ──────────────────────────────────────────────────────
 
 def _registry():
-    """延迟获取 registry（模块级缓存，首次 import 后复用）。"""
     if hasattr(_registry, '_cache'):
         return _registry._cache
     from features.registry import registry
     import features._all  # noqa
-    # 缓存到函数属性，避免全局变量污染
     _registry._cache = registry
     return registry
 
 
-# ── 核心桌面动作 ──────────────────────────────────────────────
+# ── 屏幕点击 ──────────────────────────────────────────────────
 
-def click(target: str = "", x: int = 0, y: int = 0,
-          button: str = "left", region: str = "", clicks: int = 1,
-          timeout: float = 5) -> dict:
-    """Click at a target on screen.
-
-    target: text description like "OK", "Save", or element name.
-            If empty, uses x,y coordinates.
-    button: 'left', 'right', 'middle', 'double'
-    region: optional 'x,y,w,h' to limit search area
+def click_text(target: str, region: str = "") -> dict:
+    """Click the text/element on screen.
+    target: button text, element name, SoM label '#3', or coordinates '100,200'.
+    region: limit search area 'x,y,w,h' when multiple targets exist.
+    Falls back: UIA tree → OCR → image match.
     """
     r = _registry()
-
-    # Resolve target to coordinates
-    tx, ty = x, y
-    if target:
-        # Try given as coordinates first
-        if re.match(r'^-?\d+\s*,\s*-?\d+$', target.strip()):
-            parts = target.strip().split(",")
-            tx, ty = int(parts[0]), int(parts[1])
-            target = ""
-
-    if not target and tx == 0 and ty == 0:
-        return {"success": False, "error": "Need target description or coordinates"}
-    if not target and tx != 0 and ty != 0:
-        # Direct coordinate click
-        coord_str = f"{tx},{ty}"
-        btn_map = {"left": "click_target", "right": "right_click",
-                    "middle": "middle_click", "double": "click_target"}
-        tool = btn_map.get(button, "click_target")
-        kw = {"target": coord_str}
-        if region:
-            kw["region"] = region
-        if button == "double" or clicks >= 2:
-            kw["double"] = True
-        return r.execute(tool, **kw)
-
-    # Text target: try UIA first, then OCR-based click
-    if button == "right":
-        return r.execute("right_click", target=target, region=region)
-    if button == "middle":
-        return r.execute("middle_click", target=target)
     kw = {"target": target}
     if region:
         kw["region"] = region
-    if button == "double" or clicks >= 2:
-        kw["double"] = True
-    if timeout:
-        kw["timeout"] = timeout
     return r.execute("click_target", **kw)
 
 
-def type_text(text: str, target: str = "",
-              clear_first: bool = True, interval: float = 0) -> dict:
-    """Type text onto screen.
-
-    text: text to type
-    target: optional — click here first before typing
-    clear_first: clear existing text before typing
+def click_coord(x: int, y: int, button: str = "left") -> dict:
+    """Click at exact screen pixel coordinates.
+    Use when target has no text (blank canvas, desktop background).
+    button: 'left'(default) | 'right' | 'middle' | 'double'
     """
     r = _registry()
+    coord = f"{x},{y}"
+    btn_map = {"left": "click_target", "right": "right_click",
+               "middle": "middle_click", "double": "click_target"}
+    tool = btn_map.get(button, "click_target")
+    kw: dict[str, Any] = {"target": coord}
+    if button in ("double", "right"):
+        kw["button"] = button
+    return r.execute(tool, **kw)
 
+
+def double_click(target: str = "") -> dict:
+    """Double-click to open desktop icons, list items, files.
+    Single-click only selects; double-click opens.
+    """
+    r = _registry()
+    kw: dict[str, Any] = {"double": True}
     if target:
-        click_result = click(target=target, timeout=3)
+        kw["target"] = target
+    return r.execute("click_target", **kw)
+
+
+def right_click(target: str = "") -> dict:
+    """Right-click to open context menu."""
+    r = _registry()
+    kw: dict[str, Any] = {}
+    if target:
+        kw["target"] = target
+    return r.execute("right_click", **kw)
+
+
+# ── 键盘与输入 ────────────────────────────────────────────────
+
+def type_text(text: str, target: str = "", clear_first: bool = True) -> dict:
+    """Type text into the focused input field.
+    target: optional — click here first before typing.
+    Chinese text automatically uses clipboard paste (bypasses IME).
+    clear_first: clear existing text before typing (default True).
+    """
+    r = _registry()
+    if target:
+        click_result = click_text(target=target, timeout=3)
         if not click_result.get("success"):
             return click_result
         time.sleep(0.3)
 
-    # Prefer clipboard paste for Chinese/special characters
     has_chinese = any('一' <= c <= '鿿' for c in text)
     if has_chinese:
         result = r.execute("type_clipboard", text=text)
         if result.get("success"):
             return result
-
-    # Fallback to char-by-char typing
-    kw = {"text": text, "clear_first": clear_first}
-    if interval > 0:
-        kw["interval"] = interval
-    return r.execute("type_text", **kw)
+    return r.execute("type_text", text=text, clear_first=clear_first)
 
 
 def press_keys(keys: str) -> dict:
-    """Press keyboard shortcut. Examples: 'ctrl+s', 'alt+tab', 'esc', 'ctrl+c'."""
-    r = _registry()
-    return r.execute("hotkey", keys=keys)
+    """Press a keyboard shortcut.
+    Examples: 'ctrl+s', 'alt+tab', 'esc', 'ctrl+c', 'ctrl+v', 'enter', 'win+d'
+    """
+    return _registry().execute("hotkey", keys=keys)
 
 
 def scroll(direction: str = "down", amount: int = 3,
            target: str = "", x: int = 0, y: int = 0) -> dict:
-    """Scroll at target location.
-
-    direction: 'down', 'up', 'left', 'right'
-    amount: scroll clicks or pixels
+    """Scroll at a target location.
+    direction: 'down'(default) | 'up' | 'left' | 'right'
+    amount: scroll steps (default 3)
+    target: text description or SoM label for scroll position.
     """
     r = _registry()
-    kw = {"direction": direction, "amount": amount}
+    kw: dict[str, Any] = {"direction": direction, "amount": amount}
     if target:
         kw["target"] = target
     if x or y:
@@ -138,25 +126,22 @@ def scroll(direction: str = "down", amount: int = 3,
 
 
 def hover(target: str, duration: float = 0.5) -> dict:
-    """Hover cursor over an element."""
-    r = _registry()
-    return r.execute("hover", target=target, duration=duration)
+    """Hover cursor over an element to see tooltip or trigger hover effect."""
+    return _registry().execute("hover", target=target, duration=duration)
 
 
 def drag(from_target: str, to_target: str, duration: float = 0.3) -> dict:
     """Drag from one position to another."""
-    r = _registry()
-    return r.execute("drag", from_target=from_target,
-                     to_target=to_target, duration=duration)
+    return _registry().execute("drag", from_target=from_target,
+                                to_target=to_target, duration=duration)
 
 
 # ── 屏幕读取 ──────────────────────────────────────────────────
 
-def read_text(target: str = "", region: str = "") -> dict:
+def ocr_read(target: str = "", region: str = "") -> dict:
     """Read text from screen using OCR.
-
-    target: if provided, search for specific text and return its location
-    region: optional 'x,y,w,h' to limit search area
+    target: if provided, search for this text and return its location.
+    region: optional 'x,y,w,h' to limit scan area.
     """
     r = _registry()
     if target:
@@ -165,73 +150,61 @@ def read_text(target: str = "", region: str = "") -> dict:
 
 
 def read_ui(max_depth: int = 5) -> dict:
-    """Read UI accessibility tree of active window."""
-    r = _registry()
-    return r.execute("a11y_get_tree", max_depth=max_depth)
-
-
-def screenshot(region: str = "", format: str = "jpeg", quality: int = 50) -> dict:
-    """Take a screenshot.
-
-    region: optional 'x,y,w,h'. Empty = full screen
+    """Read the UI accessibility tree of the active window.
+    Returns all buttons, menus, inputs, and their labels.
     """
-    r = _registry()
-    kw = {"format": format, "quality": quality}
+    return _registry().execute("a11y_get_tree", max_depth=max_depth)
+
+
+def screenshot(region: str = "", quality: int = 50) -> dict:
+    """Take a screenshot. Empty region = full screen.
+    quality: JPEG quality 1-100 (default 50).
+    """
+    kw: dict[str, Any] = {"format": "jpeg", "quality": quality}
     if region:
         kw["region"] = region
-    return r.execute("screenshot", **kw)
+    return _registry().execute("screenshot", **kw)
 
 
 def get_cursor() -> dict:
-    """Get current mouse cursor position and window under cursor."""
-    r = _registry()
-    return r.execute("get_cursor_pos")
+    """Get current mouse cursor position and the window under cursor."""
+    return _registry().execute("get_cursor_pos")
 
 
 # ── 窗口管理 ──────────────────────────────────────────────────
 
-def manage_window(action: str, title: str = "",
-                  width: int = 0, height: int = 0,
-                  position: str = "") -> dict:
-    """Manage windows.
-
-    action: 'focus' | 'minimize' | 'maximize' | 'restore' |
-            'close' | 'resize' | 'snap'
-    title: window title (empty = active window)
-    """
-    r = _registry()
-    action = action.lower()
-
-    if action == "focus":
-        if not title:
-            return {"success": False, "error": "manage_window(action='focus') 需要 title 参数，如 title='计算器'"}
-        return r.execute("focus_window", title=title)
-    if action == "minimize":
-        return r.execute("window_minimize", title=title)
-    if action == "maximize":
-        return r.execute("window_maximize", title=title)
-    if action == "restore":
-        return r.execute("window_restore", title=title)
-    if action == "close":
-        return r.execute("window_close", title=title)
-    if action == "resize":
-        return r.execute("window_resize", width=width,
-                         height=height, title=title)
-    if action == "snap":
-        return r.execute("window_snap", position=position, title=title)
-
-    return {"success": False, "error": f"Unknown action: {action}"}
-
-
 def list_windows() -> dict:
-    """List all visible windows."""
-    r = _registry()
-    return r.execute("list_windows")
+    """List all visible windows with their titles, positions, and states."""
+    return _registry().execute("list_windows")
+
+
+def focus_window(title: str) -> dict:
+    """Bring a window to the foreground by title (partial match)."""
+    return _registry().execute("focus_window", title=title)
+
+
+def close_window(title: str = "") -> dict:
+    """Close a window. Empty title = active window."""
+    return _registry().execute("window_close", title=title)
+
+
+def minimize_window(title: str = "") -> dict:
+    """Minimize a window to taskbar. Empty title = active window."""
+    return _registry().execute("window_minimize", title=title)
+
+
+def maximize_window(title: str = "") -> dict:
+    """Maximize a window. Empty title = active window."""
+    return _registry().execute("window_maximize", title=title)
+
+
+def resize_window(width: int, height: int, title: str = "") -> dict:
+    """Resize a window to specific dimensions. Empty title = active window."""
+    return _registry().execute("window_resize", width=width, height=height, title=title)
 
 
 # ── 应用管理 ──────────────────────────────────────────────────
 
-# 常用程序名对照表（中文名 → exe名，容忍 LLM 不传准确 exe 名）
 _COMMON_APPS = {
     "calc": "calc.exe", "calculator": "calc.exe", "计算器": "calc.exe",
     "notepad": "notepad.exe", "记事本": "notepad.exe",
@@ -251,313 +224,278 @@ _COMMON_APPS = {
 
 
 def _resolve_app(target: str) -> str:
-    """将中文名/简写解析为 exe 文件名"""
+    """Resolve Chinese alias / short name to exe filename."""
     if not target:
         return ""
-    # 已经是 exe 格式
     if target.lower().endswith(".exe"):
         return target
-    # 查别名表
     t = target.lower().strip()
     if t in _COMMON_APPS:
         return _COMMON_APPS[t]
-    # 尝试直接加 .exe
-    exe_name = f"{t}.exe" if "." not in t else t
-    return exe_name
+    return f"{t}.exe" if "." not in t else t
 
 
-def manage_app(action: str, target: str = "", force: bool = False) -> dict:
-    """Manage applications.
-
-    action: 'launch' | 'kill' | 'detect'
-    target: program name like 'notepad.exe', 'calc.exe'
+def launch_app(target: str) -> dict:
+    """Launch an application. Supports Chinese names like '计算器', '记事本'.
+    Auto-detects if already running to avoid duplicate launches.
+    After launch, use focus_window(title) to bring it front.
     """
     r = _registry()
+    exe = _resolve_app(target)
+    if not exe:
+        return {"success": False, "error": "launch_app needs target, e.g. target='notepad.exe'"}
 
-    if action == "launch":
-        exe = _resolve_app(target)
-        if not exe:
-            return {"success": False, "error": "manage_app(action='launch') 需要 target 参数，如 target='notepad.exe'"}
+    try:
+        detect_r = r.execute("detect_process", name=exe)
+        det_ok = detect_r.get("result", detect_r.get("success", False))
+        if isinstance(det_ok, bool) and det_ok:
+            return {"success": True, "skipped": "already_running",
+                    "message": f"'{target}' already running. Use focus_window(title='...') to bring it front."}
+    except Exception:
+        pass
+    return r.execute("launch_program", target=exe)
 
-        # ── 检测进程是否已在运行 → 不重复启动 ──
-        try:
-            detect_r = r.execute("detect_process", name=exe)
-            det_ok = detect_r.get("result", detect_r.get("success", False))
-            if isinstance(det_ok, bool) and det_ok:
-                return {
-                    "success": True, "skipped": "already_running",
-                    "message": f"「{target}」已在运行。请用 manage_window(action='focus', title='...') 聚焦窗口后继续操作。"
-                }
-        except Exception:
-            pass
 
-        # ── 启动 ──
-        return r.execute("launch_program", target=exe)
-    if action == "kill":
-        exe = _resolve_app(target)
-        if not exe:
-            return {"success": False, "error": "manage_app(action='kill') 需要 target 参数，如 target='notepad.exe'"}
-        return r.execute("kill_process", name=exe, force=force)
-    if action == "detect":
-        exe = _resolve_app(target)
-        if not exe:
-            return {"success": False, "error": "manage_app(action='detect') 需要 target 参数"}
-        return r.execute("detect_process", name=exe)
+def kill_app(target: str, force: bool = False) -> dict:
+    """Terminate an application by name. force=True for forced kill."""
+    exe = _resolve_app(target)
+    if not exe:
+        return {"success": False, "error": "kill_app needs target, e.g. target='notepad.exe'"}
+    return _registry().execute("kill_process", name=exe, force=force)
 
-    return {"success": False, "error": f"Unknown action: {action}"}
+
+def detect_app(target: str) -> dict:
+    """Check if an application process is running."""
+    exe = _resolve_app(target)
+    if not exe:
+        return {"success": False, "error": "detect_app needs target, e.g. target='notepad.exe'"}
+    return _registry().execute("detect_process", name=exe)
 
 
 # ── 系统控制 ──────────────────────────────────────────────────
 
-def control_audio(action: str = "set", level: float = 50) -> dict:
-    """Control system audio.
-
-    action: 'set' (volume 0-100) or 'mute' (toggle)
-    level: volume level 0-100 (for 'set' action)
-    """
-    r = _registry()
-    if action == "set":
-        return r.execute("volume_set", level=level)
-    if action == "mute":
-        return r.execute("volume_mute")
-    return {"success": False, "error": f"Unknown action: {action}"}
+def set_volume(level: float) -> dict:
+    """Set system volume (0-100)."""
+    return _registry().execute("volume_set", level=level)
 
 
-def system_info(query: str = "all") -> dict:
-    """Get system information.
+def toggle_mute() -> dict:
+    """Toggle system audio mute on/off."""
+    return _registry().execute("volume_mute")
 
-    query: 'battery' | 'network' | 'all'
-    """
-    r = _registry()
-    results = {}
 
-    if query in ("battery", "all"):
-        try:
-            results["battery"] = r.execute("battery_status")
-        except Exception as e:
-            results["battery"] = {"error": str(e)}
-
-    if query in ("network", "all"):
-        try:
-            results["network"] = r.execute("network_status")
-        except Exception as e:
-            results["network"] = {"error": str(e)}
-
-    return {"success": True, "result": results} if results else \
-           {"success": False, "error": f"Unknown query: {query}"}
+def get_battery() -> dict:
+    """Get battery status (percentage, charging)."""
+    return _registry().execute("battery_status")
 
 
 def set_brightness(level: float) -> dict:
-    """Set display brightness (0-100). For laptop displays."""
-    r = _registry()
-    return r.execute("display_brightness", level=level)
+    """Set display brightness (0-100). Laptop displays only."""
+    return _registry().execute("display_brightness", level=level)
 
 
-def lock_screen() -> dict:
-    """Lock the workstation (equivalent to Win+L)."""
-    r = _registry()
-    return r.execute("lock_workstation")
+def lock_workstation() -> dict:
+    """Lock the screen (Win+L)."""
+    return _registry().execute("lock_workstation")
 
 
 def notify(title: str = "Task Complete", message: str = "") -> dict:
-    """Send Windows taskbar notification."""
-    r = _registry()
-    return r.execute("send_notification", title=title, message=message)
+    """Send a Windows taskbar notification."""
+    return _registry().execute("send_notification", title=title, message=message)
 
 
 # ── 对话框 ────────────────────────────────────────────────────
 
-def dialog(action: str = "close", path: str = "", timeout: float = 5) -> dict:
-    """Handle dialogs.
+def close_dialog(timeout: float = 5) -> dict:
+    """Auto-close any open dialog/popup (save confirm, error, overwrite prompt)."""
+    return _registry().execute("handle_dialog", timeout=timeout)
 
-    action: 'close' to auto-close popups, 'save' to fill save dialog
-    path: file path for 'save' action
+
+def save_dialog(path: str, timeout: float = 5) -> dict:
+    """Fill the file-save dialog with a path.
+    Note: modern Windows IFileDialog cannot be automated — use write_file() instead.
     """
-    r = _registry()
-    if action == "close":
-        return r.execute("handle_dialog", timeout=timeout)
-    if action == "save":
-        return r.execute("fill_save_dialog", filepath=path, timeout=timeout)
-    return {"success": False, "error": f"Unknown dialog action: {action}"}
+    return _registry().execute("fill_save_dialog", filepath=path, timeout=timeout)
 
 
 # ── 网络 ──────────────────────────────────────────────────────
 
-def network(action: str = "status", ssid: str = "", password: str = "") -> dict:
-    """Manage network.
+def get_network_status() -> dict:
+    """Get current network connectivity status."""
+    return _registry().execute("network_status")
 
-    action: 'status' | 'scan_wifi' | 'connect_wifi' | 'disconnect_wifi'
-    """
+
+def scan_wifi() -> dict:
+    """List available WiFi networks."""
+    return _registry().execute("wifi_list")
+
+
+def connect_wifi(ssid: str, password: str = "") -> dict:
+    """Connect to a WiFi network."""
+    return _registry().execute("wifi_connect", ssid=ssid, password=password)
+
+
+def disconnect_wifi() -> dict:
+    """Disconnect from current WiFi network."""
+    return _registry().execute("wifi_disconnect")
+
+
+# ── 浏览器 ────────────────────────────────────────────────────
+
+def browser_open(url: str) -> dict:
+    """Open a URL in the browser. Auto-connects to existing browser session."""
     r = _registry()
-    if action == "status":
-        return r.execute("network_status")
-    if action == "scan_wifi":
-        return r.execute("wifi_list")
-    if action == "connect_wifi":
-        return r.execute("wifi_connect", ssid=ssid, password=password)
-    if action == "disconnect_wifi":
-        return r.execute("wifi_disconnect")
-    return {"success": False, "error": f"Unknown network action: {action}"}
+    r.execute("browser_connect")
+    return r.execute("browser_navigate", url=url)
 
 
-# ── 工具 ──────────────────────────────────────────────────────
+def browser_click(selector: str) -> dict:
+    """Click an element in the browser by CSS selector."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_click", selector=selector)
+
+
+def browser_type(selector: str, text: str) -> dict:
+    """Type text into a browser input field by CSS selector."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_type", selector=selector, text=text)
+
+
+def browser_read(selector: str = "") -> dict:
+    """Read text from the browser page. With selector, reads that element."""
+    r = _registry()
+    r.execute("browser_connect")
+    if selector:
+        return r.execute("browser_get_text", selector=selector)
+    return r.execute("browser_get_text")
+
+
+def browser_screenshot() -> dict:
+    """Take a screenshot of the current browser page."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_screenshot")
+
+
+def browser_back() -> dict:
+    """Navigate back in browser history."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_go_back")
+
+
+def browser_refresh() -> dict:
+    """Refresh the current browser page."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_refresh")
+
+
+def browser_get_url() -> dict:
+    """Get the current browser URL."""
+    r = _registry()
+    r.execute("browser_connect")
+    return r.execute("browser_get_url")
+
+
+# ── 文件与命令 ────────────────────────────────────────────────
 
 def run_command(command: str, timeout: float = 30) -> dict:
-    """Execute a shell command and return output."""
-    r = _registry()
-    return r.execute("run_command", command=command, timeout=timeout)
+    """Execute a shell command and return its output."""
+    return _registry().execute("run_command", command=command, timeout=timeout)
 
 
 def run_python_script(script: str, timeout: int = 120) -> dict:
-    """Execute Python code directly. Uses subprocess for isolation.
-
-    Pre-installed: pywinauto, pyautogui, psutil, os, subprocess, time, json, math, random.
+    """Execute Python code in a subprocess.
+    Pre-installed: pywinauto, pyautogui, psutil, os, subprocess, json.
     """
-    import subprocess, tempfile, os, time, sys
+    import subprocess as _sp, tempfile as _tf, os as _os, sys as _sys
     try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".py", prefix="lg_script_")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(script)
-        except Exception:
-            os.unlink(tmp_path)
-            return {"success": False, "error": "failed to write script"}
-
+        fd, tmp = _tf.mkstemp(suffix=".py", prefix="lg_")
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script)
         start = time.time()
-        proc = subprocess.run(
-            [sys.executable, tmp_path],
-            capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-        )
-        elapsed = time.time() - start
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        success = proc.returncode == 0
-
+        proc = _sp.run([_sys.executable, tmp], capture_output=True, text=True,
+                       timeout=timeout, env={**_os.environ, "PYTHONIOENCODING": "utf-8"})
         return {
-            "success": success,
-            "stdout": stdout,
-            "stderr": stderr,
+            "success": proc.returncode == 0,
+            "stdout": proc.stdout.strip(),
+            "stderr": proc.stderr.strip(),
             "exit_code": proc.returncode,
-            "elapsed": round(elapsed, 1),
+            "elapsed": round(time.time() - start, 1),
         }
-    except subprocess.TimeoutExpired:
+    except _sp.TimeoutExpired:
         return {"success": False, "error": f"Script timed out after {timeout}s"}
     except Exception as e:
         return {"success": False, "error": str(e)}
     finally:
         try:
-            os.unlink(tmp_path)
+            _os.unlink(tmp)
         except Exception:
             pass
 
 
-def file_ops(action: str, path: str, content: str = "",
-             pattern: str = "", recursive: bool = False) -> dict:
-    """File operations.
+def read_file(path: str) -> dict:
+    """Read file contents as text."""
+    return _registry().execute("file_read", path=path)
 
-    action: 'read' | 'write' | 'list' | 'exists' | 'delete' | 'copy' | 'move'
-    path: file path
-    content: file content (for 'write')
-    pattern: glob pattern (for 'list')
-    """
-    r = _registry()
-    if action == "read":
-        return r.execute("file_read", path=path)
-    if action == "write":
-        return r.execute("file_write", path=path, content=content)
-    if action == "list":
-        kw = {"path": path}
-        if pattern:
-            kw["pattern"] = pattern
-        kw["recursive"] = recursive
-        return r.execute("file_list", **kw)
-    if action == "exists":
-        return r.execute("file_exists", path=path)
-    if action == "delete":
-        return r.execute("file_delete", path=path)
-    if action == "copy":
-        return r.execute("file_copy", src=path, dst=content)
-    if action == "move":
-        return r.execute("file_move", src=path, dst=content)
-    return {"success": False, "error": f"Unknown file action: {action}"}
+
+def write_file(path: str, content: str) -> dict:
+    """Write text content to a file. Creates directories if needed."""
+    return _registry().execute("file_write", path=path, content=content)
+
+
+def list_files(path: str, pattern: str = "", recursive: bool = False) -> dict:
+    """List files in a directory. Optional glob pattern and recursive search."""
+    kw: dict[str, Any] = {"path": path}
+    if pattern:
+        kw["pattern"] = pattern
+    if recursive:
+        kw["recursive"] = True
+    return _registry().execute("file_list", **kw)
+
+
+def delete_file(path: str) -> dict:
+    """Delete a file."""
+    return _registry().execute("file_delete", path=path)
+
+
+def copy_file(src: str, dst: str) -> dict:
+    """Copy a file from source to destination."""
+    return _registry().execute("file_copy", src=src, dst=dst)
+
+
+def move_file(src: str, dst: str) -> dict:
+    """Move/rename a file."""
+    return _registry().execute("file_move", src=src, dst=dst)
 
 
 def wait(seconds: float = 1.0) -> dict:
-    """Wait for specified seconds. Use between actions to let UI settle."""
-    import time
+    """Wait for N seconds. Use between actions to let the UI settle."""
     time.sleep(seconds)
     return {"success": True, "result": {"waited": seconds}}
 
 
-# ── 浏览器操作 ───────────────────────────────────────────────
-
-def browser_do(action: str, url: str = "", text: str = "",
-               selector: str = "", timeout: float = 10) -> dict:
-    """Browser automation — interact with web pages via CDP.
-
-    action: 'navigate' | 'click' | 'type' | 'read' | 'screenshot' |
-            'back' | 'close' | 'refresh' | 'get_url'
-    url: target URL (for 'navigate')
-    text: text to type (for 'type')
-    selector: CSS selector (for 'click'/'type'/'read')
-    """
-    r = _registry()
-
-    if action == "navigate":
-        r.execute("browser_connect")
-        return r.execute("browser_navigate", url=url)
-    if action == "click":
-        r.execute("browser_connect")
-        return r.execute("browser_click", selector=selector)
-    if action == "type":
-        r.execute("browser_connect")
-        return r.execute("browser_type", selector=selector, text=text)
-    if action == "read":
-        r.execute("browser_connect")
-        return r.execute("browser_get_text", selector=selector)
-    if action == "screenshot":
-        r.execute("browser_connect")
-        return r.execute("browser_screenshot")
-    if action == "back":
-        r.execute("browser_connect")
-        return r.execute("browser_go_back")
-    if action == "close":
-        r.execute("browser_connect")
-        return r.execute("browser_close")
-    if action == "refresh":
-        r.execute("browser_connect")
-        return r.execute("browser_refresh")
-    if action == "get_url":
-        r.execute("browser_connect")
-        return r.execute("browser_get_url")
-
-    return {"success": False, "error": f"Unknown browser action: {action}"}
-
-
-# ── 流程图模式（默认隐藏）────────────────────────────────────────
+# ── 流程图模式（默认隐藏）─────────────────────────────────────
 
 _FLOW_CHART_ENABLED = False
 
 
 def set_flow_chart_mode(enabled: bool):
-    """Enable/disable flow chart meta-actions."""
     global _FLOW_CHART_ENABLED
     _FLOW_CHART_ENABLED = enabled
 
 
 def generate_flow(goal: str) -> dict:
-    """[Flow Chart] Generate a visual flow chart from a task description.
-    This creates a reusable automated workflow in the frontend.
-    """
-    r = _registry()
-    return r.execute("generate_flow_script", goal=goal)
+    """[Flow Chart] Generate a reusable visual workflow from a task description."""
+    return _registry().execute("generate_flow_script", goal=goal)
 
 
 def execute_flow(script: str) -> dict:
     """[Flow Chart] Execute a flow chart script (DSL text or FlowScript JSON)."""
     r = _registry()
-    # Try as DSL text first
     if script.strip().startswith("{"):
         return r.execute("software_load_script", script=script)
     return r.execute("run_dsl", dsl=script)
@@ -565,332 +503,311 @@ def execute_flow(script: str) -> dict:
 
 # ── 元动作注册表 ──────────────────────────────────────────────
 
-# 不需要执行后截图的元动作（读取类/纯工具类操作，屏幕不会变化）
+# 不需要执行后截图的元动作（屏幕不会变化）
 NO_SS_AFTER_META = frozenset({
-    "read_text", "read_ui", "screenshot", "get_cursor",
-    "list_windows", "control_audio", "system_info",
-    "set_brightness", "lock_screen", "notify",
-    "network", "file_ops", "wait",
+    "ocr_read", "read_ui", "screenshot", "get_cursor",
+    "list_windows", "get_network_status", "scan_wifi",
+    "get_battery", "set_volume", "toggle_mute",
+    "set_brightness", "lock_workstation", "notify",
+    "read_file", "list_files", "wait",
     "generate_flow", "execute_flow",
 })
 
-# Each meta-action: (description, params_schema, handler_fn, expert)
-# expert=True means hidden in default mode (only shown when flow_chart enabled)
 META_ACTIONS: dict[str, tuple] = {}
+_w = META_ACTIONS  # shorthand
 
-# Core desktop actions
-META_ACTIONS["click"] = (
-    "点击屏幕上的目标。普通按钮用 click(target='按钮名') 即可。"
-    "桌面图标和列表项（联系人、文件、聊天记录等）单击只选中不打开，必须用 button='double' 双击。"
-    "target 可以是按钮文字('确认'、'保存')、元素名称、截图编号('#3')或坐标'100,200'。"
-    "桌面背景、画布空白等没有控件名的区域，只能用 x,y 坐标点击，根据截图估算位置。"
-    "自动用 UIA 无障碍树 → OCR 文字识别 → 图像匹配定位目标。如果目标唯一可以直接点，"
-    "如果多个同名目标用 region 参数限定搜索区域。"
-    "如果一次点击没有反应，先截图看看是否点偏了，然后调整坐标重试；如果目标没打开（如图标、列表项），"
-    "试试 button='double' 双击。右键菜单用 button='right'。"
-    "桌面图标可以先截图上让 AI 看清图标位置，再用坐标点击 click(x=约数,y=约数,button='double')。"
-    "坐标是实际屏幕像素，截图经过缩放但 AI 会自动换算。"
-    "常用: click(target='确认'), click(target='#3'), click(x=500,y=400), click(target='QQ', button='double')",
-    {
-        "target": "str - 目标文字/元素名/截图编号#N/坐标'x,y'",
-        "button": "str? - 鼠标键: 'left'(默认), 'right'右键, 'middle'中键, 'double'双击",
-        "region": "str? - 限定搜索区域 'x,y,w,h'，多目标时使用",
-    },
-    click,
+_w["click_text"] = (
+    "点击屏幕上的文字/元素。桌面图标用 double_click，右键菜单用 right_click。",
+    {"target": "str - 按钮文字/元素名/SoM编号#N/坐标'x,y'",
+     "region": "str? - 限定'x,y,w,h'，多目标时使用"},
+    click_text,
 )
-
-META_ACTIONS["type_text"] = (
-    "向当前焦点输入框输入文字。先点击目标输入框再输入。中文会自动用剪贴板粘贴(绕过输入法)。"
-    "clear_first=True 会先清空已有内容。"
-    "常用: type_text(text='Hello World'), type_text(text='搜索关键词', target='搜索框', clear_first=True)",
-    {
-        "text": "str - 要输入的文字内容",
-        "target": "str? - 先点击此目标再输入（输入框的描述）",
-        "clear_first": "bool? - 输入前先清空已有内容（默认true）",
-    },
+_w["click_coord"] = (
+    "在精确像素坐标点击。用于没有文字的区域（桌面背景、画布空白）。",
+    {"x": "int - 屏幕x坐标", "y": "int - 屏幕y坐标",
+     "button": "str? - left(默认)/right/middle/double"},
+    click_coord,
+)
+_w["double_click"] = (
+    "双击打开桌面图标/列表项/文件。单击只选中，必须双击才能打开。",
+    {"target": "str? - 目标文字或SoM编号"},
+    double_click,
+)
+_w["right_click"] = (
+    "右键点击弹出上下文菜单。",
+    {"target": "str? - 目标文字或SoM编号"},
+    right_click,
+)
+_w["type_text"] = (
+    "向输入框输入文字。中文自动用剪贴板粘贴(绕过输入法)。",
+    {"text": "str - 要输入的文字",
+     "target": "str? - 先点击此目标再输入",
+     "clear_first": "bool? - 输入前清空(默认true)"},
     type_text,
 )
-
-META_ACTIONS["press_keys"] = (
-    "按下键盘快捷键或组合键。常用: 'ctrl+s'保存, 'alt+tab'切换窗口, 'ctrl+c'复制, 'ctrl+v'粘贴, "
-    "'esc'取消/关闭, 'alt+f4'关闭窗口, 'ctrl+a'全选, 'win+d'显示桌面, "
-    "'enter'确认, 'tab'切换焦点, 'ctrl+z'撤销, 'ctrl+shift+z'重做。"
-    "多个键用 + 连接。",
-    {"keys": "str - 快捷键组合，如 'ctrl+s', 'alt+tab', 'esc'"},
+_w["press_keys"] = (
+    "按快捷键: 'ctrl+s', 'alt+tab', 'ctrl+c', 'ctrl+v', 'esc', 'enter', 'win+d'…",
+    {"keys": "str - 快捷键，多个键用+连接"},
     press_keys,
 )
-
-META_ACTIONS["scroll"] = (
-    "在屏幕指定位置滚动鼠标滚轮。direction方向: 'down'向下(默认), 'up'向上, 'left'向左, 'right'向右。"
-    "amount滚动格数(默认3格)。target指定滚动位置(文字描述或坐标)，不填则在当前鼠标位置滚动。"
-    "常用: scroll(direction='down'), scroll(direction='down', target='设置页面', amount=5)",
-    {
-        "direction": "str? - 滚动方向: 'down'(默认), 'up', 'left', 'right'",
-        "amount": "int? - 滚动格数（默认3）",
-        "target": "str? - 滚动位置（文字描述或坐标，不填则当前鼠标位置）",
-    },
+_w["scroll"] = (
+    "在指定位置滚动鼠标滚轮。",
+    {"direction": "str? - down(默认)/up/left/right",
+     "amount": "int? - 滚动步数(默认3)",
+     "target": "str? - 滚动位置描述"},
     scroll,
 )
-
-META_ACTIONS["hover"] = (
-    "将鼠标悬停在目标元素上（不点击）。用于触发 tooltip 提示、hover 样式效果或预览链接。"
-    "常用: hover(target='菜单项')",
-    {
-        "target": "str - 悬停目标（文字描述）",
-        "duration": "num? - 悬停秒数（默认0.5）",
-    },
+_w["hover"] = (
+    "悬停鼠标在元素上查看工具提示。",
+    {"target": "str - 目标文字/SoM编号",
+     "duration": "float? - 悬停秒数(默认0.5)"},
     hover,
 )
-
-META_ACTIONS["drag"] = (
-    "从起始位置拖拽到目标位置。from_target 和 to_target 可以是文字描述或坐标 'x,y'。"
-    "用于拖拽文件、移动窗口、调整滑块。"
-    "常用: drag(from_target='文件图标', to_target='目标文件夹')",
-    {
-        "from_target": "str - 起始位置（文字描述或坐标）",
-        "to_target": "str - 目标位置（文字描述或坐标）",
-        "duration": "num? - 拖动耗时秒数（默认0.3）",
-    },
+_w["drag"] = (
+    "从一处拖动到另一处。",
+    {"from_target": "str - 起始位置",
+     "to_target": "str - 目标位置",
+     "duration": "float? - 拖动秒数(默认0.3)"},
     drag,
 )
-
-# Screen reading
-META_ACTIONS["read_text"] = (
-    "用 OCR 读取屏幕上的文字。如果提供 target 参数，会查找特定文字并返回坐标；如果 target 为空，返回屏幕上所有文字。"
-    "用 region 参数限定识别区域。先 read_ui 看控件树，再 read_text 找具体文字。"
-    "常用: read_text() 读取全部文字, read_text(target='错误提示') 找特定文字位置, read_text(region='100,200,500,300') 限区域",
-    {
-        "target": "str? - 要查找的特定文字（找到返回坐标），空则返回全部文字",
-        "region": "str? - 限定识别区域 'x,y,w,h'",
-    },
-    read_text,
+_w["ocr_read"] = (
+    "用OCR读取屏幕文字。指定target则搜索该文字并返回坐标。",
+    {"target": "str? - 要搜索的文字",
+     "region": "str? - 限定区域'x,y,w,h'"},
+    ocr_read,
 )
-
-META_ACTIONS["read_ui"] = (
-    "读取当前活动窗口的无障碍控件树(UIA)，返回按钮、输入框、列表等元素的层级结构、名称和位置。"
-    "比 OCR 更精确，能获取标准 Windows 控件的准确名称(按钮、输入框、列表等)。"
-    "点击前先用 read_ui 查看目标控件的准确名称。"
-    "常用: read_ui(), read_ui(max_depth=3)",
-    {"max_depth": "int? - 控件树深度（默认5，越大信息越多）"},
+_w["read_ui"] = (
+    "读取活动窗口的无障碍控件树(所有按钮/菜单/输入框)。",
+    {"max_depth": "int? - 树深度(默认5)"},
     read_ui,
 )
-
-META_ACTIONS["screenshot"] = (
-    "截取当前屏幕。region 为空截取全屏，指定 region 截取部分区域。"
-    "用于视觉验证界面状态或提供给多模态模型分析。"
-    "常用: screenshot(), screenshot(region='0,0,500,800')",
-    {"region": "str? - 截取区域 'x,y,w,h'，空=全屏"},
+_w["screenshot"] = (
+    "截取屏幕截图。用于查看当前界面状态。",
+    {"region": "str? - 截取区域'x,y,w,h'(空=全屏)",
+     "quality": "int? - JPEG质量1-100(默认50)"},
     screenshot,
 )
-
-META_ACTIONS["get_cursor"] = (
-    "获取鼠标当前屏幕坐标(x, y)和所在窗口的标题。点击前先获取鼠标位置确认位置正确。"
-    "常用: get_cursor()",
+_w["get_cursor"] = (
+    "获取当前鼠标位置和鼠标下的窗口信息。",
     {},
     get_cursor,
 )
-
-# Window management
-META_ACTIONS["manage_window"] = (
-    "窗口操作：聚焦、最小化、最大化、还原、关闭、调整大小、贴边。"
-    "title 为空时操作当前活动窗口。"
-    "【重要】action='focus' 时必须提供 title。"
-    "常用: manage_window(action='focus', title='计算器') 聚焦窗口, "
-    "manage_window(action='close') 关闭当前窗口, "
-    "manage_window(action='minimize', title='记事本') 最小化, "
-    "manage_window(action='snap', position='left') 左半屏贴边",
-    {
-        "action": "str - 操作: 'focus'聚焦, 'minimize'最小化, 'maximize'最大化, 'restore'还原, 'close'关闭, 'resize'调整大小, 'snap'贴边",
-        "title": "str? - 窗口标题（action='focus' 时此参数必需）",
-        "width": "int? - 调整宽度（用于 'resize'）",
-        "height": "int? - 调整高度（用于 'resize'）",
-        "position": "str? - 贴边位置（用于 'snap'）: 'left', 'right', 'top', 'bottom'",
-    },
-    manage_window,
-)
-
-META_ACTIONS["list_windows"] = (
-    "列出所有可见窗口的标题。启动应用前检查是否已在运行，或查找窗口标题用于 manage_window。"
-    "常用: list_windows()",
+_w["list_windows"] = (
+    "列出所有可见窗口(标题、位置、状态)。",
     {},
     list_windows,
 )
-
-# App management
-META_ACTIONS["manage_app"] = (
-    "启动、终止或检测应用程序。'launch'启动程序(未运行时)或聚焦已运行的窗口。"
-    "'kill'终止进程,'force=true'强制终止。'detect'检查进程是否在运行。"
-    "【重要】target 是必需的参数，必须指定程序名。"
-    "常用: manage_app(action='launch', target='notepad.exe') 启动记事本, "
-    "manage_app(action='detect', target='chrome.exe') 检查Chrome是否在运行",
-    {
-        "action": "str - 操作: 'launch'启动, 'kill'终止, 'detect'检测",
-        "target": "str - 必需。程序名如 'notepad.exe', 'calc.exe', 'chrome.exe'",
-        "force": "bool? - 强制终止（用于 'kill'）",
-    },
-    manage_app,
+_w["focus_window"] = (
+    "将窗口前置激活（支持部分标题匹配）。",
+    {"title": "str - 窗口标题关键词"},
+    focus_window,
 )
-
-# System
-META_ACTIONS["control_audio"] = (
-    "控制系统音量。'set'设置音量(0-100), 'mute'静音切换。"
-    "常用: control_audio(action='set', level=50) 设音量50%, control_audio(action='mute') 静音切换",
-    {
-        "action": "str? - 'set'设置音量(默认) 或 'mute'静音切换",
-        "level": "num? - 音量 0-100（用于 'set'）",
-    },
-    control_audio,
+_w["close_window"] = (
+    "关闭窗口。不传title=关闭当前活动窗口。",
+    {"title": "str? - 窗口标题关键词"},
+    close_window,
 )
-
-META_ACTIONS["system_info"] = (
-    "获取系统信息。'battery'电池电量百分比和充电状态, 'network'网络连接类型和IP, 'all'全部信息。"
-    "常用: system_info(query='battery') 查电量, system_info(query='all') 查全部",
-    {"query": "str? - 'battery'(默认)电池, 'network'网络, 'all'全部"},
-    system_info,
+_w["minimize_window"] = (
+    "最小化窗口到任务栏。不传title=最小化当前窗口。",
+    {"title": "str? - 窗口标题关键词"},
+    minimize_window,
 )
-
-META_ACTIONS["set_brightness"] = (
-    "设置笔记本屏幕亮度百分比(0-100)。仅在笔记本上有效。"
-    "常用: set_brightness(level=70)",
-    {"level": "num - 亮度百分比 0-100"},
+_w["maximize_window"] = (
+    "最大化窗口。不传title=最大化当前窗口。",
+    {"title": "str? - 窗口标题关键词"},
+    maximize_window,
+)
+_w["resize_window"] = (
+    "调整窗口大小到指定像素尺寸。",
+    {"width": "int - 宽(像素)", "height": "int - 高(像素)",
+     "title": "str? - 窗口标题关键词"},
+    resize_window,
+)
+_w["launch_app"] = (
+    "启动应用程序。支持中文名'计算器''记事本'。自动检测是否已在运行避免重复启动。",
+    {"target": "str - 程序名(notepad.exe/计算器/chrome)"},
+    launch_app,
+)
+_w["kill_app"] = (
+    "终止应用程序进程。",
+    {"target": "str - 程序名(notepad.exe)", "force": "bool? - 强制终止"},
+    kill_app,
+)
+_w["detect_app"] = (
+    "检查应用程序是否在运行。",
+    {"target": "str - 程序名(notepad.exe)"},
+    detect_app,
+)
+_w["set_volume"] = (
+    "设置系统音量(0-100)。",
+    {"level": "float - 音量0-100"},
+    set_volume,
+)
+_w["toggle_mute"] = (
+    "切换静音开关。",
+    {},
+    toggle_mute,
+)
+_w["get_battery"] = (
+    "获取电池状态(百分比/是否充电)。",
+    {},
+    get_battery,
+)
+_w["set_brightness"] = (
+    "设置屏幕亮度(0-100，仅笔记本)。",
+    {"level": "float - 亮度0-100"},
     set_brightness,
 )
-
-META_ACTIONS["lock_screen"] = (
-    "立即锁定工作站(等同于Win+L)。离开时使用，无需参数。"
-    "常用: lock_screen()",
+_w["lock_workstation"] = (
+    "锁定工作站(Win+L)。",
     {},
-    lock_screen,
+    lock_workstation,
 )
-
-META_ACTIONS["browser_do"] = (
-    "浏览器自动化(Chrome CDP)。自动连接已打开的Chrome。'navigate'打开URL, "
-    "'click'用CSS选择器点击元素, 'type'输入文字, 'read'读取元素文本, "
-    "'screenshot'截取页面, 'back'后退, 'close'关闭, 'refresh'刷新, 'get_url'获取当前URL。"
-    "常用: browser_do(action='navigate', url='https://www.baidu.com'), "
-    "browser_do(action='click', selector='#su'), "
-    "browser_do(action='type', selector='#kw', text='搜索词')",
-    {
-        "action": "str - 操作: 'navigate'导航, 'click'点击, 'type'输入, 'read'读取, 'screenshot'截图, 'back'后退, 'close'关闭, 'refresh'刷新, 'get_url'获取URL",
-        "url": "str? - 目标URL（用于 'navigate'）",
-        "selector": "str? - CSS选择器（用于 'click'/'type'/'read'）",
-        "text": "str? - 要输入的文字（用于 'type'）",
-    },
-    browser_do,
-)
-
-META_ACTIONS["notify"] = (
-    "在Windows任务栏托盘区域发送通知。用于任务完成提醒或告警。"
-    "常用: notify(title='完成', message='脚本已执行完毕')",
-    {"title": "str - 通知标题", "message": "str - 通知正文"},
+_w["notify"] = (
+    "发送Windows任务栏通知。",
+    {"title": "str? - 标题(默认Task Complete)", "message": "str? - 消息内容"},
     notify,
 )
-
-META_ACTIONS["dialog"] = (
-    "处理对话框和弹窗。'close'自动检测并关闭任意可见对话框(保存确认、错误提示、覆盖询问等)。"
-    "'save'在已有保存对话框中填入路径。每次操作后如果出现弹窗应先调用dialog('close')。"
-    "常用: dialog(action='close'), dialog(action='save', path='C:\\\\test.txt')",
-    {
-        "action": "str - 'close'关闭弹窗(默认) 或 'save'填写保存路径",
-        "path": "str? - 文件路径（用于 'save'）",
-    },
-    dialog,
+_w["close_dialog"] = (
+    "自动关闭弹窗(保存确认/错误提示/覆盖询问)。",
+    {"timeout": "float? - 等待秒数(默认5)"},
+    close_dialog,
 )
-
-META_ACTIONS["network"] = (
-    "网络连接管理。'status'查看连接状态, 'scan_wifi'扫描WiFi列表, 'connect_wifi'连接WiFi, 'disconnect_wifi'断开WiFi。"
-    "常用: network(action='status'), network(action='scan_wifi'), network(action='connect_wifi', ssid='MyWiFi', password='123456')",
-    {
-        "action": "str - 'status'(默认)状态, 'scan_wifi'扫描WiFi, 'connect_wifi'连接WiFi, 'disconnect_wifi'断开WiFi",
-        "ssid": "str? - WiFi名称（用于 'connect_wifi'）",
-        "password": "str? - WiFi密码（用于 'connect_wifi'）",
-    },
-    network,
+_w["save_dialog"] = (
+    "填写文件保存对话框路径。(旧版对话框可用，现代IFileDialog无法自动化，用write_file替代)",
+    {"path": "str - 保存路径"},
+    save_dialog,
 )
-
-# Utility
-META_ACTIONS["run_command"] = (
-    "执行命令行(cmd.exe)命令并返回输出结果。用于系统配置、查询状态、文件操作。"
-    "常用: run_command(command='ipconfig'), run_command(command='dir C:\\\\')",
-    {
-        "command": "str - 要执行的命令",
-        "timeout": "num? - 超时秒数（默认30）",
-    },
+_w["get_network_status"] = (
+    "获取网络连接状态。",
+    {},
+    get_network_status,
+)
+_w["scan_wifi"] = (
+    "扫描可用WiFi网络列表。",
+    {},
+    scan_wifi,
+)
+_w["connect_wifi"] = (
+    "连接WiFi网络。",
+    {"ssid": "str - WiFi名称", "password": "str? - 密码"},
+    connect_wifi,
+)
+_w["disconnect_wifi"] = (
+    "断开当前WiFi连接。",
+    {},
+    disconnect_wifi,
+)
+_w["browser_open"] = (
+    "在浏览器中打开URL。",
+    {"url": "str - 完整URL(含https://)"},
+    browser_open,
+)
+_w["browser_click"] = (
+    "点击浏览器页面的元素(CSS选择器)。",
+    {"selector": "str - CSS选择器"},
+    browser_click,
+)
+_w["browser_type"] = (
+    "在浏览器输入框中输入文字。",
+    {"selector": "str - CSS选择器", "text": "str - 输入文字"},
+    browser_type,
+)
+_w["browser_read"] = (
+    "读取浏览器页面文字。",
+    {"selector": "str? - CSS选择器(空=读取全文)"},
+    browser_read,
+)
+_w["browser_screenshot"] = (
+    "截取浏览器页面截图。",
+    {},
+    browser_screenshot,
+)
+_w["browser_back"] = (
+    "浏览器后退。",
+    {},
+    browser_back,
+)
+_w["browser_refresh"] = (
+    "刷新浏览器页面。",
+    {},
+    browser_refresh,
+)
+_w["browser_get_url"] = (
+    "获取当前浏览器URL。",
+    {},
+    browser_get_url,
+)
+_w["run_command"] = (
+    "执行Shell命令并返回输出结果。",
+    {"command": "str - shell命令", "timeout": "float? - 超时秒数(默认30)"},
     run_command,
 )
-
-META_ACTIONS["run_python_script"] = (
-    "直接执行 Python 代码。用于复杂桌面操作、条件逻辑、批量处理。"
-    "已预装 pywinauto, pyautogui, psutil, os, subprocess, time, json, math, random 等库。"
-    "代码中适当加 print() 输出结果和时间。"
-    "常用: run_python_script(script='import pyautogui\\npyautogui.click(100, 200)')",
-    {
-        "script": "str - 要执行的 Python 代码",
-        "timeout": "num? - 超时秒数（默认120）",
-    },
+_w["run_python_script"] = (
+    "执行Python代码(子进程隔离)。预装: pywinauto, pyautogui, psutil。",
+    {"script": "str - Python代码", "timeout": "int? - 超时秒数(默认120)"},
     run_python_script,
 )
-
-META_ACTIONS["file_ops"] = (
-    "文件操作：读取、写入、列出、删除、复制、移动。'write'写入内容到文件, "
-    "'read'读取文件内容, 'list'列出目录文件(pattern支持*.txt通配), "
-    "'exists'检查是否存在, 'delete'删除, 'copy'复制, 'move'移动。"
-    "常用: file_ops(action='read', path='C:\\\\test.txt'), "
-    "file_ops(action='write', path='C:\\\\test.txt', content='Hello'), "
-    "file_ops(action='list', path='C:\\\\', pattern='*.txt')",
-    {
-        "action": "str - 操作: 'read'读取, 'write'写入, 'list'列出, 'exists'检查, 'delete'删除, 'copy'复制, 'move'移动",
-        "path": "str - 文件路径",
-        "content": "str? - 文件内容(用于'write') 或 目标路径(用于'copy'/'move')",
-        "pattern": "str? - 文件通配(用于'list')，如 '*.txt'",
-    },
-    file_ops,
+_w["read_file"] = (
+    "读取文件内容。",
+    {"path": "str - 文件路径"},
+    read_file,
 )
-
-META_ACTIONS["wait"] = (
-    "等待指定秒数。在操作之间让界面稳定、等待窗口打开或应用响应。"
-    "常用: wait(seconds=0.5) 等半秒, wait(seconds=2) 等2秒",
-    {"seconds": "num - 等待秒数（0.5-30）"},
+_w["write_file"] = (
+    "写入文件内容(自动创建目录)。",
+    {"path": "str - 文件路径", "content": "str - 内容"},
+    write_file,
+)
+_w["list_files"] = (
+    "列出目录中的文件。",
+    {"path": "str - 目录路径", "pattern": "str? - glob模式(*.txt)",
+     "recursive": "bool? - 递归子目录"},
+    list_files,
+)
+_w["delete_file"] = (
+    "删除文件。",
+    {"path": "str - 文件路径"},
+    delete_file,
+)
+_w["copy_file"] = (
+    "复制文件。",
+    {"src": "str - 源路径", "dst": "str - 目标路径"},
+    copy_file,
+)
+_w["move_file"] = (
+    "移动/重命名文件。",
+    {"src": "str - 源路径", "dst": "str - 目标路径"},
+    move_file,
+)
+_w["wait"] = (
+    "等待N秒让界面稳定(输入后0.3s，操作后0.5s，新窗口打开后1-2s)。",
+    {"seconds": "float? - 等待秒数(默认1.0)"},
     wait,
 )
-
-# Flow chart mode (expert=True = hidden by default)
-META_ACTIONS["generate_flow"] = (
-    "[高级] 从任务描述生成可视化流程图。在前端画布创建可复用的自动化工作流。"
-    "流程图可以保存、分享和反复执行。用于创建通用自动化脚本。"
-    "常用: generate_flow(goal='打开计算器并计算 1+2')",
-    {"goal": "str - 任务描述，用于生成流程图"},
+_w["generate_flow"] = (
+    "[流程图] 从任务描述生成可视化工作流。",
+    {"goal": "str - 任务描述"},
     generate_flow,
     True,  # expert=True
 )
-
-META_ACTIONS["execute_flow"] = (
-    "[高级] 执行之前生成的流程图脚本(DSL文本或FlowScript JSON)。"
-    "常用: execute_flow(script='CLICK 100 200\\nWAIT 2\\nSCREENSHOT')",
-    {"script": "str - 流程图脚本（DSL文本或FlowScript JSON）"},
+_w["execute_flow"] = (
+    "[流程图] 执行一个流程图脚本。",
+    {"script": "str - DSL文本或FlowScript JSON"},
     execute_flow,
-    True,  # expert=True
+    True,
 )
+del _w
 
 
 # ── 主入口 ────────────────────────────────────────────────────
 
 def execute(name: str, args: dict) -> dict:
-    """Execute a meta-action by name.
-
-    Auto-coerces parameter types based on handler's type annotations
-    (handles LLMs passing numbers as strings).
-
-    Returns:
-        dict with 'success' key, matching @feature tool return format.
-    """
+    """Execute a meta-action by name. Auto-coerces parameter types."""
     entry = META_ACTIONS.get(name)
     if not entry:
         return {"success": False, "error": f"Unknown meta-action: {name}"}
 
     handler = entry[2]
-
-    # Type coercion: convert string values to annotated types
     import inspect
     sig = inspect.signature(handler)
     coerced = dict(args)
@@ -901,7 +818,6 @@ def execute(name: str, args: dict) -> dict:
         if not isinstance(val, str):
             continue
         ann = param.annotation
-        # Handle both string annotations (from __future__) and direct type annotations
         if ann is int or ann == 'int':
             try:
                 coerced[pname] = int(val)
@@ -922,60 +838,42 @@ def execute(name: str, args: dict) -> dict:
 
 
 def get_prompt(use_flow_chart: bool = False) -> str:
-    """Build the meta-actions prompt for LLM consumption.
-
-    Returns a ~8K char prompt with Chinese descriptions and usage examples.
-    """
+    """Build the meta-actions prompt for LLM consumption."""
     lines = [
         "## 可用动作（按分类）",
         "",
-        "你是桌面自动化 AI，有约 24 个上层动作。每个动作内部自动选择最佳实现方式：",
-        "UIA 无障碍树定位 → OCR 文字识别定位 → 图像模板匹配 → 直接屏幕坐标。",
-        "你不需要关心底层技术细节，只需要描述你要做什么和操作目标。",
+        "你是桌面自动化 AI。每个动作做一件事，最多传3个参数。",
+        "内部自动选择：UIA控件树 → OCR文字识别 → 图像匹配 → 直接坐标。",
         "",
-        "【重要】参数中的 ? 表示可选参数。字符串值需要加引号，数字和布尔值不加。",
-        "例: click(target='确认', region='0,0,500,800')  ✓  target 加了引号",
-        "    click(target=确认)                            ✗ 没加引号",
-        "    manage_app(action='launch', target='notepad.exe')",
-        "    press_keys(keys='ctrl+s')",
-        "    wait(seconds=0.5)",
+        "【参数规则】",
+        "- 字符串值加引号: click_text(target='确认')",
+        "- 数字和布尔值不加引号: wait(seconds=0.5), resize_window(width=800, height=600)",
+        "- ? 表示可选参数，可省略",
         "",
     ]
 
     categories = [
-        ("屏幕点击与输入", [
-            "click", "type_text", "press_keys", "scroll", "hover", "drag",
-        ]),
-        ("屏幕读取（先读后点）", [
-            "read_text", "read_ui", "screenshot", "get_cursor",
-        ]),
-        ("窗口管理", [
-            "manage_window", "list_windows",
-        ]),
-        ("应用管理", [
-            "manage_app",
-        ]),
-        ("系统控制", [
-            "control_audio", "system_info", "set_brightness", "lock_screen", "notify",
-        ]),
-        ("对话框处理", [
-            "dialog",
-        ]),
-        ("浏览器自动化", [
-            "browser_do",
-        ]),
-        ("网络管理", [
-            "network",
-        ]),
-        ("工具命令", [
-            "run_command", "file_ops", "wait",
-        ]),
+        ("点击", ["click_text", "click_coord", "double_click", "right_click"]),
+        ("输入与键盘", ["type_text", "press_keys", "scroll", "hover", "drag"]),
+        ("读取屏幕", ["ocr_read", "read_ui", "screenshot", "get_cursor"]),
+        ("窗口管理", ["list_windows", "focus_window", "close_window", "minimize_window",
+                       "maximize_window", "resize_window"]),
+        ("应用管理", ["launch_app", "kill_app", "detect_app"]),
+        ("系统控制", ["set_volume", "toggle_mute", "get_battery",
+                       "set_brightness", "lock_workstation", "notify"]),
+        ("对话框", ["close_dialog", "save_dialog"]),
+        ("浏览器", ["browser_open", "browser_click", "browser_type",
+                     "browser_read", "browser_screenshot", "browser_back",
+                     "browser_refresh", "browser_get_url"]),
+        ("网络", ["get_network_status", "scan_wifi", "connect_wifi", "disconnect_wifi"]),
+        ("文件与命令", ["run_command", "run_python_script",
+                        "read_file", "write_file", "list_files",
+                        "delete_file", "copy_file", "move_file"]),
+        ("等待", ["wait"]),
     ]
 
     if use_flow_chart:
-        categories.append(("流程图（高级）", [
-            "generate_flow", "execute_flow",
-        ]))
+        categories.append(("流程图", ["generate_flow", "execute_flow"]))
 
     for cat_name, action_names in categories:
         lines.append(f"\n### {cat_name}\n")
@@ -984,64 +882,64 @@ def get_prompt(use_flow_chart: bool = False) -> str:
             if not entry:
                 continue
             desc, params, handler, *_ = entry
-            lines.append(f"**{name}** — {desc.split('.')[0]}。")
+            short = desc.split("。")[0]
+            lines.append(f"**{name}** — {short}。")
             if params:
                 lines.append("参数:")
                 for pname, pdesc in params.items():
                     optional = "?" in pname
                     clean_name = pname.replace("?", "")
-                    lines.append(f"  - {clean_name} {'(可选)' if optional else ''}: {pdesc.split(' - ', 1)[-1] if ' - ' in pdesc else pdesc}")
+                    pd = pdesc.split(" - ", 1)[-1] if " - " in pdesc else pdesc
+                    lines.append(f"  - {clean_name} {'(可选)' if optional else ''}: {pd}")
 
     lines.append(r"""
 ## 常用工作流
 
-1. 启动程序 → 操作
-   manage_app(action='launch', target='notepad.exe')
+1. 启动应用 → 操作
+   launch_app(target='notepad.exe')
    wait(seconds=0.5)
-   type_text(text='Hello World')
+   type_text(text='Hello')
 
 2. 聚焦窗口 → 点击
-   manage_window(action='focus', title='计算器')
-   click(target='1')
-   click(target='+')
-   click(target='2')
+   focus_window(title='计算器')
+   click_text(target='1')
+   click_text(target='+')
+   click_text(target='2')
 
-3. 保存文件
+3. 保存文件(写入而非对话框)
    press_keys(keys='ctrl+s')
    wait(seconds=0.3)
-   dialog(action='save', path='C:\Users\test\file.txt')
+   close_dialog()
 
 4. 处理弹窗
-   dialog(action='close')  — 自动关闭保存确认/错误提示/覆盖询问
+   close_dialog()  — 自动关闭保存确认/错误提示
 
-5. 读取 → 点击菜单
-   read_ui()                    — 获取窗口所有按钮/菜单名
-   click(target='文件')
-   click(target='另存为')
+5. 读取屏幕 → 点击菜单
+   read_ui()                  — 获取所有按钮/菜单
+   click_text(target='文件')
+   click_text(target='另存为')
 
-6. 打开列表项（联系人/文件/聊天）
-   click(target='目标名', button='double')  — 双击打开，单击只选中
+6. 打开桌面图标/列表项(必须双击)
+   double_click(target='微信')   — 或双击桌面图标
 
 7. 浏览器操作
-   browser_do(action='navigate', url='https://www.baidu.com')
-   browser_do(action='type', selector='#kw', text='天气')
-   browser_do(action='click', selector='#su')
+   browser_open(url='https://www.baidu.com')
+   browser_type(selector='#kw', text='天气')
+   browser_click(selector='#su')
 
-## 核心原则
-- 能用 manage_window 直接聚焦的，不要手动点击标题栏
-- 能用 press_keys 快捷键的，不要点菜单（如 ctrl+s 保存，ctrl+c 复制）
-- 描述目标用文字（按钮名称），不要猜坐标
-- 操作后加 wait(0.2-0.5) 让界面稳定
-- 输入文字前必须先 click 点击输入框
-- 桌面图标和列表项必须双击 button='double' 才能打开，单击只选中
-- 桌面背景/空白区域没有控件名，用坐标点击 click(x=..., y=..., button='right')
-- 如果点击没有效果（界面无变化），换用不同的点击方式：坐标偏了就调坐标，单击不行试双击，左键不行试右键
+8. 右键菜单
+   right_click(target='桌面')
+
+## 使用原则
+- 用 focus_window 直接聚焦窗口而不是手动点击标题栏
+- 用 press_keys 快捷键代替菜单点击(ctrl+s保存, ctrl+c复制)
+- 描述目标用按钮文字，不要猜坐标
+- 操作后加 wait(0.2-1.0) 等待界面稳定
+- 输入文字前先用 click_text 点击输入框
+- 桌面图标和列表项必须用 double_click 才能打开
+- 桌面空白区域没有控件名，用 click_coord(x, y) 点击坐标
 """)
 
-    lines.append(f"\n共 {len(META_ACTIONS)} 个动作注册，默认展示 {len(META_ACTIONS) - (0 if use_flow_chart else 2)} 个。")
-    lines.append("需要创建可视化流程图请开启流程图模式。")
-
+    visible = len(META_ACTIONS) - (0 if use_flow_chart else 2)
+    lines.append(f"\n共 {len(META_ACTIONS)} 个动作注册，默认展示 {visible} 个。")
     return "\n".join(lines)
-
-
-import re  # noqa: needed at module level for click()

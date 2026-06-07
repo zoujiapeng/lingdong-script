@@ -44,7 +44,7 @@ _MIN_SUCCESS_RATE = 0.1  # 当成功率低于此值时终止（已完成步数 /
 # ── 已知多模态模型列表（可直接"看"截图，不需要 SoM 标号）──
 # ── Imports from extracted modules ──
 from agent.prompts import (
-    AGENT_CORE_FEATURES, is_multimodal_model,
+    is_multimodal_model,
     SCRIPTED_MODE_INSTRUCTIONS, CHAT_MODE_INSTRUCTIONS,
     TEXT_PROTOCOL_FORMAT_INSTRUCTIONS,
 )
@@ -63,80 +63,17 @@ def set_flow_chart_mode(enabled: bool = True):
     from agent.meta_actions import set_flow_chart_mode as _set_meta_fc
     _set_meta_fc(enabled)
 
-def _build_feature_tools_compact() -> str:
-    """构建运行时 Agent 补充 @feature 工具列表。
-
-    非流程图模式的 text_protocol 使用。只展示 AGENT_CORE_FEATURES 白名单
-    中的工具（元动作未覆盖的补充能力），而非全部 ~200 个 @feature 工具。
-    流程图模式不受此限制，使用 build_path_prompt() 展示全部工具。
-    """
-    from features.registry import registry, FeatureCategory
-    import features._all  # noqa: F401
-
-    cat_labels = {
-        FeatureCategory.ACTION: "交互动作",
-        FeatureCategory.PERCEPTION: "感知识别",
-        FeatureCategory.CONTROL: "控制流",
-        FeatureCategory.AI: "AI 规划",
-        FeatureCategory.MACRO: "宏指令",
-        FeatureCategory.SYSTEM: "系统功能",
-        FeatureCategory.DEBUG: "调试诊断",
-    }
-
-    # 只收集白名单内的工具
-    core_specs = []
-    for spec in registry.all():
-        if spec.deprecated or spec.hidden:
-            continue
-        if spec.name in AGENT_CORE_FEATURES:
-            core_specs.append(spec)
-
-    # 按分类分组
-    grouped: dict = {}
-    for spec in core_specs:
-        cat = spec.category
-        grouped.setdefault(cat, []).append(spec)
-
-    hidden_count = len([s for s in registry.all() if not s.deprecated and not s.hidden]) - len(core_specs)
-
-    lines = [
-        "\n\n## 补充工具（元动作不够用时使用）",
-        "",
-        f"元动作已覆盖大部分场景。以下 {len(core_specs)} 个工具是元动作未直接包装的补充能力。",
-        f"另有 {hidden_count} 个 DSL 构建/调试/测试专用工具仅在流程图生成时使用，运行时无需关注。",
-        "",
-    ]
-    for cat in FeatureCategory:
-        specs = grouped.get(cat, [])
-        if not specs:
-            continue
-        label = cat_labels.get(cat, cat.value)
-        lines.append(f"### {label}（{len(specs)} 个）")
-        for s in sorted(specs, key=lambda x: x.name):
-            desc = (s.description or "")[:120].replace("\n", " ")
-            lines.append(f"  - **{s.name}** — {desc}")
-        lines.append("")
-
-    if core_specs:
-        lines.append("使用方式与元动作相同：在「工具:」行写工具名，参数写在参数行。")
-        lines.append("优先使用元动作，元动作不够用时再选用这些补充工具。")
-
-    return "\n".join(lines)
-
-
 def _build_tools_text() -> str:
     """生成工具描述文本。
 
-    非流程图模式: 元动作 + @feature 工具紧凑列表，LLM 知道所有可用工具。
+    text_protocol 模式: 仅元动作提示，LLM 使用 27 个元动作操作电脑。
     Flow chart mode: 按访问模式分组的完整工具列表。
     """
     if _USE_FLOW_CHART_MODE:
         from agent.tool_path_selector import build_path_prompt
         return build_path_prompt()
     from agent.meta_actions import get_prompt
-    meta = get_prompt(use_flow_chart=_USE_FLOW_CHART_MODE)
-    tools = _build_feature_tools_compact()
-    return meta + tools
+    return get_prompt(use_flow_chart=_USE_FLOW_CHART_MODE)
 
 
 def _build_clean_system_prompt(tools_text: str) -> str:
@@ -177,7 +114,7 @@ Available tools:
 
 from agent.supervisor import Supervisor
 from agent.state_persistence import RunSummary, save_run, load_history
-from agent.config import AgentConfig, agent_config_from_legacy
+from agent.config import AgentConfig
 
 class LingdongAgent:
     """统一的桌面自动化 AI Agent。
@@ -1394,24 +1331,25 @@ class LingdongAgent:
     def _resolve_text_protocol_config(self, agent_config: Optional[AgentConfig]) -> dict:
         """提取或自动检测文本协议的配置参数。"""
         if agent_config is not None:
+            resolved = agent_config.resolve()
             return {
-                "multimodal": agent_config._multimodal,
-                "vision_mode": agent_config._resolved_vision_mode,
-                "context_minimal": agent_config._resolved_screen_context == "minimal",
-                "use_dedup": agent_config.image_dedup,
-                "use_fast": agent_config.fast_mode,
-                "on_error": agent_config._resolved_on_error,
-                "max_steps": agent_config.max_steps,
-                "max_consecutive_failures": agent_config.max_consecutive_failures,
-                "min_success_rate": agent_config.min_success_rate,
-                "som_enabled": agent_config.som_enabled,
-                "flow_chart_mode": agent_config.flow_chart_mode,
-                "screenshot_quality": agent_config.screenshot_quality,
-                "sliding_window_size": agent_config.sliding_window_size,
-                "verify": agent_config.verify,
-                "chat_mode": agent_config.chat_mode,
-                "visual_strategy": agent_config.visual_strategy,
-                "local_vision": agent_config.local_vision,
+                "multimodal": resolved.get("multimodal", False),
+                "vision_mode": resolved.get("vision_mode", "som"),
+                "context_minimal": resolved.get("screen_context", "full") == "minimal",
+                "use_dedup": resolved.get("image_dedup", True),
+                "use_fast": resolved.get("fast_mode", False),
+                "on_error": resolved.get("on_error", "retry"),
+                "max_steps": resolved.get("max_steps", MAX_STEPS),
+                "max_consecutive_failures": resolved.get("max_consecutive_failures", MAX_CONSECUTIVE_FAILURES),
+                "min_success_rate": resolved.get("min_success_rate", _MIN_SUCCESS_RATE),
+                "som_enabled": resolved.get("som_enabled", True),
+                "flow_chart_mode": resolved.get("flow_chart_mode", False),
+                "screenshot_quality": resolved.get("screenshot_quality", 60),
+                "sliding_window_size": resolved.get("sliding_window_size", 0),
+                "verify": resolved.get("verify", True),
+                "chat_mode": resolved.get("chat_mode", False),
+                "visual_strategy": resolved.get("visual_strategy", "auto"),
+                "local_vision": resolved.get("local_vision", False),
             }
         multimodal = is_multimodal_model(self.model)
         return {
@@ -2065,794 +2003,9 @@ state, keyboard shortcuts, clipboard typing, and screenshot-change verification.
         }
 
     # ══════════════════════════════════════════════════════════
-    #  LangGraph 模式 (函数调用模型)
+    #  (已移除: LangGraph / Planned / ComputerUse 旧路由)
+    #  新路径统一通过 _unified_run() → execution_mode 分发
     # ══════════════════════════════════════════════════════════
-
-    _LANGGRAPH_AVAILABLE = None
-
-    @classmethod
-    def _check_langgraph(cls) -> bool:
-        if cls._LANGGRAPH_AVAILABLE is None:
-            try:
-                import langgraph  # noqa
-                import langchain_openai  # noqa
-                cls._LANGGRAPH_AVAILABLE = True
-            except ImportError:
-                cls._LANGGRAPH_AVAILABLE = False
-        return cls._LANGGRAPH_AVAILABLE
-
-    def _create_llm(self):
-        """创建 LangChain LLM 实例。"""
-        api_base = (self.api_base or "https://api.deepseek.com/v1").rstrip("/")
-        try:
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model or "deepseek-chat",
-                api_key=self.api_key or "",
-                base_url=f"{api_base}",
-                temperature=0.1,
-                max_tokens=4096,
-                timeout=30,
-                max_retries=2,
-            )
-        except ImportError:
-            pass
-
-        from langchain_core.language_models.chat_models import BaseChatModel
-        from langchain_core.outputs import ChatResult, ChatGeneration
-        from langchain_core.messages import AIMessage
-
-        class _MockLLM(BaseChatModel):
-            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="I will use a tool."))])
-            @property
-            def _llm_type(self) -> str:
-                return "mock"
-
-        logger.warning("langchain-openai not installed, using mock LLM")
-        return _MockLLM()
-
-    _langgraph_tools_cache: Optional[list] = None
-
-    AGENT_TOOLS: Set[str] = {
-        # ---- 交互动作 ----
-        "click_target", "right_click", "hover", "mouse_move",
-        "type_text", "type_clipboard",
-        "hotkey", "scroll", "drag", "swipe",
-        "triple_click", "middle_click", "select_text",
-        # ---- 浏览器 ----
-        "browser_connect", "browser_navigate", "browser_click", "browser_type",
-        "browser_list_tabs", "browser_close_tab", "browser_screenshot",
-        "browser_get_url", "browser_get_text", "browser_find_elements",
-        "browser_wait_element", "browser_wait_page_load", "browser_execute_js",
-        "browser_refresh", "browser_go_back", "browser_new_tab", "browser_switch_tab",
-        # ---- 感知识别 ----
-        "screenshot", "find_image", "ocr_find_text", "ocr_extract_all",
-        "region_select", "color_check", "popup_close",
-        "a11y_get_tree", "find_element", "wait_element",
-        # ---- 系统控制 ----
-        "launch_program", "run_command", "program_resolve", "program_list",
-        "focus_window", "get_active_window", "list_windows",
-        # ---- 窗口管理 ----
-        "window_minimize", "window_maximize", "window_close",
-        "window_resize", "window_restore", "show_desktop",
-        # ---- 进程 ----
-        "detect_process", "find_processes", "kill_process",
-        # ---- 系统功能 ----
-        "volume_set", "volume_mute", "display_brightness",
-        "battery_status", "lock_workstation",
-        "wifi_list", "wifi_connect", "wifi_disconnect",
-        # ---- 等待 ----
-        "wait_action", "wait_screen_stable", "wait_screen_change",
-        # ---- 元动作 ----
-        "run_python_script",
-    }
-
-    def _load_langgraph_tools(self) -> list:
-        """从 @feature 注册表加载可用工具（过滤 + 类级缓存）。"""
-        if self._langgraph_tools_cache is not None:
-            return self._langgraph_tools_cache
-
-        from features.registry import registry
-        import features._all  # noqa (~8s 首次导入)
-
-        tools = []
-        for spec in registry.all():
-            if spec.deprecated or spec.hidden:
-                continue
-            if spec.name not in self.AGENT_TOOLS:
-                continue
-            tools.append(self._make_tool_func(spec))
-        LingdongAgent._langgraph_tools_cache = tools
-        logger.info("Loaded %d LangGraph tools from registry (cached)", len(tools))
-        return tools
-
-    def _make_tool_func(self, spec):
-        """包装 @feature 为 LangGraph 可调用函数。"""
-        import inspect
-        param_names = [p.name for p in spec.params]
-        _rename = {"args": "v_args", "kwargs": "v_kwargs"}
-        schema_names = [_rename.get(n, n) for n in param_names]
-
-        def tool_fn(**kwargs) -> str:
-            try:
-                from features.registry import registry as r
-                rev = {"v_args": "args", "v_kwargs": "kwargs"}
-                mapped = {rev.get(k, k): v for k, v in kwargs.items()}
-                cleaned = {k: v for k, v in mapped.items() if v is not None}
-                result = r.execute(spec.name, **cleaned)
-                if isinstance(result, dict):
-                    return json.dumps(result, ensure_ascii=False, default=str)
-                return str(result)
-            except Exception as e:
-                return json.dumps({"success": False, "error": str(e)})
-
-        sig = inspect.Signature(
-            [inspect.Parameter(sn, inspect.Parameter.KEYWORD_ONLY, default=None)
-             for sn in schema_names],
-            return_annotation=str,
-        )
-        tool_fn.__name__ = spec.name
-        tool_fn.__qualname__ = spec.name
-        tool_fn.__signature__ = sig
-        tool_fn.__doc__ = f"{spec.display_name}: {spec.description}\n\n参数: {[p.name for p in spec.params]}"
-        return tool_fn
-
-    def _make_supervision_wrapper(self):
-        """创建 LangGraph ToolNode 监督包装器。
-
-        适配 LangGraph 1.x ToolCallWrapper 协议，必须返回 ToolMessage。
-        """
-        from langchain_core.messages import ToolMessage
-
-        def wrapper(call_req, execute):
-            tool_call = call_req.tool_call
-            name = tool_call.get("name", "")
-            args = tool_call.get("args", {})
-            tool_call_id = tool_call.get("id", "")
-            result = self.supervisor.execute(name, args)
-            content = json.dumps(result, ensure_ascii=False, default=str)
-            return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
-
-        return wrapper
-
-    def run_langgraph(self, goal: str, config: Optional[dict] = None,
-                       _agent_config: Optional[AgentConfig] = None) -> dict:
-        """LangGraph 模式：create_react_agent 驱动执行。
-
-        适用于 DeepSeek/GPT/Claude 等支持函数调用的 LLM。
-
-        参数:
-            _agent_config: 统一配置（由 _unified_run 传入），None 时保持旧行为
-        """
-        from langgraph.prebuilt import create_react_agent, ToolNode
-        from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
-
-        self._ensure_registry()
-        tools = self._load_langgraph_tools()
-
-        llm = self._create_llm()
-
-        try:
-            from agent.dialog_handler import start_dialog_monitor
-            desktop = os.path.expanduser("~/Desktop")
-            start_dialog_monitor(save_dir=desktop)
-        except Exception:
-            pass
-
-        tool_node = ToolNode(tools, wrap_tool_call=self._make_supervision_wrapper())
-
-        # 用与文本协议相同的路径选择系统提示词
-        path_prompt = self._tools_text if self._tools_text else ""
-        path_hint = ""
-        try:
-            from agent.tool_path_selector import select_best_path, AccessPattern
-            suggested = select_best_path(goal)
-            if suggested is not None:
-                path_hint = f"\n建议路径: {suggested.label_cn}(L{suggested.value}) — {suggested.guidance}"
-        except Exception:
-            pass
-
-        system_prompt = """你是一个桌面自动化助手。用下面的工具操作电脑。
-
-## 工具
-- click_target - 点击屏幕元素（target="按钮文字" 或 "x,y" 坐标）
-- type_text - 输入文字
-- hotkey - 键盘快捷键
-- launch_program - 启动程序
-- run_command - 执行命令
-- screenshot - 截图
-- wait_action - 等待
-
-## 规则
-1. 文字点不中就换坐标
-2. 完成后直接结束，无需额外标记
-3. 坐标是屏幕绝对坐标
-"""
-
-        # ── SoM 预扫描: 首次截图并标注元素，供后续工具执行使用 ──
-        try:
-            if self._som_enabled:
-                raw_b64 = self.supervisor.capture_b64(quality=60, max_size=1600)
-                som_result = self._apply_som(raw_b64, multimodal=False)
-                self.supervisor._last_som_map = som_result["label_map"]
-                count = som_result.get("count", 0)
-                if count > 0:
-                    self._emit("log", {"level": "info", "message": f"SoM预扫描: {count}个元素"})
-        except Exception as e:
-            logger.warning("SoM pre-scan failed: %s", e)
-
-        graph = create_react_agent(model=llm, tools=tool_node, prompt=system_prompt)
-
-        self._emit("agent_start", {"goal": goal, "engine": "langgraph", "model": self.model})
-
-        max_steps_lg = _agent_config.max_steps if _agent_config else MAX_STEPS
-        thread_config = {"recursion_limit": max_steps_lg}
-        if config:
-            thread_config.update(config)
-
-        start = time.time()
-        steps = []
-        pending_by_id: dict = {}
-
-        try:
-            events = graph.stream(
-                {"messages": [HumanMessage(content=goal)]},
-                thread_config,
-                stream_mode="values",
-            )
-
-            step_num = 0
-            seen_ids: set = set()
-            for event in events:
-                messages = event.get("messages", [])
-                if not messages:
-                    continue
-
-                last = messages[-1]
-
-                if isinstance(last, AIMessage) and hasattr(last, "tool_calls") and last.tool_calls:
-                    for tc in last.tool_calls:
-                        tid = tc.get("id", "")
-                        if tid in seen_ids:
-                            continue
-                        seen_ids.add(tid)
-                        step_num += 1
-                        step_data = {
-                            "step_num": step_num,
-                            "tool": tc.get("name", "unknown"),
-                            "args": tc.get("args", {}),
-                            "status": "running",
-                        }
-                        if tid:
-                            pending_by_id[tid] = step_data
-                        steps.append(step_data)
-                        self._emit("step_complete", dict(step_data))
-                        logger.info("Step %d: %s(%s)", step_num,
-                                    tc["name"], json.dumps(tc.get("args", {}), ensure_ascii=False)[:120])
-
-                elif isinstance(last, ToolMessage):
-                    tid = last.tool_call_id
-                    pd = pending_by_id.pop(tid, None)
-                    if pd is not None:
-                        try:
-                            result_data = json.loads(last.content)
-                        except Exception:
-                            result_data = {"output": str(last.content)[:500]}
-                        pd["status"] = "completed" if result_data.get("success") else "failed"
-                        pd["result"] = result_data
-                        self._emit("step_complete", dict(pd))
-
-            for pd in pending_by_id.values():
-                pd["status"] = "error"
-                pd["result"] = {"success": False, "error": "execution timeout"}
-
-            elapsed = time.time() - start
-            success_count = sum(1 for s in steps if s.get("status") == "completed")
-            result = {
-                "success": success_count > 0,
-                "steps": steps,
-                "summary": f"Executed {len(steps)} steps ({success_count} ok) in {elapsed:.1f}s",
-                "total_steps": len(steps),
-                "elapsed_ms": round(elapsed * 1000, 1),
-            }
-            self._emit("agent_done", {"status": "completed", **result})
-            return result
-
-        except Exception as e:
-            elapsed = time.time() - start
-            error_result = {
-                "success": False, "steps": steps, "error": str(e),
-                "total_steps": len(steps), "elapsed_ms": round(elapsed * 1000, 1),
-            }
-            self._emit("agent_done", {"status": "failed", **error_result})
-            logger.exception("LangGraph execution failed")
-            return error_result
-
-    # ══════════════════════════════════════════════════════════
-    #  Planned 模式 (Planner + PlanExecutor)
-    # ══════════════════════════════════════════════════════════
-
-    def run_planned(self, goal: str, steps: Optional[list] = None,
-                     _agent_config: Optional[AgentConfig] = None) -> dict:
-        """Planned mode: Planner → Plan DAG → PlanExecutor.
-
-        使用 Planner 将目标分解为 Plan DAG（带 fallback 链），
-        然后通过 PlanExecutor 拓扑序执行，支持自动重试 + 路径降级。
-
-        参数:
-            goal: 自然语言目标
-            steps: 可选预生成步骤，为 None 时自动调用 generate_flow_script
-            _agent_config: 统一配置（由 _unified_run 传入），None 时保持旧行为
-
-        返回:
-            dict{success, plan, steps, total_steps, summary, elapsed_ms}
-        """
-        self._ensure_registry()
-        self._emit("agent_start", {"goal": goal, "engine": "planned", "model": self.model})
-        start = time.time()
-
-        from agent.planner import Planner, PlanExecutor as PlanExec
-
-        planner = Planner(
-            api_key=self.api_key,
-            api_base=self.api_base,
-            model=self.model,
-        )
-
-        # ── 生成 Plan DAG ──
-        if steps:
-            plan = planner.plan_from_steps(goal, steps)
-            self._emit("log", {"level": "info",
-                               "message": f"Plan from {len(steps)} pre-generated steps ({len(plan.nodes)} nodes)"})
-        else:
-            plan = planner.plan(goal)
-            self._emit("log", {"level": "info",
-                               "message": f"Plan generated: {len(plan.nodes)} nodes"})
-
-        if not plan.nodes:
-            self._emit("log", {"level": "warn", "message": "Empty plan, falling back to text_protocol"})
-            self._inject_memory_prompt(goal)
-            return self.run_text_protocol(goal)
-
-        # ── 执行 Plan DAG ──
-        executor = PlanExec(
-            agent=self,
-            plan=plan,
-            emit_event=lambda e, d: self._emit(e, d),
-            stop_event=self._stop_event,
-            log_func=lambda lv, msg: self._emit("log", {"level": lv, "message": msg}),
-        )
-
-        exec_result = executor.execute()
-
-        elapsed = time.time() - start
-        summary = plan.summary()
-
-        final_status = "completed" if exec_result.get("success") else "failed"
-        self._emit("agent_done", {
-            "status": final_status,
-            "total_steps": summary["total"],
-            "summary": f"Plan executed: {summary.get('completed', 0)}/{summary['total']} steps ok",
-        })
-
-        return {
-            "success": exec_result.get("success", False),
-            "plan": plan.to_dict(),
-            "steps": [n.to_dict() for n in plan.nodes],
-            "total_steps": summary["total"],
-            "summary": f"Plan: {summary.get('completed', 0)}/{summary['total']} steps ok, "
-                       f"{summary.get('failed', 0)} failed, {summary.get('skipped', 0)} skipped",
-            "elapsed_ms": round(elapsed * 1000),
-        }
-
-    # ══════════════════════════════════════════════════════════
-    #  Computer Use 模式 (Vision-based action loop)
-    # ══════════════════════════════════════════════════════════
-
-    def _computer_use_loop(self, goal: str, config: AgentConfig) -> dict:
-        """Computer Use 风格循环：截图 → 视觉模型分析 → 执行 → 新截图 → ...
-
-        使用 OpenAI 兼容 API 的 Vision 模型（MIMO-V2-Omni 等）。
-        模型直接看截图，输出结构化指令决定点击/输入/按键等动作。
-        不需要 SoM/OCR/UIA，端到端视觉推理（取决于模型能力）。
-        """
-        import pyautogui
-        screen_w, screen_h = pyautogui.size()
-        start = time.time()
-        steps = []
-        max_steps = config.max_steps or MAX_STEPS
-
-        self._emit("agent_start", {"goal": goal, "engine": "computer_use/vision",
-                                    "model": self.model})
-
-        SYSPROMPT = f"""你是桌面电脑操作助手。通过「看截图 → 决定动作 → 看结果 → 继续动作」的循环完成用户目标。
-
-可用动作:
-- mouse_move(x, y) — 移动鼠标到坐标
-- left_click(x, y) — 左键点击（省略坐标=点击当前位置）
-- right_click(x, y) — 右键点击
-- double_click(x, y) — 双击
-- type(text) — 输入文字
-- key(text) — 按键盘键 (Enter, Tab, Escape, Backspace, Ctrl+C, Alt+Tab 等)
-- scroll(dx, dy) — 滚动
-- cursor_position — 获取当前鼠标位置
-- done(summary) — 任务彻底完成时使用
-
-关键规则:
-1. 每轮只做一个动作，不要在一次回复中做多个动作
-2. 输入文字前必须先用 click 点击输入框确保焦点
-3. done() 只能在实际完成用户目标后使用，不要提前结束
-4. 不要猜测坐标位置 - 如果截图里看不到目标，说明需要先做其他操作（如滚动、切换窗口等）
-5. PARAMS 为空时写 {{}}，不要省略
-
-屏幕分辨率: {screen_w}x{screen_h}
-
-输出格式:
-ACTION: 动作名
-PARAMS: {{"参数名": "值"}}
-思考: 简短理由
-
-错误做法:
-ACTION: done
-PARAMS: {{"summary": "打开了浏览器"}}
-(× 用户要你操作，不是描述)
-
-正确做法:
-ACTION: left_click
-PARAMS: {{"x": 960, "y": 540}}
-思考: 点击搜索输入框准备输入查询
-"""
-        self._emit("log", {"level": "info",
-                           "message": f"Computer Use Vision: model={self.model}"})
-
-        messages = [{"role": "system", "content": SYSPROMPT}]
-        done_noop_count = 0
-
-        def _runtime_snapshot(include_screen: bool = True) -> dict:
-            """Capture a small generic state snapshot for post-action verification."""
-            snap: dict[str, object] = {}
-            try:
-                from features.system_features import get_active_window
-                aw_data = get_active_window()
-                if isinstance(aw_data, dict):
-                    snap["active_window"] = {
-                        "title": aw_data.get("title", ""),
-                        "left": aw_data.get("left"),
-                        "top": aw_data.get("top"),
-                        "width": aw_data.get("width"),
-                        "height": aw_data.get("height"),
-                    }
-            except Exception:
-                pass
-            if include_screen:
-                try:
-                    b64 = self.supervisor.capture_b64(quality=35, max_size=900, update_scale=False)
-                    snap["screen_hash"] = hashlib.sha256(b64.encode("utf-8")).hexdigest()[:12]
-                except Exception:
-                    pass
-            return snap
-
-        for loop in range(1, max_steps + 1):
-            if self._stop_event and self._stop_event.is_set():
-                break
-
-            b64 = self.supervisor.capture_b64(quality=self._screenshot_quality)
-            msg_text = "当前屏幕截图，请分析并决定下一步动作。" if loop > 1 else f"任务目标: {goal}\n\n请分析屏幕截图，执行第一步。"
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": msg_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            })
-
-            raw = self._call_llm(messages)
-            if raw is None:
-                messages.append({"role": "user", "content": "API请求失败（网络连接中断），我已重试。请基于最后一次成功的截图继续执行任务。"})
-                if loop >= 3:
-                    break
-                continue
-
-            content = raw["choices"][0]["message"].get("content", "") or ""
-            self._emit("log", {"level": "info", "message": f"思考: {content[:300]}"})
-
-            action, action_data = self._parse_computer_vision_response(content)
-
-            if action == "done":
-                if len(steps) == 0:
-                    done_noop_count += 1
-                    if done_noop_count >= 3:
-                        break
-                    # 不走 API：直接注入提示，画面没变无需截新图
-                    messages.append({"role": "user", "content": "你没有执行任何动作就完成了。必须执行至少一个动作（如 click / type / key）。先做动作，完成后才能 done。"})
-                    self._emit("log", {"level": "info", "message": "模型过早 done，已发出纠正提示"})
-                    if len(messages) > 8:
-                        messages = [messages[0]] + messages[-6:]
-                    continue
-                summary = action_data.get("summary", content)[:500]
-                self._emit("log", {"level": "info", "message": f"完成: {summary}"})
-                ok_count = sum(1 for s in steps if s.get("status") == "completed")
-                return {
-                    "success": ok_count > 0, "steps": steps,
-                    "summary": summary, "total_steps": len(steps),
-                    "elapsed_ms": round((time.time() - start) * 1000),
-                }
-
-            if action == "error":
-                self._emit("log", {"level": "warn", "message": f"无法解析: {content[:200]}"})
-                messages.append({
-                    "role": "user",
-                    "content": "格式错误。请严格使用: ACTION: 动作名\\nPARAMS: {{...}} 格式",
-                })
-                continue
-
-            action_data = {k: v for k, v in action_data.items() if v is not None}
-            step, result_content, success = self._record_computer_step(
-                steps, loop, action, action_data, screen_w, screen_h)
-
-            result_text = "成功" if success else f"失败: {result_content.get('text', '')}"
-            if verify_after is not None:
-                before_title = ""
-                after_title = ""
-                if isinstance(verify_before, dict) and isinstance(verify_before.get("active_window"), dict):
-                    before_title = str(verify_before["active_window"].get("title", ""))
-                if isinstance(verify_after, dict) and isinstance(verify_after.get("active_window"), dict):
-                    after_title = str(verify_after["active_window"].get("title", ""))
-                verification_text = (
-                    f"\n验证: active_window '{before_title}' -> '{after_title}', "
-                    f"screen_changed={step['result'].get('verification', {}).get('screen_changed', False)}"
-                )
-            else:
-                verification_text = ""
-            messages.append({"role": "user", "content": f"执行结果: {result_text}{verification_text}"})
-
-            if len(messages) > self.sliding_window_limit:
-                messages = [messages[0]] + messages[-(self.sliding_window_limit - 2):]
-
-        elapsed = time.time() - start
-        ok_count = sum(1 for s in steps if s.get("status") == "completed")
-        return {
-            "success": ok_count > 0, "steps": steps,
-            "summary": f"Computer Use 执行 {len(steps)} 步 ({ok_count} 成功)",
-            "total_steps": len(steps), "elapsed_ms": round(elapsed * 1000),
-        }
-
-    @staticmethod
-    def _parse_computer_vision_response(content: str) -> tuple:
-        """解析 Vision 模型的响应，返回 (action, params_dict)。
-
-        支持两种格式:
-          1. 标准: ACTION: xxx\nPARAMS: {...}
-          2. JSON: {"ACTION": "xxx", "PARAMS": {...}}
-        """
-        import re
-        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
-
-        # 尝试 JSON 格式
-        action, params = None, None
-        if content.startswith("{"):
-            try:
-                js = json.loads(content)
-                if isinstance(js, dict):
-                    action = str(js.get("ACTION", js.get("action", ""))).strip().lower()
-                    params = js.get("PARAMS", js.get("params", js.get("arguments", {})))
-                    if isinstance(params, str):
-                        try:
-                            params = json.loads(params)
-                        except json.JSONDecodeError:
-                            params = {}
-                    if not isinstance(params, dict):
-                        params = {"value": str(params)}
-            except json.JSONDecodeError:
-                pass
-
-        if not action:
-            action_match = re.search(r"ACTION:\s*(\S+)", content)
-            if not action_match:
-                return "error", {"raw": content[:200]}
-            action = action_match.group(1).strip().lower().strip('",')
-
-        if params is None:
-            params = {}
-            params_match = re.search(r"PARAMS:\s*(\{.*?\})", content, re.DOTALL)
-            if params_match:
-                try:
-                    parsed = json.loads(params_match.group(1))
-                    if isinstance(parsed, dict):
-                        params = parsed
-                except json.JSONDecodeError:
-                    pass
-
-        if not params:
-            kv_match = re.findall(r"(\w+)\s*[:=]\s*(\S+)", content)
-            for k, v in kv_match:
-                if k.lower() != "action":
-                    params[k] = v.strip('"\'')
-            if not params:
-                kv_match = re.findall(r"(\w+)\s*[:：]\s*(.+)", content)
-                for k, v in kv_match:
-                    if k.lower() not in ("action", "思考"):
-                        params[k] = v.strip('"\'')
-        return action, params
-
-    def _record_computer_step(self, steps: list, loop: int,
-                               action: str, action_data: dict,
-                               screen_w: int, screen_h: int) -> tuple:
-        """记录步骤、执行 computer 动作、返回 (step_dict, result_content, success)。"""
-        sn = len(steps) + 1
-        self._emit("log", {"level": "info",
-                           "message": f"Computer: {action} {json.dumps(action_data, ensure_ascii=False)[:200]}"})
-        step = {
-            "step_num": sn, "tool": f"computer.{action}",
-            "args": action_data, "status": "running",
-        }
-        self._emit("step_complete", dict(step))
-        step_start = time.time()
-        try:
-            result_content = self._execute_computer_action(action, action_data, screen_w, screen_h,
-                                                             screenshot_quality=self._screenshot_quality)
-            success = True
-        except Exception as e:
-            result_content = {"type": "text", "text": f"Error: {str(e)}"}
-            success = False
-            self._emit("log", {"level": "error", "message": f"Computer action failed: {str(e)[:200]}"})
-
-        step["status"] = "completed" if success else "failed"
-        step["result"] = {"success": success, "error": "" if success else result_content.get("text", str(result_content)),
-                          "step_ms": round((time.time() - step_start) * 1000)}
-        steps.append(step)
-        self._emit("step_complete", dict(step))
-        return step, result_content, success
-
-    @staticmethod
-    def _execute_computer_action(action: str, data: dict,
-                                  screen_w: int, screen_h: int,
-                                  screenshot_quality: int = 60) -> dict:
-        """执行 computer_use 动作，返回 tool_result content block。
-
-        支持:
-          screenshot, mouse_move, left_click, right_click, middle_click,
-          double_click, left_click_drag, scroll, type, key, cursor_position
-
-        参数兼容 Anthropic 格式 (coordinate: [x, y]) 和 Vision 格式 (x: 500, y: 300)。
-        """
-        import pyautogui
-        import time as _time
-
-        def _get(d: dict, k: str, default=None):
-            v = d.get(k, default)
-            if isinstance(v, str) and v.lower() == "none":
-                return default
-            return v
-
-        def _coord(key: str = "coordinate", fallback_x: str = "x", fallback_y: str = "y"):
-            """统一取坐标：支持 coordinate:[x,y], x:500/y:300, x:[500,300] 等多种格式。"""
-            if key in data:
-                c = data[key]
-                if isinstance(c, (list, tuple)) and len(c) >= 2:
-                    return max(0, min(int(c[0]), screen_w - 1)), max(0, min(int(c[1]), screen_h - 1))
-            raw_x = _get(data, fallback_x, -1)
-            raw_y = _get(data, fallback_y, -1)
-            # 处理 x: [960, 159] 这种数组格式
-            if isinstance(raw_x, (list, tuple)) and len(raw_x) >= 2:
-                return max(0, min(int(raw_x[0]), screen_w - 1)), max(0, min(int(raw_x[1]), screen_h - 1))
-            try:
-                x = int(raw_x) if raw_x not in (None, "", -1) else -1
-                y = int(raw_y) if raw_y not in (None, "", -1) else -1
-            except (TypeError, ValueError):
-                return None
-            if x >= 0 and y >= 0:
-                return max(0, min(x, screen_w - 1)), max(0, min(y, screen_h - 1))
-            return None
-
-        pyautogui.FAILSAFE = False
-
-        # ── screenshot → 截图返回 ──
-        if action == "screenshot":
-            from agent.supervisor import Supervisor
-            sup = Supervisor(screenshot_quality=85)
-            b64 = sup.capture_b64()
-            return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
-
-        # ── mouse_move ──
-        if action == "mouse_move":
-            coord = _coord()
-            if coord:
-                pyautogui.moveTo(coord[0], coord[1])
-
-        # ── left_click / right_click / middle_click / double_click ──
-        elif action in ("left_click", "right_click", "middle_click", "double_click"):
-            click_fn = {"left_click": pyautogui.click, "right_click": pyautogui.rightClick,
-                        "middle_click": pyautogui.middleClick, "double_click": pyautogui.doubleClick}[action]
-            coord = _coord()
-            if coord:
-                click_fn(coord[0], coord[1])
-            else:
-                click_fn()
-
-        # ── left_click_drag ──
-        elif action in ("left_click_drag", "drag"):
-            start_coord = _coord("start_coordinate", "start_x", "start_y") or (0, 0)
-            end_coord = _coord("coordinate", "end_x", "end_y") or start_coord
-            pyautogui.moveTo(start_coord[0], start_coord[1])
-            pyautogui.drag(end_coord[0] - start_coord[0], end_coord[1] - start_coord[1], duration=0.3)
-
-        # ── scroll ──
-        elif action == "scroll":
-            dx = int(_get(data, "dx", _get(data, "scroll_x", 0)))
-            dy = int(_get(data, "dy", _get(data, "scroll_y", -3)))
-            pyautogui.scroll(dy)
-            if dx:
-                pyautogui.hscroll(dx)
-
-        # ── type ──
-        elif action == "type":
-            text = _get(data, "text", "")
-            if text:
-                pyautogui.write(text, interval=0.02)
-
-        # ── key ──
-        elif action == "key":
-            key_text = _get(data, "text", "")
-            if key_text:
-                # 处理组合键: Ctrl+C, Alt+Tab, Ctrl+Shift+Esc
-                if "+" in key_text or "-" in key_text:
-                    sep = "+" if "+" in key_text else "-"
-                    parts = key_text.split(sep)
-                    mods = []
-                    main_key = None
-                    key_map = {"ctrl": "ctrl", "control": "ctrl", "alt": "alt",
-                               "shift": "shift", "super": "win", "win": "win",
-                               "meta": "win"}
-                    for p in parts:
-                        pk = p.strip().lower()
-                        if pk in key_map:
-                            mods.append(key_map[pk])
-                        else:
-                            main_key = pk
-                    if main_key and mods:
-                        hotkey_str = "+".join(mods + [main_key])
-                        pyautogui.hotkey(*mods, main_key)
-                    elif main_key:
-                        pyautogui.press(main_key)
-                    else:
-                        pyautogui.hotkey(*mods)
-                else:
-                    key_map = {
-                        "Return": "enter", "Enter": "enter", "Tab": "tab", "Space": "space",
-                        "Backspace": "backspace", "Delete": "delete",
-                        "Escape": "esc", "Esc": "esc",
-                        "Super_R": "win", "Super_L": "win", "Super": "win",
-                        "Control_L": "ctrl", "Control_R": "ctrl", "Control": "ctrl",
-                        "Alt_L": "alt", "Alt_R": "alt", "Alt": "alt",
-                        "Shift_L": "shift", "Shift_R": "shift", "Shift": "shift",
-                        "CapsLock": "capslock",
-                        "PageUp": "pageup", "PageDown": "pagedown",
-                        "Home": "home", "End": "end",
-                        "Up": "up", "Down": "down", "Left": "left", "Right": "right",
-                        "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4",
-                        "F5": "f5", "F6": "f6", "F7": "f7", "F8": "f8",
-                        "F9": "f9", "F10": "f10", "F11": "f11", "F12": "f12",
-                        "PrintScreen": "printscreen",
-                        "ScrollLock": "scrolllock", "Pause": "pause",
-                        "Menu": "apps", "NumLock": "numlock",
-                    }
-                    mapped = key_map.get(key_text, key_text.lower())
-                    pyautogui.press(mapped)
-
-        # ── cursor_position ──
-        elif action == "cursor_position":
-            x, y = pyautogui.position()
-            return {"type": "text", "text": f"Cursor position: ({x}, {y})"}
-
-        else:
-            return {"type": "text", "text": f"Unknown computer action: {action}"}
-
-        # ── 非 screenshot 动作：执行后截取新截图返回 ──
-        _time.sleep(0.15)
-        from agent.supervisor import Supervisor
-        b64 = Supervisor(screenshot_quality=screenshot_quality).capture_b64(max_size=1920)
 
     # ══════════════════════════════════════════════════════════
     #  _unified_run — 统一执行入口
@@ -2860,120 +2013,36 @@ PARAMS: {{"x": 960, "y": 540}}
 
     def _unified_run(self, goal: str, config: AgentConfig,
                      steps: Optional[list] = None) -> dict:
-        """统一执行入口。根据 AgentConfig.execution_mode 直接分发。
+        """统一执行入口。根据 AgentConfig.execution_mode 直接分发。"""
+        execution_mode = config.execution_mode
 
-        新路径 (execution_mode 非空):
-          直接调用 config.resolve() 获取运行时参数, 根据 mode 分发。
-        旧路径 (无 execution_mode):
-          回退到 resolve_auto() 自动检测。
-        """
-        # ── 检测使用新还是旧路径 ──
-        execution_mode = getattr(config, "execution_mode", "")
-        if execution_mode and execution_mode in ("flow_chart", "multimodal", "text", "offline"):
-            # ── 新路径: mode-based dispatch ──
-            resolved = config.resolve()
-
-            # 传播监督层配置
-            self.supervisor.on_error = resolved.get("on_error", "retry")
-            self.supervisor.window_aware_ocr = resolved.get("window_aware_ocr", False)
-            self.supervisor.uia_pre_focus = resolved.get("uia_pre_focus", False)
-            self.supervisor.uia_enabled = resolved.get("uia_enabled", True)
-            # 同步 UIA 全局开关到 interaction 层，确保 @feature 级别的 UIA 也被禁用
-            from interaction.actions import set_uia_enabled as _set_uia
-            _set_uia(resolved.get("uia_enabled", True))
-            self.supervisor.scripted_mode = resolved.get("scripted_mode", False)
-            self.supervisor.verify = resolved.get("verify", True)
-
-            # 同步 LLM 参数
-            self._temperature = resolved.get("temperature", 0.1)
-            self._max_tokens = resolved.get("max_tokens", 4096)
-            self._llm_retries = resolved.get("llm_retries", 2)
-            self._screenshot_quality = resolved.get("screenshot_quality", 60)
-            self._som_enabled = resolved.get("som_enabled", True)
-            self._local_vision_enabled = resolved.get("local_vision", False)
-            self.sliding_window_limit = resolved.get("sliding_window_size", 0) or 12
-
-            # 记忆系统
-            self._reflection_enabled = resolved.get("memory_enabled", False)
-
-            # 脚本模式注入
-            self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
-
-            self._emit("log", {"level": "info", "message":
-                f"Unified agent: mode={execution_mode}, "
-                f"memory={resolved.get('memory_enabled')}, "
-                f"supervise={resolved.get('supervise', True)}, "
-                f"uia={resolved.get('uia_enabled')}, "
-                f"som={resolved.get('som_enabled')}, "
-                f"win_ocr={resolved.get('window_aware_ocr')}, "
-                f"visual={resolved.get('visual_strategy')}, "
-                f"max_steps={resolved.get('max_steps')}"})
-
-            # ── Dispatch ──
-            if execution_mode == "flow_chart":
-                # 流程图模式: 仅调用 LLM 生成流程图/伪代码, 不操作屏幕
-                # 生成 → 前端展示 → 用户决定是否执行
-                return self._run_direct(goal)
-
-            elif execution_mode == "multimodal":
-                return self.run_text_protocol(goal, _agent_config=config,
-                                               guidance_queue=self._guidance_queue)
-
-            elif execution_mode == "text":
-                return self.run_text_protocol(goal, _agent_config=config,
-                                               guidance_queue=self._guidance_queue)
-
-            else:  # offline
-                return {"success": True, "steps": [], "summary": "离线模式 (预留)", "total_steps": 0}
-
-        # ══════════════════════════════════════════════════════
-        # 旧路径: resolve_auto 自动检测 (向后兼容)
-        # ══════════════════════════════════════════════════════
-        config.resolve_auto(self.model)
+        # ── mode-based dispatch ──
+        resolved = config.resolve()
 
         # 传播监督层配置
-        self.supervisor.on_error = config._resolved_on_error
-        self.supervisor.window_aware_ocr = config.window_aware_ocr
-        self.supervisor.uia_pre_focus = config.uia_pre_focus
-        self.supervisor.uia_enabled = getattr(config, 'uia_enabled', True)
-        self.supervisor.scripted_mode = config.scripted_mode
-        self.supervisor.verify = config.verify
+        self.supervisor.on_error = resolved.get("on_error", "retry")
+        self.supervisor.window_aware_ocr = resolved.get("window_aware_ocr", False)
+        self.supervisor.uia_pre_focus = resolved.get("uia_pre_focus", False)
+        self.supervisor.uia_enabled = resolved.get("uia_enabled", True)
+        from interaction.actions import set_uia_enabled as _set_uia
+        _set_uia(resolved.get("uia_enabled", True))
+        self.supervisor.scripted_mode = resolved.get("scripted_mode", False)
+        self.supervisor.verify = resolved.get("verify", True)
 
-        # 同步 LLM 参数到实例
-        self._temperature = config.temperature
-        self._max_tokens = config.max_tokens
-        self._llm_retries = config.llm_retries
-        self._screenshot_quality = config.screenshot_quality
-        self._som_enabled = config.som_enabled
-        self._local_vision_enabled = config.local_vision
-        # 滑动窗口：auto=0 → multimodal 用 8, text 用 12
-        self.sliding_window_limit = config.sliding_window_size or (8 if config._multimodal else 12)
+        # 同步 LLM 参数
+        self._temperature = resolved.get("temperature", 0.1)
+        self._max_tokens = resolved.get("max_tokens", 4096)
+        self._llm_retries = resolved.get("llm_retries", 2)
+        self._screenshot_quality = resolved.get("screenshot_quality", 60)
+        self._som_enabled = resolved.get("som_enabled", True)
+        self._local_vision_enabled = resolved.get("local_vision", False)
+        self.sliding_window_limit = resolved.get("sliding_window_size", 0) or 12
 
-        # 脚本执行模式注入提示词（始终注入，run_python_script 已注册为通用元动作）
+        # 记忆系统
+        self._reflection_enabled = resolved.get("memory_enabled", False)
+
+        # 脚本模式注入
         self._system_prompt += SCRIPTED_MODE_INSTRUCTIONS
-
-        self._emit("log", {"level": "info", "message":
-            f"Unified agent: planning={config._resolved_planning}, "
-            f"protocol={config._resolved_llm_protocol}, "
-            f"vision={config._resolved_vision_mode}, "
-            f"context={config._resolved_screen_context}, "
-            f"multimodal={config._multimodal}, "
-            f"on_error={config._resolved_on_error}, "
-            f"window_ocr={config.window_aware_ocr}, "
-            f"uia_focus={config.uia_pre_focus}, "
-            f"scripted={config.scripted_mode}, "
-            f"max_steps={config.max_steps}, "
-            f"som={config.som_enabled}, "
-            f"temp={config.temperature}, "
-            f"retries={config.llm_retries}, "
-            f"quality={config.screenshot_quality}, "
-            f"chat_mode={config.chat_mode}, "
-            f"visual={config.visual_strategy}, "
-            f"local_vision={config.local_vision}"})
-
-        # ── 反思/学习开关 ──
-        self._reflection_enabled = getattr(config, "reflection_enabled", True)
-        self._step_reflections.clear()
 
         # ── 历史记忆注入 (统一入口) ──
         self._inject_memory_prompt(goal)
@@ -2984,50 +2053,41 @@ PARAMS: {{"x": 960, "y": 540}}
         except Exception:
             pass
 
-        # ── Computer Use protocol (Claude API with computer_use beta) ──
-        if config._resolved_llm_protocol == "computer_use":
-            return self._computer_use_loop(goal, config)
+        self._emit("log", {"level": "info", "message":
+            f"Unified agent: mode={execution_mode}, "
+            f"memory={resolved.get('memory_enabled')}, "
+            f"supervise={resolved.get('supervise', True)}, "
+            f"uia={resolved.get('uia_enabled')}, "
+            f"som={resolved.get('som_enabled')}, "
+            f"win_ocr={resolved.get('window_aware_ocr')}, "
+            f"visual={resolved.get('visual_strategy')}, "
+            f"max_steps={resolved.get('max_steps')}"})
 
-        # ── Planning: pre_plan vs per_step ──
-        if config._resolved_planning == "pre_plan":
-            return self._run_pre_plan(goal, steps, config)
+        # ── Dispatch ──
+        if execution_mode == "flow_chart":
+            return self._run_direct(goal)
 
-        elif config._resolved_planning == "per_step":
-            if config._resolved_llm_protocol == "text":
-                return self.run_text_protocol(goal, _agent_config=config,
-                                               guidance_queue=self._guidance_queue)
-            elif config._resolved_llm_protocol == "function_calling":
-                return self._run_per_step_function_calling(goal, config)
+        elif execution_mode == "multimodal":
+            return self.run_text_protocol(goal, _agent_config=config,
+                                           guidance_queue=self._guidance_queue)
 
-        # Fallback
-        return self.run_text_protocol(goal, _agent_config=config,
-                                       guidance_queue=self._guidance_queue)
+        elif execution_mode == "text":
+            return self.run_text_protocol(goal, _agent_config=config,
+                                           guidance_queue=self._guidance_queue)
 
-    def _run_pre_plan(self, goal: str, steps: Optional[list],
-                      config: AgentConfig) -> dict:
-        """Pre-plan mode: generate all steps upfront, then execute via PlanExecutor."""
-        return self.run_planned(goal, steps=steps, _agent_config=config)
-
-    def _run_per_step_function_calling(self, goal: str, config: AgentConfig) -> dict:
-        """Per-step mode with function calling LLM (LangGraph)."""
-        self._emit("log", {"level": "info", "message": f"LangGraph max_steps set to {config.max_steps}"})
-        return self.run_langgraph(goal, _agent_config=config)
+        else:  # offline
+            return {"success": True, "steps": [], "summary": "离线模式 (预留)", "total_steps": 0}
 
     # ══════════════════════════════════════════════════════════
-    #  统一入口 (保留旧 dispatch 保证向后兼容)
+    #  统一入口
     # ══════════════════════════════════════════════════════════
 
-    def run(self, goal: str, mode: str = "auto", **kwargs) -> dict:
+    def run(self, goal: str, **kwargs) -> dict:
         """执行目标。
 
         参数:
             goal: 自然语言目标描述
-            mode: 执行模式 (当 agent_config 提供时忽略此参数)
-                "auto"           — 自动选择 (mimo-model → text_protocol, 否则 → langgraph)
-                "text_protocol"  — MIMO 风格文本协议循环
-                "langgraph"      — LangGraph create_react_agent
-                "direct"         — 仅生成流程图 (generate_flow_script)
-            agent_config: AgentConfig 实例（新统一路径，提供时忽略 mode）
+            agent_config: AgentConfig 实例
 
         返回:
             dict{success, steps, summary, total_steps, elapsed_ms}
@@ -3036,41 +2096,9 @@ PARAMS: {{"x": 960, "y": 540}}
             return {"success": False, "steps": [], "total_steps": 0,
                     "error": "stopped before start", "elapsed_ms": 0}
 
-        # ── 新统一路径：AgentConfig 提供时直接使用 ──
         agent_config = kwargs.get("agent_config")
-        agent_config_provided = agent_config is not None
-        if agent_config_provided:
-            result = self._unified_run(goal, agent_config, steps=kwargs.get("steps"))
-            exec_mode = agent_config._resolved_planning or "unified"
-        else:
-            # ── 旧 4 路 dispatch（向后兼容）──
-            # 自动检测模式
-            if mode == "auto":
-                model_lower = self.model.strip().lower()
-                if "mimo" in model_lower:
-                    mode = "text_protocol"
-                elif self._check_langgraph():
-                    mode = "langgraph"
-                else:
-                    # 无 langgraph → 回退到 planned (最便宜: 1次LLM调用, 然后离线执行)
-                    self._emit("log", {"level": "info", "message": "LangGraph not available, falling back to planned"})
-                    mode = "planned"
-
-            if mode == "text_protocol":
-                self._inject_memory_prompt(goal)
-                result = self.run_text_protocol(goal)
-            elif mode == "planned":
-                self._inject_memory_prompt(goal)
-                steps = kwargs.get("steps")
-                result = self.run_planned(goal, steps=steps)
-            elif mode == "langgraph":
-                self._inject_memory_prompt(goal)
-                result = self.run_langgraph(goal)
-            elif mode == "direct":
-                result = self._run_direct(goal)
-            else:
-                raise ValueError(f"Unknown mode: {mode}")
-            exec_mode = mode
+        result = self._unified_run(goal, agent_config, steps=kwargs.get("steps"))
+        exec_mode = agent_config.execution_mode
 
         # ── Post-task reflection + memory update ──
         rules_count = 0

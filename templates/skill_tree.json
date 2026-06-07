@@ -1,10 +1,20 @@
 {
-  "version": 2,
+  "version": 6,
   "categories": {
     "等待监控": {
       "patterns": {
         "测试结晶": [
           "测试结晶"
+        ]
+      }
+    },
+    "通用": {
+      "patterns": {
+        "自动_type": [
+          "自动_type_execute_payload_script_meta_id_9R5C",
+          "自动_type_execute_payload_script_meta_id_cFPy",
+          "自动_type_execute_payload_script_meta_id_K00F",
+          "自动_type_execute_payload_script_meta_id_s4bX"
         ]
       }
     }

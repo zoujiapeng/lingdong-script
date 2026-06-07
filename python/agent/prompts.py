@@ -4,7 +4,6 @@ Extracted from agent.py to reduce module size.
 """
 
 from __future__ import annotations
-from typing import Set
 
 
 # ── Multimodal Model Detection ─────────────────────────────
@@ -39,24 +38,6 @@ def is_multimodal_model(model_name: str) -> bool:
     if "vision" in name or "multimodal" in name or "omni" in name:
         return True
     return False
-
-
-# ── Agent Core Feature Whitelist ───────────────────────────
-
-AGENT_CORE_FEATURES: Set[str] = {
-    "find_image", "color_check", "region_select",
-    "wait_element", "wait_screen_stable", "wait_screen_change",
-    "wait_region", "detect_progress",
-    "popup_close",
-    "a11y_find_element", "a11y_click_element",
-    "program_list", "program_resolve", "detect_process", "find_processes",
-    "vlm_analyze",
-    "macro_playback", "macro_list",
-    "browser_list_tabs", "browser_new_tab", "browser_switch_tab",
-    "browser_find_elements", "browser_execute_js",
-    "wait_action", "wait_condition",
-    "wait_process_start", "wait_process_exit",
-}
 
 
 # ── System Prompt Constants ────────────────────────────────

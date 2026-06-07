@@ -27,15 +27,41 @@ const _STORAGE_KEY = 'lingdong-agent-goal';
 const KEY_STORAGE = 'lingdong-deepseek-key';
 const BASE_STORAGE = 'lingdong-llm-base';
 const MODEL_STORAGE = 'lingdong-llm-model';
+const VERIFY_STORAGE = 'lingdong-verify-enabled';
+const AUTO_LEARN_STORAGE = 'lingdong-auto-learn';
+const OMNIPARSER_STORAGE = 'lingdong-omniparser';
+const AGENT_PROTOCOL_STORAGE = 'lingdong-agent-protocol';
+const AGENT_VISION_STORAGE = 'lingdong-agent-vision';
+const AGENT_PLANNING_STORAGE = 'lingdong-agent-planning';
+const AGENT_ONERROR_STORAGE = 'lingdong-agent-on-error';
+const AGENT_MULTIMODAL_STORAGE = 'lingdong-agent-multimodal';
+const AGENT_FASTMODE_STORAGE = 'lingdong-agent-fast-mode';
 
 // ── Helpers ──
 function lsGet(k: string, d = '') { try { return localStorage.getItem(k) || d; } catch { return d; } }
 function lsSet(k: string, v: string) { try { localStorage.setItem(k, v); } catch {} }
 function lsBool(k: string, d = false) { try { const v = localStorage.getItem(k); return v !== null ? v === 'true' : d; } catch { return d; } }
 function lsNum(k: string, d: number) { try { const v = localStorage.getItem(k); return v !== null ? parseFloat(v) : d; } catch { return d; } }
+function lsMode(k: string, d = '') { try { return localStorage.getItem(k) || d; } catch { return d; } }
 function maskKey(key: string): string {
   if (key.length <= 12) return key.slice(0, 4) + '...' + key.slice(-4);
   return key.slice(0, 6) + '...' + key.slice(-4);
+}
+
+function getRuntimeLLMConfig(preset: typeof PRESETS[number]) {
+  const fallbackKey = preset.key.trim();
+  const fallbackBase = preset.base.trim();
+  const fallbackModel = preset.model.trim();
+  const w = window as any;
+  const storedKey = lsGet(KEY_STORAGE);
+  const storedBase = lsGet(BASE_STORAGE);
+  const storedModel = lsGet(MODEL_STORAGE);
+
+  return {
+    apiKey: (w.__DEEPSEEK_KEY__ || storedKey || fallbackKey).trim(),
+    apiBase: (w.__LLM_API_BASE__ || storedBase || fallbackBase).trim(),
+    model: (w.__LLM_MODEL__ || storedModel || fallbackModel).trim(),
+  };
 }
 
 // ── Presets ──
@@ -141,14 +167,22 @@ export function AgentView() {
     if (!p) return;
     setActivePreset(label);
     setExecutionMode(p.mode);
-    // Save to localStorage so Python agent can find it
-    lsSet(KEY_STORAGE, p.key);
     lsSet(BASE_STORAGE, p.base);
     lsSet(MODEL_STORAGE, p.model);
   }, []);
 
   // ── buildAgentConfig ──
   const buildAgentConfig = useCallback((): Record<string, any> => {
+    const savedProtocol = lsMode(AGENT_PROTOCOL_STORAGE, 'auto');
+    const savedVision = lsMode(AGENT_VISION_STORAGE, 'auto');
+    const savedPlanning = lsMode(AGENT_PLANNING_STORAGE, 'auto');
+    const savedOnError = lsMode(AGENT_ONERROR_STORAGE, 'retry');
+    const savedMultimodal = lsMode(AGENT_MULTIMODAL_STORAGE, 'auto');
+    const fastMode = lsBool(AGENT_FASTMODE_STORAGE, false);
+    const verifyEnabled = lsBool(VERIFY_STORAGE, true);
+    const autoLearn = lsBool(AUTO_LEARN_STORAGE, false);
+    const omniparserEnabled = lsBool(OMNIPARSER_STORAGE, false);
+
     const cfg: Record<string, any> = {
       execution_mode: executionMode,
       memory_enabled: memoryOn,
@@ -156,7 +190,14 @@ export function AgentView() {
       temperature: 0.1,
       max_tokens: 4096,
       screenshot_quality: 60,
-      on_error: 'retry',
+      on_error: savedOnError,
+      verify: verifyEnabled,
+      fast_mode: fastMode,
+      auto_learn: autoLearn,
+      omniparser_enabled: omniparserEnabled,
+      multimodal: savedMultimodal === 'auto'
+        ? (preset.mode === 'multimodal' ? 'true' : 'false')
+        : savedMultimodal,
     };
     if (executionMode === 'flow_chart') {
       cfg.supervise = supervise;
@@ -170,8 +211,10 @@ export function AgentView() {
       cfg.window_aware_ocr = tvWindowOcr;
       cfg.local_vision = tvLocalVision;
       cfg.visual_strategy = tvVisualStrategy;
-      cfg.llm_protocol = 'text';
-      cfg.planning = 'per_step';
+      cfg.llm_protocol = savedProtocol === 'auto' ? 'text' : savedProtocol;
+      cfg.vision_mode = savedVision === 'auto' ? 'som' : savedVision;
+      cfg.planning = savedPlanning === 'auto' ? 'per_step' : savedPlanning;
+      cfg.screen_context = fastMode ? 'minimal' : 'full';
     }
     return cfg;
   }, [executionMode, memoryOn, maxSteps, supervise, mmScreenshotQuality,
@@ -184,9 +227,7 @@ export function AgentView() {
     if (withSupervise) { _persistedLog = []; setLog([]); }
     addEntry({ type: 'system', text: withSupervise ? '正在启动执行...' : '正在生成流程图...' });
 
-    const apiKey_ = preset.key.trim();
-    const apiBase_ = preset.base.trim();
-    const model_ = preset.model.trim();
+    const { apiKey: apiKey_, apiBase: apiBase_, model: model_ } = getRuntimeLLMConfig(preset);
 
     if (!apiKey_) {
       addEntry({ type: 'system', text: '⚠️ 未配置 API 密钥' });
@@ -197,8 +238,9 @@ export function AgentView() {
       await window.electronAPI!.agentStart(goal.trim(), {
         api_key: apiKey_, api_base: apiBase_, model: model_,
         multimodal: preset.mode === 'multimodal' ? 'true' : 'false',
-        verify_enabled: 'true',
-        auto_learn: 'false',
+        verify_enabled: lsBool(VERIFY_STORAGE, true) ? 'true' : 'false',
+        auto_learn: lsBool(AUTO_LEARN_STORAGE, false) ? 'true' : 'false',
+        omniparser_enabled: lsBool(OMNIPARSER_STORAGE, false) ? 'true' : 'false',
         agent_config: buildAgentConfig(),
       }, withSupervise, stepsArg ?? undefined);
     } catch (err: any) {
@@ -390,12 +432,12 @@ export function AgentView() {
           <span>{preset.model}</span>
           <span>|</span>
           {showKey ? (
-            <input value={preset.key} onChange={e => {}}
+            <input value={getRuntimeLLMConfig(preset).apiKey} onChange={e => {}}
               style={{ width: 240, padding: '2px 6px', background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', borderRadius: 3, color: 'var(--text-muted)', fontSize: 11 }}
               onBlur={() => setShowKey(false)} />
           ) : (
             <span style={{ cursor: 'pointer' }} onClick={() => setShowKey(true)}>
-              ●●● {maskKey(preset.key)}
+              ●●● {maskKey(getRuntimeLLMConfig(preset).apiKey)}
             </span>
           )}
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>

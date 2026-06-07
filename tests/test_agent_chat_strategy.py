@@ -264,21 +264,14 @@ class TestConfigPropagation:
             model="deepseek-chat",
         )
 
-    def test_propagates_chat_mode(self, agent):
-        from agent.config import AgentConfig
-        cfg = AgentConfig(chat_mode=True)
-        cfg.resolve_auto("deepseek-chat")
-        resolved = agent._resolve_text_protocol_config(cfg)
-        assert resolved.get("chat_mode") is True
-
     def test_propagates_visual_strategy(self, agent):
         from agent.config import AgentConfig
-        cfg = AgentConfig(visual_strategy="ocr_llm")
-        cfg.resolve_auto("deepseek-chat")
+        cfg = AgentConfig(execution_mode="text")
+        cfg.text_vision_cfg.visual_strategy = "ocr_llm"
         resolved = agent._resolve_text_protocol_config(cfg)
         assert resolved.get("visual_strategy") == "ocr_llm"
 
     def test_no_config_returns_defaults(self, agent):
         resolved = agent._resolve_text_protocol_config(None)
-        assert "chat_mode" not in resolved
-        assert "visual_strategy" not in resolved
+        assert resolved.get("multimodal") is not None
+        assert resolved.get("max_steps") == 50
