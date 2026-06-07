@@ -11,24 +11,25 @@
 graph TB
     User["用户自然语言目标"] --> Run["agent.run(goal)"]
 
-    subgraph UR["_unified_run(goal, config) — 执行体"]
-        S["config.resolve()<br/>展平配置 → sync 参数 → 注入记忆"]
+    subgraph UR["_unified_run(goal, config) - 执行体"]
+        S["config.resolve() / 展平配置 / sync 参数 / 注入记忆"]
         D{"execution_mode"}
         S --> D
-        D -->|flow_chart| FC["_run_direct()<br/>→ generate_flow_script()<br/>返回流程图 JSON，不下场执行"]
+        D -->|flow_chart| FC["_run_direct() / generate_flow_script()<br/>返回流程图 JSON，不下场执行"]
         D -->|multimodal| MM["run_text_protocol()<br/>截图直接送 LLM（多模态视觉理解）"]
         D -->|text| TX["run_text_protocol()<br/>SoM 标号 + UIA + OCR（本地视觉定位）"]
-        D -->|offline| OFF["直接返回 {success: true}<br/>不调 LLM，不截屏"]
+        D -->|offline| OFF["直接返回 success<br/>不调 LLM，不截屏"]
     end
 
     subgraph PT["run() 统一后处理（所有模式共享）"]
-        P1["reflection.reflect_task()<br/>错误分析 → 改进建议"]
+        P1["reflection.reflect_task()<br/>错误分析 / 改进建议"]
         P2["memory 更新<br/>add_rule / add_preference / add_episode"]
         P3["state_persistence.save_run()<br/>运行摘要持久化"]
         P1 --> P2 --> P3
     end
 
-    Run --> UR -.-> |返回 result| PT
+    Run --> UR
+    UR --> PT
 ```
 
 > **旧路由已移除**: 之前有 `resolve_auto()` / `agent_config_from_legacy()` / `LangGraph` / `Planned` / `ComputerUse` 等 5 种旧执行模式。现改为 `_unified_run()` 统一入口：内部 `config.resolve()` 展平配置 → `execution_mode` 4 种分发，所有模式共享 `run()` 的后处理管道（反思 + 记忆 + 持久化）。
