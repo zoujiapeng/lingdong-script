@@ -58,90 +58,102 @@ graph TB
 ## 3. text_protocol 执行循环 (最常用模式)
 
 ```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Agent as LingdongAgent
-    participant LLM as LLM API
-    participant Sup as Supervisor
-    participant Registry as @Feature Registry
-    participant Screen as 屏幕
+graph TB
+    START["run_text_protocol(goal)"] --> INIT
 
-    User->>Agent: run_text_protocol(goal)
-    
-    Note over Agent: 初始化配置
-    Agent->>Agent: _begin_prompt_trace(goal)
-    Agent->>Agent: _ensure_registry()
-    Agent->>Agent: 构建系统提示词
-    Agent->>Agent: 注入记忆 _inject_memory_prompt()
-    
-    Note over Agent: 首次截图+感知
-    Agent->>Screen: capture_b64()
-    Agent->>Agent: _apply_som() → SoM 标号
-    Agent->>Agent: _compact_som_label() → 紧凑文本
-    Agent->>Agent: 获取窗口列表+屏幕上下文
-    
-    Note over Agent: 构建首轮消息
-    Agent->>LLM: POST chat/completions (系统提示+截图+上下文)
-    LLM-->>Agent: Tool: click\nArgs:\n  target: #3
-    
-    loop 每步执行
-        Note over Agent: 解析 LLM 回复
-        Agent->>text_protocol: parse_response(content)
-        text_protocol-->>Agent: ("tool", "click", {target: "#3"})
-        
-        alt 多工具批处理
-            Agent->>text_protocol: parse_tool_blocks(content)
-            text_protocol-->>Agent: [("click",{...}), ("type",{...})]
-        end
-        
-        Note over Agent: 执行前快照
-        Agent->>Agent: _runtime_snapshot() → verify_before
-        
-        loop 批量工具块
-            Note over Agent: SoM #N 解析
-            Agent->>Sup: execute("click", {target: "#3"})
-            
-            Note over Sup: 8 步监督流水线
-            Sup->>Sup: 0. SoM 解引用 (#3→坐标)
-            Sup->>Sup: 1. UIA 语义定位/窗口限定/预聚焦
-            Sup->>Sup: 2. 视觉定位兜底 (经验库+VLM)
-            Sup->>Sup: 3. 窗口焦点安全
-            Sup->>Sup: 4. 执行+重试
-            Sup->>Sup: 5. 自动对话框处理
-            Sup->>Sup: 6. 屏幕稳定等待
-            Sup->>Sup: 7. 失败诊断截图
-            Sup-->>Agent: {success: true, result: ...}
-            
-            alt 窗口上下文变化
-                Agent->>Agent: verify_after 检测title变化
-                Agent->>Agent: break (刷新感知)
-            end
-        end
-        
-        Note over Agent: 构建下一步消息
-        Agent->>Agent: _append_step_feedback()
-        Agent->>Agent: _strip_binary() 去除base64
-        
-        alt 对话模式
-            Agent->>Agent: _process_chat_messages()
-        end
-        
-        Agent->>Screen: capture_b64() 新截图
-        Agent->>Agent: _apply_som() 新SoM
-        Agent->>LLM: 执行结果+新截图+上下文
-        
-        LLM-->>Agent: Tool: ... / Done: Summary
-        
-        alt 连续失败>=max
-            Agent->>Agent: 终止
-        end
+    subgraph INIT["阶段1: 初始化"]
+        direction TB
+        I1["_begin_prompt_trace(goal)"] --> I2["_ensure_registry()"]
+        I2 --> I3["构建系统提示词 + 注入记忆"]
+        I3 --> I4["capture_b64() 全屏截图"]
+        I4 --> I5["_apply_som() → SoM 标号"]
+        I5 --> I6["_compact_som_label() → 紧凑文本"]
+        I6 --> I7["获取窗口列表 + 屏幕上下文"]
     end
-    
-    Note over Agent: 执行后处理
-    Agent->>Reflection: reflect_task()
-    Agent->>Memory: add_rule/add_preference/add_episode
-    Agent->>Persistence: save_run()
-    Agent-->>User: agent_done 事件
+
+    INIT --> FIRST["POST chat/completions<br/>系统提示 + SoM + 上下文"]
+    FIRST --> FIRST_R["LLM 回复: Tool 指令"]
+
+    FIRST_R --> STEP
+
+    subgraph STEP["阶段2: 每步执行循环"]
+        direction TB
+
+        PARSE["parse_response(content)<br/>→ (tool_type, name, args)"]
+        TYPE{"回复类型?"}
+        PARSE --> TYPE
+        TYPE -->|Done| EXIT_STEP["退出循环"]
+        TYPE -->|Tool| MULTI{"包含多个<br/>工具块?"}
+
+        BATCH["parse_tool_blocks()<br/>→ 批量工具列表"]
+        SNAP["_runtime_snapshot() → verify_before"]
+
+        TOOL{"还有未执行<br/>工具块?"}
+        EXEC["Supervisor.execute(name, args)"]
+
+        subgraph SUP["监督流水线 (Supervisor)"]
+            direction TB
+            S1["0. SoM 解引用 (#N→坐标)"]
+            S2["1. UIA 语义定位 + 窗口限定"]
+            S3["   预聚焦 (type/clipboard)"]
+            S4["2. 视觉定位兜底 (经验库+VLM)"]
+            S5["3. 窗口焦点安全"]
+            S6["4. 执行 + 指数退避重试"]
+            S7["5. 自动对话框处理"]
+            S8["6. 屏幕稳定等待"]
+            S9["7. 失败诊断截图"]
+            S1 --> S2 --> S3 --> S4 --> S5
+            S5 --> S6 --> S7 --> S8 --> S9
+        end
+
+        WCHG{"窗口 title<br/>发生变化?"}
+        BREAK["break 跳出<br/>刷新感知"]
+
+        FB["_append_step_feedback()"]
+        STRIP["_strip_binary() 去除 base64"]
+
+        CHAT{"对话模式?"}
+        CHAT_P["_process_chat_messages()"]
+
+        SS["capture_b64() 新截图"]
+        SOM2["_apply_som() 新 SoM"]
+        NLLM["POST chat/completions<br/>执行结果 + 截图 + 上下文"]
+        FAIL{"连续失败<br/>≥ max_failures?"}
+        TERM["终止"]
+
+        MULTI -->|是| BATCH
+        MULTI -->|否| SNAP
+        BATCH --> SNAP
+        SNAP --> TOOL
+        TOOL -->|有| EXEC
+        EXEC --> S1
+        S9 --> WCHG
+        WCHG -->|变化| BREAK
+        BREAK --> TOOL
+        WCHG -->|无变化| TOOL
+
+        TOOL -->|无| FB
+        FB --> STRIP --> CHAT
+        CHAT -->|是| CHAT_P
+        CHAT_P --> SS
+        CHAT -->|否| SS
+        SS --> SOM2 --> NLLM
+        NLLM --> FAIL
+        FAIL -->|是| TERM
+        FAIL -->|否| PARSE
+    end
+
+    EXIT_STEP --> POST
+    TERM --> POST
+
+    subgraph POST["阶段3: 后处理"]
+        direction TB
+        P1["reflection.reflect_task()<br/>错误分析 + 改进建议"]
+        P2["memory 更新<br/>add_rule / add_preference / add_episode"]
+        P3["state_persistence.save_run()<br/>运行摘要持久化"]
+        P4["emit agent_done 事件"]
+        P1 --> P2 --> P3 --> P4
+    end
 ```
 
 ---
