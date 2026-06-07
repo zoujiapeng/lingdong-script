@@ -29,7 +29,7 @@ graph TB
     %% ==================== 网关层 ====================
     subgraph Main["Electron Main Process"]
         IPC_Bridge["ipcMain<br/>30+ IPC 处理程序<br/>文件/引擎/Agent/截图/OCR"]
-        API_Server["HTTP API Server<br/>:7880<br/>59 端点"]
+        API_Server["HTTP API Server<br/>:7880<br/>54 端点 + /mcp"]
         MCP_TS["TypeScript MCP<br/>5 tools<br/>stdio/HTTP"]
         Engine_Bridge["Engine Bridge<br/>Python 进程管理<br/>3 级: 持久/单次/原始"]
         Scheduler_Bridge["Scheduler Bridge<br/>APScheduler 守护进程"]
@@ -40,9 +40,8 @@ graph TB
     %% ==================== Python 后端 ====================
     subgraph Agent_System["AI Agent 系统"]
         Agent_Main["agent/__main__.py<br/>IPC 入口<br/>stdin/stdout JSON"]
-        Lingdong["LingdongAgent<br/>5 种执行模式:<br/>text/langgraph/planned<br/>computer_use/direct"]
+        Lingdong["LingdongAgent<br/>4 种执行模式:<br/>flow_chart/multimodal<br/>text/offline"]
         Supervisor["Supervisor<br/>8 步监督流水线<br/>SoM→UIA→视觉→聚焦<br/>→执行→对话框→稳定→诊断"]
-        Planner["Planner<br/>Plan DAG 分解<br/>拓扑排序执行"]
         MetaActions["meta_actions.py<br/>27 元动作<br/>高层 LLM 接口"]
         TextProtocol["text_protocol.py<br/>Tool:/Args: 协议解析"]
         Router["tool_path_selector.py<br/>7 级路径选择<br/>L0 DIRECT~L6 DSL"]
@@ -63,8 +62,8 @@ graph TB
 
     subgraph Feature_System["@Feature 注册系统"]
         Registry["registry.py<br/>FeatureRegistry 单例<br/>@feature 装饰器"]
-        Feature_Modules["42 模块<br/>227 工具<br/>懒加载"]
-        MCP_PY["mcp/server.py<br/>Python MCP Server<br/>~120 tools"]
+        Feature_Modules["42 模块<br/>246 注册 / 227 MCP 可见<br/>懒加载"]
+        MCP_PY["mcp/server.py<br/>Python MCP Server<br/>~227 tools (动态)"]
     end
 
     subgraph Trigger_System["触发器系统"]
@@ -110,7 +109,6 @@ graph TB
 
     Agent_Main --> Lingdong
     Lingdong --> Supervisor
-    Lingdong --> Planner
     Lingdong --> MetaActions
     Lingdong --> TextProtocol
     Lingdong --> Memory
@@ -122,8 +120,7 @@ graph TB
     Supervisor --> Dialog
     Supervisor --> Registry
 
-    Planner --> Router
-    Planner --> FlowFeatures["features/flow_features<br/>generate_flow_script"]
+    Lingdong --> FlowFeatures["features/flow_features<br/>generate_flow_script"]
 
     MetaActions --> Registry
 
@@ -160,9 +157,9 @@ graph TB
 
 | 模块 | 位置 | 职责 | 关键类/函数 | 行数 |
 |------|------|------|-------------|------|
-| **Agent Runtime** | `python/agent/` | AI 驱动的桌面自动化执行，5 种模式 | `LingdongAgent`, `Supervisor`, `prompts.py` | ~5500 |
+| **Agent Runtime** | `python/agent/` | AI 驱动的桌面自动化执行，4 种模式 | `LingdongAgent`, `Supervisor`, `prompts.py` | ~5500 |
 | **DSL Engine** | `python/engine/` | DSL 脚本解析、执行、优化、结晶 | `DSLExecutor`, `DSLParser`, `PlanExecutor` | ~5000 |
-| **Feature Registry** | `python/features/` | 227 工具的注册、lazy load、多协议导出 | `FeatureRegistry`, `@feature` | ~12000 |
+| **Feature Registry** | `python/features/` | 246 工具注册、lazy load、多协议导出 | `FeatureRegistry`, `@feature` | ~12000 |
 | **IPC Gateway** | `src/main/` | Electron 主进程，子进程管理，HTTP API | `main.ts`, `api.ts`, `engine.ts` | ~3000 |
 | **Frontend** | `src/renderer/` | 流程图编辑器，Agent 配置，状态管理 | `Zustand Store`, `FlowCanvas` | ~5000 |
 | **Perception** | `python/perception/` | OCR、图像匹配、颜色检测、场景识别 | `OCREngine`, `TemplateMatcher` | ~1400 |
@@ -233,21 +230,20 @@ graph LR
     %% Agent 系统依赖
     agent --> prompts["agent/prompts.py<br/>提示词+模型检测"]
     agent --> supervisor
-    agent --> planner
     agent --> text_protocol
     agent --> meta_actions
     agent --> memory
     agent --> reflection
     agent --> local_vision
+    agent --> flow_features["features/flow_features"]
 
     supervisor --> registry
     supervisor --> dialog_handler
     supervisor --> visual_locator
     supervisor --> actions
 
-    planner --> meta_actions
-    planner --> router["tool_path_selector"]
-    planner --> flow_features["features/flow_features"]
+    %% flow_chart 模式依赖
+    flow_features --> registry
 
     %% Engine 系统依赖
     engine["engine/executor"] --> parser["engine/dsl_parser"]
