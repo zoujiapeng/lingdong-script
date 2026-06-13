@@ -42,6 +42,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentStatus: () =>
     ipcRenderer.invoke('agent:status'),
 
+  // WinPilot embedded server URL (Agent panel iframe target)
+  getWinpilotUrl: () =>
+    ipcRenderer.invoke('winpilot:url'),
+
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg);

@@ -12,6 +12,7 @@ import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPython
 import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
 import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
+import { startWinpilotServer, getWinpilotUrl, stopWinpilotServer } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -788,6 +789,9 @@ ipcMain.handle('agent:guidance', (_, text: string) => {
   return { success: true };
 });
 
+// WinPilot embedded server URL for the Agent panel iframe (null until ready).
+ipcMain.handle('winpilot:url', () => getWinpilotUrl());
+
 ipcMain.handle('agent:chat', (_, text: string) => {
   sendToAgent({ type: 'chat', text });
   return { success: true };
@@ -1525,6 +1529,9 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     buildAppMenu();
     createWindow();
+    // Launch the embedded WinPilot agent server (non-blocking; the Agent panel
+    // iframe polls winpilot:url until it is ready).
+    startWinpilotServer().catch((e) => console.error('[winpilot] start failed:', e));
     apiServer = startApiServer({
       mainWindow,
       getCachedRendererState: () => _cachedRendererState,
@@ -1610,6 +1617,7 @@ process.on('unhandledRejection', (reason) => {
 app.on('window-all-closed', () => {
   stopPythonEngine();
   stopFeatureProcess();
+  stopWinpilotServer();
   apiServer?.close();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -1618,5 +1626,6 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   stopPythonEngine();
   stopFeatureProcess();
+  stopWinpilotServer();
   scheduler.stop();
 });
