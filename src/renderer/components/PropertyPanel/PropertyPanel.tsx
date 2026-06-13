@@ -604,6 +604,8 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
                 <option value="text">文字识别</option>
               </select>
             </div>
+
+            {/* === 坐标模式 === */}
             {p.mode === 'coordinate' && (<>
               <div style={{ display: 'flex', gap: 8 }}>
                 <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
@@ -611,6 +613,90 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
                 </div>
                 <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
                   <input className="form-input" type="number" value={p.y ?? 0} onChange={(e) => updateParams({ ...p, y: parseInt(e.target.value) || 0 })} />
+                </div>
+              </div>
+            </>)}
+
+            {/* === 图片识别模式 === */}
+            {p.mode === 'image' && (<>
+              <div className="form-group"><label className="form-label">目标图片列表（优先级排序）</label>
+                {(p.targets || []).map((t: any, i: number) => (
+                  <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4, alignItems: 'center' }}>
+                    <span style={{ cursor: 'grab', color: 'var(--text-muted)', fontSize: 16, userSelect: 'none' }}>⠿</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 20 }}>#{i + 1}</span>
+                    <input className="form-input" type="text" value={t.path || ''} placeholder="图片路径"
+                      onChange={(e) => { const targets = [...(p.targets || [])]; targets[i] = { ...targets[i], path: e.target.value }; updateParams({ ...p, targets }); }} style={{ flex: 1 }} />
+                    <button onClick={() => { const targets = (p.targets || []).filter((_: any, j: number) => j !== i); updateParams({ ...p, targets }); }}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 16 }}>×</button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', flex: 1 }}
+                    onClick={() => updateParams({ ...p, targets: [...(p.targets || []), { path: '' }] })}>+ 手动添加图片</button>
+                  <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', flex: 1 }}
+                    onClick={async () => {
+                      try {
+                        const win = window as any;
+                        if (win.electronAPI?.selectRegion) {
+                          const region = await win.electronAPI.selectRegion();
+                          if (region && region.dataURL) {
+                            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+                            const path = `框选_${ts}.png`;
+                            updateParams({ ...p, targets: [...(p.targets || []), { path, base64: region.dataURL }] });
+                            win.electronAPI.saveBase64Image?.(path, region.dataURL);
+                          }
+                        }
+                      } catch (e) { /* 用户取消 */ }
+                    }}>📷 框选截图添加</button>
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', flex: 1, fontSize: 12 }}
+                    onClick={() => {
+                      const targets = [...(p.targets || [])];
+                      if (targets.length < 2) return;
+                      // 上移选中的第一张
+                      const idx = prompt('输入要上移的图片序号 (1-' + targets.length + '):');
+                      if (idx) {
+                        const i = parseInt(idx) - 1;
+                        if (i > 0 && i < targets.length) {
+                          [targets[i - 1], targets[i]] = [targets[i], targets[i - 1]];
+                          updateParams({ ...p, targets });
+                        }
+                      }
+                    }}>↑ 上移优先级</button>
+                  <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', flex: 1, fontSize: 12 }}
+                    onClick={() => {
+                      const targets = [...(p.targets || [])];
+                      if (targets.length < 2) return;
+                      const idx = prompt('输入要下移的图片序号 (1-' + targets.length + '):');
+                      if (idx) {
+                        const i = parseInt(idx) - 1;
+                        if (i >= 0 && i < targets.length - 1) {
+                          [targets[i], targets[i + 1]] = [targets[i + 1], targets[i]];
+                          updateParams({ ...p, targets });
+                        }
+                      }
+                    }}>↓ 下移优先级</button>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">相似度 %</label>
+                  <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 90}
+                    onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 90 })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">超时（秒）</label>
+                  <input className="form-input" type="number" min={1} max={120} value={p.timeout ?? 5}
+                    onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 5 })} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">偏移 X</label>
+                  <input className="form-input" type="number" value={p.offset_x ?? 0}
+                    onChange={(e) => updateParams({ ...p, offset_x: parseInt(e.target.value) || 0 })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">偏移 Y</label>
+                  <input className="form-input" type="number" value={p.offset_y ?? 0}
+                    onChange={(e) => updateParams({ ...p, offset_y: parseInt(e.target.value) || 0 })} />
                 </div>
               </div>
               <div className="form-group"><label className="form-label">点击方式</label>
@@ -622,32 +708,52 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
                   <option value="triple">三击</option>
                 </select>
               </div>
-            </>)}
-            {p.mode === 'image' && (<>
-              <div className="form-group"><label className="form-label">目标图片</label>
-                {(p.targets || []).map((t: any, i: number) => (
-                  <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                    <input className="form-input" type="text" value={t.path || ''} placeholder="图片路径"
-                      onChange={(e) => { const targets = [...(p.targets || [])]; targets[i] = { ...targets[i], path: e.target.value }; updateParams({ ...p, targets }); }} style={{ flex: 1 }} />
-                    <button onClick={() => { const targets = (p.targets || []).filter((_: any, j: number) => j !== i); updateParams({ ...p, targets }); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>×</button>
-                  </div>
-                ))}
-                <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', marginTop: 4 }}
-                  onClick={() => updateParams({ ...p, targets: [...(p.targets || []), { path: '' }] })}>+ 添加图片</button>
-              </div>
-              <div className="form-group"><label className="form-label">相似度</label>
-                <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 90}
-                  onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 90 })} />
+              <div className="form-group" style={{ display: 'flex', gap: 16 }}>
+                <label className="form-checkbox-label">
+                  <input type="checkbox" checked={p.multi_scale !== false}
+                    onChange={(e) => updateParams({ ...p, multi_scale: e.target.checked })} style={{ marginRight: 6 }} />多尺寸匹配
+                </label>
+                <label className="form-checkbox-label">
+                  <input type="checkbox" checked={p.match_all === true}
+                    onChange={(e) => updateParams({ ...p, match_all: e.target.checked })} style={{ marginRight: 6 }} />匹配全部
+                </label>
               </div>
             </>)}
+
+            {/* === 文字识别模式 === */}
             {p.mode === 'text' && (<>
               <div className="form-group"><label className="form-label">文字内容</label>
                 <input className="form-input" type="text" value={p.text ?? ''} placeholder="要点击的文字"
                   onChange={(e) => updateParams({ ...p, text: e.target.value })} />
               </div>
-              <div className="form-group"><label className="form-label">相似度</label>
-                <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 80}
-                  onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 80 })} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">相似度 %</label>
+                  <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 80}
+                    onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 80 })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">超时（秒）</label>
+                  <input className="form-input" type="number" min={1} max={120} value={p.timeout ?? 5}
+                    onChange={(e) => updateParams({ ...p, timeout: parseInt(e.target.value) || 5 })} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">偏移 X</label>
+                  <input className="form-input" type="number" value={p.offset_x ?? 0}
+                    onChange={(e) => updateParams({ ...p, offset_x: parseInt(e.target.value) || 0 })} />
+                </div>
+                <div className="form-group" style={{ flex: 1 }}><label className="form-label">偏移 Y</label>
+                  <input className="form-input" type="number" value={p.offset_y ?? 0}
+                    onChange={(e) => updateParams({ ...p, offset_y: parseInt(e.target.value) || 0 })} />
+                </div>
+              </div>
+              <div className="form-group"><label className="form-label">点击方式</label>
+                <select className="form-input" value={p.method || 'single'} onChange={(e) => updateParams({ ...p, method: e.target.value })}>
+                  <option value="single">单击</option>
+                  <option value="double">双击</option>
+                  <option value="right">右击</option>
+                  <option value="middle">中键</option>
+                  <option value="triple">三击</option>
+                </select>
               </div>
             </>)}
           </>)}
@@ -801,71 +907,6 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
                 onChange={(e) => updateParams({ ...p, password: e.target.value })} />
             </div>
           </>)}
-        </div>
-      );
-    }
-    case 'click_action': {
-      const p = node.params as any;
-      const mode = p.mode || 'coordinate';
-      return (
-        <div>
-          <div className="form-group"><label className="form-label">点击模式</label>
-            <select className="form-input" value={mode} onChange={(e) => updateParams({ ...p, mode: e.target.value })}>
-              <option value="coordinate">坐标点击</option>
-              <option value="image">图片识别</option>
-              <option value="text">文字识别</option>
-            </select>
-          </div>
-          {mode === 'coordinate' && (<>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <div className="form-group" style={{ flex: 1 }}><label className="form-label">X</label>
-                <input className="form-input" type="number" value={p.x ?? 0} onChange={(e) => updateParams({ ...p, x: parseInt(e.target.value) || 0 })} />
-              </div>
-              <div className="form-group" style={{ flex: 1 }}><label className="form-label">Y</label>
-                <input className="form-input" type="number" value={p.y ?? 0} onChange={(e) => updateParams({ ...p, y: parseInt(e.target.value) || 0 })} />
-              </div>
-            </div>
-            <div className="form-group"><label className="form-label">点击方式</label>
-              <select className="form-input" value={p.method || 'single'} onChange={(e) => updateParams({ ...p, method: e.target.value })}>
-                <option value="single">单击</option>
-                <option value="double">双击</option>
-                <option value="right">右击</option>
-                <option value="middle">中键</option>
-                <option value="triple">三击</option>
-              </select>
-            </div>
-          </>)}
-          {mode === 'image' && (<>
-            <div className="form-group"><label className="form-label">目标图片</label>
-              {(p.targets || []).map((t: any, i: number) => (
-                <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                  <input className="form-input" type="text" value={t.path || ''} placeholder="图片路径"
-                    onChange={(e) => { const targets = [...(p.targets || [])]; targets[i] = { ...targets[i], path: e.target.value }; updateParams({ ...p, targets }); }} style={{ flex: 1 }} />
-                  <button onClick={() => { const targets = (p.targets || []).filter((_: any, j: number) => j !== i); updateParams({ ...p, targets }); }} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>×</button>
-                </div>
-              ))}
-              <button className="form-input" style={{ cursor: 'pointer', textAlign: 'center', marginTop: 4 }}
-                onClick={() => updateParams({ ...p, targets: [...(p.targets || []), { path: '' }] })}>+ 添加图片</button>
-            </div>
-            <div className="form-group"><label className="form-label">相似度</label>
-              <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 90}
-                onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 90 })} />
-            </div>
-          </>)}
-          {mode === 'text' && (<>
-            <div className="form-group"><label className="form-label">文字内容</label>
-              <input className="form-input" type="text" value={p.text ?? ''} placeholder="要点击的文字"
-                onChange={(e) => updateParams({ ...p, text: e.target.value })} />
-            </div>
-            <div className="form-group"><label className="form-label">相似度</label>
-              <input className="form-input" type="number" min={1} max={100} value={p.similarity ?? 80}
-                onChange={(e) => updateParams({ ...p, similarity: parseInt(e.target.value) || 80 })} />
-            </div>
-          </>)}
-          <div className="form-group"><label className="form-label">点击后延迟（秒）</label>
-            <input className="form-input" type="number" min={0} step={0.1} value={p.delay_after ?? 0.5}
-              onChange={(e) => updateParams({ ...p, delay_after: parseFloat(e.target.value) || 0 })} />
-          </div>
         </div>
       );
     }

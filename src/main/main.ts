@@ -372,7 +372,7 @@ function createWindow() {
   );
 
   if (isDev) {
-    mainWindow!.loadURL('http://localhost:5173');
+    mainWindow!.loadURL('http://localhost:5200');
   } else {
     mainWindow!.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
@@ -958,6 +958,23 @@ function confirm(){
   }
 }
 
+/**
+ * 将 base64 图片保存到 templates/ 目录，供 Python 引擎执行时直接使用。
+ */
+ipcMain.handle('screenshot:saveBase64Image', async (_, filename: string, dataURL: string) => {
+  try {
+    const base64Data = dataURL.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    const templateDir = path.join(getBaseDir(), 'templates');
+    fs.mkdirSync(templateDir, { recursive: true });
+    const filePath = path.join(templateDir, path.basename(filename));
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, path: filePath };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+});
+
 ipcMain.handle('screenshot:capture', async () => _captureScreenshot());
 
 async function _selectRegion(): Promise<any> {
@@ -1039,11 +1056,25 @@ function confirm(){
     selWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(selHTML));
     selWin.once('ready-to-show', () => selWin.show());
 
-    // Wait for selection result, return coordinates directly (no cropping)
-    const result = await new Promise<{ x: number; y: number; w: number; h: number } | null>((resolve) => {
-      const cleanup = () => { ipcMain.removeAllListeners('ss:done'); ipcMain.removeAllListeners('ss:cancel'); };
+    // Wait for selection result, then crop the region to return both coords + image
+    const result = await new Promise<{ x: number; y: number; w: number; h: number; dataURL: string } | null>((resolve) => {
+      const cleanup = () => { ipcMain.removeAllListeners('ss:done'); ipcMain.removeAllListeners('ss:cancel'); ipcMain.removeAllListeners('ss:cropped'); };
       const timeout = setTimeout(() => { cleanup(); selWin.close(); mainWindow!.restore(); resolve(null); }, 60000);
-      ipcMain.once('ss:done', (_: any, rect) => { clearTimeout(timeout); cleanup(); resolve(rect); });
+      ipcMain.once('ss:done', (_: any, rect: { x: number; y: number; w: number; h: number }) => {
+        const { x, y, w, h } = rect;
+        // Crop the selected region from the full screenshot (same technique as _captureScreenshot)
+        const cropWin = new BrowserWindow({
+          show: false,
+          webPreferences: { contextIsolation: false, nodeIntegration: true },
+        });
+        const cropHTML = `<script>const{ipcRenderer}=require("electron");const i=new Image();i.onload=()=>{const c=document.createElement("canvas");c.width=${w};c.height=${h};c.getContext("2d").drawImage(i,${x},${y},${w},${h},0,0,${w},${h});ipcRenderer.send("ss:cropped",c.toDataURL("image/png"))};i.src='${fullDataURL}';<\/script>`;
+        cropWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(cropHTML));
+        ipcMain.once('ss:cropped', (_2: any, dataURL: string) => {
+          cropWin.close(); clearTimeout(timeout); cleanup();
+          resolve({ x, y, w, h, dataURL });
+        });
+        cropWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
+      });
       ipcMain.once('ss:cancel', () => { clearTimeout(timeout); cleanup(); resolve(null); });
       selWin.once('closed', () => { clearTimeout(timeout); cleanup(); resolve(null); });
     });
@@ -1051,7 +1082,7 @@ function confirm(){
     selWin.close();
     mainWindow.restore();
     mainWindow.focus();
-    if (result) return { x: result.x, y: result.y, w: result.w, h: result.h };
+    if (result) return { x: result.x, y: result.y, w: result.w, h: result.h, dataURL: result.dataURL };
     return { error: 'cancelled' };
 
   } catch (e: any) {

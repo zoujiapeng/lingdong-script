@@ -917,8 +917,7 @@ function getDefaultParams(type: string): any {
     case 'click': return { x: 0, y: 0, method: 'single', delay_after: 0.5 };
     case 'image_click': return { targets: [], similarity: 90, timeout: 5, method: 'single', offset_x: 0, offset_y: 0, delay_after: 0.5, multi_scale: false, match_all: false };
     case 'click_text': return { text: '', similarity: 80, method: 'single', offset_x: 0, offset_y: 0, timeout: 5, delay_after: 0.5 };
-    case 'click_action': return { mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, offset_x: 0, offset_y: 0, timeout: 5 };
-    case 'mouse_operation': return { sub_operation: 'click', mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, timeout: 5, scroll_direction: 'down', scroll_amount: 3, hover_x: 0, hover_y: 0, hover_duration: 0.5, move_x: 0, move_y: 0 };
+    case 'mouse_operation': return { sub_operation: 'click', mode: 'coordinate', x: 0, y: 0, method: 'single', delay_after: 0.5, targets: [], text: '', similarity: 90, timeout: 5, offset_x: 0, offset_y: 0, multi_scale: false, match_all: false, scroll_direction: 'down', scroll_amount: 3, hover_x: 0, hover_y: 0, hover_duration: 0.5, move_x: 0, move_y: 0 };
     case 'wait': return { wait_type: 'time', duration: 1 };
     case 'input_text': return { text: '', click_before: false, clear_before: true, delay_after: 0.3 };
     case 'keyboard': return { keys: [], modifiers: [], delay_after: 0.2 };

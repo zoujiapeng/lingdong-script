@@ -427,11 +427,6 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       forward(nodeId, 'output', state, gens, convergence);
       break;
 
-    case 'click_action':
-      emit(state, gens.genClickAction(p));
-      forward(nodeId, 'output', state, gens, convergence);
-      break;
-
     case 'mouse_operation':
       emit(state, gens.genClickAction(p));
       forward(nodeId, 'output', state, gens, convergence);

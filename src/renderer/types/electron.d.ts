@@ -21,7 +21,8 @@ export interface ElectronAPI {
 
   // Screenshot capture
   captureScreenshot: () => Promise<string>;
-  selectRegion: () => Promise<{ x: number; y: number; w: number; h: number } | null>;
+  selectRegion: () => Promise<{ x: number; y: number; w: number; h: number; dataURL: string } | null>;
+  saveBase64Image: (filename: string, dataURL: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) => Promise<string>;
 
   // AI generation

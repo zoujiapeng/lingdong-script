@@ -50,8 +50,10 @@ export function ImageClickParams({ params, onChange }: Props) {
         const result = await api.captureScreenshot();
         if (result.dataURL) {
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
-          const newTarget: ImageTarget = { path: `截图_${ts}.png`, base64: result.dataURL };
+          const path = `截图_${ts}.png`;
+          const newTarget: ImageTarget = { path, base64: result.dataURL };
           onChange({ targets: [...targets, newTarget] });
+          api.saveBase64Image?.(path, result.dataURL);
         }
       }
     } catch (err: any) {
@@ -98,8 +100,21 @@ export function ImageClickParams({ params, onChange }: Props) {
       const api = (window as any).electronAPI;
       if (api?.selectRegion) {
         const result = await api.selectRegion();
+        console.log('[框选] selectRegion 返回:', JSON.stringify(result));
         if (result && typeof result.x === 'number') {
-          onChange({ region: { x: result.x, y: result.y, w: result.w, h: result.h } });
+          const regionPatch = { x: result.x, y: result.y, w: result.w, h: result.h };
+          console.log('[框选] 设置 region:', JSON.stringify(regionPatch));
+          onChange({ region: regionPatch });
+          if (result.dataURL && result.w > 0 && result.h > 0) {
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            const path = `框选_${ts}.png`;
+            const newTarget: ImageTarget = { path, base64: result.dataURL };
+            console.log('[框选] 添加 target, dataURL 长度:', result.dataURL.length);
+            onChange({ targets: [...(params.targets || []), newTarget] });
+            api.saveBase64Image?.(path, result.dataURL);
+          } else {
+            console.log('[框选] 没有 dataURL, 跳过添加图片');
+          }
         }
       }
     } catch (err: any) {

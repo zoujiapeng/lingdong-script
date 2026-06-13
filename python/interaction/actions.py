@@ -600,7 +600,7 @@ class ActionHandler:
         from features._utils import parse_region
         from perception.vision import TemplateMatcher
 
-        target_names = [Path(t.strip()).stem for t in str(targets or "").split(",") if t.strip()]
+        target_names = [Path(t.strip().strip("\"'")).stem for t in str(targets or "").split(",") if t.strip()]
         if not target_names:
             return {"success": True, "found": False, "error": "缺少模板名"}
 
