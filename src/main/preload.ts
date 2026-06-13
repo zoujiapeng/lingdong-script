@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Screenshot capture
   captureScreenshot: () => ipcRenderer.invoke('screenshot:capture'),
   selectRegion: () => ipcRenderer.invoke('screenshot:selectRegion'),
+  saveBase64Image: (filename: string, dataURL: string) => ipcRenderer.invoke('screenshot:saveBase64Image', filename, dataURL),
   ocrRecognizeRegion: (region: { x: number; y: number; w: number; h: number }) =>
     ipcRenderer.invoke('ocr:recognizeRegion', region),
 

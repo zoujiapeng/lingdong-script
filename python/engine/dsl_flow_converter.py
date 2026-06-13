@@ -941,28 +941,7 @@ def flow_to_dsl(script: dict) -> str:
                 suffix = " RIGHT"
             return f"CLICK {x} {y}{suffix}"
 
-        if ntype == "click_action":
-            mode = p.get("mode", "coordinate")
-            if mode == "image":
-                targets = p.get("targets", [])
-                paths = " ".join(f'"{t["path"]}"' for t in targets if t.get("path"))
-                return f"IMAGE_CLICK {paths}"
-            elif mode == "text":
-                text = p.get("text", "")
-                return f'OCR_FIND "{text}"'
-            else:
-                x, y = p.get("x", 0), p.get("y", 0)
-                method = p.get("method", "single")
-                suffix = ""
-                if method == "double":
-                    suffix = " DOUBLE"
-                elif method == "right":
-                    suffix = " RIGHT"
-                elif method == "triple":
-                    suffix = " TRIPLE"
-                return f"CLICK {x} {y}{suffix}"
-
-        if ntype == "mouse_operation":
+        if ntype in ("click_action", "mouse_operation"):
             sub = p.get("sub_operation", "click")
             if sub == "scroll":
                 direction = p.get("scroll_direction", "down")
@@ -1025,7 +1004,7 @@ def flow_to_dsl(script: dict) -> str:
 
         if ntype == "image_click":
             targets = p.get("targets", [])
-            paths = " ".join(f'"{t["path"]}"' for t in targets if t.get("path"))
+            paths = " ".join(t["path"] for t in targets if t.get("path"))
             return f"IMAGE_CLICK {paths}"
 
         if ntype == "click_text":

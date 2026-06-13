@@ -102,7 +102,7 @@ export function createFlowExecutor(
     try {
       let result: string;
 
-      switch (node.type) {
+      switch (node.type as string) {
         case 'start':
           result = 'output';
           break;
@@ -534,9 +534,20 @@ export function createFlowExecutor(
           } else if (sub === 'move') {
             log('info', `移动至 (${params.move_x},${params.move_y})`, nodeId);
           } else {
-            log('info', `点击: (${params.x}, ${params.y}) [${params.method}]`, nodeId);
+            const mode = params.mode || 'coordinate';
+            if (mode === 'image') {
+              const target = (params.targets || [])[0];
+              const fname = target ? target.path.split(/[\\/]/).pop() : '未知';
+              log('info', `检测图片: ${fname} (相似度${params.similarity || 90}%, 超时${params.timeout || 5}s)`, nodeId);
+              await delay(200);
+            } else if (mode === 'text') {
+              log('info', `OCR点击文本: "${(params.text || '').substring(0, 30)}" (相似度${params.similarity || 80}%)`, nodeId);
+              await delay(300);
+            } else {
+              log('info', `点击: (${params.x}, ${params.y}) [${params.method}]`, nodeId);
+              await delay(200);
+            }
           }
-          await delay(200);
           await delay((params.delay_after || 0.5) * 1000);
           result = 'output';
           break;

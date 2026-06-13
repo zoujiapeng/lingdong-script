@@ -53,7 +53,6 @@ export type NodeType =
   | 'desktop_action'
   | 'clipboard_action'
   | 'process_action'
-  | 'click_action'
   | 'mouse_operation'
   // 对话框 / 无障碍 / WiFi
   | 'dialog_action'

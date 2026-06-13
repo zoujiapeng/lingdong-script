@@ -35,17 +35,6 @@ function getNodeSummary(node: FlowNodeType): string {
       const methodLabel = p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击';
       return `OCR「${txt.substring(0, 16)}${txt.length > 16 ? '…' : ''}」 ${methodLabel}`;
     }
-    case 'click_action': {
-      if (p.mode === 'image') {
-        const targets = p.targets || [];
-        if (!targets.length) return '图片点击: 未设目标';
-        const names = targets.slice(0, 2).map((t: any) => (t.path||'').split(/[\\/]/).pop()).filter(Boolean);
-        return `图片点击: ${names.join(',')}${targets.length>2?'…':''} ${p.similarity}%`;
-      }
-      if (p.mode === 'text') return `文本点击: 「${(p.text||'').substring(0,12)}」`;
-      const methodL = p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击';
-      return `坐标(${p.x},${p.y}) ${methodL}`;
-    }
     case 'mouse_operation': {
       const sub = p.sub_operation || 'click';
       if (sub === 'scroll') return `滚轮: ${p.scroll_direction || 'down'} ${p.scroll_amount || 3}格`;
