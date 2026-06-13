@@ -73,3 +73,18 @@ UserszouDesktop*/
 # Voice model files (downloaded on demand)
 python/voice/models/
 python/voice/whisper_models/
+
+# WinPilot runtime files (config.json may contain API keys — never commit)
+python/winpilot_home/config.json
+python/winpilot_home/traces/
+python/winpilot_home/scripts/
+python/winpilot_home/templates_img/
+python/winpilot_home/experience_memory.json
+python/winpilot_home/winpilot/bin/
+
+# Pytest cache
+.pytest_cache/
+
+# Vite logs
+vite*.log
+*_debug.log
