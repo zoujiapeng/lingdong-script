@@ -11,6 +11,8 @@ Thumbs.db
 screenshot_*.png
 *.js.map
 *.js
+# WinPilot webui source: vanilla JS, not build artifacts — must be tracked
+!python/winpilot_home/webui/*.js
 python-runtime/
 
 # Build assets (icons, screenshots)
