@@ -1,0 +1,71 @@
+{
+  "api": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "",
+    "model": "deepseek-v4-flash",
+    "temperature": 0.3,
+    "max_tokens": 4096
+  },
+  "vlm": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "thinking": false
+  },
+  "perception": {
+    "uia": {
+      "enabled": true,
+      "priority": 1
+    },
+    "win32": {
+      "enabled": true,
+      "priority": 2
+    },
+    "ocr": {
+      "enabled": true,
+      "priority": 3
+    },
+    "cv": {
+      "enabled": true,
+      "priority": 4
+    },
+    "vlm": {
+      "enabled": false,
+      "priority": 5
+    }
+  },
+  "fusion": {
+    "escalate_on_empty": true,
+    "ocr_skip_when_uia_rich": true,
+    "uia_rich_threshold": 20
+  },
+  "agent": {
+    "max_steps": 40,
+    "max_retries": 2,
+    "dry_run": false,
+    "experience_memory": true,
+    "shell_enabled": true,
+    "world_model": true,
+    "replan_on_fail": true,
+    "planning_enabled": true,
+    "playbooks_enabled": true,
+    "session_memory": true,
+    "verify_done": true,
+    "done_max_rejects": 2,
+    "approve_mode": "off",
+    "escalation_model": "",
+    "no_mouse_steal": false
+  },
+  "ocr": {
+    "use_gpu": true,
+    "min_confidence": 0.55
+  },
+  "search": {
+    "everything_es_path": ""
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  }
+}
