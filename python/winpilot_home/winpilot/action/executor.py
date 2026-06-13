@@ -205,23 +205,64 @@ def _raw_click(x: int, y: int, button: str, double: bool, hwnd: int | None) -> N
             time.sleep(0.06)
 
 
-def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4) -> dict:
+def _emit_move(x: int, y: int) -> None:
+    """Move the cursor AND post a mouse-move event so apps see continuous
+    motion. SetCursorPos alone is silent — paint/canvas apps need the
+    MOUSEEVENTF_MOVE event to register a stroke between button-down and up."""
+    move_mouse(x, y)
+    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MOVE)])
+
+
+def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
+         points: list | None = None, hwnd: int | None = None) -> dict:
+    """Press at the start, move through the path, release at the end.
+
+    Emits MOUSEEVENTF_MOVE on every interpolation step (not just SetCursorPos)
+    so paint/canvas apps register a continuous stroke instead of a single
+    down→up jump. ``points`` (optional) is a polyline of [x, y] waypoints for
+    freehand drawing; when given, the full path is (x1,y1) → points… → (x2,y2).
+    """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    if hwnd:
+        focus_window(hwnd)
+        time.sleep(0.05)
     # drag inherently needs a moving cursor; in no-steal mode we still snap the
     # user's cursor back afterwards (a true background drag isn't reliable).
     saved = _cursor_pos() if _no_mouse_steal() else None
-    move_mouse(x1, y1)
+
+    # Build the waypoint list: start → optional polyline → end.
+    waypoints: list[tuple[int, int]] = [(int(x1), int(y1))]
+    if points:
+        for p in points:
+            try:
+                waypoints.append((int(p[0]), int(p[1])))
+            except (TypeError, IndexError, ValueError, KeyError):
+                continue
+    waypoints.append((int(x2), int(y2)))
+
+    move_mouse(*waypoints[0])
     time.sleep(0.08)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
-    steps = max(8, int(duration_s / 0.02))
-    for i in range(1, steps + 1):
-        move_mouse(int(x1 + (x2 - x1) * i / steps), int(y1 + (y2 - y1) * i / steps))
-        time.sleep(duration_s / steps)
+    time.sleep(0.04)  # let the app register the press before moving
+
+    seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                for a, b in zip(waypoints, waypoints[1:])]
+    total = max(sum(seg_lens), 1.0)
+    for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
+        steps = max(4, int(seg / 8))  # ~8px per move event for a smooth stroke
+        seg_dur = duration_s * (seg / total)
+        for i in range(1, steps + 1):
+            _emit_move(int(a[0] + (b[0] - a[0]) * i / steps),
+                       int(a[1] + (b[1] - a[1]) * i / steps))
+            time.sleep(max(0.008, seg_dur / steps))
+
+    time.sleep(0.03)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
     if saved:
         _restore_cursor(saved)
-    BUS.publish("action", action="drag", frm=[x1, y1], to=[x2, y2])
+    BUS.publish("action", action="drag", frm=[x1, y1], to=[x2, y2],
+                waypoints=len(waypoints))
     return {"ok": True}
 
 

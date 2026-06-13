@@ -128,10 +128,17 @@ def tool_schemas(planning: bool = False) -> list[dict]:
         ),
         _tool(
             "drag",
-            "从(x1,y1)拖拽到(x2,y2)",
+            "拖拽/绘画：从(x1,y1)拖到(x2,y2)。绘制曲线/多段线时用 points 传"
+            "中间路径点 [[x,y],...]（按顺序经过，再到终点）。duration 为总时长(秒)。",
             {
                 "x1": {"type": "integer"}, "y1": {"type": "integer"},
                 "x2": {"type": "integer"}, "y2": {"type": "integer"},
+                "points": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "integer"}},
+                    "description": "可选中间路径点 [[x,y],...]，用于自由绘画/多段拖拽",
+                },
+                "duration": {"type": "number", "description": "总拖拽时长(秒)，默认0.4"},
             },
             required=["x1", "y1", "x2", "y2"],
         ),
@@ -638,10 +645,14 @@ class ToolSession:
     def _t_drag(self, args: dict) -> ToolResult:
         x1, y1 = int(args["x1"]), int(args["y1"])
         x2, y2 = int(args["x2"]), int(args["y2"])
-        result = executor.drag(x1, y1, x2, y2)
+        points = args.get("points") if isinstance(args.get("points"), list) else None
+        duration = float(args.get("duration", 0.4))
+        result = executor.drag(x1, y1, x2, y2, duration_s=duration,
+                               points=points, hwnd=self.hwnd)
         return ToolResult(
             self._fmt(result),
-            replay={"tool": "drag", "from": [x1, y1], "to": [x2, y2]},
+            replay={"tool": "drag", "from": [x1, y1], "to": [x2, y2],
+                    "points": points, "duration": duration},
         )
 
     def _t_wait(self, args: dict) -> ToolResult:
