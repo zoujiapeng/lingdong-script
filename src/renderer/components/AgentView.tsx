@@ -1,78 +1,66 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store';
-import { PlanVisualizer } from './common/PlanVisualizer';
-import type { AgentRunRecord } from '../types';
 
-// ── Types ──
-interface StepData {
-  step_num: number; tool: string; thought: string;
-  step_label?: string; step_type?: string; error?: string;
-  result: { success: boolean; confidence: number };
-}
+// ── Native WinPilot event log entries ──
 type LogEntry =
   | { type: 'system'; text: string; _id?: number }
-  | { type: 'step'; data: StepData; _id?: number }
-  | { type: 'user'; text: string; _id?: number }
-  | { type: 'complete'; steps: number; _id?: number }
-  | { type: 'fail'; reason: string; _id?: number }
-  | { type: 'guidance'; text: string; _id?: number }
-  | { type: 'script'; pseudocode: string; explanation: string; _id?: number };
+  | { type: 'step'; step: number; reasoning: string; content: string; _id?: number }
+  | { type: 'tool'; tool: string; args: unknown; preview: string; ms?: number; ok: boolean; terminal?: string; _id?: number }
+  | { type: 'plan'; steps: string[]; _id?: number }
+  | { type: 'chat'; role: string; text: string; interject?: boolean; _id?: number }
+  | { type: 'check'; passed: boolean; reason: string; _id?: number }
+  | { type: 'recovery'; reason: string; _id?: number }
+  | { type: 'playbook'; name: string; _id?: number }
+  | { type: 'done'; status: string; result: string; steps: number; _id?: number }
+  | { type: 'fail'; reason: string; _id?: number };
+
+interface Usage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cache_hit_tokens?: number;
+  cost_cny?: number;
+}
 
 let _logIdCounter = 0;
-let _hasActiveRun = false;
 let _persistedLog: LogEntry[] = [];
-let _cachedSteps: any[] | null = null;
 
 const _STORAGE_KEY = 'lingdong-agent-goal';
 const KEY_STORAGE = 'lingdong-deepseek-key';
 const BASE_STORAGE = 'lingdong-llm-base';
 const MODEL_STORAGE = 'lingdong-llm-model';
 const VERIFY_STORAGE = 'lingdong-verify-enabled';
-const AUTO_LEARN_STORAGE = 'lingdong-auto-learn';
-const OMNIPARSER_STORAGE = 'lingdong-omniparser';
-const AGENT_PROTOCOL_STORAGE = 'lingdong-agent-protocol';
-const AGENT_VISION_STORAGE = 'lingdong-agent-vision';
-const AGENT_PLANNING_STORAGE = 'lingdong-agent-planning';
-const AGENT_ONERROR_STORAGE = 'lingdong-agent-on-error';
-const AGENT_MULTIMODAL_STORAGE = 'lingdong-agent-multimodal';
-const AGENT_FASTMODE_STORAGE = 'lingdong-agent-fast-mode';
+const MULTIMODAL_STORAGE = 'lingdong-agent-multimodal';
+const MAXSTEPS_STORAGE = 'lingdong-agent-max-steps';
 
 // ── Helpers ──
 function lsGet(k: string, d = '') { try { return localStorage.getItem(k) || d; } catch { return d; } }
 function lsSet(k: string, v: string) { try { localStorage.setItem(k, v); } catch {} }
 function lsBool(k: string, d = false) { try { const v = localStorage.getItem(k); return v !== null ? v === 'true' : d; } catch { return d; } }
 function lsNum(k: string, d: number) { try { const v = localStorage.getItem(k); return v !== null ? parseFloat(v) : d; } catch { return d; } }
-function lsMode(k: string, d = '') { try { return localStorage.getItem(k) || d; } catch { return d; } }
 function maskKey(key: string): string {
+  if (!key) return '未配置';
   if (key.length <= 12) return key.slice(0, 4) + '...' + key.slice(-4);
   return key.slice(0, 6) + '...' + key.slice(-4);
 }
 
+// Resolve the LLM connection. Secrets come ONLY from runtime config
+// (build-time global, localStorage) — never hardcoded in source.
 function getRuntimeLLMConfig(preset: typeof PRESETS[number]) {
-  const fallbackKey = preset.key.trim();
-  const fallbackBase = preset.base.trim();
-  const fallbackModel = preset.model.trim();
   const w = window as any;
-  const storedKey = lsGet(KEY_STORAGE);
-  const storedBase = lsGet(BASE_STORAGE);
-  const storedModel = lsGet(MODEL_STORAGE);
-
   return {
-    apiKey: (w.__DEEPSEEK_KEY__ || storedKey || fallbackKey).trim(),
-    apiBase: (w.__LLM_API_BASE__ || storedBase || fallbackBase).trim(),
-    model: (w.__LLM_MODEL__ || storedModel || fallbackModel).trim(),
+    apiKey: (w.__DEEPSEEK_KEY__ || lsGet(KEY_STORAGE) || '').trim(),
+    apiBase: (w.__LLM_API_BASE__ || lsGet(BASE_STORAGE) || preset.base).trim(),
+    model: (w.__LLM_MODEL__ || lsGet(MODEL_STORAGE) || preset.model).trim(),
   };
 }
 
-// ── Presets ──
+// ── Presets (endpoint + model defaults only; NO keys in source) ──
 const PRESETS = [
-  { label: 'DeepSeek', model: 'deepseek-chat', base: 'https://api.deepseek.com/v1',
-    key: 'REDACTED_DEEPSEEK_KEY', mode: 'text' as const },
-  { label: 'MIMO', model: 'mimo-v2-omni', base: 'https://api.xiaomimimo.com/v1',
-    key: 'REDACTED_SILICONFLOW_KEY_1', mode: 'multimodal' as const },
+  { label: 'DeepSeek', model: 'deepseek-chat', base: 'https://api.deepseek.com/v1', multimodal: false },
+  { label: 'MIMO', model: 'mimo-v2-omni', base: 'https://api.xiaomimimo.com/v1', multimodal: true },
 ];
 
-// ── Inline toggle ──
+// ── Inline controls ──
 function Toggle({ label, on, onChange, desc }: { label: string; on: boolean; onChange: (v: boolean) => void; desc?: string }) {
   return (
     <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', cursor: 'pointer' }}>
@@ -102,432 +90,359 @@ function Slider({ label, value, min, max, step, onChange }: {
   );
 }
 
-function Select({ label, value, options, onChange }: {
-  label: string; value: string; options: { value: string; label: string }[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div style={{ padding: '6px 0' }}>
-      <div style={{ fontSize: 13, marginBottom: 4 }}>{label}</div>
-      <select value={value} onChange={e => onChange(e.target.value)}
-        style={{ width: '100%', padding: '6px 8px', background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-primary)', borderRadius: 4, fontSize: 13 }}>
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </div>
-  );
+function summarizeArgs(args: unknown): string {
+  if (args == null) return '';
+  try {
+    const s = typeof args === 'string' ? args : JSON.stringify(args);
+    return s.length > 120 ? s.slice(0, 120) + '…' : s;
+  } catch {
+    return '';
+  }
 }
 
 // ====================================================================
-//  Main component
+//  Main component — WinPilot agent panel
 // ====================================================================
 
 export function AgentView() {
   const [goal, setGoal] = useState(() => sessionStorage.getItem(_STORAGE_KEY) || '');
   const [running, setRunning] = useState(false);
   const [offline, setOffline] = useState(false);
-  const [offlineRunning, setOfflineRunning] = useState(false);
   const [log, setLog] = useState<LogEntry[]>(_persistedLog);
-  const [lastSummary, setLastSummary] = useState<{ status: string; steps: number; goal: string } | null>(null);
-  const [generatedScript, setGeneratedScript] = useState<{ pseudocode: string; explanation: string } | null>(null);
-  const [lastLearning, setLastLearning] = useState<{ insights: string[]; mistakes: string[]; rulesCount: number; prefsCount: number } | null>(null);
-  const [memoryStats, setMemoryStats] = useState<{ preferences: number; rules: number; episodes: number } | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
+  const [lastStatus, setLastStatus] = useState<string | null>(null);
 
-  // ── Preset & mode ──
   const [activePreset, setActivePreset] = useState(PRESETS[0].label);
-  const [executionMode, setExecutionMode] = useState<'flow_chart' | 'multimodal' | 'text' | 'offline'>('text');
   const [showKey, setShowKey] = useState(false);
+  const [keyInput, setKeyInput] = useState(() => lsGet(KEY_STORAGE));
+
+  // ── WinPilot-relevant config ──
+  const [maxSteps, setMaxSteps] = useState(() => lsNum(MAXSTEPS_STORAGE, 40));
+  const [verifyEnabled, setVerifyEnabled] = useState(() => lsBool(VERIFY_STORAGE, true));
+  const [multimodal, setMultimodal] = useState(() => lsBool(MULTIMODAL_STORAGE, false));
+
+  const [guidance, setGuidance] = useState('');
   const goalRef = useRef(goal);
   const msgEndRef = useRef<HTMLDivElement>(null);
-
-  // ── Mode config states ──
-  // Flow chart
-  const [supervise, setSupervise] = useState(true);
-  // Multimodal
-  const [mmScreenshotQuality, setMmScreenshotQuality] = useState(() => lsNum('lingdong-agent-screenshot-quality', 60));
-  // Text vision
-  const [tvUia, setTvUia] = useState(false);
-  const [tvOcr, setTvOcr] = useState(true);
-  const [tvYolo, setTvYolo] = useState(false);
-  const [tvSom, setTvSom] = useState(true);
-  const [tvWindowOcr, setTvWindowOcr] = useState(true);
-  const [tvLocalVision, setTvLocalVision] = useState(false);
-  const [tvVisualStrategy, setTvVisualStrategy] = useState('som');
-  // Global
-  const [memoryOn, setMemoryOn] = useState(false);
-  const [maxSteps, setMaxSteps] = useState(() => lsNum('lingdong-agent-max-steps', 20));
-
-  // ── Chat & guidance ──
-  const [guidance, setGuidance] = useState('');
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'agent'; text: string }[]>([]);
   const preset = PRESETS.find(p => p.label === activePreset) || PRESETS[0];
 
-  // ── Apply preset when selected ──
   const applyPreset = useCallback((label: string) => {
     const p = PRESETS.find(x => x.label === label);
     if (!p) return;
     setActivePreset(label);
-    setExecutionMode(p.mode);
+    setMultimodal(p.multimodal);
+    lsSet(MULTIMODAL_STORAGE, String(p.multimodal));
     lsSet(BASE_STORAGE, p.base);
     lsSet(MODEL_STORAGE, p.model);
   }, []);
 
-  // ── buildAgentConfig ──
-  const buildAgentConfig = useCallback((): Record<string, any> => {
-    const savedProtocol = lsMode(AGENT_PROTOCOL_STORAGE, 'auto');
-    const savedVision = lsMode(AGENT_VISION_STORAGE, 'auto');
-    const savedPlanning = lsMode(AGENT_PLANNING_STORAGE, 'auto');
-    const savedOnError = lsMode(AGENT_ONERROR_STORAGE, 'retry');
-    const savedMultimodal = lsMode(AGENT_MULTIMODAL_STORAGE, 'auto');
-    const fastMode = lsBool(AGENT_FASTMODE_STORAGE, false);
-    const verifyEnabled = lsBool(VERIFY_STORAGE, true);
-    const autoLearn = lsBool(AUTO_LEARN_STORAGE, false);
-    const omniparserEnabled = lsBool(OMNIPARSER_STORAGE, false);
-
-    const cfg: Record<string, any> = {
-      execution_mode: executionMode,
-      memory_enabled: memoryOn,
-      max_steps: maxSteps,
-      temperature: 0.1,
-      max_tokens: 4096,
-      screenshot_quality: 60,
-      on_error: savedOnError,
-      verify: verifyEnabled,
-      fast_mode: fastMode,
-      auto_learn: autoLearn,
-      omniparser_enabled: omniparserEnabled,
-      multimodal: savedMultimodal === 'auto'
-        ? (preset.mode === 'multimodal' ? 'true' : 'false')
-        : savedMultimodal,
-    };
-    if (executionMode === 'flow_chart') {
-      cfg.supervise = supervise;
-    } else if (executionMode === 'multimodal') {
-      cfg.screenshot_quality = mmScreenshotQuality;
-    } else if (executionMode === 'text') {
-      cfg.uia_enabled = tvUia;
-      cfg.ocr_enabled = tvOcr;
-      cfg.yolo_enabled = tvYolo;
-      cfg.som_enabled = tvSom;
-      cfg.window_aware_ocr = tvWindowOcr;
-      cfg.local_vision = tvLocalVision;
-      cfg.visual_strategy = tvVisualStrategy;
-      cfg.llm_protocol = savedProtocol === 'auto' ? 'text' : savedProtocol;
-      cfg.vision_mode = savedVision === 'auto' ? 'som' : savedVision;
-      cfg.planning = savedPlanning === 'auto' ? 'per_step' : savedPlanning;
-      cfg.screen_context = fastMode ? 'minimal' : 'full';
-    }
-    return cfg;
-  }, [executionMode, memoryOn, maxSteps, supervise, mmScreenshotQuality,
-      tvUia, tvOcr, tvYolo, tvSom, tvWindowOcr, tvLocalVision, tvVisualStrategy]);
-
-  // ── Run agent ──
-  const runAgent = useCallback(async (withSupervise: boolean) => {
-    if (!goal.trim()) return;
-    _hasActiveRun = false;
-    if (withSupervise) { _persistedLog = []; setLog([]); }
-    addEntry({ type: 'system', text: withSupervise ? '正在启动执行...' : '正在生成流程图...' });
-
-    const { apiKey: apiKey_, apiBase: apiBase_, model: model_ } = getRuntimeLLMConfig(preset);
-
-    if (!apiKey_) {
-      addEntry({ type: 'system', text: '⚠️ 未配置 API 密钥' });
-      setRunning(false); return;
-    }
-    try {
-      const stepsArg = withSupervise ? _cachedSteps : undefined;
-      await window.electronAPI!.agentStart(goal.trim(), {
-        api_key: apiKey_, api_base: apiBase_, model: model_,
-        multimodal: preset.mode === 'multimodal' ? 'true' : 'false',
-        verify_enabled: lsBool(VERIFY_STORAGE, true) ? 'true' : 'false',
-        auto_learn: lsBool(AUTO_LEARN_STORAGE, false) ? 'true' : 'false',
-        omniparser_enabled: lsBool(OMNIPARSER_STORAGE, false) ? 'true' : 'false',
-        agent_config: buildAgentConfig(),
-      }, withSupervise, stepsArg ?? undefined);
-    } catch (err: any) {
-      addEntry({ type: 'fail', reason: `启动失败: ${err.message}` });
-    }
-  }, [goal, preset, buildAgentConfig]);
-
-  const stopAgent = useCallback(async () => {
-    try {
-      if (offline) { await window.electronAPI!.engineStop(); setOfflineRunning(false); }
-      else { await window.electronAPI!.agentStop(); }
-      addEntry({ type: 'system', text: '已停止' });
-      setRunning(false); _hasActiveRun = false;
-    } catch { }
-  }, [offline]);
-
-  const loadScriptToCanvas = useCallback((script: any) => {
-    try { fetch('http://127.0.0.1:7880/api/load-script', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ script: typeof script === 'string' ? { pseudocode: script } : script }),
-    }); } catch {}
-  }, []);
-
-  const runOffline = useCallback(async () => {
-    if (!goal.trim()) return;
-    _persistedLog = []; setLog([]); setGeneratedScript(null);
-    addEntry({ type: 'system', text: '正在离线执行流程图...' });
-    setOfflineRunning(true); setRunning(true);
-    try { await window.electronAPI!.engineStart(JSON.stringify(useStore.getState().script)); }
-    catch { addEntry({ type: 'fail', reason: '离线执行失败' }); setRunning(false); setOfflineRunning(false); _hasActiveRun = false; }
-  }, [goal]);
-
   const addEntry = useCallback((entry: LogEntry) => {
-    const e = { ...entry, _id: ++_logIdCounter } as any;
+    const e = { ...entry, _id: ++_logIdCounter } as LogEntry;
     _persistedLog = [..._persistedLog, e];
     setLog(_persistedLog);
   }, []);
 
+  // ── Run / stop ──
+  const runAgent = useCallback(async () => {
+    if (!goal.trim() || running) return;
+    _persistedLog = []; setLog([]); setUsage(null); setLastStatus(null);
+
+    if (offline) {
+      addEntry({ type: 'system', text: '正在离线执行当前流程图...' });
+      setRunning(true);
+      try {
+        await window.electronAPI!.engineStart(JSON.stringify(useStore.getState().script));
+      } catch {
+        addEntry({ type: 'fail', reason: '离线执行失败' });
+        setRunning(false);
+      }
+      return;
+    }
+
+    const { apiKey, apiBase, model } = getRuntimeLLMConfig(preset);
+    if (!apiKey) {
+      addEntry({ type: 'system', text: '⚠️ 未配置 API 密钥，请先在上方填入 Key' });
+      return;
+    }
+    addEntry({ type: 'system', text: '正在启动 WinPilot...' });
+    setRunning(true);
+    lsSet(MAXSTEPS_STORAGE, String(maxSteps));
+    lsSet(VERIFY_STORAGE, String(verifyEnabled));
+    lsSet(MULTIMODAL_STORAGE, String(multimodal));
+    try {
+      await window.electronAPI!.agentStart(goal.trim(), {
+        api_key: apiKey,
+        api_base: apiBase,
+        model,
+        multimodal: multimodal ? 'true' : 'false',
+        verify_enabled: verifyEnabled ? 'true' : 'false',
+        agent_config: { max_steps: maxSteps, temperature: 0.3 },
+      });
+    } catch (err: any) {
+      addEntry({ type: 'fail', reason: `启动失败: ${err?.message || err}` });
+      setRunning(false);
+    }
+  }, [goal, running, offline, preset, maxSteps, verifyEnabled, multimodal, addEntry]);
+
+  const stopAgent = useCallback(async () => {
+    try {
+      if (offline) await window.electronAPI!.engineStop();
+      else await window.electronAPI!.agentStop();
+      addEntry({ type: 'system', text: '已请求停止' });
+      setRunning(false);
+    } catch { /* ignore */ }
+  }, [offline, addEntry]);
+
+  const sendGuidance = useCallback(async () => {
+    const text = guidance.trim();
+    if (!text || !running) return;
+    setGuidance('');
+    try { await window.electronAPI!.agentGuidance(text); } catch { /* ignore */ }
+  }, [guidance, running]);
+
   useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [log]);
   useEffect(() => { goalRef.current = goal; }, [goal]);
 
-  // ── IPC listeners ──
+  // ── IPC listener: consume WinPilot native BUS events verbatim ──
   useEffect(() => {
     const api = window.electronAPI;
     if (!api) return;
     const unsubMsg = api.onAgentMessage?.((msg: any) => {
       switch (msg.type) {
         case 'agent_start':
-          _hasActiveRun = true; _cachedSteps = null;
-          addEntry({ type: 'system', text: `正在处理：${msg.goal}` });
-          setRunning(true); setLastSummary(null);
+          setRunning(true); setLastStatus(null);
+          addEntry({ type: 'system', text: `正在处理：${msg.task ?? ''}` });
           break;
-        case 'plan_state':
-          if (msg.plan?.nodes?.length > 0 && !msg.final)
-            addEntry({ type: 'system', text: `计划已生成：${msg.plan.nodes.length} 个步骤` });
+        case 'agent_plan': {
+          const raw = msg.plan;
+          const steps: string[] = Array.isArray(raw)
+            ? raw.map((s: any) => typeof s === 'string' ? s : (s?.desc || s?.text || JSON.stringify(s)))
+            : Array.isArray(raw?.steps)
+              ? raw.steps.map((s: any) => typeof s === 'string' ? s : (s?.desc || s?.text || JSON.stringify(s)))
+              : [];
+          if (steps.length) addEntry({ type: 'plan', steps });
           break;
-        case 'step_complete':
-          addEntry({ type: 'step', data: msg });
-          if (msg.tool === 'generate_flow_script' && msg.result?.success) {
-            const data = msg.result.data || {};
-            const pseudo = data.pseudocode || data.result?.pseudocode;
-            if (pseudo) {
-              addEntry({ type: 'script', pseudocode: pseudo, explanation: data.explanation || '' });
-              setGeneratedScript({ pseudocode: pseudo, explanation: data.explanation || '' });
-              const steps = data.structured_steps || data.result?.structured_steps || [];
-              if (Array.isArray(steps) && steps.length > 0) _cachedSteps = steps;
-              loadScriptToCanvas(pseudo);
-            }
+        }
+        case 'agent_step': {
+          const content = typeof msg.content === 'string' ? msg.content : '';
+          const reasoning = typeof msg.reasoning === 'string' ? msg.reasoning : '';
+          // A step with no tool calls and some content is a plain reply.
+          if ((msg.n_tool_calls ?? 0) === 0 && content) {
+            addEntry({ type: 'chat', role: 'assistant', text: content });
+          } else if (reasoning || content) {
+            addEntry({ type: 'step', step: msg.step ?? 0, reasoning, content });
           }
           break;
-        case 'agent_done':
-          if (!_hasActiveRun) return;
-          if (msg.status === 'completed' && msg.total_steps > 0)
-            addEntry({ type: 'complete', steps: msg.total_steps });
-          else
-            addEntry({ type: 'fail', reason: msg.fail_reason || '执行失败' });
-          setRunning(false); _hasActiveRun = false;
-          setLastSummary({ status: msg.status, steps: msg.total_steps || 0, goal: goalRef.current.slice(0, 80) });
+        }
+        case 'agent_tool':
+          addEntry({
+            type: 'tool',
+            tool: msg.tool ?? '?',
+            args: msg.args,
+            preview: typeof msg.result_preview === 'string' ? msg.result_preview : '',
+            ms: typeof msg.elapsed_ms === 'number' ? msg.elapsed_ms : undefined,
+            ok: !msg.error,
+            terminal: msg.terminal || undefined,
+          });
+          break;
+        case 'agent_usage':
+          if (msg.total && typeof msg.total === 'object') setUsage(msg.total as Usage);
+          break;
+        case 'done_check':
+          addEntry({ type: 'check', passed: !!msg.passed, reason: msg.reason || '' });
+          break;
+        case 'agent_recovery':
+          addEntry({ type: 'recovery', reason: msg.reason || msg.kind || '重新规划' });
+          break;
+        case 'playbook':
+          addEntry({ type: 'playbook', name: msg.name || '' });
+          break;
+        case 'chat':
+          addEntry({ type: 'chat', role: msg.role || 'assistant', text: msg.content || '', interject: !!msg.interject });
+          break;
+        case 'agent_done': {
+          const status = msg.status || 'error';
+          const ok = status === 'done' || status === 'reply';
+          if (ok) addEntry({ type: 'done', status, result: msg.result || '', steps: msg.steps ?? 0 });
+          else addEntry({ type: 'fail', reason: msg.result || `执行${status === 'stopped' ? '已停止' : '失败'}` });
+          setRunning(false);
+          setLastStatus(status);
+          break;
+        }
+        case 'agent_error':
+          addEntry({ type: 'fail', reason: msg.error || '内部错误' });
+          setRunning(false);
+          break;
+        case 'user_guidance_sent':
+          addEntry({ type: 'chat', role: 'user', text: msg.text || '', interject: true });
           break;
         case 'log':
           if (msg.level === 'error') addEntry({ type: 'system', text: `[错误] ${msg.message}` });
           else if (msg.level === 'warn') addEntry({ type: 'system', text: `[警告] ${msg.message}` });
           else addEntry({ type: 'system', text: msg.message });
           break;
-        case 'error':
-          addEntry({ type: 'system', text: `[错误] ${msg.message}` });
-          break;
-        case 'agent_learned':
-          setLastLearning({ insights: msg.insights || [], mistakes: msg.mistakes || [],
-            rulesCount: msg.rules_count || 0, prefsCount: msg.prefs_count || 0 });
-          break;
-        case 'memory_snapshot':
-          setMemoryStats({ preferences: msg.preferences || 0, rules: msg.rules || 0, episodes: msg.episodes || 0 });
-          break;
+        // world / status_report intentionally not surfaced in the log.
       }
     });
     const unsubLog = api.onAgentLog?.((msg: any) => {
-      if (msg.level === 'error') addEntry({ type: 'system', text: `[进程] ${msg.message}` });
+      if (msg.level === 'error' && msg.message) addEntry({ type: 'system', text: `[进程] ${msg.message}` });
     });
     return () => { unsubMsg?.(); unsubLog?.(); };
   }, [addEntry]);
 
-  // ── Tabs ──
-  const TABS = [
-    { id: 'flow_chart' as const, label: '流程图', desc: '生成流程图，用户决定执行' },
-    { id: 'multimodal' as const, label: '多模态', desc: 'MIMO 直接看截图操作' },
-    { id: 'text' as const, label: '非多模态', desc: 'DeepSeek + SoM+OCR 纯视觉' },
-    { id: 'offline' as const, label: '离线', desc: '直接执行当前流程图' },
-  ];
-
-  const renderModePanel = () => {
-    if (executionMode === 'flow_chart') {
-      return (
-        <div>
-          <Toggle label="监督执行" on={supervise} onChange={setSupervise}
-            desc="执行时实时监督并验证每一步" />
-        </div>
-      );
-    }
-    if (executionMode === 'multimodal') {
-      return (
-        <div>
-          <Slider label="截图质量" value={mmScreenshotQuality} min={10} max={95}
-            onChange={setMmScreenshotQuality} />
-          <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>多模态模型直接从截图看到界面，无需其他感知参数。</div>
-        </div>
-      );
-    }
-    if (executionMode === 'text') {
-      return (
-        <div>
-          <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>感知参数 — 自定义纯文本模型如何"看"屏幕</div>
-          <Toggle label="UIA 控件树" on={tvUia} onChange={setTvUia}
-            desc="Windows 无障碍接口，精确定位控件（默认关）" />
-          <Toggle label="OCR 文字检测" on={tvOcr} onChange={setTvOcr}
-            desc="识别屏幕上的文字（默认开）" />
-          <Toggle label="YOLO 图标检测" on={tvYolo} onChange={setTvYolo}
-            desc="检测图标/按钮位置（默认关）" />
-          <Toggle label="SoM 标号" on={tvSom} onChange={setTvSom}
-            desc="给屏幕元素编号，LLM 用 #N 点击（默认开）" />
-          <Toggle label="窗口限定" on={tvWindowOcr} onChange={setTvWindowOcr}
-            desc="只扫描活动窗口内的元素（默认开）" />
-          <Toggle label="本地视觉" on={tvLocalVision} onChange={setTvLocalVision}
-            desc="YOLO ONNX 本地模型（默认关）" />
-          <Select label="视觉策略" value={tvVisualStrategy}
-            options={[
-              { value: 'som', label: 'SoM 编号 — OCR 文字→#N 点击' },
-              { value: 'ocr_llm', label: 'OCR→LLM→坐标 — 文字列表让 LLM 选' },
-              { value: 'blind_guess', label: '盲猜坐标 — LLM 直接猜像素位置' },
-            ]}
-            onChange={setTvVisualStrategy} />
-        </div>
-      );
-    }
-    // offline
-    return (
-      <div style={{ padding: 20, textAlign: 'center', color: '#666', fontSize: 14 }}>
-        离线模式 — 待开发<br />
-        <span style={{ fontSize: 12 }}>将支持不依赖 LLM 的本地执行</span>
-      </div>
-    );
-  };
+  const llm = getRuntimeLLMConfig(preset);
 
   // ── Render ──
   return (
     <div className="agent-view-panel">
-      {/* ── Header: goal + preset ── */}
+      {/* ── Header: goal + preset + run ── */}
       <div className="agent-view-section" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input className="agent-input" value={goal} onChange={e => { setGoal(e.target.value); sessionStorage.setItem(_STORAGE_KEY, e.target.value); }}
+          <input className="agent-input" value={goal}
+            onChange={e => { setGoal(e.target.value); sessionStorage.setItem(_STORAGE_KEY, e.target.value); }}
             placeholder="输入目标，如「打开计算器，计算 7÷99」"
             style={{ flex: 1, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border-primary)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-            onKeyDown={e => { if (e.key === 'Enter' && !running) { if (offline) runOffline(); else runAgent(executionMode !== 'flow_chart'); } }} />
+            onKeyDown={e => { if (e.key === 'Enter' && !running) runAgent(); }} />
           <select value={activePreset} onChange={e => applyPreset(e.target.value)}
             style={{ padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border-primary)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13, cursor: 'pointer' }}>
             {PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
           </select>
-          <button className="agent-btn agent-btn-primary" onClick={() => { if (offline) runOffline(); else runAgent(executionMode !== 'flow_chart'); }}
+          <button className="agent-btn agent-btn-primary" onClick={runAgent}
             disabled={running} style={{ whiteSpace: 'nowrap', padding: '8px 16px' }}>
             {offline ? '离线执行' : '运行'}
           </button>
           {running && <button className="agent-btn" onClick={stopAgent} style={{ padding: '8px 12px' }}>停止</button>}
         </div>
 
-        {/* Key display (collapsible) */}
+        {/* Key + model row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#888' }}>
-          <span>{preset.label}</span>
-          <span>|</span>
-          <span>{preset.model}</span>
-          <span>|</span>
+          <span>{preset.label}</span><span>|</span><span>{llm.model}</span><span>|</span>
           {showKey ? (
-            <input value={getRuntimeLLMConfig(preset).apiKey} onChange={e => {}}
-              style={{ width: 240, padding: '2px 6px', background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', borderRadius: 3, color: 'var(--text-muted)', fontSize: 11 }}
-              onBlur={() => setShowKey(false)} />
+            <input value={keyInput} autoFocus
+              placeholder="粘贴 API Key"
+              onChange={e => setKeyInput(e.target.value)}
+              onBlur={() => { lsSet(KEY_STORAGE, keyInput.trim()); setShowKey(false); }}
+              onKeyDown={e => { if (e.key === 'Enter') { lsSet(KEY_STORAGE, keyInput.trim()); setShowKey(false); } }}
+              style={{ width: 260, padding: '2px 6px', background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)', borderRadius: 3, color: 'var(--text-muted)', fontSize: 11 }} />
           ) : (
-            <span style={{ cursor: 'pointer' }} onClick={() => setShowKey(true)}>
-              ●●● {maskKey(getRuntimeLLMConfig(preset).apiKey)}
+            <span style={{ cursor: 'pointer' }} onClick={() => { setKeyInput(lsGet(KEY_STORAGE)); setShowKey(true); }}>
+              ●●● {maskKey(llm.apiKey)}（点击编辑）
             </span>
           )}
-          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <label style={{ fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)}
-                style={{ accentColor: '#4f8cff' }} />
-              离线
-            </label>
-            <label style={{ fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <input type="checkbox" checked={memoryOn} onChange={e => setMemoryOn(e.target.checked)}
-                style={{ accentColor: '#4f8cff' }} />
-              记忆
-            </label>
-          </span>
+          <label style={{ marginLeft: 'auto', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <input type="checkbox" checked={offline} onChange={e => setOffline(e.target.checked)}
+              style={{ accentColor: '#4f8cff' }} />
+            离线（直接跑流程图）
+          </label>
         </div>
       </div>
 
-      {/* ── Mode Tabs ── */}
-      <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border-primary)' }}>
-        {TABS.map(tab => (
-          <button key={tab.id} onClick={() => setExecutionMode(tab.id)}
-            style={{
-              flex: 1, padding: '10px 8px', cursor: 'pointer', border: 'none', borderBottom: executionMode === tab.id ? '2px solid #4f8cff' : '2px solid transparent',
-              background: executionMode === tab.id ? 'var(--bg-secondary)' : 'transparent', color: executionMode === tab.id ? 'var(--text-primary)' : 'var(--text-muted)',
-              fontSize: 13, fontWeight: executionMode === tab.id ? 600 : 400, transition: 'all 0.15s',
-            }}>
-            <div>{tab.label}</div>
-            <div style={{ fontSize: 10, color: '#888', marginTop: 2 }}>{tab.desc}</div>
-          </button>
-        ))}
-      </div>
-
-      {/* ── Mode config panel ── */}
-      <div className="agent-view-section" style={{ padding: 12, borderBottom: '1px solid #444' }}>
-        {renderModePanel()}
-      </div>
-
-      {/* ── Plan visualizer ── */}
-      {generatedScript && !running && !lastSummary && (
-        <div className="agent-view-section" style={{ padding: 12 }}>
-          <PlanVisualizer />
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button className="agent-btn agent-btn-primary" onClick={() => runAgent(true)}>执行计划</button>
-            <button className="agent-btn" onClick={() => runAgent(false)}>重新生成</button>
-          </div>
+      {/* ── WinPilot config ── */}
+      {!offline && (
+        <div className="agent-view-section" style={{ padding: 12, borderBottom: '1px solid var(--border-primary)' }}>
+          <Slider label="最大步数" value={maxSteps} min={5} max={80} onChange={setMaxSteps} />
+          <Toggle label="完成核验" on={verifyEnabled} onChange={setVerifyEnabled}
+            desc="独立核验任务是否真正完成（done-gate）" />
+          <Toggle label="多模态视觉 (VLM)" on={multimodal} onChange={setMultimodal}
+            desc="启用视觉语言模型感知维度（需在 config 配置 VLM 端点）" />
         </div>
       )}
 
-      {/* ── Log / Execution ── */}
+      {/* ── Usage ── */}
+      {usage && (
+        <div className="agent-view-section" style={{ padding: '6px 12px', fontSize: 12, color: '#888', display: 'flex', gap: 16, borderBottom: '1px solid var(--border-primary)' }}>
+          <span>输入 {usage.prompt_tokens ?? 0}</span>
+          <span>输出 {usage.completion_tokens ?? 0}</span>
+          {usage.cache_hit_tokens ? <span>缓存 {usage.cache_hit_tokens}</span> : null}
+          <span style={{ marginLeft: 'auto', color: '#4f8cff' }}>¥{(usage.cost_cny ?? 0).toFixed(4)}</span>
+        </div>
+      )}
+
+      {/* ── Log ── */}
       {(log.length > 0 || running) && (
         <div className="agent-view-section" style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: 8 }}>
           {log.map((entry, i) => {
-            if (entry.type === 'step' && 'data' in entry) {
-              const d = (entry as any).data;
+            const key = entry._id || i;
+            if (entry.type === 'step') {
               return (
-                <div key={entry._id || i} style={{ padding: '6px 8px', fontSize: 12, borderBottom: '1px solid #444' }}>
-                  <span style={{ color: '#4f8cff' }}>#{d.step_num}</span>
-                  {' '}<span style={{ color: '#e8c84a' }}>{d.tool}</span>
-                  {d.args && <span style={{ color: '#888' }}> {JSON.stringify(d.args).slice(0, 100)}</span>}
-                  {d.status === 'completed' && <span style={{ color: '#4caf50', marginLeft: 6 }}>✓</span>}
-                  {d.status === 'failed' && <span style={{ color: '#f44336', marginLeft: 6 }}>✗</span>}
-                  {d.result?.step_ms && <span style={{ color: '#888', marginLeft: 6 }}>{d.result.step_ms}ms</span>}
+                <div key={key} style={{ padding: '6px 8px', fontSize: 12, borderBottom: '1px solid var(--border-primary)' }}>
+                  <span style={{ color: '#4f8cff' }}>#{entry.step}</span>
+                  {entry.reasoning && <span style={{ color: '#bbb', marginLeft: 6 }}>{entry.reasoning}</span>}
+                  {entry.content && <div style={{ color: '#999', marginTop: 2 }}>{entry.content}</div>}
                 </div>
               );
             }
-            if (entry.type === 'complete') {
-              return <div key={entry._id || i} style={{ padding: '8px', fontSize: 13, color: '#4caf50', textAlign: 'center' }}>✅ 执行完成，共 {(entry as any).steps} 步</div>;
+            if (entry.type === 'tool') {
+              return (
+                <div key={key} style={{ padding: '5px 8px', fontSize: 12 }}>
+                  <span style={{ color: '#e8c84a' }}>🔧 {entry.tool}</span>
+                  {entry.args != null && <span style={{ color: '#888' }}> {summarizeArgs(entry.args)}</span>}
+                  <span style={{ color: entry.ok ? '#4caf50' : '#f44336', marginLeft: 6 }}>{entry.ok ? '✓' : '✗'}</span>
+                  {entry.terminal && <span style={{ color: '#4f8cff', marginLeft: 6 }}>[{entry.terminal}]</span>}
+                  {entry.ms != null && <span style={{ color: '#888', marginLeft: 6 }}>{entry.ms}ms</span>}
+                  {entry.preview && <div style={{ color: '#888', marginTop: 2 }}>{entry.preview}</div>}
+                </div>
+              );
+            }
+            if (entry.type === 'plan') {
+              return (
+                <div key={key} style={{ padding: '6px 8px', fontSize: 12, background: 'var(--bg-secondary)', borderRadius: 4, margin: '4px 0' }}>
+                  <div style={{ color: '#4f8cff', marginBottom: 2 }}>📋 计划（{entry.steps.length} 步）</div>
+                  {entry.steps.map((s, j) => <div key={j} style={{ color: '#aaa' }}>{j + 1}. {s}</div>)}
+                </div>
+              );
+            }
+            if (entry.type === 'chat') {
+              return (
+                <div key={key} style={{ padding: '4px 8px', fontSize: 12, color: entry.role === 'user' ? '#8cf' : '#cde' }}>
+                  {entry.role === 'user' ? '💬 ' : '🤖 '}{entry.interject && entry.role === 'user' ? '（提示）' : ''}{entry.text}
+                </div>
+              );
+            }
+            if (entry.type === 'check') {
+              return <div key={key} style={{ padding: '4px 8px', fontSize: 12, color: entry.passed ? '#4caf50' : '#e8a' }}>
+                {entry.passed ? '✔ 完成核验通过' : '✘ 核验未通过'}{entry.reason ? `：${entry.reason}` : ''}
+              </div>;
+            }
+            if (entry.type === 'recovery') {
+              return <div key={key} style={{ padding: '4px 8px', fontSize: 12, color: '#e8a' }}>↻ 重新规划：{entry.reason}</div>;
+            }
+            if (entry.type === 'playbook') {
+              return <div key={key} style={{ padding: '4px 8px', fontSize: 12, color: '#9c7' }}>📖 应用方法库：{entry.name}</div>;
+            }
+            if (entry.type === 'done') {
+              return <div key={key} style={{ padding: 8, fontSize: 13, color: '#4caf50' }}>
+                ✅ {entry.status === 'reply' ? '已回复' : `完成（${entry.steps} 步）`}{entry.result ? `：${entry.result}` : ''}
+              </div>;
             }
             if (entry.type === 'fail') {
-              return <div key={entry._id || i} style={{ padding: '8px', fontSize: 13, color: '#f44336', textAlign: 'center' }}>❌ {(entry as any).reason || '执行失败'}</div>;
+              return <div key={key} style={{ padding: 8, fontSize: 13, color: '#f44336' }}>❌ {entry.reason}</div>;
             }
-            const text = 'text' in entry ? (entry as any).text : '';
-            const prefix = entry.type === 'system' ? '' : entry.type === 'user' ? '💬 ' : entry.type === 'guidance' ? '📌 ' : '';
-            const color = entry.type === 'system' ? '#aaa' : entry.type === 'user' ? '#8cf' : '#ccc';
-            return (
-              <div key={entry._id || i} style={{ padding: '3px 8px', fontSize: 12, color }}>
-                {prefix}{text}
-              </div>
-            );
+            // system
+            return <div key={key} style={{ padding: '3px 8px', fontSize: 12, color: '#aaa' }}>{entry.text}</div>;
           })}
           <div ref={msgEndRef} />
         </div>
       )}
 
+      {/* ── Mid-run hint input ── */}
+      {running && !offline && (
+        <div className="agent-view-section" style={{ padding: 8, display: 'flex', gap: 8, borderTop: '1px solid var(--border-primary)' }}>
+          <input value={guidance} onChange={e => setGuidance(e.target.value)}
+            placeholder="给 Agent 一个提示（执行中可发送）..."
+            onKeyDown={e => { if (e.key === 'Enter') sendGuidance(); }}
+            style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border-primary)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 13 }} />
+          <button className="agent-btn" onClick={sendGuidance} style={{ padding: '6px 12px' }}>发送</button>
+        </div>
+      )}
+
       {/* ── Summary ── */}
-      {lastSummary && !running && (
+      {lastStatus && !running && (
         <div className="agent-view-section" style={{ padding: 12, textAlign: 'center', fontSize: 13, color: '#888' }}>
-          {lastSummary.status === 'completed'
-            ? `✅ 已完成 (${lastSummary.steps} 步)`
-            : `❌ 执行失败: ${lastSummary.goal}`}
+          {lastStatus === 'done' ? '✅ 已完成'
+            : lastStatus === 'reply' ? '💬 已回复'
+            : lastStatus === 'stopped' ? '⏹ 已停止'
+            : '❌ 执行失败'}
         </div>
       )}
     </div>

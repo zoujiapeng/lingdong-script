@@ -739,15 +739,18 @@ function startAgentProcess(goal: string, config?: Record<string, any>, supervise
     mainWindow?.webContents.send('agent-log', { level: 'error', message: _stderrDecoder.write(data) });
   });
 
-  // Add a safety timeout: kill if agent runs longer than 300 seconds
+  // Add a safety timeout: kill if agent runs longer than 30 minutes.
+  // WinPilot multi-step runs with OCR/VLM can take several minutes; the
+  // previous 300s cap would sever long-but-healthy runs mid-task.
+  const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
   const agentTimeout = setTimeout(() => {
     if (!isAgentTokenCurrent(token)) return;
-    console.warn('[agent] Safety timeout — killing agent after 300s');
-    mainWindow?.webContents.send('agent-log', { level: 'error', message: 'Agent 执行超时 (300s)，已自动终止' });
+    console.warn('[agent] Safety timeout — killing agent after 30min');
+    mainWindow?.webContents.send('agent-log', { level: 'error', message: 'Agent 执行超时 (30 分钟)，已自动终止' });
     proc.kill();
     setAgentProcess(null);
     setAgentRunning(false);
-  }, 300000);
+  }, AGENT_TIMEOUT_MS);
 
   proc.on('exit', (code) => {
     clearTimeout(agentTimeout);

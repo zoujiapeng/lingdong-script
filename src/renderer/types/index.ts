@@ -630,11 +630,20 @@ export interface AgentMemorySnapshot {
 export interface AgentRunRecord {
   id: string;
   goal: string;
-  status: 'completed' | 'failed' | 'stopped';
-  total_steps: number;
-  completed_steps: number;
-  failed_steps: number;
-  skipped_steps: number;
+  /** WinPilot terminal statuses: done | fail | reply | stopped | error */
+  status: 'done' | 'fail' | 'reply' | 'stopped' | 'error';
+  run_id?: string;
+  /** Number of agent steps taken. */
+  steps: number;
+  /** Final result / answer text from the agent. */
+  result?: string;
+  /** Token + cost usage from WinPilot (cost_cny in RMB). */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    cache_hit_tokens?: number;
+    cost_cny?: number;
+  };
   started_at: string;
   finished_at: string;
   elapsed_seconds: number;
