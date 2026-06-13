@@ -87,6 +87,9 @@ export interface ElectronAPI {
   agentChat: (text: string) => Promise<any>;
   agentStatus: () => Promise<any>;
 
+  // WinPilot embedded server URL (Agent panel iframe target)
+  getWinpilotUrl: () => Promise<string | null>;
+
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;
   onAgentLog: (callback: (msg: any) => void) => () => void;
