@@ -1,1 +1,0 @@
-{"code":"const ipc = window.electronAPI; if (typeof ipc.getAgentLogs === 'function') { ipc.getAgentLogs().then(l => JSON.stringify(l)); } else { 'no getAgentLogs' }"}
