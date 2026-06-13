@@ -84,6 +84,7 @@ export interface ElectronAPI {
   agentStart: (goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) => Promise<any>;
   agentStop: () => Promise<any>;
   agentGuidance: (text: string) => Promise<any>;
+  agentChat: (text: string) => Promise<any>;
   agentStatus: () => Promise<any>;
 
   // Agent messages

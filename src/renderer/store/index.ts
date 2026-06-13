@@ -2021,122 +2021,62 @@ function _registerListeners() {
       useStore.getState().addLog({ level: msg.level || 'info', message: msg.message });
     }));
 
-    // Agent message dedup guard: track last agent_done to prevent duplicate handling
-    let _agentDoneGoal = '';
+    // Agent run tracking: dedup agent_done by run_id, time the run.
+    let _agentDoneRunId = '';
     let _agentStartTime = 0;
+    let _agentRunId = '';
+    let _agentGoal = '';
 
     _listenerCleanups.push(_api.onAgentMessage((msg: Record<string, unknown>) => {
       const msgType = typeof msg?.type === 'string' ? msg.type : '';
       if (!msgType) return;
 
-      if (msgType === 'plan_state') {
-        const planData = msg.plan as Record<string, unknown> | undefined;
-        if (!planData?.nodes) return;
-        const nodes = (planData.nodes as PlanNodeState[]) ?? [];
-        useStore.setState((s) => {
-          s.execution.plan = {
-            goal: (planData.goal as string) ?? '',
-            status: (planData.status as string) ?? 'running',
-            nodes,
-            summary: planData.summary as PlanDAGState['summary'],
-          };
-          const runningNode = nodes.find((n: PlanNodeState) => n.status === 'running');
-          const failedNode = nodes.find((n: PlanNodeState) => n.status === 'failed');
-          s.execution.current_node_id = runningNode?.id ?? failedNode?.id ?? s.execution.current_node_id;
-          if (msg.final) {
-            s.execution.status = planData.status === 'completed' ? 'completed' : 'error';
-            s.execution.current_node_id = undefined;
-          }
-        });
-        return;
-      }
-
-      if (msgType === 'step_attempt') {
-        const nodeId = typeof msg.node_id === 'string' ? msg.node_id : '';
-        const tool = typeof msg.tool === 'string' ? msg.tool : '';
-        if (!nodeId) return;
-        useStore.setState((s) => {
-          const node = s.execution.plan?.nodes?.find((n: PlanNodeState) => n.id === nodeId);
-          if (node) {
-            node.attempts = (node.attempts ?? 0) + 1;
-            if (tool) node.tool = tool;
-          }
-        });
-        return;
-      }
-
-      if (msgType === 'step_complete') {
-        const tool = typeof msg.tool === 'string' ? msg.tool : '';
-        const result = msg.result as Record<string, unknown> | undefined;
-        if (tool === 'generate_flow_script' && result?.success) {
-          const data = (result.data as Record<string, unknown>) ?? {};
-          const dataResult = data.result as Record<string, unknown> | undefined;
-          const pseudocode =
-            (data.pseudocode as string) ??
-            (dataResult?.pseudocode as string) ??
-            ((dataResult?.result as Record<string, unknown> | undefined)?.pseudocode as string);
-          if (pseudocode) {
-            import('../utils/pseudoParser').then(({ parsePseudoToFlow }) => {
-              try {
-                const script = parsePseudoToFlow(pseudocode);
-                const store = useStore.getState();
-                script.meta = { ...script.meta, id: store.script.meta.id, name: store.script.meta.name + ' (Agent)' };
-                store.loadScript(script);
-                store.setViewMode('canvas');
-              } catch (e) { console.error('[agent] loadScript failed:', e); }
-            });
-          }
-        } else if (tool !== 'generate_flow_script' && result) {
-          useStore.setState((s) => {
-            s.execution.status = result.success ? 'running' : 'error';
-            const stepNum = typeof msg.step_num === 'number' ? msg.step_num : undefined;
-            s.execution.current_node_id = stepNum != null ? `agent_step_${stepNum}` : undefined;
-          });
-        }
-        return;
-      }
-
+      // WinPilot native events. The detailed step/tool/usage stream is rendered
+      // by AgentView; the store only tracks coarse run status + history.
       if (msgType === 'agent_start') {
-        // Reset state on new run; clear dedup guard; record start time
-        _agentDoneGoal = '';
         _agentStartTime = Date.now();
+        _agentDoneRunId = '';
+        _agentRunId = typeof msg.run_id === 'string' ? msg.run_id : '';
+        _agentGoal = typeof msg.task === 'string' ? msg.task : '';
         useStore.setState((s) => {
           s.execution.plan = undefined;
+          s.execution.status = 'running';
+          s.execution.current_node_id = undefined;
         });
         return;
       }
 
       if (msgType === 'agent_done') {
-        const status = typeof msg.status === 'string' ? msg.status : 'failed';
-        const totalSteps = typeof msg.total_steps === 'number' ? msg.total_steps : 0;
-        const goal = typeof msg.goal === 'string' ? msg.goal : '';
-        const failReason = typeof msg.fail_reason === 'string' ? msg.fail_reason : '';
-        const summaryText = typeof msg.summary === 'string' ? msg.summary : '';
+        const runId = typeof msg.run_id === 'string' ? msg.run_id : '';
+        // Dedup: a given run_id finishes once.
+        if (runId && _agentDoneRunId === runId) return;
+        if (runId) _agentDoneRunId = runId;
 
-        // Dedup: agent_done with same goal should only fire once
-        if (goal && _agentDoneGoal === goal) return;
-        if (goal) _agentDoneGoal = goal;
+        const status = (typeof msg.status === 'string' ? msg.status : 'error') as AgentRunRecord['status'];
+        const steps = typeof msg.steps === 'number' ? msg.steps : 0;
+        const result = typeof msg.result === 'string' ? msg.result : '';
+        const usage = (msg.usage && typeof msg.usage === 'object')
+          ? (msg.usage as AgentRunRecord['usage'])
+          : undefined;
 
         useStore.setState((s) => {
-          s.execution.status = status === 'completed' ? 'completed' : 'error';
+          s.execution.status = (status === 'done' || status === 'reply') ? 'completed' : 'error';
           s.execution.current_node_id = undefined;
         });
 
-        // Record history
-        const plan = useStore.getState().execution.plan;
         const elapsed = _agentStartTime > 0 ? Math.round((Date.now() - _agentStartTime) / 1000) : 0;
         const record: AgentRunRecord = {
           id: Math.random().toString(36).slice(2, 10),
-          goal: goal || plan?.goal || '',
-          status: status === 'completed' ? 'completed' : status === 'stopped' ? 'stopped' : 'failed',
-          total_steps: totalSteps,
-          completed_steps: plan?.summary?.completed ?? 0,
-          failed_steps: plan?.summary?.failed ?? 0,
-          skipped_steps: plan?.summary?.skipped ?? 0,
+          goal: _agentGoal || '',
+          status,
+          run_id: runId || _agentRunId || undefined,
+          steps,
+          result,
+          usage,
           started_at: new Date(_agentStartTime || Date.now()).toISOString(),
           finished_at: new Date().toISOString(),
           elapsed_seconds: elapsed,
-          summary: summaryText || failReason || '',
+          summary: result,
         };
         useStore.getState().addAgentHistory(record);
         return;
