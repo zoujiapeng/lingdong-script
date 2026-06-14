@@ -520,6 +520,7 @@ class ToolSession:
             expect=args.get("expect"),
             hwnd=self.hwnd,
             timeout_s=10.0,
+            stop_event=self.stop_event,
         )
         if result.get("ok"):
             # Record the launched app's window (post-launch foreground) so
@@ -591,7 +592,8 @@ class ToolSession:
             return ToolResult("click 需要 element_id 或 x,y 坐标")
 
         result = verify.run_with_verify(
-            "click", action, expect=args.get("expect"), hwnd=self.hwnd)
+            "click", action, expect=args.get("expect"), hwnd=self.hwnd,
+            stop_event=self.stop_event)
         return ToolResult(self._fmt(result), replay=replay)
 
     def _t_type_text(self, args: dict) -> ToolResult:
@@ -621,14 +623,15 @@ class ToolSession:
 
         result = verify.run_with_verify(
             "type_text", action, expect=args.get("expect"),
-            hwnd=self.hwnd, retryable=False)
+            hwnd=self.hwnd, retryable=False, stop_event=self.stop_event)
         return ToolResult(self._fmt(result), replay=replay)
 
     def _t_hotkey(self, args: dict) -> ToolResult:
         keys = [str(k) for k in args["keys"]]
         result = verify.run_with_verify(
             "hotkey", lambda: executor.press_keys(keys),
-            expect=args.get("expect"), hwnd=self.hwnd, retryable=False)
+            expect=args.get("expect"), hwnd=self.hwnd, retryable=False,
+            stop_event=self.stop_event)
         return ToolResult(
             self._fmt(result),
             replay={"tool": "hotkey", "keys": keys, "expect": args.get("expect")},
@@ -660,7 +663,8 @@ class ToolSession:
         if not isinstance(condition, dict) or not condition:
             return ToolResult("wait 需要 condition 验证条件对象")
         timeout_s = float(args.get("timeout_s", 10.0))
-        outcome = verify.check(condition, hwnd=self.hwnd, timeout_s=timeout_s)
+        outcome = verify.check(condition, hwnd=self.hwnd, timeout_s=timeout_s,
+                               stop_event=self.stop_event)
         return ToolResult(
             self._fmt(outcome.to_dict()),
             replay={"tool": "wait", "condition": condition, "timeout_s": timeout_s},

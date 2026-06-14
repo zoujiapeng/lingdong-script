@@ -58,6 +58,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     "ocr": {"use_gpu": True, "min_confidence": 0.55},
     "search": {"everything_es_path": ""},
+    "coding": {"enabled": True, "workspace": "", "max_steps": 30},
     "server": {"host": "127.0.0.1", "port": 8765},
 }
 

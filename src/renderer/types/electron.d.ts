@@ -89,6 +89,8 @@ export interface ElectronAPI {
 
   // WinPilot embedded server URL (Agent panel iframe target)
   getWinpilotUrl: () => Promise<string | null>;
+  // Ensure the WinPilot server is (re)starting; returns status for the Agent panel
+  ensureWinpilot: () => Promise<{ url: string | null; starting: boolean; error: string | null }>;
 
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;

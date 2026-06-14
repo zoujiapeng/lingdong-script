@@ -143,7 +143,8 @@ def feedback(recipe_ids: list[str], success: bool) -> None:
                 if success:
                     r["successes"] += 1
                     r["provisional"] = False
-                if r["uses"] >= _EVICT_MIN_USES and r["successes"] == 0:
+                if (r["uses"] >= _EVICT_MIN_USES and r["successes"] == 0
+                        and not r.get("manual")):
                     logger.info("经验配方屡试无效，已淘汰: %s", r.get("task", "")[:40])
                     continue
             kept.append(r)
@@ -151,14 +152,22 @@ def feedback(recipe_ids: list[str], success: bool) -> None:
 
 
 # ------------------------------------------------------------------ matching
-def hints_with_ids(task: str) -> tuple[str, list[str]]:
-    """Render up to N relevant recipes + their ids (for score feedback)."""
+def hints_with_ids(task: str, notes_only: bool = False) -> tuple[str, list[str]]:
+    """Render up to N relevant recipes + their ids (for score feedback).
+
+    ``notes_only=True`` restricts matching to manual factual notes (added via
+    the ``remember`` tool / UI), excluding auto-recorded action recipes. Used
+    for coding tasks: project facts ("用 pnpm", "测试命令 pytest -q") still
+    transfer, but non-portable action replays do not.
+    """
     if not enabled():
         return "", []
     task_lower = task.lower()
     words = [w for w in task_lower.replace("，", " ").replace(",", " ").split() if len(w) >= 2]
     scored: list[tuple[float, dict]] = []
     for recipe in _load():
+        if notes_only and not recipe.get("manual"):
+            continue
         haystack = (recipe.get("task", "") + recipe.get("app", "")).lower()
         score: float = sum(1 for w in words if w in haystack)
         # Chinese tasks rarely have spaces — substring overlap fallback.
@@ -239,6 +248,12 @@ def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | Non
 def hints_for(task: str) -> str:
     """Back-compat wrapper used by older callers/tests."""
     return hints_with_ids(task)[0]
+
+
+def note_hints(task: str) -> str:
+    """Relevant manual factual notes only (no ids → never scored/evicted by the
+    calling run). For coding tasks, which keep facts but not action replays."""
+    return hints_with_ids(task, notes_only=True)[0]
 
 
 # ---------------------------------------------------------------------- CRUD

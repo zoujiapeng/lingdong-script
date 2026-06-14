@@ -37,6 +37,46 @@ _ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
                  "focus_window", "wait", "tray_click", "run_shell"}
 
 
+def _is_coding_task(task: str) -> bool:
+    """Coding/software tasks are EXCLUDED from the reusable experience system
+    and routed to the coding sub-agent. A recorded run for one repo/bug is
+    meaningless to replay on another — solved fresh each time.
+
+    Detection (intent-aware, so "打开/玩 X游戏" stays a GUI task while "做一个
+    X游戏" goes to the coding agent):
+    - an open/launch/play intent at the start → never coding (GUI)
+    - any strong, unambiguous coding signal → coding
+    - a "build/write a <software-noun>" pattern → coding
+    """
+    text = (task or "").strip()
+    low = text.lower()
+    if _OPEN_INTENT.match(text):
+        return False
+    if any(k in low for k in _CODING_STRONG):
+        return True
+    return bool(_CODING_BUILD.search(text))
+
+
+# Open/launch/play intents → GUI, even when the object is a game/app/program.
+_OPEN_INTENT = re.compile(r"^(打开|开启|启动|运行|玩|播放|关闭|切换|最小化|最大化|登录|搜索)")
+# Strong, unambiguous coding signals (substring match, lowercased).
+_CODING_STRONG = (
+    "调试", "debug", "重构", "refactor", "仓库", "repo", "git", "github", "clone",
+    "克隆", "bug", "报错", "异常", "traceback", "编译", "build ", "单元测试", "pytest",
+    "npm", "pnpm", "yarn", "cargo", "dotnet", ".net", "代码", "源码", "函数", "脚本",
+    "这个项目", "项目里", "写代码", "写个程序", "写一个程序", "实现一个", "api 接口", "接口",
+    "数据库", "前端", "后端", "部署",
+)
+# "build/write a <software>" → coding (window between verb and noun for Chinese).
+_CODING_BUILD = re.compile(
+    r"(做|写|开发|实现|生成|创建|编写|搭建|搭|建|帮我做|帮我写)"
+    r"[^。,，;；\n]{0,12}"
+    r"(游戏|小游戏|网页|网站|页面|程序|软件|脚本|应用|小程序|html|网址|界面|插件|工具|"
+    r"爬虫|机器人|\bbot\b|\bapp\b|计算器|时钟|待办|todo|博客|商城|登录页|表单)",
+    re.IGNORECASE,
+)
+
+
 def _client():
     from openai import OpenAI
 
@@ -90,6 +130,8 @@ class AgentRunner:
                             "cache_hit_tokens": 0, "cost_cny": 0.0}
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
+        # Coding tasks are excluded from the reusable experience system.
+        self._is_coding = _is_coding_task(task)
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -107,8 +149,11 @@ class AgentRunner:
         for text in pending:
             self.messages.append({
                 "role": "user",
-                "content": f"[用户实时提示] {text}\n（这是用户在旁观察后给的建议，"
-                           f"请重新考虑当前思路、采纳更好的做法，不要机械照搬字面）",
+                "content": f"[用户实时指示] {text}\n"
+                           f"（用户在旁观察后给出的实时指示，请【优先、按字面】遵循；"
+                           f"若与当前做法冲突，以用户指示为准。"
+                           f"若用户表达停止/取消/不要这样做，就立即停下当前动作并据此调整，"
+                           f"不要自行换一种方式硬继续原目标。）",
             })
             BUS.publish("chat", run_id=self.run_id, role="user", content=text,
                         interject=True)
@@ -145,6 +190,9 @@ class AgentRunner:
 
     # ----------------------------------------------------------------- api
     def _chat(self, client, tools: list[dict]):
+        """Run the (blocking) completion in a worker thread so a Stop can
+        abandon an in-flight LLM call immediately, instead of waiting up to the
+        120s request timeout. Returns the response, or None if stopped."""
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
         # Escalate ONE decision to a stronger model when we just got stuck
@@ -158,22 +206,40 @@ class AgentRunner:
                 model = esc
             else:
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
-        last_exc: Exception | None = None
-        for attempt in range(1, _API_RETRIES + 1):
-            try:
-                return client.chat.completions.create(
-                    model=model,
-                    messages=self.messages,
-                    tools=tools,
-                    temperature=float(api.get("temperature", 0.3)),
-                    max_tokens=int(api.get("max_tokens", 4096)),
-                )
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
-                if attempt < _API_RETRIES:
-                    time.sleep(1.5 * attempt)
-        raise RuntimeError(f"API 连续 {_API_RETRIES} 次失败: {last_exc}")
+
+        box: dict[str, Any] = {}
+
+        def worker() -> None:
+            last_exc: Exception | None = None
+            for attempt in range(1, _API_RETRIES + 1):
+                if self.stop_event.is_set():
+                    return
+                try:
+                    box["resp"] = client.chat.completions.create(
+                        model=model,
+                        messages=self.messages,
+                        tools=tools,
+                        temperature=float(api.get("temperature", 0.3)),
+                        max_tokens=int(api.get("max_tokens", 4096)),
+                    )
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
+                    if attempt < _API_RETRIES:
+                        time.sleep(1.5 * attempt)
+            box["exc"] = RuntimeError(f"API 连续 {_API_RETRIES} 次失败: {last_exc}")
+
+        thread = threading.Thread(target=worker, daemon=True, name="llm-call")
+        thread.start()
+        while thread.is_alive():
+            if self.stop_event.is_set():
+                logger.info("Stop 请求：放弃进行中的 LLM 调用")
+                return None  # abandon the in-flight request (it finishes unused)
+            thread.join(timeout=0.2)
+        if "exc" in box:
+            raise box["exc"]
+        return box.get("resp")
 
     def _track_usage(self, resp) -> None:
         usage = getattr(resp, "usage", None)
@@ -447,7 +513,13 @@ class AgentRunner:
         self.status = "running"
         max_steps = int(CONFIG.get("agent", "max_steps", default=40))
         plan_on = planning_enabled()
-        hints, self._hint_ids = experience.hints_with_ids(self.task)
+        # Coding tasks are excluded from action-replay reuse, but relevant
+        # factual project notes (manual 'remember' entries) still help — inject
+        # them read-only (empty hint_ids → never scored/evicted by this run).
+        if self._is_coding:
+            hints, self._hint_ids = experience.note_hints(self.task), []
+        else:
+            hints, self._hint_ids = experience.hints_with_ids(self.task)
         matched_books = playbooks.for_task(self.task)
         self._injected_playbooks = {b.name for b in matched_books}
         system = prompts.system_prompt(
@@ -468,19 +540,21 @@ class AgentRunner:
         # Proactive reuse: when this task strongly matches a past run that left a
         # verified replay script, direct the agent to reuse it first (it's the
         # whole point of skills; replay failure auto-falls-back to live actions).
-        try:
-            script, recipe = experience.reusable_script_for(self.task)
-            if script and recipe:
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        f"⚡ 本任务与上次成功完成的「{recipe['task']}」高度一致，已有可复用流程脚本。"
-                        f"**第一步请直接调用 reuse_skill 复用**（0-token 重放上次步骤）；"
-                        "若重放中途某步失败，它会告诉你卡在哪，你再从那步起实时操作。"),
-                })
-                BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
-        except Exception as exc:
-            logger.debug("复用建议注入失败: %s", exc)
+        # Skipped for coding tasks — they are never in the reusable scope.
+        if not self._is_coding:
+            try:
+                script, recipe = experience.reusable_script_for(self.task)
+                if script and recipe:
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"⚡ 本任务与上次成功完成的「{recipe['task']}」高度一致，已有可复用流程脚本。"
+                            f"**第一步请直接调用 reuse_skill 复用**（0-token 重放上次步骤）；"
+                            "若重放中途某步失败，它会告诉你卡在哪，你再从那步起实时操作。"),
+                    })
+                    BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
+            except Exception as exc:
+                logger.debug("复用建议注入失败: %s", exc)
         tools = tool_schemas(planning=plan_on)
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints))
@@ -493,26 +567,34 @@ class AgentRunner:
                     break
                 self._drain_interjections()
                 resp = self._chat(client, tools)
+                if resp is None:        # Stop requested mid LLM-call → abandon
+                    self.status = "stopped"
+                    break
                 self._track_usage(resp)
                 msg = resp.choices[0].message
                 reasoning = getattr(msg, "reasoning_content", None) or ""
+                self.messages.append(_sanitize_assistant(msg))
+
+                if not msg.tool_calls:
+                    # Plain-text reply — the final answer. Emit it ONCE via the
+                    # chat event (carrying any reasoning). The step event stays
+                    # content-less so the chat pane doesn't show it twice.
+                    self.status = "reply"
+                    self.result_text = msg.content or ""
+                    BUS.publish("agent_step", run_id=self.run_id, step=step,
+                                reasoning="", content="", n_tool_calls=0)
+                    BUS.publish("chat", run_id=self.run_id, role="assistant",
+                                content=self.result_text, reasoning=reasoning[:800])
+                    break
+
                 BUS.publish(
                     "agent_step",
                     run_id=self.run_id,
                     step=step,
                     reasoning=reasoning[:800],
                     content=(msg.content or "")[:800],
-                    n_tool_calls=len(msg.tool_calls or []),
+                    n_tool_calls=len(msg.tool_calls),
                 )
-                self.messages.append(_sanitize_assistant(msg))
-
-                if not msg.tool_calls:
-                    # plain text reply — treat as the final answer to the user
-                    self.status = "reply"
-                    self.result_text = msg.content or ""
-                    BUS.publish("chat", run_id=self.run_id, role="assistant",
-                                content=self.result_text)
-                    break
 
                 terminal = self._handle_tool_calls(msg.tool_calls)
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
@@ -531,7 +613,10 @@ class AgentRunner:
             self.result_text = str(exc)
             BUS.publish("agent_error", run_id=self.run_id, error=str(exc))
 
-        if self.status == "done":
+        # Record a reusable recipe (+ export a replayable .wps.json) ONLY for
+        # non-coding successes. Coding tasks are excluded from the reusable
+        # scope entirely — solved fresh next time, guided by the playbook.
+        if self.status == "done" and not self._is_coding:
             app_hint = self.session.snapshot.title if self.session.snapshot else ""
             # Trusted (→ reusable skill + linked script) when EITHER the done-gate
             # judge independently confirmed success, OR an action passed external

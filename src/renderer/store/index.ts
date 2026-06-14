@@ -614,7 +614,7 @@ interface AppStore {
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
-  setViewMode: (mode: 'canvas' | 'pseudocode' | 'settings' | 'agent') => void;
+  setViewMode: (mode: 'canvas' | 'pseudocode' | 'settings' | 'agent' | 'replay') => void;
   startConnecting: (nodeId: string, portId: string) => void;
   stopConnecting: () => void;
   setHoveredNode: (id?: string) => void;

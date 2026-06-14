@@ -4,6 +4,13 @@ import { FlowScript, FlowNode, FlowEdge, MacroEvent } from '../types';
 /**
  * Convert recorded macro events into a FlowScript.
  *
+ * @deprecated (P5 migration) This converts the legacy pynput macro — absolute
+ * coordinates + keystrokes only, no element selectors — so the result breaks on
+ * any layout/resolution change. Prefer the WinPilot **human-demonstration
+ * recorder** (Agent → 重放 → 录制演示), which captures element selectors at click
+ * time and produces a `.wps.json` that re-locates targets by text on replay.
+ * Kept for backward compatibility with existing recorded macros.
+ *
  * Rules:
  * - click (pressed) → CLICK node
  * - key press (single char) → INPUT_TEXT node
