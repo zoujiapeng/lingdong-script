@@ -29,10 +29,10 @@ flowchart LR
     end
     A -. "产出 .wps.json<br/>(纯代码转换层)" .-> B
 
-    classDef live fill:#dcfce7,stroke:#16a34a;
-    classDef legacy fill:#fef9c3,stroke:#ca8a04;
-    class A,tools,percept,actver,coding live;
-    class B,nodes,feats legacy;
+    classDef liveNode fill:#dcfce7,stroke:#16a34a,color:#000;
+    classDef oldNode fill:#fef9c3,stroke:#ca8a04,color:#000;
+    class tools,percept,actver,coding liveNode;
+    class nodes,feats oldNode;
 ```
 
 > **设计铁律**：绝不把 254 @feature 或流程图知识塞进主 agent（对 agent 是"副优化"，拖垮性能）。需要新专长时，仿编程子 agent 另做**独立子 agent**（如未来的"流程图编排子 agent"）。
@@ -122,3 +122,75 @@ python/
 ```
 
 > 历史背景：早期 agent 是 `python/agent/` 下的 LingdongAgent（27 元动作/supervisor/5 执行模式/SoM/本地视觉引擎），已被 WinPilot 整体取代。任何提到这些的旧文档/注释都已过时。
+
+## 6. 完整架构流程图（端到端）
+
+> 一张图覆盖：用户输入 → 两条路径（agent / 流程图）→ WinPilot 内部（路由、感知、验证、录制、重放、记忆）→ 重放内容转成原版节点回到编辑器 → 旧引擎执行 → 外部协议。绿色=WinPilot（精简、现役），黄色=旧流程图体系。
+
+```mermaid
+flowchart TB
+    user(["用户"])
+
+    subgraph EL["Electron 桌面应用"]
+        rend["React 渲染器<br/>流程图画布 · 属性面板 · 导入/录制"]
+        main["主进程<br/>窗口 · IPC · 子进程管理"]
+        httpapi["HTTP API :7880<br/>远程控制 + /mcp"]
+    end
+
+    subgraph WP["WinPilot AI Agent · python/winpilot_home"]
+        ipc["IPC 适配器<br/>agent/__main__.py"]
+        router{"_is_coding_task ?"}
+        gui["AgentRunner<br/>GUI 操控循环"]
+        code["CodingRunner<br/>编程子 agent"]
+        tools["~22 工具<br/>click / type / launch / run_shell …"]
+        ctool["文件仓库工具<br/>read / write / apply_patch / search"]
+        perc["感知融合<br/>UIA + win32 + OCR + CV + VLM"]
+        ver["动作 + 验证<br/>executor · verify(expect) · 重试"]
+        rec["录制器<br/>trace 导出 .wps.json"]
+        rep["离线 Replayer<br/>0-token · 文字重定位"]
+        mem["记忆<br/>经验 / 笔记 / playbook"]
+    end
+
+    subgraph FE["流程图引擎（旧体系）"]
+        conv["wpsToFlowScript<br/>纯代码转换层"]
+        eng["DSL 执行器<br/>FlowScript ↔ DSL"]
+        feat["@feature 注册表 · 254"]
+    end
+
+    cc(["Claude Code / 外部"])
+    mcp["MCP · Python / TS / HTTP"]
+
+    user -->|"自然语言任务"| ipc
+    user -->|"拖拽 / 编辑 / F5"| rend
+
+    ipc --> router
+    router -->|"GUI 任务"| gui
+    router -->|"编程任务"| code
+    gui --> tools
+    tools --> perc
+    perc --> ver
+    code --> ctool
+    gui --> rec
+    rec --> rep
+    gui --> mem
+
+    rec -->|".wps.json"| conv
+    conv -->|"原版 65 节点"| rend
+    rend -->|"F5 运行"| eng
+    eng --> feat
+
+    main -->|"spawn"| ipc
+    main -->|"spawn"| eng
+    rend -->|"iframe webui + REST"| ipc
+    cc -->|":7880"| httpapi
+    httpapi --> rend
+    httpapi -->|"/mcp"| feat
+    mcp --> feat
+
+    classDef liveNode fill:#dcfce7,stroke:#16a34a,color:#000;
+    classDef oldNode fill:#fef9c3,stroke:#ca8a04,color:#000;
+    class ipc,gui,code,tools,ctool,perc,ver,rec,rep,mem liveNode;
+    class conv,eng,feat oldNode;
+```
+
+**读图顺序**：①用户给自然语言 → IPC → 路由到 GUI/编程 agent；②GUI agent 用 ~22 工具操控，每步经感知融合定位 + 验证重试；③跑过的动作录成 `.wps.json`；④纯代码转换成原版 65 节点回到画布，可编辑、混编、F5 用旧引擎执行；⑤外部（Claude Code / MCP）可经 HTTP API 远程驱动。

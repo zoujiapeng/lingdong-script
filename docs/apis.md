@@ -6,14 +6,14 @@
 
 ```mermaid
 flowchart TB
-    cc([Claude Code / 外部 curl]) -- ":7880 HTTP API" --> api
+    cc(["Claude Code / 外部 curl"]) -- ":7880 HTTP API" --> api
     subgraph electron[Electron]
         api["HTTP API :7880<br/>src/main/api.ts (54+ 端点 + /mcp)"]
         rend["渲染器 (React)"]
         main["主进程"]
     end
     rend -- "fetch / iframe" --> wp["WinPilot FastAPI :动态端口<br/>winpilot/server.py"]
-    ide([MCP 客户端]) -- "stdio" --> pmcp["Python MCP<br/>python/mcp/server.py"]
+    ide(["MCP 客户端"]) -- "stdio" --> pmcp["Python MCP<br/>python/mcp/server.py"]
     ide -- "stdio" --> tmcp["TS MCP<br/>npm run ai:mcp (5 工具)"]
     cc -- ":7880/mcp" --> hmcp["HTTP MCP 端点"]
     pmcp --> feats["@feature 注册表 (254)"]

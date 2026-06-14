@@ -17,7 +17,8 @@
 
 | 文档 | 内容 |
 |---|---|
-| [architecture.md](architecture.md) | 总体架构：两大子系统、进程/端口、桥接关系、数据流（含系统图） |
+| [项目导览-面试版.md](项目导览-面试版.md) | 🟢 **通俗导览**：不懂技术也能看懂项目是什么/解决什么/怎么设计 + 面试怎么讲 |
+| [architecture.md](architecture.md) | 总体架构：两大子系统、进程/端口、桥接关系、数据流 + **完整端到端流程图** |
 | [winpilot-agent.md](winpilot-agent.md) | WinPilot AI Agent 深度：执行循环、~22 工具、多维感知、动作+验证、编程子 agent、记忆/playbook |
 | [replay-recording.md](replay-recording.md) | 重放与录制：`.wps.json` 格式、离线 0-token Replayer、人类演示录制、wps→流程图导入、三套录制 |
 | [flow-editor.md](flow-editor.md) | 流程图编辑器：React 前端、65 节点、DSL、执行引擎、@feature 注册表（254）、HTN |
@@ -27,7 +28,7 @@
 
 ```mermaid
 flowchart TB
-    user([用户])
+    user(["用户"])
 
     subgraph electron["Electron 桌面应用"]
         renderer["React 渲染器<br/>流程图编辑器 · 65节点 · DSL"]
@@ -56,10 +57,10 @@ flowchart TB
     engine --> features
     httpapi -. "/mcp" .-> features
 
-    classDef live fill:#dcfce7,stroke:#16a34a;
-    classDef legacy fill:#fef9c3,stroke:#ca8a04;
-    class winpilot,wploop,recorder,wpserver live;
-    class legacy,engine,features legacy;
+    classDef liveNode fill:#dcfce7,stroke:#16a34a,color:#000;
+    classDef oldNode fill:#fef9c3,stroke:#ca8a04,color:#000;
+    class wpserver,wploop,recorder liveNode;
+    class engine,features oldNode;
 ```
 
 **关键边界**：WinPilot agent **只有 ~22 个精简工具，完全不用 254 个 @feature**，也不感知流程图格式——这是刻意的，避免拖垮 agent。@feature/65 节点/DSL 只服务于流程图编辑器、引擎、MCP、HTTP API。agent 的产物（`.wps.json`）通过**纯代码转换层**变成原版流程图节点后才进编辑器。详见 [architecture.md](architecture.md)。
