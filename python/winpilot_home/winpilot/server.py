@@ -21,9 +21,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .agent.loop import AgentRunner
+from .agent.router import build_runner
 from .agent.session import SESSION
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
 from .perception import ocr, vlm
+from .recorder import human as human_mod
 from .recorder import trace as trace_mod
 from .utils.log import BUS, logger
 
@@ -32,15 +34,16 @@ _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None)
 
-_origin = (
-    f'http://{CONFIG.get("server", "host", default="127.0.0.1")}'
-    f':{CONFIG.get("server", "port", default=8765)}'
-)
+# The server binds 127.0.0.1 only. Allow any origin so the Electron renderer
+# (file:// in prod, http://localhost:5200 in dev) can call the REST API
+# cross-origin — e.g. the React 重放 editor listing traces/scripts and the
+# human-recorder controls. The embedded iframe webui is same-origin and was
+# unaffected, which is why only the React panel hit CORS failures.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_origin],
+    allow_origins=["*"],
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_headers=["*"],
 )
 
 
@@ -73,7 +76,7 @@ class _RunState:
     def busy(self) -> bool:
         running_agent = self.thread is not None and self.thread.is_alive()
         running_replay = self.replay_thread is not None and self.replay_thread.is_alive()
-        return running_agent or running_replay
+        return running_agent or running_replay or human_mod.RECORDER.is_recording()
 
 
 STATE = _RunState()
@@ -105,6 +108,14 @@ class ExportRequest(BaseModel):
     name: str | None = None
 
 
+class ScriptSaveRequest(BaseModel):
+    script: dict[str, Any]
+
+
+class HumanStartRequest(BaseModel):
+    name: str | None = None
+
+
 # ----------------------------------------------------------------- endpoints
 @app.post("/api/chat")
 def start_chat(req: ChatRequest) -> dict[str, Any]:
@@ -115,8 +126,8 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
         if STATE.busy():
             raise HTTPException(409, "已有任务在运行，请先停止")
         STATE.stop_event = threading.Event()
-        runner = AgentRunner(task, stop_event=STATE.stop_event,
-                             session_context=SESSION.recent())
+        runner = build_runner(task, stop_event=STATE.stop_event,
+                              session_context=SESSION.recent())
         STATE.runner = runner
         trace_mod.RECORDER.start(runner.run_id)
         BUS.publish("chat", run_id=runner.run_id, role="user", content=task)
@@ -247,6 +258,65 @@ def export(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
 @app.get("/api/scripts")
 def scripts() -> list[dict[str, Any]]:
     return trace_mod.list_scripts()
+
+
+def _script_path(file: str) -> Path:
+    if not file.endswith(".wps.json"):
+        raise HTTPException(400, "文件名必须以 .wps.json 结尾")
+    return _ensure_inside(SCRIPTS_DIR / file, SCRIPTS_DIR, "脚本")
+
+
+@app.get("/api/script/{file}")
+def get_script(file: str) -> dict[str, Any]:
+    """Read one .wps.json document (for the visual editor to load as a graph)."""
+    path = _script_path(file)
+    if not path.exists():
+        raise HTTPException(404, "脚本不存在")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(400, f"脚本解析失败: {exc}") from exc
+
+
+@app.put("/api/script/{file}")
+def put_script(file: str, req: ScriptSaveRequest) -> dict[str, Any]:
+    """Save an edited .wps.json after structural validation (reject unknown
+    tools / malformed nesting before it can ever be replayed)."""
+    path = _script_path(file)
+    err = trace_mod.validate_script(req.script)
+    if err:
+        raise HTTPException(400, f"脚本校验失败: {err}")
+    SCRIPTS_DIR.mkdir(exist_ok=True)
+    path.write_text(
+        json.dumps(req.script, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"ok": True, "file": path.name}
+
+
+@app.post("/api/human/start")
+def human_start(req: HumanStartRequest | None = None) -> dict[str, Any]:
+    """Begin a human-demonstration recording (captures clicks/keys with
+    perception selectors into a .wps.json)."""
+    with STATE.lock:
+        if STATE.busy():
+            raise HTTPException(409, "已有任务/重放/录制在运行")
+        try:
+            human_mod.RECORDER.start((req.name if req else None) or "")
+        except Exception as exc:  # pynput unavailable etc.
+            raise HTTPException(500, f"无法启动录制: {exc}") from exc
+    return {"ok": True}
+
+
+@app.post("/api/human/stop")
+def human_stop() -> dict[str, Any]:
+    result = human_mod.RECORDER.stop()
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error", "停止失败"))
+    return result
+
+
+@app.get("/api/human/status")
+def human_status() -> dict[str, Any]:
+    return {"recording": human_mod.RECORDER.is_recording()}
 
 
 @app.post("/api/replay")

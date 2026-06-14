@@ -46,7 +46,43 @@ const patchConfig = (patch) =>
   }).then((cfg) => { config = cfg; renderBadgesFromConfig(); });
 
 /* ============================== chat ============================== */
-function addChat(role, content, extra) {
+// Persist chat across iframe reloads (keyed by server port so a new app
+// session starts fresh). The Agent panel keeps the iframe mounted across tab
+// switches, but a hard reload / retry would otherwise lose the conversation.
+const CHAT_KEY = "wp_chat_" + location.port;
+let _chatMsgs = [];
+function persistChat() {
+  try { sessionStorage.setItem(CHAT_KEY, JSON.stringify(_chatMsgs.slice(-300))); }
+  catch (_e) { /* quota / disabled — non-fatal */ }
+}
+
+/* Render model/user text: triple-backtick code fences become monospace <pre>
+   (so ASCII diagrams / tables / flowcharts keep their alignment); plain text
+   keeps newlines via pre-wrap. DOM-built (no innerHTML) so it stays XSS-safe. */
+function renderContentInto(node, text) {
+  text = String(text == null ? "" : text);
+  if (text.indexOf("```") === -1) {
+    node.appendChild(el("div", "text-block", text));
+    return;
+  }
+  const parts = text.split("```");
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      let code = part;
+      const nl = part.indexOf("\n");
+      if (nl >= 0) {
+        const first = part.slice(0, nl).trim();
+        if (/^[a-z0-9+#._-]*$/i.test(first)) code = part.slice(nl + 1); // drop lang line
+      }
+      node.appendChild(el("pre", "code-block", code.replace(/\s+$/, "")));
+    } else if (part) {
+      node.appendChild(el("div", "text-block", part));
+    }
+  });
+  if (!node.childNodes.length) node.appendChild(el("div", "text-block", text));
+}
+
+function _renderChat(role, content, extra) {
   const msg = el("div", `msg ${role}`);
   if (extra && extra.reasoning) {
     const details = el("details", "reasoning");
@@ -54,11 +90,34 @@ function addChat(role, content, extra) {
     details.appendChild(el("div", "", extra.reasoning));
     msg.appendChild(details);
   }
-  const body = el("div", "", content);
+  const body = el("div", "msg-body");
   if (extra && extra.statusClass) body.classList.add(extra.statusClass);
+  renderContentInto(body, content);
   msg.appendChild(body);
   chatList.appendChild(msg);
   chatList.scrollTop = chatList.scrollHeight;
+}
+
+function addChat(role, content, extra) {
+  _renderChat(role, content, extra);
+  _chatMsgs.push({
+    role, content,
+    reasoning: extra && extra.reasoning,
+    statusClass: extra && extra.statusClass,
+  });
+  persistChat();
+}
+
+function restoreChat() {
+  try {
+    const raw = sessionStorage.getItem(CHAT_KEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || !arr.length) return;
+    arr.forEach((m) => _renderChat(m.role, m.content,
+      { reasoning: m.reasoning, statusClass: m.statusClass }));
+    _chatMsgs = arr;
+  } catch (_e) { /* ignore corrupt store */ }
 }
 
 /* ============================== logs ============================== */
@@ -79,16 +138,42 @@ const okMark = (ok) => {
   return s;
 };
 
+/* ============================== plan panel ============================== */
+// Collapsible plan/todo status region. Shown only while a plan exists; fully
+// hidden (not just empty) otherwise. Driven by agent_plan events.
+let _plan = [];
+function renderPlanPanel() {
+  const panel = $("plan-panel");
+  if (!panel) return;
+  if (!Array.isArray(_plan) || !_plan.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const done = _plan.filter((s) => s.done).length;
+  const prog = $("plan-progress");
+  if (prog) prog.textContent = `${done}/${_plan.length}`;
+  const body = $("plan-body");
+  if (!body) return;
+  body.textContent = "";
+  _plan.forEach((s, i) => {
+    body.appendChild(el("div", s.done ? "todo-done" : "todo-pending",
+      `${s.done ? "☑" : "☐"} ${i + 1}. ${s.goal}`));
+  });
+}
+
 /* ========================= event rendering ========================= */
 function renderEvent(ev) {
   switch (ev.type) {
     case "ping": return;
     case "chat":
-      if (ev.role === "assistant") addChat("assistant", ev.content);
+      if (ev.role === "assistant")
+        addChat("assistant", ev.content, ev.reasoning ? { reasoning: ev.reasoning } : null);
       return;
     case "agent_start":
       running = true; updateRunBadge();
-      addLog("agent", "agent", `任务开始 [${ev.run_id}] 最大步数=${ev.max_steps}` +
+      _plan = []; renderPlanPanel();
+      if (ev.agent === "coding") addChat("system", "🧑‍💻 已切换到编程子 agent（文件/仓库工具）");
+      addLog("agent", "agent", `任务开始 [${ev.run_id}]` +
+        (ev.agent === "coding" ? " · 编程子agent" : "") +
+        ` 最大步数=${ev.max_steps}` +
         (ev.has_experience ? " (注入了历史经验)" : ""), ev.ts);
       return;
     case "agent_step": {
@@ -134,17 +219,12 @@ function renderEvent(ev) {
     }
     case "agent_plan": {
       const steps = ev.plan || [];
+      if (Array.isArray(ev.plan)) { _plan = ev.plan; renderPlanPanel(); }
       const done = steps.filter((s) => s.done).length;
       const frag = document.createDocumentFragment();
       const label = ev.action === "complete" ? `完成子目标 ${ev.index}` :
         ev.action === "revise" ? "更新计划" : "制定计划";
       frag.appendChild(document.createTextNode(`${label} (${done}/${steps.length})`));
-      const ul = el("div", "plan-todo");
-      steps.forEach((s, i) => {
-        ul.appendChild(el("div", s.done ? "todo-done" : "todo-pending",
-          `${s.done ? "☑" : "☐"} ${i + 1}. ${s.goal}`));
-      });
-      frag.appendChild(ul);
       addLog("计划", "agent", frag, ev.ts);
       return;
     }
@@ -240,12 +320,25 @@ function updateRunBadge() {
   badge.textContent = running ? "运行中" : "空闲";
   badge.classList.toggle("running", running);
   $("btn-stop").disabled = !running;
+  $("btn-stop").textContent = "停止";
   // Keep send usable while running — it becomes a "steer / interject" button.
   $("btn-send").disabled = false;
   $("btn-send").textContent = running ? "插话提示" : "执行任务";
   $("task-input").placeholder = running
     ? "任务运行中——发一句提示纠偏/补充，它会在下一步看到"
     : "描述任务，如：打开记事本，输入\"你好世界\"，另存为到桌面 test.txt";
+}
+
+// Request a stop with immediate UI feedback. The agent honors stop at step
+// boundaries, before each tool, during the LLM call (abandoned), and inside
+// verify/wait polling — so this is now prompt, but a tool already mid-flight
+// (e.g. a long run_shell) still finishes first.
+async function requestStop() {
+  const btn = $("btn-stop");
+  if (btn) { btn.disabled = true; btn.textContent = "停止中…"; }
+  addLog("停止", "agent", "已请求停止，正在中断当前步骤…");
+  try { await api("/api/stop", { method: "POST" }); }
+  catch (err) { addChat("system", `停止失败: ${err.message}`); }
 }
 function renderBadgesFromConfig() {
   if (!config) return;
@@ -492,6 +585,10 @@ async function main() {
   renderBadgesFromConfig();
   fillSettings();
   bindSettings();
+  restoreChat();           // bring back the conversation after a reload
+  renderPlanPanel();       // hidden until a plan arrives
+  const planHead = $("plan-head");
+  if (planHead) planHead.onclick = () => $("plan-panel").classList.toggle("collapsed");
   connectWs();
   refreshStatus();
   refreshTraces();
@@ -500,11 +597,24 @@ async function main() {
   refreshSession();
   setInterval(refreshStatus, 4000);
 
-  $("btn-send").onclick = async () => {
-    const text = $("task-input").value.trim();
+  // Short "stop/cancel" words typed while running mean STOP — not a steering
+  // hint. Otherwise the agent treats "停" as advice and merely switches method.
+  const STOP_RE = /^(停|停一下|停下|停止|别动|住手|停手|暂停|中止|打住|stop|halt|cancel|abort)[\s!！。.]*$/i;
+  const _history = [];
+  let _histIdx = -1;
+
+  async function sendMessage() {
+    const ta = $("task-input");
+    const text = ta.value.trim();
     if (!text) return;
-    $("task-input").value = "";
+    ta.value = "";
+    _history.push(text); _histIdx = _history.length;
     if (running) {
+      if (STOP_RE.test(text)) {
+        addChat("user", "🛑 " + text);
+        await requestStop();
+        return;
+      }
       // steer the in-flight task
       addChat("user", "💬 " + text);
       try {
@@ -525,11 +635,31 @@ async function main() {
         body: JSON.stringify({ task: text }),
       });
     } catch (err) { addChat("system", `启动失败: ${err.message}`); }
-  };
+  }
+  $("btn-send").onclick = sendMessage;
+
   $("task-input").onkeydown = (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("btn-send").onclick();
+    // IME composition (Chinese pinyin etc.): never send/navigate mid-compose.
+    if (e.isComposing || e.keyCode === 229) return;
+    const ta = e.target;
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
+    // Shift+Enter falls through to the textarea's default newline.
+    // Shell-style history: ArrowUp at the very start recalls previous inputs;
+    // ArrowDown walks forward / clears. Mid-text, arrows move the caret normally.
+    if (e.key === "ArrowUp" && ta.selectionStart === 0 && ta.selectionEnd === 0 && _history.length) {
+      e.preventDefault();
+      _histIdx = _histIdx <= 0 ? 0 : _histIdx - 1;
+      ta.value = _history[_histIdx] || "";
+      ta.setSelectionRange(0, 0);
+    } else if (e.key === "ArrowDown" && ta.selectionStart === ta.value.length && _history.length) {
+      if (_histIdx < _history.length - 1) {
+        e.preventDefault(); _histIdx += 1; ta.value = _history[_histIdx] || "";
+      } else if (_histIdx === _history.length - 1) {
+        e.preventDefault(); _histIdx = _history.length; ta.value = "";
+      }
+    }
   };
-  $("btn-stop").onclick = () => api("/api/stop", { method: "POST" });
+  $("btn-stop").onclick = requestStop;
   $("btn-clear-log").onclick = () => { logList.textContent = ""; };
   $("btn-settings").onclick = () => $("drawer").classList.add("open");
   $("btn-close-drawer").onclick = () => $("drawer").classList.remove("open");

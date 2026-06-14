@@ -79,6 +79,7 @@ CONFIG.save = lambda *a, **k: None  # type: ignore[assignment]
 
 from winpilot.utils.log import BUS
 from winpilot.agent.loop import AgentRunner
+from winpilot.agent.router import build_runner
 from winpilot.agent.session import SESSION
 
 logger = logging.getLogger("agent.winpilot.ipc")
@@ -224,8 +225,8 @@ class AgentIPC:
             _log("warn", f"Config apply failed: {exc}")
 
         self._stop = threading.Event()
-        runner = AgentRunner(goal, stop_event=self._stop,
-                             session_context=SESSION.recent())
+        runner = build_runner(goal, stop_event=self._stop,
+                              session_context=SESSION.recent())
         self._runner = runner
 
         def worker():

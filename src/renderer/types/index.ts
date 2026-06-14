@@ -706,7 +706,7 @@ export interface UIState {
   grid_size: number;
   dark_mode: boolean;
   themeMode: 'light' | 'dark' | 'system';
-  viewMode: 'canvas' | 'pseudocode' | 'settings' | 'agent';
+  viewMode: 'canvas' | 'pseudocode' | 'settings' | 'agent' | 'replay';
   panels_visible: boolean;
   show_node_library: boolean;
   show_property_panel: boolean;

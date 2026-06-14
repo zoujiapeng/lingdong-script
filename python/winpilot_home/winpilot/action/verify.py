@@ -195,9 +195,13 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
 
 
 def check(expect: dict, hwnd: int | None = None,
-          timeout_s: float = _DEFAULT_TIMEOUT_S) -> VerifyOutcome:
+          timeout_s: float = _DEFAULT_TIMEOUT_S,
+          stop_event=None) -> VerifyOutcome:
     """Poll the expect conditions until verified or timeout, escalating
-    perception level (0=fused → 1=window OCR → 2=full-screen OCR) over time."""
+    perception level (0=fused → 1=window OCR → 2=full-screen OCR) over time.
+
+    ``stop_event`` (threading.Event) lets a Stop abort the polling loop early
+    instead of waiting out the timeout."""
     started = time.monotonic()
     deadline = started + timeout_s
     level = 0
@@ -210,6 +214,8 @@ def check(expect: dict, hwnd: int | None = None,
             if last.verified and not last.method:
                 last.method = "fused"
             return last
+        if stop_event is not None and stop_event.is_set():
+            return last  # Stop requested → don't keep polling
         # escalate: >1/3 of budget → window OCR; >2/3 → full-screen OCR
         if elapsed > timeout_s * 2 / 3:
             level = 2
@@ -234,11 +240,13 @@ def run_with_verify(
     hwnd: int | None = None,
     retryable: bool = True,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    stop_event=None,
 ) -> dict[str, Any]:
     """Execute an action, verify the expectation, retry on failure.
 
     Non-retryable actions (e.g. type_text — re-running duplicates input) are
-    executed once; only verification is repeated.
+    executed once; only verification is repeated. ``stop_event`` aborts the
+    verify polling + retry loop promptly when a Stop is requested.
     """
     max_retries = int(CONFIG.get("agent", "max_retries", default=2))
     attempts = 0
@@ -258,7 +266,8 @@ def run_with_verify(
             result = {"ok": False, "error": str(exc)}
             # Don't verify a screen the action never touched — a stale match
             # would falsely report success. Retry the action or give up.
-            if retryable and attempts <= max_retries:
+            if retryable and attempts <= max_retries and not (
+                    stop_event is not None and stop_event.is_set()):
                 continue
             outcome = VerifyOutcome(False, f"动作执行异常: {exc}", "") if expect else None
             break
@@ -269,7 +278,7 @@ def run_with_verify(
 
         # Shrink the verify budget to whatever's left of the overall cap.
         budget = max(1.0, min(timeout_s, overall_deadline - time.monotonic()))
-        outcome = check(expect, hwnd=hwnd, timeout_s=budget)
+        outcome = check(expect, hwnd=hwnd, timeout_s=budget, stop_event=stop_event)
         BUS.publish(
             "verify",
             action=name,
@@ -282,7 +291,8 @@ def run_with_verify(
         if outcome.verified:
             break
         if (not retryable or attempts > max_retries or not result.get("ok", True)
-                or time.monotonic() >= overall_deadline):
+                or time.monotonic() >= overall_deadline
+                or (stop_event is not None and stop_event.is_set())):
             break
         logger.info("动作 %s 验证失败（第%d次），重试: %s", name, attempts, outcome.detail)
 

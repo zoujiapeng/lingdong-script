@@ -11,6 +11,7 @@ import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { ParamPromptDialog } from './components/common/ParamPromptDialog';
 import { PseudoPanel } from './components/PseudoPanel';
 import { AgentView } from './components/AgentView';
+import { ReplayEditorView } from './components/ReplayEditorView';
 import { SettingsPanel } from './components/SettingsPanel';
 import { useStore } from './store';
 import { htnRegistry } from './utils/htnRegistry';
@@ -288,6 +289,16 @@ export default function App() {
           </svg>
           Agent
         </button>
+        <button
+          className={`view-tab ${viewMode === 'replay' ? 'active' : ''}`}
+          onClick={() => setViewMode('replay')}
+          title="导入 Agent 录制/脚本到流程图，或录制演示"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          导入/录制
+        </button>
         <div className="view-tabs-spacer" />
         <button
           className={`view-tab ${viewMode === 'settings' ? 'active' : ''} view-tab-settings`}
@@ -307,10 +318,25 @@ export default function App() {
       <TriggerConfigPanel />
 
       <div className={`app-body${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
+        {/* AgentView stays mounted across tab switches so the embedded WinPilot
+            iframe (chat history + live WebSocket) survives. Unmounting it would
+            reload the webui and lose the conversation, and re-show "正在启动". */}
+        <div
+          className="agent-view-host"
+          style={{
+            display: viewMode === 'agent' ? 'flex' : 'none',
+            flex: 1,
+            minWidth: 0,
+            width: '100%',
+            height: '100%',
+          }}
+        >
+          <AgentView />
+        </div>
         {viewMode === 'settings' ? (
           <SettingsPanel />
-        ) : viewMode === 'agent' ? (
-          <AgentView />
+        ) : viewMode === 'agent' ? null : viewMode === 'replay' ? (
+          <ReplayEditorView />
         ) : viewMode === 'pseudocode' ? (
           <div className="canvas-area">
             <PseudoPanel />

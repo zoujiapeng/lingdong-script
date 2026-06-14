@@ -12,7 +12,7 @@ import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPython
 import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
 import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
-import { startWinpilotServer, getWinpilotUrl, stopWinpilotServer } from './winpilotServer';
+import { startWinpilotServer, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -791,6 +791,10 @@ ipcMain.handle('agent:guidance', (_, text: string) => {
 
 // WinPilot embedded server URL for the Agent panel iframe (null until ready).
 ipcMain.handle('winpilot:url', () => getWinpilotUrl());
+
+// Trigger a (re)start if the server isn't up, and report status (url/starting/
+// error). The Agent panel polls this so a failed startup can recover from UI.
+ipcMain.handle('winpilot:ensure', () => ensureWinpilotServer());
 
 ipcMain.handle('agent:chat', (_, text: string) => {
   sendToAgent({ type: 'chat', text });

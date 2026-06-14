@@ -22,7 +22,8 @@ from ..action import executor, verify
 from ..config import SCRIPTS_DIR, TRACES_DIR
 from ..perception import fusion, win32
 from ..utils.log import BUS, logger
-from ..utils.screenshot import capture
+from ..utils.screenshot import Region, capture
+from . import replay_control
 
 _SCREENSHOT_TOOLS = {"click", "type_text", "hotkey", "launch", "drag", "scroll"}
 _SCREENSHOT_MAX_W = 960
@@ -211,6 +212,7 @@ def export_script(run_id: str, name: str | None = None) -> Path:
         "format": "wps/1",
         "name": name or task[:60] or run_id,
         "task": task,
+        "source": "agent",
         "source_run": run_id,
         "created": int(time.time()),
         "steps": steps,
@@ -237,6 +239,58 @@ def list_scripts() -> list[dict[str, Any]]:
     return out
 
 
+# ---------------------------------------------------------------- validation
+# Tools the offline Replayer understands: leaf actions + control flow + ext.*.
+LEAF_TOOLS = frozenset({
+    "click", "type_text", "hotkey", "launch", "focus_window",
+    "scroll", "drag", "wait", "run_shell", "tray_click",
+})
+CTRL_TOOLS = frozenset({"ctrl.if", "ctrl.loop"})
+EXT_TOOLS = frozenset({
+    "ext.delay", "ext.var_set", "ext.clipboard_set",
+    "ext.clipboard_get", "ext.run_shell", "ext.screenshot",
+})
+KNOWN_TOOLS = LEAF_TOOLS | CTRL_TOOLS | EXT_TOOLS
+
+
+def _validate_steps(steps: Any, where: str) -> str | None:
+    if not isinstance(steps, list):
+        return f"{where} 必须是数组"
+    for i, step in enumerate(steps, start=1):
+        loc = f"{where}[{i}]"
+        if not isinstance(step, dict):
+            return f"{loc} 必须是对象"
+        tool = step.get("tool")
+        if tool not in KNOWN_TOOLS:
+            return f"{loc} 未知步骤类型: {tool!r}"
+        if tool == "ctrl.if":
+            for branch in ("then", "else"):
+                if step.get(branch) is not None:
+                    err = _validate_steps(step[branch], f"{loc}.{branch}")
+                    if err:
+                        return err
+        elif tool == "ctrl.loop":
+            err = _validate_steps(step.get("body") or [], f"{loc}.body")
+            if err:
+                return err
+    return None
+
+
+def validate_script(data: Any) -> str | None:
+    """Structural validation of a .wps.json document (any nesting depth).
+
+    Returns an error message string, or None if valid. Used by the PUT
+    endpoint to reject malformed/unknown-tool scripts before saving."""
+    if not isinstance(data, dict):
+        return "脚本必须是 JSON 对象"
+    fmt = data.get("format")
+    if fmt not in ("wps/1", "wps/2"):
+        return f"未知 format: {fmt!r}（应为 wps/1 或 wps/2）"
+    if data.get("vars") is not None and not isinstance(data.get("vars"), dict):
+        return "vars 必须是对象"
+    return _validate_steps(data.get("steps"), "steps")
+
+
 # ------------------------------------------------------------------- replay
 class Replayer:
     """Offline script execution: selector-based re-location + verify."""
@@ -244,6 +298,11 @@ class Replayer:
     def __init__(self, stop_event: threading.Event | None = None) -> None:
         self.stop_event = stop_event or threading.Event()
         self.hwnd: int | None = None
+        # wps/2: per-run variable store for ${var} interpolation.
+        self.vars: dict[str, str] = {}
+        # Inter-leaf pacing (overridable in tests for speed).
+        self.step_delay: float = 0.25
+        self._results: list[dict[str, Any]] = []
 
     def _relocate(self, step: dict) -> tuple[int, int] | None:
         """Find click target on the live screen: text match → recorded coords."""
@@ -268,7 +327,8 @@ class Replayer:
         if tool == "launch":
             return verify.run_with_verify(
                 "launch", lambda: executor.launch(step["command"]),
-                expect=expect, hwnd=self.hwnd, timeout_s=10.0)
+                expect=expect, hwnd=self.hwnd, timeout_s=10.0,
+                stop_event=self.stop_event)
         if tool == "focus_window":
             found = win32.find_window(step.get("title", ""))
             if not found:
@@ -284,7 +344,7 @@ class Replayer:
                 "click",
                 lambda: executor.click(x, y, button=step.get("button", "left"),
                                        double=bool(step.get("double")), hwnd=self.hwnd),
-                expect=expect, hwnd=self.hwnd)
+                expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
         if tool == "type_text":
             point = self._relocate(step)
 
@@ -295,11 +355,13 @@ class Replayer:
                 return executor.type_text(step.get("text_input", ""))
 
             return verify.run_with_verify(
-                "type_text", action, expect=expect, hwnd=self.hwnd, retryable=False)
+                "type_text", action, expect=expect, hwnd=self.hwnd, retryable=False,
+                stop_event=self.stop_event)
         if tool == "hotkey":
             return verify.run_with_verify(
                 "hotkey", lambda: executor.press_keys(step.get("keys", [])),
-                expect=expect, hwnd=self.hwnd, retryable=False)
+                expect=expect, hwnd=self.hwnd, retryable=False,
+                stop_event=self.stop_event)
         if tool == "scroll":
             coords = step.get("coords", [0, 0])
             return executor.scroll(coords[0], coords[1], int(step.get("amount", 0)))
@@ -318,7 +380,8 @@ class Replayer:
                 button=step.get("button", "left"))
         if tool == "wait":
             outcome = verify.check(step.get("condition", {}), hwnd=self.hwnd,
-                                   timeout_s=float(step.get("timeout_s", 10)))
+                                   timeout_s=float(step.get("timeout_s", 10)),
+                                   stop_event=self.stop_event)
             return {"ok": outcome.verified, **outcome.to_dict()}
         return {"ok": False, "error": f"未知步骤类型: {tool}"}
 
@@ -328,26 +391,170 @@ class Replayer:
             path = SCRIPTS_DIR / path
         script = json.loads(path.read_text(encoding="utf-8"))
         steps = script.get("steps", [])
-        BUS.publish("replay", state="start", script=path.name, total=len(steps))
-        results = []
-        ok_all = True
-        for idx, step in enumerate(steps, start=1):
-            if self.stop_event.is_set():
-                BUS.publish("replay", state="stopped", at=idx)
-                return {"ok": False, "stopped_at": idx, "results": results}
-            result = self._run_step(idx, step)
-            step_ok = bool(result.get("ok", True)) and result.get("verified", True) is not False
-            BUS.publish("replay", state="step", index=idx, tool=step.get("tool"),
-                        ok=step_ok, detail={k: v for k, v in result.items()
-                                            if k in ("error", "verify_detail", "attempts")})
-            results.append({"index": idx, "tool": step.get("tool"), "ok": step_ok})
-            if not step_ok:
-                ok_all = False
-                break
-            time.sleep(0.25)
+        # wps/2: seed variables (all string-valued). v1 scripts have none.
+        raw_vars = script.get("vars") or {}
+        self.vars = {str(k): str(v) for k, v in raw_vars.items()}
+        self._results = []
+        total = replay_control.count_leaves(steps)
+        BUS.publish("replay", state="start", script=path.name, total=total)
+        ok_all = self._exec_steps(steps)
         BUS.publish("replay", state="done", ok=ok_all)
-        return {"ok": ok_all, "results": results}
+        return {"ok": ok_all, "results": self._results}
+
+    # --------------------------------------------------------- step engine
+    def _should_stop(self) -> bool:
+        return self.stop_event.is_set()
+
+    def _check_condition(self, cond: dict, timeout_s: float) -> bool:
+        """Evaluate a verify-DSL condition offline (0-token). Used by ctrl.*."""
+        try:
+            return verify.check(cond, hwnd=self.hwnd, timeout_s=timeout_s).verified
+        except Exception as exc:
+            logger.warning("replay 条件求值失败: %s", exc)
+            return False
+
+    def _exec_steps(self, steps: list[dict], prefix: str = "") -> bool:
+        """Execute a (possibly nested) step list. Returns False on first failure
+        so the caller can locate where replay diverged."""
+        for i, raw in enumerate(steps, start=1):
+            if self._should_stop():
+                BUS.publish("replay", state="stopped", at=f"{prefix}{i}")
+                return False
+            idx = f"{prefix}{i}"
+            step = replay_control.interpolate_step(raw, self.vars)
+            tool = step.get("tool", "")
+
+            if tool == "ctrl.if":
+                if not replay_control.exec_if(self, step, idx):
+                    return False
+                continue
+            if tool == "ctrl.loop":
+                if not replay_control.exec_loop(self, step, idx):
+                    return False
+                continue
+
+            if tool.startswith("ext."):
+                result = self._run_ext_step(step)
+                ok = bool(result.get("ok", True))
+            else:
+                result = self._run_step(idx, step)
+                ok = (bool(result.get("ok", True))
+                      and result.get("verified", True) is not False)
+            self._emit_step(idx, tool, ok, result)
+            if not ok:
+                return False
+            if self.step_delay:
+                time.sleep(self.step_delay)
+        return True
+
+    def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
+        BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
+                    detail={k: v for k, v in result.items()
+                            if k in ("error", "verify_detail", "attempts")})
+        self._results.append({"index": idx, "tool": tool, "ok": ok})
+
+    def _emit_ctrl(self, idx: str, tool: str, ok: bool, detail: dict) -> None:
+        BUS.publish("replay", state="ctrl", index=idx, tool=tool, ok=ok,
+                    detail=detail)
+
+    # ------------------------------------------------------- ext.* steps
+    def _run_ext_step(self, step: dict) -> dict[str, Any]:
+        """Human-convenience offline steps (never seen by the agent)."""
+        tool = step.get("tool", "")
+        if tool == "ext.delay":
+            try:
+                time.sleep(max(0.0, float(step.get("seconds", 0))))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "ext.delay seconds 非法"}
+            return {"ok": True}
+
+        if tool == "ext.var_set":
+            name = str(step.get("name", "")).strip()
+            if not name:
+                return {"ok": False, "error": "ext.var_set 缺少 name"}
+            if step.get("from") == "clipboard":
+                value = _clipboard_get()
+            else:
+                value = str(step.get("value", ""))
+            self.vars[name] = value
+            return {"ok": True, "value": value}
+
+        if tool == "ext.clipboard_set":
+            return _clipboard_set(str(step.get("text", "")))
+
+        if tool == "ext.clipboard_get":
+            into = str(step.get("into", "")).strip()
+            text = _clipboard_get()
+            if into:
+                self.vars[into] = text
+            return {"ok": True, "text": text}
+
+        if tool == "ext.run_shell":
+            from ..action import shell
+            result = shell.run(str(step.get("command", "")),
+                               shell=str(step.get("shell", "powershell")),
+                               timeout_s=float(step.get("timeout_s", 30)))
+            into = str(step.get("into", "")).strip()
+            if into:
+                self.vars[into] = result.get("stdout", "") or ""
+            return result
+
+        if tool == "ext.screenshot":
+            return self._ext_screenshot(step)
+
+        return {"ok": False, "error": f"未知 ext 步骤: {tool}"}
+
+    def _ext_screenshot(self, step: dict) -> dict[str, Any]:
+        rel = str(step.get("path") or "shots/replay.png")
+        target = (SCRIPTS_DIR / rel)
+        region_spec = step.get("region")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            region = None
+            if isinstance(region_spec, dict):
+                region = Region(int(region_spec["x"]), int(region_spec["y"]),
+                                int(region_spec["w"]), int(region_spec["h"]))
+            image = capture(region)
+            ok = cv2.imwrite(str(target), image)
+            return {"ok": bool(ok), "path": str(target)}
+        except Exception as exc:
+            logger.warning("ext.screenshot 失败: %s", exc)
+            return {"ok": False, "error": str(exc)}
 
 
 def replay(script_path: str | Path, stop_event: threading.Event | None = None) -> dict:
     return Replayer(stop_event).run(script_path)
+
+
+# ------------------------------------------------------------- clipboard
+def _clipboard_get() -> str:
+    """Read Unicode text from the Windows clipboard (empty on failure)."""
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        except (TypeError, OSError):
+            data = ""
+        finally:
+            win32clipboard.CloseClipboard()
+        return data or ""
+    except Exception as exc:
+        logger.warning("剪贴板读取失败: %s", exc)
+        return ""
+
+
+def _clipboard_set(text: str) -> dict[str, Any]:
+    """Write Unicode text to the Windows clipboard."""
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
+        finally:
+            win32clipboard.CloseClipboard()
+        return {"ok": True}
+    except Exception as exc:
+        logger.warning("剪贴板写入失败: %s", exc)
+        return {"ok": False, "error": str(exc)}

@@ -1,16 +1,15 @@
-<!DOCTYPE html>
+﻿﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WinPilot · DeepSeek 电脑操控 Agent</title>
+<title>DeepSeek 电脑操控 Agent</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
     <span class="logo">◈</span>
-    <h1>WinPilot</h1>
     <span class="tagline">deepseek-v4-flash · 多维感知操控</span>
   </div>
   <div class="badges">
@@ -23,6 +22,16 @@
     <button class="iconbtn" id="btn-settings" title="设置">⚙</button>
   </div>
 </header>
+
+<!-- 计划/todo 折叠区：有计划才显示 -->
+<section class="plan-panel" id="plan-panel" hidden>
+  <div class="plan-head" id="plan-head">
+    <span class="plan-title">📋 计划</span>
+    <span class="plan-progress" id="plan-progress"></span>
+    <span class="plan-caret">▾</span>
+  </div>
+  <div class="plan-body" id="plan-body"></div>
+</section>
 
 <main class="layout">
   <!-- 左：聊天 -->

@@ -317,6 +317,13 @@ def macro_get_events(name: str) -> dict:
     tags=["macro", "flow", "conversion"],
 )
 def macro_convert_to_flow(name: str) -> dict:
+    """Convert a recorded pynput macro into a FlowScript.
+
+    .. deprecated:: (P5) Legacy coordinate-only macro → brittle on layout/
+       resolution changes. Prefer WinPilot's human-demonstration recorder
+       (winpilot/recorder/human.py), which captures element selectors and emits
+       a re-locatable .wps.json. Kept for backward compatibility.
+    """
     path = _MACRO_DIR / f"{name.strip()}.json"
     if not path.exists():
         return {"success": False, "error": f"宏 '{name}' 不存在"}

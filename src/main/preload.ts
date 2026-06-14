@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getWinpilotUrl: () =>
     ipcRenderer.invoke('winpilot:url'),
 
+  // Ensure the WinPilot server is (re)starting; returns {url, starting, error}
+  ensureWinpilot: () =>
+    ipcRenderer.invoke('winpilot:ensure'),
+
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg);
