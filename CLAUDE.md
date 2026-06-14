@@ -5,7 +5,7 @@ Electron + React + Python 桌面自动化流程编辑器。可视化编排屏幕
 > ## ⚠️ 架构现状（2026-06 最新，覆盖下方任何冲突的旧描述）
 >
 > **当前分支 `feat/winpilot-agent` 的 AI Agent 已整体重写为 WinPilot，位于 `python/winpilot_home/winpilot/`。**
-> 下方"AI Agent 系统 / 5 执行模式 / 监督执行层(supervisor) / AgentConfig / 4 视觉策略 / 本地视觉引擎(YOLO/MobileNet/SoM/OmniParser) / 视觉定位+经验复用(experience_db/visual_locator) / Set-of-Mark"等章节**描述的是已删除的旧 LingdongAgent，全部过时**，仅作历史参考。以 `python/winpilot_home/` 为准。
+> 早期的 LingdongAgent（27 元动作 / supervisor / 5 执行模式 / AgentConfig / 4 视觉策略 / 本地视觉引擎 YOLO·MobileNet·SoM·OmniParser / 视觉定位 experience_db·visual_locator 等）**已整体删除**——本文与 `docs/` 已据此重写，不再保留其章节。深度文档见 [docs/](docs/)。
 >
 > - **现役 agent = WinPilot**：`python/agent/__main__.py` 是 IPC 适配器，经 `winpilot.agent.router.build_runner` 路由到 `AgentRunner`(GUI 操控) 或 `CodingRunner`(编程子agent)。Electron 主进程还把 WinPilot 作为内嵌 FastAPI 服务拉起（`src/main/winpilotServer.ts`），其原生 webui (`winpilot_home/webui/`) 以 iframe 嵌在 React 的 Agent 面板。
 > - **WinPilot 只有 ~22 个 LLM 工具**（`winpilot/agent/tools.py`，OpenAI function-calling），自带感知/动作栈（`perception/` 多维融合 UIA+OCR+CV+VLM、`action/{executor,verify,shell}`）。**它完全不用 `python/features/` 的 254 个 @feature**；@feature/65节点/DSL 只服务于流程图编辑器、MCP、HTTP API。
@@ -305,221 +305,40 @@ def my_tool(target: str) -> dict:
 | `export_dsl_reference()` | DSL 语法参考 |
 | `execute(name, **params)` | 统一执行入口 (类型转换+错误处理) |
 
-## AI Agent 系统
+## AI Agent (WinPilot)
 
-> 🛑 **本整章（含 5 执行模式 / 对话模式 / AgentConfig / 4 视觉策略 / 监督执行层 / 自我反思 / 工具访问路径选择器 / 前端 AgentView）描述的是【已删除的旧 LingdongAgent】，全部过时，切勿据此开发。**
-> 现役 agent 是 WinPilot（`python/winpilot_home/winpilot/`），见文件顶部"架构现状"。要点：`agent/loop.py` 的 `AgentRunner` 单循环（function-calling，~22 工具，stop 可中断 LLM 调用）；编程任务由 `agent/router.py` 路由到 `agent/coding.py` 的 `CodingRunner`；感知是 `perception/fusion.py` 的多维融合而非下方的 SoM/本地视觉引擎；每步动作经 `action/verify.py` 的 expect 验证+重试 + 一个怀疑型 done-gate；per-app 知识在 `playbooks/*.json`。以下内容仅作历史参考。
+> 现役 AI Agent，位于 `python/winpilot_home/winpilot/`，取代了早期的 LingdongAgent（27 元动作 / supervisor / 5 执行模式 / SoM / 本地视觉引擎 —— **均已删除**）。深度文档见 [docs/winpilot-agent.md](docs/winpilot-agent.md)。
 
-AI Agent 是灵动脚本的核心智能层，支持 **5 种执行模式** + **双离线模式** + **对话模式** + **4 种视觉策略**。
+### 设计理念（重要）
 
-### 双模式入口
+- **主 agent 必须精简**：只有 ~22 个 function-calling 工具（`agent/tools.py`），**绝不挂 254 个 @feature、不感知流程图格式** —— 那对 agent 是"副优化"，会拖垮性能、破坏 prompt 前缀缓存。
+- **专长拆成独立子 agent**：编程能力是独立的 `CodingRunner`（`agent/coding.py` + `coding_tools.py`，文件/仓库工具限定工作区），由 `agent/router.py` 按 `_is_coding_task` 路由；GUI agent 主路径零改动。未来其它专长（如"流程图编排子 agent"）同理另开。
+- **能确定性完成的不走 GUI**：优先 `run_shell`(PowerShell) / `search_files` 做文件/进程/命令类操作。
+- **每步验证**：动作带 `expect` 条件（`action/verify.py`：text_appears/window_appears/file_exists/shell_true 等），执行后校验+重试；`done` 由怀疑型 judge 二次核验，防"假完成"。
 
-```
-AgentView 前端入口 (AgentView.tsx)
-  +-- AI Agent 模式（在线）: 输入自然语言 -> LLM 生成计划 -> 执行
-  |   +-- 含监督执行: 窗口焦点/OCR验证/失败恢复
-  |   +-- 含流程图模式: 生成可视化流程图后逐步骤执行
-  +-- 离线模式（离线执行）:
-       +-- 直接运行当前画布上的流程图
-       +-- 无需 LLM / API Key
-       +-- 无网络也可执行
-       +-- 通过 engine:start IPC 直接调用 Python 引擎
-```
+### 组成
 
-**离线模式**: 前端切换开关，将当前画布上的流程图直接发送到 Python 引擎执行（`engine:start`），完全不需要 AI / API Key。适用于调试和无需 LLM 的场景。
+| 模块 | 职责 |
+|---|---|
+| `agent/loop.py` `AgentRunner` | GUI 操控主循环（function-calling，stop 可中断在途 LLM 调用） |
+| `agent/tools.py` | ~22 工具 + `ToolSession` 分发；优先 `element_id`(UIA 快路径) |
+| `agent/coding.py` / `coding_tools.py` / `router.py` | 编程子 agent + 路由 |
+| `perception/fusion.py` | 多维感知融合（UIA+win32+OCR+CV+VLM，分配 element_id） |
+| `action/{executor,verify,shell}` | 动作执行 / expect 验证+重试 / shell |
+| `recorder/{trace,replay_control,human}` | 录制→.wps.json→离线 0-token Replayer / 人类演示录制 |
+| `memory/experience.py` | 经验（成功流程→可复用 .wps.json）+ 事实笔记 |
+| `agent/playbooks.py` + `playbooks/*.json` | 情境攻略（数据形式，加 JSON 即可，不增加工具） |
 
-### 5 种 Agent 执行模式
+### 入口与 IPC
 
-| 模式 | 入口方法 | 说明 |
-|---|---|---|
-| **text_protocol** | `run_text_protocol()` | 文本协议循环: LLM -> 解析"工具:/参数:" -> 执行 -> 截图反馈。适用 MIMO 等纯文本模型。支持 chat_mode + visual_strategy |
-| **langgraph** | `run_langgraph()` | LangGraph `create_react_agent`，函数调用模型 (DeepSeek/GPT/Claude)。每个 @feature 工具包装为 LangChain Tool |
-| **planned** | `run_planned()` | Planner 生成 DAG -> PlanExecutor 拓扑序执行（带 fallback 链）。仅需 1 次 LLM 调用，后续离线执行 |
-| **computer_use** | `_computer_use_loop()` | Vision-only 循环: 截图 -> 模型分析 -> 动作 -> 新截图。ACTION:/PARAMS:/思考: 格式 |
-| **direct** | `_run_direct()` | 一键生成流程图: 调用 `generate_flow_script` 返回结果，不下场执行 |
+`python/agent/__main__.py` 是 IPC 适配器：经 `winpilot.agent.router.build_runner` 在进程内驱动 `AgentRunner`/`CodingRunner`，把 WinPilot 原生 BUS 事件转成 stdout JSON 行。
+- 命令(stdin)：`start / stop / guidance / chat / status`
+- 事件(stdout)：WinPilot 原生 `agent_start / agent_step / agent_tool / agent_usage / agent_plan / chat / done_check / agent_recovery / playbook / world / agent_error / agent_done`
+- Electron 还把 WinPilot 作为内嵌 FastAPI 服务拉起（`src/main/winpilotServer.ts`），webui 以 iframe 嵌入 Agent 面板；REST 见 [docs/apis.md](docs/apis.md)。
 
-统一入口 `_unified_run()` 通过 `AgentConfig` 自动路由到对应模式。
+### Agent 内容 → 流程图（零侵入 agent）
 
-### 对话模式 (Chat Mode)
-
-开关 `chat_mode: bool = False`，开启后 Agent 可"边干活边聊天"：
-
-```
-Agent 执行循环 (run_text_protocol)
-  +-- 每轮开始时: _process_chat_messages()
-  |   +-- 从 guidance_queue 读取用户消息
-  |   +-- 注入 LLM 消息历史: "[用户消息] ..."
-  |   +-- LLM 可自然聊天回复 / 调整策略 / 接受新任务
-  +-- LLM 回复解析:
-  |   +-- "工具:" -> 正常执行
-  |   +-- 纯文本 (>20字) -> _emit_chat_response() -> 前端显示
-  +-- 前端:
-      +-- 输入框切换为"输入消息与 AI 对话..."
-      +-- 对话历史气泡列表
-      +-- 发送 -> agent:chat IPC -> _cmd_chat() -> guidance_queue
-```
-
-### AgentConfig 配置系统
-
-`python/agent/config.py` -- 统一配置 dataclass，~30 参数通过 IPC 序列化传输。
-
-**核心策略 (字符串, 自动解析 auto):**
-- `llm_protocol`: auto/text/function_calling/computer_use
-- `vision_mode`: auto/direct/som/omniparser
-- `planning`: auto/pre_plan/per_step
-- `screen_context`: auto/minimal/full
-- `on_error`: retry/replan/skip/stop
-- `visual_strategy`: auto/cli_path/blind_guess/ocr_llm/som
-
-**开关 (布尔值):**
-- `verify`, `fast_mode`, `image_dedup`, `window_aware_ocr`, `uia_pre_focus`
-- `scripted_mode`, `auto_learn`, `som_enabled`, `flow_chart_mode`, `chat_mode`
-
-**安全限制:**
-- `max_steps` (20), `max_consecutive_failures` (5), `min_success_rate` (0.1)
-
-**LLM 参数:**
-- `temperature` (0.1), `max_tokens` (4096), `llm_retries` (2)
-- `screenshot_quality` (60), `sliding_window_size` (0=auto)
-
-`resolve_auto()` 自动检测多模态能力并设置默认值：
-- 多模态模型 -> text + direct + per_step + minimal
-- 纯文本模型 -> function_calling + som + pre_plan + full
-
-### 4 种视觉策略 (Visual Strategy)
-
-通过在 AgentView 的 Perceive 节点选择，控制 Agent 如何"看"屏幕：
-
-| 方案 | visual_strategy | 原理 | 状态 |
-|---|---|---|---|
-| **CLI/路径优先** | `cli_path` | 尝试 CLI 等价操作，SoM 兜底 | 可选 |
-| **自主盲猜** | `blind_guess` | LLM 凭经验猜坐标（原始方式） | 可选 |
-| **OCR->LLM->点击** | `ocr_llm` | OCR 截取所有文字 -> LLM 语义选择 -> 点坐标 | 可选 |
-| **SoM 标号** | `som` | UIA+OCR->标号截图->LLM 选 #N->转坐标 | 默认关闭 |
-| **自动** | `auto` | 多模态=直接截图, 纯文本=SoM | 默认 |
-
-### 监督执行层 (Supervisor)
-
-所有执行模式共享 `python/agent/supervisor.py`，每步执行流水线：
-
-```
-supervisor.execute(name, args)
-  +-- 1. SoM 解引用 (#N -> 坐标)
-  +-- 2. UIA 元素定位 (控件树匹配)
-  +-- 3. 视觉定位兜底 (经验库->OpenCV->VLM)
-  +-- 4. 窗口焦点安全 (自动聚焦目标窗口)
-  +-- 5. 工具执行 (registry.execute / 元动作)
-  +-- 6. 对话框自动处理 (win32 API)
-  +-- 7. 屏幕稳定等待 (等待界面变化完成)
-  +-- 8. OCR 验证 (可选, verify=true时)
-```
-
-元动作（27 个）走 `meta_execute()` 快速路径，绕过部分验证步骤。
-
-### 自我反思与学习
-
-`python/agent/reflection.py` -- Agent 在执行完成后自动反思：
-
-1. **执行摘要** -- 汇总执行步骤、成功/失败
-2. **错误分析** -- 识别失败模式和原因
-3. **改进建议** -- 提出下次执行的优化策略
-4. **经验存储** -- 成功定位的经验自动存入数据库
-
-`python/agent/memory.py` -- 双轨记忆系统：
-- **短期记忆** -- 当前执行会话的步骤历史和上下文
-- **长期记忆** -- 跨会话的持久化经验，包括常见任务模式和成功策略
-
-### Agent 记忆与反思 (Memory & Reflection)
-
-Agent 在工作时会自动维护 **短期记忆**（当前会话的上下文和步骤历史），并在执行结束后或失败时触发 **自我反思**：
-
-```
-Reflection 流程:
-  +-- _generate_reflection()
-  |   +-- 汇总执行步骤 (step_complete 事件)
-  |   +-- 分析失败原因 (工具执行错误 / 超时 / 验证失败)
-  |   +-- 生成改进建议 (下次类似任务的优化策略)
-  +-- _store_reflection()
-  |   +-- 存入 memory.py 的长期记忆数据库
-  +-- 下次执行时:
-      +-- 检索相关长期记忆
-      +-- 注入系统提示词作为参考
-```
-
-### 工具访问路径选择器
-
-Agent 按优先级选择最优执行路径：
-
-| 优先级 | 模式 | 适用场景 |
-|---|---|---|
-| L0 | 直接 API | 文件操作、剪贴板、进程管理 |
-| L1 | 浏览器 CDP | 浏览器内自动化 |
-| L2 | Windows UIA | 窗口控件操作 |
-| L3 | 视觉 OCR | 文字定位、屏幕文字读取 |
-| L4 | SoM 标号 | 元素检测 + 编号标注 |
-| L5 | 宏录制/回放 | 录制回放、视觉宏 |
-| L6 | DSL 脚本 | 可复用流程图生成 |
-
-### 前端 AgentView 配置界面
-
-`src/renderer/components/AgentView.tsx` (~490 行) -- 流程图风格的 Agent 配置面板，8 个可折叠节点：
-
-1. **Goal Node** -- 目标输入, 状态指示, 离线/流程图模式切换
-2. **LLM Brain** -- API Key/Base/Model, 协议/规划策略, 多模态, 温度, 对话模式
-3. **Plan Node** -- PlanVisualizer, 生成计划展示, 执行/重新生成
-4. **Perceive Node** -- 视觉模式, SoM/OmniParser, 截图质量, 屏幕上下文, 视觉策略
-5. **Act Node** -- 窗口感知OCR, UIA预聚焦, 脚本执行, 快速模式, 自动学习
-6. **Verify Node** -- OCR 验证开关
-7. **Error Handler** -- 失败策略 (重试/重规划/跳过/停止), 安全限制
-8. **Exec Node** -- 日志, 聊天框 (对话模式), 指令输入
-
-Tool Explorer 弹窗显示 27 元动作 + 全部 @feature 工具。
-
-## Agent IPC 协议
-
-> ⚠️ **部分过时。** stdin/stdout JSON 协议与命令（start/stop/guidance/chat/status）仍有效，但 `python/agent/__main__.py` 现在驱动的是 **WinPilot 的 `AgentRunner`/`CodingRunner`**（经 `winpilot.agent.router.build_runner`），向 stdout 转发的是 **WinPilot 原生 BUS 事件**（agent_start/agent_step/agent_tool/agent_usage/agent_plan/chat/done_check/agent_done 等），而非下方旧 LingdongAgent 的事件名。下方命令表大体仍准，事件表以 WinPilot 实际发出的为准。
-
-AI Agent 子进程通过 **stdin/stdout JSON** 与 Electron 主进程通信。设计用于实时流式展示执行进度。
-
-### IPC 命令 (Electron -> Agent, stdin)
-
-| 命令 | 参数 | 用途 |
-|---|---|---|
-| `{"type": "start", "goal": "...", "config": {...}}` | config 含 agent_config 字典 | 启动 Agent (5 种模式自动路由) |
-| `{"type": "stop"}` | -- | 请求优雅停止 |
-| `{"type": "guidance", "text": "..."}` | text: 指令文本 | 注入用户指引 |
-| `{"type": "chat", "text": "..."}` | text: 聊天文本 | 对话模式聊天消息 |
-| `{"type": "status"}` | -- | 查询当前状态 |
-
-### IPC 事件 (Agent -> Electron, stdout)
-
-| 事件 | 关键字段 | 用途 |
-|---|---|---|
-| `agent_start` | goal, engine, model | Agent 启动 |
-| `step_complete` | step_num, tool, result.success/error | 每步结果 (前端实时更新) |
-| `agent_done` | status, total_steps, fail_reason | Agent 结束 |
-| `log` | level, message | 日志 |
-| `user_guidance_sent` | text | 用户指引确认 |
-| `agent_chat_response` | text | AI 聊天回复 (对话模式) |
-| `plan_state` | plan | 计划状态更新 |
-| `memory_snapshot` | memory | 记忆快照 |
-| `agent_reflection` | reflection | 自我反思内容 |
-| `error` | message | 错误 |
-| `status_report` | running, stopped | 状态报告 |
-
-### 进程生命周期
-
-```
-main.ts startAgentProcess()
-  +-- 杀死旧进程 (stop + timeout + kill)
-  +-- spawn: python -u -m agent (stdin/stdout/stderr 管道)
-  +-- 行缓存: StringDecoder UTF-8
-  +-- 300ms 延迟后发送 start 命令
-  +-- 标准输出: JSON -> agent-message IPC -> renderer
-  +-- 非JSON: -> agent-log IPC -> renderer
-  +-- 安全超时: 300s 自动 kill
-  +-- Token 系统: nextAgentToken() 防过期回调
-```
+agent 产出 `.wps.json`（带语义选择器），由**纯代码转换层** `src/renderer/utils/wpsToFlowScript.ts` 转成原版 65 节点 FlowScript，经 React「导入/录制」标签导入到画布，与指令库节点自由混编、F5 用原版引擎执行。**agent 本身不参与转换、不感知流程图。** 详见 [docs/replay-recording.md](docs/replay-recording.md)。
 
 ## 宏录制功能
 
@@ -583,101 +402,9 @@ main.ts startAgentProcess()
 - `python/agent/experience_db.py` -- 经验数据库，JSON 索引 + PNG 模板
 - `python/experience/templates/` -- 裁剪小图存储目录
 
-## 本地视觉引擎
+## 感知与重放（WinPilot）
 
-> 🛑 **过时（旧 LingdongAgent）。** YOLOv8/MobileNet/RapidOCR + SoM 这套本地视觉引擎已随 LingdongAgent 删除。现役 WinPilot 的"看屏幕"是 `winpilot/perception/fusion.py` 的多维融合（UIA 控件树 + win32 + OCR + OpenCV 图标 + 可选 VLM，按优先级合并去重，给元素分配 element_id），不再用下方的本地检测模型/SoM 标号。以下仅历史参考。
-
-让纯文本模型也能"看"屏幕，全部本地 GPU 完成，零 API 成本：
-
-```
-截图 -> YOLOv8(144ms)检测图标 + MobileNet(10ms)分类 + RapidOCR(~3s)读文字
-      -> SoM 标号 (#1: "我的手机" 坐标 913,263)
-      -> 纯文本 LLM 直接选 #N 或文字点击
-```
-
-### 技术栈
-
-| 组件 | 技术 | 性能 | 用途 |
-|---|---|---|---|
-| **YOLOv8** | ONNX DirectML | ~144ms (AMD 780M) | UI 图标按钮检测 |
-| **MobileNet V3** | ONNX | ~10ms/个 | 图标分类 (envelope, wall_clock...) |
-| **RapidOCR** | ONNX | ~3s 全屏 | 文字检测 + 识别 + 精确坐标 |
-| **OpenCV** | matchTemplate | ~50ms | 模板匹配，经验库检索 |
-
-`python/agent/local_vision_engine.py` -- 统一入口，管理模型加载、GPU 内存、推理调度。
-
-## 视觉定位 + 经验复用学习系统
-
-> 🛑 **过时（旧 LingdongAgent）。** `agent/visual_locator.py` / `agent/experience_db.py` / `_apply_visual_locator` 已删除。现役 WinPilot：动作定位走 `perception/fusion.py`（优先 element_id/UIA，OCR/坐标兜底）；经验/技能复用是 `memory/experience.py`（事实笔记 + 成功流程导出为 `.wps.json` 供 `reuse_skill` 0-token 重放）。以下仅历史参考。
-
-Agent 监督执行时通过 **视觉定位** 模块将语义目标（如"搜索按钮"）转为屏幕坐标，并使用 **经验数据库** 实现"越用越快"。
-
-### 架构
-
-```
-_apply_visual_locator(name, args)
-  +-- 提取 target_text（如 "搜索按钮"）
-  +-- 截取全屏截图
-  +-- visual_locator.locate()
-  |    +-- 1. ExperienceDB -> 有模板?
-  |    |   +-- OpenCV matchTemplate -> 命中 -> 返回坐标
-  |    +-- 2. VLM 兜底 (多模态开启时)
-  |    |   +-- VLM API 分析截图 -> 返回坐标 -> 裁剪小图 -> 存入 ExperienceDB
-  |    +-- 3. 均失败 -> 返回错误，走正常执行流程
-  +-- 更新 args.x / args.y -> 监督执行使用坐标
-```
-
-### 控制开关
-
-| 开关 | localStorage key | 效果 |
-|---|---|---|
-| **多模态 (视觉模型)** | `lingdong-llm-multimodal` | VLM API 分析截图定位元素 |
-| **自动学习** | `lingdong-auto-learn` | 成功自动截图记录, 后续 OpenCV 匹配 |
-
-两个开关同时开启才启用 VLM 兜底；仅 auto-learn 开启时只使用 ExperienceDB + OpenCV。
-
-### 经验数据存储
-
-```
-python/experience/
-+-- db.json            # 经验索引（SHA256 签名->路径/坐标/置信度）
-+-- templates/         # 裁剪小图（PNG）
-```
-
-## Set-of-Mark (SoM) 标号系统
-
-> 🛑 **过时（旧 LingdongAgent）。** SoM 标号 / OmniParser 子进程已随 LingdongAgent 删除（`omni_parser_repo/` 可能仍在磁盘但不再被现役 agent 使用）。WinPilot 用 `perception/fusion.py` 的 element_id 直接引用元素，无需在截图上画编号。以下仅历史参考。
-
-Agent 在执行时对屏幕元素进行 **蓝色框 + #N 编号** 标注，纯文本模型直接用 `#3` 指定目标。
-
-### 双轨 SoM 引擎
-
-| 引擎 | 技术栈 | 定位精度 | 速度 | 状态 |
-|---|---|---|---|---|
-| **OmniParser** | YOLOv8 图标检测 + Florence-2 标题 + EasyOCR | 像素级 | ~3-8s (CPU) | 需 transformers 4.x |
-| **UIA + OCR 兜底** | Windows UIA 控件树 + EasyOCR 文字检测 | 像素级 | ~1-3s | **默认工作路径** |
-
-### 执行流程
-
-```
-_apply_som(b64_img)
-  +-- OmniParser 优先
-  |    +-- 启动 FastAPI 子进程 (lazy, 仅首次)
-  |    +-- POST /parse/ -> 返回 {image_b64, label_map, count}
-  |    +-- 失败 -> 静默降级到 UIA+OCR
-  +-- UIA + OCR 兜底 (always available)
-       +-- a11y_get_tree(depth=3) -> UIA 控件列表
-       +-- ocr_extract_all() -> OCR 文字框
-       +-- 去重合并 -> 编号排序 (从上到下, 从左到右)
-       +-- OpenCV 画蓝色框 + #N 编号
-```
-
-### 关键文件
-
-- `python/agent/agent.py` -- `_apply_som()` 核心方法
-- `python/agent/omniparser_client.py` -- OmniParser FastAPI 客户端（子进程管理 + parse API）
-- `omni_parser_repo/` -- OmniParser V2 仓库
-- `omni_parser_repo/weights/` -- 模型权重（icon_detect 40MB + icon_caption 1GB）
+> 旧的"本地视觉引擎(YOLO/MobileNet/RapidOCR) / 视觉定位+经验复用(visual_locator/experience_db) / Set-of-Mark 标号"子系统已随 LingdongAgent 删除。现役 WinPilot：感知 = `perception/fusion.py` 多维融合（优先 element_id/UIA）；重放 = `recorder/` 的 `.wps.json` + 离线 0-token `Replayer`（文字重定位 + expect 校验）。详见 [docs/winpilot-agent.md](docs/winpilot-agent.md) 与 [docs/replay-recording.md](docs/replay-recording.md)。
 
 ## 摄像头节点
 
