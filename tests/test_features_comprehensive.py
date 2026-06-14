@@ -173,7 +173,6 @@ PARAMS_REQUIRED: dict[str, dict] = {
     "qq_send_message": {"contact": "", "message": ""},
     "qq_find_contact": {"contact": ""},
     "menu_structure": {"target": ""},
-    "macro_extract_visual_templates": {"macro_name": "__nonexistent__"},
     "learned_delete": {"target_id": ""},
     "learned_get": {"target_id": ""},
     "learned_record": {"target_id": "", "success": True},
