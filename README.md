@@ -2,7 +2,7 @@
 
 # 灵动脚本
 
-**AI Agent 桌面操控系统 — 5 种执行模式 · 27 个元动作 · 243 个工具 · 55 种节点**
+**AI Agent 桌面操控系统 · 可视化流程图编辑器 · 一次生成永久零 Token 重放**
 
 [![Electron](https://img.shields.io/badge/Electron-33-blue?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://reactjs.org/)
@@ -12,9 +12,10 @@
 
 </div>
 
-灵动脚本是一个 **AI Agent 桌面操控系统**。它让 LLM 直接控制 Windows 桌面——点击按钮、输入文字、识别图像、操作浏览器、管理窗口进程等。
+灵动脚本是一个 **AI Agent 桌面操控系统 + 可视化自动化流程图编辑器**。它让 LLM 直接控制 Windows 桌面——点击按钮、输入文字、识别图像、操作浏览器、管理窗口进程等；agent 跑过的流程可录制、转成可编辑的流程图、永久零 Token 重放。
 
-Agent 有 5 种执行模式，从纯视觉循环到函数调用到预生成计划，覆盖不同场景。所有 GUI 操作经过监督流水线：窗口焦点安全 → 元素定位 → 执行 → OCR 验证 → 失败恢复。
+现役 AI Agent 是 **WinPilot**（`python/winpilot_home/`）：function-calling 单循环 + 编程子 agent（CodingRunner），自带多维感知（UIA+OCR+CV+VLM 融合）与逐步 expect 验证。详见 `CLAUDE.md` 顶部"架构现状"。
+> 注：旧版 README/部分 docs 提到的"5 种执行模式 · 27 个元动作 · LingdongAgent"已随 WinPilot 重写删除，请以 `CLAUDE.md` 为准。
 
 ---
 
