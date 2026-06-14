@@ -1,5 +1,25 @@
 # 更新日志
 
+## [Unreleased] - WinPilot 重构（分支 feat/winpilot-agent）
+
+### AI Agent 整体重写为 WinPilot
+- **取代旧 LingdongAgent**（27 元动作 / supervisor / 5 执行模式 / SoM / 本地视觉引擎 YOLO·MobileNet·OmniParser / visual_locator·experience_db —— **均已删除**）
+- **精简主 agent**：~22 个 function-calling 工具（`winpilot/agent/tools.py`），不挂 254 @feature、不感知流程图，自带多维感知融合（UIA+OCR+CV+VLM）与逐步 `expect` 验证 + 怀疑型 done-gate
+- **编程子 agent（CodingRunner）**：独立文件/仓库工具（read/write/apply_patch/list/search/run_shell，限定工作区），按意图路由；GUI agent 主路径零改动
+- 编程任务排除"动作重放复用"，但保留事实笔记
+
+### 重放与录制
+- **`.wps.json` (wps/2)**：带语义选择器 + `expect` + 控制流（ctrl.if/loop）+ 变量 + ext.* 便利步骤
+- **离线 0-token Replayer**：文字重定位 + expect 校验；停止可中断在途 LLM 调用与验证轮询
+- **人类演示录制器**（点击瞬间抓元素选择器）；三套录制输出统一为可入流程图的格式
+- **wps→原版 FlowScript 转换器**（纯代码层）+ React「导入/录制」标签：agent 内容导入原版画布、与指令库节点自由混编、F5 运行
+
+### Agent 页面修复
+- 切标签对话不丢（AgentView 常驻 + sessionStorage）、`winpilot:ensure` 启动恢复、计划折叠区、回车发送/Shift+回车换行、修重复回复、停止响应、"停"意图直接停止、等宽代码块渲染、CORS 放开（仅 127.0.0.1）
+
+### 文档
+- `docs/` 全部重写为当前架构（含 GitHub 可渲染 Mermaid 图）；`CLAUDE.md` 删除过时章节并重写；`README.md` 全面更新
+
 ## [1.2.0] - 2026-05-28
 
 ### STT 引擎改进
