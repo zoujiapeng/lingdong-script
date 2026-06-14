@@ -43,7 +43,6 @@ _FEATURE_MODULES = [
     "features.program_registry",
     "features.dialog_features",
     "features.menu_features",
-    "features.visual_macro_features",
     "features.aggregate_features",
     "features.test_flow_features",
     "features.camera_features",
