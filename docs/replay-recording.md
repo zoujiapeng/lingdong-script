@@ -38,7 +38,7 @@ WinPilot 的重放脚本格式。每一步 `tool` 字段是 agent 工具名，**
 
 ```mermaid
 flowchart TB
-    s([.wps.json]) --> ex["_exec_steps (递归)"]
+    s([".wps.json"]) --> ex["_exec_steps (递归)"]
     ex --> leaf{"步骤类型"}
     leaf -- "动作" --> reloc["_relocate: 按 text 在实时屏幕<br/>fusion.observe 重定位 → 坐标兜底"]
     reloc --> verify["run_with_verify(expect)<br/>校验+重试 (stop 可中断)"]

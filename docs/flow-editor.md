@@ -55,7 +55,7 @@ LOOP 5 ... END
 flowchart LR
     fs["FlowScript (前端)"] -- "flow_to_dsl" --> dsl["DSL 文本"]
     dsl -- "DSLParser" --> ast["AST"]
-    ast -- "DSLExecutor._execute_node" --> exec{分发}
+    ast -- "DSLExecutor._execute_node" --> exec{"分发"}
     exec -- "内置 _exec_xxx (可靠, 带重试+自愈)" --> builtin["CLICK/TYPE/IF/LOOP/系统电源/WAIT…"]
     exec -- "REGISTRY_FEATURE 兜底" --> feat["registry.execute @feature"]
 ```

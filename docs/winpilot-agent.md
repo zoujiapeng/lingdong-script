@@ -14,7 +14,7 @@
 
 ```mermaid
 flowchart TB
-    task([任务 goal]) --> router{"_is_coding_task?<br/>(loop.py 意图识别)"}
+    task(["任务 goal"]) --> router{"_is_coding_task?<br/>(loop.py 意图识别)"}
     router -- "做/写/开发 X游戏/网页/程序<br/>调试/重构/仓库/git/bug…" --> coding["CodingRunner<br/>agent/coding.py"]
     router -- "打开/玩/启动 X · 其它桌面任务" --> gui["AgentRunner<br/>agent/loop.py"]
     coding --> ctools["文件/仓库工具<br/>agent/coding_tools.py<br/>read/write/apply_patch/list/search/run_shell"]

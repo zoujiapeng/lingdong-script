@@ -27,38 +27,38 @@
 
 ```mermaid
 flowchart TB
-    user([用户：自然语言 / 拖拽编排])
+    user(["用户：自然语言 / 拖拽编排"])
 
     subgraph electron["Electron 桌面应用"]
         rend["React 流程图编辑器<br/>~65 节点 · DSL · 导入/录制"]
-        api["HTTP API :7880<br/>(Claude Code 远程控制 + /mcp)"]
+        api["HTTP API :7880<br/>Claude Code 远程控制 + /mcp"]
     end
 
-    subgraph winpilot["WinPilot AI Agent · python/winpilot_home"]
-        loop["AgentRunner (GUI 操控)<br/>~22 精简工具 · 多维感知 · expect 验证"]
-        coding["CodingRunner (编程子 agent)<br/>文件/仓库工具，限定工作区"]
-        rec["录制/重放<br/>trace → .wps.json → 0-token Replayer"]
+    subgraph winpilot["WinPilot AI Agent (python/winpilot_home)"]
+        loop["AgentRunner · GUI 操控<br/>~22 精简工具 · 多维感知 · expect 验证"]
+        coding["CodingRunner · 编程子 agent<br/>文件/仓库工具，限定工作区"]
+        rec["录制 / 重放<br/>trace → .wps.json → 0-token Replayer"]
     end
 
-    subgraph legacy["流程图引擎 · python/engine + features"]
-        engine["DSL 执行器 (FlowScript ↔ DSL)"]
-        feats["@feature 注册表 · 254 工具<br/>→ MCP / HTTP / DSL / 节点"]
+    subgraph legacy["流程图引擎 (python/engine + features)"]
+        engine["DSL 执行器<br/>FlowScript ↔ DSL"]
+        feats["@feature 注册表 · 254 工具<br/>MCP / HTTP / DSL / 节点"]
     end
 
     user --> rend
     user --> loop
-    rend -- "iframe 内嵌 webui" --> winpilot
-    loop -. "_is_coding_task 路由" .-> coding
+    rend -->|"Agent 面板内嵌 webui"| loop
+    loop -.->|"_is_coding_task 路由"| coding
     loop --> rec
-    rec -- "导出 .wps.json → 纯代码转换 → 原版节点" --> rend
-    rend -- "F5 运行" --> engine
+    rec -->|"导出 .wps.json → 转成原版节点"| rend
+    rend -->|"F5 运行"| engine
     engine --> feats
-    api -. "/mcp" .-> feats
+    api -.->|"/mcp"| feats
 
-    classDef live fill:#dcfce7,stroke:#16a34a;
-    classDef legacy fill:#fef9c3,stroke:#ca8a04;
-    class winpilot,loop,coding,rec live;
-    class legacy,engine,feats legacy;
+    classDef liveNode fill:#dcfce7,stroke:#16a34a,color:#000;
+    classDef oldNode fill:#fef9c3,stroke:#ca8a04,color:#000;
+    class loop,coding,rec liveNode;
+    class engine,feats oldNode;
 ```
 
 ---
