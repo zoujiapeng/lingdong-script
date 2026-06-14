@@ -50,7 +50,7 @@ flowchart TB
     rend -- "iframe 内嵌 webui" --> winpilot
     loop -. "_is_coding_task 路由" .-> coding
     loop --> rec
-    rec -- ".wps.json --(纯代码转换)--> 原版节点" --> rend
+    rec -- "导出 .wps.json → 纯代码转换 → 原版节点" --> rend
     rend -- "F5 运行" --> engine
     engine --> feats
     api -. "/mcp" .-> feats
