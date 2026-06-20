@@ -8,6 +8,7 @@ on the resolved element — faster and more reliable than synthetic clicks.
 from __future__ import annotations
 
 import ctypes
+import string
 import subprocess
 import time
 from ctypes import wintypes
@@ -87,6 +88,8 @@ _VK = {
     "plus": 0xBB, "minus": 0xBD, "comma": 0xBC, "period": 0xBE, "slash": 0xBF,
 }
 _EXTENDED_VKS = {0x2E, 0x2D, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5B, 0x5D}
+_VK_SHIFT, _VK_CTRL, _VK_ALT = 0x10, 0x11, 0x12
+_VK_TEXT_CHARS = set(string.digits + "+-*/=.,")
 
 
 def _vk_of(key: str) -> int:
@@ -99,6 +102,36 @@ def _vk_of(key: str) -> int:
         if res != -1:
             return res & 0xFF
     raise ValueError(f"未知按键: {key}")
+
+
+def _press_char_vk(char: str) -> bool:
+    """Press one printable char through the active keyboard layout."""
+    res = user32.VkKeyScanW(ctypes.c_wchar(char))
+    if res == -1:
+        return False
+    vk = res & 0xFF
+    state = (res >> 8) & 0xFF
+    modifiers: list[int] = []
+    if state & 1:
+        modifiers.append(_VK_SHIFT)
+    if state & 2:
+        modifiers.append(_VK_CTRL)
+    if state & 4:
+        modifiers.append(_VK_ALT)
+
+    flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS else 0
+    inputs = [_key_input(vk=m) for m in modifiers]
+    inputs.extend([
+        _key_input(vk=vk, flags=flags),
+        _key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP),
+    ])
+    inputs.extend(_key_input(vk=m, flags=_KEYEVENTF_KEYUP) for m in reversed(modifiers))
+    _send_inputs(inputs)
+    return True
+
+
+def _should_type_via_vk(text: str) -> bool:
+    return bool(text) and all(char in _VK_TEXT_CHARS for char in text)
 
 
 def _dry_run() -> bool:
@@ -305,6 +338,16 @@ def type_text(text: str, interval_s: float = 0.008) -> dict:
     """Unicode injection — IME-independent, supports Chinese."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    if _should_type_via_vk(text):
+        typed = 0
+        for char in text:
+            if not _press_char_vk(char):
+                break
+            typed += 1
+            time.sleep(max(interval_s, 0.03))
+        BUS.publish("action", action="type_text", length=typed, via="vk")
+        return {"ok": typed == len(text), "typed": typed,
+                "requested": len(text), "via": "vk"}
     for char in text:
         if char == "\n":
             press_keys(["enter"])

@@ -237,3 +237,186 @@ def is_animating(region: Region, sample_s: float = 0.8) -> bool:
     time.sleep(sample_s / 2)
     third = capture(region)
     return diff_ratio(first, second) > 0.001 or diff_ratio(second, third) > 0.001
+
+
+def image_ink_stats(path: str) -> dict:
+    """Lightweight non-visual summary for saved drawings/screenshots.
+
+    This deliberately does not claim semantic understanding. It only tells a
+    text-only agent/judge whether an image is blank-ish and where visible ink is.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {"exists": False, "path": str(p)}
+    image = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return {"exists": True, "path": str(p), "readable": False}
+    h, w = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Treat near-white as background; this works for common canvas/image tasks.
+    mask = gray < 245
+    ink_pixels = int(mask.sum())
+    total = int(mask.size)
+    stats: dict = {
+        "exists": True,
+        "readable": True,
+        "path": str(p),
+        "width": int(w),
+        "height": int(h),
+        "ink_pixels": ink_pixels,
+        "ink_ratio": round(ink_pixels / total, 6) if total else 0.0,
+    }
+    if ink_pixels == 0:
+        stats.update({"blankish": True, "component_count": 0})
+        return stats
+    ys, xs = np.where(mask)
+    bbox = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)]
+    stats["ink_bbox"] = bbox
+    num_labels, labels, comp_stats, _centroids = cv2.connectedComponentsWithStats(
+        mask.astype("uint8"), connectivity=8
+    )
+    comps: list[dict] = []
+    min_area = max(12, int(total * 0.00001))
+    for label in range(1, num_labels):
+        x, y, cw, ch, area = comp_stats[label].tolist()
+        if area < min_area:
+            continue
+        comps.append({
+            "bbox": [int(x), int(y), int(x + cw), int(y + ch)],
+            "area": int(area),
+        })
+    comps.sort(key=lambda item: item["area"], reverse=True)
+    stats["blankish"] = ink_pixels < max(50, total * 0.0001)
+    stats["component_count"] = len(comps)
+    stats["largest_components"] = comps[:8]
+    return stats
+
+
+def image_color_stats(path: str) -> dict:
+    """Count coarse color evidence in a saved image.
+
+    This is intentionally low-level. It does not say what was drawn; it only
+    reports whether requested colors have visible pixels.
+    """
+    p = Path(path)
+    if not p.exists():
+        return {"exists": False, "path": str(p)}
+    image = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return {"exists": True, "path": str(p), "readable": False}
+    h, w = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    chroma = (sat > 70) & (val > 50)
+    masks = {
+        "red": chroma & ((hue <= 10) | (hue >= 170)),
+        "orange": chroma & (hue > 10) & (hue <= 24),
+        "yellow": chroma & (hue > 24) & (hue <= 38),
+        "green": chroma & (hue > 38) & (hue <= 88),
+        "blue": chroma & (hue >= 95) & (hue <= 135),
+        "purple": chroma & (hue > 135) & (hue < 170),
+        "black": gray < 80,
+    }
+    total = int(h * w)
+    colors: dict[str, dict[str, float | int | bool]] = {}
+    for name, mask in masks.items():
+        pixels = int(mask.sum())
+        colors[name] = {
+            "pixels": pixels,
+            "ratio": round(pixels / total, 6) if total else 0.0,
+            "visible": pixels >= max(30, int(total * 0.000005)),
+        }
+    return {
+        "exists": True,
+        "readable": True,
+        "path": str(p),
+        "width": int(w),
+        "height": int(h),
+        "colors": colors,
+    }
+
+
+def color_presence(image: np.ndarray) -> dict:
+    """Coarse visible-color summary for a screen/window image.
+
+    Returns only compact facts: per-color visibility, pixel count, and bounding
+    box. This is meant for text-only agents that need to know whether their
+    requested colored action actually appeared on screen.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return {"readable": False, "colors": {}}
+    h, w = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    chroma = (sat > 70) & (val > 50)
+    masks = {
+        "red": chroma & ((hue <= 10) | (hue >= 170)),
+        "orange": chroma & (hue > 10) & (hue <= 24),
+        "yellow": chroma & (hue > 24) & (hue <= 38),
+        "green": chroma & (hue > 38) & (hue <= 88),
+        "blue": chroma & (hue >= 95) & (hue <= 135),
+        "purple": chroma & (hue > 135) & (hue < 170),
+        "black": gray < 80,
+    }
+    total = int(h * w)
+    threshold = max(30, int(total * 0.00002))
+    colors: dict[str, dict] = {}
+    for name, mask in masks.items():
+        pixels = int(mask.sum())
+        item: dict[str, object] = {
+            "pixels": pixels,
+            "ratio": round(pixels / total, 6) if total else 0.0,
+            "visible": pixels >= threshold,
+        }
+        if pixels >= threshold:
+            ys, xs = np.where(mask)
+            item["bbox"] = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)]
+            num_labels, _labels, comp_stats, _centroids = cv2.connectedComponentsWithStats(
+                mask.astype("uint8"), connectivity=8
+            )
+            components: list[dict] = []
+            for label in range(1, num_labels):
+                x, y, cw, ch, area = comp_stats[label].tolist()
+                if int(area) < threshold:
+                    continue
+                components.append({
+                    "bbox": [int(x), int(y), int(x + cw), int(y + ch)],
+                    "area": int(area),
+                })
+            components.sort(key=lambda entry: int(entry["area"]), reverse=True)
+            if components:
+                item["largest_bbox"] = components[0]["bbox"]
+                item["largest_area"] = components[0]["area"]
+        colors[name] = item
+    return {"readable": True, "width": int(w), "height": int(h), "colors": colors}
+
+
+def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
+    """Find a large light work surface inside a window screenshot.
+
+    This is a generic heuristic for drawing/editor tasks: pick the largest
+    near-white connected region. It deliberately avoids app names and gives
+    text-only agents a better visual summary target than the whole toolbar.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return None
+    h, w = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sat = hsv[:, :, 1]
+    mask = (gray > 235) & (sat < 45)
+    num_labels, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        mask.astype("uint8"), connectivity=8
+    )
+    min_area = max(20_000, int(h * w * 0.08))
+    best: tuple[int, list[int]] | None = None
+    for label in range(1, num_labels):
+        x, y, cw, ch, area = stats[label].tolist()
+        if area < min_area or cw < max(120, w * 0.25) or ch < max(80, h * 0.18):
+            continue
+        bbox = [int(x), int(y), int(x + cw), int(y + ch)]
+        if best is None or int(area) > best[0]:
+            best = (int(area), bbox)
+    return best[1] if best else None

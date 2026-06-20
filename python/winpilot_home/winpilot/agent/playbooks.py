@@ -100,7 +100,15 @@ def for_task(task: str) -> list[Playbook]:
     if not enabled():
         return books
     task_lower = (task or "").lower()
-    return [b for b in books if any(k in task_lower for k in b.keywords)]
+    upload_publish = any(k in task_lower for k in (
+        "upload", "publish", "post", "creator", "draft",
+        "\u4e0a\u4f20", "\u53d1\u5e03", "\u6295\u7a3f", "\u4f5c\u54c1",
+        "\u6807\u9898", "\u8349\u7a3f",
+    ))
+    matched = [b for b in books if any(k in task_lower for k in b.keywords)]
+    if upload_publish:
+        matched = [b for b in matched if b.name != "media-playback"]
+    return matched
 
 
 def for_window_title(title: str, exclude: set[str]) -> Playbook | None:

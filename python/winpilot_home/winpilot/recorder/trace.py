@@ -92,13 +92,18 @@ class TraceRecorder:
                 return
             run_id = self._run_id
             step = None
-            if event.get("type") == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
+            phase = "after"
+            if event.get("type") == "agent_tool_start" and event.get("tool") in _SCREENSHOT_TOOLS:
                 self._step += 1
                 step = self._step
+                phase = "before"
+            elif event.get("type") == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
+                step = self._step or 1
+                phase = "after"
         # Phase 2 (unlocked): screen grab + JPEG encode are slow.
         record = dict(event)
         if step is not None:
-            shot = self._save_screenshot(run_id, step)
+            shot = self._save_screenshot(run_id, step, phase)
             if shot:
                 record["screenshot"] = shot
         # Phase 3 (locked): append, re-checking the file is still open.
@@ -111,7 +116,7 @@ class TraceRecorder:
             except OSError as exc:
                 logger.warning("trace 写入失败: %s", exc)
 
-    def _save_screenshot(self, run_id: str | None, step: int) -> str | None:
+    def _save_screenshot(self, run_id: str | None, step: int, phase: str = "after") -> str | None:
         if not run_id:
             return None
         try:
@@ -120,7 +125,7 @@ class TraceRecorder:
             if w > _SCREENSHOT_MAX_W:
                 scale = _SCREENSHOT_MAX_W / w
                 image = cv2.resize(image, (_SCREENSHOT_MAX_W, int(h * scale)))
-            rel = f"{run_id}/step_{step:03d}.jpg"
+            rel = f"{run_id}/{phase}_{step:03d}.jpg"
             path = TRACES_DIR / rel
             ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:

@@ -175,6 +175,7 @@ def status() -> dict[str, Any]:
         "usage": dict(runner.usage_total) if runner else None,
         "ocr_provider": ocr.active_provider(),
         "vlm_configured": vlm.is_configured(),
+        "vlm_reason": vlm.configuration_issue() or None,
         "enabled_dimensions": CONFIG.enabled_dimensions(),
         "is_admin": _is_admin(),
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),

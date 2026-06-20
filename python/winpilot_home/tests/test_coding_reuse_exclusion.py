@@ -17,10 +17,12 @@ def fresh_memory(tmp_path, monkeypatch):
     from winpilot import config
     mem = tmp_path / "experience_memory.json"
     monkeypatch.setattr(config, "MEMORY_PATH", mem)
+    monkeypatch.setitem(config.CONFIG._data["agent"], "experience_memory", True)
     from winpilot.memory import experience
     importlib.reload(experience)
     # reload re-binds MEMORY_PATH from config at import time
     monkeypatch.setattr(experience, "MEMORY_PATH", mem)
+    monkeypatch.setitem(experience.CONFIG._data["agent"], "experience_memory", True)
     return experience
 
 
@@ -58,6 +60,24 @@ def test_auto_recipe_still_evicted_on_repeated_failure(fresh_memory):
     for _ in range(3):
         exp.feedback([rid], success=False)
     assert exp.get(rid) is None, "a never-successful auto recipe should be evicted"
+
+
+def test_volatile_window_state_tasks_do_not_reuse_or_record(fresh_memory):
+    exp = fresh_memory
+    task = "只检查当前已经打开的QQ窗口，找出哪个已经登录、哪个是登录页"
+
+    assert exp.is_volatile_state_task(task)
+    exp.record(task, "QQ", ['focus_window "QQ"', 'read_text'], verified=True,
+               script="stale.wps.json")
+    assert exp.all_recipes() == []
+
+    exp.add(task, app="QQ", steps=['focus_window "QQ"'], manual=False)
+    full, ids = exp.hints_with_ids(task)
+    assert full == ""
+    assert ids == []
+    script, recipe = exp.reusable_script_for(task)
+    assert script == ""
+    assert recipe is None
 
 
 def test_is_coding_task_detection():

@@ -359,6 +359,15 @@ async function refreshStatus() {
       : isGpu ? "GPU(DML)" : "CPU");
     ocrBadge.classList.toggle("gpu", isGpu);
     $("ocr-provider-line").textContent = `当前 provider: ${st.ocr_provider}`;
+    const vlmBadge = $("badge-vlm");
+    if (vlmBadge) {
+      const vlmState = st.vlm_configured
+        ? "可用"
+        : (st.vlm_reason ? "受限" : "未启用");
+      vlmBadge.textContent = `VLM: ${vlmState}`;
+      vlmBadge.title = st.vlm_reason || "VLM 状态";
+      vlmBadge.classList.toggle("gpu", !!st.vlm_configured);
+    }
     if (typeof st.is_admin === "boolean") {
       const ab = $("badge-admin");
       ab.textContent = "权限: " + (st.is_admin ? "管理员" : "普通");

@@ -5,11 +5,16 @@ WinPilot gains true vision:
 - ``describe(region, question)`` — ad-hoc visual Q&A about a screen region.
 - ``collect(region)`` — VLM-grounded element extraction (slowest dimension,
   lowest default priority; used when structured dimensions fail).
+
+DeepSeek's public chat models are text-only in the API path we tested, so the
+vision layer here is intentionally separate. That matches the official "vision
+proxy" pattern: image -> external VLM -> text result -> DeepSeek reasoning.
 """
 from __future__ import annotations
 
 import base64
 import json
+import re
 
 import cv2
 
@@ -18,10 +23,36 @@ from ..utils.log import logger
 from ..utils.screenshot import Region, capture
 from .model import UIElement
 
+_DEEPSEEK_TEXT_ONLY_RE = re.compile(
+    r"^(deepseek-chat|deepseek-reasoner|deepseek-v4(?:-flash|-pro)?)$",
+    re.I,
+)
+
+
+def configuration_issue() -> str:
+    """Return a human-readable reason the VLM path is unavailable.
+
+    DeepSeek's current public chat API rejects image_url inputs for the text
+    models we tested (deepseek-chat, deepseek-reasoner, deepseek-v4-flash,
+    deepseek-v4-pro), so it cannot back the visual/perception pipeline
+    directly. Use a separate multimodal endpoint as the vision proxy.
+    """
+    vlm = CONFIG.get("vlm", default={})
+    base_url = str(vlm.get("base_url") or "").lower()
+    model = str(vlm.get("model") or "")
+    if vlm.get("enabled") and base_url and model:
+        if "deepseek" in base_url and _DEEPSEEK_TEXT_ONLY_RE.fullmatch(model):
+            return (
+                "DeepSeek V4 API is text-only; use a separate multimodal VLM "
+                "endpoint for screenshots/images."
+            )
+    return ""
+
 
 def is_configured() -> bool:
     vlm = CONFIG.get("vlm", default={})
-    return bool(vlm.get("enabled") and vlm.get("base_url") and vlm.get("model"))
+    return bool(vlm.get("enabled") and vlm.get("base_url") and vlm.get("model")
+                and not configuration_issue())
 
 
 def _client():
@@ -62,7 +93,8 @@ def _extra_body() -> dict:
 def describe(region: Region, question: str) -> str:
     """Ask the configured VLM a question about a screen region."""
     if not is_configured():
-        return "VLM 未配置"
+        issue = configuration_issue()
+        return f"VLM 未配置{f'：{issue}' if issue else ''}"
     b64, _scale = _encode_region(region)
     vlm = CONFIG.get("vlm", default={})
     try:

@@ -119,7 +119,7 @@ def _search_powershell(query: str, max_results: int, path: str | None) -> dict:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=45, creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=8, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
         return {"engine": "powershell", "results": lines[:max_results],
@@ -135,6 +135,19 @@ def search(query: str, max_results: int = _DEFAULT_MAX, path: str | None = None)
     """Filename search. Everything-first, PowerShell fallback. Never raises."""
     if not query or not query.strip():
         return {"engine": "none", "results": [], "count": 0, "error": "查询为空"}
+    lowered = query.lower().strip()
+    if not path and (".exe" in lowered or lowered.endswith("*.lnk")):
+        return {
+            "engine": "none",
+            "results": [],
+            "count": 0,
+            "hint": (
+                "search_files is for user files, not installed-app launch. "
+                "For applications, use find_app first, then find_program or "
+                "launch by display name. Pass path only when the user really "
+                "asked to locate a file under that folder."
+            ),
+        }
     BUS.publish("action", action="search_files", query=query, path=path or "")
     ev = _search_everything(query, max_results, path)
     if ev is not None and ev.get("engine") == "everything":

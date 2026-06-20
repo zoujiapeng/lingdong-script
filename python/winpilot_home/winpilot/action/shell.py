@@ -51,8 +51,20 @@ def _decode(data: bytes, prefer: tuple[str, ...]) -> str:
     return data.decode(prefer[0], errors="replace")
 
 
-def run(command: str, shell: str = "powershell",
-        timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None) -> dict:
+def _kill_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception as exc:
+        logger.debug("failed to kill shell process tree pid=%s: %s", pid, exc)
+
+
+def _run_legacy_subprocess(command: str, shell: str = "powershell",
+                           timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None) -> dict:
     """Run a command, capture output. Never raises — errors come back in the dict.
 
     shell: "powershell" (default) or "cmd".
@@ -79,14 +91,16 @@ def run(command: str, shell: str = "powershell",
         prefer = ("utf-8", "gbk")
 
     BUS.publish("action", action="shell", shell=shell, command=command[:400])
+    proc: subprocess.Popen | None = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
-            timeout=timeout_s,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=cwd,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
+        stdout_b, stderr_b = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         logger.warning("shell 命令超时(%ss): %s", timeout_s, command[:120])
         return {"ok": False, "error": f"命令超时（{timeout_s}s）", "timeout": True}
@@ -96,6 +110,70 @@ def run(command: str, shell: str = "powershell",
 
     stdout = _truncate(_decode(proc.stdout or b"", prefer))
     stderr = _truncate(_decode(proc.stderr or b"", prefer))
+    ok = proc.returncode == 0
+    BUS.publish("action", action="shell_result", exit_code=proc.returncode,
+                ok=ok, output_preview=(stdout or stderr)[:300])
+    return {
+        "ok": ok,
+        "exit_code": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def run(command: str, shell: str = "powershell",
+        timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None) -> dict:
+    """Run a command, capture output, and kill the whole process tree on timeout."""
+    if not shell_enabled():
+        return {"ok": False, "error": "shell is disabled"}
+    if not command or not command.strip():
+        return {"ok": False, "error": "empty command"}
+    blocked = safety.guard(command)
+    if blocked is not None:
+        BUS.publish("action", action="shell_blocked", command=command[:200],
+                    reason=blocked.get("error") or blocked.get("note"))
+        return blocked
+
+    if shell == "cmd":
+        argv = ["cmd", "/c", command]
+        prefer = ("gbk", "utf-8")
+    else:
+        argv = ["powershell", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-Command",
+                _PS_UTF8_PREFIX + command]
+        prefer = ("utf-8", "gbk")
+
+    BUS.publish("action", action="shell", shell=shell, command=command[:400])
+    proc: subprocess.Popen | None = None
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        stdout_b, stderr_b = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            _kill_process_tree(proc.pid)
+            try:
+                stdout_b, stderr_b = proc.communicate(timeout=2)
+            except Exception:
+                stdout_b, stderr_b = b"", b""
+        logger.warning("shell command timed out (%ss): %s", timeout_s, command[:120])
+        BUS.publish("action", action="shell_result", exit_code=None,
+                    ok=False, output_preview=f"timeout after {timeout_s}s")
+        return {"ok": False, "error": f"command timed out ({timeout_s}s)",
+                "timeout": True,
+                "stdout": _truncate(_decode(stdout_b or b"", prefer)),
+                "stderr": _truncate(_decode(stderr_b or b"", prefer))}
+    except Exception as exc:
+        logger.warning("shell execution failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    stdout = _truncate(_decode(stdout_b or b"", prefer))
+    stderr = _truncate(_decode(stderr_b or b"", prefer))
     ok = proc.returncode == 0
     BUS.publish("action", action="shell_result", exit_code=proc.returncode,
                 ok=ok, output_preview=(stdout or stderr)[:300])
