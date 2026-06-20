@@ -50,6 +50,37 @@ def _normalize(recipe: dict) -> dict:
 # encode per-run handles that are meaningless next session — they can't be reused.
 _JUNK_STEP = re.compile(r'\b(element_id|hwnd)\b')
 _OLD_FORMAT = re.compile(r'^\w+\(\{.*\}\)$')
+_VOLATILE_CN = ("当前", "现在", "此刻", "已打开", "已经打开", "前台", "窗口")
+_STATE_CN = ("检查", "扫描", "找出", "哪个", "状态", "登录", "登录页", "在线")
+_VOLATILE_EN = (
+    "current",
+    "currently",
+    "now",
+    "open window",
+    "visible window",
+    "foreground",
+    "which window",
+    "logged in",
+    "login page",
+    "status",
+)
+
+
+def is_volatile_state_task(task: str) -> bool:
+    """Return True for tasks whose answer depends on live, changing UI state.
+
+    Action recipes are useful for stable workflows, but dangerous for questions
+    like "which already-open window is logged in": old hwnds and old screen
+    conclusions can become false minutes later.
+    """
+    text = _norm(task)
+    if not text:
+        return False
+    if any(k in text for k in _VOLATILE_EN):
+        return True
+    has_live_anchor = any(k in text for k in _VOLATILE_CN)
+    has_state_question = any(k in text for k in _STATE_CN)
+    return has_live_anchor and has_state_question
 
 
 def _clean_steps(steps: list) -> list[str]:
@@ -107,6 +138,9 @@ def record(task: str, app_hint: str, steps: list[str],
     replayable .wps.json for 0-token reuse.
     """
     if not enabled() or not steps:
+        return
+    if is_volatile_state_task(task):
+        logger.info("跳过易变状态任务的经验记录: %s", task[:60])
         return
     recipe = _normalize({
         "task": task[:200],
@@ -167,6 +201,10 @@ def hints_with_ids(task: str, notes_only: bool = False) -> tuple[str, list[str]]
     scored: list[tuple[float, dict]] = []
     for recipe in _load():
         if notes_only and not recipe.get("manual"):
+            continue
+        if (not recipe.get("manual")
+                and (is_volatile_state_task(task)
+                     or is_volatile_state_task(recipe.get("task", "")))):
             continue
         haystack = (recipe.get("task", "") + recipe.get("app", "")).lower()
         score: float = sum(1 for w in words if w in haystack)
@@ -232,9 +270,11 @@ def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | Non
 
     Returns (script_filename, recipe) or ("", None). Used by the reuse_skill tool.
     """
+    if is_volatile_state_task(task):
+        return "", None
     if recipe_id:
         recipe = get(recipe_id)
-        if recipe and recipe.get("script"):
+        if recipe and recipe.get("script") and not is_volatile_state_task(recipe.get("task", "")):
             return recipe["script"], recipe
         return "", recipe
     _text, ids = hints_with_ids(task)

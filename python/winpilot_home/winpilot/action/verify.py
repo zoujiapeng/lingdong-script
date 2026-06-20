@@ -100,7 +100,13 @@ def _find_text(needle: str, hwnd: int | None, level: int) -> tuple[bool, str]:
     if level < 2:
         return False, ""
 
-    # Level 2: full-screen OCR — catches toasts/dialogs outside the window.
+    # Level 2: full-screen OCR — catches toasts/dialogs outside a target only
+    # when no target window was supplied. If an action was scoped to a window,
+    # accepting full-screen text can produce false success from the agent UI,
+    # logs, or other apps that happen to contain the same words.
+    if target:
+        return False, ""
+
     # Last resort, so trade precision for recall with a lowered threshold.
     try:
         if ocr.find_text(_full_screen_region(), needle, min_conf=0.4):
@@ -157,6 +163,8 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
                deadline: float | None = None) -> VerifyOutcome:
     """Evaluate every condition in the expect dict once (AND semantics)."""
     for key, value in expect.items():
+        if key == "timeout_s":
+            continue
         if key == "text_appears":
             ok, method = _find_text(str(value), hwnd, level)
             if not ok:

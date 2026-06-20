@@ -13,6 +13,12 @@ import uiautomation as auto
 from ..utils.log import logger
 from .model import UIElement
 
+try:
+    auto.SetGlobalSearchTimeout(1.2)
+    auto.OPERATION_WAIT_TIME = 0.1
+except Exception:
+    pass
+
 # Roles we surface to the model. Anything else is treated as container and recursed.
 _INTERESTING = {
     "ButtonControl": "button",
@@ -48,7 +54,7 @@ _CONTAINER_ROLES = {"window", "pane", "group", "list", "toolbar", "menubar"}
 
 _MAX_ELEMENTS = 300
 _MAX_DEPTH = 18
-_TIME_BUDGET_S = 3.0
+_TIME_BUDGET_S = 1.8
 
 
 def _states_of(ctrl: auto.Control) -> list[str]:

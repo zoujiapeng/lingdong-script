@@ -26,6 +26,15 @@ _CACHE_TTL_S = 300.0
 _cache_lock = threading.Lock()
 _cache: tuple[float, list[dict]] | None = None
 
+_SYSTEM_TOOL_TARGETS = [
+    ("notepad", "notepad.exe"),
+    ("calculator", "calc.exe"),
+    ("paint", "mspaint.exe"),
+    ("command prompt", "cmd.exe"),
+    ("powershell", "powershell.exe"),
+    ("terminal", "wt.exe"),
+]
+
 _START_MENU_DIRS = [
     Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
     Path(os.environ.get("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
@@ -105,12 +114,29 @@ def _app_paths_entries() -> list[dict]:
     return entries
 
 
+def _system_tool_entries() -> list[dict]:
+    """Stable Windows inbox tools that may not appear in StartApps/App Paths."""
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    system32 = Path(windir) / "System32"
+    entries: list[dict] = []
+    for name, exe in _SYSTEM_TOOL_TARGETS:
+        path = system32 / exe
+        if path.exists():
+            entries.append({"name": name, "target": str(path), "kind": "exe"})
+    return entries
+
+
 def _index() -> list[dict]:
     global _cache
     with _cache_lock:
         if _cache is not None and time.monotonic() - _cache[0] < _CACHE_TTL_S:
             return _cache[1]
-    entries = _start_menu_entries() + _uwp_entries() + _app_paths_entries()
+    entries = (
+        _start_menu_entries()
+        + _uwp_entries()
+        + _app_paths_entries()
+        + _system_tool_entries()
+    )
     # Dedupe by (lowered name, kind) keeping first occurrence.
     seen: set[tuple[str, str]] = set()
     deduped = []

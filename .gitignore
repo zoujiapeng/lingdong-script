@@ -32,6 +32,7 @@ lingdong-*.zip
 python/macros/visual_*.json
 
 # Browser test snapshots
+.playwright-cli/
 python/browser_snapshots/
 
 # Generated flow files
@@ -47,6 +48,8 @@ omni_parser_repo/
 agent_test.*
 browser_test.*
 web_screenshot_*.png
+output_*.png
+_*.png
 vision_demo/
 vision_demo2/
 ufo_benchmark/

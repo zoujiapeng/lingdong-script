@@ -11,6 +11,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+import win32gui
+
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, screen_size, window_region
@@ -18,6 +20,45 @@ from . import ocr, uia, vision_cv, vlm, win32
 from .model import UIElement
 
 _DEDUP_IOU = 0.5
+
+
+def _rect_overlap_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area = max(1, (ax2 - ax1) * (ay2 - ay1))
+    return inter / area
+
+
+def _foreground_modal_over_target(hwnd: int, region: Region) -> bool:
+    """Detect owner-drawn/modal foreground overlays that can make UIA hang.
+
+    When a XAML/custom modal is foreground and overlaps the requested target,
+    querying UIA on the owner window can block. In that case Win32/OCR/CV and
+    visual summaries are safer than walking the owner's UIA tree.
+    """
+    try:
+        fg = win32gui.GetForegroundWindow()
+        if not fg or fg == hwnd:
+            return False
+        cls = (win32gui.GetClassName(fg) or "").casefold()
+        title = (win32gui.GetWindowText(fg) or "").strip()
+        rect = win32gui.GetWindowRect(fg)
+    except Exception:
+        return False
+    target_rect = (region.left, region.top, region.right, region.bottom)
+    overlap = _rect_overlap_ratio(rect, target_rect)
+    modalish = (
+        "modal" in cls
+        or "popup" in cls
+        or "tooltip" in cls
+        or (not title and overlap > 0.25)
+    )
+    return modalish and overlap > 0.15
 
 
 @dataclass
@@ -60,6 +101,33 @@ class Snapshot:
         lines.extend(element.to_line() for element in shown)
         if len(self.elements) > max_elements:
             lines.append(f"...还有 {len(self.elements) - max_elements} 个元素已省略")
+        return "\n".join(lines)
+    def to_text(self, max_elements: int = 160) -> str:
+        lines = [
+            f"Window: \"{self.title}\" hwnd={self.hwnd} "
+            f"rect=({self.region.left},{self.region.top},"
+            f"{self.region.width}x{self.region.height})"
+        ]
+        stats = " ".join(
+            f"{name}:{stat['count']} in {stat['ms']}ms"
+            for name, stat in self.dim_stats.items()
+        )
+        if stats:
+            lines.append(f"Perception: {stats}")
+
+        readable = sum(1 for e in self.elements if (e.text or "").strip())
+        big = self.region.width * self.region.height > 200_000
+        if readable < 3 and big:
+            lines.append(
+                "WARNING: this large window has almost no readable structured "
+                "elements. It may be canvas/video/game/custom drawing. Verify "
+                "focus first; if no visual model is available, do not pretend "
+                "to know pixel contents from coordinates alone."
+            )
+        shown = self.elements[:max_elements]
+        lines.extend(element.to_line() for element in shown)
+        if len(self.elements) > max_elements:
+            lines.append(f"... {len(self.elements) - max_elements} more elements omitted")
         return "\n".join(lines)
 
 
@@ -147,12 +215,20 @@ def observe(hwnd: int, include_icons: bool = True) -> Snapshot:
     skip_ocr_if_rich = bool(CONFIG.get("fusion", "ocr_skip_when_uia_rich", default=True))
     uia_rich_threshold = int(CONFIG.get("fusion", "uia_rich_threshold", default=20))
     uia_count = 0
+    skip_uia_modal = _foreground_modal_over_target(hwnd, region)
     fused: list[UIElement] = []
     for dim in order:
         started = time.monotonic()
         collected: list[UIElement] = []
         try:
             if dim == "uia":
+                if skip_uia_modal:
+                    snapshot.dim_stats["uia"] = {
+                        "count": 0,
+                        "ms": 0,
+                        "skipped": "foreground_modal_overlay",
+                    }
+                    continue
                 collected = uia.collect(hwnd)
                 uia_count = sum(1 for e in collected if (e.text or "").strip())
             elif dim == "win32":

@@ -11,14 +11,18 @@ import threading
 
 from ..config import CONFIG
 from ..utils.log import logger
-from .loop import AgentRunner, _is_coding_task
+from .loop import AgentRunner, _is_coding_task, _is_gui_only_task
 
 
 def build_runner(task: str, stop_event: threading.Event | None = None,
                  session_context: list | None = None):
     """Return a runner (AgentRunner | CodingRunner) for the task. Both share the
     run() / run_id / status / result_text / interject interface."""
-    if CONFIG.get("coding", "enabled", default=True) and _is_coding_task(task):
+    if (
+        CONFIG.get("coding", "enabled", default=True)
+        and _is_coding_task(task)
+        and not _is_gui_only_task(task)
+    ):
         try:
             from .coding import CodingRunner
             logger.info("路由到编程子agent: %s", task[:60])

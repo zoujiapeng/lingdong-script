@@ -47,7 +47,8 @@ class UIElement:
         if self.text:
             text = self.text if len(self.text) <= 60 else self.text[:57] + "..."
             parts.append(f'"{text}"')
-        parts.append(f"({self.cx},{self.cy})")
+        parts.append(f"center=({self.cx},{self.cy})")
+        parts.append(f"bbox=({self.left},{self.top},{self.width},{self.height})")
         if self.states:
             parts.append(",".join(self.states))
         parts.append(f"src={self.source}")

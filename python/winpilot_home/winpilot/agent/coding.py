@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from ..config import CONFIG
+from ..config import CONFIG, TRACES_DIR
 from ..utils.log import BUS, logger
 from . import loop as _loop
 from .coding_tools import CodingSession, coding_tool_schemas
@@ -34,8 +35,10 @@ _CODING_SYSTEM = """你是 WinPilot 的【编程子agent】——一名在工作
    整文件重写用 write_file。改完务必 read_file 复看，确认改对了
 3. 用 run_shell 装依赖/构建/测试/运行/git——以真实退出码和输出判断成败，**绝不假设成功**
 4. 遇报错：看 stderr/traceback 定位到 文件:行号 → 读上下文 → 提出修复 → 改 → 重跑验证（红→绿闭环），别盲改
-5. 同一处试 2 次没好就换角度（依赖版本/环境变量/路径/编码）
-6. 完成调 done(summary)；确认无解调 fail(reason)
+5. 克隆 GitHub/开源项目但用户没给 URL：先 github_search(项目名) 找仓库，选最匹配的 clone_url；
+   不要在本地目录里找一个还没克隆的项目，也不要停下来问用户网址
+6. 同一处试 2 次没好就换角度（依赖版本/环境变量/路径/编码）
+7. 完成调 done(summary)；确认无解调 fail(reason)
    - done 的 summary 里【务必写清】：项目完整路径、入口文件、如何运行（启动命令），
      方便之后"打开/运行它"时能直接找到
 
@@ -46,6 +49,15 @@ _CODING_SYSTEM = """你是 WinPilot 的【编程子agent】——一名在工作
 
 工作区根目录：{workspace}
 本机：{os}"""
+
+
+_CODING_SYSTEM += """
+
+Safety boundary for generic coding tasks:
+- Prefer read-only inspection and runnable verification (`--help`, `--version`, tests, build).
+- Do not rewrite config/credential files such as `.env`, tokens, secrets, or credentials unless the user explicitly asked to configure/edit them.
+- If a command needs a missing API key or credential, report the exact required variable and stop or mark partial success; do not invent or rewrite config.
+"""
 
 
 def workspace_dir() -> Path:
@@ -64,7 +76,7 @@ class CodingRunner:
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
         self.workspace = workspace_dir()
-        self.session = CodingSession(self.workspace, self.stop_event)
+        self.session = CodingSession(self.workspace, self.stop_event, task=task)
         self.messages: list[dict] = []
         self.status = "pending"
         self.result_text = ""
@@ -72,6 +84,9 @@ class CodingRunner:
                             "cache_hit_tokens": 0, "cost_cny": 0.0}
         self._interjections: list[str] = []
         self._lock = threading.Lock()
+        self._llm_trace_index = 0
+        self._tool_history: list[tuple[str, dict[str, Any], str]] = []
+        self._completion_rejects = 0
 
     def interject(self, text: str) -> None:
         text = (text or "").strip()
@@ -90,12 +105,38 @@ class CodingRunner:
             })
             BUS.publish("chat", run_id=self.run_id, role="user", content=text, interject=True)
 
+    def _trace_debug(self, kind: str, payload: dict[str, Any]) -> None:
+        if not CONFIG.get("agent", "llm_trace", default=True):
+            return
+        try:
+            self._llm_trace_index += 1
+            run_dir = TRACES_DIR / self.run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            safe_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", kind).strip("_") or "event"
+            path = run_dir / f"{self._llm_trace_index:03d}_{safe_kind}.json"
+            path.write_text(
+                json.dumps(_loop.AgentRunner._jsonable(payload), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug("coding LLM trace write failed: %s", exc)
+
     def _chat(self, client, tools: list[dict]):
         """Stop-aware threaded completion (abandons on stop) — same pattern as
         loop.AgentRunner._chat so Stop is responsive during the LLM call."""
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
         box: dict[str, Any] = {}
+        self._trace_debug("llm_request", {
+            "run_id": self.run_id,
+            "task": self.task,
+            "agent": "coding",
+            "model": model,
+            "temperature": float(api.get("temperature", 0.2)),
+            "max_tokens": int(api.get("max_tokens", 4096)),
+            "messages": self.messages,
+            "tools": tools,
+        })
 
         def worker() -> None:
             last_exc: Exception | None = None
@@ -119,10 +160,29 @@ class CodingRunner:
         thread.start()
         while thread.is_alive():
             if self.stop_event.is_set():
+                self._trace_debug("llm_abandoned", {
+                    "run_id": self.run_id,
+                    "agent": "coding",
+                    "model": model,
+                    "reason": "stop_event",
+                })
                 return None
             thread.join(timeout=0.2)
         if "exc" in box:
+            self._trace_debug("llm_error", {
+                "run_id": self.run_id,
+                "agent": "coding",
+                "model": model,
+                "error": str(box["exc"]),
+            })
             raise box["exc"]
+        if box.get("resp") is not None:
+            self._trace_debug("llm_response", {
+                "run_id": self.run_id,
+                "agent": "coding",
+                "model": model,
+                "response": box.get("resp"),
+            })
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
@@ -153,20 +213,101 @@ class CodingRunner:
             except (json.JSONDecodeError, ValueError) as exc:
                 self.messages.append({"role": "tool", "tool_call_id": tc.id,
                                       "content": f"工具参数 JSON 解析失败: {exc}。请重新调用并给出合法 JSON。"})
+                self._trace_debug("tool_arg_error", {
+                    "run_id": self.run_id,
+                    "agent": "coding",
+                    "tool_call_id": tc.id,
+                    "tool": tc.function.name,
+                    "raw_arguments": tc.function.arguments,
+                    "error": str(exc),
+                })
                 BUS.publish("agent_tool", run_id=self.run_id, tool=tc.function.name, error=str(exc))
                 continue
             started = time.monotonic()
             result = self.session.dispatch(tc.function.name, args)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._trace_debug("tool_result", {
+                "run_id": self.run_id,
+                "agent": "coding",
+                "tool_call_id": tc.id,
+                "tool": tc.function.name,
+                "args": args,
+                "result_text": result.text,
+                "summary": result.summary,
+                "terminal": result.terminal,
+                "elapsed_ms": elapsed_ms,
+            })
+            self._tool_history.append((tc.function.name, args, result.text or ""))
+            self._tool_history = self._tool_history[-40:]
             BUS.publish("agent_tool", run_id=self.run_id, tool=tc.function.name, args=args,
                         result_preview=result.text[:300],
-                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        elapsed_ms=elapsed_ms,
                         terminal=result.terminal)
+            # The UI may show a preview/summary, but the model must receive the
+            # full tool result. Otherwise a successful search/read can look
+            # "folded" to the LLM and it will repeat or hallucinate missing data.
             self.messages.append({"role": "tool", "tool_call_id": tc.id,
-                                  "content": result.summary or result.text})
+                                  "content": result.text})
             if result.terminal:
+                if result.terminal == "done" and self._reject_incomplete_run_task():
+                    continue
                 self.result_text = result.text
                 return result.terminal
         return None
+
+    def _requires_run_attempt(self) -> bool:
+        text = self.task.lower()
+        has_repo = any(k in text for k in (
+            "clone", "github", "repo", "repository", "open-source", "opensource",
+            "\u514b\u9686", "\u5f00\u6e90", "\u4ed3\u5e93",
+        ))
+        wants_run = any(k in text for k in (
+            "run", "start", "launch", "serve", "build", "test", "verify",
+            "\u8dd1\u8d77\u6765", "\u8fd0\u884c", "\u542f\u52a8", "\u6253\u5f00",
+            "\u6784\u5efa", "\u6d4b\u8bd5", "\u9a8c\u8bc1",
+        ))
+        return has_repo and wants_run
+
+    def _has_run_attempt(self) -> bool:
+        markers = (
+            "npm", "pnpm", "yarn", "bun", "node ", "python", "pip", "pytest",
+            "cargo", "go ", "dotnet", "mvn", "gradle", "make", "cmake",
+            "get-command", "--version", "test-netconnection", "netstat",
+            "get-process", "invoke-webrequest", "curl", "start-process",
+        )
+        for name, args, _out in self._tool_history:
+            if name != "run_shell":
+                continue
+            cmd = str(args.get("command") or "").lower()
+            if "git clone" in cmd and not any(m in cmd for m in markers if m != "get-command"):
+                continue
+            if any(marker in cmd for marker in markers):
+                return True
+        return False
+
+    def _reject_incomplete_run_task(self) -> bool:
+        if not self._requires_run_attempt() or self._has_run_attempt():
+            return False
+        if self._completion_rejects >= 2:
+            return False
+        self._completion_rejects += 1
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "[completion check failed] The user asked to clone and run/start/verify the project. "
+                "You have not actually attempted dependency/runtime checks, install/build/run, or "
+                "deterministic verification. Do not just summarize README commands. Continue with "
+                "run_shell checks such as Get-Command for the required runtime, then install/build/run "
+                "or fail with the exact missing prerequisite/output."
+            ),
+        })
+        BUS.publish(
+            "done_check",
+            run_id=self.run_id,
+            passed=False,
+            reason="clone/run task has no real run/build/runtime verification attempt",
+        )
+        return True
 
     def run(self) -> dict[str, Any]:
         self.status = "running"
@@ -194,10 +335,15 @@ class CodingRunner:
                 self.messages.append(_loop._sanitize_assistant(msg))
 
                 if not msg.tool_calls:
-                    self.status = "reply"
-                    self.result_text = msg.content or ""
                     BUS.publish("agent_step", run_id=self.run_id, step=step,
                                 reasoning="", content="", n_tool_calls=0)
+                    proposed = msg.content or ""
+                    if self._reject_incomplete_run_task():
+                        BUS.publish("chat", run_id=self.run_id, role="assistant",
+                                    content=proposed[:500], reasoning=reasoning[:800])
+                        continue
+                    self.status = "reply"
+                    self.result_text = proposed
                     BUS.publish("chat", run_id=self.run_id, role="assistant",
                                 content=self.result_text, reasoning=reasoning[:800])
                     break

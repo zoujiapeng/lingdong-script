@@ -14,15 +14,16 @@ import re
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
-from ..config import CONFIG
+from ..config import CONFIG, TRACES_DIR
 from ..memory import experience
-from ..perception import fusion, vlm
+from ..perception import fusion, vision_cv, vlm
 from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
 from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
-from .tools import ToolSession, tool_schemas
+from .tools import ToolResult, ToolSession, tool_schemas
 
 _KEEP_FULL_OBSERVATIONS = 2
 _API_RETRIES = 3
@@ -35,6 +36,88 @@ _PRICE_CACHE_HIT_PER_M = 0.2
 _PRICE_OUTPUT_PER_M = 8.0
 _ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
                  "focus_window", "wait", "tray_click", "run_shell"}
+
+
+def _is_gui_only_task(task: str) -> bool:
+    text = (task or "").casefold()
+    return (
+        bool(re.search(r"\bgui[- ]only\b", text))
+        or "must use gui" in text
+        or "gui方式" in text
+        or "gui 方式" in text
+        or "可见gui" in text
+        or "可见 gui" in text
+        or "通过可见" in text
+        or "必须通过可见" in text
+        or "必须通过gui" in text
+        or "必须通过 gui" in text
+        or "不要用脚本" in text
+        or "不能用脚本" in text
+        or "别用脚本" in text
+        or "不要使用脚本" in text
+    )
+
+
+_DRAWING_TASK_RE = re.compile(
+    r"draw|drawing|paint|sketch|canvas|whiteboard|"
+    r"\u753b|\u753b\u56fe|\u7ed8\u56fe|\u6d82\u9e26|\u753b\u677f|\u767d\u677f",
+    re.IGNORECASE,
+)
+
+
+def _is_drawing_task(task: str) -> bool:
+    return bool(_DRAWING_TASK_RE.search(task or ""))
+
+
+def _required_image_paths(task: str) -> list[str]:
+    paths = re.findall(
+        r"[A-Za-z]:\\[^\r\n\"'<>|]+?\.(?:png|jpg|jpeg|bmp|gif)",
+        task or "",
+        flags=re.IGNORECASE,
+    )
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        value = path.strip().rstrip(".,;:，。；：)")
+        key = value.casefold()
+        if value and key not in seen:
+            cleaned.append(value)
+            seen.add(key)
+    return cleaned
+
+
+_DRAWING_COLOR_TERMS = {
+    "red": ("red", "\u7ea2", "\u7ea2\u8272"),
+    "blue": ("blue", "\u84dd", "\u84dd\u8272"),
+    "green": ("green", "\u7eff", "\u7eff\u8272"),
+    "yellow": ("yellow", "\u9ec4", "\u9ec4\u8272"),
+    "orange": ("orange", "\u6a59", "\u6a59\u8272"),
+    "purple": ("purple", "\u7d2b", "\u7d2b\u8272"),
+    "black": ("black", "\u9ed1", "\u9ed1\u8272"),
+}
+
+
+def _required_drawing_colors(task: str) -> list[str]:
+    text = (task or "").casefold()
+    colors: list[str] = []
+    for color, terms in _DRAWING_COLOR_TERMS.items():
+        if any(term in text for term in terms):
+            colors.append(color)
+    return colors
+
+
+def _gui_only_shell_allowed(command: str) -> bool:
+    low = (command or "").casefold()
+    verification_markers = ("test-path", "get-content", "select-string")
+    mutation_or_ui_automation = (
+        "set-content", "add-content", "out-file", "new-item", "copy-item",
+        "move-item", "remove-item", "start-process", "sendkeys", "clipboard",
+        "windows.automation", "wscript.shell", "shell.application",
+    )
+    return (
+        any(marker in low for marker in verification_markers)
+        and not any(marker in low for marker in mutation_or_ui_automation)
+    )
 
 
 def _is_coding_task(task: str) -> bool:
@@ -55,6 +138,27 @@ def _is_coding_task(task: str) -> bool:
     if any(k in low for k in _CODING_STRONG):
         return True
     return bool(_CODING_BUILD.search(text))
+
+
+_COMMUNICATION_HINTS = (
+    "发信息", "发消息", "发送", "回复", "私信", "聊天", "邮件",
+    "message", "send", "reply", "email", "chat",
+)
+
+
+def _is_communication_task(task: str) -> bool:
+    text = (task or "").lower()
+    return any(hint in text for hint in _COMMUNICATION_HINTS)
+
+
+def _quoted_payloads(task: str) -> list[str]:
+    matches = re.findall(r'"([^"]{1,120})"|“([^”]{1,120})”|「([^」]{1,120})」', task or "")
+    payloads: list[str] = []
+    for groups in matches:
+        value = next((g for g in groups if g), "").strip()
+        if value:
+            payloads.append(value)
+    return payloads
 
 
 # Open/launch/play intents → GUI, even when the object is a game/app/program.
@@ -86,6 +190,150 @@ def _client():
     return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=120)
 
 
+def _required_visible_payloads(task: str) -> list[str]:
+    """Extract literal text that a GUI writing/typing task must make visible."""
+    text = task or ""
+    low = text.lower()
+    line_re = (
+        r"\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+"
+        r"\u884c\s*[=:\uff1a\uff1d]\s*([^\uff0c,\u3002\uff1b;\r\n]+)"
+    )
+    payloads = [m.strip() for m in re.findall(line_re, text) if m.strip()]
+    if any(trigger in low for trigger in ("type", "input", "write", "fill")):
+        payloads.extend(_quoted_payloads(text))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for payload in payloads:
+        payload = payload.strip()
+        if payload and payload not in seen:
+            unique.append(payload)
+            seen.add(payload)
+    return unique
+
+
+def _gui_search_payloads(task: str) -> list[str]:
+    text = task or ""
+    payloads: list[str] = []
+    patterns = (
+        r"(?:search|look up)\s+([A-Za-z0-9][^,.;\r\n]{1,80})",
+        r"(?:\u641c\u7d22|\u67e5\u627e)\s*([^\uff0c,\u3002\uff1b;\r\n]{1,80})",
+    )
+    for pattern in patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            value = str(match).strip()
+            value = re.split(
+                r"\s+(?:and|then|in|on|at)\s+|(?:\u5e76|\u7136\u540e|\u6253\u5f00|\u64ad\u653e)",
+                value,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip()
+            if value:
+                payloads.append(value.strip('"“” '))
+    seen: set[str] = set()
+    out: list[str] = []
+    for payload in payloads:
+        key = payload.casefold()
+        if key not in seen:
+            out.append(payload)
+            seen.add(key)
+    return out
+
+
+def _is_gui_search_task(task: str) -> bool:
+    text = (task or "").lower()
+    wants_open = any(k in text for k in ("open", "打开", "启动", "进入"))
+    wants_search = any(k in text for k in ("search", "look up", "搜索", "查找"))
+    app_surface = any(k in text for k in (
+        "client", "store", "app", "steam", "douyin", "抖音", "网易云", "music",
+        "客户端", "商店", "应用", "页面",
+    ))
+    return wants_open and wants_search and app_surface
+
+
+def _is_store_search_task(task: str) -> bool:
+    text = (task or "").lower()
+    return _is_gui_search_task(task) and any(k in text for k in (
+        "store", "shop", "\u5546\u5e97", "\u9875\u9762", "page",
+    ))
+
+
+def _blocks_store_search_action(task: str, tool_name: str, args: dict) -> str:
+    if not _is_store_search_task(task):
+        return ""
+    command = str(args.get("command") or args.get("target") or "").casefold()
+    if tool_name in {"launch", "run_shell"} and any(
+        bad in command for bad in ("rungameid", "install/", "steam://run", "steam://install")
+    ):
+        return (
+            "Store/search navigation task blocked a launch/install/run protocol. "
+            "The user asked to search/open a store/page, not start or install the item. "
+            "Open the app/store/search UI or a store/search deep link, then verify the "
+            "requested query/page is visible."
+        )
+    return ""
+
+
+def _is_upload_publish_task(task: str) -> bool:
+    text = (task or "").casefold()
+    explicit = any(k in text for k in (
+        "upload", "publish", "post", "creator", "draft",
+        "\u4e0a\u4f20", "\u53d1\u5e03", "\u6295\u7a3f", "\u4f5c\u54c1",
+        "\u6807\u9898", "\u8349\u7a3f",
+    ))
+    media_file = any(ext in text for ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"))
+    platform_or_form = any(k in text for k in (
+        "douyin", "tiktok", "creator", "upload", "publish", "post", "draft",
+        "\u6296\u97f3", "\u521b\u4f5c\u8005", "\u53d1\u5e03", "\u4e0a\u4f20", "\u6807\u9898",
+    ))
+    return explicit or (media_file and platform_or_form)
+
+
+def _blocks_upload_media_analysis(task: str, tool_name: str, args: dict) -> str:
+    if not _is_upload_publish_task(task):
+        return ""
+    command = str(
+        args.get("command")
+        or args.get("script")
+        or args.get("target")
+        or args.get("name")
+        or ""
+    ).casefold()
+    media_terms = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+    analysis_or_playback = (
+        "ffprobe", "ffmpeg", "wmplayer", "windows media player", "opencv",
+        "cv2", "extract frame", "showinfo", "start-process", "media player",
+        "vlc", "potplayer", "mpv", "mplayer",
+    )
+    media_player_target = any(
+        marker in command
+        for marker in ("wmplayer", "windows media player", "media player", "vlc", "potplayer", "mpv")
+    )
+    has_media_file = any(term in command for term in media_terms)
+    readonly_media_check = any(
+        marker in command
+        for marker in ("test-path", "get-item", "get-childitem", "resolve-path")
+    )
+    media_analysis_target = (
+        has_media_file
+        and any(marker in command for marker in analysis_or_playback)
+    )
+    if (
+        tool_name in {"run_shell", "run_detached", "launch", "find_program"}
+        and (
+            media_player_target
+            or media_analysis_target
+            or (tool_name in {"run_shell", "run_detached", "launch"} and has_media_file and not readonly_media_check)
+        )
+    ):
+        return (
+            "Upload/publish task blocked media playback/analysis. The media file is an "
+            "upload payload, not something to play, inspect, or understand. Verify the file "
+            "exists if needed, then open the requested app/platform upload UI, choose the file, "
+            "fill metadata, and stop before final publish."
+        )
+    return ""
+
+
 def _sanitize_assistant(msg) -> dict[str, Any]:
     """Assistant message for history — WITHOUT reasoning_content."""
     out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
@@ -109,7 +357,7 @@ class AgentRunner:
         self.task = task
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
-        self.session = ToolSession(stop_event=self.stop_event)
+        self.session = ToolSession(stop_event=self.stop_event, task=task)
         # Prior finished tasks this session (list[SessionEntry]) for continuity.
         self.session_context = session_context or []
         self.messages: list[dict] = []
@@ -130,6 +378,7 @@ class AgentRunner:
                             "cache_hit_tokens": 0, "cost_cny": 0.0}
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
+        self._llm_trace_index = 0                    # local forensic trace files
         # Coding tasks are excluded from the reusable experience system.
         self._is_coding = _is_coding_task(task)
 
@@ -158,6 +407,50 @@ class AgentRunner:
             BUS.publish("chat", run_id=self.run_id, role="user", content=text,
                         interject=True)
             logger.info("收到用户插话: %s", text[:80])
+
+    # ------------------------------------------------------------- tracing
+    @staticmethod
+    def _jsonable(obj: Any) -> Any:
+        """Best-effort conversion for OpenAI SDK objects into JSON data."""
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, dict):
+            return {str(k): AgentRunner._jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [AgentRunner._jsonable(v) for v in obj]
+        if hasattr(obj, "model_dump"):
+            try:
+                return AgentRunner._jsonable(obj.model_dump())
+            except Exception:
+                pass
+        if hasattr(obj, "dict"):
+            try:
+                return AgentRunner._jsonable(obj.dict())
+            except Exception:
+                pass
+        return str(obj)
+
+    def _trace_debug(self, kind: str, payload: dict[str, Any]) -> None:
+        """Write exact per-step forensic data to traces/<run_id>/.
+
+        This is intentionally file-only, not a BUS event, so the web UI does
+        not receive huge prompt payloads. It lets us reproduce what the LLM saw
+        and why it made each decision after a failed desktop run.
+        """
+        if not CONFIG.get("agent", "llm_trace", default=True):
+            return
+        try:
+            self._llm_trace_index += 1
+            run_dir = TRACES_DIR / self.run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            safe_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", kind).strip("_") or "event"
+            path = run_dir / f"{self._llm_trace_index:03d}_{safe_kind}.json"
+            path.write_text(
+                json.dumps(self._jsonable(payload), ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug("LLM trace write failed: %s", exc)
 
     # ------------------------------------------------------------- history
     def _append_tool_result(self, tool_call_id: str, result_text: str,
@@ -208,6 +501,15 @@ class AgentRunner:
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
 
         box: dict[str, Any] = {}
+        self._trace_debug("llm_request", {
+            "run_id": self.run_id,
+            "task": self.task,
+            "model": model,
+            "temperature": float(api.get("temperature", 0.3)),
+            "max_tokens": int(api.get("max_tokens", 4096)),
+            "messages": self.messages,
+            "tools": tools,
+        })
 
         def worker() -> None:
             last_exc: Exception | None = None
@@ -235,10 +537,26 @@ class AgentRunner:
         while thread.is_alive():
             if self.stop_event.is_set():
                 logger.info("Stop 请求：放弃进行中的 LLM 调用")
+                self._trace_debug("llm_abandoned", {
+                    "run_id": self.run_id,
+                    "model": model,
+                    "reason": "stop_event",
+                })
                 return None  # abandon the in-flight request (it finishes unused)
             thread.join(timeout=0.2)
         if "exc" in box:
+            self._trace_debug("llm_error", {
+                "run_id": self.run_id,
+                "model": model,
+                "error": str(box["exc"]),
+            })
             raise box["exc"]
+        if box.get("resp") is not None:
+            self._trace_debug("llm_response", {
+                "run_id": self.run_id,
+                "model": model,
+                "response": box.get("resp"),
+            })
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
@@ -319,6 +637,25 @@ class AgentRunner:
             if ok:
                 self._had_verified_action = True
 
+    def _drawing_should_stop_mutating(self) -> bool:
+        """Guard against post-completion overwork on canvas tasks.
+
+        Once the plan is marked complete and the requested output image exists,
+        more GUI mutation usually means the agent is chasing optional polish and
+        can damage a valid result. It should switch to deterministic verify/done.
+        """
+        if not _is_drawing_task(self.task):
+            return False
+        try:
+            if not (self.session.plan and self.session.plan.all_done()):
+                return False
+        except Exception:
+            return False
+        if not any(step.startswith("drag(") for step in self._steps_log):
+            return False
+        paths = _required_image_paths(self.task)
+        return bool(paths) and any(Path(path).exists() for path in paths)
+
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
         for tc in tool_calls:
@@ -331,22 +668,87 @@ class AgentRunner:
             except (json.JSONDecodeError, ValueError) as exc:
                 error = f"工具参数 JSON 解析失败: {exc}。请重新调用并给出合法 JSON。"
                 self._append_tool_result(tc.id, error)
+                self._trace_debug("tool_arg_error", {
+                    "run_id": self.run_id,
+                    "tool_call_id": tc.id,
+                    "tool": tc.function.name,
+                    "raw_arguments": tc.function.arguments,
+                    "error": str(exc),
+                })
                 BUS.publish("agent_tool", run_id=self.run_id, tool=tc.function.name,
                             error=str(exc))
                 continue
 
+            BUS.publish("agent_tool_start", run_id=self.run_id,
+                        tool=tc.function.name, args=args)
             started = time.monotonic()
-            result = self.session.dispatch(tc.function.name, args)
+            blocked_store_action = _blocks_store_search_action(self.task, tc.function.name, args)
+            blocked_upload_action = _blocks_upload_media_analysis(self.task, tc.function.name, args)
+            if blocked_store_action or blocked_upload_action:
+                result = ToolResult(blocked_store_action or blocked_upload_action)
+            elif (
+                self._drawing_should_stop_mutating()
+                and tc.function.name in {"click", "drag", "type_text", "hotkey", "scroll"}
+            ):
+                result = ToolResult(
+                    "Drawing/canvas task appears complete: all plan steps are marked done, "
+                    "the requested output image exists, and visible drag evidence was recorded. "
+                    "Do not keep mutating the canvas for optional polish. Use final Test-Path/"
+                    "file_exists verification if needed, then call done."
+                )
+            elif (
+                _is_gui_only_task(self.task)
+                and tc.function.name in {
+                    "run_shell", "run_detached", "write_file", "read_file", "list_dir",
+                    "apply_patch", "search_files",
+                }
+                and not (
+                    tc.function.name == "run_shell"
+                    and _gui_only_shell_allowed(str(args.get("command", "")))
+                )
+            ):
+                result = ToolResult(
+                    f"GUI-only mode blocked {tc.function.name}: use GUI tools "
+                    "such as launch/focus_window/observe/click/type_text/hotkey "
+                    "for the work. Shell is allowed only for final Test-Path/"
+                    "Get-Content/Select-String verification."
+                )
+            else:
+                result = self.session.dispatch(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._trace_debug("tool_result", {
+                "run_id": self.run_id,
+                "tool_call_id": tc.id,
+                "tool": tc.function.name,
+                "args": args,
+                "result_text": result.text,
+                "summary": result.summary,
+                "terminal": result.terminal,
+                "replay": result.replay,
+                "elapsed_ms": elapsed_ms,
+            })
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
             # Keep recent tool outputs as evidence for the done-gate judge
             # (esp. run_shell stdout / verify results — deterministic proof
             # the GUI screen can't show).
-            if tc.function.name in ("run_shell", "run_detached", "search_files",
-                                    "read_text", "find_app", "find_program") or \
-                    '"verified"' in (result.text or ""):
-                self._recent_results.append((tc.function.name, (result.text or "")[:400]))
+            evidence_tools = {
+                "run_shell",
+                "run_detached",
+                "search_files",
+                "list_windows",
+                "scan_windows",
+                "read_text",
+                "find_app",
+                "find_program",
+            }
+            if (
+                tc.function.name in evidence_tools
+                or '"verified"' in (result.text or "")
+                or "visual_change_detected" in (result.text or "")
+            ):
+                limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
+                self._recent_results.append((tc.function.name, (result.text or "")[:limit]))
                 self._recent_results = self._recent_results[-6:]
             BUS.publish(
                 "agent_tool",
@@ -395,6 +797,158 @@ class AgentRunner:
         recent = "；".join(self._steps_log[-6:]) or "(无动作记录)"
         evidence = "\n".join(f"- {name}: {out}" for name, out in self._recent_results) \
             or "(无)"
+        if _is_drawing_task(self.task):
+            stats = []
+            for path in _required_image_paths(self.task):
+                try:
+                    item = vision_cv.image_ink_stats(path)
+                    item["color_stats"] = vision_cv.image_color_stats(path)
+                    stats.append(item)
+                except Exception as exc:
+                    stats.append({"path": path, "error": str(exc)})
+            if stats:
+                evidence += "\n- image_ink_stats: " + json.dumps(
+                    stats, ensure_ascii=False
+                )[:1200]
+        required_payloads = _required_visible_payloads(self.task)
+        if required_payloads:
+            haystack = f"{screen}\n{evidence}"
+            missing = [payload for payload in required_payloads if payload not in haystack]
+            if missing:
+                reason = (
+                    "写入/输入任务缺少最终可见证据：最终 observe/read_text 或确定性证据里没有出现 "
+                    + "、".join(missing[:3])
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[完成校验未通过] {reason}。请先在目标窗口真正输入这些文本，"
+                        "然后重新 observe/read_text 验证文本可见，再调用 done。"
+                    ),
+                })
+                logger.info("done 被快速核验拒绝(输入文本缺失): %s", reason)
+                return False
+        if _is_drawing_task(self.task):
+            saw_drag = any(step.startswith("drag(") for step in self._steps_log)
+            saw_visual_change = "visual_change_detected\": true" in evidence.lower()
+            image_paths = _required_image_paths(self.task)
+            missing_paths = [path for path in image_paths if not Path(path).exists()]
+            required_colors = _required_drawing_colors(self.task)
+            if not saw_drag:
+                reason = (
+                    "Drawing/canvas task has no recorded drag stroke. Tool selection or clicks "
+                    "are not enough evidence that visible drawing occurred."
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[done check failed] {reason} Use drag on the canvas/work surface, "
+                        "observe the result, then save/verify before done."
+                    ),
+                })
+                return False
+            if image_paths and missing_paths:
+                reason = (
+                    "Drawing/canvas task requested output image file(s), but they do not exist: "
+                    + ", ".join(missing_paths[:3])
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[done check failed] {reason}. Save through the GUI, handle any "
+                        "Save As/replace dialog, then verify file_exists before done."
+                    ),
+                })
+                return False
+            if image_paths and required_colors:
+                missing_colors: dict[str, list[str]] = {}
+                for path in image_paths:
+                    try:
+                        stats = vision_cv.image_color_stats(path)
+                    except Exception as exc:
+                        stats = {"path": path, "error": str(exc)}
+                    colors = stats.get("colors", {}) if isinstance(stats, dict) else {}
+                    for color in required_colors:
+                        if not colors.get(color, {}).get("visible"):
+                            missing_colors.setdefault(path, []).append(color)
+                if missing_colors:
+                    reason = (
+                        "Drawing/canvas task requested specific colors, but the saved image lacks "
+                        "visible color evidence: "
+                        + "; ".join(
+                            f"{Path(path).name}: {', '.join(colors)}"
+                            for path, colors in list(missing_colors.items())[:3]
+                        )
+                    )
+                    BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                    self._done_rejects += 1
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[done check failed] {reason}. Use the drawing app's visible color "
+                            "controls to select the requested colors, add visible strokes/shapes "
+                            "in those colors, save again, and verify before done."
+                        ),
+                    })
+                    return False
+            if not saw_visual_change:
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "[drawing evidence warning] A drag occurred, but recent evidence does not "
+                        "show visual_change_detected=true. Before done, observe or add another "
+                        "visible stroke inside the canvas and verify the saved image exists."
+                    ),
+                })
+        if _is_gui_search_task(self.task):
+            payloads = _gui_search_payloads(self.task)
+            missing = [
+                payload for payload in payloads
+                if payload.casefold() not in screen.casefold()
+            ]
+            if missing:
+                reason = (
+                    "GUI search/navigation task lacks final on-screen evidence. "
+                    "The target search text/page is not visible in the current app window: "
+                    + ", ".join(missing[:3])
+                    + ". Local files, installed-game manifests, or shell output cannot replace "
+                    "opening the requested app/client and searching inside its GUI."
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[done check failed] {reason} Open/focus the requested app, use its "
+                        "visible search field or page navigation, then observe/read_text until "
+                        "the target text is visible before done."
+                    ),
+                })
+                return False
+        if _is_communication_task(self.task):
+            payloads = _quoted_payloads(self.task)
+            if payloads and not any(payload in screen for payload in payloads):
+                reason = (
+                    "通信任务缺少最终可见证据：目标窗口当前画面没有出现要发送的消息文本，"
+                    "不能把 click/type_text/hotkey 的 ok 当成发送成功"
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[完成核验未通过] {reason}。请先打开目标会话/输入区，"
+                        "发送后重新 observe 或 read_text，确认消息出现在目标会话中再 done。"
+                    ),
+                })
+                logger.info("done 被快速核验拒绝(通信任务): %s", reason)
+                return False
         api = CONFIG.get("api", default={})
         judge_model = (CONFIG.get("agent", "escalation_model", default="")
                        or api.get("done_judge_model") or api.get("model", "deepseek-v4-flash"))
@@ -403,6 +957,11 @@ class AgentRunner:
             "重要：文件/文件夹/进程/命令类任务，以【确定性证据】(run_shell 输出、Test-Path/Exists 结果、"
             "verified 字段)为准——这类结果在桌面/后台,GUI 界面上【本来就看不到】,"
             "**绝不能因为‘最终界面没显示’就判未完成**。只有可视交互(网页填表/界面内容)才看界面。"
+            "同理，窗口清点/状态检查类任务应优先相信 list_windows、scan_windows、read_text 的真实工具输出；"
+            "scan_windows 可能会恢复原前台窗口，所以不能仅因当前前台不是目标窗口就判失败。"
+            "对发消息/发送聊天/邮件/评论等对外通信任务，click/type_text/hotkey 的 ok 或 verified "
+            "只证明动作执行，不证明消息已送达；必须有目标会话/收件上下文中的最终可见证据"
+            "（例如聊天记录出现要发送的文本、输入框清空并记录出现、或应用明确发送成功状态）才可判 done。"
             '只输出 JSON: {"done": true/false, "reason": "简短中文理由"}。')
         user_p = (
             f"用户任务：{self.task}\n\n"
@@ -410,20 +969,46 @@ class AgentRunner:
             f"已执行动作(最近)：{recent}\n\n"
             f"确定性证据(工具真实输出/验证结果)：\n{evidence}\n\n"
             f"当前前台界面元素(仅供参考,文件/进程类勿据此判负)：\n{screen[:1000]}")
+        self._trace_debug("done_check_request", {
+            "run_id": self.run_id,
+            "model": judge_model,
+            "messages": [
+                {"role": "system", "content": sys_p},
+                {"role": "user", "content": user_p},
+            ],
+        })
         try:
             resp = client.chat.completions.create(
                 model=judge_model,
                 messages=[{"role": "system", "content": sys_p},
                           {"role": "user", "content": user_p}],
-                temperature=0.0, max_tokens=400,
+                temperature=0.0, max_tokens=800,
             )
+            self._trace_debug("done_check_response", {
+                "run_id": self.run_id,
+                "model": judge_model,
+                "response": resp,
+            })
             raw = resp.choices[0].message.content or ""
             m = re.search(r"\{.*\}", raw, re.DOTALL)
-            verdict = json.loads(m.group(0)) if m else {}
-            is_done = bool(verdict.get("done", True))  # unparseable → accept
-            reason = str(verdict.get("reason", ""))[:200]
+            if not m:
+                is_done = False
+                reason = "完成核验未返回可解析 JSON，不能接受为完成"
+            else:
+                try:
+                    verdict = json.loads(m.group(0))
+                    is_done = bool(verdict.get("done", False))
+                    reason = str(verdict.get("reason", ""))[:200]
+                except json.JSONDecodeError:
+                    is_done = False
+                    reason = "完成核验返回的 JSON 损坏，不能接受为完成"
         except Exception as exc:  # fail-open — never deadlock on judge errors
             logger.warning("done 核验调用失败，放行: %s", exc)
+            self._trace_debug("done_check_error", {
+                "run_id": self.run_id,
+                "model": judge_model,
+                "error": str(exc),
+            })
             return True
 
         BUS.publish("done_check", run_id=self.run_id, passed=is_done, reason=reason)
@@ -463,6 +1048,12 @@ class AgentRunner:
         if not self.session.world_enabled:
             return
         BUS.publish("world", run_id=self.run_id, **self.session.world.state())
+        visual_note = self.session.take_visual_advisory()
+        if visual_note:
+            self.messages.append({
+                "role": "user",
+                "content": f"[visual state warning] {visual_note}",
+            })
         note = self.session.world.advisory()
         if note:
             self.messages.append({"role": "user", "content": f"[系统观察] {note}"})
@@ -525,14 +1116,70 @@ class AgentRunner:
         system = prompts.system_prompt(
             experience_hints=hints, vlm_enabled=vlm.is_configured(),
             planning_enabled=plan_on,
-            playbook_text=playbooks.render_section(matched_books))
+            playbook_text=playbooks.render_section(matched_books),
+            style=str(CONFIG.get("agent", "prompt_style", default="full")))
         self.messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},
         ]
+        if _is_communication_task(self.task):
+            payloads = _quoted_payloads(self.task)
+            wants_decor = any(k in (self.task or "").lower() for k in (
+                "表情", "emoji", "sticker", "表情包", "贴纸", "emoticon",
+            ))
+            if payloads:
+                core = payloads[0][:80]
+                extra = "如果能清楚看到表情/贴纸入口，再额外尝试一次装饰。" if wants_decor else ""
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[通信任务提示] 先把要发送的正文 '{core}' 真正送达并重新 observe/read_text 验证。"
+                        "如果界面里正文已经出现在输入框，就优先完成发送，不要为了装饰项在发送区附近反复试探模糊图标。"
+                        f"{extra}"
+                    ),
+                })
         # Session continuity: let referential follow-ups ("再来一次" etc.) resolve
         # against prior tasks this session. Injected right after the task so it's
         # in the cache-friendly prefix; gated by config.
+        if _is_drawing_task(self.task):
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "[Drawing/canvas task guidance] The goal is visible pixels, not just tool selection. "
+                    "Use observe to locate the canvas/work surface, then use drag strokes inside that "
+                    "surface. After each drag, read the tool result: visual_change_detected=true means "
+                    "the stroke likely changed the visible surface; false means you probably dragged on "
+                    "a toolbar, popup, inactive surface, or with a non-drawing mode. If a popup, color "
+                    "panel, or text toolbar blocks the canvas, press Esc or click back on the canvas and "
+                    "continue. Do not call done until the drawing is visibly non-empty and any requested "
+                    "output image file has been saved and verified to exist. If the user requested "
+                    "specific colors, select those colors in the GUI and verify the saved image has "
+                    "visible pixels in those colors before done."
+                ),
+            })
+        if _is_upload_publish_task(self.task):
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "[Upload/publish task guidance] Treat the media path as a file to select in an "
+                    "upload form, not content to play or analyze. Start by observing/focusing the "
+                    "target app or creator/upload page. Use upload/post/publish-entry UI, choose the "
+                    "file in the file picker, fill requested title/metadata, and stop before final "
+                    "publish when requested. If login, QR, face, or phone verification blocks the "
+                    "flow, report that exact blocker."
+                ),
+            })
+        if _is_gui_only_task(self.task):
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    "[GUI-only task guidance] The user explicitly asked for visible GUI operation. "
+                    "Do not use shell/search_files/run_detached/read_file/write_file to perform or "
+                    "prepare the work. Use list_windows/find_app/find_program/launch/focus_window/"
+                    "observe/click/type_text/hotkey/drag/scroll. Shell is only for final read-only "
+                    "verification such as Test-Path/Get-Content/Select-String after the GUI work."
+                ),
+            })
         if self.session_context and CONFIG.get("agent", "session_memory", default=True):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
@@ -579,10 +1226,15 @@ class AgentRunner:
                     # Plain-text reply — the final answer. Emit it ONCE via the
                     # chat event (carrying any reasoning). The step event stays
                     # content-less so the chat pane doesn't show it twice.
-                    self.status = "reply"
                     self.result_text = msg.content or ""
                     BUS.publish("agent_step", run_id=self.run_id, step=step,
                                 reasoning="", content="", n_tool_calls=0)
+                    if self._recent_results:
+                        if not self._verify_done(client, steps_left=max_steps - step):
+                            continue
+                        self.status = "done"
+                    else:
+                        self.status = "reply"
                     BUS.publish("chat", run_id=self.run_id, role="assistant",
                                 content=self.result_text, reasoning=reasoning[:800])
                     break
