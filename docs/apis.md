@@ -1,76 +1,130 @@
 # 接口与协议
 
-> 三个服务/端口，加 Electron IPC、HTTP API、WinPilot REST、三个 MCP 入口。
+项目有四类接口：Electron HTTP API、WinPilot REST、Electron IPC、MCP。
 
-## 1. 服务与端口一览
+## Electron HTTP API
 
-```mermaid
-flowchart TB
-    cc(["Claude Code / 外部 curl"]) -- ":7880 HTTP API" --> api
-    subgraph electron[Electron]
-        api["HTTP API :7880<br/>src/main/api.ts (54+ 端点 + /mcp)"]
-        rend["渲染器 (React)"]
-        main["主进程"]
-    end
-    rend -- "fetch / iframe" --> wp["WinPilot FastAPI :动态端口<br/>winpilot/server.py"]
-    ide(["MCP 客户端"]) -- "stdio" --> pmcp["Python MCP<br/>python/mcp/server.py"]
-    ide -- "stdio" --> tmcp["TS MCP<br/>npm run ai:mcp (5 工具)"]
-    cc -- ":7880/mcp" --> hmcp["HTTP MCP 端点"]
-    pmcp --> feats["@feature 注册表 (254)"]
-    api --> feats
-```
+实现：`src/main/api.ts`。默认监听 `127.0.0.1:7880`，可由 `API_PORT` 覆盖。
 
-| 服务 | 端口/通道 | 用途 |
+主要端点按当前代码：
+
+| 端点 | 方法 | 说明 |
 |---|---|---|
-| HTTP API | `:7880`（`API_PORT` 可覆盖） | Claude Code 远程实时控制前端 + `/mcp` |
-| WinPilot FastAPI | 动态端口（仅 127.0.0.1，CORS 全开） | agent 聊天/状态/trace/脚本/重放/录制 + WS 事件流 |
-| Python MCP | stdio JSON-RPC | 由 254 @feature 动态生成 MCP 工具 |
-| TS MCP | stdio | 5 工具（run_flow/list_flows/create_flow/ask_ai/screen_capture） |
-| Agent IPC | stdin/stdout JSON | 主进程 ↔ WinPilot agent 子进程 |
-| 引擎 IPC | stdin/stdout JSON | 主进程 ↔ 流程图执行引擎 |
+| `/api/ping` | GET/POST | 健康检查 |
+| `/api/get-state` | GET/POST | 读取渲染器状态 |
+| `/api/set-view-mode` | GET/POST | 切换视图 |
+| `/api/fit-screen` | GET/POST | 画布自适应 |
+| `/api/execute-js` | GET/POST | 在前端执行 JS |
+| `/api/load-script` | POST | 加载 FlowScript |
+| `/api/add-node` | POST | 添加节点 |
+| `/api/update-node` | POST | 更新节点 |
+| `/api/update-node-params` | POST | 更新节点参数 |
+| `/api/delete-nodes` | POST | 删除节点 |
+| `/api/add-edge` | POST | 添加连线 |
+| `/api/delete-edges` | POST | 删除连线 |
+| `/api/check-params` | POST | 检查缺失参数 |
+| `/api/auto-layout` | POST | 自动布局 |
+| `/api/run-dsl` | POST | DSL 转流程图 |
+| `/api/generate-dsl` | POST | 自然语言生成 DSL |
+| `/api/create-flow` | POST | DSL/自然语言创建流程 |
+| `/api/engine/start` | POST | 启动流程图执行 |
+| `/api/engine/pause` | POST | 暂停执行 |
+| `/api/engine/resume` | POST | 恢复执行 |
+| `/api/screenshot/capture` | POST | 截屏 |
+| `/api/screenshot/select-region` | POST | 选择区域 |
+| `/api/ocr/region` | POST | OCR 指定区域 |
+| `/api/wheel-select` | POST | 滚轮选择器 |
+| `/api/macro/start-recording` | POST | 普通宏录制开始 |
+| `/api/macro/stop-recording` | POST | 普通宏录制停止 |
+| `/api/macro/play` | POST | 播放宏 |
+| `/api/macro/list` | POST | 列宏 |
+| `/api/macro/delete` | POST | 删除宏 |
+| `/api/macro/get-events` | POST | 读取宏事件 |
+| `/api/macro/recording-status` | POST | 宏录制状态 |
+| `/api/features/list` | POST | 列 @feature |
+| `/api/features/reload` | POST | 重新加载 @feature |
+| `/api/features/call` | POST | 调用 @feature |
+| `/api/ai/generate` | POST | 前端/旧体系 LLM 调用 |
+| `/api/set-ui` | POST | 更新 UI 状态 |
+| `/api/command` | POST | 批量前端命令 |
+| `/api/new-script` | POST | 新建脚本 |
+| `/api/save-script` | POST | 保存脚本 |
+| `/api/set-script-name` | POST | 设置脚本名 |
+| `/api/save-template` | POST | 保存模板 |
+| `/api/list-templates` | POST | 列模板 |
+| `/api/search-templates` | POST | 搜模板 |
+| `/api/marks/save` | POST | 保存标记 |
+| `/api/marks/load` | POST | 读取标记 |
+| `/api/undo`、`/api/redo` | POST | 撤销/重做 |
+| `/api/select-all`、`/api/clear-selection`、`/api/copy-selected`、`/api/cut-selected`、`/api/paste`、`/api/duplicate-nodes` | POST | 画布编辑命令 |
+| `/api/agent-start` | POST | 通过旧 IPC 路径启动 Agent |
+| `/mcp` | POST | HTTP MCP JSON-RPC |
 
-## 2. HTTP API `:7880`（节选，`src/main/api.ts`）
+这组端点主要用于控制 React 流程图编辑器，不等同于 WinPilot REST。
 
-供外部（如 Claude Code）curl 实时操控前端画布：
+## WinPilot REST
 
-| 端点 | 用途 |
-|---|---|
-| `POST /api/ping` | 健康检查 |
-| `POST /api/load-script` | 加载完整流程图 |
-| `POST /api/run-dsl` | DSL 文本 → 流程图 |
-| `POST /api/add-node` / `update-node` / `delete-nodes` | 节点增改删 |
-| `POST /api/add-edge` / `delete-edges` / `auto-layout` | 连线/排版 |
-| `POST /api/create-flow` | DSL/自然语言 → 流程图（含参数检查） |
-| `POST /api/engine/start` / `pause` / `resume` | 执行引擎控制 |
-| `POST /api/macro/*` | 宏录制启停/列表/播放（F6） |
-| `POST /api/agent-start` | 启动 AI Agent |
-| `POST /api/features/{list,reload,call}` | @feature 自省/调用 |
-| `POST /mcp` | MCP over HTTP（JSON-RPC，首启自动注册到 `~/.claude.json`） |
+实现：`python/winpilot_home/winpilot/server.py`。Electron 会以本地动态端口启动它，前端 Agent 面板通过 iframe 和 REST 使用。
 
-完整端点见 `src/main/api.ts` 的 `switch (url.pathname)`。
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/chat` | POST | 启动 WinPilot 任务 |
+| `/api/stop` | POST | 停止当前任务 |
+| `/api/interject` | POST | 向运行中的任务插话/纠正 |
+| `/api/status` | GET | 当前运行状态 |
+| `/api/elevate` | POST | 以管理员权限重启/提升 |
+| `/api/config` | GET/PATCH | 读取/更新配置 |
+| `/api/traces` | GET | 列 trace |
+| `/api/trace/{run_id}` | GET | 读取 trace JSONL |
+| `/api/trace/{run_id}/shot/{name}` | GET | 读取 trace 截图 |
+| `/api/export/{run_id}` | POST | trace 导出 `.wps.json` |
+| `/api/scripts` | GET | 列 `.wps.json` 脚本 |
+| `/api/script/{file}` | GET/PUT | 读写脚本 |
+| `/api/human/start` | POST | 开始人类演示录制 |
+| `/api/human/stop` | POST | 停止人类演示录制 |
+| `/api/human/status` | GET | 人类演示录制状态 |
+| `/api/replay` | POST | 离线 replay `.wps.json` |
+| `/api/memory` | GET/POST/DELETE | 列/增/清记忆 |
+| `/api/memory/{recipe_id}` | PUT/DELETE | 更新/删除单条记忆 |
+| `/api/session` | GET/DELETE | 列/清会话上下文 |
+| `/ws/events` | WebSocket | WinPilot BUS 事件流 |
+| `/` | GET | webui 首页 |
 
-## 3. WinPilot REST（`python/winpilot_home/winpilot/server.py`）
+## Agent IPC
 
-渲染器 Agent 面板 + 「导入/录制」hub 调用（CORS 全开，因仅绑 127.0.0.1）：
+实现：`python/agent/__main__.py`。
 
-| 端点 | 用途 |
-|---|---|
-| `POST /api/chat` / `stop` / `interject` | 启动任务 / 停止 / 实时插话 |
-| `GET /api/status` / `config`，`PATCH /api/config` | 运行状态 / 配置读写 |
-| `GET /api/traces` / `trace/{run_id}` / `trace/{id}/shot/{name}` | 列出/读取 trace + 截图 |
-| `POST /api/export/{run_id}` | trace → `.wps.json` |
-| `GET /api/scripts`，`GET/PUT /api/script/{file}` | 列出/读写 `.wps.json`（PUT 带 schema 校验） |
-| `POST /api/replay` | 离线 0-token 重放 `.wps.json` |
-| `POST /api/human/{start,stop,status}` | 人类演示录制器 |
-| `GET/POST/PUT/DELETE /api/memory`，`/api/session` | 经验记忆 / 会话上下文 |
-| `WS /ws/events` | 实时 BUS 事件流（agent_start/step/tool/usage/chat/replay…） |
+stdin 命令：
 
-## 4. MCP 三入口
+- `start`
+- `stop`
+- `guidance`
+- `chat`
+- `status`
 
-1. **Python MCP（主）** `python python/mcp/server.py`：由 @feature 注册表动态生成工具（过滤 hidden/deprecated），覆盖交互/感知/控制流/AI规划/宏/系统/调试 7 类。
-2. **TS MCP（桥接）** `npm run ai:mcp`：5 个工具用于前端集成与文件管理。
-3. **HTTP MCP** `POST :7880/mcp`：标准 MCP JSON-RPC，首次启动自动注册到 `~/.claude.json`。
+stdout 事件来自 WinPilot BUS，常见包括：
 
-## 5. Electron IPC
+- `agent_start`
+- `agent_step`
+- `agent_tool`
+- `agent_usage`
+- `agent_plan`
+- `chat`
+- `done_check`
+- `agent_recovery`
+- `playbook`
+- `world`
+- `agent_error`
+- `agent_done`
 
-`preload.ts`（contextBridge 暴露）→ `main.ts`（handler）→ Python 子进程。WinPilot 相关：`winpilot:url`（iframe 地址）、`winpilot:ensure`（确保/重启服务 + 返回错误详情）、`agent:*`（start/stop/guidance/chat/status）。所有 Python 子进程经 `spawnPython()` 强制 `PYTHONIOENCODING=utf-8`。
+## MCP
+
+当前有三种 MCP 入口：
+
+| 入口 | 代码 | 说明 |
+|---|---|---|
+| Python MCP | `python/mcp/server.py` | 从 @feature 注册表导出工具 |
+| TypeScript MCP | `src/ai-interface/`，脚本 `npm run ai:mcp` | `run_flow/list_flows/create_flow/ask_ai/screen_capture` |
+| HTTP MCP | `src/main/api.ts` 的 `/mcp` | 通过 Electron HTTP API 暴露 |
+
+MCP 服务的是流程图/@feature/外部集成，不是 WinPilot 主 GUI agent 的工具表。
