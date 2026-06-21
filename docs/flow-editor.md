@@ -34,7 +34,7 @@
 - 摄像头：`camera_capture`、`camera_record`
 - 扩展：`popup_close`、`tool_call`
 
-文档里不要再把历史节点数量写成精确值；代码当前 `NodeType` 是约 50 个，`nodeDefinitions.ts` 是实际来源。
+当前 `NodeType` 为 54 个；`src/renderer/types/index.ts` 和 `utils/nodeDefinitions.ts` 是实际来源。
 
 ## FlowScript 与 DSL
 
