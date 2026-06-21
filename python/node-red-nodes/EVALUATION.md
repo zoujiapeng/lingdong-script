@@ -1,81 +1,28 @@
-# Node-RED 集成评估报告
+# Node-RED 集成评估
 
-## 基本信息
-- **评估日期**: 2026-05-16
-- **Node-RED 版本**: 4.1.10
-- **目标**: 评估用 Node-RED 替换 React Flow 前端画布的可行性
+## 结论
 
-## 测试结果
+当前不使用 Node-RED 替换主流程图画布。`python/node-red-nodes/` 保留为实验/PoC，`package.json` 仍通过 `file:python/node-red-nodes/lobster` 引用本地节点包。
 
-| 项目 | 状态 | 备注 |
-|------|------|------|
-| npm install node-red | ✅ | 233 个依赖包, 无冲突 |
-| 启动/停止 | ✅ | 内嵌 Express HTTP 服务器 |
-| Admin UI 加载 | ✅ | http://localhost:1880/admin |
-| HTTP API 通信 | ✅ | 可通过 :5877 调用 lobster 后端 |
-| 自定义节点创建 | ✅ | lobster-click / lobster-type / lobster-run-dsl 3 个节点 |
-| Electron 嵌入 | ⚠️ | 技术上可行（webview/iframe），但需要处理端口冲突和 CSP |
-| 完整节点迁移 | ❌ | 127 个自定义节点需逐一重写为 Node-RED 格式 |
+## 当前 PoC 内容
 
-## 评估细节
+目录 `python/node-red-nodes/lobster/` 包含 3 个自定义节点：
 
-### 1. Node-RED 启动测试
-- 内嵌模式通过 `RED.init()` + `RED.start()` 正常启停
-- 提供 Admin UI（httpAdminRoot）和 HTTP API（httpNodeRoot）两个挂载点
-- 日志级别可配置（warn/info/debug/trace）
+- `lobster-click`
+- `lobster-type`
+- `lobster-run-dsl`
 
-### 2. 自定义节点测试
-创建了 3 个 PoC 节点：
-- `lobster-click` — 屏幕坐标点击，调用 `POST /api/features/call {name: "click_target", params: {x, y}}`
-- `lobster-type` — 键盘输入，调用 `POST /api/features/call {name: "type_text", params: {text}}`
-- `lobster-run-dsl` — DSL 脚本执行，调用 `POST /api/features/call {name: "run_dsl", params: {dsl}}`
+这些节点的设计意图是通过 HTTP 调用本项目后端能力。当前项目主 HTTP API 是 Electron 的 `127.0.0.1:7880`，实际可用端点以 `src/main/api.ts` 为准，旧评估中提到的 `:5877` 不再作为当前事实使用。
 
-所有节点通过 Node-RED 的 npm 模块发现机制加载（`node-red-contrib-lobster`）。
+## 为什么不替换 React 画布
 
-### 3. 与现有后端通信测试
-- Node-RED 自定义节点通过 `http.request` 调用 `127.0.0.1:5877/api/features/call`
-- 响应正常解析为 `msg.payload` 传递给下游节点
-- 支持异步非阻塞执行
+- React 画布已经和 FlowScript、属性面板、模板、快捷键、执行状态、导入录制深度绑定。
+- Node-RED 的 flow 格式和当前 FlowScript 不同，完整迁移成本高。
+- 桌面 GUI 自动化需要区域拾取、OCR、窗口/进程、Agent IPC、录制导入等专用交互，Node-RED 需要大量定制。
+- 当前目标是提升 WinPilot 通用桌面操控能力，而不是更换画布框架。
 
-### 4. Electron 集成可行性
-**可行方案**：
-- 在 Electron 中启动内嵌 Node-RED 服务器（同进程或子进程）
-- 通过 `<webview>` 或 `<iframe>` 嵌入 Admin UI
-- 通过 Electron IPC 或直接 HTTP 调用与 Node-RED 通信
+## 可保留用途
 
-**风险**：
-- 端口冲突（现有 :5877 + Node-RED :1880）
-- CSP 限制（生产模式从 file:// 加载，跨域访问 localhost:1880 可能被阻止）
-- 双 HTTP 服务器增加内存消耗
-- Node-RED 的 flow 格式与现有 FlowScript 格式不同
-- 需要维护两套节点定义（React + Node-RED）或实现完整迁移
-
-## 结论与建议
-
-### 不建议将 React Flow 替换为 Node-RED
-
-1. **成本 vs 收益不成比例**：
-   - 需重写 127 个自定义节点为 Node-RED 格式
-   - 需重写属性面板、节点库、参数编辑器等所有前端组件
-   - 现有代码（nodeDefinitions.ts, PropertyPanel/*.tsx, FlowNode.tsx）完全废弃
-
-2. **架构不匹配**：
-   - Node-RED 是为 IoT/设备自动化设计的（MQTT, HTTP, GPIO），而非桌面 GUI 自动化
-   - 当前系统关键特性（OCR 区域拾取、滚轮选择器、宏录制、AI Agent IPC）没有 Node-RED 对应物
-   - 这些特性需要大量自定义 Node-RED 插件开发
-
-3. **运行模式冲突**：
-   - Node-RED 是持久化服务器，当前系统是桌面应用按需启动
-   - 生产模式（file://）下嵌入外部 HTTP 服务有 CSP 问题
-   - Node-RED 的流程部署机制（deploy button）与现有直接执行模式不同
-
-### Node-RED 的潜在用途
-
-Node-RED 更适合作为**外部编排工具**，而非替换前端画布：
-- 用户可以通过 Node-RED 编排复杂的跨应用自动化流程
-- 将 lobster 暴露为 Node-RED 的子流程/函数节点
-- 与 Home Assistant、智能家居等 IoT 系统集成
-
-### 最终决定
-Phase 4 结论：**保留 React Flow，不做 Node-RED 迁移**。
-将本项目维持在 `claude/` 目录中，作为评估参考。
+- 作为外部编排实验。
+- 作为 Node-RED 用户接入本项目能力的参考。
+- 未来若需要 IoT/HTTP/MQTT 生态集成，可单独完善，不影响主流程图编辑器。

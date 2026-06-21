@@ -1,93 +1,133 @@
-# WinPilot AI Agent
+# WinPilot Agent
 
-> 现役 AI Agent，位于 `python/winpilot_home/winpilot/`。取代了已删除的旧 LingdongAgent。
-> 入口：`python/agent/__main__.py`（IPC 适配器）→ `winpilot/agent/router.py` → `AgentRunner`（GUI 操控）或 `CodingRunner`（编程）。
+WinPilot 是当前桌面 Agent 主体，位于 `python/winpilot_home/winpilot/`。
 
-## 1. 设计原则
+## 入口
 
-- **精简优先**：主 agent 只有 ~22 个 function-calling 工具，**不挂 254 @feature、不感知流程图格式**。工具表越稳定，DeepSeek 的 prefix cache 命中越高、越省钱。
-- **确定性优先**：能用 `run_shell`（PowerShell）确定性完成的（文件/进程/命令/查询），不走 GUI。
-- **每步验证**：每个动作可带 `expect` 验证条件，执行后轮询校验 + 失败重试；`done` 由独立怀疑型 judge 二次核验，防"假完成"。
-- **专长拆分子 agent**：编程能力是独立的 `CodingRunner`（自带文件/仓库工具）；GUI agent 主路径零改动。未来其它专长同理另开子 agent。
-
-## 2. 路由
-
-```mermaid
-flowchart TB
-    task(["任务 goal"]) --> router{"_is_coding_task?<br/>(loop.py 意图识别)"}
-    router -- "做/写/开发 X游戏/网页/程序<br/>调试/重构/仓库/git/bug…" --> coding["CodingRunner<br/>agent/coding.py"]
-    router -- "打开/玩/启动 X · 其它桌面任务" --> gui["AgentRunner<br/>agent/loop.py"]
-    coding --> ctools["文件/仓库工具<br/>agent/coding_tools.py<br/>read/write/apply_patch/list/search/run_shell"]
-    gui --> gtools["~22 GUI 工具<br/>agent/tools.py"]
-```
-
-`router.build_runner(task)`（`agent/router.py`）按 `_is_coding_task` 选择。意图识别是**正则化**的：句首"打开/启动/玩/运行"→ 一律 GUI；命中强编程词或"(做|写|开发…)…(游戏|网页|程序|应用…)"→ 编程子 agent。
-
-## 3. GUI Agent 执行循环（AgentRunner）
-
-```mermaid
-sequenceDiagram
-    participant L as AgentRunner.run (loop.py)
-    participant LLM as DeepSeek (function-calling)
-    participant T as ToolSession (tools.py)
-    participant P as perception/fusion.py
-    participant V as action/verify.py
-
-    L->>L: 系统提示 + 任务 + (命中的 playbook/经验笔记)
-    loop 每步 (≤ max_steps)
-        L->>L: 注入用户实时插话(若有)
-        L->>LLM: messages + tools  (子线程调用，可被 Stop 立刻放弃)
-        LLM-->>L: 工具调用 或 纯文本回复
-        alt 纯文本
-            L->>L: status=reply，结束 (chat 事件)
-        else 工具调用
-            L->>T: dispatch(tool, args)
-            T->>P: observe (UIA+OCR+CV+VLM 融合) / 定位 element_id
-            T->>V: 执行动作 → run_with_verify(expect)  (轮询校验+重试，Stop 可中断)
-            T-->>L: 结果 + replay 选择器(供录制)
-            opt tool == done
-                L->>V: done-gate：重新感知真实屏幕 + 怀疑型 judge 核验
-            end
-        end
-    end
-    L->>L: 成功且非编程 → 导出 .wps.json + 记经验
-```
-
-### 关键工具（`agent/tools.py`，约 22 个 + 条件性）
-
-`list_windows · observe · focus_window · find_app · find_program · tray_click · launch · click · type_text · hotkey · scroll · drag · wait · read_text · find_image · capture_template · color_probe · undo_last · search_files · done · fail`，条件启用：`run_shell`/`run_detached`（shell 开启时）、`revise_plan`/`complete_subgoal`（planning）、`remember`/`forget`/`reuse_skill`（经验）、`vlm_describe`（配置 VLM 时）。
-
-- **优先 `element_id`**：`observe` 返回带 id 的元素，`click(element_id=…)` 走 UIA 快路径，比裸坐标稳。
-- **`expect` 验证 DSL**（`action/verify.py`）：`text_appears/text_gone/window_appears/window_gone/screen_stable/color_match` + 确定性 ground-truth `file_exists/file_contains/process_running/process_gone/shell_true`。
-- **Stop 响应**：LLM 调用在子线程，Stop 时立即放弃；`verify` 的轮询/重试也响应 `stop_event`——所以"停止"很快（仅已在执行中的工具会先跑完）。
-
-## 4. 多维感知融合（`perception/fusion.py`）
-
-`observe(hwnd)` 按优先级跑启用的维度，合并去重，给每个元素分配稳定的 `element_id`：
-
-| 维度 | 来源 | 说明 |
+| 入口 | 代码 | 说明 |
 |---|---|---|
-| `uia` | Windows UIA 控件树 | 最可靠，带状态 |
-| `win32` | Win32/Explorer | 控件 + 资源管理器项 |
-| `ocr` | OCR 文字识别 | UIA 已很丰富时可跳过（省时） |
-| `cv` | OpenCV 图标候选 | 无文字图标 |
-| `vlm` | 多模态视觉（可选） | canvas/游戏/视频等结构化感知为空时兜底 |
+| 前端 Agent 页面 | `src/renderer/components/AgentView.tsx` + `winpilot_home/webui/` | iframe 打开 WinPilot webui |
+| FastAPI | `winpilot/server.py` | `/api/chat` 启动任务，`/ws/events` 推送日志 |
+| Electron IPC | `python/agent/__main__.py` | stdin/stdout JSON，路由到 WinPilot runner |
+| 路由 | `winpilot/agent/router.py` | 根据任务选择 `AgentRunner` 或 `CodingRunner` |
 
-空快照时有"升级阶梯"（窗口 OCR → 全屏 OCR → VLM）兜底，绝不把空屏交给模型。
+## 配置
 
-## 5. 编程子 agent（CodingRunner）
+默认配置在 `winpilot/config.py`，运行时写入 `python/winpilot_home/config.json`。
 
-`agent/coding.py` + `agent/coding_tools.py`：独立循环 + 独立工具集，**不碰 GUI 工具**。
+重要配置：
 
-- 工具：`read_file · write_file · apply_patch(唯一查找替换) · list_dir · search_text · run_shell · done · fail`，全部限定在**工作区根**（`config.coding.workspace`，默认用户主目录）。
-- 复用 `loop.py` 的 LLM 客户端/用量统计/同款 stop-aware 子线程调用；发同样的 BUS 事件（webui 显示"🧑‍💻 编程子agent"）。
-- **编程任务排除动作复用**：不导出 `.wps.json`、不存可复用 skill；但保留**事实笔记**（`remember` 的项目约定），下次同项目更快。
+| 配置 | 含义 |
+|---|---|
+| `api.base_url/api_key/model` | OpenAI 兼容文本模型，默认 DeepSeek API 和 `deepseek-v4-flash` |
+| `vlm.*` | 可选视觉模型配置，默认关闭 |
+| `perception.uia/win32/ocr/cv/vlm` | 感知维度开关和优先级 |
+| `fusion.escalate_on_empty` | 空感知时逐级兜底 |
+| `fusion.ocr_skip_when_uia_rich` | UIA 信息充足时跳过 OCR 节省时间 |
+| `agent.max_steps` | 主循环最大步数 |
+| `agent.shell_enabled` | 是否暴露 shell 工具 |
+| `agent.world_model` | 是否注入世界状态/卡住提示 |
+| `agent.planning_enabled` | 是否启用计划工具 |
+| `agent.playbooks_enabled` | 是否按任务/窗口注入 playbook |
+| `agent.verify_done` | 是否让 done 经过怀疑型二次验证 |
+| `agent.llm_trace` | 是否保存每轮 LLM forensic trace |
+| `coding.enabled/workspace/max_steps` | 编程子 agent 开关、工作区、最大步数 |
 
-## 6. 记忆与 playbook
+`config.example.json` 只是示例；若字段少于 `config.py`，以 `config.py` 默认值为准。
 
-- **经验记忆** `memory/experience.py`：成功流程→可复用 skill（导出 `.wps.json` 供 `reuse_skill` 0-token 重放）；手动事实笔记（`remember`）跨任务注入且不被淘汰。编程任务只用笔记、不用动作复用。
-- **Playbook** `agent/playbooks.py` + `playbooks/*.json`：按任务关键词或运行时窗口标题注入的"情境攻略"（如另存为对话框必胜法、编程工作流），**以数据形式存在、加一个 JSON 即可，不增加任何工具**。
+## GUI Agent 循环
 
-## 7. IPC 协议（`python/agent/__main__.py`）
+`AgentRunner` 在 `agent/loop.py`：
 
-stdin/stdout JSON 行。命令：`start / stop / guidance / chat / status`。事件：WinPilot 原生 BUS（`agent_start / agent_step / agent_tool / agent_usage / agent_plan / chat / done_check / agent_recovery / playbook / world / agent_error / agent_done`），由适配器逐行转发给 Electron 渲染器。
+1. 构造系统提示词、任务、记忆、playbook、世界状态。
+2. 调用 OpenAI 兼容 chat completions function-calling。
+3. 接收工具调用并交给 `ToolSession`。
+4. 动作工具通过 `action/verify.py` 执行 expect 校验和重试。
+5. `done` 不是直接相信模型，而是重新观察屏幕并按任务类型做二次判断。
+6. 成功后可导出 trace/`.wps.json`，并写入经验/事实笔记。
+
+当前代码对多类假成功有额外防护：
+
+- 绘图任务要求真实拖拽、保存文件存在、必要颜色在保存图里出现。
+- 通信任务要求用户指定的引号内容在目标界面可见。
+- GUI 搜索/商店搜索要求最终屏幕证据。
+- 上传/发布任务会阻止用媒体播放/分析冒充发布。
+- GUI-only 任务会阻止 agent 用 shell/file 快捷方式绕过前端路径。
+
+## 工具集
+
+主 GUI 工具由 `agent/tools.py` 定义。核心工具包括：
+
+`list_windows`、`scan_windows`、`observe`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`done`、`fail`。
+
+按配置/任务可额外启用：
+
+- `run_shell`、`run_detached`
+- `revise_plan`、`complete_subgoal`
+- `remember`、`forget`、`reuse_skill`
+- `vlm_describe`
+
+注意：这些是 WinPilot 的 LLM 工具，不是 `python/features/` 的 @feature。
+
+## 感知
+
+`perception/fusion.py` 融合多种维度：
+
+| 维度 | 代码 | 作用 |
+|---|---|---|
+| UIA | `perception/uia.py` | 控件树、可点击控件、名称/角色 |
+| Win32 | `perception/win32.py` | 窗口、标题、进程等桌面信息 |
+| OCR | `perception/ocr.py` | UIA 覆盖不到的软件文字 |
+| CV | `perception/vision_cv.py` | 图像差异、颜色、画布、模板、粗视觉摘要 |
+| VLM | `perception/vlm.py` | 可选视觉模型描述，配置后才启用 |
+
+当前实现包含这些稳定性策略：
+
+- UIA 超时和预算被压低，避免单轮 observe 卡死。
+- 当前台模态窗口覆盖目标窗口时跳过目标窗口 UIA，改走 Win32/OCR/CV。
+- UIA 足够丰富时可跳过 OCR。
+- 空结果会升级到 OCR/VLM 兜底。
+- 绘画/画布/颜色任务会追加 `Visual state summary`，包括可能画布区域、粗颜色、工具面板/弹窗风险。
+- `drag` 会记录动作前后区域差异，给模型反馈是否真的画出了东西。
+
+## 世界模型和记忆
+
+- `perception/world.py` 和 loop 内状态用于发现重复动作、目标窗口变化、视觉告警。
+- `memory/experience.py` 存成功经验和事实笔记。
+- 编程任务不复用旧 GUI 动作轨迹，避免跨项目假复用；可保留事实笔记。
+- `agent/session.py` 保存会话上下文，前端可查看和清空。
+
+世界模型不是“用户记忆越多越聪明”的替代品。它的作用是把当前任务里的屏幕状态、重复失败、窗口锚点、视觉异常等短期事实反馈给模型，减少盲试和假成功。新用户没有历史记忆时，硬实力仍取决于感知质量、工具反馈、验证 gate 和 prompt 结构。
+
+## CodingRunner
+
+`agent/coding.py` + `agent/coding_tools.py` 是独立编程子 agent。
+
+工具：
+
+- `list_dir`
+- `read_file`
+- `write_file`
+- `apply_patch`
+- `search_text`
+- `github_search`
+- `run_shell`
+- `done`
+- `fail`
+
+安全/质量约束：
+
+- 路径限制在 `coding.workspace`。
+- 保护 `.env`、secret、credential 等敏感配置。
+- 对“克隆开源项目并跑起来”这类任务，不能只读 README 后宣布成功，必须实际尝试 clone/install/build/run/test 或给出精确 blocker。
+
+## Playbook
+
+`python/winpilot_home/playbooks/*.json` 是数据化情境攻略，不增加工具。当前有：
+
+- `coding-project.json`
+- `file-dialog.json`
+- `media-playback.json`
+- `tray-wakeup.json`
+
+`agent.playbooks_enabled=true` 时按任务/窗口选择性注入；关闭时按代码逻辑处理为非选择性注入。
