@@ -68,7 +68,7 @@ sequenceDiagram
     participant T as Trace
     participant W as .wps.json
     participant C as wpsToFlowScript.ts
-    participant R as React Flow Editor
+    participant R as React Editor
     participant E as Python Engine
 
     U->>A: 自然语言任务

@@ -33,7 +33,7 @@ WinPilot 是当前桌面 Agent 主体，位于 `python/winpilot_home/winpilot/`�
 | `agent.llm_trace` | 是否保存每轮 LLM forensic trace |
 | `coding.enabled/workspace/max_steps` | 编程子 agent 开关、工作区、最大步数 |
 
-`config.example.json` 只是示例；若字段少于 `config.py`，以 `config.py` 默认值为准。
+`config.example.json` 是示例文件；修改默认行为时同步它。
 
 ## GUI Agent 循环
 
@@ -56,16 +56,16 @@ WinPilot 是当前桌面 Agent 主体，位于 `python/winpilot_home/winpilot/`�
 
 ## 工具集
 
-主 GUI 工具由 `agent/tools.py` 定义。核心工具包括：
+主 GUI 工具由 `agent/tools.py` 定义。基础工具包括：
 
 `list_windows`、`scan_windows`、`observe`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`done`、`fail`。
 
-按配置/任务可额外启用：
+按配置动态加入：
 
-- `run_shell`、`run_detached`
-- `revise_plan`、`complete_subgoal`
-- `remember`、`forget`、`reuse_skill`
-- `vlm_describe`
+- `agent.shell_enabled=true`：`run_shell`、`run_detached`
+- `agent.planning_enabled=true`：`revise_plan`、`complete_subgoal`
+- `agent.experience_memory=true`：`remember`、`forget`、`reuse_skill`
+- VLM 配置有效：`vlm_describe`
 
 注意：这些是 WinPilot 的 LLM 工具，不是 `python/features/` 的 @feature。
 
@@ -130,4 +130,4 @@ WinPilot 是当前桌面 Agent 主体，位于 `python/winpilot_home/winpilot/`�
 - `media-playback.json`
 - `tray-wakeup.json`
 
-`agent.playbooks_enabled=true` 时按任务/窗口选择性注入；关闭时按代码逻辑处理为非选择性注入。
+`agent.playbooks_enabled=true` 时按任务/窗口选择性注入；关闭时 `for_task()` 会一次性返回全部 playbook，近似旧的单体提示词兜底，但运行时窗口触发注入会关闭。

@@ -85,13 +85,16 @@ WinPilot 跑出的 trace 可导出 `.wps.json`，由 `src/renderer/utils/wpsToFl
 
 ## WinPilot 工具事实
 
-GUI agent 工具主要包括：
+GUI agent 基础工具主要包括：
 
 `list_windows`、`scan_windows`、`observe`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`done`、`fail`。
 
-配置/任务可能额外启用：
+按配置动态加入：
 
-`run_shell`、`run_detached`、`revise_plan`、`complete_subgoal`、`remember`、`forget`、`reuse_skill`、`vlm_describe`。
+- `agent.shell_enabled=true`：`run_shell`、`run_detached`
+- `agent.planning_enabled=true`：`revise_plan`、`complete_subgoal`
+- `agent.experience_memory=true`：`remember`、`forget`、`reuse_skill`
+- VLM 配置有效：`vlm_describe`
 
 编程子 agent 工具：
 
@@ -113,7 +116,7 @@ GUI agent 工具主要包括：
 - `coding.enabled`: `true`
 - 感知默认开启 UIA、Win32、OCR、CV，VLM 默认关闭。
 
-`python/winpilot_home/config.example.json` 是示例文件，字段可能少于 `config.py`；修改默认行为时同步它。
+`python/winpilot_home/config.example.json` 是示例文件；修改默认行为时同步它。
 
 ## 测试
 
