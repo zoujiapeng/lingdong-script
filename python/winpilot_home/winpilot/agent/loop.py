@@ -27,6 +27,9 @@ from .tools import ToolResult, ToolSession, tool_schemas
 
 _KEEP_FULL_OBSERVATIONS = 2
 _API_RETRIES = 3
+# Done-judge budget. Reasoning models (mimo-v2-pro) can spend 800+ tokens on
+# reasoning_content alone; keep enough headroom that the verdict JSON still fits.
+_JUDGE_MAX_TOKENS = 2500
 # Fold old observations only past this size (~12K tokens × ~4 chars/token).
 # Below it, history stays append-only so the DeepSeek prefix cache hits ~100%.
 _CONTEXT_FOLD_THRESHOLD_CHARS = 48000
@@ -982,15 +985,27 @@ class AgentRunner:
                 model=judge_model,
                 messages=[{"role": "system", "content": sys_p},
                           {"role": "user", "content": user_p}],
-                temperature=0.0, max_tokens=800,
+                temperature=0.0, max_tokens=_JUDGE_MAX_TOKENS,
             )
             self._trace_debug("done_check_response", {
                 "run_id": self.run_id,
                 "model": judge_model,
                 "response": resp,
             })
-            raw = resp.choices[0].message.content or ""
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            judge_msg = resp.choices[0].message
+            raw = judge_msg.content or ""
+            # Reasoning models (e.g. mimo-v2-pro) may spend the whole token
+            # budget on reasoning_content and leave content empty; the verdict
+            # is then only in the reasoning. Fall back to it so we don't reject
+            # a genuinely-finished task just because the JSON landed there.
+            if not re.search(r"\{.*\}", raw, re.DOTALL):
+                reasoning_text = getattr(judge_msg, "reasoning_content", "") or ""
+                if reasoning_text:
+                    raw = raw + "\n" + reasoning_text
+            # Prefer the LAST JSON object (the reasoning may contain the schema
+            # example first, then the real verdict last).
+            matches = list(re.finditer(r"\{[^{}]*\"done\"[^{}]*\}", raw, re.DOTALL))
+            m = matches[-1] if matches else re.search(r"\{.*\}", raw, re.DOTALL)
             if not m:
                 is_done = False
                 reason = "完成核验未返回可解析 JSON，不能接受为完成"

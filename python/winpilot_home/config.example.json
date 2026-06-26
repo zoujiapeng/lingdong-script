@@ -23,6 +23,7 @@
   "fusion": {
     "escalate_on_empty": true,
     "ocr_skip_when_uia_rich": true,
+    "vlm_skip_when_uia_rich": true,
     "uia_rich_threshold": 20
   },
   "agent": {
