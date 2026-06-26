@@ -626,3 +626,99 @@ def screenshot_base64(display_id: int | None = None,
             return {"ok": False, "error": str(exc)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ----------------------------------------------------------------- hold keys
+# Ported from cc-haha runtime/win_helper.py hold_keys()
+
+def hold_keys(keys: list[str], duration_ms: int) -> dict:
+    """Press and hold a chord for ``duration_ms`` then release.
+
+    Useful for games / accelerated UI where a key must stay down (e.g. hold
+    Shift while clicking, or hold an arrow to scroll a long list).
+    """
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    try:
+        vks = [_vk_of(k) for k in keys]
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    downs, ups = [], []
+    for vk in vks:
+        flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS else 0
+        downs.append(_key_input(vk=vk, flags=flags))
+        ups.append(_key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP))
+    _send_inputs(downs)
+    try:
+        time.sleep(max(int(duration_ms), 0) / 1000.0)
+    finally:
+        _send_inputs(list(reversed(ups)))
+    BUS.publish("action", action="hold_keys", keys=keys, duration_ms=duration_ms)
+    return {"ok": True, "keys": keys, "duration_ms": duration_ms}
+
+
+# --------------------------------------------------------------- displays
+# Ported from cc-haha runtime/win_helper.py get_displays() (mss-based here)
+
+def list_displays() -> dict:
+    """Enumerate monitors (id, geometry, origin, primary flag).
+
+    cc-haha used screeninfo; we reuse mss (already a dependency) so no new
+    package is needed. ``id`` matches the index ``screenshot``/``zoom`` accept.
+    """
+    try:
+        import mss
+        with mss.mss() as sct:
+            all_mon = sct.monitors  # [0]=virtual bounding box, [1..]=real
+            primary = all_mon[1] if len(all_mon) > 1 else all_mon[0]
+            displays = []
+            for idx, mon in enumerate(all_mon[1:]):
+                displays.append({
+                    "id": idx,
+                    "width": mon["width"],
+                    "height": mon["height"],
+                    "originX": mon["left"],
+                    "originY": mon["top"],
+                    "isPrimary": (mon == primary),
+                })
+        return {"ok": True, "count": len(displays), "displays": displays}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# --------------------------------------------------------------- zoom region
+
+def zoom_region(x: int, y: int, width: int, height: int,
+                quality: int = 80) -> dict:
+    """Capture an arbitrary screen rectangle and return JPEG base64.
+
+    Ported from cc-haha runtime/win_helper.py capture_region(). Use to inspect
+    a small area (a status icon, a number) at full resolution instead of
+    downscaling the whole screen.
+    """
+    if _dry_run():
+        return {"ok": True, "dry_run": True, "base64": "", "width": 0, "height": 0}
+    if width <= 0 or height <= 0:
+        return {"ok": False, "error": "width/height 必须为正"}
+    try:
+        import mss
+        from PIL import Image
+        with mss.mss() as sct:
+            region = {"left": int(x), "top": int(y),
+                      "width": int(width), "height": int(height)}
+            raw = sct.grab(region)
+            image = Image.frombytes("RGB", raw.size, raw.rgb)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return {
+            "ok": True,
+            "base64": b64,
+            "width": image.width,
+            "height": image.height,
+            "region": {"x": int(x), "y": int(y),
+                       "width": int(width), "height": int(height)},
+            "size_bytes": len(buffer.getvalue()),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
