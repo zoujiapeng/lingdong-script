@@ -214,6 +214,11 @@ def observe(hwnd: int, include_icons: bool = True) -> Snapshot:
     # OCR. Gated by perception.ocr_skip_when_uia_rich.
     skip_ocr_if_rich = bool(CONFIG.get("fusion", "ocr_skip_when_uia_rich", default=True))
     uia_rich_threshold = int(CONFIG.get("fusion", "uia_rich_threshold", default=20))
+    # VLM on every observe is the biggest latency sink (~7-12s/call). When UIA
+    # already returned a rich element set, the VLM is redundant on the hot path
+    # — skip it here. It still runs as the escalate_on_empty rescue (below) when
+    # nothing readable was found, and stays available via the vlm_describe tool.
+    skip_vlm_if_rich = bool(CONFIG.get("fusion", "vlm_skip_when_uia_rich", default=True))
     uia_count = 0
     skip_uia_modal = _foreground_modal_over_target(hwnd, region)
     fused: list[UIElement] = []
@@ -242,6 +247,9 @@ def observe(hwnd: int, include_icons: bool = True) -> Snapshot:
             elif dim == "cv":
                 collected = vision_cv.detect_icon_candidates(region) if include_icons else []
             elif dim == "vlm":
+                if skip_vlm_if_rich and uia_count >= uia_rich_threshold:
+                    snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": "uia_rich"}
+                    continue
                 collected = vlm.collect(region)
         except Exception as exc:
             logger.warning("感知维度 %s 异常: %s", dim, exc)

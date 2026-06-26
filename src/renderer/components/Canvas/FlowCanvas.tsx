@@ -216,7 +216,6 @@ export function FlowCanvas() {
 
       // If connecting, check if mouse is released over a target node
       const cn = useStore.getState().ui.connecting;
-      console.log('[CANVAS] handleMouseUp connecting:', cn.active, 'from:', cn.from_node);
       if (cn.active && cn.from_node) {
         const canvasPos = screenToCanvas(e.clientX, e.clientY);
         const targetNode = nodes.find((n) => {
@@ -318,12 +317,10 @@ export function FlowCanvas() {
   const handlePortMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string, portId: string) => {
       e.stopPropagation();
-      console.log('[CANVAS] handlePortMouseDown', nodeId, portId);
       if (portId === 'input') return; // can't drag from input
       startConnecting(nodeId, portId);
       const rect = wrapperRef.current!.getBoundingClientRect();
       setConnectingEnd({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-      console.log('[CANVAS] connecting started, connectingEnd set');
     },
     [startConnecting]
   );
@@ -332,11 +329,9 @@ export function FlowCanvas() {
     (e: React.MouseEvent, nodeId: string, portId: string) => {
       e.stopPropagation();
       const st = useStore.getState().ui.connecting;
-      console.log('[CANVAS] handlePortMouseUp', nodeId, portId, 'connecting:', st.active, 'from:', st.from_node);
       if (!st.active) return;
       if (st.from_node && portId === 'input') {
         if (st.from_node !== nodeId) {
-          console.log('[CANVAS] adding edge', st.from_node, '->', nodeId);
           addEdge({
             from_node: st.from_node,
             from_port: st.from_port || 'output',
@@ -348,7 +343,6 @@ export function FlowCanvas() {
       // Always stop connecting — even if released on output port or non-target
       stopConnecting();
       setConnectingEnd(null);
-      console.log('[CANVAS] connection ended, stopConnecting called');
     },
     [addEdge, stopConnecting]
   );
@@ -371,7 +365,6 @@ export function FlowCanvas() {
 
   // Connecting line
   const connectingLine = useMemo(() => connecting.active && connecting.from_node && connectingEnd ? (() => {
-    console.log('[CANVAS] rendering connecting line, from:', connecting.from_node, 'port:', connecting.from_port);
     const fromPos = getNodePortScreenPos(connecting.from_node!, connecting.from_port || 'output');
     if (!fromPos) return null;
     const rect = wrapperRef.current?.getBoundingClientRect();

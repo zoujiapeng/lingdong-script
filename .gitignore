@@ -33,7 +33,11 @@ python/macros/visual_*.json
 
 # Browser test snapshots
 .playwright-cli/
+.playwright-mcp/
 python/browser_snapshots/
+
+# E2E test driver + local run artifacts
+.e2e/
 
 # Generated flow files
 *.flow

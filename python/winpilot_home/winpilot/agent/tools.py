@@ -304,6 +304,106 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                 required=["question"],
             )
         )
+    # ---- clipboard tools (ported from cc-haha) ----
+    tools.append(_tool(
+        "clipboard_read",
+        "Read the current system clipboard text content.",
+        {},
+    ))
+    tools.append(_tool(
+        "clipboard_write",
+        "Write text to the system clipboard (replaces current content).",
+        {"text": {"type": "string", "description": "Text to copy to clipboard"}},
+        required=["text"],
+    ))
+    tools.append(_tool(
+        "clipboard_paste",
+        "Paste the current clipboard content via Ctrl+V at the focused location.",
+        {},
+    ))
+    # ---- mouse fine-control tools (ported from cc-haha) ----
+    tools.append(_tool(
+        "cursor_position",
+        "Return the current mouse cursor (x, y) screen position.",
+        {},
+    ))
+    tools.append(_tool(
+        "mouse_down",
+        "Press and hold a mouse button at the current cursor position. Use with move_mouse + mouse_up for fine drag.",
+        {
+            "button": {"type": "string", "enum": ["left", "right", "middle"],
+                        "description": "Mouse button, default left"},
+        },
+    ))
+    tools.append(_tool(
+        "mouse_up",
+        "Release a mouse button at the current cursor position.",
+        {
+            "button": {"type": "string", "enum": ["left", "right", "middle"],
+                        "description": "Mouse button, default left"},
+        },
+    ))
+    tools.append(_tool(
+        "move_mouse",
+        "Move the mouse cursor to (x, y) without clicking.",
+        {
+            "x": {"type": "integer", "description": "Screen x coordinate"},
+            "y": {"type": "integer", "description": "Screen y coordinate"},
+        },
+        required=["x", "y"],
+    ))
+    # ---- screenshot tool (ported from cc-haha) ----
+    tools.append(_tool(
+        "screenshot",
+        "Capture the full screen and return a base64-encoded JPEG image. "
+        "Use with vlm_describe or for visual analysis of the current desktop state.",
+        {
+            "quality": {"type": "integer", "description": "JPEG quality 1-100, default 75"},
+        },
+    ))
+    # ---- list installed apps (ported from cc-haha) ----
+    tools.append(_tool(
+        "list_installed_apps",
+        "List all installed applications from the Windows registry with display name, bundle ID, and path. "
+        "Useful for discovering the exact name of an app before launching it.",
+        {},
+    ))
+    # ---- file management tools (from coding_tools, available to main agent) ----
+    tools.append(_tool(
+        "list_dir",
+        "List files and subdirectories in a directory. Skips node_modules/.git/dist etc.",
+        {"path": {"type": "string", "description": "Directory path (absolute or relative to cwd). Omit for current directory."}},
+    ))
+    tools.append(_tool(
+        "read_file",
+        "Read a text file's content with line numbers. Use start/count for large files.",
+        {
+            "path": {"type": "string", "description": "File path (absolute)"},
+            "start": {"type": "integer", "description": "Starting line number (from 1), optional"},
+            "count": {"type": "integer", "description": "Number of lines to read, optional"},
+        },
+        required=["path"],
+    ))
+    tools.append(_tool(
+        "write_file",
+        "Write/overwrite a file. Creates parent directories automatically.",
+        {
+            "path": {"type": "string", "description": "File path (absolute)"},
+            "content": {"type": "string", "description": "File content to write"},
+        },
+        required=["path", "content"],
+    ))
+    tools.append(_tool(
+        "search_text",
+        "Search for text (substring or regex) across files in a directory. Returns file:line:content matches.",
+        {
+            "query": {"type": "string", "description": "Search text or regex pattern"},
+            "path": {"type": "string", "description": "Directory to search in (absolute). Omit for cwd."},
+            "glob": {"type": "string", "description": "Filter by file glob pattern, e.g. *.py"},
+            "regex": {"type": "boolean", "description": "Whether query is a regex (default false)"},
+        },
+        required=["query"],
+    ))
     _normalize_tool_schema_text(tools)
     return tools
 
@@ -371,6 +471,19 @@ _CLEAN_TOOL_DESCRIPTIONS = {
     "forget": "Delete matching long-term memory notes by query.",
     "reuse_skill": "Replay a matching previously successful workflow when appropriate.",
     "vlm_describe": "Ask the visual model to describe a screen/window region when available.",
+    "clipboard_read": "Read the current system clipboard text content.",
+    "clipboard_write": "Write text to the system clipboard (replaces current content).",
+    "clipboard_paste": "Paste the current clipboard content via Ctrl+V at the focused location.",
+    "cursor_position": "Return the current mouse cursor (x, y) screen position.",
+    "mouse_down": "Press and hold a mouse button at the current cursor position.",
+    "mouse_up": "Release a mouse button at the current cursor position.",
+    "move_mouse": "Move the mouse cursor to (x, y) without clicking.",
+    "screenshot": "Capture the full screen and return a base64-encoded JPEG image.",
+    "list_installed_apps": "List all installed applications from the Windows registry.",
+    "list_dir": "List files and subdirectories in a directory.",
+    "read_file": "Read a text file's content with line numbers.",
+    "write_file": "Write or overwrite a file with the given content.",
+    "search_text": "Search for text across files in a directory.",
     "done": "Finish the run only after verified evidence shows the task is complete.",
     "fail": "Finish with an honest failure reason when the task cannot be completed.",
 }
@@ -411,6 +524,13 @@ _CLEAN_PROPERTY_DESCRIPTIONS = {
     "summary": "Short completion summary.",
     "reason": "Failure reason.",
     "question": "Focused visual question.",
+    "text": "Literal text to type or clipboard content.",
+    "quality": "JPEG quality 1-100.",
+    "button": "Mouse button: left, right, or middle.",
+    "start": "Starting line number (from 1).",
+    "count": "Number of items to read or limit.",
+    "glob": "File glob pattern filter, e.g. *.py.",
+    "regex": "Whether the query is a regular expression.",
 }
 
 
@@ -1284,3 +1404,214 @@ class ToolSession:
                 terminal=None,
             )
         return ToolResult(f"任务失败: {reason}", terminal="fail")
+
+    # ---- clipboard tools (ported from cc-haha) ----
+    def _t_clipboard_read(self, _args: dict) -> ToolResult:
+        text = executor.clipboard_read()
+        return ToolResult(text or "（剪贴板为空）",
+                          summary=f"[已折叠] clipboard_read {len(text)}字符")
+
+    def _t_clipboard_write(self, args: dict) -> ToolResult:
+        text = str(args.get("text", ""))
+        result = executor.clipboard_write(text)
+        return ToolResult(self._fmt(result))
+
+    def _t_clipboard_paste(self, _args: dict) -> ToolResult:
+        result = executor.clipboard_paste()
+        return ToolResult(self._fmt(result))
+
+    # ---- mouse fine-control tools (ported from cc-haha) ----
+    def _t_cursor_position(self, _args: dict) -> ToolResult:
+        result = executor.cursor_position()
+        return ToolResult(self._fmt(result))
+
+    def _t_mouse_down(self, args: dict) -> ToolResult:
+        button = str(args.get("button", "left"))
+        result = executor.mouse_down(button=button)
+        return ToolResult(self._fmt(result))
+
+    def _t_mouse_up(self, args: dict) -> ToolResult:
+        button = str(args.get("button", "left"))
+        result = executor.mouse_up(button=button)
+        return ToolResult(self._fmt(result))
+
+    def _t_move_mouse(self, args: dict) -> ToolResult:
+        x, y = int(args["x"]), int(args["y"])
+        executor.move_mouse(x, y)
+        return ToolResult(self._fmt({"ok": True, "x": x, "y": y}))
+
+    # ---- screenshot base64 tool (ported from cc-haha) ----
+    def _t_screenshot(self, args: dict) -> ToolResult:
+        quality = int(args.get("quality", 75))
+        result = executor.screenshot_base64(quality=quality)
+        # Don't dump the full base64 into the LLM context — too large.
+        # Return metadata + a truncated preview so the model knows it worked.
+        if result.get("ok") and result.get("base64"):
+            b64 = result["base64"]
+            result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
+            result["base64_available"] = True
+            del result["base64"]  # keep it out of the LLM context
+        return ToolResult(self._fmt(result))
+
+    # ---- list installed apps (ported from cc-haha) ----
+    def _t_list_installed_apps(self, _args: dict) -> ToolResult:
+        try:
+            import winreg
+            results: dict[str, dict] = {}
+            reg_paths = [
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            ]
+            for hive, sub_key in reg_paths:
+                try:
+                    key = winreg.OpenKey(hive, sub_key)
+                except OSError:
+                    continue
+                try:
+                    i = 0
+                    while True:
+                        try:
+                            name = winreg.EnumKey(key, i)
+                            i += 1
+                        except OSError:
+                            break
+                        try:
+                            app_key = winreg.OpenKey(key, name)
+                        except OSError:
+                            continue
+                        try:
+                            display_name = winreg.QueryValueEx(app_key, "DisplayName")[0]
+                        except OSError:
+                            winreg.CloseKey(app_key)
+                            continue
+                        try:
+                            install_location = winreg.QueryValueEx(app_key, "InstallLocation")[0]
+                        except OSError:
+                            install_location = ""
+                        try:
+                            display_icon = winreg.QueryValueEx(app_key, "DisplayIcon")[0]
+                        except OSError:
+                            display_icon = ""
+                        normalized_icon = str(display_icon).split(",")[0].strip().strip('"')
+                        normalized_install_location = str(install_location).strip().strip('"')
+                        bundle_id = name
+                        for candidate in (normalized_icon, normalized_install_location):
+                            if not candidate:
+                                continue
+                            from pathlib import Path as _P
+                            candidate_path = _P(candidate)
+                            if candidate_path.suffix.lower() == ".exe":
+                                bundle_id = candidate_path.stem
+                                break
+                        app_path = normalized_icon or normalized_install_location or ""
+                        if bundle_id not in results:
+                            results[bundle_id] = {
+                                "bundleId": bundle_id,
+                                "displayName": str(display_name),
+                                "path": app_path,
+                            }
+                        winreg.CloseKey(app_key)
+                finally:
+                    winreg.CloseKey(key)
+            apps = sorted(results.values(), key=lambda item: item["displayName"].lower())
+            lines = [
+                f'{i}. "{a["displayName"]}" [{a["bundleId"]}] {a["path"]}'
+                for i, a in enumerate(apps[:80], 1)
+            ]
+            return ToolResult(
+                f"已安装应用 ({len(apps)} 个，显示前 {min(len(apps), 80)} 个):\n" + "\n".join(lines)
+                or "未找到已安装应用",
+                summary=f"[已折叠] list_installed_apps {len(apps)}个应用",
+            )
+        except Exception as exc:
+            return ToolResult(f"列举已安装应用失败: {exc}")
+
+    # ---- file management tools (from coding_tools) ----
+    def _t_list_dir(self, args: dict) -> ToolResult:
+        from pathlib import Path
+        path = str(args.get("path") or ".")
+        p = Path(path).resolve()
+        if not p.exists():
+            return ToolResult(f"目录不存在: {path}")
+        if not p.is_dir():
+            return ToolResult(f"不是目录: {path}")
+        _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build",
+                      ".venv", "venv", ".next", ".cache", "target", "bin", "obj"}
+        entries = []
+        for child in sorted(p.iterdir(), key=lambda c: (c.is_file(), c.name.lower())):
+            if child.is_dir():
+                if child.name in _SKIP_DIRS:
+                    continue
+                entries.append(f"  {child.name}/")
+            else:
+                entries.append(f"  {child.name}")
+        body = f"{p}:\n" + "\n".join(entries[:300])
+        return ToolResult(body, summary=f"[已折叠] list_dir {len(entries)}项")
+
+    def _t_read_file(self, args: dict) -> ToolResult:
+        from pathlib import Path
+        p = Path(str(args["path"])).resolve()
+        if not p.is_file():
+            return ToolResult(f"文件不存在: {args['path']}")
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolResult(f"非文本文件: {args['path']}")
+        lines = text.splitlines()
+        start = max(1, int(args.get("start", 1)))
+        count = int(args["count"]) if args.get("count") else len(lines)
+        chunk = lines[start - 1: start - 1 + count]
+        numbered = "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk))
+        if len(numbered) > 20000:
+            numbered = numbered[:20000] + "\n...(已截断)"
+        return ToolResult(numbered, summary=f"[已折叠] read_file {p.name} {len(chunk)}行")
+
+    def _t_write_file(self, args: dict) -> ToolResult:
+        from pathlib import Path
+        p = Path(str(args["path"])).resolve()
+        content = str(args.get("content", ""))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        BUS.publish("action", action="write_file", path=str(p), bytes=len(content.encode("utf-8")))
+        return ToolResult(self._fmt({"ok": True, "path": str(p),
+                                     "bytes": len(content.encode("utf-8"))}))
+
+    def _t_search_text(self, args: dict) -> ToolResult:
+        import re as _re
+        from pathlib import Path
+        query = str(args.get("query", ""))
+        search_path = Path(str(args.get("path", "."))).resolve()
+        glob_pattern = str(args.get("glob", "*"))
+        is_regex = bool(args.get("regex", False))
+        if not search_path.is_dir():
+            return ToolResult(f"搜索目录不存在: {search_path}")
+        _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build",
+                      ".venv", "venv", ".next", ".cache"}
+        matches = []
+        pattern = _re.compile(query) if is_regex else None
+        try:
+            for f in sorted(search_path.rglob(glob_pattern)):
+                if any(skip in f.parts for skip in _SKIP_DIRS):
+                    continue
+                if not f.is_file():
+                    continue
+                try:
+                    text = f.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    hit = bool(pattern.search(line)) if is_regex else (query in line)
+                    if hit:
+                        rel = f.relative_to(search_path)
+                        matches.append(f"{rel}:{i}: {line.strip()[:200]}")
+                        if len(matches) >= 50:
+                            break
+                if len(matches) >= 50:
+                    break
+        except Exception as exc:
+            return ToolResult(f"搜索异常: {exc}")
+        return ToolResult(
+            "\n".join(matches) or f'未找到 "{query}" 的匹配',
+            summary=f"[已折叠] search_text {len(matches)}个匹配",
+        )

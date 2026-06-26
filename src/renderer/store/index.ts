@@ -1464,14 +1464,12 @@ export const useStore = create<AppStore>()(
     },
 
     startConnecting: (nodeId, portId) => {
-      console.log('[CONNECT] startConnecting', nodeId, portId);
       set((state) => {
         state.ui.connecting = { active: true, from_node: nodeId, from_port: portId };
       });
     },
 
     stopConnecting: () => {
-      console.log('[CONNECT] stopConnecting');
       set((state) => { state.ui.connecting = { active: false }; });
     },
 

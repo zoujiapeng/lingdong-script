@@ -4,14 +4,19 @@ All actions are physical-pixel screen coordinates. ``type_text`` uses
 KEYEVENTF_UNICODE so Chinese/emoji input works without an IME. A UIA fast
 path (Invoke/SetValue) is attempted first when a live UIA handle is present
 on the resolved element — faster and more reliable than synthetic clicks.
+
+Clipboard, mouse fine-control, and screenshot utilities ported from
+cc-haha ``runtime/win_helper.py`` for full computer-use parity.
 """
 from __future__ import annotations
 
+import base64
 import ctypes
 import string
 import subprocess
 import time
 from ctypes import wintypes
+from io import BytesIO
 
 import win32api
 import win32con
@@ -467,3 +472,157 @@ def uia_set_value(element, value: str) -> bool:
     except Exception:
         pass
     return False
+
+
+# ------------------------------------------------------------------- clipboard
+# Ported from cc-haha runtime/win_helper.py
+
+def clipboard_read() -> str:
+    """Read the current clipboard text content."""
+    try:
+        import pyperclip
+        return pyperclip.paste() or ""
+    except Exception as exc:
+        logger.debug("clipboard_read 失败: %s", exc)
+        # Fallback: Win32 API
+        try:
+            win32gui.OpenClipboard(None)
+            data = win32gui.GetClipboardData(win32con.CF_UNICODETEXT)
+            win32gui.CloseClipboard()
+            return data or ""
+        except Exception:
+            return ""
+
+
+def clipboard_write(text: str) -> dict:
+    """Write text to the system clipboard."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        BUS.publish("action", action="clipboard_write", length=len(text))
+        return {"ok": True, "length": len(text)}
+    except Exception as exc:
+        logger.debug("clipboard_write 失败: %s", exc)
+        # Fallback: Win32 API
+        try:
+            win32gui.OpenClipboard(None)
+            win32gui.EmptyClipboard()
+            win32gui.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            win32gui.CloseClipboard()
+            BUS.publish("action", action="clipboard_write", length=len(text), via="win32")
+            return {"ok": True, "length": len(text), "via": "win32"}
+        except Exception as exc2:
+            return {"ok": False, "error": str(exc2)}
+
+
+def clipboard_paste() -> dict:
+    """Paste from clipboard via Ctrl+V."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    press_keys(["ctrl", "v"])
+    BUS.publish("action", action="clipboard_paste")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- mouse fine-control
+# Ported from cc-haha runtime/win_helper.py
+
+def cursor_position() -> dict:
+    """Return the current cursor (x, y) position."""
+    try:
+        x, y = win32api.GetCursorPos()
+        return {"ok": True, "x": int(x), "y": int(y)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def mouse_down(button: str = "left") -> dict:
+    """Press and hold a mouse button at the current cursor position."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    if button == "left":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
+    elif button == "right":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_RIGHTDOWN)])
+    elif button == "middle":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MIDDLEDOWN)])
+    else:
+        return {"ok": False, "error": f"未知鼠标键: {button}"}
+    BUS.publish("action", action="mouse_down", button=button)
+    return {"ok": True, "button": button}
+
+
+def mouse_up(button: str = "left") -> dict:
+    """Release a mouse button at the current cursor position."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    if button == "left":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
+    elif button == "right":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_RIGHTUP)])
+    elif button == "middle":
+        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MIDDLEUP)])
+    else:
+        return {"ok": False, "error": f"未知鼠标键: {button}"}
+    BUS.publish("action", action="mouse_up", button=button)
+    return {"ok": True, "button": button}
+
+
+# --------------------------------------------------------------- screenshot base64
+
+def screenshot_base64(display_id: int | None = None,
+                      quality: int = 75) -> dict:
+    """Capture the full screen (or a specific display) and return JPEG base64.
+
+    Ported from cc-haha runtime/win_helper.py capture_display().
+    Uses mss for cross-platform capture; falls back to win32 API if mss is
+    not available.
+    """
+    if _dry_run():
+        return {"ok": True, "dry_run": True, "base64": "", "width": 0, "height": 0}
+    try:
+        import mss
+        from PIL import Image
+
+        with mss.mss() as sct:
+            # If display_id specified, grab that monitor; otherwise primary
+            if display_id is not None and display_id < len(sct.monitors) - 1:
+                monitor = sct.monitors[display_id + 1]  # sct.monitors[0] is "all"
+            else:
+                monitor = sct.monitors[1]  # primary monitor
+            raw = sct.grab(monitor)
+            image = Image.frombytes("RGB", raw.size, raw.rgb)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return {
+            "ok": True,
+            "base64": b64,
+            "width": image.width,
+            "height": image.height,
+            "size_bytes": len(buffer.getvalue()),
+        }
+    except ImportError:
+        # mss not available — fall back to win32 screenshot
+        try:
+            from ..utils.screenshot import capture, Region, screen_size
+            sw, sh = screen_size()
+            region = Region(0, 0, sw, sh)
+            image = capture(region)
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return {
+                "ok": True,
+                "base64": b64,
+                "width": image.width,
+                "height": image.height,
+                "size_bytes": len(buffer.getvalue()),
+                "via": "win32_fallback",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

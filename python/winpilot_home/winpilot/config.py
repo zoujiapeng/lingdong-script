@@ -38,7 +38,7 @@ _DEFAULTS: dict[str, Any] = {
         "vlm": {"enabled": False, "priority": 5},
     },
     "fusion": {"escalate_on_empty": True, "ocr_skip_when_uia_rich": True,
-               "uia_rich_threshold": 20},
+               "vlm_skip_when_uia_rich": True, "uia_rich_threshold": 20},
     "agent": {
         "max_steps": 40,
         "max_retries": 2,
