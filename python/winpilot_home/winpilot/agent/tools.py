@@ -361,6 +361,41 @@ def tool_schemas(planning: bool = False) -> list[dict]:
             "quality": {"type": "integer", "description": "JPEG quality 1-100, default 75"},
         },
     ))
+    # ---- hold_key (ported from cc-haha) ----
+    tools.append(_tool(
+        "hold_key",
+        "Press and HOLD one or more keys for a duration in milliseconds, then "
+        "release. Use for games or UI that need a sustained keypress (e.g. hold "
+        "an arrow key to keep scrolling). For a normal key chord use hotkey instead.",
+        {
+            "keys": {"type": "array", "items": {"type": "string"},
+                      "description": "Keys to hold together, e.g. [\"shift\"] or [\"ctrl\",\"a\"]"},
+            "duration_ms": {"type": "integer", "description": "How long to hold, in milliseconds"},
+        },
+        required=["keys", "duration_ms"],
+    ))
+    # ---- list_displays (ported from cc-haha) ----
+    tools.append(_tool(
+        "list_displays",
+        "Enumerate connected monitors with their id, size, origin, and which is "
+        "primary. The id maps to the display index screenshot/zoom accept.",
+        {},
+    ))
+    # ---- zoom region screenshot (ported from cc-haha) ----
+    tools.append(_tool(
+        "zoom",
+        "Capture a specific screen rectangle at full resolution and return a "
+        "base64 JPEG. Use to inspect a small region (a tiny number, a status "
+        "icon) without downscaling the whole screen.",
+        {
+            "x": {"type": "integer", "description": "Region top-left x"},
+            "y": {"type": "integer", "description": "Region top-left y"},
+            "width": {"type": "integer", "description": "Region width in pixels"},
+            "height": {"type": "integer", "description": "Region height in pixels"},
+            "quality": {"type": "integer", "description": "JPEG quality 1-100, default 80"},
+        },
+        required=["x", "y", "width", "height"],
+    ))
     # ---- list installed apps (ported from cc-haha) ----
     tools.append(_tool(
         "list_installed_apps",
@@ -479,6 +514,9 @@ _CLEAN_TOOL_DESCRIPTIONS = {
     "mouse_up": "Release a mouse button at the current cursor position.",
     "move_mouse": "Move the mouse cursor to (x, y) without clicking.",
     "screenshot": "Capture the full screen and return a base64-encoded JPEG image.",
+    "hold_key": "Press and hold keys for a duration in milliseconds, then release.",
+    "list_displays": "Enumerate connected monitors with id, size, origin, and primary flag.",
+    "zoom": "Capture a specific screen rectangle at full resolution as base64 JPEG.",
     "list_installed_apps": "List all installed applications from the Windows registry.",
     "list_dir": "List files and subdirectories in a directory.",
     "read_file": "Read a text file's content with line numbers.",
@@ -527,6 +565,10 @@ _CLEAN_PROPERTY_DESCRIPTIONS = {
     "text": "Literal text to type or clipboard content.",
     "quality": "JPEG quality 1-100.",
     "button": "Mouse button: left, right, or middle.",
+    "keys": "Keys to hold together, e.g. [\"shift\"] or [\"ctrl\",\"a\"].",
+    "duration_ms": "Hold duration in milliseconds.",
+    "width": "Region width in pixels.",
+    "height": "Region height in pixels.",
     "start": "Starting line number (from 1).",
     "count": "Number of items to read or limit.",
     "glob": "File glob pattern filter, e.g. *.py.",
@@ -1035,7 +1077,21 @@ class ToolSession:
             # undo_last closes THAT window, not whatever is foreground later.
             launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
             self._undo_stack.append(("app", launched_hwnd))
-            if resolved is not None:
+            # Prefer resolving the launched window by its expected title: the
+            # post-launch foreground can be stolen by another window (a console,
+            # a notification), which would otherwise make the next bare observe
+            # target the wrong window. Title match is focus-independent.
+            expect = args.get("expect") or {}
+            want_title = str(expect.get("window_appears") or "").strip()
+            title_hwnd = None
+            if want_title:
+                found = win32.find_window(want_title)
+                if found and self._window_alive(int(found.get("hwnd") or 0)):
+                    title_hwnd = int(found["hwnd"])
+            if title_hwnd:
+                self._remember_target(title_hwnd, want_title)
+                result["target_hwnd"] = title_hwnd
+            elif resolved is not None:
                 self._remember_target(launched_hwnd, str(resolved.get("name") or command))
                 target = self._find_target_window()
                 if target:
@@ -1451,6 +1507,35 @@ class ToolSession:
             result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
             result["base64_available"] = True
             del result["base64"]  # keep it out of the LLM context
+        return ToolResult(self._fmt(result))
+
+    # ---- hold_key (ported from cc-haha) ----
+    def _t_hold_key(self, args: dict) -> ToolResult:
+        keys = args.get("keys") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        result = executor.hold_keys([str(k) for k in keys],
+                                    int(args.get("duration_ms", 0)))
+        return ToolResult(self._fmt(result))
+
+    # ---- list_displays (ported from cc-haha) ----
+    def _t_list_displays(self, _args: dict) -> ToolResult:
+        result = executor.list_displays()
+        return ToolResult(self._fmt(result))
+
+    # ---- zoom region screenshot (ported from cc-haha) ----
+    def _t_zoom(self, args: dict) -> ToolResult:
+        result = executor.zoom_region(
+            int(args["x"]), int(args["y"]),
+            int(args["width"]), int(args["height"]),
+            quality=int(args.get("quality", 80)),
+        )
+        # Same as screenshot: keep the raw base64 out of the LLM context.
+        if result.get("ok") and result.get("base64"):
+            b64 = result["base64"]
+            result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
+            result["base64_available"] = True
+            del result["base64"]
         return ToolResult(self._fmt(result))
 
     # ---- list installed apps (ported from cc-haha) ----
