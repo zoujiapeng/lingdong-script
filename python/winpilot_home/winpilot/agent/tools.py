@@ -562,10 +562,7 @@ _CLEAN_PROPERTY_DESCRIPTIONS = {
     "summary": "Short completion summary.",
     "reason": "Failure reason.",
     "question": "Focused visual question.",
-    "text": "Literal text to type or clipboard content.",
     "quality": "JPEG quality 1-100.",
-    "button": "Mouse button: left, right, or middle.",
-    "keys": "Keys to hold together, e.g. [\"shift\"] or [\"ctrl\",\"a\"].",
     "duration_ms": "Hold duration in milliseconds.",
     "width": "Region width in pixels.",
     "height": "Region height in pixels.",
@@ -797,15 +794,6 @@ class ToolSession:
         return note
 
     # -------------------------------------------------------------- tools
-    def _t_list_windows(self, _args: dict) -> ToolResult:
-        windows = win32.list_windows()
-        lines = [
-            f'hwnd={w["hwnd"]} "{w["title"]}" class={w["class_name"]} rect={w["rect"]}'
-            for w in windows[:40]
-        ]
-        return ToolResult("\n".join(lines) or "无可见窗口",
-                          summary=f"[已折叠] list_windows {len(windows)}个窗口")
-
     def _t_list_windows(self, _args: dict) -> ToolResult:
         windows = win32.list_windows()
         lines = [

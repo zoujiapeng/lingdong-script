@@ -80,30 +80,6 @@ class Snapshot:
 
     def to_text(self, max_elements: int = 160) -> str:
         lines = [
-            f"窗口: \"{self.title}\" hwnd={self.hwnd} "
-            f"rect=({self.region.left},{self.region.top},{self.region.width}x{self.region.height})"
-        ]
-        stats = " ".join(
-            f"{name}:{stat['count']}个/{stat['ms']}ms" for name, stat in self.dim_stats.items()
-        )
-        if stats:
-            lines.append(f"感知维度: {stats}")
-        # Canvas/visual blind-spot: a large window yielding almost no structural
-        # elements is almost certainly canvas/game/video — tell the model so it
-        # uses VLM vision instead of blindly guessing coordinates.
-        readable = sum(1 for e in self.elements if (e.text or "").strip())
-        big = self.region.width * self.region.height > 200_000
-        if readable < 3 and big:
-            lines.append(
-                "⚠️ 此界面结构化感知几乎为空（可能是 canvas/游戏/视频/自绘内容）——"
-                "UIA/OCR/CV 读不到，请用 vlm_describe 看实际画面，不要靠坐标/颜色盲猜")
-        shown = self.elements[:max_elements]
-        lines.extend(element.to_line() for element in shown)
-        if len(self.elements) > max_elements:
-            lines.append(f"...还有 {len(self.elements) - max_elements} 个元素已省略")
-        return "\n".join(lines)
-    def to_text(self, max_elements: int = 160) -> str:
-        lines = [
             f"Window: \"{self.title}\" hwnd={self.hwnd} "
             f"rect=({self.region.left},{self.region.top},"
             f"{self.region.width}x{self.region.height})"
