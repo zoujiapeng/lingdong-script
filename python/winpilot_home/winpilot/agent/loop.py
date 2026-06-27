@@ -19,14 +19,18 @@ from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
 from ..memory import experience
-from ..perception import fusion, vision_cv, vlm
+from ..perception import fusion, intent, vision_cv, vlm
 from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
 from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
 from .tools import ToolResult, ToolSession, tool_schemas
 
 _KEEP_FULL_OBSERVATIONS = 2
-_API_RETRIES = 3
+_API_RETRIES = 4
+# 429/rate-limit backoff base seconds (exponential: 5, 10, 20...). Bursts of
+# rapid LLM calls (e.g. drawing many strokes) can trip provider rate limits;
+# a short retry isn't enough, so wait progressively longer.
+_RATE_LIMIT_BACKOFF_S = 5.0
 # Done-judge budget. Reasoning models (mimo-v2-pro) can spend 800+ tokens on
 # reasoning_content alone; keep enough headroom that the verdict JSON still fits.
 _JUDGE_MAX_TOKENS = 2500
@@ -38,7 +42,7 @@ _PRICE_CACHE_MISS_PER_M = 2.0
 _PRICE_CACHE_HIT_PER_M = 0.2
 _PRICE_OUTPUT_PER_M = 8.0
 _ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
-                 "focus_window", "wait", "tray_click", "run_shell"}
+                 "draw_strokes", "focus_window", "wait", "tray_click", "run_shell"}
 
 
 def _is_gui_only_task(task: str) -> bool:
@@ -375,6 +379,8 @@ class AgentRunner:
         self._done_verified = False                  # done-gate judge genuinely passed
         self._recent_results: list[tuple[str, str]] = []  # tool outputs as done-gate evidence
         self._escalate_next = False                  # use stronger model on next _chat
+        self._consecutive_unverified = 0             # steps without a verified=true action
+        self._last_reflect_step = 0                  # step number of last reflect injection
         self.status = "pending"                     # running/done/fail/reply/stopped/error
         self.result_text = ""
         self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
@@ -514,6 +520,21 @@ class AgentRunner:
             "tools": tools,
         })
 
+        def _is_rate_limit(exc: Exception) -> bool:
+            text = str(exc).lower()
+            return "429" in text or "too many requests" in text or "rate limit" in text
+
+        def _backoff_sleep(seconds: float) -> bool:
+            """Sleep in small slices so a Stop interrupts the wait. Returns
+            False if a Stop was requested mid-wait."""
+            waited = 0.0
+            while waited < seconds:
+                if self.stop_event.is_set():
+                    return False
+                time.sleep(0.2)
+                waited += 0.2
+            return True
+
         def worker() -> None:
             last_exc: Exception | None = None
             for attempt in range(1, _API_RETRIES + 1):
@@ -532,7 +553,16 @@ class AgentRunner:
                     last_exc = exc
                     logger.warning("API 调用失败 (第%d次): %s", attempt, exc)
                     if attempt < _API_RETRIES:
-                        time.sleep(1.5 * attempt)
+                        # Rate limits (429) need a much longer wait than a
+                        # transient network blip — back off exponentially
+                        # (5s, 10s, 20s...) so a burst of drawing strokes
+                        # doesn't kill the run. Stop interrupts the wait.
+                        if _is_rate_limit(exc):
+                            if not _backoff_sleep(_RATE_LIMIT_BACKOFF_S * (2 ** (attempt - 1))):
+                                return
+                        else:
+                            if not _backoff_sleep(1.5 * attempt):
+                                return
             box["exc"] = RuntimeError(f"API 连续 {_API_RETRIES} 次失败: {last_exc}")
 
         thread = threading.Thread(target=worker, daemon=True, name="llm-call")
@@ -654,7 +684,7 @@ class AgentRunner:
                 return False
         except Exception:
             return False
-        if not any(step.startswith("drag(") for step in self._steps_log):
+        if not any(step.startswith(("drag(", "draw_strokes(")) for step in self._steps_log):
             return False
         paths = _required_image_paths(self.task)
         return bool(paths) and any(Path(path).exists() for path in paths)
@@ -691,7 +721,7 @@ class AgentRunner:
                 result = ToolResult(blocked_store_action or blocked_upload_action)
             elif (
                 self._drawing_should_stop_mutating()
-                and tc.function.name in {"click", "drag", "type_text", "hotkey", "scroll"}
+                and tc.function.name in {"click", "drag", "draw_strokes", "type_text", "hotkey", "scroll"}
             ):
                 result = ToolResult(
                     "Drawing/canvas task appears complete: all plan steps are marked done, "
@@ -792,7 +822,10 @@ class AgentRunner:
         screen = ""
         try:
             hwnd = self.session.hwnd
-            snap = fusion.observe(hwnd, include_icons=False) if hwnd else self.session.snapshot
+            pmode = intent.perception_mode(
+                self.task, self.session.snapshot.title if self.session.snapshot else "")
+            snap = (fusion.observe(hwnd, include_icons=False, perception_mode=pmode)
+                    if hwnd else self.session.snapshot)
             screen = snap.to_text(50) if snap else ""
         except Exception as exc:  # perception must never break the gate
             logger.debug("done 核验 observe 失败: %s", exc)
@@ -834,7 +867,7 @@ class AgentRunner:
                 logger.info("done 被快速核验拒绝(输入文本缺失): %s", reason)
                 return False
         if _is_drawing_task(self.task):
-            saw_drag = any(step.startswith("drag(") for step in self._steps_log)
+            saw_drag = any(step.startswith(("drag(", "draw_strokes(")) for step in self._steps_log)
             saw_visual_change = "visual_change_detected\": true" in evidence.lower()
             image_paths = _required_image_paths(self.task)
             missing_paths = [path for path in image_paths if not Path(path).exists()]
@@ -950,8 +983,31 @@ class AgentRunner:
                         "发送后重新 observe 或 read_text，确认消息出现在目标会话中再 done。"
                     ),
                 })
-                logger.info("done 被快速核验拒绝(通信任务): %s", reason)
+                logger.info("done 被快速核验拒绝(通信任务-有payload): %s", reason)
                 return False
+            elif not payloads:
+                # No quoted message text — require that read_text was called and
+                # returned non-empty content from the chat window (proves the
+                # chat surface is open and has something to show).
+                has_chat_evidence = any(
+                    name == "read_text" and len(out.strip()) > 10
+                    for name, out in self._recent_results
+                )
+                if not has_chat_evidence:
+                    reason = (
+                        "通信任务未见聊天窗口内容证据：尚未调用 read_text 确认聊天窗口打开且有内容。"
+                        "请打开目标联系人的聊天窗口，read_text 确认后再 done"
+                    )
+                    BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                    self._done_rejects += 1
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[完成核验未通过] {reason}。"
+                        ),
+                    })
+                    logger.info("done 被快速核验拒绝(通信任务-无payload): %s", reason)
+                    return False
         api = CONFIG.get("api", default={})
         judge_model = (CONFIG.get("agent", "escalation_model", default="")
                        or api.get("done_judge_model") or api.get("model", "deepseek-v4-flash"))
@@ -1114,6 +1170,79 @@ class AgentRunner:
         BUS.publish("playbook", run_id=self.run_id, name=book.name, trigger=title[:60])
         logger.info("运行中注入 playbook: %s (窗口: %s)", book.name, title[:40])
 
+    # ------------------------------------------------------------ reflect loop
+    def _build_reflection(self, step: int) -> str:
+        """Generate a structured reflection note from current run state.
+
+        Pure code — no extra LLM call. Distills recent actions, verification
+        outcomes, and world state into a concise checkpoint message so the
+        model has an explicit recap of where it is before deciding next steps.
+
+        Inspired by Reflexion (Shinn et al. 2023): explicit verbal reflection
+        injected into context improves decision quality without an extra model.
+        """
+        recent_actions = self._steps_log[-6:] if self._steps_log else []
+        world_state = self.session.world.state() if self.session.world_enabled else {}
+        window_title = self.session.snapshot.title if self.session.snapshot else "未知窗口"
+        plan_summary = ""
+        if self.session.plan and self.session.plan.active():
+            plan_summary = f"\n当前计划进度：{self.session.plan.render()}"
+
+        # Build verification status summary.
+        verified_count = sum(
+            1 for name, out in self._recent_results
+            if '"verified": true' in out.lower()
+        )
+        unverified_note = (
+            f"（最近 {self._consecutive_unverified} 步没有 verified=true 的动作，注意核验）"
+            if self._consecutive_unverified >= 3 else ""
+        )
+
+        parts = [
+            f"[反思检查点 第{step}步] 当前窗口：「{window_title}」",
+            f"最近动作：{' → '.join(recent_actions) or '（无）'}",
+            f"已验证动作数：{verified_count}{unverified_note}",
+        ]
+        if world_state.get("repeated_action"):
+            parts.append(f"警告：检测到重复动作 {world_state['repeated_action']}")
+        if plan_summary:
+            parts.append(plan_summary)
+        parts.append(
+            "请检查：① 当前是否在正确的窗口/界面？② 上一步动作是否真正生效（observe 验证了吗）？"
+            "③ 接下来最关键的一步是什么？"
+        )
+        return "\n".join(parts)
+
+    def _maybe_reflect(self, step: int) -> None:
+        """Inject a reflection checkpoint at configurable intervals.
+
+        Fires when:
+        - step reaches a reflect interval (default every 8 steps), OR
+        - 3+ consecutive unverified action steps
+
+        Edge-gated against the last inject step to avoid rapid-fire injections.
+        Does NOT call an extra LLM — just appends to messages.
+        """
+        reflect_interval = int(CONFIG.get("agent", "reflect_interval", default=8))
+        if reflect_interval <= 0:
+            return
+        # Avoid injecting on consecutive steps (minimum 3 steps gap).
+        steps_since_last = step - self._last_reflect_step
+        if steps_since_last < 3:
+            return
+        should_reflect = (
+            (step > 1 and step % reflect_interval == 0)
+            or self._consecutive_unverified >= 3
+        )
+        if not should_reflect:
+            return
+        note = self._build_reflection(step)
+        self.messages.append({"role": "user", "content": note})
+        self._last_reflect_step = step
+        BUS.publish("agent_reflect", run_id=self.run_id, step=step,
+                    consecutive_unverified=self._consecutive_unverified)
+        logger.info("反思检查点注入 step=%d unverified=%d", step, self._consecutive_unverified)
+
     # ------------------------------------------------------------------ run
     def run(self) -> dict[str, Any]:
         self.status = "running"
@@ -1145,14 +1274,21 @@ class AgentRunner:
             if payloads:
                 core = payloads[0][:80]
                 extra = "如果能清楚看到表情/贴纸入口，再额外尝试一次装饰。" if wants_decor else ""
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[通信任务提示] 先把要发送的正文 '{core}' 真正送达并重新 observe/read_text 验证。"
-                        "如果界面里正文已经出现在输入框，就优先完成发送，不要为了装饰项在发送区附近反复试探模糊图标。"
-                        f"{extra}"
-                    ),
-                })
+                hint_body = (
+                    f"先把要发送的正文 '{core}' 真正送达并重新 observe/read_text 验证。"
+                    "如果界面里正文已经出现在输入框，就优先完成发送，不要为了装饰项在发送区附近反复试探模糊图标。"
+                    f"{extra}"
+                )
+            else:
+                hint_body = (
+                    "先打开目标联系人的聊天窗口，确认输入框可用，输入消息并发送。"
+                    "发送后调用 read_text 确认消息出现在聊天记录中，再调用 done。"
+                    "done 前必须有 read_text 的输出证据。"
+                )
+            self.messages.append({
+                "role": "user",
+                "content": f"[通信任务提示] {hint_body}",
+            })
         # Session continuity: let referential follow-ups ("再来一次" etc.) resolve
         # against prior tasks this session. Injected right after the task so it's
         # in the cache-friendly prefix; gated by config.
@@ -1161,10 +1297,16 @@ class AgentRunner:
                 "role": "user",
                 "content": (
                     "[Drawing/canvas task guidance] The goal is visible pixels, not just tool selection. "
-                    "Use observe to locate the canvas/work surface, then use drag strokes inside that "
-                    "surface. After each drag, read the tool result: visual_change_detected=true means "
-                    "the stroke likely changed the visible surface; false means you probably dragged on "
-                    "a toolbar, popup, inactive surface, or with a non-drawing mode. If a popup, color "
+                    "Work in batches: observe ONCE to locate the canvas and tools, plan the whole figure "
+                    "(all strokes), then commit them in as few calls as possible using draw_strokes "
+                    "(many separate strokes in one call) rather than one drag per LLM round-trip. After a "
+                    "batch, observe again to check the result and only then draw corrections. "
+                    "Read the tool result: visual_change_detected=true means the strokes likely changed the "
+                    "visible surface; false means you probably drew on a toolbar, popup, inactive surface, "
+                    "or with a non-drawing mode. If a stroke batch reports visual_change_detected=false, do "
+                    "NOT start probing colors or coordinates — first make sure a drawing tool (Pencil/Brush) "
+                    "is actually selected by clicking it, click once on the canvas to focus it, then retry. "
+                    "If a popup, color "
                     "panel, or text toolbar blocks the canvas, press Esc or click back on the canvas and "
                     "continue. Do not call done until the drawing is visibly non-empty and any requested "
                     "output image file has been saved and verified to exist. If the user requested "
@@ -1264,6 +1406,15 @@ class AgentRunner:
                 )
 
                 terminal = self._handle_tool_calls(msg.tool_calls)
+                # Track consecutive steps without a verified action for reflect.
+                if self._last_verify_ok is True:
+                    self._consecutive_unverified = 0
+                elif self._last_verify_ok is False or self._last_verify_ok is None:
+                    # None means no verify-capable tool was called this step.
+                    # Only increment on action tools, not purely observe steps.
+                    action_names = {tc.function.name for tc in msg.tool_calls}
+                    if action_names & _ACTION_TOOLS:
+                        self._consecutive_unverified += 1
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
                     continue  # done-gate rejected the claim → keep working
                 if terminal:
@@ -1271,6 +1422,7 @@ class AgentRunner:
                     break
                 self._surface_world_advisory()
                 self._maybe_inject_playbook()
+                self._maybe_reflect(step)
             else:
                 self.status = "fail"
                 self.result_text = f"达到最大步数 {max_steps} 仍未完成"
