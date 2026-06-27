@@ -17,7 +17,8 @@ import win32gui
 from ..action import executor, shell, verify
 from ..config import CONFIG
 from ..memory import experience
-from ..perception import apps, fusion, ocr, search, tray, vision_cv, vlm, win32, world
+from ..perception import (apps, fusion, intent, ocr, search, tray, vision_cv,
+                          vlm, win32, world)
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner
@@ -155,6 +156,25 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                 "duration": {"type": "number", "description": "总拖拽时长(秒)，默认0.4"},
             },
             required=["x1", "y1", "x2", "y2"],
+        ),
+        _tool(
+            "draw_strokes",
+            "批量绘画：一次画多条独立笔画，适合画完整图形（如猫脸+耳朵+眼睛+胡须）。"
+            "每条笔画是一串点 [[x,y],...]，会自动抬笔分隔（笔画之间不连线）。"
+            "推荐用法：观察一次屏幕→规划好整幅图的所有笔画→用本工具一次画完→再观察检查，"
+            "不要一笔一观察。返回每条笔画的可见变化与总变化。",
+            {
+                "strokes": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "array", "items": {"type": "integer"}},
+                    },
+                    "description": "笔画列表，每条是 [[x,y],[x,y],...] 至少2个点",
+                },
+                "duration": {"type": "number", "description": "每条笔画时长(秒)，默认0.4"},
+            },
+            required=["strokes"],
         ),
         _tool(
             "wait",
@@ -702,6 +722,15 @@ class ToolSession:
     def _fmt(data: dict) -> str:
         return json.dumps(data, ensure_ascii=False, default=str)
 
+    def _perception_mode(self) -> str:
+        """Return the perception strategy mode for the current task + window title."""
+        title = self.snapshot.title if self.snapshot else ""
+        return intent.perception_mode(self.task, title)
+
+    def _vision_priority(self) -> bool:
+        """Legacy accessor — True when perception mode is 'visual'."""
+        return self._perception_mode() != "normal"
+
     def _needs_visual_state_summary(self) -> bool:
         text = f"{self.task} {self.snapshot.title if self.snapshot else ''}".casefold()
         needles = (
@@ -930,7 +959,8 @@ class ToolSession:
         if not hwnd:
             return ToolResult("无法确定目标窗口，请先 list_windows + focus_window")
         include_icons = bool(args.get("include_icons", True))
-        self.snapshot = fusion.observe(hwnd, include_icons=include_icons)
+        self.snapshot = fusion.observe(hwnd, include_icons=include_icons,
+                                       perception_mode=self._perception_mode())
         self._remember_target(hwnd, self.snapshot.title)
         text = self.snapshot.to_text()
         visual_summary = self._visual_state_summary(hwnd)
@@ -1277,6 +1307,62 @@ class ToolSession:
         bottom = max(ys) + pad
         return Region(left, top, max(1, right - left), max(1, bottom - top)).clamp_to_screen()
 
+    def _t_draw_strokes(self, args: dict) -> ToolResult:
+        raw = args.get("strokes")
+        if not isinstance(raw, list) or not raw:
+            return ToolResult("draw_strokes 需要 strokes: [[[x,y],...], ...]（至少一条笔画）")
+        duration = float(args.get("duration", 0.4))
+        # Normalize + collect all coords for one before/after diff region.
+        strokes: list[list[list[int]]] = []
+        all_coords: list[tuple[int, int]] = []
+        for stroke in raw:
+            pts: list[list[int]] = []
+            for p in stroke or []:
+                try:
+                    x, y = int(p[0]), int(p[1])
+                except (TypeError, ValueError, IndexError, KeyError):
+                    continue
+                pts.append([x, y])
+                all_coords.append((x, y))
+            if len(pts) >= 2:
+                strokes.append(pts)
+        if not strokes:
+            return ToolResult("draw_strokes 没有有效笔画（每条至少需要2个点）")
+        xs = [c[0] for c in all_coords]
+        ys = [c[1] for c in all_coords]
+        pad = 28
+        region = Region(min(xs) - pad, min(ys) - pad,
+                        max(1, max(xs) - min(xs) + 2 * pad),
+                        max(1, max(ys) - min(ys) + 2 * pad)).clamp_to_screen()
+        before = None
+        try:
+            before = capture(region)
+        except Exception as exc:
+            logger.debug("draw_strokes pre-capture failed: %s", exc)
+        result = executor.draw_strokes(strokes, duration_s=duration, hwnd=self.hwnd)
+        if before is not None:
+            try:
+                time.sleep(0.12)
+                after = capture(region)
+                ratio = vision_cv.diff_ratio(before, after)
+                result["visual_change_ratio"] = round(float(ratio), 5)
+                result["visual_change_detected"] = bool(ratio >= 0.0008)
+                result["visual_feedback"] = (
+                    f"drew {result.get('strokes_drawn', 0)} strokes; "
+                    + ("visible pixels changed across the figure region — good evidence "
+                       "the strokes landed on the canvas. Re-observe to check the result."
+                       if ratio >= 0.0008 else
+                       "the region barely changed; the strokes may have hit toolbar/popup "
+                       "chrome or an inactive surface. Re-observe, ensure a Pencil/Brush "
+                       "tool is selected and the canvas is focused, then retry.")
+                )
+            except Exception as exc:
+                logger.debug("draw_strokes post-capture/diff failed: %s", exc)
+        return ToolResult(
+            self._fmt(result),
+            replay={"tool": "draw_strokes", "strokes": strokes, "duration": duration},
+        )
+
     def _t_wait(self, args: dict) -> ToolResult:
         condition = args.get("condition") or {}
         if not isinstance(condition, dict) or not condition:
@@ -1293,7 +1379,8 @@ class ToolSession:
         hwnd = self._resolve_hwnd(args)
         if not hwnd:
             return ToolResult("无目标窗口")
-        snapshot = fusion.observe(hwnd, include_icons=False)
+        snapshot = fusion.observe(hwnd, include_icons=False,
+                                   perception_mode=self._perception_mode())
         texts = [e.text for e in snapshot.elements if e.text.strip()]
         ocr_elements = ocr.collect(snapshot.region, min_conf=0.45)
         texts.extend(e.text for e in ocr_elements if e.text.strip())

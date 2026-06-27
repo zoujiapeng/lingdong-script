@@ -177,24 +177,51 @@ def _escalate_empty(snapshot: Snapshot, region: Region,
     return fused
 
 
-def observe(hwnd: int, include_icons: bool = True) -> Snapshot:
-    """Observe a window with all enabled dimensions, fused by priority."""
+def observe(hwnd: int, include_icons: bool = True,
+            vision_priority: bool = False,
+            perception_mode: str = "") -> Snapshot:
+    """Observe a window with all enabled dimensions, fused by priority.
+
+    perception_mode controls how aggressively visual perception is applied:
+      "normal"  (default) — UIA-rich windows skip OCR/VLM for speed.
+      "visual"  — chat/canvas/mirror tasks: OCR always runs; when VLM is
+                  configured it also runs as an assist dimension (not just
+                  as rescue), unless the window is extremely UIA-rich
+                  (>= vlm_assist_threshold, default 60).
+      "vlm_first" — future; reserved.
+
+    For backward-compat, passing vision_priority=True is equivalent to
+    perception_mode="visual".
+    """
+    # Normalise the mode from either argument.
+    if not perception_mode:
+        perception_mode = "visual" if vision_priority else "normal"
+
     region = window_region(hwnd)
     title = win32._window_text(hwnd)
     snapshot = Snapshot(hwnd=hwnd, title=title, region=region)
 
     order = CONFIG.enabled_dimensions()
-    # OCR on a large/complex window is the latency killer (~6s on Krita-class
-    # apps). When UIA already returned a rich, reliable element set, OCR is
-    # mostly redundant — skip it. Sparse-UIA cases (canvas/OCR-mode) still run
-    # OCR. Gated by perception.ocr_skip_when_uia_rich.
-    skip_ocr_if_rich = bool(CONFIG.get("fusion", "ocr_skip_when_uia_rich", default=True))
+    is_visual = perception_mode == "visual"
+
+    # OCR: skip when UIA already returned a rich, reliable element set —
+    # except for visual-mode tasks (chat/canvas) where the real content lives
+    # in pixels invisible to UIA.
+    skip_ocr_if_rich = (
+        bool(CONFIG.get("fusion", "ocr_skip_when_uia_rich", default=True))
+        and not is_visual
+    )
     uia_rich_threshold = int(CONFIG.get("fusion", "uia_rich_threshold", default=20))
-    # VLM on every observe is the biggest latency sink (~7-12s/call). When UIA
-    # already returned a rich element set, the VLM is redundant on the hot path
-    # — skip it here. It still runs as the escalate_on_empty rescue (below) when
-    # nothing readable was found, and stays available via the vlm_describe tool.
-    skip_vlm_if_rich = bool(CONFIG.get("fusion", "vlm_skip_when_uia_rich", default=True))
+
+    # VLM assist: in visual mode, VLM runs as a regular dimension (not just
+    # the rescue ladder) when configured. A higher threshold (vlm_assist_threshold,
+    # default 60) is used so that extremely UIA-rich windows (e.g. a full IDE)
+    # still skip VLM for latency, while chat-app chrome (~20-40 UIA elements)
+    # gets VLM coverage for the pixel-rendered message bubbles.
+    vlm_assist_threshold = int(CONFIG.get("fusion", "vlm_assist_threshold", default=60))
+    # In normal mode, VLM on the hot path is still suppressed at uia_rich_threshold.
+    skip_vlm_if_rich_normal = bool(CONFIG.get("fusion", "vlm_skip_when_uia_rich", default=True))
+
     uia_count = 0
     skip_uia_modal = _foreground_modal_over_target(hwnd, region)
     fused: list[UIElement] = []
@@ -223,10 +250,23 @@ def observe(hwnd: int, include_icons: bool = True) -> Snapshot:
             elif dim == "cv":
                 collected = vision_cv.detect_icon_candidates(region) if include_icons else []
             elif dim == "vlm":
-                if skip_vlm_if_rich and uia_count >= uia_rich_threshold:
-                    snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": "uia_rich"}
+                # Visual mode: VLM assists up to the higher threshold.
+                # Normal mode: VLM is still skipped when UIA is rich.
+                if is_visual:
+                    skip_vlm = uia_count >= vlm_assist_threshold
+                    skip_reason = "vlm_assist_threshold"
+                else:
+                    skip_vlm = skip_vlm_if_rich_normal and uia_count >= uia_rich_threshold
+                    skip_reason = "uia_rich"
+                if skip_vlm:
+                    snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": skip_reason}
                     continue
                 collected = vlm.collect(region)
+                if collected:
+                    logger.info(
+                        "VLM assist (%s mode): %d elements from %s",
+                        perception_mode, len(collected), title[:40],
+                    )
         except Exception as exc:
             logger.warning("感知维度 %s 异常: %s", dim, exc)
         elapsed_ms = int((time.monotonic() - started) * 1000)
