@@ -25,6 +25,7 @@
 | `python/winpilot_home/winpilot/agent/tool_schemas.py` | GUI agent OpenAI function schema |
 | `python/winpilot_home/winpilot/agent/task_rules.py` | GUI 任务分类和 done gate 规则辅助函数 |
 | `python/winpilot_home/winpilot/agent/done_verifier.py` | GUI agent done 二次核验 mixin |
+| `python/winpilot_home/winpilot/agent/context_guidance.py` | GUI agent planning/world/playbook 上下文提示 mixin |
 | `python/winpilot_home/winpilot/agent/reflection.py` | GUI agent 反思检查点 mixin |
 | `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、窗口/屏幕工具 |
 | `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
@@ -49,11 +50,11 @@
 - WinPilot 截图转 base64 的公共逻辑在 `winpilot/utils/image_capture.py`。
 - WinPilot GUI 工具 schema 已从 `agent/tools.py` 拆到 `agent/tool_schemas.py`，并压缩为短描述，减少 LLM 工具上下文噪音。
 - 文件读写/搜索 handler 已拆到 `agent/file_tools.py`。
-- WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；反思检查点已拆到 `agent/reflection.py`。
+- WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；planning/world/playbook 提示已拆到 `agent/context_guidance.py`；反思检查点已拆到 `agent/reflection.py`。
 - legacy Flow/DSL executor 的共享状态/异常类型已拆到 `python/engine/executor_types.py`，`executor.py` 仍只按 legacy 执行器维护。
 - 旧 `python/core/screenshot.py` 保留 `capture_screen()` 兼容 legacy Robot Framework keyword。
 - `npm run clean` 清 `dist/`、`release/`、测试/浏览器缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
-- 下一步优先拆 `agent/loop.py` 的计划上下文；`agent/tools.py` 后续继续拆窗口、输入、视觉、记忆工具。
+- 下一步优先继续拆 `agent/tools.py` 的窗口、输入、视觉、记忆工具。
 
 ## 验证
 
