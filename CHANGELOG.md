@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Refactoring
+
+- Split WinPilot GUI tool schema construction from runtime dispatch:
+  - `agent/tool_schemas.py` now owns compact OpenAI function schemas.
+  - `agent/tool_result.py` now owns the shared `ToolResult` object.
+  - `agent/file_tools.py` now owns generic file tools used by `ToolSession`.
+  - `agent/tools.py` remains the runtime `ToolSession` and desktop GUI handler surface.
+
+### Size
+
+- Added `npm run clean` for generated build outputs, caches, browser snapshots, and Python `__pycache__`.
+- Added `npm run clean:runtime` for additionally removing ignored `python-runtime/`.
+- Removed tracked `.playwright-mcp` browser snapshots.
+- Tightened Electron Builder resources to exclude Python caches, tests, dist-info/egg-info, local WinPilot runtime data, and extra Electron locales.
+- Compressed GUI tool schema descriptions to reduce code size and LLM tool-context noise.
+
 ### Documentation
 
 - Rewrote the project documentation from current code facts instead of stale historical Agent notes.

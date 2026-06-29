@@ -24,7 +24,8 @@
     "escalate_on_empty": true,
     "ocr_skip_when_uia_rich": true,
     "vlm_skip_when_uia_rich": true,
-    "uia_rich_threshold": 20
+    "uia_rich_threshold": 20,
+    "vlm_assist_threshold": 60
   },
   "agent": {
     "max_steps": 40,
@@ -43,7 +44,8 @@
     "approve_mode": "off",
     "escalation_model": "",
     "no_mouse_steal": false,
-    "llm_trace": true
+    "llm_trace": true,
+    "reflect_interval": 8
   },
   "ocr": {
     "use_gpu": true,

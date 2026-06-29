@@ -1,9 +1,9 @@
-"""Agent tool definitions (OpenAI function-calling schemas) + dispatcher.
+"""Agent tool dispatcher and per-run tool session state.
 
-The dispatcher holds per-run session state: the latest Snapshot (element-id
-registry) and the current target hwnd. Every action tool accepts an optional
-``expect`` condition (see action/verify.py DSL) and runs through the
-Action→Verify→Retry engine.
+Function-calling schemas live in ``tool_schemas.py``. This module keeps the
+runtime state: latest Snapshot, current target hwnd, world model, undo stack,
+and concrete tool handlers. Every action tool can accept an ``expect``
+condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 """
 from __future__ import annotations
 
@@ -19,610 +19,17 @@ from ..config import CONFIG
 from ..memory import experience
 from ..perception import (apps, fusion, intent, ocr, search, tray, vision_cv,
                           vlm, win32, world)
+from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner
 
-_EXPECT_SCHEMA = {
-    "type": "object",
-    "description": (
-        '验证条件,可组合: {"text_appears":"另存为"} {"text_gone":"..."} '
-        '{"window_appears":"标题子串"} {"window_gone":"..."} {"screen_stable":true} '
-        '{"color_match":{"x":1,"y":2,"rgb":[0,120,215],"tolerance":40}} '
-        '【确定性ground-truth(最可靠,涉及文件/进程时优先用)】: '
-        '{"file_exists":"路径"} {"file_contains":{"path":"..","text":".."}} '
-        '{"process_running":"exe名"} {"process_gone":"exe名"} '
-        '{"shell_true":"PowerShell表达式(真值即通过)"}'
-    ),
-}
+from .file_tools import FileToolMixin
+from .tool_schemas import tool_schemas
+from .tool_result import ToolResult
 
 
-def tool_schemas(planning: bool = False) -> list[dict]:
-    """OpenAI tools array. ``planning`` adds the todo-management tools;
-    vlm_describe only when a VLM is configured."""
-    tools = [
-        _tool("list_windows", "列出当前所有可见的顶层窗口（标题、hwnd、位置）", {}),
-        _tool(
-            "observe",
-            "感知一个窗口：返回其全部 UI 元素列表（带元素id、文字、坐标、状态、来源维度）。"
-            "不传 hwnd 则观察当前前台窗口。操作前必须先 observe。",
-            {
-                "hwnd": {"type": "integer", "description": "窗口句柄，省略=前台窗口"},
-                "include_icons": {"type": "boolean", "description": "是否包含CV图标候选，默认true"},
-            },
-        ),
-        _tool(
-            "scan_windows",
-            "Scan several matching windows by briefly focusing and observing each one. "
-            "Use when an app has multiple windows with the same title, or when the "
-            "current window appears to be a login/blocked page but another instance "
-            "may already be usable.",
-            {
-                "query": {"type": "string", "description": "Title/app substring, e.g. QQ, WeChat, Chrome"},
-                "max_windows": {"type": "integer", "description": "Maximum matching windows to scan"},
-            },
-            required=["query"],
-        ),
-        _tool(
-            "focus_window",
-            "把窗口切到前台并设为当前操作目标",
-            {"hwnd": {"type": "integer"}},
-            required=["hwnd"],
-        ),
-        _tool(
-            "find_app",
-            "检查程序是否已在运行（即使窗口隐藏/在系统托盘）。返回进程数与所有窗口（含隐藏）。"
-            "launch 任何可能已在后台的程序（QQ/微信等）前必须先调用此工具",
-            {"name": {"type": "string", "description": "进程名子串，如 QQ、wechat、notepad"}},
-            required=["name"],
-        ),
-        _tool(
-            "find_program",
-            "按显示名查找本机【已安装】的程序（支持中文名，如 网易云音乐、微信），"
-            "返回可启动目标列表。找不到程序的 exe 名时必须用它，不要瞎猜",
-            {"name": {"type": "string", "description": "程序显示名或其一部分"}},
-            required=["name"],
-        ),
-        _tool(
-            "tray_click",
-            "点击系统托盘图标（自动展开隐藏图标溢出区）。用于唤起最小化到托盘的程序。"
-            "找不到时会返回托盘现有图标名列表",
-            {
-                "name": {"type": "string", "description": "图标名子串，如 QQ"},
-                "double": {"type": "boolean", "description": "双击，默认false"},
-                "button": {"type": "string", "enum": ["left", "right"], "description": "默认left；right弹出托盘菜单"},
-            },
-            required=["name"],
-        ),
-        _tool(
-            "launch",
-            "启动程序（exe名/完整路径/shell命令/应用显示名如\"网易云音乐\"——"
-            "非可执行命令会自动按已安装应用解析启动）",
-            {"command": {"type": "string"}, "expect": _EXPECT_SCHEMA},
-            required=["command"],
-        ),
-        _tool(
-            "click",
-            "点击。优先传 element_id（走UIA快路径）；或传裸坐标 x,y",
-            {
-                "element_id": {"type": "integer", "description": "最近一次observe中的元素id"},
-                "x": {"type": "integer"},
-                "y": {"type": "integer"},
-                "button": {"type": "string", "enum": ["left", "right", "middle"]},
-                "double": {"type": "boolean"},
-                "expect": _EXPECT_SCHEMA,
-            },
-        ),
-        _tool(
-            "type_text",
-            "输入文字（支持中文，自动处理输入法）。可先传 element_id 点击聚焦该输入框",
-            {
-                "text": {"type": "string"},
-                "element_id": {"type": "integer", "description": "可选，先聚焦的输入框元素id"},
-                "expect": _EXPECT_SCHEMA,
-            },
-            required=["text"],
-        ),
-        _tool(
-            "hotkey",
-            '按快捷键组合，如 ["ctrl","s"]、["enter"]、["alt","f4"]',
-            {
-                "keys": {"type": "array", "items": {"type": "string"}},
-                "expect": _EXPECT_SCHEMA,
-            },
-            required=["keys"],
-        ),
-        _tool(
-            "scroll",
-            "在坐标处滚动，amount 正=向上 负=向下（格数）",
-            {
-                "x": {"type": "integer"}, "y": {"type": "integer"},
-                "amount": {"type": "integer"},
-            },
-            required=["x", "y", "amount"],
-        ),
-        _tool(
-            "drag",
-            "拖拽/绘画：从(x1,y1)拖到(x2,y2)。绘制曲线/多段线时用 points 传"
-            "中间路径点 [[x,y],...]（按顺序经过，再到终点）。duration 为总时长(秒)。",
-            {
-                "x1": {"type": "integer"}, "y1": {"type": "integer"},
-                "x2": {"type": "integer"}, "y2": {"type": "integer"},
-                "points": {
-                    "type": "array",
-                    "items": {"type": "array", "items": {"type": "integer"}},
-                    "description": "可选中间路径点 [[x,y],...]，用于自由绘画/多段拖拽",
-                },
-                "duration": {"type": "number", "description": "总拖拽时长(秒)，默认0.4"},
-            },
-            required=["x1", "y1", "x2", "y2"],
-        ),
-        _tool(
-            "draw_strokes",
-            "批量绘画：一次画多条独立笔画，适合画完整图形（如猫脸+耳朵+眼睛+胡须）。"
-            "每条笔画是一串点 [[x,y],...]，会自动抬笔分隔（笔画之间不连线）。"
-            "推荐用法：观察一次屏幕→规划好整幅图的所有笔画→用本工具一次画完→再观察检查，"
-            "不要一笔一观察。返回每条笔画的可见变化与总变化。",
-            {
-                "strokes": {
-                    "type": "array",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "array", "items": {"type": "integer"}},
-                    },
-                    "description": "笔画列表，每条是 [[x,y],[x,y],...] 至少2个点",
-                },
-                "duration": {"type": "number", "description": "每条笔画时长(秒)，默认0.4"},
-            },
-            required=["strokes"],
-        ),
-        _tool(
-            "wait",
-            "等待条件满足（不执行任何动作），如等窗口出现/画面稳定",
-            {
-                "condition": _EXPECT_SCHEMA,
-                "timeout_s": {"type": "number", "description": "默认10秒"},
-            },
-            required=["condition"],
-        ),
-        _tool(
-            "read_text",
-            "读取窗口内全部可见文字（融合感知+OCR），用于读结果/确认内容",
-            {"hwnd": {"type": "integer", "description": "省略=当前目标窗口"}},
-        ),
-        _tool(
-            "find_image",
-            "在屏幕上模板匹配查找图片（templates_img/下的模板名），返回坐标",
-            {"template": {"type": "string"}},
-            required=["template"],
-        ),
-        _tool(
-            "capture_template",
-            "把屏幕某区域截存为图像模板（之后可用 find_image 在屏幕上找它）。"
-            "用于记住某个图标/按钮的样子，逐步积累图标库",
-            {
-                "left": {"type": "integer"}, "top": {"type": "integer"},
-                "width": {"type": "integer"}, "height": {"type": "integer"},
-                "name": {"type": "string", "description": "模板名，如 chrome图标"},
-            },
-            required=["left", "top", "width", "height", "name"],
-        ),
-        _tool(
-            "color_probe",
-            "读取屏幕某点的颜色（平均色+主色，hex），判断按钮状态/主题/进度条",
-            {"x": {"type": "integer"}, "y": {"type": "integer"}},
-            required=["x", "y"],
-        ),
-        _tool(
-            "undo_last",
-            "撤销/回收本次最近的可逆动作:取消刚启动的后台/定时任务、关掉刚打开的程序窗口、"
-            "或对当前窗口执行 Ctrl+Z。用户说'撤销/取消刚才/关掉它'时用。GUI 可逆性有限。",
-            {},
-        ),
-        _tool(
-            "search_files",
-            "用 Everything 秒级搜索全盘文件名（找文件/歌曲/文档首选，远快于遍历）。"
-            "返回匹配的完整路径列表。可选 path 限定目录",
-            {
-                "query": {"type": "string", "description": "文件名关键词或通配符，如 *.mp3、报告"},
-                "max_results": {"type": "integer", "description": "默认50"},
-                "path": {"type": "string", "description": "限定搜索目录，省略=全盘"},
-            },
-            required=["query"],
-        ),
-        _tool(
-            "done",
-            "任务成功完成时调用，结束运行",
-            {"summary": {"type": "string", "description": "完成情况总结"}},
-            required=["summary"],
-        ),
-        _tool(
-            "fail",
-            "确认任务无法完成时调用，结束运行",
-            {"reason": {"type": "string"}},
-            required=["reason"],
-        ),
-    ]
-    if shell.shell_enabled():
-        tools.insert(0, _tool(
-            "run_detached",
-            "启动一个【独立存活】的后台 PowerShell 脚本（不随本程序退出而死）。"
-            "延时/定时/长时后台任务的唯一可靠方式——run_shell 的进程命令返回就死，"
-            "Start-Job 也会随之死。脚本里用 Start-Sleep 做延时、用 msg.exe 或托盘气泡做非阻塞提醒"
-            "（不要用会阻塞的 MessageBox）。返回 PID，安排后务必验证该进程存活。",
-            {
-                "script": {"type": "string",
-                           "description": "完整 PowerShell 脚本（可含 Start-Sleep、Start-Process 等）"},
-                "name": {"type": "string", "description": "任务名（用于脚本文件名），如 提醒吃饭"},
-            },
-            required=["script"],
-        ))
-        tools.insert(0, _tool(
-            "run_shell",
-            "执行 PowerShell/cmd 命令并返回输出（stdout/stderr/退出码）。"
-            "文件增删改查移动、启动程序、播放媒体、系统/进程/服务查询等优先用它，比 GUI 快且稳。"
-            "默认 powershell；命令可直接读到结果",
-            {
-                "command": {"type": "string", "description": "要执行的命令"},
-                "shell": {"type": "string", "enum": ["powershell", "cmd"], "description": "默认powershell"},
-                "timeout_s": {"type": "number", "description": "默认30秒"},
-            },
-            required=["command"],
-        ))
-    if planning:
-        tools.append(_tool(
-            "revise_plan",
-            "把当前任务（重新）拆解为有序子目标 todo 列表。多步任务开始时或发现原计划不对时调用。",
-            {"steps": {"type": "array", "items": {"type": "string"},
-                       "description": "有序子目标。每项是一句简短动宾短语；"
-                       "若某步有确定性完成信号,可写成对象 {\"goal\":\"..\",\"check\":{\"file_exists\":\"..\"}} 便于自动核验"}},
-            required=["steps"],
-        ))
-        tools.append(_tool(
-            "complete_subgoal",
-            "标记某个子目标已完成（按计划里的序号）。完成一步就调用，便于跟踪进度。",
-            {"index": {"type": "integer", "description": "计划中的子目标序号（从1开始）"}},
-            required=["index"],
-        ))
-    if experience.enabled():
-        tools.append(_tool(
-            "remember",
-            "把一条用户要求记住的信息/偏好/做法存入长期经验记忆（跨任务生效）。"
-            "仅在用户明确要求记住某事时调用。",
-            {
-                "note": {"type": "string", "description": "要记住的内容，一句话"},
-                "app": {"type": "string", "description": "关联的应用名，可选"},
-            },
-            required=["note"],
-        ))
-        tools.append(_tool(
-            "forget",
-            "按关键词删除匹配的经验记忆条目（用户要求忘掉某事时调用）。会返回删除了哪些。",
-            {"query": {"type": "string", "description": "匹配任务/应用/步骤文本的关键词"}},
-            required=["query"],
-        ))
-        tools.append(_tool(
-            "reuse_skill",
-            "复用上次某个成功任务的完整流程（0-token 离线重放，文字→坐标自动重定位）。"
-            "当前任务与历史成功任务基本相同时优先用它，比一步步重做快得多。"
-            "重放到某步失败会自动停下并告知失败位置，你再从那步起改用实时操作。",
-            {
-                "task": {"type": "string", "description": "要复用的历史任务描述（或其关键词）"},
-                "recipe_id": {"type": "string", "description": "可选，直接指定经验条目 id"},
-            },
-        ))
-    if vlm.is_configured():
-        tools.append(
-            _tool(
-                "vlm_describe",
-                "让视觉模型描述屏幕区域（看图片内容/图标含义）。不传区域=当前窗口",
-                {
-                    "question": {"type": "string"},
-                    "left": {"type": "integer"}, "top": {"type": "integer"},
-                    "width": {"type": "integer"}, "height": {"type": "integer"},
-                },
-                required=["question"],
-            )
-        )
-    # ---- clipboard tools (ported from cc-haha) ----
-    tools.append(_tool(
-        "clipboard_read",
-        "Read the current system clipboard text content.",
-        {},
-    ))
-    tools.append(_tool(
-        "clipboard_write",
-        "Write text to the system clipboard (replaces current content).",
-        {"text": {"type": "string", "description": "Text to copy to clipboard"}},
-        required=["text"],
-    ))
-    tools.append(_tool(
-        "clipboard_paste",
-        "Paste the current clipboard content via Ctrl+V at the focused location.",
-        {},
-    ))
-    # ---- mouse fine-control tools (ported from cc-haha) ----
-    tools.append(_tool(
-        "cursor_position",
-        "Return the current mouse cursor (x, y) screen position.",
-        {},
-    ))
-    tools.append(_tool(
-        "mouse_down",
-        "Press and hold a mouse button at the current cursor position. Use with move_mouse + mouse_up for fine drag.",
-        {
-            "button": {"type": "string", "enum": ["left", "right", "middle"],
-                        "description": "Mouse button, default left"},
-        },
-    ))
-    tools.append(_tool(
-        "mouse_up",
-        "Release a mouse button at the current cursor position.",
-        {
-            "button": {"type": "string", "enum": ["left", "right", "middle"],
-                        "description": "Mouse button, default left"},
-        },
-    ))
-    tools.append(_tool(
-        "move_mouse",
-        "Move the mouse cursor to (x, y) without clicking.",
-        {
-            "x": {"type": "integer", "description": "Screen x coordinate"},
-            "y": {"type": "integer", "description": "Screen y coordinate"},
-        },
-        required=["x", "y"],
-    ))
-    # ---- screenshot tool (ported from cc-haha) ----
-    tools.append(_tool(
-        "screenshot",
-        "Capture the full screen and return a base64-encoded JPEG image. "
-        "Use with vlm_describe or for visual analysis of the current desktop state.",
-        {
-            "quality": {"type": "integer", "description": "JPEG quality 1-100, default 75"},
-        },
-    ))
-    # ---- hold_key (ported from cc-haha) ----
-    tools.append(_tool(
-        "hold_key",
-        "Press and HOLD one or more keys for a duration in milliseconds, then "
-        "release. Use for games or UI that need a sustained keypress (e.g. hold "
-        "an arrow key to keep scrolling). For a normal key chord use hotkey instead.",
-        {
-            "keys": {"type": "array", "items": {"type": "string"},
-                      "description": "Keys to hold together, e.g. [\"shift\"] or [\"ctrl\",\"a\"]"},
-            "duration_ms": {"type": "integer", "description": "How long to hold, in milliseconds"},
-        },
-        required=["keys", "duration_ms"],
-    ))
-    # ---- list_displays (ported from cc-haha) ----
-    tools.append(_tool(
-        "list_displays",
-        "Enumerate connected monitors with their id, size, origin, and which is "
-        "primary. The id maps to the display index screenshot/zoom accept.",
-        {},
-    ))
-    # ---- zoom region screenshot (ported from cc-haha) ----
-    tools.append(_tool(
-        "zoom",
-        "Capture a specific screen rectangle at full resolution and return a "
-        "base64 JPEG. Use to inspect a small region (a tiny number, a status "
-        "icon) without downscaling the whole screen.",
-        {
-            "x": {"type": "integer", "description": "Region top-left x"},
-            "y": {"type": "integer", "description": "Region top-left y"},
-            "width": {"type": "integer", "description": "Region width in pixels"},
-            "height": {"type": "integer", "description": "Region height in pixels"},
-            "quality": {"type": "integer", "description": "JPEG quality 1-100, default 80"},
-        },
-        required=["x", "y", "width", "height"],
-    ))
-    # ---- list installed apps (ported from cc-haha) ----
-    tools.append(_tool(
-        "list_installed_apps",
-        "List all installed applications from the Windows registry with display name, bundle ID, and path. "
-        "Useful for discovering the exact name of an app before launching it.",
-        {},
-    ))
-    # ---- file management tools (from coding_tools, available to main agent) ----
-    tools.append(_tool(
-        "list_dir",
-        "List files and subdirectories in a directory. Skips node_modules/.git/dist etc.",
-        {"path": {"type": "string", "description": "Directory path (absolute or relative to cwd). Omit for current directory."}},
-    ))
-    tools.append(_tool(
-        "read_file",
-        "Read a text file's content with line numbers. Use start/count for large files.",
-        {
-            "path": {"type": "string", "description": "File path (absolute)"},
-            "start": {"type": "integer", "description": "Starting line number (from 1), optional"},
-            "count": {"type": "integer", "description": "Number of lines to read, optional"},
-        },
-        required=["path"],
-    ))
-    tools.append(_tool(
-        "write_file",
-        "Write/overwrite a file. Creates parent directories automatically.",
-        {
-            "path": {"type": "string", "description": "File path (absolute)"},
-            "content": {"type": "string", "description": "File content to write"},
-        },
-        required=["path", "content"],
-    ))
-    tools.append(_tool(
-        "search_text",
-        "Search for text (substring or regex) across files in a directory. Returns file:line:content matches.",
-        {
-            "query": {"type": "string", "description": "Search text or regex pattern"},
-            "path": {"type": "string", "description": "Directory to search in (absolute). Omit for cwd."},
-            "glob": {"type": "string", "description": "Filter by file glob pattern, e.g. *.py"},
-            "regex": {"type": "boolean", "description": "Whether query is a regex (default false)"},
-        },
-        required=["query"],
-    ))
-    _normalize_tool_schema_text(tools)
-    return tools
-
-
-def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required or [],
-            },
-        },
-    }
-
-
-_CLEAN_TOOL_DESCRIPTIONS = {
-    "list_windows": "List visible top-level windows with title, hwnd, and geometry.",
-    "observe": (
-        "Observe a window and return structured UI elements with element ids, "
-        "text, role, coordinates, bbox, state, and perception source. If hwnd "
-        "is omitted, observes the current foreground/target window."
-    ),
-    "scan_windows": (
-        "Briefly focus and observe several matching windows, returning text "
-        "summaries and generic signals such as auth/login-like or main/search-like. "
-        "If no visible window matches, it also scans matching hidden/running "
-        "top-level windows. Use this when an app has multiple windows, hidden "
-        "windows, or the focused window is a login page."
-    ),
-    "focus_window": "Bring the given hwnd to the foreground and set it as the current target.",
-    "find_app": (
-        "Check whether an app/process is running, including hidden/background/tray "
-        "state. Use before launching apps that may already be running."
-    ),
-    "find_program": (
-        "Find locally installed programs by display name or partial name. Use when "
-        "the executable name is unknown."
-    ),
-    "tray_click": "Click a system tray icon by name; useful for apps minimized to tray.",
-    "launch": "Launch a program by exe name, full path, shell command, or installed app display name.",
-    "click": "Click an observed element_id, or absolute screen coordinates x/y.",
-    "type_text": "Type literal text. Optionally pass element_id to focus an input before typing.",
-    "hotkey": "Press a keyboard shortcut, e.g. ['ctrl','s'], ['enter'], ['alt','f4'].",
-    "scroll": "Scroll at screen coordinates x/y by amount; positive/negative direction depends on system wheel semantics.",
-    "drag": "Drag from x1/y1 to x2/y2, optionally through intermediate points.",
-    "wait": "Wait until an expected condition is true, without performing an action.",
-    "read_text": "Read visible text from the target window using fused perception/OCR.",
-    "find_image": "Find an image template on screen and return matching coordinates.",
-    "capture_template": "Capture a screen region as a reusable image template.",
-    "color_probe": "Read color information at a screen point.",
-    "undo_last": "Undo or clean up the most recent reversible action from this run.",
-    "search_files": (
-        "Search user files by name, optionally under a path. Do not use this "
-        "to launch installed applications; use find_app/find_program/launch."
-    ),
-    "run_shell": "Run a PowerShell/cmd command and return stdout/stderr/exit code.",
-    "run_detached": "Start an independent background PowerShell script and return its PID.",
-    "revise_plan": "Create or replace a short ordered todo plan for the task.",
-    "complete_subgoal": "Mark a todo item complete by index.",
-    "remember": "Store a user-requested long-term memory note.",
-    "forget": "Delete matching long-term memory notes by query.",
-    "reuse_skill": "Replay a matching previously successful workflow when appropriate.",
-    "vlm_describe": "Ask the visual model to describe a screen/window region when available.",
-    "clipboard_read": "Read the current system clipboard text content.",
-    "clipboard_write": "Write text to the system clipboard (replaces current content).",
-    "clipboard_paste": "Paste the current clipboard content via Ctrl+V at the focused location.",
-    "cursor_position": "Return the current mouse cursor (x, y) screen position.",
-    "mouse_down": "Press and hold a mouse button at the current cursor position.",
-    "mouse_up": "Release a mouse button at the current cursor position.",
-    "move_mouse": "Move the mouse cursor to (x, y) without clicking.",
-    "screenshot": "Capture the full screen and return a base64-encoded JPEG image.",
-    "hold_key": "Press and hold keys for a duration in milliseconds, then release.",
-    "list_displays": "Enumerate connected monitors with id, size, origin, and primary flag.",
-    "zoom": "Capture a specific screen rectangle at full resolution as base64 JPEG.",
-    "list_installed_apps": "List all installed applications from the Windows registry.",
-    "list_dir": "List files and subdirectories in a directory.",
-    "read_file": "Read a text file's content with line numbers.",
-    "write_file": "Write or overwrite a file with the given content.",
-    "search_text": "Search for text across files in a directory.",
-    "done": "Finish the run only after verified evidence shows the task is complete.",
-    "fail": "Finish with an honest failure reason when the task cannot be completed.",
-}
-
-
-_CLEAN_EXPECT_DESCRIPTION = (
-    "Verification condition. Examples: "
-    '{"text_appears":"Save"}, {"text_gone":"Loading"}, '
-    '{"window_appears":"Notepad"}, {"window_gone":"Calculator"}, '
-    '{"screen_stable":true}, '
-    '{"color_match":{"x":1,"y":2,"rgb":[0,120,215],"tolerance":40}}, '
-    '{"file_exists":"C:\\\\path\\\\file.txt"}, '
-    '{"file_contains":{"path":"C:\\\\path\\\\file.txt","text":"hello"}}, '
-    '{"process_running":"notepad"}, {"process_gone":"notepad"}, '
-    '{"shell_true":"Test-Path C:\\\\x"}'
-)
-
-
-_CLEAN_PROPERTY_DESCRIPTIONS = {
-    "hwnd": "Window handle. Omit for current target/foreground window when allowed.",
-    "include_icons": "Whether to include CV icon candidates.",
-    "name": "Program, process, tray icon, or task name.",
-    "command": "Command, exe name, path, or installed app display name.",
-    "element_id": "Element id from the most recent observe result.",
-    "x": "Absolute screen x coordinate.",
-    "y": "Absolute screen y coordinate.",
-    "button": "Mouse button.",
-    "double": "Whether to double-click.",
-    "text": "Literal text to type or verify.",
-    "keys": "Shortcut keys as an array.",
-    "amount": "Scroll amount.",
-    "condition": _CLEAN_EXPECT_DESCRIPTION,
-    "timeout_s": "Timeout in seconds.",
-    "query": "Search query.",
-    "max_windows": "Maximum number of matching windows to scan.",
-    "max_results": "Maximum number of results.",
-    "path": "Optional path scope.",
-    "summary": "Short completion summary.",
-    "reason": "Failure reason.",
-    "question": "Focused visual question.",
-    "quality": "JPEG quality 1-100.",
-    "duration_ms": "Hold duration in milliseconds.",
-    "width": "Region width in pixels.",
-    "height": "Region height in pixels.",
-    "start": "Starting line number (from 1).",
-    "count": "Number of items to read or limit.",
-    "glob": "File glob pattern filter, e.g. *.py.",
-    "regex": "Whether the query is a regular expression.",
-}
-
-
-def _normalize_tool_schema_text(tools: list[dict]) -> None:
-    """Replace mojibake descriptions before sending schemas to the LLM."""
-    for tool in tools:
-        fn = tool.get("function", {})
-        name = fn.get("name", "")
-        if name in _CLEAN_TOOL_DESCRIPTIONS:
-            fn["description"] = _CLEAN_TOOL_DESCRIPTIONS[name]
-        params = fn.get("parameters", {})
-        props = params.get("properties", {})
-        for prop_name, spec in props.items():
-            if prop_name == "expect":
-                spec["description"] = _CLEAN_EXPECT_DESCRIPTION
-            elif isinstance(spec, dict) and prop_name in _CLEAN_PROPERTY_DESCRIPTIONS:
-                spec["description"] = _CLEAN_PROPERTY_DESCRIPTIONS[prop_name]
-
-
-class ToolResult:
-    """Dispatcher output: text for the LLM + metadata for the loop."""
-
-    def __init__(self, text: str, is_observe: bool = False,
-                 terminal: str | None = None, summary: str = "",
-                 replay: dict | None = None) -> None:
-        self.text = text
-        self.is_observe = is_observe
-        self.terminal = terminal          # None | "done" | "fail"
-        self.summary = summary            # one-line replacement when folded
-        self.replay = replay              # selector info for offline replay export
-
-
-class ToolSession:
+class ToolSession(FileToolMixin):
     """Per-run state: latest snapshot + current target window."""
 
     def __init__(self, stop_event=None, task: str = "") -> None:
@@ -739,6 +146,20 @@ class ToolSession:
             "\u753b\u677f", "\u767d\u677f", "\u989c\u8272", "color",
         )
         return any(needle in text for needle in needles)
+
+    def _capture_window_b64(self, hwnd: int) -> str:
+        """Capture the target window as a JPEG and return base64.
+
+        Only called when the main model has native vision. Returns empty string
+        on any error so the observe result is never blocked.
+        """
+        from ..agent.loop import _main_model_has_vision
+        if not _main_model_has_vision():
+            return ""
+        image_b64 = capture_window_jpeg_b64(hwnd)
+        if not image_b64:
+            logger.debug("窗口截图捕获失败或返回空图像")
+        return image_b64
 
     def _visual_state_summary(self, hwnd: int) -> str:
         if not self._needs_visual_state_summary():
@@ -970,7 +391,8 @@ class ToolSession:
             f'[已折叠] observe "{self.snapshot.title}" '
             f"{len(self.snapshot.elements)}个元素"
         )
-        return ToolResult(text, is_observe=True, summary=summary)
+        image_b64 = self._capture_window_b64(hwnd)
+        return ToolResult(text, is_observe=True, summary=summary, image_b64=image_b64 if image_b64 else "")
 
     def _t_focus_window(self, args: dict) -> ToolResult:
         hwnd = int(args["hwnd"])
@@ -1207,13 +629,21 @@ class ToolSession:
             element = None
 
         def action() -> dict:
+            import time
             if element is not None:
                 if executor.uia_set_value(element, text):
                     return {"ok": True, "via": "uia_set_value"}
                 executor.click(element.cx, element.cy, hwnd=self.hwnd)
-                import time
                 time.sleep(0.15)
-            return executor.type_text(text)
+            elif self.hwnd:
+                # Guard against focus theft (e.g. another window came to front
+                # between the last observe and now). Re-focus the target window
+                # before typing so SendInput lands in the right place.
+                import win32gui
+                if win32gui.GetForegroundWindow() != self.hwnd:
+                    executor.focus_window(self.hwnd)
+                    time.sleep(0.12)
+            return executor.type_text(text, hwnd=self.hwnd)
 
         result = verify.run_with_verify(
             "type_text", action, expect=args.get("expect"),
@@ -1225,8 +655,17 @@ class ToolSession:
 
     def _t_hotkey(self, args: dict) -> ToolResult:
         keys = [str(k) for k in args["keys"]]
+
+        def action() -> dict:
+            import time
+            import win32gui
+            if self.hwnd and win32gui.GetForegroundWindow() != self.hwnd:
+                executor.focus_window(self.hwnd)
+                time.sleep(0.12)
+            return executor.press_keys(keys)
+
         result = verify.run_with_verify(
-            "hotkey", lambda: executor.press_keys(keys),
+            "hotkey", action,
             expect=args.get("expect"), hwnd=self.hwnd, retryable=False,
             stop_event=self.stop_event)
         if not args.get("expect"):
@@ -1686,92 +1125,3 @@ class ToolSession:
             )
         except Exception as exc:
             return ToolResult(f"列举已安装应用失败: {exc}")
-
-    # ---- file management tools (from coding_tools) ----
-    def _t_list_dir(self, args: dict) -> ToolResult:
-        from pathlib import Path
-        path = str(args.get("path") or ".")
-        p = Path(path).resolve()
-        if not p.exists():
-            return ToolResult(f"目录不存在: {path}")
-        if not p.is_dir():
-            return ToolResult(f"不是目录: {path}")
-        _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build",
-                      ".venv", "venv", ".next", ".cache", "target", "bin", "obj"}
-        entries = []
-        for child in sorted(p.iterdir(), key=lambda c: (c.is_file(), c.name.lower())):
-            if child.is_dir():
-                if child.name in _SKIP_DIRS:
-                    continue
-                entries.append(f"  {child.name}/")
-            else:
-                entries.append(f"  {child.name}")
-        body = f"{p}:\n" + "\n".join(entries[:300])
-        return ToolResult(body, summary=f"[已折叠] list_dir {len(entries)}项")
-
-    def _t_read_file(self, args: dict) -> ToolResult:
-        from pathlib import Path
-        p = Path(str(args["path"])).resolve()
-        if not p.is_file():
-            return ToolResult(f"文件不存在: {args['path']}")
-        try:
-            text = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return ToolResult(f"非文本文件: {args['path']}")
-        lines = text.splitlines()
-        start = max(1, int(args.get("start", 1)))
-        count = int(args["count"]) if args.get("count") else len(lines)
-        chunk = lines[start - 1: start - 1 + count]
-        numbered = "\n".join(f"{start + i}\t{ln}" for i, ln in enumerate(chunk))
-        if len(numbered) > 20000:
-            numbered = numbered[:20000] + "\n...(已截断)"
-        return ToolResult(numbered, summary=f"[已折叠] read_file {p.name} {len(chunk)}行")
-
-    def _t_write_file(self, args: dict) -> ToolResult:
-        from pathlib import Path
-        p = Path(str(args["path"])).resolve()
-        content = str(args.get("content", ""))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        BUS.publish("action", action="write_file", path=str(p), bytes=len(content.encode("utf-8")))
-        return ToolResult(self._fmt({"ok": True, "path": str(p),
-                                     "bytes": len(content.encode("utf-8"))}))
-
-    def _t_search_text(self, args: dict) -> ToolResult:
-        import re as _re
-        from pathlib import Path
-        query = str(args.get("query", ""))
-        search_path = Path(str(args.get("path", "."))).resolve()
-        glob_pattern = str(args.get("glob", "*"))
-        is_regex = bool(args.get("regex", False))
-        if not search_path.is_dir():
-            return ToolResult(f"搜索目录不存在: {search_path}")
-        _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build",
-                      ".venv", "venv", ".next", ".cache"}
-        matches = []
-        pattern = _re.compile(query) if is_regex else None
-        try:
-            for f in sorted(search_path.rglob(glob_pattern)):
-                if any(skip in f.parts for skip in _SKIP_DIRS):
-                    continue
-                if not f.is_file():
-                    continue
-                try:
-                    text = f.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    continue
-                for i, line in enumerate(text.splitlines(), 1):
-                    hit = bool(pattern.search(line)) if is_regex else (query in line)
-                    if hit:
-                        rel = f.relative_to(search_path)
-                        matches.append(f"{rel}:{i}: {line.strip()[:200]}")
-                        if len(matches) >= 50:
-                            break
-                if len(matches) >= 50:
-                    break
-        except Exception as exc:
-            return ToolResult(f"搜索异常: {exc}")
-        return ToolResult(
-            "\n".join(matches) or f'未找到 "{query}" 的匹配',
-            summary=f"[已折叠] search_text {len(matches)}个匹配",
-        )

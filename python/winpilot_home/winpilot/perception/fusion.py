@@ -9,6 +9,7 @@ snapshot registry.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import win32gui
@@ -177,6 +178,28 @@ def _escalate_empty(snapshot: Snapshot, region: Region,
     return fused
 
 
+def _run_uia(hwnd: int) -> tuple[list[UIElement], int]:
+    """Run UIA collection and return (elements, elapsed_ms). Never raises."""
+    started = time.monotonic()
+    try:
+        collected = uia.collect(hwnd)
+    except Exception as exc:
+        logger.warning("UIA 并行采集异常: %s", exc)
+        collected = []
+    return collected, int((time.monotonic() - started) * 1000)
+
+
+def _run_ocr(region: Region) -> tuple[list[UIElement], int]:
+    """Run OCR collection and return (elements, elapsed_ms). Never raises."""
+    started = time.monotonic()
+    try:
+        collected = ocr.collect(region)
+    except Exception as exc:
+        logger.warning("OCR 并行采集异常: %s", exc)
+        collected = []
+    return collected, int((time.monotonic() - started) * 1000)
+
+
 def observe(hwnd: int, include_icons: bool = True,
             vision_priority: bool = False,
             perception_mode: str = "") -> Snapshot:
@@ -203,6 +226,8 @@ def observe(hwnd: int, include_icons: bool = True,
 
     order = CONFIG.enabled_dimensions()
     is_visual = perception_mode == "visual"
+    if is_visual and vlm.is_configured() and "vlm" not in order:
+        order.append("vlm")
 
     # OCR: skip when UIA already returned a rich, reliable element set —
     # except for visual-mode tasks (chat/canvas) where the real content lives
@@ -225,53 +250,101 @@ def observe(hwnd: int, include_icons: bool = True,
     uia_count = 0
     skip_uia_modal = _foreground_modal_over_target(hwnd, region)
     fused: list[UIElement] = []
-    for dim in order:
-        started = time.monotonic()
-        collected: list[UIElement] = []
-        try:
-            if dim == "uia":
-                if skip_uia_modal:
-                    snapshot.dim_stats["uia"] = {
-                        "count": 0,
-                        "ms": 0,
-                        "skipped": "foreground_modal_overlay",
-                    }
-                    continue
-                collected = uia.collect(hwnd)
-                uia_count = sum(1 for e in collected if (e.text or "").strip())
-            elif dim == "win32":
-                collected = win32.collect(hwnd)
-                collected.extend(win32.explorer_items(hwnd))
-            elif dim == "ocr":
-                if skip_ocr_if_rich and uia_count >= uia_rich_threshold:
-                    snapshot.dim_stats["ocr"] = {"count": 0, "ms": 0, "skipped": "uia_rich"}
-                    continue
-                collected = ocr.collect(region)
-            elif dim == "cv":
-                collected = vision_cv.detect_icon_candidates(region) if include_icons else []
-            elif dim == "vlm":
-                # Visual mode: VLM assists up to the higher threshold.
-                # Normal mode: VLM is still skipped when UIA is rich.
-                if is_visual:
-                    skip_vlm = uia_count >= vlm_assist_threshold
-                    skip_reason = "vlm_assist_threshold"
+
+    if is_visual and not skip_uia_modal and "uia" in order and "ocr" in order:
+        # Visual mode (chat/canvas): UIA and OCR are likely both needed but
+        # historically ran serially (1800ms UIA + 1600ms OCR = 3.4s per call).
+        # Run them in parallel so total latency ≈ max(UIA, OCR) ≈ 1.8s.
+        logger.info("[fusion] PARALLEL PATH: visual=%s skip_modal=%s", is_visual, skip_uia_modal)
+        uia_result: list[UIElement] = []
+        ocr_result: list[UIElement] = []
+        uia_ms = 0
+        ocr_ms = 0
+        _t_parallel_start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_uia = pool.submit(_run_uia, hwnd)
+            fut_ocr = pool.submit(_run_ocr, region)
+            for fut in as_completed([fut_uia, fut_ocr]):
+                if fut is fut_uia:
+                    uia_result, uia_ms = fut.result()
                 else:
-                    skip_vlm = skip_vlm_if_rich_normal and uia_count >= uia_rich_threshold
-                    skip_reason = "uia_rich"
-                if skip_vlm:
-                    snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": skip_reason}
-                    continue
-                collected = vlm.collect(region)
-                if collected:
-                    logger.info(
-                        "VLM assist (%s mode): %d elements from %s",
-                        perception_mode, len(collected), title[:40],
-                    )
-        except Exception as exc:
-            logger.warning("感知维度 %s 异常: %s", dim, exc)
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        snapshot.dim_stats[dim] = {"count": len(collected), "ms": elapsed_ms}
-        fused = _merge(fused, collected) if fused else list(collected)
+                    ocr_result, ocr_ms = fut.result()
+        uia_count = sum(1 for e in uia_result if (e.text or "").strip())
+        _t_parallel_wall = int((time.monotonic() - _t_parallel_start) * 1000)
+        logger.info("[fusion] PARALLEL DONE: uia=%dms ocr=%dms wall=%dms", uia_ms, ocr_ms, _t_parallel_wall)
+        snapshot.dim_stats["uia"] = {"count": len(uia_result), "ms": uia_ms}
+        snapshot.dim_stats["ocr"] = {"count": len(ocr_result), "ms": ocr_ms}
+        # Merge: UIA primary, OCR fills gaps (text grafting handled in _merge).
+        fused = _merge(uia_result, ocr_result) if uia_result else list(ocr_result)
+        # Win32 + CV still run serially (they're fast: <50ms each).
+        for dim in order:
+            if dim in ("uia", "ocr"):
+                continue
+            started = time.monotonic()
+            collected: list[UIElement] = []
+            try:
+                if dim == "win32":
+                    collected = win32.collect(hwnd)
+                    collected.extend(win32.explorer_items(hwnd))
+                elif dim == "cv":
+                    collected = vision_cv.detect_icon_candidates(region) if include_icons else []
+                elif dim == "vlm":
+                    skip_vlm = uia_count >= vlm_assist_threshold
+                    if skip_vlm:
+                        snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": "vlm_assist_threshold"}
+                        continue
+                    collected = vlm.collect(region)
+                    if collected:
+                        logger.info("VLM assist (visual mode): %d elements from %s",
+                                    len(collected), title[:40])
+            except Exception as exc:
+                logger.warning("感知维度 %s 异常: %s", dim, exc)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            snapshot.dim_stats[dim] = {"count": len(collected), "ms": elapsed_ms}
+            fused = _merge(fused, collected) if fused else list(collected)
+    else:
+        # Normal mode: serial execution (unchanged behaviour).
+        for dim in order:
+            started = time.monotonic()
+            collected = []
+            try:
+                if dim == "uia":
+                    if skip_uia_modal:
+                        snapshot.dim_stats["uia"] = {
+                            "count": 0, "ms": 0, "skipped": "foreground_modal_overlay",
+                        }
+                        continue
+                    collected = uia.collect(hwnd)
+                    uia_count = sum(1 for e in collected if (e.text or "").strip())
+                elif dim == "win32":
+                    collected = win32.collect(hwnd)
+                    collected.extend(win32.explorer_items(hwnd))
+                elif dim == "ocr":
+                    if skip_ocr_if_rich and uia_count >= uia_rich_threshold:
+                        snapshot.dim_stats["ocr"] = {"count": 0, "ms": 0, "skipped": "uia_rich"}
+                        continue
+                    collected = ocr.collect(region)
+                elif dim == "cv":
+                    collected = vision_cv.detect_icon_candidates(region) if include_icons else []
+                elif dim == "vlm":
+                    if is_visual:
+                        skip_vlm = uia_count >= vlm_assist_threshold
+                        skip_reason = "vlm_assist_threshold"
+                    else:
+                        skip_vlm = skip_vlm_if_rich_normal and uia_count >= uia_rich_threshold
+                        skip_reason = "uia_rich"
+                    if skip_vlm:
+                        snapshot.dim_stats["vlm"] = {"count": 0, "ms": 0, "skipped": skip_reason}
+                        continue
+                    collected = vlm.collect(region)
+                    if collected:
+                        logger.info("VLM assist (%s mode): %d elements from %s",
+                                    perception_mode, len(collected), title[:40])
+            except Exception as exc:
+                logger.warning("感知维度 %s 异常: %s", dim, exc)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            snapshot.dim_stats[dim] = {"count": len(collected), "ms": elapsed_ms}
+            fused = _merge(fused, collected) if fused else list(collected)
 
     # CV icon candidates that overlap any textual element are noise — drop them.
     fused = [

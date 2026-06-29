@@ -1,88 +1,67 @@
-# 总体架构
+# 当前架构
 
-本文按当前代码描述项目，不沿用历史 Agent 文档。
+项目不是一个单体 agent，而是两个系统并存。
 
-## 两套系统
+## 两条主线
 
-| 系统 | 代码位置 | 职责 | 关系 |
-|---|---|---|---|
-| WinPilot Agent | `python/winpilot_home/winpilot/` | LLM 实时操控电脑、感知、动作验证、录制、记忆、编程子 agent | 当前 Agent 主体 |
-| 流程图体系 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编辑、DSL 执行、@feature、MCP/HTTP/CLI 暴露 | 传统自动化主路径 |
+| 系统 | 路径 | 职责 | 边界 |
+| --- | --- | --- | --- |
+| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆、编程子 agent | 不直接使用 `@feature`，不直接编辑流程图 |
+| 流程图/DSL 系统 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编排、DSL 执行、`@feature`、MCP/HTTP/CLI | 不等同于 WinPilot 主 agent |
 
-这两套系统刻意解耦。WinPilot 主 agent 不加载 @feature 注册表，不接收流程图节点定义。它输出 `.wps.json` 后，前端用 `wpsToFlowScript.ts` 转成原版 FlowScript。
-
-## 进程与服务
+## 进程和端口
 
 ```mermaid
 flowchart TB
-    main["Electron main<br/>src/main/main.ts"]
+    user["User"]
     renderer["React renderer<br/>src/renderer"]
-    api["HTTP API<br/>src/main/api.ts<br/>127.0.0.1:7880"]
-    wpserver["WinPilot FastAPI<br/>python/winpilot_home/serve.py<br/>动态本地端口"]
-    agentipc["Agent IPC 子进程<br/>python/agent/__main__.py"]
-    engine["Engine 子进程<br/>python/engine/engine.py"]
+    main["Electron main<br/>src/main"]
+    api["Electron HTTP API<br/>127.0.0.1:7880<br/>src/main/api.ts"]
+    wpboot["WinPilot launcher<br/>src/main/winpilotServer.ts"]
+    serve["python/winpilot_home/serve.py<br/>dynamic local port"]
+    wp["WinPilot FastAPI<br/>winpilot/server.py"]
+    ipc["IPC adapter<br/>python/agent/__main__.py"]
+    engine["Flow/DSL engine<br/>python/engine"]
+    features["@feature registry<br/>python/features"]
 
-    main --> renderer
+    user --> renderer
+    renderer --> main
     main --> api
-    main --> wpserver
-    main --> agentipc
-    main --> engine
-    renderer -->|"iframe + REST"| wpserver
-    agentipc -->|"in-process import"| winpilot["winpilot package"]
-    wpserver -->|"same package"| winpilot
+    main --> wpboot --> serve --> wp
+    main --> ipc --> wp
+    renderer -->|"Agent iframe / REST"| wp
+    renderer --> engine --> features
 ```
 
-- `src/main/winpilotServer.ts` 启动 WinPilot FastAPI，并把 URL 暴露给前端 Agent 面板。
-- `src/main/api.ts` 提供 `:7880` 外部控制接口，面向 Claude Code/curl/HTTP MCP。
-- `python/agent/__main__.py` 仍叫 `agent`，但只是 WinPilot IPC adapter。
-- `python/engine/engine.py` 运行 FlowScript/DSL，不等同于 WinPilot Agent。
+`serve.py` 会设置 `WINPILOT_LAUNCHED_VIA_SERVE=1`。`server.py` 只阻止真正的 `uvicorn winpilot.server:app` 直接启动，不阻止测试导入。
 
 ## WinPilot 内部
 
 ```mermaid
 flowchart LR
-    task["用户任务"] --> router{"router.build_runner"}
-    router -->|"GUI / 桌面任务"| gui["AgentRunner<br/>agent/loop.py"]
-    router -->|"编程/仓库任务"| coding["CodingRunner<br/>agent/coding.py"]
-    gui --> tools["ToolSession<br/>agent/tools.py"]
-    tools --> perception["fusion.observe<br/>UIA + Win32 + OCR + CV + VLM"]
-    tools --> action["executor + verify<br/>SendInput/UIA + expect"]
-    gui --> recorder["trace recorder<br/>recorder/trace.py"]
-    gui --> memory["experience memory<br/>memory/experience.py"]
-    coding --> ctools["coding_tools<br/>list/read/write/apply_patch/github_search/run_shell"]
+    server["server.py"] --> router["agent/router.py"]
+    router -->|"GUI task"| loop["AgentRunner<br/>agent/loop.py"]
+    router -->|"coding/repo task"| coding["CodingRunner<br/>agent/coding.py"]
+    loop --> schemas["Tool schemas<br/>agent/tool_schemas.py"]
+    loop --> tools["ToolSession<br/>agent/tools.py"]
+    tools --> filetools["FileToolMixin<br/>agent/file_tools.py"]
+    tools --> fusion["fusion.observe<br/>UIA/Win32/OCR/CV/VLM"]
+    tools --> action["action/executor.py<br/>SendInput/UIA/clipboard/screenshot"]
+    tools --> verify["action/verify.py<br/>expect verification"]
+    loop --> recorder["recorder/trace.py"]
+    recorder --> wps[".wps.json"]
 ```
 
-关键点：
+## 最近结构调整
 
-- GUI-only 任务不会被路由到 CodingRunner。
-- 编程子 agent 有 `github_search`，可以搜索 GitHub 项目；它对 clone/run 类任务有“必须尝试运行或明确失败”的 gate。
-- GUI agent 可用 shell，但 GUI-only 任务会限制破坏前端路径的 shell/file 快捷方式，允许只读验证。
-- `agent.llm_trace=true` 时会记录每轮 LLM 输入/输出，便于复现模型每一步收到的信息。
+- `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
+- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态 dispatch 和主要 handler；`agent/file_tools.py` 承担通用文件工具。
+- `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
+- `python/core/screenshot.py` 保留 `capture_screen()`，兼容旧 Robot Framework keywords。
+- 打包配置过滤 Python/runtime 的 pycache、测试、dist-info、运行数据；Electron 语言包限制为 `zh-CN` 和 `en-US`。
 
-## 录制到流程图
+## 维护重点
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant A as WinPilot Agent
-    participant T as Trace
-    participant W as .wps.json
-    participant C as wpsToFlowScript.ts
-    participant R as React Editor
-    participant E as Python Engine
-
-    U->>A: 自然语言任务
-    A->>A: observe / tool / expect verify
-    A->>T: 记录动作、选择器、截图
-    T->>W: 导出脚本
-    R->>W: 导入/录制页面读取
-    R->>C: 转换
-    C->>R: 原版 FlowScript
-    U->>E: F5 零-token执行
-```
-
-`WinPilot Replayer` 也可以直接离线执行 `.wps.json`，不经过流程图编辑器。
-
-## 不再存在的旧 Agent
-
-旧版 Agent 的监督器、多执行模式、本地视觉引擎、视觉定位经验库等不在当前 Git 跟踪代码中。若旧文档、历史测试或临时输出提到这些，它们只表示历史背景，不是当前架构。
+- `agent/loop.py` 仍承担任务分类、LLM 调用、done gate、反思、计划等职责，后续应拆。
+- `agent/tools.py` 已拆出 schema 和文件工具，但窗口/输入/视觉/记忆 handler 仍集中，后续应继续拆。
+- `python/engine/executor.py` 是旧 DSLExecutor，应冻结为 legacy 引擎，不继续扩张。

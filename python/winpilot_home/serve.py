@@ -1,7 +1,12 @@
-"""WinPilot server launcher for the embedded Electron Agent panel.
+"""WinPilot server launcher — the ONLY supported way to start WinPilot.
 
-Run from this directory so `winpilot` is importable and config/traces/etc.
-resolve to winpilot_home/. Usage: python serve.py [PORT]
+Always launch via:  python serve.py [PORT] [HOST]
+
+Do NOT run:  uvicorn winpilot.server:app  (blocked by a guard in server.py)
+
+The Electron main process (src/main/winpilotServer.ts) calls this script with a
+dynamically chosen free port. Running uvicorn directly would bypass config
+resolution and the startup guard, so it is intentionally blocked.
 """
 from __future__ import annotations
 
@@ -13,6 +18,9 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+# Mark that this process was started via serve.py so server.py can verify it.
+os.environ["WINPILOT_LAUNCHED_VIA_SERVE"] = "1"
 
 import uvicorn
 

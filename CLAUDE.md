@@ -1,144 +1,58 @@
-# 灵动脚本工程速览
+# AI 接手速览
 
-本文件给接手项目的 AI/开发者使用。所有描述按当前代码同步；如果历史日志或临时文件与这里冲突，以代码和 `docs/` 为准。
+这份文件只写最短事实，避免 AI 读太多旧文档。
 
-## 当前架构
+## 项目主线
 
-灵动脚本是 Windows 桌面自动化项目，当前由两套系统组成：
+1. `python/winpilot_home/winpilot/`
+   - 当前 WinPilot desktop agent。
+   - GUI 任务：`agent/loop.py` 的 `AgentRunner`。
+   - 编程/仓库任务：`agent/coding.py` 的 `CodingRunner`。
+   - 路由入口：`agent/router.py`。
 
-1. **WinPilot Agent**：`python/winpilot_home/winpilot/`
-   - 实时操控电脑。
-   - 使用 OpenAI 兼容 function-calling 模型，默认 DeepSeek 配置。
-   - 感知融合 UIA、Win32、OCR、CV、可选 VLM。
-   - 动作带 expect 验证，done 有二次核验，重点防假成功。
-   - 编程/仓库任务由独立 `CodingRunner` 处理。
+2. `src/renderer/` + `python/engine/` + `python/features/`
+   - 旧流程图/DSL/`@feature` 自动化系统。
+   - 仍在用，但不是 WinPilot 主 agent 的工具来源。
 
-2. **流程图编辑器/执行引擎**：`src/renderer/` + `python/engine/` + `python/features/`
-   - React 画布编辑 FlowScript。
-   - Python engine 执行 DSL。
-   - @feature 注册表服务流程图、MCP、HTTP、CLI。
-   - 不作为 WinPilot 主 agent 的工具来源。
+## 入口文件
 
-WinPilot 跑出的 trace 可导出 `.wps.json`，由 `src/renderer/utils/wpsToFlowScript.ts` 纯代码转换成 FlowScript 进入画布。
+| 路径 | 作用 |
+| --- | --- |
+| `src/main/winpilotServer.ts` | Electron 启动 WinPilot FastAPI |
+| `python/winpilot_home/serve.py` | WinPilot 唯一支持的服务启动入口 |
+| `python/winpilot_home/winpilot/server.py` | WinPilot REST/WebSocket |
+| `python/winpilot_home/winpilot/config.py` | 真实默认配置 |
+| `python/winpilot_home/winpilot/agent/tool_schemas.py` | GUI agent OpenAI function schema |
+| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、窗口/屏幕工具 |
+| `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
+| `python/winpilot_home/winpilot/agent/tool_result.py` | GUI agent 工具返回对象 |
+| `python/winpilot_home/winpilot/action/executor.py` | 鼠标、键盘、窗口、剪贴板、截图等底层动作 |
+| `python/winpilot_home/winpilot/perception/fusion.py` | UIA/Win32/OCR/CV/VLM 感知融合 |
+| `src/main/api.ts` | Electron HTTP API，默认 `127.0.0.1:7880` |
 
-## 硬边界
+## 不要踩坑
 
-- 不要把 `python/features/` 的 @feature 塞进 WinPilot 主 agent。
-- 不要让主 agent 感知或编辑流程图内部格式。
-- 新专长优先参考 `CodingRunner` 做独立子 agent。
-- GUI-only 测试以前端路径和真实屏幕为准，不能只看日志成功。
-- `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是运行数据，不提交。
+- 不要直接运行 `uvicorn winpilot.server:app`；用 `python/winpilot_home/serve.py`。
+- 不要把 `python/features/` 当成 WinPilot 工具池。
+- 不要写计算器、QQ、网易云等单软件专属规则。
+- 不要相信“done 日志”等于真实成功；必须看屏幕/文件/进程/窗口/trace。
+- 不要把 `config.json`、`traces/`、`scripts/`、`experience_memory.json` 当源码。
+- 不要继续往 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py` 塞大块新逻辑。
 
-## 主要目录
+## 当前清理方向
 
-| 路径 | 说明 |
-|---|---|
-| `src/main/main.ts` | Electron 主进程、窗口和子进程管理 |
-| `src/main/api.ts` | `127.0.0.1:7880` HTTP API 和 HTTP MCP |
-| `src/main/winpilotServer.ts` | 启动 WinPilot FastAPI |
-| `src/renderer/` | React 流程图编辑器、Agent iframe、导入录制 UI |
-| `python/winpilot_home/winpilot/server.py` | WinPilot REST + WebSocket |
-| `python/winpilot_home/winpilot/config.py` | WinPilot 配置默认值和持久化 |
-| `python/winpilot_home/winpilot/agent/loop.py` | GUI `AgentRunner` |
-| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent 工具 schema 和 dispatcher |
-| `python/winpilot_home/winpilot/agent/coding.py` | 编程子 agent |
-| `python/winpilot_home/winpilot/agent/coding_tools.py` | 编程子 agent 工具 |
-| `python/winpilot_home/winpilot/agent/router.py` | 任务路由 |
-| `python/winpilot_home/winpilot/perception/` | UIA/Win32/OCR/CV/VLM 融合 |
-| `python/winpilot_home/winpilot/action/` | 动作执行、shell、安全、expect 验证 |
-| `python/winpilot_home/winpilot/recorder/` | trace、`.wps.json`、Replayer、人类演示录制 |
-| `python/winpilot_home/winpilot/memory/` | 经验和事实笔记 |
-| `python/agent/__main__.py` | WinPilot IPC 适配器 |
-| `python/agent/dialog_handler.py` | 旧 engine/@feature 仍使用的 Windows 对话框 helper |
-| `python/agent/menu_handler.py` | 旧 engine/@feature 仍使用的菜单 helper |
-| `python/engine/` | FlowScript/DSL 执行引擎 |
-| `python/features/` | @feature 注册表 |
-| `python/mcp/server.py` | Python MCP server |
-| `python/node-red-nodes/` | Node-RED 实验/PoC |
+- `src/renderer/store/index.ts` 已去掉重复 defaults/templates/persistence 定义，真实来源是 `store/defaults.ts` 和 `store/persistence.ts`。
+- WinPilot 截图转 base64 的公共逻辑在 `winpilot/utils/image_capture.py`。
+- WinPilot GUI 工具 schema 已从 `agent/tools.py` 拆到 `agent/tool_schemas.py`，并压缩为短描述，减少 LLM 工具上下文噪音。
+- 文件读写/搜索 handler 已拆到 `agent/file_tools.py`。
+- 旧 `python/core/screenshot.py` 保留 `capture_screen()` 兼容 legacy Robot Framework keyword。
+- `npm run clean` 清 `dist/`、`release/`、测试/浏览器缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
+- 下一步优先拆 `agent/loop.py` 的任务分类/done 验证；`agent/tools.py` 后续继续拆窗口、输入、视觉、记忆工具。
 
-## WinPilot REST
-
-当前端点来自 `python/winpilot_home/winpilot/server.py`：
-
-- `POST /api/chat`
-- `POST /api/stop`
-- `POST /api/interject`
-- `GET /api/status`
-- `POST /api/elevate`
-- `GET /api/config`
-- `PATCH /api/config`
-- `GET /api/traces`
-- `GET /api/trace/{run_id}`
-- `GET /api/trace/{run_id}/shot/{name}`
-- `POST /api/export/{run_id}`
-- `GET /api/scripts`
-- `GET /api/script/{file}`
-- `PUT /api/script/{file}`
-- `POST /api/human/start`
-- `POST /api/human/stop`
-- `GET /api/human/status`
-- `POST /api/replay`
-- `GET/POST/DELETE /api/memory`
-- `PUT/DELETE /api/memory/{recipe_id}`
-- `GET/DELETE /api/session`
-- `WS /ws/events`
-
-## WinPilot 工具事实
-
-GUI agent 基础工具主要包括：
-
-`list_windows`、`scan_windows`、`observe`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`done`、`fail`。
-
-按配置动态加入：
-
-- `agent.shell_enabled=true`：`run_shell`、`run_detached`
-- `agent.planning_enabled=true`：`revise_plan`、`complete_subgoal`
-- `agent.experience_memory=true`：`remember`、`forget`、`reuse_skill`
-- VLM 配置有效：`vlm_describe`
-
-编程子 agent 工具：
-
-`list_dir`、`read_file`、`write_file`、`apply_patch`、`search_text`、`github_search`、`run_shell`、`done`、`fail`。
-
-## 配置事实
-
-默认值在 `python/winpilot_home/winpilot/config.py`，不是 README 或旧样例。
-
-重点默认项：
-
-- `api.model`: `deepseek-v4-flash`
-- `server.host`: `127.0.0.1`
-- `server.port`: `8765`
-- `agent.max_steps`: `40`
-- `agent.llm_trace`: `true`
-- `agent.verify_done`: `true`
-- `agent.prompt_style`: `full`
-- `coding.enabled`: `true`
-- 感知默认开启 UIA、Win32、OCR、CV，VLM 默认关闭。
-
-`python/winpilot_home/config.example.json` 是示例文件；修改默认行为时同步它。
-
-## 测试
-
-优先验证：
+## 验证
 
 ```bash
 python -m pytest python/winpilot_home/tests -q
 npx vitest run
 npm run build
 ```
-
-根目录 `tests/` 是旧流程图/feature 和历史实验测试混合目录。里面仍可能有引用已删除旧 Agent 的实验测试，不能简单当成 WinPilot 当前状态。
-
-## 文档维护
-
-架构变化时同步：
-
-- `README.md`
-- `CLAUDE.md`
-- `交接说明.md`
-- `docs/*.md`
-- `CHANGELOG.md`
-- `HANDOFF_CODEX.md`，如果它仍作为当前交接文件使用
-
-运行日志、临时 txt、历史输出不要当作架构事实。

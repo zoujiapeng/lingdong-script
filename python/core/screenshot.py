@@ -106,5 +106,12 @@ class ScreenshotManager:
         return self._frame_count
 
 
+def capture_screen(path: str, region: Optional[tuple[int, int, int, int]] = None) -> str:
+    """Compatibility wrapper used by the legacy Robot Framework keywords."""
+    img = pyautogui.screenshot(region=region) if region else pyautogui.screenshot()
+    img.save(path)
+    return path
+
+
 # Avoid circular import: cv2 is needed only in capture_gray
 import cv2  # noqa: E402
