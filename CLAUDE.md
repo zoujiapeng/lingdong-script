@@ -28,6 +28,7 @@
 | `python/winpilot_home/winpilot/agent/context_guidance.py` | GUI agent planning/world/playbook 上下文提示 mixin |
 | `python/winpilot_home/winpilot/agent/reflection.py` | GUI agent 反思检查点 mixin |
 | `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、窗口/屏幕/动作核心工具 |
+| `python/winpilot_home/winpilot/agent/window_tools.py` | GUI agent 窗口列表、扫描、聚焦、应用发现工具 mixin |
 | `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
 | `python/winpilot_home/winpilot/agent/memory_tools.py` | GUI agent 经验记忆/0-token replay 工具 mixin |
 | `python/winpilot_home/winpilot/agent/desktop_tools.py` | GUI agent 剪贴板、鼠标细控、截图、显示器、应用列表工具 mixin |
@@ -53,12 +54,13 @@
 - WinPilot GUI 工具 schema 已从 `agent/tools.py` 拆到 `agent/tool_schemas.py`，并压缩为短描述，减少 LLM 工具上下文噪音。
 - 文件读写/搜索 handler 已拆到 `agent/file_tools.py`。
 - 经验记忆/复用 handler 已拆到 `agent/memory_tools.py`；桌面杂项 handler 已拆到 `agent/desktop_tools.py`。
+- 窗口列表/扫描/聚焦/应用发现 handler 已拆到 `agent/window_tools.py`。
 - 真实 GUI 评测脚本在 `scripts/gui_eval_run.py`，它走 `/api/chat`，与前端 Agent 页面同路径，并把报告写到忽略的 `python/winpilot_home/evals/`。
 - WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；planning/world/playbook 提示已拆到 `agent/context_guidance.py`；反思检查点已拆到 `agent/reflection.py`。
 - legacy Flow/DSL executor 的共享状态/异常类型已拆到 `python/engine/executor_types.py`，`executor.py` 仍只按 legacy 执行器维护。
 - 旧 `python/core/screenshot.py` 保留 `capture_screen()` 兼容 legacy Robot Framework keyword。
 - `npm run clean` 清 `dist/`、`release/`、测试/浏览器缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
-- 下一步优先继续拆 `agent/tools.py` 的窗口、输入、视觉工具。
+- 下一步优先继续拆 `agent/tools.py` 的输入、视觉工具。
 
 ## 验证
 
