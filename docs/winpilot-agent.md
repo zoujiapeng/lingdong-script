@@ -35,6 +35,22 @@
 
 后续优先继续拆 `agent/tools.py`，不要把新规则继续塞回 `loop.py`。
 
+## GUI 执行时序
+
+一次 GUI 任务的真实路径：
+
+1. 前端 Agent 页或 `scripts/gui_eval_run.py` 调 `/api/chat`。
+2. `server.py` 创建 `_RunState.stop_event`、`runner`、后台线程，并启动 `recorder/trace.py`。
+3. `agent/router.py` 选择 `AgentRunner` 或 `CodingRunner`；GUI-only 任务不会进入编程子 agent。
+4. `AgentRunner.run()` 组装 system/user messages、经验记忆、playbook、上下文提示和工具 schema。
+5. 每一步调用 LLM function calling；返回 tool calls 后由 `_handle_tool_calls()` 交给 `ToolSession.dispatch()`。
+6. `ToolSession` 维护最近 `Snapshot`、目标窗口 `hwnd`、plan、world model、undo stack；具体 handler 在各 mixin 中执行。
+7. 工具结果回写 messages、BUS 和 trace；`observe/read_text/list_windows` 等大结果会在上下文过大时折叠。
+8. `done` 或纯文本结束前会进 done verifier；证据不足会被拒绝并继续循环。
+9. 结束状态写入 `AgentRunner.status`：`done`、`fail`、`reply`、`stopped` 或 `error`。
+
+排错优先级：先看真实屏幕/截图，再看 `python/winpilot_home/traces/<run_id>.jsonl` 的工具序列和截图索引，最后看 `python/winpilot_home/traces/<run_id>/NNN_*.json` 里 LLM 每步实际收到的信息。
+
 ## 工具结构
 
 当前 GUI agent 工具被拆成几层：
@@ -43,9 +59,10 @@
 | --- | --- |
 | `agent/tool_schemas.py` | 构造短 OpenAI function-calling schema，直接发给 LLM |
 | `agent/tool_result.py` | `ToolResult` 返回对象 |
-| `agent/tools.py` | `ToolSession`、dispatch、输入/动作等核心运行态 handler |
+| `agent/tools.py` | `ToolSession`、dispatch、shell/launch/search/tray/plan/done/fail 等会话核心 handler |
 | `agent/window_tools.py` | `list_windows`、`scan_windows`、`focus_window`、`find_app`、`find_program` 窗口/应用工具 mixin |
 | `agent/perception_tools.py` | `observe`、`read_text`、`find_image`、`vlm_describe`、视觉摘要等感知工具 mixin |
+| `agent/interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` 输入动作工具 mixin |
 | `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin |
 | `agent/memory_tools.py` | `remember`、`forget`、`reuse_skill` 经验记忆和 0-token replay 工具 mixin |
 | `agent/desktop_tools.py` | 剪贴板、鼠标细控、截图、显示器、已安装应用等桌面杂项工具 mixin |
@@ -65,7 +82,7 @@
 
 `clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。
 
-`agent/tools.py` 仍偏大，但 schema、窗口、感知、文件、记忆、桌面杂项工具已拆出。后续继续拆输入/动作等 handler。
+`agent/tools.py` 已拆出 schema、窗口、感知、输入动作、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和少量 shell/launch/search/tray/plan/done/fail handler。
 
 ## 感知
 
