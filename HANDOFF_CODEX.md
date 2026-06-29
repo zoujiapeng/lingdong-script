@@ -21,6 +21,7 @@
 - `agent/tool_result.py` 从 `agent/tools.py` 拆出共享工具返回对象。
 - `agent/file_tools.py` 从 `agent/tools.py` 拆出通用文件工具 handler。
 - `agent/task_rules.py` 从 `agent/loop.py` 拆出 GUI 任务分类、GUI-only 限制和 done gate guard 规则。
+- `agent/done_verifier.py` 从 `agent/loop.py` 拆出 done 二次核验；保留 `loop.fusion/intent/CONFIG` 兼容 patch 路径。
 - `agent/reflection.py` 从 `agent/loop.py` 拆出反思检查点逻辑。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 从 `python/engine/executor.py` 拆出 legacy executor 状态、上下文和控制流异常。
@@ -32,7 +33,7 @@
 
 ## 当前风险
 
-- `agent/loop.py` 仍偏大，但任务规则和反思检查点已拆出；done 验证、计划和主循环还在里面。
+- `agent/loop.py` 仍偏大，但任务规则、done 核验和反思检查点已拆出；计划和主循环还在里面。
 - `agent/tools.py` 已开始拆分，但窗口/输入/视觉/记忆 handler 还在里面。
 - `python/engine/executor.py` 仍是 legacy 巨型执行器，已先拆出 `executor_types.py`。
 - GUI 任务必须看真实屏幕/trace/文件/进程证据，不能只看 done 日志。

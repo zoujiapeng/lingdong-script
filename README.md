@@ -15,7 +15,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`。
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
 - GUI 任务走 `AgentRunner`；编程/仓库任务走 `CodingRunner`。
-- GUI runner 的任务规则在 `agent/task_rules.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 done 验证。
+- GUI runner 的任务规则在 `agent/task_rules.py`，done 二次核验在 `agent/done_verifier.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和计划上下文。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 快速启动
