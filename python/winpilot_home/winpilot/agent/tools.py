@@ -16,7 +16,6 @@ import win32gui
 
 from ..action import executor, shell, verify
 from ..config import CONFIG
-from ..memory import experience
 from ..perception import (apps, fusion, intent, ocr, search, tray, vision_cv,
                           vlm, win32, world)
 from ..utils.image_capture import capture_window_jpeg_b64
@@ -24,12 +23,14 @@ from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner
 
+from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
+from .memory_tools import MemoryToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
 
 
-class ToolSession(FileToolMixin):
+class ToolSession(FileToolMixin, MemoryToolMixin, DesktopToolMixin):
     """Per-run state: latest snapshot + current target window."""
 
     def __init__(self, stop_event=None, task: str = "") -> None:
@@ -905,56 +906,6 @@ class ToolSession(FileToolMixin):
         return ToolResult(f"已完成子目标 {index}{'（已核验）' if check_expect else ''}。\n"
                           f"{self.plan.render()}")
 
-    def _t_remember(self, args: dict) -> ToolResult:
-        note = str(args.get("note", "")).strip()
-        if not note:
-            return ToolResult("remember 需要 note 内容")
-        recipe = experience.add(note, app=str(args.get("app", "")).strip(),
-                                steps=[note])
-        BUS.publish("memory", action="remember", id=recipe["id"], note=note[:120])
-        return ToolResult(f"已记住（id={recipe['id']}）: {note}")
-
-    def _t_forget(self, args: dict) -> ToolResult:
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return ToolResult("forget 需要 query 关键词")
-        removed = experience.delete_matching(query)
-        if not removed:
-            return ToolResult(f'没有匹配 "{query}" 的记忆条目')
-        names = "；".join(r.get("task", "")[:60] for r in removed)
-        BUS.publish("memory", action="forget", count=len(removed), query=query)
-        return ToolResult(f"已删除 {len(removed)} 条记忆: {names}")
-
-    def _t_reuse_skill(self, args: dict) -> ToolResult:
-        from ..recorder import trace as trace_mod
-
-        task = str(args.get("task", "")).strip()
-        recipe_id = str(args.get("recipe_id", "")).strip()
-        script, recipe = experience.reusable_script_for(task or self.task, recipe_id)
-        if not script:
-            return ToolResult(
-                "没有可复用的成功流程脚本（该任务无匹配的已验证历史）。请改用实时操作。")
-        from ..config import SCRIPTS_DIR
-        script_path = SCRIPTS_DIR / script
-        if not script_path.exists():
-            return ToolResult(f"复用脚本 {script} 已丢失，请实时操作。")
-        BUS.publish("memory", action="reuse", task=(recipe or {}).get("task", task))
-        try:
-            result = trace_mod.replay(script_path, stop_event=self.stop_event)
-        except Exception as exc:
-            return ToolResult(f"复用重放异常: {exc}。请改用实时操作。")
-        steps = result.get("results", [])
-        if result.get("ok"):
-            return ToolResult(
-                f"✅ 已 0-token 复用上次成功流程（{len(steps)}步全部重放成功）。"
-                "请 observe 确认最终结果是否符合预期，符合即可 done。")
-        # partial failure → tell the agent where to take over live
-        failed = next((s for s in steps if not s.get("ok")), None)
-        at = failed.get("index") if failed else len(steps)
-        return ToolResult(
-            f"⚠️ 复用重放进行到第 {at} 步（{failed.get('tool') if failed else '?'}）失败，"
-            f"前 {at-1} 步已执行。请先 observe 看当前界面，从第 {at} 步起改用实时操作完成剩余部分。")
-
     def _t_done(self, args: dict) -> ToolResult:
         summary = str(args.get("summary", ""))
         return ToolResult(f"任务完成: {summary}", terminal="done")
@@ -974,154 +925,3 @@ class ToolSession(FileToolMixin):
                 terminal=None,
             )
         return ToolResult(f"任务失败: {reason}", terminal="fail")
-
-    # ---- clipboard tools (ported from cc-haha) ----
-    def _t_clipboard_read(self, _args: dict) -> ToolResult:
-        text = executor.clipboard_read()
-        return ToolResult(text or "（剪贴板为空）",
-                          summary=f"[已折叠] clipboard_read {len(text)}字符")
-
-    def _t_clipboard_write(self, args: dict) -> ToolResult:
-        text = str(args.get("text", ""))
-        result = executor.clipboard_write(text)
-        return ToolResult(self._fmt(result))
-
-    def _t_clipboard_paste(self, _args: dict) -> ToolResult:
-        result = executor.clipboard_paste()
-        return ToolResult(self._fmt(result))
-
-    # ---- mouse fine-control tools (ported from cc-haha) ----
-    def _t_cursor_position(self, _args: dict) -> ToolResult:
-        result = executor.cursor_position()
-        return ToolResult(self._fmt(result))
-
-    def _t_mouse_down(self, args: dict) -> ToolResult:
-        button = str(args.get("button", "left"))
-        result = executor.mouse_down(button=button)
-        return ToolResult(self._fmt(result))
-
-    def _t_mouse_up(self, args: dict) -> ToolResult:
-        button = str(args.get("button", "left"))
-        result = executor.mouse_up(button=button)
-        return ToolResult(self._fmt(result))
-
-    def _t_move_mouse(self, args: dict) -> ToolResult:
-        x, y = int(args["x"]), int(args["y"])
-        executor.move_mouse(x, y)
-        return ToolResult(self._fmt({"ok": True, "x": x, "y": y}))
-
-    # ---- screenshot base64 tool (ported from cc-haha) ----
-    def _t_screenshot(self, args: dict) -> ToolResult:
-        quality = int(args.get("quality", 75))
-        result = executor.screenshot_base64(quality=quality)
-        # Don't dump the full base64 into the LLM context — too large.
-        # Return metadata + a truncated preview so the model knows it worked.
-        if result.get("ok") and result.get("base64"):
-            b64 = result["base64"]
-            result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
-            result["base64_available"] = True
-            del result["base64"]  # keep it out of the LLM context
-        return ToolResult(self._fmt(result))
-
-    # ---- hold_key (ported from cc-haha) ----
-    def _t_hold_key(self, args: dict) -> ToolResult:
-        keys = args.get("keys") or []
-        if isinstance(keys, str):
-            keys = [keys]
-        result = executor.hold_keys([str(k) for k in keys],
-                                    int(args.get("duration_ms", 0)))
-        return ToolResult(self._fmt(result))
-
-    # ---- list_displays (ported from cc-haha) ----
-    def _t_list_displays(self, _args: dict) -> ToolResult:
-        result = executor.list_displays()
-        return ToolResult(self._fmt(result))
-
-    # ---- zoom region screenshot (ported from cc-haha) ----
-    def _t_zoom(self, args: dict) -> ToolResult:
-        result = executor.zoom_region(
-            int(args["x"]), int(args["y"]),
-            int(args["width"]), int(args["height"]),
-            quality=int(args.get("quality", 80)),
-        )
-        # Same as screenshot: keep the raw base64 out of the LLM context.
-        if result.get("ok") and result.get("base64"):
-            b64 = result["base64"]
-            result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
-            result["base64_available"] = True
-            del result["base64"]
-        return ToolResult(self._fmt(result))
-
-    # ---- list installed apps (ported from cc-haha) ----
-    def _t_list_installed_apps(self, _args: dict) -> ToolResult:
-        try:
-            import winreg
-            results: dict[str, dict] = {}
-            reg_paths = [
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-            ]
-            for hive, sub_key in reg_paths:
-                try:
-                    key = winreg.OpenKey(hive, sub_key)
-                except OSError:
-                    continue
-                try:
-                    i = 0
-                    while True:
-                        try:
-                            name = winreg.EnumKey(key, i)
-                            i += 1
-                        except OSError:
-                            break
-                        try:
-                            app_key = winreg.OpenKey(key, name)
-                        except OSError:
-                            continue
-                        try:
-                            display_name = winreg.QueryValueEx(app_key, "DisplayName")[0]
-                        except OSError:
-                            winreg.CloseKey(app_key)
-                            continue
-                        try:
-                            install_location = winreg.QueryValueEx(app_key, "InstallLocation")[0]
-                        except OSError:
-                            install_location = ""
-                        try:
-                            display_icon = winreg.QueryValueEx(app_key, "DisplayIcon")[0]
-                        except OSError:
-                            display_icon = ""
-                        normalized_icon = str(display_icon).split(",")[0].strip().strip('"')
-                        normalized_install_location = str(install_location).strip().strip('"')
-                        bundle_id = name
-                        for candidate in (normalized_icon, normalized_install_location):
-                            if not candidate:
-                                continue
-                            from pathlib import Path as _P
-                            candidate_path = _P(candidate)
-                            if candidate_path.suffix.lower() == ".exe":
-                                bundle_id = candidate_path.stem
-                                break
-                        app_path = normalized_icon or normalized_install_location or ""
-                        if bundle_id not in results:
-                            results[bundle_id] = {
-                                "bundleId": bundle_id,
-                                "displayName": str(display_name),
-                                "path": app_path,
-                            }
-                        winreg.CloseKey(app_key)
-                finally:
-                    winreg.CloseKey(key)
-            apps = sorted(results.values(), key=lambda item: item["displayName"].lower())
-            lines = [
-                f'{i}. "{a["displayName"]}" [{a["bundleId"]}] {a["path"]}'
-                for i, a in enumerate(apps[:80], 1)
-            ]
-            return ToolResult(
-                f"已安装应用 ({len(apps)} 个，显示前 {min(len(apps), 80)} 个):\n" + "\n".join(lines)
-                or "未找到已安装应用",
-                summary=f"[已折叠] list_installed_apps {len(apps)}个应用",
-            )
-        except Exception as exc:
-            return ToolResult(f"列举已安装应用失败: {exc}")

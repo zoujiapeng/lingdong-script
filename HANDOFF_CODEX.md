@@ -20,12 +20,15 @@
 - `agent/tool_schemas.py` 已压缩为短描述，减少每轮 LLM 工具上下文。
 - `agent/tool_result.py` 从 `agent/tools.py` 拆出共享工具返回对象。
 - `agent/file_tools.py` 从 `agent/tools.py` 拆出通用文件工具 handler。
+- `agent/memory_tools.py` 从 `agent/tools.py` 拆出 remember/forget/reuse_skill handler。
+- `agent/desktop_tools.py` 从 `agent/tools.py` 拆出剪贴板、鼠标细控、截图、显示器、已安装应用 handler。
 - `agent/task_rules.py` 从 `agent/loop.py` 拆出 GUI 任务分类、GUI-only 限制和 done gate guard 规则。
 - `agent/done_verifier.py` 从 `agent/loop.py` 拆出 done 二次核验；保留 `loop.fusion/intent/CONFIG` 兼容 patch 路径。
 - `agent/context_guidance.py` 从 `agent/loop.py` 拆出 upfront plan、world advisory、stuck recovery 和 playbook 注入。
 - `agent/reflection.py` 从 `agent/loop.py` 拆出反思检查点逻辑。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 从 `python/engine/executor.py` 拆出 legacy executor 状态、上下文和控制流异常。
+- `scripts/gui_eval_run.py` 走 `/api/chat` 生成真实 GUI 评测证据报告，输出到忽略目录 `python/winpilot_home/evals/`。
 - `npm run clean` 可删除 `dist/`、`release/`、缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
 - `python/core/screenshot.py` 补 `capture_screen()`，兼容 legacy Robot Framework keyword。
 - `server.py` 的启动守卫只拦真实 `uvicorn winpilot.server:app`，不拦测试导入。
@@ -35,7 +38,7 @@
 ## 当前风险
 
 - `agent/loop.py` 仍偏大，但任务规则、done 核验、上下文提示和反思检查点已拆出；主 LLM/tool loop 还在里面。
-- `agent/tools.py` 已开始拆分，但窗口/输入/视觉/记忆 handler 还在里面。
+- `agent/tools.py` 已开始拆分，但窗口/输入/视觉 handler 还在里面。
 - `python/engine/executor.py` 仍是 legacy 巨型执行器，已先拆出 `executor_types.py`。
 - GUI 任务必须看真实屏幕/trace/文件/进程证据，不能只看 done 日志。
 - 不要为了 QQ、计算器、网易云、抖音等软件写专属规则。

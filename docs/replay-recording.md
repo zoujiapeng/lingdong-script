@@ -12,6 +12,14 @@ Agent 实时操作 -> trace -> .wps.json -> Replayer 或 FlowScript
 
 当 `agent.llm_trace=true` 时，系统会记录 LLM 请求/响应、工具调用、截图引用和事件，用于复现模型每一步看到的信息。调试假成功时优先看 trace 和真实屏幕，不只看最终 `done`。
 
+真实 GUI 评测可用脚本生成证据报告：
+
+```bash
+python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
+```
+
+脚本走 `/api/chat`，也就是前端 Agent 页面同一路径；它不会直接调用内部 runner。输出在 `python/winpilot_home/evals/`，只保存本机评测索引，不提交。报告会列出 `run_id`、trace 文件、截图目录、工具序列和 done 核验摘要。
+
 ## .wps.json
 
 `.wps.json` 是 WinPilot 侧的语义重放格式，不是 FlowScript。
