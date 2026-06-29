@@ -1,0 +1,157 @@
+"""System, launch, tray, shell, and undo tool handlers for ToolSession."""
+from __future__ import annotations
+
+import sys
+
+import win32gui
+
+from ..action import executor, shell, verify
+from ..perception import apps, search, tray, win32
+from ..utils.log import BUS
+from .tool_result import ToolResult
+
+
+def _tools_attr(name: str, default):
+    """Preserve historical monkeypatch paths on winpilot.agent.tools."""
+    tools_mod = sys.modules.get("winpilot.agent.tools")
+    return getattr(tools_mod, name, default) if tools_mod is not None else default
+
+
+class SystemToolMixin:
+    def _t_run_shell(self, args: dict) -> ToolResult:
+        shell_mod = _tools_attr("shell", shell)
+        command = str(args["command"])
+        shell_kind = str(args.get("shell", "powershell"))
+        timeout_s = float(args.get("timeout_s", 30))
+        result = shell_mod.run(command, shell=shell_kind, timeout_s=timeout_s)
+        return ToolResult(
+            self._fmt(result),
+            replay={"tool": "run_shell", "command": command, "shell": shell_kind,
+                    "timeout_s": timeout_s},
+        )
+
+    def _t_run_detached(self, args: dict) -> ToolResult:
+        shell_mod = _tools_attr("shell", shell)
+        script = str(args["script"])
+        name = str(args.get("name", "task"))
+        result = shell_mod.run_detached(script, name=name)
+        if result.get("ok") and result.get("pid"):
+            self._undo_stack.append(("detached", result["pid"]))
+        return ToolResult(
+            self._fmt(result),
+            replay={"tool": "run_detached", "script": script, "name": name},
+        )
+
+    def _t_undo_last(self, _args: dict) -> ToolResult:
+        executor_mod = _tools_attr("executor", executor)
+        win32_mod = _tools_attr("win32", win32)
+        win32gui_mod = _tools_attr("win32gui", win32gui)
+        while self._undo_stack:
+            kind, payload = self._undo_stack.pop()
+            if kind == "detached":
+                import subprocess
+                subprocess.run(["taskkill", "/f", "/pid", str(payload)],
+                               capture_output=True, timeout=10)
+                BUS.publish("action", action="undo", what=f"取消后台任务 pid={payload}")
+                return ToolResult(f"已取消最近的后台/定时任务 (pid={payload})。")
+            if kind == "app":
+                hwnd = payload
+                if not hwnd or not win32gui_mod.IsWindow(hwnd):
+                    continue
+                title = win32_mod._window_text(hwnd)
+                res = executor_mod.close_window(hwnd)
+                if res.get("ok"):
+                    BUS.publish("action", action="undo", what=f"关闭窗口 {title}")
+                    return ToolResult(f'已关闭最近打开的程序窗口 "{title}"。')
+        executor_mod.press_keys(["ctrl", "z"])
+        return ToolResult("无可回收的启动记录；已对当前窗口执行撤销 (Ctrl+Z)。")
+
+    def _t_search_files(self, args: dict) -> ToolResult:
+        search_mod = _tools_attr("search", search)
+        result = search_mod.search(
+            str(args["query"]),
+            max_results=int(args.get("max_results", 50)),
+            path=args.get("path"),
+        )
+        return ToolResult(self._fmt(result))
+
+    def _t_tray_click(self, args: dict) -> ToolResult:
+        tray_mod = _tools_attr("tray", tray)
+        result = tray_mod.click_tray_icon(
+            str(args["name"]),
+            double=bool(args.get("double", False)),
+            button=str(args.get("button", "left")),
+        )
+        return ToolResult(
+            self._fmt(result),
+            replay={"tool": "tray_click", "name": str(args["name"]),
+                    "double": bool(args.get("double", False)),
+                    "button": str(args.get("button", "left"))},
+        )
+
+    def _t_launch(self, args: dict) -> ToolResult:
+        apps_mod = _tools_attr("apps", apps)
+        executor_mod = _tools_attr("executor", executor)
+        verify_mod = _tools_attr("verify", verify)
+        win32_mod = _tools_attr("win32", win32)
+        command = str(args["command"]).strip()
+        resolved = self._resolve_launch_target(command)
+
+        def do_launch() -> dict:
+            if resolved is not None:
+                return apps_mod.launch_target(resolved)
+            return executor_mod.launch(command)
+
+        result = verify_mod.run_with_verify(
+            "launch",
+            do_launch,
+            expect=args.get("expect"),
+            hwnd=self.hwnd,
+            timeout_s=10.0,
+            stop_event=self.stop_event,
+        )
+        if result.get("ok"):
+            launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
+            self._undo_stack.append(("app", launched_hwnd))
+            expect = args.get("expect") or {}
+            want_title = str(expect.get("window_appears") or "").strip()
+            title_hwnd = None
+            if want_title:
+                found = win32_mod.find_window(want_title)
+                if found and self._window_alive(int(found.get("hwnd") or 0)):
+                    title_hwnd = int(found["hwnd"])
+            if title_hwnd:
+                self._remember_target(title_hwnd, want_title)
+                result["target_hwnd"] = title_hwnd
+            elif resolved is not None:
+                self._remember_target(launched_hwnd, str(resolved.get("name") or command))
+                target = self._find_target_window()
+                if target:
+                    self._remember_target(target)
+            elif launched_hwnd:
+                self._remember_target(launched_hwnd)
+        if resolved is not None:
+            result["resolved_app"] = f'{resolved["name"]} [{resolved["kind"]}]'
+            if self.hwnd:
+                result["target_hwnd"] = self.hwnd
+        return ToolResult(
+            self._fmt(result),
+            replay={"tool": "launch", "command": command,
+                    "expect": args.get("expect")},
+        )
+
+    @staticmethod
+    def _resolve_launch_target(command: str) -> dict | None:
+        apps_mod = _tools_attr("apps", apps)
+        import shutil
+        from pathlib import Path as _P
+
+        if not command or any(ch in command for ch in "\\/|&><\""):
+            return None
+        if _P(command).exists() or shutil.which(command):
+            return None
+        base = command.split()[0] if command.isascii() else command
+        if command.isascii() and (shutil.which(base) or len(command.split()) > 1):
+            return None
+        candidates = apps_mod.resolve(command)
+        return candidates[0] if candidates else None

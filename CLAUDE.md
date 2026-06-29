@@ -27,10 +27,11 @@
 | `python/winpilot_home/winpilot/agent/done_verifier.py` | GUI agent done 二次核验 mixin |
 | `python/winpilot_home/winpilot/agent/context_guidance.py` | GUI agent planning/world/playbook 上下文提示 mixin |
 | `python/winpilot_home/winpilot/agent/reflection.py` | GUI agent 反思检查点 mixin |
-| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、shell/launch/search/tray/plan/done/fail |
+| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、plan/done/fail |
 | `python/winpilot_home/winpilot/agent/window_tools.py` | GUI agent 窗口列表、扫描、聚焦、应用发现工具 mixin |
 | `python/winpilot_home/winpilot/agent/perception_tools.py` | GUI agent observe/read_text/VLM/template/color 感知工具 mixin |
 | `python/winpilot_home/winpilot/agent/interaction_tools.py` | GUI agent click/type/hotkey/scroll/drag/draw/wait 输入动作工具 mixin |
+| `python/winpilot_home/winpilot/agent/system_tools.py` | GUI agent run_shell/run_detached/launch/tray/search/undo 系统工具 mixin |
 | `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
 | `python/winpilot_home/winpilot/agent/memory_tools.py` | GUI agent 经验记忆/0-token replay 工具 mixin |
 | `python/winpilot_home/winpilot/agent/desktop_tools.py` | GUI agent 剪贴板、鼠标细控、截图、显示器、应用列表工具 mixin |
@@ -68,12 +69,13 @@
 - 窗口列表/扫描/聚焦/应用发现 handler 已拆到 `agent/window_tools.py`。
 - observe/read_text/VLM/template/color 感知 handler 已拆到 `agent/perception_tools.py`。
 - click/type/hotkey/scroll/drag/draw/wait 输入动作 handler 已拆到 `agent/interaction_tools.py`。
+- run_shell/run_detached/launch/tray/search/undo 系统工具 handler 已拆到 `agent/system_tools.py`。
 - 真实 GUI 评测脚本在 `scripts/gui_eval_run.py`，它走 `/api/chat`，与前端 Agent 页面同路径，并把报告写到忽略的 `python/winpilot_home/evals/`。
 - WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；planning/world/playbook 提示已拆到 `agent/context_guidance.py`；反思检查点已拆到 `agent/reflection.py`。
 - legacy Flow/DSL executor 的共享状态/异常类型已拆到 `python/engine/executor_types.py`，`executor.py` 仍只按 legacy 执行器维护。
 - 旧 `python/core/screenshot.py` 保留 `capture_screen()` 兼容 legacy Robot Framework keyword。
 - `npm run clean` 清 `dist/`、`release/`、测试/浏览器缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
-- `agent/tools.py` 现在主要保留 `ToolSession` 状态、dispatch、shell/launch/search/tray/plan/done/fail。
+- `agent/tools.py` 现在主要保留 `ToolSession` 状态、dispatch、plan/done/fail。
 
 ## 验证
 

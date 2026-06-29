@@ -8,7 +8,6 @@ condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import win32gui
@@ -25,6 +24,7 @@ from .file_tools import FileToolMixin
 from .interaction_tools import InteractionToolMixin
 from .memory_tools import MemoryToolMixin
 from .perception_tools import PerceptionToolMixin
+from .system_tools import SystemToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
 from .window_tools import WindowToolMixin
@@ -37,6 +37,7 @@ class ToolSession(
     WindowToolMixin,
     PerceptionToolMixin,
     InteractionToolMixin,
+    SystemToolMixin,
 ):
     """Per-run state: latest snapshot + current target window."""
 
@@ -136,151 +137,6 @@ class ToolSession(
     @staticmethod
     def _fmt(data: dict) -> str:
         return json.dumps(data, ensure_ascii=False, default=str)
-
-    def _t_run_shell(self, args: dict) -> ToolResult:
-        command = str(args["command"])
-        shell_kind = str(args.get("shell", "powershell"))
-        timeout_s = float(args.get("timeout_s", 30))
-        result = shell.run(command, shell=shell_kind, timeout_s=timeout_s)
-        return ToolResult(
-            self._fmt(result),
-            replay={"tool": "run_shell", "command": command, "shell": shell_kind,
-                    "timeout_s": timeout_s},
-        )
-
-    def _t_run_detached(self, args: dict) -> ToolResult:
-        script = str(args["script"])
-        name = str(args.get("name", "task"))
-        result = shell.run_detached(script, name=name)
-        if result.get("ok") and result.get("pid"):
-            self._undo_stack.append(("detached", result["pid"]))  # cancelable
-        return ToolResult(
-            self._fmt(result),
-            replay={"tool": "run_detached", "script": script, "name": name},
-        )
-
-    def _t_undo_last(self, _args: dict) -> ToolResult:
-        """Best-effort rollback of the most recent reversible action this run:
-        cancel a scheduled/background task, close the last launched app, or
-        Ctrl+Z the foreground window. GUI is only partly reversible."""
-        while self._undo_stack:
-            kind, payload = self._undo_stack.pop()
-            if kind == "detached":
-                import subprocess
-                subprocess.run(["taskkill", "/f", "/pid", str(payload)],
-                               capture_output=True, timeout=10)
-                BUS.publish("action", action="undo", what=f"取消后台任务 pid={payload}")
-                return ToolResult(f"已取消最近的后台/定时任务 (pid={payload})。")
-            if kind == "app":
-                # Close the specific launched window (not the current foreground,
-                # which the user may have switched). Skip if it's already gone.
-                hwnd = payload
-                if not hwnd or not win32gui.IsWindow(hwnd):
-                    continue
-                title = win32._window_text(hwnd)
-                res = executor.close_window(hwnd)
-                if res.get("ok"):
-                    BUS.publish("action", action="undo", what=f"关闭窗口 {title}")
-                    return ToolResult(f'已关闭最近打开的程序窗口 "{title}"。')
-                # couldn't close → fall through to next undo candidate
-        # nothing on the stack → editor-style undo on the foreground
-        executor.press_keys(["ctrl", "z"])
-        return ToolResult("无可回收的启动记录；已对当前窗口执行撤销 (Ctrl+Z)。")
-
-    def _t_search_files(self, args: dict) -> ToolResult:
-        result = search.search(
-            str(args["query"]),
-            max_results=int(args.get("max_results", 50)),
-            path=args.get("path"),
-        )
-        return ToolResult(self._fmt(result))
-
-    def _t_tray_click(self, args: dict) -> ToolResult:
-        result = tray.click_tray_icon(
-            str(args["name"]),
-            double=bool(args.get("double", False)),
-            button=str(args.get("button", "left")),
-        )
-        return ToolResult(
-            self._fmt(result),
-            replay={"tool": "tray_click", "name": str(args["name"]),
-                    "double": bool(args.get("double", False)),
-                    "button": str(args.get("button", "left"))},
-        )
-
-    def _t_launch(self, args: dict) -> ToolResult:
-        command = str(args["command"]).strip()
-        resolved = self._resolve_launch_target(command)
-
-        def do_launch() -> dict:
-            if resolved is not None:
-                return apps.launch_target(resolved)
-            return executor.launch(command)
-
-        result = verify.run_with_verify(
-            "launch",
-            do_launch,
-            expect=args.get("expect"),
-            hwnd=self.hwnd,
-            timeout_s=10.0,
-            stop_event=self.stop_event,
-        )
-        if result.get("ok"):
-            # Record the launched app's window (post-launch foreground) so
-            # undo_last closes THAT window, not whatever is foreground later.
-            launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
-            self._undo_stack.append(("app", launched_hwnd))
-            # Prefer resolving the launched window by its expected title: the
-            # post-launch foreground can be stolen by another window (a console,
-            # a notification), which would otherwise make the next bare observe
-            # target the wrong window. Title match is focus-independent.
-            expect = args.get("expect") or {}
-            want_title = str(expect.get("window_appears") or "").strip()
-            title_hwnd = None
-            if want_title:
-                found = win32.find_window(want_title)
-                if found and self._window_alive(int(found.get("hwnd") or 0)):
-                    title_hwnd = int(found["hwnd"])
-            if title_hwnd:
-                self._remember_target(title_hwnd, want_title)
-                result["target_hwnd"] = title_hwnd
-            elif resolved is not None:
-                self._remember_target(launched_hwnd, str(resolved.get("name") or command))
-                target = self._find_target_window()
-                if target:
-                    self._remember_target(target)
-            elif launched_hwnd:
-                self._remember_target(launched_hwnd)
-        if resolved is not None:
-            result["resolved_app"] = f'{resolved["name"]} [{resolved["kind"]}]'
-            if self.hwnd:
-                result["target_hwnd"] = self.hwnd
-        return ToolResult(
-            self._fmt(result),
-            replay={"tool": "launch", "command": command,
-                    "expect": args.get("expect")},
-        )
-
-    @staticmethod
-    def _resolve_launch_target(command: str) -> dict | None:
-        """Map an app display name (e.g. 网易云音乐) to an installed-app target.
-
-        Only kicks in when the command is clearly NOT directly executable:
-        not an existing path, not on PATH, no shell syntax. Keeps notepad/calc
-        and full commands on the legacy Popen path untouched.
-        """
-        import shutil
-        from pathlib import Path as _P
-
-        if not command or any(ch in command for ch in "\\/|&><\""):
-            return None
-        if _P(command).exists() or shutil.which(command):
-            return None
-        base = command.split()[0] if command.isascii() else command
-        if command.isascii() and (shutil.which(base) or len(command.split()) > 1):
-            return None  # looks like a real command line — don't second-guess it
-        candidates = apps.resolve(command)
-        return candidates[0] if candidates else None
 
     def _t_revise_plan(self, args: dict) -> ToolResult:
         steps = args.get("steps") or []

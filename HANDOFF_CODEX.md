@@ -22,6 +22,7 @@
 - `agent/window_tools.py` 从 `agent/tools.py` 拆出窗口列表/扫描/聚焦/应用发现 handler。
 - `agent/perception_tools.py` 从 `agent/tools.py` 拆出 observe/read_text/VLM/template/color handler。
 - `agent/interaction_tools.py` 从 `agent/tools.py` 拆出 click/type/hotkey/scroll/drag/draw/wait handler。
+- `agent/system_tools.py` 从 `agent/tools.py` 拆出 run_shell/run_detached/launch/tray/search/undo handler。
 - `agent/file_tools.py` 从 `agent/tools.py` 拆出通用文件工具 handler。
 - `agent/memory_tools.py` 从 `agent/tools.py` 拆出 remember/forget/reuse_skill handler。
 - `agent/desktop_tools.py` 从 `agent/tools.py` 拆出剪贴板、鼠标细控、截图、显示器、已安装应用 handler。
@@ -42,7 +43,7 @@
 ## 当前风险
 
 - `agent/loop.py` 仍偏大，但任务规则、done 核验、上下文提示和反思检查点已拆出；主 LLM/tool loop 还在里面。
-- `agent/tools.py` 已大幅拆分；剩余主要是 `ToolSession` 状态、dispatch、shell/launch/search/tray/plan/done/fail。
+- `agent/tools.py` 已大幅拆分；剩余主要是 `ToolSession` 状态、dispatch、plan/done/fail。
 - `python/engine/executor.py` 仍是 legacy 巨型执行器，已先拆出 `executor_types.py`。
 - GUI 任务必须看真实屏幕/trace/文件/进程证据，不能只看 done 日志。
 - 不要为了 QQ、计算器、网易云、抖音等软件写专属规则。
