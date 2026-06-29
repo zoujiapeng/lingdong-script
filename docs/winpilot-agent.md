@@ -59,10 +59,11 @@
 | --- | --- |
 | `agent/tool_schemas.py` | 构造短 OpenAI function-calling schema，直接发给 LLM |
 | `agent/tool_result.py` | `ToolResult` 返回对象 |
-| `agent/tools.py` | `ToolSession`、dispatch、shell/launch/search/tray/plan/done/fail 等会话核心 handler |
+| `agent/tools.py` | `ToolSession`、dispatch、plan/done/fail 等会话核心 handler |
 | `agent/window_tools.py` | `list_windows`、`scan_windows`、`focus_window`、`find_app`、`find_program` 窗口/应用工具 mixin |
 | `agent/perception_tools.py` | `observe`、`read_text`、`find_image`、`vlm_describe`、视觉摘要等感知工具 mixin |
 | `agent/interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` 输入动作工具 mixin |
+| `agent/system_tools.py` | `run_shell`、`run_detached`、`launch`、`tray_click`、`search_files`、`undo_last` 系统/启动工具 mixin |
 | `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin |
 | `agent/memory_tools.py` | `remember`、`forget`、`reuse_skill` 经验记忆和 0-token replay 工具 mixin |
 | `agent/desktop_tools.py` | 剪贴板、鼠标细控、截图、显示器、已安装应用等桌面杂项工具 mixin |
@@ -82,7 +83,7 @@
 
 `clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。
 
-`agent/tools.py` 已拆出 schema、窗口、感知、输入动作、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和少量 shell/launch/search/tray/plan/done/fail handler。
+`agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和少量 plan/done/fail handler。
 
 ## 感知
 
