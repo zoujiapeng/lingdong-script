@@ -24,9 +24,10 @@
 - `dsl_parser.py`：DSL 解析。
 - `dsl_flow_converter.py`：FlowScript 与 DSL 互转。
 - `executor.py`：旧 DSLExecutor，仍支持大量节点和系统动作。
+- `executor_types.py`：旧 DSLExecutor 的状态、上下文和控制流异常。
 - `engine.py` / `unified_entry.py`：执行入口。
 
-`python/engine/executor.py` 很大，应作为 legacy Flow/DSL 执行器维护，不继续塞 WinPilot 能力。
+`python/engine/executor.py` 仍很大，但共享类型已拆到 `executor_types.py`。它应作为 legacy Flow/DSL 执行器维护，不继续塞 WinPilot 能力。
 
 ## @feature
 
@@ -50,6 +51,7 @@
 - `src/renderer/components/PropertyPanel/`
 - `python/engine/dsl_flow_converter.py`
 - `python/engine/executor.py`
+- `python/engine/executor_types.py`
 - 相关 vitest / Python 测试
 
 ## 与 WinPilot 的桥

@@ -15,6 +15,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`。
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
 - GUI 任务走 `AgentRunner`；编程/仓库任务走 `CodingRunner`。
+- GUI runner 的任务规则在 `agent/task_rules.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 done 验证。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 快速启动
@@ -76,7 +77,7 @@ python -m pytest tests/test_vision.py tests/test_interfaces.py -q
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
 - 不把 `@feature` 全塞给 WinPilot 主 agent；新专长优先做独立子 agent。
 - 不只看日志判定成功；GUI 任务必须用屏幕、文件、进程、窗口或 trace 证据验证。
-- 不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
+- 不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。legacy executor 共享类型在 `python/engine/executor_types.py`。
 - `release/`、`dist/`、`python-runtime/`、缓存和 pycache 是可再生成/本机产物，不当源码阅读。
 
 MIT

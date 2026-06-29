@@ -9,6 +9,10 @@
   - `agent/tool_result.py` now owns the shared `ToolResult` object.
   - `agent/file_tools.py` now owns generic file tools used by `ToolSession`.
   - `agent/tools.py` remains the runtime `ToolSession` and desktop GUI handler surface.
+- Split pure GUI runner rules out of `agent/loop.py`:
+  - `agent/task_rules.py` now owns GUI task classification and guard helpers.
+  - `agent/reflection.py` now owns reflection checkpoint helpers.
+- Split legacy Flow/DSL executor shared types into `python/engine/executor_types.py`.
 
 ### Size
 
