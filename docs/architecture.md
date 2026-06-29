@@ -49,6 +49,8 @@ flowchart LR
     loop --> schemas["Tool schemas<br/>agent/tool_schemas.py"]
     loop --> tools["ToolSession<br/>agent/tools.py"]
     tools --> filetools["FileToolMixin<br/>agent/file_tools.py"]
+    tools --> memorytools["MemoryToolMixin<br/>agent/memory_tools.py"]
+    tools --> desktoptools["DesktopToolMixin<br/>agent/desktop_tools.py"]
     tools --> fusion["fusion.observe<br/>UIA/Win32/OCR/CV/VLM"]
     tools --> action["action/executor.py<br/>SendInput/UIA/clipboard/screenshot"]
     tools --> verify["action/verify.py<br/>expect verification"]
@@ -59,7 +61,7 @@ flowchart LR
 ## 最近结构调整
 
 - `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
-- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态 dispatch 和主要 handler；`agent/file_tools.py` 承担通用文件工具。
+- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态 dispatch 和核心窗口/感知/动作 handler；`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担文件、记忆复用、桌面杂项工具。
 - `agent/task_rules.py` 承担 GUI task 分类、GUI-only 限制和 done gate guard 的纯规则；`agent/done_verifier.py` 承担 done 二次核验；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 承担 legacy Flow/DSL executor 的共享状态、上下文和控制流异常，`executor.py` 继续作为 legacy 执行器维护。
@@ -69,5 +71,5 @@ flowchart LR
 ## 维护重点
 
 - `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
-- `agent/tools.py` 已拆出 schema 和文件工具，但窗口/输入/视觉/记忆 handler 仍集中，后续应继续拆。
+- `agent/tools.py` 已拆出 schema、文件、记忆、桌面杂项工具，但窗口/输入/视觉 handler 仍集中，后续应继续拆。
 - `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。

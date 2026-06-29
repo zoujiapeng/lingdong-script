@@ -43,6 +43,14 @@ npm run clean
 
 `npm run clean:runtime` 会额外删除忽略的 `python-runtime/`。只有在不需要打包内置 Python 版本、且能重新准备 runtime 时使用。
 
+真实 GUI 评测走和前端相同的 `/api/chat` 路径：
+
+```bash
+python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
+```
+
+报告输出到忽略目录 `python/winpilot_home/evals/`，trace 和截图仍在本机运行目录。
+
 旧根目录测试需要额外路径：
 
 ```powershell
