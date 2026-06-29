@@ -14,6 +14,25 @@ def test_resolve_hwnd_prefers_live_session_target(monkeypatch):
     assert session._resolve_hwnd({}) == 100
 
 
+def test_resolve_hwnd_prefers_matching_foreground_over_stale_target(monkeypatch):
+    session = ToolSession()
+    session.hwnd = 100
+    session.target_hint = "Calculator"
+
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.IsWindow", lambda hwnd: True)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetForegroundWindow", lambda: 200)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetAncestor", lambda hwnd, flag: hwnd)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetClassName", lambda hwnd: "ApplicationFrameWindow")
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32._window_text",
+        lambda hwnd: "Calculator" if hwnd == 200 else "Calculator",
+    )
+
+    assert session._resolve_hwnd({}) == 200
+    assert session.hwnd == 200
+
+
 def test_resolve_hwnd_recovers_target_by_title_before_foreground(monkeypatch):
     session = ToolSession()
     session.hwnd = 100

@@ -70,13 +70,14 @@ def _client():
 def _main_model_has_vision() -> bool:
     """True when the main API model natively supports image input.
 
-    MiMo / Qwen2.5-VL / GPT-4o class models accept image_url content in user
-    messages. DeepSeek text-only models (deepseek-chat, deepseek-v4-*) do not.
+    Plain MiMo chat models such as mimo-v2.5-pro reject image input on the
+    OpenAI-compatible endpoint. Only explicitly multimodal/vision model names
+    should receive image_url content. DeepSeek chat models are text-only in
+    the API path we tested.
     """
     model = str(CONFIG.get("api", "model", default="")).lower()
     return (
-        "mimo" in model
-        or "omni" in model
+        "omni" in model
         or "-vl" in model
         or "vision" in model
         or "gpt-4o" in model
@@ -246,8 +247,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
     def _inject_observe_screenshot(self) -> None:
         """After an observe, embed the current window screenshot into history as
-        a user message so the main vision model (mimo-v2-pro) can see the actual
-        pixels without a separate VLM grounding pass.
+        a user message so a native vision model can see the actual pixels
+        without a separate VLM grounding pass.
 
         The injected message is registered in _foldable so it gets compressed
         alongside the paired observe tool result when history grows large.

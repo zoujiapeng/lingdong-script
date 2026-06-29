@@ -50,6 +50,12 @@
 
 ### Agent hardening already present on this branch
 
+- Treat plain MiMo chat models such as `mimo-v2.5-pro` as text-only unless the
+  model name explicitly indicates multimodal/vision support, preventing
+  unsupported `image_url` requests on text-only endpoints.
+- Prefer a matching foreground top-level window over a stale remembered hwnd
+  when resolving the current target window, reducing false success with
+  duplicate same-title windows.
 - GUI tasks route to `AgentRunner`; coding/repository tasks route to `CodingRunner`.
 - `CodingRunner` includes `github_search` and run-gate logic for clone/install/run tasks.
 - GUI-only tasks restrict shell/file shortcuts that would bypass real frontend operation.

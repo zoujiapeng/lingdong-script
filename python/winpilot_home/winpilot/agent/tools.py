@@ -13,9 +13,12 @@ from typing import Any
 
 import win32gui
 
+_GA_ROOT = 2
+
 from ..action import executor, shell, verify
 from ..config import CONFIG
 from ..perception import apps, fusion, ocr, search, tray, vision_cv, win32, world
+from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner
@@ -93,9 +96,41 @@ class ToolSession(
     def _norm_window_text(value: object) -> str:
         return str(value or "").casefold()
 
+    def _matches_target_hint(self, title: object, class_name: object = "") -> bool:
+        needle = self._norm_window_text(self.target_hint)
+        if not needle:
+            return False
+        haystacks = [
+            self._norm_window_text(title),
+            self._norm_window_text(class_name),
+        ]
+        needles = [self._norm_window_text(item) for item in expand_app_aliases(needle)]
+        for item in needles or [needle]:
+            if any(item and (item in hay or hay in item) for hay in haystacks):
+                return True
+        return any(needle and (needle in hay or hay in needle) for hay in haystacks)
+
     @staticmethod
     def _window_alive(hwnd: int | None) -> bool:
         return bool(hwnd and win32gui.IsWindow(int(hwnd)) and win32gui.IsWindowVisible(int(hwnd)))
+
+    def _foreground_target_window(self) -> int | None:
+        try:
+            fg = win32gui.GetForegroundWindow()
+            root = win32gui.GetAncestor(fg, _GA_ROOT) if fg else 0
+        except Exception:
+            return None
+        for hwnd in (root, fg):
+            if not self._window_alive(hwnd):
+                continue
+            try:
+                title = win32._window_text(hwnd)
+                class_name = win32gui.GetClassName(hwnd)
+            except Exception:
+                continue
+            if self._matches_target_hint(title, class_name):
+                return int(hwnd)
+        return None
 
     def _remember_target(self, hwnd: int | None = None, hint: str = "") -> None:
         if hwnd and self._window_alive(hwnd):
@@ -105,13 +140,10 @@ class ToolSession(
             self.target_hint = hint
 
     def _find_target_window(self) -> int | None:
-        needle = self._norm_window_text(self.target_hint)
-        if not needle:
+        if not self._norm_window_text(self.target_hint):
             return None
         for window in win32.list_windows():
-            title = self._norm_window_text(window.get("title"))
-            class_name = self._norm_window_text(window.get("class_name"))
-            if needle in title or title in needle or needle in class_name:
+            if self._matches_target_hint(window.get("title"), window.get("class_name")):
                 hwnd = int(window.get("hwnd") or 0)
                 if self._window_alive(hwnd):
                     return hwnd
@@ -123,6 +155,10 @@ class ToolSession(
             if self._window_alive(hwnd):
                 self._remember_target(hwnd)
             return hwnd
+        foreground_target = self._foreground_target_window()
+        if foreground_target:
+            self._remember_target(foreground_target)
+            return foreground_target
         if self._window_alive(self.hwnd):
             return self.hwnd
         target = self._find_target_window()
