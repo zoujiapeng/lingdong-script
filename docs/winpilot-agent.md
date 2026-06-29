@@ -29,10 +29,11 @@
 | --- | --- |
 | `agent/task_rules.py` | 任务分类、GUI-only guard、done gate 需要的纯字符串规则 |
 | `agent/done_verifier.py` | done 二次核验 mixin，集中处理假成功防护 |
+| `agent/context_guidance.py` | upfront plan、world advisory、stuck recovery、playbook 注入 |
 | `agent/reflection.py` | 反思检查点 mixin，不额外调用 LLM |
-| `agent/loop.py` | LLM 编排、工具调用循环、上下文折叠和计划状态 |
+| `agent/loop.py` | LLM 编排、工具调用循环、上下文折叠和终止收尾 |
 
-后续优先继续拆 `planning.py`，不要把新规则继续塞回 `loop.py`。
+后续优先继续拆 `agent/tools.py`，不要把新规则继续塞回 `loop.py`。
 
 ## 工具结构
 

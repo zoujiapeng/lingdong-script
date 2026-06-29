@@ -23,8 +23,9 @@ from ..perception import fusion, intent, vlm
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
+from .context_guidance import ContextGuidanceMixin
 from .done_verifier import DoneVerifierMixin
-from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
+from .planner import planning_enabled
 from .reflection import ReflectionMixin
 from .task_rules import (
     _blocks_store_search_action,
@@ -97,7 +98,7 @@ def _sanitize_assistant(msg) -> dict[str, Any]:
     return out
 
 
-class AgentRunner(ReflectionMixin, DoneVerifierMixin):
+class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     """One task execution. Designed to run on a background thread."""
 
     def __init__(self, task: str, stop_event: threading.Event | None = None,
@@ -584,81 +585,6 @@ class AgentRunner(ReflectionMixin, DoneVerifierMixin):
                 self.result_text = result.text
                 return result.terminal
         return None
-
-    # --------------------------------------------------------------- planning
-    def _maybe_plan_upfront(self, client) -> None:
-        """For clearly multi-step tasks, decompose once and inject the plan into
-        the stable context prefix (cache-friendly — added before the loop, never
-        rewritten). Trivial tasks skip this to avoid the extra LLM call."""
-        if not should_plan_upfront(self.task):
-            return
-        api = CONFIG.get("api", default={})
-        steps = make_plan(client, api.get("model", "deepseek-v4-flash"), self.task)
-        if not steps:
-            return
-        self.session.plan = Plan(steps)
-        self.messages.append({"role": "user", "content": self.session.plan.render()})
-        BUS.publish("agent_plan", run_id=self.run_id, action="init",
-                    plan=self.session.plan.snapshot())
-
-    # ------------------------------------------------------------ world model
-    def _surface_world_advisory(self) -> None:
-        """Append a one-line world advisory to the tail of history (cache-safe,
-        append-only) only when there's something worth telling the model, and
-        publish compact world state for the UI/trace regardless."""
-        if not self.session.world_enabled:
-            return
-        BUS.publish("world", run_id=self.run_id, **self.session.world.state())
-        visual_note = self.session.take_visual_advisory()
-        if visual_note:
-            self.messages.append({
-                "role": "user",
-                "content": f"[visual state warning] {visual_note}",
-            })
-        note = self.session.world.advisory()
-        if note:
-            self.messages.append({"role": "user", "content": f"[系统观察] {note}"})
-        self._maybe_structured_replan()
-
-    def _maybe_structured_replan(self) -> None:
-        """On the FIRST detection of being stuck, inject a structured reflection
-        that forces a real change of approach (deeper than a one-line nudge):
-        name the blocker, what's been tried, and a different method — and revise
-        the plan. Edge-triggered (once per stuck episode) to avoid spam."""
-        if not self.session.world_enabled:
-            return
-        stuck, why = self.session.world.take_stuck_signal()
-        if not stuck:
-            return
-        plan_hint = ("用 revise_plan 重列一个【不同思路】的计划"
-                     if planning_enabled() else "明确换一个完全不同的方法")
-        self.messages.append({
-            "role": "user",
-            "content": (
-                f"[强制重规划] 检测到卡住：{why}。停止重复当前做法，先想清楚再动：\n"
-                f"1) 现在卡在哪一步/哪个子目标？2) 已经试过什么、为什么没用？"
-                f"3) 有什么【完全不同】的办法（换工具/换路径/run_shell 命令行/find_program/重新 observe）？\n"
-                f"然后{plan_hint}并按新计划执行。"),
-        })
-        BUS.publish("agent_recovery", run_id=self.run_id, kind="structured_replan", reason=why)
-        logger.info("触发结构化重规划: %s", why)
-        self._escalate_next = True  # let a stronger model pick the new approach
-
-    def _maybe_inject_playbook(self) -> None:
-        """Mid-run playbook rescue: if the current window title matches a
-        playbook trigger (e.g. a save-as dialog appeared for a task whose text
-        never mentioned saving), inject that playbook once."""
-        title = self.session.snapshot.title if self.session.snapshot else ""
-        book = playbooks.for_window_title(title, exclude=self._injected_playbooks)
-        if book is None:
-            return
-        self._injected_playbooks.add(book.name)
-        self.messages.append({
-            "role": "user",
-            "content": f"[情境提示] 检测到「{title}」相关界面，适用以下方法：\n{book.content}",
-        })
-        BUS.publish("playbook", run_id=self.run_id, name=book.name, trigger=title[:60])
-        logger.info("运行中注入 playbook: %s (窗口: %s)", book.name, title[:40])
 
     # ------------------------------------------------------------------ run
     def run(self) -> dict[str, Any]:
