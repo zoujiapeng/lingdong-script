@@ -23,12 +23,15 @@
 - 可选 planning、playbook、experience memory、world advisory。
 - 视觉模型可用时，`observe` 后可把当前窗口截图注入为 `image_url` 消息。
 
-`loop.py` 仍过大，后续应拆出：
+`loop.py` 仍是 GUI runner 主循环，但部分纯逻辑已拆出：
 
-- `task_classifier.py`
-- `done_verifier.py`
-- `planning.py`
-- `reflection.py`
+| 文件 | 职责 |
+| --- | --- |
+| `agent/task_rules.py` | 任务分类、GUI-only guard、done gate 需要的纯字符串规则 |
+| `agent/reflection.py` | 反思检查点 mixin，不额外调用 LLM |
+| `agent/loop.py` | LLM 编排、工具调用循环、上下文折叠、done 二次验证和计划状态 |
+
+后续优先继续拆 `done_verifier.py` 和 `planning.py`，不要把新规则继续塞回 `loop.py`。
 
 ## 工具结构
 

@@ -24,6 +24,24 @@ from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
 from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
+from .reflection import ReflectionMixin
+from .task_rules import (
+    _blocks_store_search_action,
+    _blocks_upload_media_analysis,
+    _gui_only_shell_allowed,
+    _gui_search_payloads,
+    _is_coding_task,
+    _is_communication_task,
+    _is_drawing_task,
+    _is_gui_only_task,
+    _is_gui_search_task,
+    _is_upload_publish_task,
+    _looks_like_contact_list,
+    _quoted_payloads,
+    _required_drawing_colors,
+    _required_image_paths,
+    _required_visible_payloads,
+)
 from .tools import ToolResult, ToolSession, tool_schemas
 
 _KEEP_FULL_OBSERVATIONS = 2
@@ -44,168 +62,6 @@ _PRICE_CACHE_HIT_PER_M = 0.2
 _PRICE_OUTPUT_PER_M = 8.0
 _ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
                  "draw_strokes", "focus_window", "wait", "tray_click", "run_shell"}
-
-
-def _looks_like_contact_list(text: str) -> bool:
-    """Heuristic: is this read_text output from a contacts/session list rather
-    than an open chat conversation window?
-
-    QQ's contact list shows: window chrome, contact names, last-message previews
-    (short, typically ≤ 40 chars), timestamps. An actual open chat shows multiple
-    full message bubbles. We flag it as a contacts list when it has many short
-    lines but very little long text (like full message bubbles would have).
-    """
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines:
-        return True
-    # Count lines with meaningful length (>30 chars) — real chat bubbles tend
-    # to be long. Contact-list previews are always short.
-    long_lines = sum(1 for l in lines if len(l) > 30)
-    # If fewer than 3 long lines in the whole output it's likely a contact list
-    return long_lines < 3
-
-
-def _is_gui_only_task(task: str) -> bool:
-    text = (task or "").casefold()
-    return (
-        bool(re.search(r"\bgui[- ]only\b", text))
-        or "must use gui" in text
-        or "gui方式" in text
-        or "gui 方式" in text
-        or "可见gui" in text
-        or "可见 gui" in text
-        or "通过可见" in text
-        or "必须通过可见" in text
-        or "必须通过gui" in text
-        or "必须通过 gui" in text
-        or "不要用脚本" in text
-        or "不能用脚本" in text
-        or "别用脚本" in text
-        or "不要使用脚本" in text
-    )
-
-
-_DRAWING_TASK_RE = re.compile(
-    r"draw|drawing|paint|sketch|canvas|whiteboard|"
-    r"\u753b|\u753b\u56fe|\u7ed8\u56fe|\u6d82\u9e26|\u753b\u677f|\u767d\u677f",
-    re.IGNORECASE,
-)
-
-
-def _is_drawing_task(task: str) -> bool:
-    return bool(_DRAWING_TASK_RE.search(task or ""))
-
-
-def _required_image_paths(task: str) -> list[str]:
-    paths = re.findall(
-        r"[A-Za-z]:\\[^\r\n\"'<>|]+?\.(?:png|jpg|jpeg|bmp|gif)",
-        task or "",
-        flags=re.IGNORECASE,
-    )
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for path in paths:
-        value = path.strip().rstrip(".,;:，。；：)")
-        key = value.casefold()
-        if value and key not in seen:
-            cleaned.append(value)
-            seen.add(key)
-    return cleaned
-
-
-_DRAWING_COLOR_TERMS = {
-    "red": ("red", "\u7ea2", "\u7ea2\u8272"),
-    "blue": ("blue", "\u84dd", "\u84dd\u8272"),
-    "green": ("green", "\u7eff", "\u7eff\u8272"),
-    "yellow": ("yellow", "\u9ec4", "\u9ec4\u8272"),
-    "orange": ("orange", "\u6a59", "\u6a59\u8272"),
-    "purple": ("purple", "\u7d2b", "\u7d2b\u8272"),
-    "black": ("black", "\u9ed1", "\u9ed1\u8272"),
-}
-
-
-def _required_drawing_colors(task: str) -> list[str]:
-    text = (task or "").casefold()
-    colors: list[str] = []
-    for color, terms in _DRAWING_COLOR_TERMS.items():
-        if any(term in text for term in terms):
-            colors.append(color)
-    return colors
-
-
-def _gui_only_shell_allowed(command: str) -> bool:
-    low = (command or "").casefold()
-    verification_markers = ("test-path", "get-content", "select-string")
-    mutation_or_ui_automation = (
-        "set-content", "add-content", "out-file", "new-item", "copy-item",
-        "move-item", "remove-item", "start-process", "sendkeys", "clipboard",
-        "windows.automation", "wscript.shell", "shell.application",
-    )
-    return (
-        any(marker in low for marker in verification_markers)
-        and not any(marker in low for marker in mutation_or_ui_automation)
-    )
-
-
-def _is_coding_task(task: str) -> bool:
-    """Coding/software tasks are EXCLUDED from the reusable experience system
-    and routed to the coding sub-agent. A recorded run for one repo/bug is
-    meaningless to replay on another — solved fresh each time.
-
-    Detection (intent-aware, so "打开/玩 X游戏" stays a GUI task while "做一个
-    X游戏" goes to the coding agent):
-    - an open/launch/play intent at the start → never coding (GUI)
-    - any strong, unambiguous coding signal → coding
-    - a "build/write a <software-noun>" pattern → coding
-    """
-    text = (task or "").strip()
-    low = text.lower()
-    if _OPEN_INTENT.match(text):
-        return False
-    if any(k in low for k in _CODING_STRONG):
-        return True
-    return bool(_CODING_BUILD.search(text))
-
-
-_COMMUNICATION_HINTS = (
-    "发信息", "发消息", "发送", "回复", "私信", "聊天", "邮件",
-    "message", "send", "reply", "email", "chat",
-)
-
-
-def _is_communication_task(task: str) -> bool:
-    text = (task or "").lower()
-    return any(hint in text for hint in _COMMUNICATION_HINTS)
-
-
-def _quoted_payloads(task: str) -> list[str]:
-    matches = re.findall(r'"([^"]{1,120})"|“([^”]{1,120})”|「([^」]{1,120})」', task or "")
-    payloads: list[str] = []
-    for groups in matches:
-        value = next((g for g in groups if g), "").strip()
-        if value:
-            payloads.append(value)
-    return payloads
-
-
-# Open/launch/play intents → GUI, even when the object is a game/app/program.
-_OPEN_INTENT = re.compile(r"^(打开|开启|启动|运行|玩|播放|关闭|切换|最小化|最大化|登录|搜索)")
-# Strong, unambiguous coding signals (substring match, lowercased).
-_CODING_STRONG = (
-    "调试", "debug", "重构", "refactor", "仓库", "repo", "git", "github", "clone",
-    "克隆", "bug", "报错", "异常", "traceback", "编译", "build ", "单元测试", "pytest",
-    "npm", "pnpm", "yarn", "cargo", "dotnet", ".net", "代码", "源码", "函数", "脚本",
-    "这个项目", "项目里", "写代码", "写个程序", "写一个程序", "实现一个", "api 接口", "接口",
-    "数据库", "前端", "后端", "部署",
-)
-# "build/write a <software>" → coding (window between verb and noun for Chinese).
-_CODING_BUILD = re.compile(
-    r"(做|写|开发|实现|生成|创建|编写|搭建|搭|建|帮我做|帮我写)"
-    r"[^。,，;；\n]{0,12}"
-    r"(游戏|小游戏|网页|网站|页面|程序|软件|脚本|应用|小程序|html|网址|界面|插件|工具|"
-    r"爬虫|机器人|\bbot\b|\bapp\b|计算器|时钟|待办|todo|博客|商城|登录页|表单)",
-    re.IGNORECASE,
-)
 
 
 def _client():
@@ -233,150 +89,6 @@ def _main_model_has_vision() -> bool:
     )
 
 
-def _required_visible_payloads(task: str) -> list[str]:
-    """Extract literal text that a GUI writing/typing task must make visible."""
-    text = task or ""
-    low = text.lower()
-    line_re = (
-        r"\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+"
-        r"\u884c\s*[=:\uff1a\uff1d]\s*([^\uff0c,\u3002\uff1b;\r\n]+)"
-    )
-    payloads = [m.strip() for m in re.findall(line_re, text) if m.strip()]
-    if any(trigger in low for trigger in ("type", "input", "write", "fill")):
-        payloads.extend(_quoted_payloads(text))
-    seen: set[str] = set()
-    unique: list[str] = []
-    for payload in payloads:
-        payload = payload.strip()
-        if payload and payload not in seen:
-            unique.append(payload)
-            seen.add(payload)
-    return unique
-
-
-def _gui_search_payloads(task: str) -> list[str]:
-    text = task or ""
-    payloads: list[str] = []
-    patterns = (
-        r"(?:search|look up)\s+([A-Za-z0-9][^,.;\r\n]{1,80})",
-        r"(?:\u641c\u7d22|\u67e5\u627e)\s*([^\uff0c,\u3002\uff1b;\r\n]{1,80})",
-    )
-    for pattern in patterns:
-        for match in re.findall(pattern, text, flags=re.IGNORECASE):
-            value = str(match).strip()
-            value = re.split(
-                r"\s+(?:and|then|in|on|at)\s+|(?:\u5e76|\u7136\u540e|\u6253\u5f00|\u64ad\u653e)",
-                value,
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].strip()
-            if value:
-                payloads.append(value.strip('"“” '))
-    seen: set[str] = set()
-    out: list[str] = []
-    for payload in payloads:
-        key = payload.casefold()
-        if key not in seen:
-            out.append(payload)
-            seen.add(key)
-    return out
-
-
-def _is_gui_search_task(task: str) -> bool:
-    text = (task or "").lower()
-    wants_open = any(k in text for k in ("open", "打开", "启动", "进入"))
-    wants_search = any(k in text for k in ("search", "look up", "搜索", "查找"))
-    app_surface = any(k in text for k in (
-        "client", "store", "app", "steam", "douyin", "抖音", "网易云", "music",
-        "客户端", "商店", "应用", "页面",
-    ))
-    return wants_open and wants_search and app_surface
-
-
-def _is_store_search_task(task: str) -> bool:
-    text = (task or "").lower()
-    return _is_gui_search_task(task) and any(k in text for k in (
-        "store", "shop", "\u5546\u5e97", "\u9875\u9762", "page",
-    ))
-
-
-def _blocks_store_search_action(task: str, tool_name: str, args: dict) -> str:
-    if not _is_store_search_task(task):
-        return ""
-    command = str(args.get("command") or args.get("target") or "").casefold()
-    if tool_name in {"launch", "run_shell"} and any(
-        bad in command for bad in ("rungameid", "install/", "steam://run", "steam://install")
-    ):
-        return (
-            "Store/search navigation task blocked a launch/install/run protocol. "
-            "The user asked to search/open a store/page, not start or install the item. "
-            "Open the app/store/search UI or a store/search deep link, then verify the "
-            "requested query/page is visible."
-        )
-    return ""
-
-
-def _is_upload_publish_task(task: str) -> bool:
-    text = (task or "").casefold()
-    explicit = any(k in text for k in (
-        "upload", "publish", "post", "creator", "draft",
-        "\u4e0a\u4f20", "\u53d1\u5e03", "\u6295\u7a3f", "\u4f5c\u54c1",
-        "\u6807\u9898", "\u8349\u7a3f",
-    ))
-    media_file = any(ext in text for ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"))
-    platform_or_form = any(k in text for k in (
-        "douyin", "tiktok", "creator", "upload", "publish", "post", "draft",
-        "\u6296\u97f3", "\u521b\u4f5c\u8005", "\u53d1\u5e03", "\u4e0a\u4f20", "\u6807\u9898",
-    ))
-    return explicit or (media_file and platform_or_form)
-
-
-def _blocks_upload_media_analysis(task: str, tool_name: str, args: dict) -> str:
-    if not _is_upload_publish_task(task):
-        return ""
-    command = str(
-        args.get("command")
-        or args.get("script")
-        or args.get("target")
-        or args.get("name")
-        or ""
-    ).casefold()
-    media_terms = (".mp4", ".mov", ".avi", ".mkv", ".webm")
-    analysis_or_playback = (
-        "ffprobe", "ffmpeg", "wmplayer", "windows media player", "opencv",
-        "cv2", "extract frame", "showinfo", "start-process", "media player",
-        "vlc", "potplayer", "mpv", "mplayer",
-    )
-    media_player_target = any(
-        marker in command
-        for marker in ("wmplayer", "windows media player", "media player", "vlc", "potplayer", "mpv")
-    )
-    has_media_file = any(term in command for term in media_terms)
-    readonly_media_check = any(
-        marker in command
-        for marker in ("test-path", "get-item", "get-childitem", "resolve-path")
-    )
-    media_analysis_target = (
-        has_media_file
-        and any(marker in command for marker in analysis_or_playback)
-    )
-    if (
-        tool_name in {"run_shell", "run_detached", "launch", "find_program"}
-        and (
-            media_player_target
-            or media_analysis_target
-            or (tool_name in {"run_shell", "run_detached", "launch"} and has_media_file and not readonly_media_check)
-        )
-    ):
-        return (
-            "Upload/publish task blocked media playback/analysis. The media file is an "
-            "upload payload, not something to play, inspect, or understand. Verify the file "
-            "exists if needed, then open the requested app/platform upload UI, choose the file, "
-            "fill metadata, and stop before final publish."
-        )
-    return ""
-
-
 def _sanitize_assistant(msg) -> dict[str, Any]:
     """Assistant message for history — WITHOUT reasoning_content."""
     out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
@@ -392,7 +104,7 @@ def _sanitize_assistant(msg) -> dict[str, Any]:
     return out
 
 
-class AgentRunner:
+class AgentRunner(ReflectionMixin):
     """One task execution. Designed to run on a background thread."""
 
     def __init__(self, task: str, stop_event: threading.Event | None = None,
@@ -1255,79 +967,6 @@ class AgentRunner:
         })
         BUS.publish("playbook", run_id=self.run_id, name=book.name, trigger=title[:60])
         logger.info("运行中注入 playbook: %s (窗口: %s)", book.name, title[:40])
-
-    # ------------------------------------------------------------ reflect loop
-    def _build_reflection(self, step: int) -> str:
-        """Generate a structured reflection note from current run state.
-
-        Pure code — no extra LLM call. Distills recent actions, verification
-        outcomes, and world state into a concise checkpoint message so the
-        model has an explicit recap of where it is before deciding next steps.
-
-        Inspired by Reflexion (Shinn et al. 2023): explicit verbal reflection
-        injected into context improves decision quality without an extra model.
-        """
-        recent_actions = self._steps_log[-6:] if self._steps_log else []
-        world_state = self.session.world.state() if self.session.world_enabled else {}
-        window_title = self.session.snapshot.title if self.session.snapshot else "未知窗口"
-        plan_summary = ""
-        if self.session.plan and self.session.plan.active():
-            plan_summary = f"\n当前计划进度：{self.session.plan.render()}"
-
-        # Build verification status summary.
-        verified_count = sum(
-            1 for name, out in self._recent_results
-            if '"verified": true' in out.lower()
-        )
-        unverified_note = (
-            f"（最近 {self._consecutive_unverified} 步没有 verified=true 的动作，注意核验）"
-            if self._consecutive_unverified >= 3 else ""
-        )
-
-        parts = [
-            f"[反思检查点 第{step}步] 当前窗口：「{window_title}」",
-            f"最近动作：{' → '.join(recent_actions) or '（无）'}",
-            f"已验证动作数：{verified_count}{unverified_note}",
-        ]
-        if world_state.get("repeated_action"):
-            parts.append(f"警告：检测到重复动作 {world_state['repeated_action']}")
-        if plan_summary:
-            parts.append(plan_summary)
-        parts.append(
-            "请检查：① 当前是否在正确的窗口/界面？② 上一步动作是否真正生效（observe 验证了吗）？"
-            "③ 接下来最关键的一步是什么？"
-        )
-        return "\n".join(parts)
-
-    def _maybe_reflect(self, step: int) -> None:
-        """Inject a reflection checkpoint at configurable intervals.
-
-        Fires when:
-        - step reaches a reflect interval (default every 8 steps), OR
-        - 3+ consecutive unverified action steps
-
-        Edge-gated against the last inject step to avoid rapid-fire injections.
-        Does NOT call an extra LLM — just appends to messages.
-        """
-        reflect_interval = int(CONFIG.get("agent", "reflect_interval", default=8))
-        if reflect_interval <= 0:
-            return
-        # Avoid injecting on consecutive steps (minimum 3 steps gap).
-        steps_since_last = step - self._last_reflect_step
-        if steps_since_last < 3:
-            return
-        should_reflect = (
-            (step > 1 and step % reflect_interval == 0)
-            or self._consecutive_unverified >= 3
-        )
-        if not should_reflect:
-            return
-        note = self._build_reflection(step)
-        self.messages.append({"role": "user", "content": note})
-        self._last_reflect_step = step
-        BUS.publish("agent_reflect", run_id=self.run_id, step=step,
-                    consecutive_unverified=self._consecutive_unverified)
-        logger.info("反思检查点注入 step=%d unverified=%d", step, self._consecutive_unverified)
 
     # ------------------------------------------------------------------ run
     def run(self) -> dict[str, Any]:

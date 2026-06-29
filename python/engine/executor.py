@@ -11,41 +11,16 @@ import time
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
 from typing import Callable, Dict, Optional, Any
-from dataclasses import dataclass, field
 
 from engine.dsl_parser import ASTNode, NodeType, DSLParser
-
-
-class ExecutorState(str, Enum):
-    IDLE = "idle"
-    RUNNING = "running"
-    PAUSED = "paused"
-    STOPPED = "stopped"
-    ERROR = "error"
-    FINISHED = "finished"
-
-
-@dataclass
-class ExecutionContext:
-    variables: Dict[str, Any] = field(default_factory=dict)
-    loop_count: Dict[str, int] = field(default_factory=dict)
-    max_loops: int = 9999
-    retry_limit: int = 3
-    timeout: float = 30.0
-    max_call_depth: int = 50
-
-
-class ExecutionError(Exception):
-    pass
-
-
-class ReturnSignal(Exception):
-    """从子程序返回的信号，携带返回值"""
-    def __init__(self, value: Any = None):
-        self.value = value
-        super().__init__()
+from engine.executor_types import (
+    BreakLoop,
+    ExecutionContext,
+    ExecutionError,
+    ExecutorState,
+    ReturnSignal,
+)
 
 
 class DSLExecutor:
@@ -1795,9 +1770,3 @@ class DSLExecutor:
 
     def _log(self, msg: str):
         self._emit("log", message=msg)
-
-
-class BreakLoop(Exception):
-    """用于从 LOOP 内部跳出的控制流异常"""
-    def __str__(self):
-        return "BREAK 只能在 LOOP 内部使用"
