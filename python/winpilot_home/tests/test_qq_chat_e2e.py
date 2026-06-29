@@ -2,7 +2,7 @@
 
 These tests do NOT hit a real QQ process or LLM. They verify that:
 
-1. The agent is wired correctly for a vision-capable main model (mimo):
+1. The agent is wired correctly for a vision-capable main model:
    - system prompt declares native vision instead of "text-only"
    - screenshot injection is attempted after each observe
 2. Experience memory is bypassed (no hints, no reuse suggestions).
@@ -34,7 +34,7 @@ def _make_runner(task: str = TASK):
 
 
 # ---------------------------------------------------------------------------
-# 1. Vision-aware system prompt (mimo path)
+# 1. Vision-aware system prompt
 # ---------------------------------------------------------------------------
 
 class TestVisionPrompt:
@@ -50,16 +50,17 @@ class TestVisionPrompt:
         assert _VISION_TEXT_ONLY in prompt_without_vision
         assert _VISION_NATIVE not in prompt_without_vision
 
-    def test_mimo_model_detected_as_vision_capable(self):
+    def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision
 
         vision_models = [
-            "mimo-v2-pro", "mimo-v2-flash", "qwen2.5-vl-72b",
-            "gpt-4o", "gpt-4o-mini", "omni-latest", "llava-vision",
+            "mimo-v2-omni", "qwen2.5-vl-72b", "gpt-4o",
+            "gpt-4o-mini", "omni-latest", "llava-vision",
         ]
         text_models = [
             "deepseek-v4-flash", "deepseek-v4-pro",
             "deepseek-chat", "deepseek-reasoner",
+            "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro",
         ]
 
         with patch("winpilot.agent.loop.CONFIG") as mock_cfg:
@@ -70,7 +71,7 @@ class TestVisionPrompt:
                 mock_cfg.get.return_value = model
                 assert _main_model_has_vision() is False, f"expected no vision for {model}"
 
-    def test_screenshot_injected_after_observe_for_mimo(self):
+    def test_screenshot_injected_after_observe_for_vision_model(self):
         """_inject_observe_screenshot should append an image_url message when
         the main model is vision-capable and an hwnd is set.
 
