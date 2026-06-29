@@ -43,7 +43,8 @@
 | --- | --- |
 | `agent/tool_schemas.py` | 构造短 OpenAI function-calling schema，直接发给 LLM |
 | `agent/tool_result.py` | `ToolResult` 返回对象 |
-| `agent/tools.py` | `ToolSession`、dispatch、窗口/屏幕/输入/视觉等核心运行态 handler |
+| `agent/tools.py` | `ToolSession`、dispatch、屏幕/输入/视觉等核心运行态 handler |
+| `agent/window_tools.py` | `list_windows`、`scan_windows`、`focus_window`、`find_app`、`find_program` 窗口/应用工具 mixin |
 | `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin |
 | `agent/memory_tools.py` | `remember`、`forget`、`reuse_skill` 经验记忆和 0-token replay 工具 mixin |
 | `agent/desktop_tools.py` | 剪贴板、鼠标细控、截图、显示器、已安装应用等桌面杂项工具 mixin |
@@ -63,7 +64,7 @@
 
 `clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。
 
-`agent/tools.py` 仍偏大，但 schema、文件、记忆、桌面杂项工具已拆出。后续继续拆窗口、输入、视觉等 handler。
+`agent/tools.py` 仍偏大，但 schema、窗口、文件、记忆、桌面杂项工具已拆出。后续继续拆输入、视觉等 handler。
 
 ## 感知
 
