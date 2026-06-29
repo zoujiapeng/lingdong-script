@@ -44,9 +44,17 @@ def test_comms_done_gate_no_payload_requires_read_text():
 
 
 def test_comms_done_gate_no_payload_passes_with_read_text():
-    """Without quoted payload, done is allowed when read_text has content."""
+    """Without quoted payload, done is allowed when read_text has real chat content."""
     runner = _make_runner("打开QQ找我的手机持续聊天")
-    runner._recent_results = [("read_text", "你好 在吗 收到了吗 今天怎么样")]
+    # Simulate a real chat window read_text: long enough lines that look like
+    # actual message bubbles, not a short contacts-list preview.
+    runner._recent_results = [(
+        "read_text",
+        "你好 在吗 收到了吗 今天怎么样\n"
+        "2025-06-27 16:00  你好，这是一条很长的测试消息，让我来测试一下这个功能是否正常工作\n"
+        "2025-06-27 16:01  好的，已经收到了你发来的消息，一切正常，感谢你的测试\n"
+        "2025-06-27 16:02  没问题，有什么需要帮忙的请继续发消息给我哦\n"
+    )]
     runner._done_rejects = 0
 
     with patch.object(runner.session, "hwnd", None), \

@@ -1,9 +1,9 @@
-历史测试输出快照。
+历史测试输出快照，不代表当前测试结果。
 
-该文件不代表当前测试结果，也不应作为架构事实引用。当前验证以实际命令为准：
+当前验证以实际命令为准：
 
 python -m pytest python/winpilot_home/tests -q
 npx vitest run
 npm run build
 
-根目录 tests/ 混有旧流程图/feature 测试和历史实验测试；如果运行失败，需要先判断是否引用已删除旧 Agent。
+根目录 tests/ 混有旧流程图、feature 和历史实验测试。失败时先判断测试是否仍引用旧 Agent 或已删除模块。

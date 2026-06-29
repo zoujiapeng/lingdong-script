@@ -52,6 +52,25 @@ def _fake_observe_env(monkeypatch):
     monkeypatch.setattr(fusion, "window_region", lambda hwnd: region)
     monkeypatch.setattr(fusion.win32, "_window_text", lambda hwnd: "QQ")
     monkeypatch.setattr(fusion, "_foreground_modal_over_target", lambda hwnd, reg: False)
+    config_get = fusion.CONFIG.get
+
+    def fake_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "ocr_skip_when_uia_rich":
+            return True
+        if section == "fusion" and key == "vlm_skip_when_uia_rich":
+            return True
+        if section == "fusion" and key == "vlm_assist_threshold":
+            return 60
+        if section == "fusion" and key == "uia_rich_threshold":
+            return 20
+        return config_get(section, key, default=default)
+
+    monkeypatch.setattr(fusion.CONFIG, "get", fake_config_get)
+    monkeypatch.setattr(
+        fusion.CONFIG,
+        "enabled_dimensions",
+        lambda: ["uia", "win32", "ocr", "cv", "vlm"],
+    )
 
     # UIA returns a RICH set (>= normal threshold=20, < vlm_assist_threshold=60).
     rich = [

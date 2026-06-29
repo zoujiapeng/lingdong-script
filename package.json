@@ -17,6 +17,8 @@
     "build:cli": "tsc -p tsconfig.cli.json",
     "build:ai": "tsc -p tsconfig.ai.json",
     "build:all": "npm run build:cli && npm run build:ai",
+    "clean": "node scripts/clean-artifacts.cjs",
+    "clean:runtime": "node scripts/clean-artifacts.cjs --runtime",
     "cli": "node dist/cli/cli/index.js",
     "ai": "node dist/ai-interface/index.js",
     "ai:mcp": "node dist/ai-interface/index.js --mode mcp",
@@ -67,14 +69,31 @@
         "from": "python",
         "to": "python",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/.pytest_cache/**",
+          "!**/traces/**",
+          "!**/scripts/**",
+          "!**/templates_img/**",
+          "!**/experience_memory.json",
+          "!**/config.json"
         ]
       },
       {
         "from": "python-runtime",
         "to": "python-runtime",
         "filter": [
-          "**/*"
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/tests/**",
+          "!**/test/**",
+          "!**/*.dist-info/**",
+          "!**/*.egg-info/**",
+          "!**/PyWin32.chm"
         ]
       },
       {
@@ -93,6 +112,10 @@
       }
     ],
     "win": {
+      "electronLanguages": [
+        "zh-CN",
+        "en-US"
+      ],
       "target": [
         "nsis",
         "portable"

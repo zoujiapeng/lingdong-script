@@ -243,12 +243,63 @@ def _raw_click(x: int, y: int, button: str, double: bool, hwnd: int | None) -> N
             time.sleep(0.06)
 
 
+def _abs_mouse_move(x: int, y: int) -> None:
+    """Send an ABSOLUTE hardware-level mouse move through the input queue.
+
+    SetCursorPos repositions the cursor but is "silent": Win11 Paint and other
+    WinUI/pointer-input canvases track WM_MOUSEMOVE/WM_POINTER events from the
+    input queue, and a relative MOUSEEVENTF_MOVE with dx=dy=0 is a zero-delta
+    no-op that never registers a stroke. An absolute move (normalized to the
+    virtual desktop, 0..65535) generates a real move event at the target point,
+    so press → moves → release draws a continuous stroke. Verified on Win11
+    Paint: relative-zero gives 0.0 visual change, absolute draws the line.
+    """
+    vx = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+    vy = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+    vw = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+    vh = user32.GetSystemMetrics(79)   # SM_CYVIRTUALSCREEN
+    nx = int((int(x) - vx) * 65535 / max(1, vw - 1))
+    ny = int((int(y) - vy) * 65535 / max(1, vh - 1))
+    flags = (win32con.MOUSEEVENTF_MOVE | win32con.MOUSEEVENTF_ABSOLUTE
+             | 0x4000)  # MOUSEEVENTF_VIRTUALDESK
+    _send_inputs([_mouse_input(flags, dx=nx, dy=ny)])
+
+
 def _emit_move(x: int, y: int) -> None:
-    """Move the cursor AND post a mouse-move event so apps see continuous
-    motion. SetCursorPos alone is silent — paint/canvas apps need the
-    MOUSEEVENTF_MOVE event to register a stroke between button-down and up."""
-    move_mouse(x, y)
-    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MOVE)])
+    """Move the cursor through a single ABSOLUTE SendInput event so canvas apps
+    register continuous motion between button-down and up.
+
+    Uses ONLY the absolute move — not SetCursorPos followed by it. Issuing both
+    per interpolation step makes Win11 Paint's stroke registration flaky: the
+    two moves to (nearly) the same point in rapid succession get coalesced and
+    the stroke intermittently lands as a click (a dot) instead of a line.
+    The absolute SendInput move already repositions the system cursor, so
+    GetCursorPos-based readers stay consistent. Verified on Win11 Paint:
+    pure-absolute draws every stroke; the combo dropped ~half of them."""
+    _abs_mouse_move(x, y)
+
+
+def _stroke_path(waypoints: list[tuple[int, int]], duration_s: float) -> None:
+    """Press at the first waypoint, move through the path, release at the end.
+    Shared by drag() and draw_strokes() so stroke registration is identical."""
+    _abs_mouse_move(*waypoints[0])  # absolute move so the press lands as real input
+    time.sleep(0.08)
+    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
+    time.sleep(0.04)  # let the app register the press before moving
+
+    seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                for a, b in zip(waypoints, waypoints[1:])]
+    total = max(sum(seg_lens), 1.0)
+    for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
+        steps = max(4, int(seg / 8))  # ~8px per move event for a smooth stroke
+        seg_dur = duration_s * (seg / total)
+        for i in range(1, steps + 1):
+            _emit_move(int(a[0] + (b[0] - a[0]) * i / steps),
+                       int(a[1] + (b[1] - a[1]) * i / steps))
+            time.sleep(max(0.008, seg_dur / steps))
+
+    time.sleep(0.03)
+    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
 
 
 def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
@@ -279,29 +330,46 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
                 continue
     waypoints.append((int(x2), int(y2)))
 
-    move_mouse(*waypoints[0])
-    time.sleep(0.08)
-    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
-    time.sleep(0.04)  # let the app register the press before moving
-
-    seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-                for a, b in zip(waypoints, waypoints[1:])]
-    total = max(sum(seg_lens), 1.0)
-    for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
-        steps = max(4, int(seg / 8))  # ~8px per move event for a smooth stroke
-        seg_dur = duration_s * (seg / total)
-        for i in range(1, steps + 1):
-            _emit_move(int(a[0] + (b[0] - a[0]) * i / steps),
-                       int(a[1] + (b[1] - a[1]) * i / steps))
-            time.sleep(max(0.008, seg_dur / steps))
-
-    time.sleep(0.03)
-    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
+    _stroke_path(waypoints, duration_s)
     if saved:
         _restore_cursor(saved)
     BUS.publish("action", action="drag", frm=[x1, y1], to=[x2, y2],
                 waypoints=len(waypoints))
     return {"ok": True}
+
+
+def draw_strokes(strokes: list, duration_s: float = 0.4,
+                 hwnd: int | None = None) -> dict:
+    """Draw multiple SEPARATE strokes in one call, lifting the pen between them.
+
+    Each stroke is a polyline [[x,y],...]; the pen presses at its first point,
+    moves through the rest, and releases — so strokes don't connect. This lets
+    the agent commit a whole figure (face + ears + eyes + whiskers) from a
+    single observation instead of one LLM round-trip per stroke. Returns the
+    count of strokes actually drawn (those with >= 2 valid points)."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    if hwnd:
+        focus_window(hwnd)
+        time.sleep(0.05)
+    saved = _cursor_pos() if _no_mouse_steal() else None
+    drawn = 0
+    for stroke in strokes or []:
+        waypoints: list[tuple[int, int]] = []
+        for p in stroke or []:
+            try:
+                waypoints.append((int(p[0]), int(p[1])))
+            except (TypeError, IndexError, ValueError, KeyError):
+                continue
+        if len(waypoints) < 2:
+            continue
+        _stroke_path(waypoints, duration_s)
+        drawn += 1
+        time.sleep(0.04)  # small gap so the app finalizes each stroke
+    if saved:
+        _restore_cursor(saved)
+    BUS.publish("action", action="draw_strokes", strokes=drawn)
+    return {"ok": True, "strokes_drawn": drawn}
 
 
 def scroll(x: int, y: int, amount: int) -> dict:
@@ -339,13 +407,25 @@ def scroll(x: int, y: int, amount: int) -> dict:
 
 
 # ------------------------------------------------------------- keyboard API
-def type_text(text: str, interval_s: float = 0.008) -> dict:
-    """Unicode injection — IME-independent, supports Chinese."""
+def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> dict:
+    """Unicode injection — IME-independent, supports Chinese.
+
+    hwnd: if given, re-focus the window every 8 characters so focus theft
+    (another window activating mid-type) does not silently swallow keystrokes.
+    """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+
+    def _refocus_if_needed(i: int) -> None:
+        if hwnd and i > 0 and i % 8 == 0:
+            if win32gui.GetForegroundWindow() != hwnd:
+                focus_window(hwnd)
+                time.sleep(0.08)
+
     if _should_type_via_vk(text):
         typed = 0
         for char in text:
+            _refocus_if_needed(typed)
             if not _press_char_vk(char):
                 break
             typed += 1
@@ -353,7 +433,8 @@ def type_text(text: str, interval_s: float = 0.008) -> dict:
         BUS.publish("action", action="type_text", length=typed, via="vk")
         return {"ok": typed == len(text), "typed": typed,
                 "requested": len(text), "via": "vk"}
-    for char in text:
+    for i, char in enumerate(text):
+        _refocus_if_needed(i)
         if char == "\n":
             press_keys(["enter"])
             continue

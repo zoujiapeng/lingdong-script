@@ -20,6 +20,7 @@ from typing import Any
 from ..config import CONFIG, TRACES_DIR
 from ..memory import experience
 from ..perception import fusion, intent, vision_cv, vlm
+from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
 from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
@@ -43,6 +44,25 @@ _PRICE_CACHE_HIT_PER_M = 0.2
 _PRICE_OUTPUT_PER_M = 8.0
 _ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
                  "draw_strokes", "focus_window", "wait", "tray_click", "run_shell"}
+
+
+def _looks_like_contact_list(text: str) -> bool:
+    """Heuristic: is this read_text output from a contacts/session list rather
+    than an open chat conversation window?
+
+    QQ's contact list shows: window chrome, contact names, last-message previews
+    (short, typically ≤ 40 chars), timestamps. An actual open chat shows multiple
+    full message bubbles. We flag it as a contacts list when it has many short
+    lines but very little long text (like full message bubbles would have).
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return True
+    # Count lines with meaningful length (>30 chars) — real chat bubbles tend
+    # to be long. Contact-list previews are always short.
+    long_lines = sum(1 for l in lines if len(l) > 30)
+    # If fewer than 3 long lines in the whole output it's likely a contact list
+    return long_lines < 3
 
 
 def _is_gui_only_task(task: str) -> bool:
@@ -195,6 +215,22 @@ def _client():
     if not api.get("api_key"):
         raise RuntimeError("config.json 缺少 api.api_key")
     return OpenAI(base_url=api["base_url"], api_key=api["api_key"], timeout=120)
+
+
+def _main_model_has_vision() -> bool:
+    """True when the main API model natively supports image input.
+
+    MiMo / Qwen2.5-VL / GPT-4o class models accept image_url content in user
+    messages. DeepSeek text-only models (deepseek-chat, deepseek-v4-*) do not.
+    """
+    model = str(CONFIG.get("api", "model", default="")).lower()
+    return (
+        "mimo" in model
+        or "omni" in model
+        or "-vl" in model
+        or "vision" in model
+        or "gpt-4o" in model
+    )
 
 
 def _required_visible_payloads(task: str) -> list[str]:
@@ -463,7 +499,11 @@ class AgentRunner:
 
     # ------------------------------------------------------------- history
     def _append_tool_result(self, tool_call_id: str, result_text: str,
-                            summary: str = "") -> None:
+                            summary: str = "",
+                            image_b64: str = "") -> None:
+        # NOTE: mime API does not support multipart tool results (image_url in tool role).
+        # Always use plain text; screenshot is injected as a separate user message via
+        # _inject_observe_screenshot when image_b64 is empty (fallback path).
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": result_text})
         if summary:
@@ -480,15 +520,52 @@ class AgentRunner:
         The newest _KEEP_FULL_OBSERVATIONS are always kept full.
         """
         def total_chars() -> int:
-            return sum(len(str(m.get("content") or "")) for m in self.messages)
+            total = 0
+            for m in self.messages:
+                c = m.get("content") or ""
+                total += len(c) if isinstance(c, str) else sum(
+                    len(str(part)) for part in c
+                )
+            return total
 
         while (
             len(self._foldable) > _KEEP_FULL_OBSERVATIONS
             and total_chars() > _CONTEXT_FOLD_THRESHOLD_CHARS
         ):
             idx, summary = self._foldable.pop(0)
-            if not self.messages[idx]["content"].startswith("[已折叠]"):
+            content = self.messages[idx]["content"]
+            already_folded = isinstance(content, str) and content.startswith("[已折叠]")
+            if not already_folded:
                 self.messages[idx]["content"] = summary
+
+    def _inject_observe_screenshot(self) -> None:
+        """After an observe, embed the current window screenshot into history as
+        a user message so the main vision model (mimo-v2-pro) can see the actual
+        pixels without a separate VLM grounding pass.
+
+        The injected message is registered in _foldable so it gets compressed
+        alongside the paired observe tool result when history grows large.
+        """
+        if not _main_model_has_vision():
+            return
+        hwnd = self.session.hwnd
+        if not hwnd:
+            return
+        try:
+            b64 = capture_window_jpeg_b64(hwnd)
+            if not b64:
+                return
+            self.messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[当前窗口截图，结合上方文字元素列表使用]"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            })
+            self._foldable.append((len(self.messages) - 1, "[已折叠 screenshot]"))
+            self._fold_old()
+        except Exception as exc:
+            logger.debug("observe 截图注入失败: %s", exc)
 
     # ----------------------------------------------------------------- api
     def _chat(self, client, tools: list[dict]):
@@ -794,6 +871,10 @@ class AgentRunner:
                 replay=result.replay,
             )
             self._append_tool_result(tc.id, result.text, summary=result.summary)
+            if result.is_observe:
+                # Inject screenshot as separate user message (mime does not support
+                # multipart tool results, so we cannot inline image_b64 in tool role).
+                self._inject_observe_screenshot()
             if result.terminal:
                 self.result_text = result.text
                 return result.terminal
@@ -987,10 +1068,15 @@ class AgentRunner:
                 return False
             elif not payloads:
                 # No quoted message text — require that read_text was called and
-                # returned non-empty content from the chat window (proves the
-                # chat surface is open and has something to show).
+                # returned content that looks like an actual chat window (not just
+                # a contact list). Chat windows contain message timestamps or
+                # bubble-like text patterns. A read_text from a contacts list
+                # only shows the preview line, not the full conversation.
+                # We require at least 50 chars AND that the content doesn't look
+                # like it's only showing a contacts list (which has short previews).
                 has_chat_evidence = any(
-                    name == "read_text" and len(out.strip()) > 10
+                    name == "read_text" and len(out.strip()) > 50
+                    and not _looks_like_contact_list(out)
                     for name, out in self._recent_results
                 )
                 if not has_chat_evidence:
@@ -1261,7 +1347,8 @@ class AgentRunner:
             experience_hints=hints, vlm_enabled=vlm.is_configured(),
             planning_enabled=plan_on,
             playbook_text=playbooks.render_section(matched_books),
-            style=str(CONFIG.get("agent", "prompt_style", default="full")))
+            style=str(CONFIG.get("agent", "prompt_style", default="full")),
+            main_model_has_vision=_main_model_has_vision())
         self.messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},

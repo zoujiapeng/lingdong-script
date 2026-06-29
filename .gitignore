@@ -38,6 +38,9 @@ python/browser_snapshots/
 
 # E2E test driver + local run artifacts
 .e2e/
+_e2e_shots/
+.plan.md
+_draw_*.py
 
 # Generated flow files
 *.flow

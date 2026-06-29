@@ -1,12 +1,17 @@
 """FastAPI server: REST control surface + WebSocket event stream + static UI.
 
 One agent run at a time. All BUS events stream to every connected browser.
+
+IMPORTANT: Start this server via serve.py only — never directly with uvicorn.
+  Correct:  python serve.py [PORT] [HOST]
+  Blocked:  uvicorn winpilot.server:app   ← intentionally rejected
 """
 from __future__ import annotations
 
 import asyncio
 import ctypes
 import json
+import os
 import queue
 import re
 import sys
@@ -31,6 +36,24 @@ from .utils.log import BUS, logger
 
 WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
+
+
+def _started_by_direct_uvicorn() -> bool:
+    argv = " ".join(str(arg).lower() for arg in sys.argv)
+    return "uvicorn" in argv and "winpilot.server:app" in argv
+
+
+# Guard: block direct uvicorn invocation. The only supported launcher is
+# serve.py (used by the Electron process). Direct uvicorn starts break config
+# path resolution and cause port confusion with the embedded server.
+if _started_by_direct_uvicorn() and not os.environ.get("WINPILOT_LAUNCHED_VIA_SERVE"):
+    print(
+        "\n[WinPilot] ERROR: do NOT start this server with uvicorn directly.\n"
+        "  Use:  python serve.py [PORT] [HOST]\n"
+        "  The Electron app (灵动脚本) launches serve.py automatically.\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None)
 
