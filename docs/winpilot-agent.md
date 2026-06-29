@@ -51,6 +51,30 @@
 
 排错优先级：先看真实屏幕/截图，再看 `python/winpilot_home/traces/<run_id>.jsonl` 的工具序列和截图索引，最后看 `python/winpilot_home/traces/<run_id>/NNN_*.json` 里 LLM 每步实际收到的信息。
 
+## 工具级复盘
+
+目标不是看 agent 自称成功，而是复现“模型看到了什么、调用了什么、屏幕实际发生了什么”。
+
+1. 走真实路径启动任务：前端 Agent 页，或 `python scripts/gui_eval_run.py "任务"`。后者也调用 `/api/chat`，不是离线 CLI。
+2. 取得 `run_id`：前端日志、`/api/status`、或 eval 报告都会包含。
+3. 打开 `python/winpilot_home/traces/<run_id>.jsonl`：
+   - `agent_start`：任务文本和最大步数。
+   - `agent_step`：第几轮 LLM、reasoning 摘要、tool call 数。
+   - `agent_tool_start`：工具执行前，包含工具名和参数。
+   - `agent_tool`：工具执行后，包含 `result_preview`、`terminal`、`elapsed_ms`、`replay`，动作工具还可能包含 `screenshot`。
+   - `done_check`：done gate 的判断结果和拒绝原因。
+   - `agent_done`：最终状态，不等于真实成功，必须结合证据判断。
+4. 打开 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。`TraceRecorder` 会给 `click`、`type_text`、`hotkey`、`launch`、`drag`、`scroll` 保存前后截图，用来确认是否真的点击/输入/切换/滚动。
+5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
+6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
+   - 窗口/应用发现：`window_tools.py`
+   - 感知/OCR/VLM：`perception_tools.py`
+   - 点击/输入/拖拽/绘制：`interaction_tools.py`
+   - shell/启动/tray/search/undo：`system_tools.py`
+   - 计划/done/fail：`plan_tools.py`
+   - 剪贴板/截图/鼠标细控：`desktop_tools.py`
+7. 修复后重复同一路径测试，保留新的 trace/eval 报告；不要只用单元测试或 agent 的最终话术判断 GUI 能力。
+
 ## 工具结构
 
 当前 GUI agent 工具被拆成几层：

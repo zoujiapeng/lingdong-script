@@ -60,6 +60,16 @@
 - 每一步是：构造/折叠 messages -> 调 LLM function calling -> `ToolSession.dispatch()` -> 工具 mixin 执行 -> 写 BUS 事件和 trace -> 可能注入 world/playbook/reflect。
 - LLM 每步真实收到/返回的信息在 `python/winpilot_home/traces/<run_id>/NNN_*.json`；UI 事件和截图索引在 `python/winpilot_home/traces/<run_id>.jsonl`。
 
+## 如何复盘工具细节
+
+- 真实 GUI 评测用前端 Agent 页，或用 `scripts/gui_eval_run.py "任务"`；脚本同样 POST `/api/chat`，轮询 `/api/status`，读取 `/api/trace/<run_id>`，不会绕开前端路径。
+- 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
+- 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
+- `click/type_text/hotkey/launch/drag/scroll` 会自动保存动作前后截图；必须人工打开截图确认真实画面和 agent 的推理是否一致。
+- 看 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`，确认模型每一步实际收到了什么感知文本、工具结果、用户插话、视觉图片，以及它返回了哪些 tool calls。
+- 如果“成功”可疑，查 `done_check` 事件和 `done_verifier.py`；没有截图/文件/进程/窗口/read_text 证据的 done 都不能算真成功。
+- 如果工具看起来没生效，先对比截图，再看该工具 mixin：感知在 `perception_tools.py`，输入动作在 `interaction_tools.py`，启动/shell 在 `system_tools.py`，计划/done/fail 在 `plan_tools.py`。
+
 ## 当前清理方向
 
 - `src/renderer/store/index.ts` 已去掉重复 defaults/templates/persistence 定义，真实来源是 `store/defaults.ts` 和 `store/persistence.ts`。
