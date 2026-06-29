@@ -2,7 +2,8 @@
 
 Function-calling schemas live in ``tool_schemas.py``. This module keeps the
 runtime state: latest Snapshot, current target hwnd, world model, undo stack,
-and concrete tool handlers. Every action tool can accept an ``expect``
+dispatch, and shared target/element resolution. Concrete tool handlers live in
+the sibling ``*_tools.py`` mixins. Every action tool can accept an ``expect``
 condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 """
 from __future__ import annotations
@@ -19,6 +20,9 @@ from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner
 
+# Several imports above are retained as stable monkeypatch targets for older
+# tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
+# them through their _tools_attr compatibility helper.
 from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
 from .interaction_tools import InteractionToolMixin
