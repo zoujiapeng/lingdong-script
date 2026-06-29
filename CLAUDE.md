@@ -27,9 +27,10 @@
 | `python/winpilot_home/winpilot/agent/done_verifier.py` | GUI agent done 二次核验 mixin |
 | `python/winpilot_home/winpilot/agent/context_guidance.py` | GUI agent planning/world/playbook 上下文提示 mixin |
 | `python/winpilot_home/winpilot/agent/reflection.py` | GUI agent 反思检查点 mixin |
-| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、窗口/屏幕/动作核心工具 |
+| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession`、dispatch、shell/launch/search/tray/plan/done/fail |
 | `python/winpilot_home/winpilot/agent/window_tools.py` | GUI agent 窗口列表、扫描、聚焦、应用发现工具 mixin |
 | `python/winpilot_home/winpilot/agent/perception_tools.py` | GUI agent observe/read_text/VLM/template/color 感知工具 mixin |
+| `python/winpilot_home/winpilot/agent/interaction_tools.py` | GUI agent click/type/hotkey/scroll/drag/draw/wait 输入动作工具 mixin |
 | `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
 | `python/winpilot_home/winpilot/agent/memory_tools.py` | GUI agent 经验记忆/0-token replay 工具 mixin |
 | `python/winpilot_home/winpilot/agent/desktop_tools.py` | GUI agent 剪贴板、鼠标细控、截图、显示器、应用列表工具 mixin |
@@ -45,8 +46,17 @@
 - 不要把 `python/features/` 当成 WinPilot 工具池。
 - 不要写计算器、QQ、网易云等单软件专属规则。
 - 不要相信“done 日志”等于真实成功；必须看屏幕/文件/进程/窗口/trace。
+- GUI 真实评测优先走 `scripts/gui_eval_run.py` 或前端 Agent 页，它们都提交 `/api/chat`，不要用离线 CLI 冒充前端路径。
 - 不要把 `config.json`、`traces/`、`scripts/`、`experience_memory.json` 当源码。
 - 不要继续往 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py` 塞大块新逻辑。
+
+## 运行时状态
+
+- 前端/Electron 调 `python/winpilot_home/serve.py` 启动 FastAPI；任务从 `/api/chat` 进入，`server.py` 的 `_RunState` 保证一次只跑一个 agent/replay/人工录制。
+- `agent/router.py` 只决定 runner：GUI 任务进 `AgentRunner`，编程/仓库任务在非 GUI-only 时进 `CodingRunner`。
+- `AgentRunner.status` 状态集合：`pending`、`running`、`done`、`fail`、`reply`、`stopped`、`error`。`done` 还要经过 `done_verifier.py`，否则会被打回继续工作。
+- 每一步是：构造/折叠 messages -> 调 LLM function calling -> `ToolSession.dispatch()` -> 工具 mixin 执行 -> 写 BUS 事件和 trace -> 可能注入 world/playbook/reflect。
+- LLM 每步真实收到/返回的信息在 `python/winpilot_home/traces/<run_id>/NNN_*.json`；UI 事件和截图索引在 `python/winpilot_home/traces/<run_id>.jsonl`。
 
 ## 当前清理方向
 
@@ -57,12 +67,13 @@
 - 经验记忆/复用 handler 已拆到 `agent/memory_tools.py`；桌面杂项 handler 已拆到 `agent/desktop_tools.py`。
 - 窗口列表/扫描/聚焦/应用发现 handler 已拆到 `agent/window_tools.py`。
 - observe/read_text/VLM/template/color 感知 handler 已拆到 `agent/perception_tools.py`。
+- click/type/hotkey/scroll/drag/draw/wait 输入动作 handler 已拆到 `agent/interaction_tools.py`。
 - 真实 GUI 评测脚本在 `scripts/gui_eval_run.py`，它走 `/api/chat`，与前端 Agent 页面同路径，并把报告写到忽略的 `python/winpilot_home/evals/`。
 - WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；planning/world/playbook 提示已拆到 `agent/context_guidance.py`；反思检查点已拆到 `agent/reflection.py`。
 - legacy Flow/DSL executor 的共享状态/异常类型已拆到 `python/engine/executor_types.py`，`executor.py` 仍只按 legacy 执行器维护。
 - 旧 `python/core/screenshot.py` 保留 `capture_screen()` 兼容 legacy Robot Framework keyword。
 - `npm run clean` 清 `dist/`、`release/`、测试/浏览器缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
-- 下一步优先继续拆 `agent/tools.py` 的输入/动作工具。
+- `agent/tools.py` 现在主要保留 `ToolSession` 状态、dispatch、shell/launch/search/tray/plan/done/fail。
 
 ## 验证
 
