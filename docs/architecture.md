@@ -52,6 +52,7 @@ flowchart LR
     tools --> perceptiontools["PerceptionToolMixin<br/>agent/perception_tools.py"]
     tools --> interactiontools["InteractionToolMixin<br/>agent/interaction_tools.py"]
     tools --> systemtools["SystemToolMixin<br/>agent/system_tools.py"]
+    tools --> plantools["PlanToolMixin<br/>agent/plan_tools.py"]
     tools --> filetools["FileToolMixin<br/>agent/file_tools.py"]
     tools --> memorytools["MemoryToolMixin<br/>agent/memory_tools.py"]
     tools --> desktoptools["DesktopToolMixin<br/>agent/desktop_tools.py"]
@@ -83,13 +84,13 @@ stateDiagram-v2
 
 - `server.py` 的 `_RunState` 是服务级锁：同一时间只允许一个 agent、replay 或人工录制任务运行。
 - `AgentRunner.run()` 是 GUI agent 主循环：注入任务/上下文/记忆 -> 调 LLM -> 处理 tool calls -> `ToolSession.dispatch()` -> 工具 mixin -> done gate/world/playbook/reflect。
-- `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；具体工具按窗口、感知、交互、系统、文件、记忆、桌面杂项拆到 mixin。
+- `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；具体工具按窗口、感知、交互、系统、计划/终止、文件、记忆、桌面杂项拆到 mixin。
 - BUS/WebSocket 给前端显示进度；`recorder/trace.py` 写可回放事件和截图；`agent/loop.py` 的 LLM trace 写每步真实 prompt/response，失败复盘必须优先看这些证据。
 
 ## 最近结构调整
 
 - `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
-- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态 dispatch 和少量会话核心 handler；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、文件、记忆复用、桌面杂项工具。
+- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态状态和 dispatch；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/plan_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、计划/终止、文件、记忆复用、桌面杂项工具。
 - `agent/task_rules.py` 承担 GUI task 分类、GUI-only 限制和 done gate guard 的纯规则；`agent/done_verifier.py` 承担 done 二次核验；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 承担 legacy Flow/DSL executor 的共享状态、上下文和控制流异常，`executor.py` 继续作为 legacy 执行器维护。
@@ -99,5 +100,5 @@ stateDiagram-v2
 ## 维护重点
 
 - `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
-- `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
+- `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、计划/终止、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
 - `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。

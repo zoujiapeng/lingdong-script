@@ -11,10 +11,11 @@
   - `agent/perception_tools.py` now owns observe/read_text/VLM/template/color perception tools.
   - `agent/interaction_tools.py` now owns click/type/hotkey/scroll/drag/draw/wait tools.
   - `agent/system_tools.py` now owns run_shell/run_detached/launch/tray/search/undo tools.
+  - `agent/plan_tools.py` now owns revise_plan/complete_subgoal/done/fail tools.
   - `agent/file_tools.py` now owns generic file tools used by `ToolSession`.
   - `agent/memory_tools.py` now owns memory/replay tools used by `ToolSession`.
   - `agent/desktop_tools.py` now owns clipboard, mouse fine-control, screenshot, display, and app-list tools.
-  - `agent/tools.py` remains the runtime `ToolSession`, dispatcher, and plan/done/fail handler surface.
+  - `agent/tools.py` remains the runtime `ToolSession`, dispatcher, and target-window state surface.
 - Split pure GUI runner rules out of `agent/loop.py`:
   - `agent/task_rules.py` now owns GUI task classification and guard helpers.
   - `agent/done_verifier.py` now owns done-gate verification helpers.
