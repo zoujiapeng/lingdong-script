@@ -36,6 +36,7 @@
 
 - Rewrote the project documentation from current code facts instead of stale historical Agent notes.
 - Added a concise runtime/state-machine map for the current GUI path: `/api/chat`, server `_RunState`, runner routing, `AgentRunner.status`, `ToolSession.dispatch()`, BUS events, trace files, and done verification.
+- Documented the forensic GUI debugging workflow: inspect trace jsonl events, before/after screenshots, and per-step LLM request/response files to verify every tool call against the real screen.
 - Clarified the active architecture:
   - WinPilot lives in `python/winpilot_home/winpilot/`.
   - `python/agent/__main__.py` is an IPC adapter.
