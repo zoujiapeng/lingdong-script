@@ -239,18 +239,14 @@ def is_animating(region: Region, sample_s: float = 0.8) -> bool:
     return diff_ratio(first, second) > 0.001 or diff_ratio(second, third) > 0.001
 
 
-def image_ink_stats(path: str) -> dict:
-    """Lightweight non-visual summary for saved drawings/screenshots.
+def image_ink_stats_from_array(image: np.ndarray, path: str = "") -> dict:
+    """Lightweight non-visual summary for an image array.
 
     This deliberately does not claim semantic understanding. It only tells a
     text-only agent/judge whether an image is blank-ish and where visible ink is.
     """
-    p = Path(path)
-    if not p.exists():
-        return {"exists": False, "path": str(p)}
-    image = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
-        return {"exists": True, "path": str(p), "readable": False}
+        return {"exists": bool(path), "path": path, "readable": False}
     h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     # Treat near-white as background; this works for common canvas/image tasks.
@@ -260,12 +256,13 @@ def image_ink_stats(path: str) -> dict:
     stats: dict = {
         "exists": True,
         "readable": True,
-        "path": str(p),
         "width": int(w),
         "height": int(h),
         "ink_pixels": ink_pixels,
         "ink_ratio": round(ink_pixels / total, 6) if total else 0.0,
     }
+    if path:
+        stats["path"] = path
     if ink_pixels == 0:
         stats.update({"blankish": True, "component_count": 0})
         return stats
@@ -290,6 +287,15 @@ def image_ink_stats(path: str) -> dict:
     stats["component_count"] = len(comps)
     stats["largest_components"] = comps[:8]
     return stats
+
+
+def image_ink_stats(path: str) -> dict:
+    """Lightweight non-visual summary for saved drawings/screenshots."""
+    p = Path(path)
+    if not p.exists():
+        return {"exists": False, "path": str(p)}
+    image = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
+    return image_ink_stats_from_array(image, str(p))
 
 
 def image_color_stats(path: str) -> dict:

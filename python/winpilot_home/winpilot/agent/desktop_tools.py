@@ -1,9 +1,11 @@
 """General desktop utility tool handlers for ToolSession."""
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from ..action import executor
+from ..perception import vision_cv
 from .tool_result import ToolResult
 
 
@@ -144,6 +146,56 @@ class DesktopToolMixin:
     def _fold_base64(result: dict) -> None:
         if result.get("ok") and result.get("base64"):
             b64 = result["base64"]
+            DesktopToolMixin._add_nonvisual_summary(result, b64)
             result["base64_preview"] = b64[:120] + "...(" + str(len(b64)) + " chars total)"
             result["base64_available"] = True
+            result["text_only_note"] = (
+                "Base64 image bytes are for trace/debug. A text-only main model "
+                "cannot inspect this image directly; use nonvisual_summary, "
+                "observe OCR/UIA/CV, or a VLM tool when available."
+            )
             del result["base64"]
+
+    @staticmethod
+    def _add_nonvisual_summary(result: dict, b64: str) -> None:
+        try:
+            import cv2
+            import numpy as np
+
+            raw = base64.b64decode(b64)
+            image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                return
+            summary = DesktopToolMixin._compact_image_summary(image)
+            canvas = vision_cv.likely_canvas_bbox(image)
+            if canvas:
+                summary["likely_canvas_bbox"] = canvas
+                x1, y1, x2, y2 = canvas
+                crop = image[y1:y2, x1:x2]
+                summary["likely_canvas_summary"] = DesktopToolMixin._compact_image_summary(crop)
+            result["nonvisual_summary"] = summary
+        except Exception as exc:
+            result["nonvisual_summary_error"] = str(exc)
+
+    @staticmethod
+    def _compact_image_summary(image) -> dict:
+        ink = vision_cv.image_ink_stats_from_array(image)
+        colors = vision_cv.color_presence(image).get("colors", {})
+        visible_colors = {
+            name: {
+                key: value
+                for key, value in stats.items()
+                if key in {"pixels", "ratio", "bbox", "largest_bbox", "largest_area"}
+            }
+            for name, stats in colors.items()
+            if stats.get("visible")
+        }
+        return {
+            "width": ink.get("width"),
+            "height": ink.get("height"),
+            "blankish": ink.get("blankish"),
+            "ink_ratio": ink.get("ink_ratio"),
+            "ink_bbox": ink.get("ink_bbox"),
+            "component_count": ink.get("component_count"),
+            "visible_colors": visible_colors,
+        }

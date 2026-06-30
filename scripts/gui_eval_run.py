@@ -73,6 +73,7 @@ def _summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def run_eval(base_url: str, task: str, out_dir: Path, timeout_s: float) -> Path:
+    started_at = time.time()
     started = _request_json("POST", f"{base_url}/api/chat", {"task": task})
     run_id = str(started["run_id"])
     deadline = time.time() + timeout_s
@@ -91,10 +92,17 @@ def run_eval(base_url: str, task: str, out_dir: Path, timeout_s: float) -> Path:
     if not isinstance(events, list):
         raise RuntimeError(f"Trace response for {run_id} was not a list")
     summary = _summarize_trace(events)
+    duration_s = round(time.time() - started_at, 2)
     report = {
         "run_id": run_id,
         "task": task,
         "base_url": base_url,
+        "status": summary.get("status", ""),
+        "result": summary.get("result", ""),
+        "duration_s": duration_s,
+        "tool_count": summary.get("tool_count", 0),
+        "done_checks": summary.get("done_checks", []),
+        "rejected_done_count": summary.get("rejected_done_count", 0),
         "status_endpoint": last_status,
         "trace_file": f"python/winpilot_home/traces/{run_id}.jsonl",
         "screenshot_dir": f"python/winpilot_home/traces/{run_id}/",

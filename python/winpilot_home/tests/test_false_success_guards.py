@@ -180,6 +180,35 @@ def test_drawing_done_requires_requested_colors(monkeypatch, tmp_path):
     assert runner._done_rejects == 1
 
 
+def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a house outline on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'draw_strokes({"strokes": [[[10, 10], [50, 50]]], "duration": 0.3})'
+    ]
+    runner._recent_results = [
+        ("draw_strokes", '{"ok": true, "visual_change_detected": true}'),
+    ]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("LLM judge should not run with deterministic drawing evidence")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
 def test_drawing_stops_mutation_after_plan_done_and_file_exists(tmp_path):
     from winpilot.agent.loop import AgentRunner
 

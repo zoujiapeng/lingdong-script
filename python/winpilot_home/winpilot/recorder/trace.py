@@ -25,7 +25,15 @@ from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture
 from . import replay_control
 
-_SCREENSHOT_TOOLS = {"click", "type_text", "hotkey", "launch", "drag", "scroll"}
+_SCREENSHOT_TOOLS = {
+    "click",
+    "type_text",
+    "hotkey",
+    "launch",
+    "drag",
+    "scroll",
+    "draw_strokes",
+}
 _SCREENSHOT_MAX_W = 960
 
 # Volatile tokens that make a text selector unstable across runs (unread
