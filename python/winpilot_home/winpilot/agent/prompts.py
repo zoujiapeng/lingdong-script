@@ -23,6 +23,9 @@ Use the strongest evidence available for your model. Native-vision models should
 use screenshots; text-only models must not claim they saw a screenshot unless a
 structured visual/VLM summary actually describes it.
 Element ids are valid only for the latest observe. Do not reuse old ids.
+If observe says elements were omitted, do not infer a target's position from
+the grid. Call observe(query="exact visible target text") to get the matching
+element and coordinates.
 
 # Core workflow
 1. Start with list_windows. If the app is not visible, call find_app → scan_windows

@@ -15,7 +15,9 @@ from ..config import CONFIG
 from ..perception import fusion, intent, vision_cv
 from ..utils.log import BUS, logger
 from .task_rules import (
+    _desktop_icon_target_names,
     _gui_search_payloads,
+    _is_desktop_icon_drag_task,
     _is_communication_task,
     _is_drawing_task,
     _is_gui_search_task,
@@ -25,6 +27,7 @@ from .task_rules import (
     _required_image_paths,
     _required_visible_payloads,
 )
+from ..utils.screenshot import screen_size
 
 
 _JUDGE_MAX_TOKENS = 2500
@@ -60,7 +63,8 @@ class DoneVerifierMixin:
                 fusion_mod.observe(hwnd, include_icons=False, perception_mode=pmode)
                 if hwnd else self.session.snapshot
             )
-            return snap.to_text(50) if snap else ""
+            limit = 220 if _is_desktop_icon_drag_task(self.task) else 50
+            return snap.to_text(limit) if snap else ""
         except Exception as exc:  # perception must never break the gate
             logger.debug("done 核验 observe 失败: %s", exc)
             return ""
@@ -186,6 +190,37 @@ class DoneVerifierMixin:
         normalized = evidence.lower()
         saw_visual_change = 'visual_change_detected": true' in normalized
         return saw_stroke and saw_visual_change
+
+    def _desktop_drag_has_deterministic_done_evidence(self, screen: str, evidence: str) -> bool:
+        if not _is_desktop_icon_drag_task(self.task):
+            return False
+        targets = _desktop_icon_target_names(self.task)
+        if not targets:
+            return False
+        normalized = evidence.lower()
+        saw_drag = any(step.startswith("drag(") for step in self._steps_log)
+        saw_visual_change = 'visual_change_detected": true' in normalized
+        if not (saw_drag and saw_visual_change):
+            return False
+        wants_top_right = any(term in (self.task or "").casefold() for term in ("top-right", "top right")) \
+            or "\u53f3\u4e0a" in (self.task or "")
+        sw, sh = screen_size()
+        for target in targets:
+            line_match = re.search(
+                rf'listitem\s+"{re.escape(target)}".*?center=\((\d+),(\d+)\).*?bbox=\((\d+),(\d+),(\d+),(\d+)\)',
+                screen,
+                flags=re.IGNORECASE,
+            )
+            if not line_match:
+                continue
+            cx, cy, left, top, width, height = [int(v) for v in line_match.groups()]
+            if wants_top_right and not (
+                cx >= int(sw * 0.72) and cy <= int(sh * 0.20)
+                and left + width >= int(sw * 0.78)
+            ):
+                continue
+            return True
+        return False
 
     def _verify_gui_search_done(self, screen: str) -> bool:
         if not _is_gui_search_task(self.task):
@@ -354,6 +389,14 @@ class DoneVerifierMixin:
             reason = (
                 "Drawing task accepted from deterministic evidence: recorded "
                 "strokes and visual_change_detected=true."
+            )
+            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+            self._done_verified = True
+            return True
+        if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
+            reason = (
+                "Desktop icon drag accepted from deterministic evidence: target "
+                "listitem at requested area plus drag visual_change_detected=true."
             )
             BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
             self._done_verified = True

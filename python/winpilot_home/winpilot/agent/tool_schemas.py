@@ -87,10 +87,12 @@ def tool_schemas(planning: bool = False) -> list[dict]:
         _tool("list_windows", "List visible top-level windows with title, hwnd, class, and geometry."),
         _tool(
             "observe",
-            "Observe a window and return structured UI elements. Omit hwnd for current target/foreground window.",
+            "Observe a window and return structured UI elements. Omit hwnd for current target/foreground window. Use query for long lists/desktops when the target element may be omitted from the default output.",
             {
                 "hwnd": _prop("integer", "Window handle."),
                 "include_icons": _prop("boolean", "Whether to include CV icon candidates."),
+                "query": _prop("string", "Optional case-insensitive element text filter."),
+                "max_elements": _prop("integer", "Maximum elements to print after filtering. Default 160."),
             },
         ),
         _tool(

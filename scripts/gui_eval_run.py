@@ -78,6 +78,7 @@ def run_eval(base_url: str, task: str, out_dir: Path, timeout_s: float) -> Path:
     run_id = str(started["run_id"])
     deadline = time.time() + timeout_s
     last_status: dict[str, Any] = {}
+    timed_out = False
     while time.time() < deadline:
         last_status = _request_json("GET", f"{base_url}/api/status")
         if not last_status.get("running"):
@@ -85,18 +86,23 @@ def run_eval(base_url: str, task: str, out_dir: Path, timeout_s: float) -> Path:
         time.sleep(1.0)
     else:
         _request_json("POST", f"{base_url}/api/stop")
-        raise TimeoutError(f"GUI eval timed out after {timeout_s:.0f}s, stopped run {run_id}")
+        timed_out = True
+        time.sleep(0.5)
+        last_status = _request_json("GET", f"{base_url}/api/status")
 
     time.sleep(0.5)
     events = _request_json("GET", f"{base_url}/api/trace/{run_id}")
     if not isinstance(events, list):
         raise RuntimeError(f"Trace response for {run_id} was not a list")
     summary = _summarize_trace(events)
+    if timed_out and not summary.get("status"):
+        summary["status"] = "timeout"
     duration_s = round(time.time() - started_at, 2)
     report = {
         "run_id": run_id,
         "task": task,
         "base_url": base_url,
+        "timed_out": timed_out,
         "status": summary.get("status", ""),
         "result": summary.get("result", ""),
         "duration_s": duration_s,
