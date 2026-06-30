@@ -168,6 +168,25 @@ class DoneVerifierMixin:
             })
         return True
 
+    def _drawing_has_deterministic_done_evidence(self, evidence: str) -> bool:
+        """Accept simple canvas drawing tasks without an expensive LLM judge.
+
+        The LLM judge can spend its entire budget in provider-side reasoning and
+        return no parseable JSON. For drawing tasks that only require visible
+        strokes on the current canvas, the action log and visual summaries are
+        stronger evidence than another model's prose.
+        """
+        if not _is_drawing_task(self.task):
+            return False
+        if _required_image_paths(self.task) or _required_drawing_colors(self.task):
+            return False
+        saw_stroke = any(
+            step.startswith(("drag(", "draw_strokes(")) for step in self._steps_log
+        )
+        normalized = evidence.lower()
+        saw_visual_change = 'visual_change_detected": true' in normalized
+        return saw_stroke and saw_visual_change
+
     def _verify_gui_search_done(self, screen: str) -> bool:
         if not _is_gui_search_task(self.task):
             return True
@@ -331,6 +350,14 @@ class DoneVerifierMixin:
             return False
         if not self._verify_drawing_done(evidence):
             return False
+        if self._drawing_has_deterministic_done_evidence(evidence):
+            reason = (
+                "Drawing task accepted from deterministic evidence: recorded "
+                "strokes and visual_change_detected=true."
+            )
+            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+            self._done_verified = True
+            return True
         if not self._verify_gui_search_done(screen):
             return False
         if not self._verify_communication_done(screen):
