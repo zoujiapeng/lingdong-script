@@ -32,6 +32,11 @@ _DRAWING_TASK_RE = re.compile(
     r"\u753b|\u753b\u56fe|\u7ed8\u56fe|\u6d82\u9e26|\u753b\u677f|\u767d\u677f",
     re.IGNORECASE,
 )
+_DESKTOP_ICON_DRAG_RE = re.compile(
+    r"desktop|drag|move|icon|folder|"
+    r"\u684c\u9762|\u62d6\u52a8|\u79fb\u52a8|\u56fe\u6807|\u6587\u4ef6\u5939|\u6574\u7406|\u6392\u5217",
+    re.IGNORECASE,
+)
 _DRAWING_COLOR_TERMS = {
     "red": ("red", "\u7ea2", "\u7ea2\u8272"),
     "blue": ("blue", "\u84dd", "\u84dd\u8272"),
@@ -74,6 +79,42 @@ def _is_gui_only_task(task: str) -> bool:
 
 def _is_drawing_task(task: str) -> bool:
     return bool(_DRAWING_TASK_RE.search(task or ""))
+
+
+def _is_desktop_icon_drag_task(task: str) -> bool:
+    text = task or ""
+    low = text.casefold()
+    has_desktop = "desktop" in low or "\u684c\u9762" in text
+    has_drag = any(
+        term in low for term in ("drag", "move", "icon", "folder")
+    ) or any(term in text for term in ("\u62d6\u52a8", "\u79fb\u52a8", "\u56fe\u6807", "\u6587\u4ef6\u5939", "\u6574\u7406", "\u6392\u5217"))
+    return has_desktop and has_drag and bool(_DESKTOP_ICON_DRAG_RE.search(text))
+
+
+def _desktop_icon_target_names(task: str) -> list[str]:
+    text = task or ""
+    names = _quoted_payloads(text)
+    patterns = (
+        r"\u684c\u9762\u4e0a\u7684\s*([^\s\uff0c,\u3002\uff1b;]{2,80})",
+        r"desktop(?:\s+icon|\s+folder)?\s+([A-Za-z0-9_. -]{2,80})",
+    )
+    for pattern in patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            value = str(match).strip().strip('"')
+            value = re.sub(r"(\u6587\u4ef6\u5939|\u56fe\u6807|folder|icon)$", "", value, flags=re.IGNORECASE).strip()
+            if value:
+                names.append(value)
+    for token in re.findall(r"\b[A-Za-z0-9][A-Za-z0-9_.-]{2,}\b", text):
+        if "_" in token or "." in token:
+            names.append(token)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        key = name.casefold()
+        if key not in seen:
+            out.append(name)
+            seen.add(key)
+    return out
 
 
 def _required_image_paths(task: str) -> list[str]:

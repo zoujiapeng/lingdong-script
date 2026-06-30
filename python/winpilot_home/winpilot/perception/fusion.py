@@ -79,7 +79,7 @@ class Snapshot:
                 return element
         return None
 
-    def to_text(self, max_elements: int = 160) -> str:
+    def to_text(self, max_elements: int = 160, query: str = "") -> str:
         lines = [
             f"Window: \"{self.title}\" hwnd={self.hwnd} "
             f"rect=({self.region.left},{self.region.top},"
@@ -101,10 +101,28 @@ class Snapshot:
                 "focus first; if no visual model is available, do not pretend "
                 "to know pixel contents from coordinates alone."
             )
-        shown = self.elements[:max_elements]
+        elements = self.elements
+        query = (query or "").strip().casefold()
+        if query:
+            matches = [
+                element for element in self.elements
+                if query in (element.text or "").casefold()
+            ]
+            if matches:
+                elements = matches
+                lines.append(
+                    f'Filtered elements matching query "{query}" '
+                    f"({len(matches)}/{len(self.elements)})."
+                )
+            else:
+                lines.append(
+                    f'No elements matched query "{query}" among '
+                    f"{len(self.elements)} elements; showing first {max_elements}."
+                )
+        shown = elements[:max_elements]
         lines.extend(element.to_line() for element in shown)
-        if len(self.elements) > max_elements:
-            lines.append(f"... {len(self.elements) - max_elements} more elements omitted")
+        if len(elements) > max_elements:
+            lines.append(f"... {len(elements) - max_elements} more elements omitted")
         return "\n".join(lines)
 
 

@@ -209,6 +209,108 @@ def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
     assert runner._done_verified is True
 
 
+def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = ['drag({"x1": 100, "y1": 500, "x2": 1850, "y2": 80})']
+    runner._recent_results = [
+        ("drag", '{"ok": true, "visual_change_detected": true}'),
+    ]
+
+    screen = (
+        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
+        '[160] listitem "WinPilotDragTest_123" center=(1852,58) '
+        'bbox=(1805,5,94,107) checked,selected,focused src=uia'
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("LLM judge should not run with deterministic drag evidence")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
+def test_desktop_icon_drag_done_rejects_wrong_area(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = ['drag({"x1": 100, "y1": 500, "x2": 960, "y2": 540})']
+    runner._recent_results = [
+        ("drag", '{"ok": true, "visual_change_detected": true}'),
+    ]
+
+    screen = (
+        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
+        '[160] listitem "WinPilotDragTest_123" center=(960,540) '
+        'bbox=(913,507,94,67) checked src=uia'
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content='{"done": false, "reason": "wrong area"}'))]
+                    )
+
+    assert runner._verify_done(_Client()) is False
+
+
+def test_snapshot_to_text_query_surfaces_omitted_target():
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    elements = [
+        UIElement(elem_id=i, role="listitem", text=f"item_{i}", cx=i, cy=i)
+        for i in range(200)
+    ]
+    elements.append(
+        UIElement(
+            elem_id=201,
+            role="listitem",
+            text="WinPilotDragTest_999",
+            cx=1852,
+            cy=58,
+            left=1805,
+            top=5,
+            width=94,
+            height=67,
+        )
+    )
+    snap = Snapshot(hwnd=1, title="Program Manager", region=Region(0, 0, 1920, 1080), elements=elements)
+
+    plain = snap.to_text(max_elements=160)
+    filtered = snap.to_text(max_elements=160, query="WinPilotDragTest_999")
+
+    assert "WinPilotDragTest_999" not in plain
+    assert 'Filtered elements matching query "winpilotdragtest_999"' in filtered
+    assert "WinPilotDragTest_999" in filtered
+    assert "center=(1852,58)" in filtered
+
+
 def test_drawing_stops_mutation_after_plan_done_and_file_exists(tmp_path):
     from winpilot.agent.loop import AgentRunner
 

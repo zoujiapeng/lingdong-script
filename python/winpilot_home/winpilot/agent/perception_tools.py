@@ -136,7 +136,9 @@ class PerceptionToolMixin:
         self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
                                            perception_mode=self._perception_mode())
         self._remember_target(hwnd, self.snapshot.title)
-        text = self.snapshot.to_text()
+        query = str(args.get("query", "") or "")
+        max_elements = int(args.get("max_elements", 160) or 160)
+        text = self.snapshot.to_text(max_elements=max_elements, query=query)
         visual_summary = self._visual_state_summary(hwnd)
         if visual_summary:
             text = text + "\n" + visual_summary
