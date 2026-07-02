@@ -43,6 +43,16 @@ def _tools_attr(name: str, default):
     return getattr(tools_mod, name, default) if tools_mod is not None else default
 
 
+def _expect_timeout(args: dict, default: float = 6.0) -> float:
+    expect = args.get("expect")
+    if isinstance(expect, dict):
+        try:
+            return float(expect.get("timeout_s", default))
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
 class InteractionToolMixin:
     def _action_hwnd(self) -> int | None:
         try:
@@ -111,7 +121,7 @@ class InteractionToolMixin:
 
         result = verify_mod.run_with_verify(
             "click", action, expect=args.get("expect"), hwnd=self.hwnd,
-            stop_event=self.stop_event)
+            timeout_s=_expect_timeout(args), stop_event=self.stop_event)
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示点击已执行，必须 observe 确认界面变化")
@@ -156,7 +166,8 @@ class InteractionToolMixin:
 
         result = verify_mod.run_with_verify(
             "type_text", action, expect=args.get("expect"),
-            hwnd=self.hwnd, retryable=False, stop_event=self.stop_event)
+            hwnd=self.hwnd, retryable=False, timeout_s=_expect_timeout(args),
+            stop_event=self.stop_event)
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示输入动作已执行，必须 observe/read_text 确认文本位置")
@@ -178,7 +189,7 @@ class InteractionToolMixin:
         result = verify_mod.run_with_verify(
             "hotkey", action,
             expect=args.get("expect"), hwnd=self.hwnd, retryable=False,
-            stop_event=self.stop_event)
+            timeout_s=_expect_timeout(args), stop_event=self.stop_event)
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示快捷键已发送，必须 observe/read_text 确认结果")

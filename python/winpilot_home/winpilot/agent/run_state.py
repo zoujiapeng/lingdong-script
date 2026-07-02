@@ -71,7 +71,7 @@ def _batch_last_action(args: dict) -> str:
 
 def _batch_has_semantic_observe(args: dict) -> bool:
     last = _batch_last_action(args)
-    return last in {"observe", "read_text", "vlm_describe"}
+    return last in {"observe", "read_text", "vlm_describe", "zoom", "screenshot"}
 
 
 def _batch_has_expect(args: dict) -> bool:
