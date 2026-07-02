@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import re
 
 import win32con
 import win32gui
@@ -96,6 +97,18 @@ def list_windows() -> list[dict]:
     return windows
 
 
+def _title_key(text: str) -> str:
+    return re.sub(r"[\s_\-]+", "", (text or "").casefold())
+
+
+def title_contains(title: str, needle: str) -> bool:
+    raw_title = (title or "").casefold()
+    raw_needle = (needle or "").casefold()
+    if not raw_needle:
+        return False
+    return raw_needle in raw_title or _title_key(raw_needle) in _title_key(raw_title)
+
+
 def find_window(title_substr: str) -> dict | None:
     """First visible window whose title contains the substring (case-insensitive).
 
@@ -108,7 +121,7 @@ def find_window(title_substr: str) -> dict | None:
     windows = list_windows()
     for needle in needles:  # prefer the literal query first (expand keeps it)
         for win in windows:
-            if needle in win["title"].lower():
+            if title_contains(str(win.get("title") or ""), needle):
                 return win
     return None
 

@@ -152,7 +152,7 @@ def _check_window(needle: str, want_present: bool) -> tuple[bool, str]:
 def _check_window_title(needle: str, hwnd: int | None) -> tuple[bool, str]:
     target = _target_hwnd(hwnd)
     title = win32._window_text(target) if target else ""
-    return needle.casefold() in title.casefold(), title
+    return win32.title_contains(title, needle), title
 
 
 def _check_color(spec: dict, _hwnd: int | None) -> tuple[bool, str]:

@@ -30,6 +30,8 @@ element and coordinates.
 # Core workflow
 1. Start with list_windows. If the app is not visible, call find_app → scan_windows
    → tray_click → launch (only when confirmed not running).
+   To open a webpage, call launch with the URL directly, e.g.
+   launch(command="https://example.com"); do not wrap it as "start msedge ...".
 2. focus_window the target, then observe.
 3. Native-vision models: look at the screenshot to understand the screen.
    Text-only models: read OCR/UIA/CV and nonvisual summaries; use coordinate
@@ -46,6 +48,9 @@ element and coordinates.
    For obvious grounded mini-sequences, prefer run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
    Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
+   If a recent tool result or screen_watch says only a local ROI changed, use
+   observe(changed_only=true) to inspect that changed area before doing a full
+   window observe.
 5. After every action that should change the UI, observe again and verify via
    screenshot, VLM, nonvisual summary, OCR/UIA/CV, or deterministic output that
    the expected change occurred.

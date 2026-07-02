@@ -445,6 +445,45 @@ def test_screen_watcher_updates_bulletin_with_changed_roi():
     assert changed["top"] + changed["height"] >= 213
 
 
+def test_screen_watcher_keeps_recent_changed_roi_after_stable_sample():
+    import numpy as np
+
+    from winpilot.fast.watcher import ScreenWatcher
+    from winpilot.utils.screenshot import Region
+
+    frames = [
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        np.zeros((20, 20, 3), dtype=np.uint8),
+    ]
+    frames[1][5:13, 6:14] = 255
+    frames[2][5:13, 6:14] = 255
+    calls = []
+
+    def fake_capture(region):
+        calls.append(region)
+        return frames[min(len(calls) - 1, 2)]
+
+    watcher = ScreenWatcher(
+        region_provider=lambda: Region(100, 200, 20, 20),
+        capture_fn=fake_capture,
+        fps=10,
+    )
+
+    watcher.sample_once()
+    changed = watcher.sample_once()
+    stable = watcher.sample_once()
+    status = watcher.status()
+
+    assert changed.changed
+    assert not stable.changed
+    assert status["last_changed"] is False
+    assert status["recent_changed_regions"]
+    recent = status["recent_changed_regions"][0]
+    assert recent["left"] <= 106
+    assert recent["top"] <= 205
+
+
 def test_fast_controller_wait_change_uses_watcher():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.types import ScreenDelta

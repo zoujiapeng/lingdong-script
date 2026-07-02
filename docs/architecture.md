@@ -107,3 +107,23 @@ stateDiagram-v2
 - `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
 - `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
 - `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。
+
+## 2026-07-03 低延迟 GUI 链路
+
+```mermaid
+flowchart LR
+    llm["Main LLM<br/>任务理解/异常推理"] --> tools["ToolSession.dispatch"]
+    tools --> launch["launch/focus_window<br/>目标窗口保护"]
+    tools --> watcher["screen_watch<br/>cheap frame diff"]
+    watcher --> roi["recent changed ROI<br/>30s cache"]
+    roi --> observe["observe(changed_only=true)<br/>Win32/OCR/CV on ROI"]
+    tools --> batch["run_action_batch<br/>fast controller skeleton"]
+    observe --> world["WorldModel bulletin"]
+    observe --> done["done_verifier<br/>fresh visible evidence"]
+```
+
+- `screen_watch` 是低成本变化检测层，不做语义理解；它保留 `recent_changed_regions`，让 LLM 慢一拍调用 `observe(changed_only=true)` 时仍能只看局部。
+- `observe(changed_only=true)` 只在最近 ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。
+- URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
+- `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
+- 最新验证 run：`20260703-015021-f7167c`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用最近 ROI，done gate 以 fresh screen evidence 通过。

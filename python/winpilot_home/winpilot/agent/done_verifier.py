@@ -26,6 +26,7 @@ from .task_rules import (
     _required_drawing_colors,
     _required_image_paths,
     _required_visible_payloads,
+    _visible_state_targets,
 )
 from ..utils.screenshot import screen_size
 
@@ -133,6 +134,29 @@ class DoneVerifierMixin:
             f"[完成校验未通过] {reason}。请先在目标窗口真正输入这些文本，"
             "然后重新 observe/read_text 验证文本可见，再调用 done。",
         )
+
+    @staticmethod
+    def _normalize_visible_text(text: str) -> str:
+        return re.sub(r"[\s_\-:：]+", "", text or "").casefold()
+
+    def _visible_state_has_deterministic_done_evidence(self, screen: str) -> bool:
+        targets = _visible_state_targets(self.task)
+        if not targets:
+            return False
+        haystack = self._normalize_visible_text(screen)
+        missing = [
+            target for target in targets
+            if self._normalize_visible_text(target) not in haystack
+        ]
+        if missing:
+            return False
+        reason = (
+            "Visible state accepted from fresh screen evidence: "
+            + ", ".join(targets[:3])
+        )
+        BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+        self._done_verified = True
+        return True
 
     def _verify_drawing_done(self, evidence: str) -> bool:
         if not _is_drawing_task(self.task):
@@ -420,6 +444,8 @@ class DoneVerifierMixin:
         screen = self._fresh_done_screen()
         if not self._verify_visible_payloads(screen, evidence):
             return False
+        if self._visible_state_has_deterministic_done_evidence(screen):
+            return True
         if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
             reason = (
                 "Desktop icon drag accepted from deterministic evidence: target "

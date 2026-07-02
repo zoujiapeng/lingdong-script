@@ -207,7 +207,7 @@ class SystemToolMixin:
         if result.get("ok"):
             launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
             expect = args.get("expect") or {}
-            want_title = str(expect.get("window_appears") or "").strip()
+            want_title = str(expect.get("window_appears") or expect.get("window_title") or "").strip()
             title_hwnd = None
             if want_title:
                 found = win32_mod.find_window(want_title)

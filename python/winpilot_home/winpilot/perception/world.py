@@ -115,6 +115,8 @@ class WorldModel:
             "last_changed": bool(status.get("last_changed")),
             "last_ratio": float(status.get("last_ratio") or 0.0),
             "changed_regions": list(status.get("changed_regions") or [])[:3],
+            "recent_changed_regions": list(status.get("recent_changed_regions") or [])[:3],
+            "last_change_age_ms": int(status.get("last_change_age_ms") or 0),
             "samples": int(status.get("samples") or 0),
             "capture_latency_ms": int(status.get("capture_latency_ms") or 0),
             "diff_latency_ms": int(status.get("diff_latency_ms") or 0),
@@ -185,7 +187,7 @@ class WorldModel:
             return ""
         self._screen_notice_sent_seq = self._screen_notice_seq
         status = self._screen_bulletin
-        regions = status.get("changed_regions") or []
+        regions = status.get("changed_regions") or status.get("recent_changed_regions") or []
         roi = ""
         if regions:
             first = regions[0]

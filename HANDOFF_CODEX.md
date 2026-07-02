@@ -65,3 +65,18 @@ python -m pytest python/winpilot_home/tests -q
 npx vitest run
 npm run build
 ```
+
+## 2026-07-03 本轮新增
+
+- 分支仍是 `codex/low-latency-gui-agent`。
+- 新增网页靶场 `python/winpilot_home/eval_targets/gui_agent_target.html`，用于测试 GUI 局部变化、输入、弹窗、拖拽、画布和 trace 截图一致性。启动方式：在该目录运行 `python -m http.server 8877 --bind 127.0.0.1`。
+- `observe(changed_only=true)` 已接入 `screen_watch` 最近 ROI：当前帧有变化用 `changed_regions`，稳定后 30 秒内用 `recent_changed_regions`，并裁剪到目标窗口后再跑 Win32/OCR/CV。无可用 ROI 时会明确返回 fallback 文案。
+- `launch`/窗口匹配修复：URL 直接走 Windows protocol handler；`window_title` 和 `window_appears` 都会用于 launch 后找窗口；标题匹配会忽略空格、下划线和连字符差异。实测把 `gui_agent_target` 正确聚焦到 Chrome 靶场窗口，避免 Codex 遮挡污染感知。
+- `done_verifier.py` 新增显式可见状态目标的确定性 done：例如“确认状态卡出现 LOCAL_COUNTER”，会从 fresh screen OCR 验证，且 `LOCAL_COUNTER` 可匹配 OCR 的 `LOCAL COUNTER`。这减少了完成后等待 LLM done judge 的延迟，但不会用 agent 自己总结当证据。
+- 成功 E2E：`20260703-015021-f7167c`，UIA-off，任务通过 `/api/chat` 跑。真实截图 `python/winpilot_home/traces/20260703-015021-f7167c/after_002.jpg` 显示 `LOCAL_COUNTER_1`；trace 中 `observe(changed_only=true)` 返回 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)`；`done_check` 为 true。
+
+## 15 项改造状态
+
+- 已有基础：子目标/batch 雏形、持续 watcher、局部 ROI observe、动作变化检测、目标窗口保护、canvas fast path、部分 world model、部分 skill replay、可见证据 done gate。
+- 半成品：多层视觉调度、视觉锚点点击、状态机、探索慢复用快、预测式感知、延迟指标。它们有文件和局部逻辑，但没有形成稳定闭环。
+- 未完成：真正轻量 UI 模型/YOLO 常驻内环、视觉伺服、LLM 只处理异常、跨软件泛化 skill、完整性能 dashboard。后续不要为了单个软件写专属规则。
