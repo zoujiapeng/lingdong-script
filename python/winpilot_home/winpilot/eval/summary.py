@@ -16,6 +16,24 @@ from typing import Any
 from ..config import ROOT_DIR, TRACES_DIR
 
 EVALS_DIR = ROOT_DIR / "evals"
+_ACTION_TOOL_NAMES = {
+    "launch",
+    "click",
+    "click_element",
+    "type_text",
+    "hotkey",
+    "scroll",
+    "drag",
+    "draw_strokes",
+    "focus_window",
+    "wait",
+    "tray_click",
+    "run_action_batch",
+    "clipboard_paste",
+    "mouse_down",
+    "mouse_up",
+    "move_mouse",
+}
 
 
 def _read_jsonl(path: Path, limit: int = 10_000) -> list[dict[str, Any]]:
@@ -41,16 +59,142 @@ def _percentile(values: list[int], pct: float) -> int:
     return int(ordered[idx])
 
 
+def _latency_summary(values: list[int]) -> dict[str, Any]:
+    values = [int(v) for v in values if int(v) >= 0]
+    return {
+        "count": len(values),
+        "avg_ms": round(statistics.mean(values), 1) if values else 0,
+        "max_ms": max(values) if values else 0,
+        "p95_ms": _percentile(values, 0.95),
+    }
+
+
+def _screen_watch_status(event: dict[str, Any]) -> dict[str, Any]:
+    meta = event.get("result_meta")
+    if isinstance(meta, dict):
+        status = meta.get("screen_watch")
+        if isinstance(status, dict):
+            return status
+    status = event.get("screen_watch")
+    return status if isinstance(status, dict) else {}
+
+
+def _low_latency_metrics(
+    events: list[dict[str, Any]],
+    tool_events: list[dict[str, Any]],
+    batch_action_events: list[dict[str, Any]],
+    perception_stats: list[dict[str, Any]],
+    duration_s: float,
+) -> dict[str, Any]:
+    decision_ms: list[int] = []
+    boundary_ts: float | None = None
+    step_count = 0
+    for event in events:
+        etype = event.get("type")
+        ts = event.get("ts")
+        if not isinstance(ts, (int, float)):
+            continue
+        if etype in {"agent_start", "agent_tool"}:
+            boundary_ts = float(ts)
+        elif etype == "agent_step":
+            step_count += 1
+            if boundary_ts is not None and float(ts) >= boundary_ts:
+                decision_ms.append(int(round((float(ts) - boundary_ts) * 1000)))
+            boundary_ts = float(ts)
+
+    action_event_stream = [
+        *[event for event in tool_events if event.get("tool") != "run_action_batch"],
+        *batch_action_events,
+    ]
+    action_ms = [
+        int(event.get("elapsed_ms") or 0)
+        for event in action_event_stream
+        if event.get("tool") in _ACTION_TOOL_NAMES and event.get("elapsed_ms") is not None
+    ]
+    post_verify_ms: list[int] = []
+    screen_capture_ms: list[int] = []
+    for event in action_event_stream:
+        meta = event.get("result_meta")
+        if isinstance(meta, dict):
+            delta = meta.get("screen_delta")
+            if isinstance(delta, dict) and delta.get("elapsed_ms") is not None:
+                post_verify_ms.append(int(delta.get("elapsed_ms") or 0))
+        status = _screen_watch_status(event)
+        if status.get("capture_latency_ms") is not None:
+            screen_capture_ms.append(int(status.get("capture_latency_ms") or 0))
+
+    perception_total_ms: list[int] = []
+    vlm_perception_calls = 0
+    for event in perception_stats:
+        dims = event.get("dims") or {}
+        if not isinstance(dims, dict):
+            continue
+        total = 0
+        saw_dim = False
+        for name, stat in dims.items():
+            if not isinstance(stat, dict):
+                continue
+            if stat.get("ms") is not None:
+                total += int(stat.get("ms") or 0)
+                saw_dim = True
+            if str(name) == "vlm":
+                vlm_perception_calls += 1
+        if saw_dim:
+            perception_total_ms.append(total)
+
+    replan_count = sum(1 for e in events if e.get("type") == "agent_recovery") \
+        + sum(1 for e in tool_events if e.get("tool") == "revise_plan")
+    vlm_tool_calls = sum(1 for e in tool_events if e.get("tool") == "vlm_describe")
+    skill_reuse_count = sum(1 for e in tool_events if e.get("tool") == "reuse_skill")
+    skill_suggestions = sum(
+        1 for e in events
+        if e.get("type") == "memory" and e.get("action") == "reuse_suggested"
+    )
+    denominator = max(skill_suggestions, skill_reuse_count, 1)
+    auto_watch_starts = sum(
+        1 for e in events
+        if e.get("type") == "screen_watch" and e.get("action") == "auto_start"
+    )
+    watch_running_events = sum(
+        1 for e in tool_events
+        if _screen_watch_status(e).get("running") is True
+    )
+
+    steps = max(step_count, 1)
+    minutes = max(duration_s / 60.0, 1 / 60.0)
+    return {
+        "screen_capture_latency": _latency_summary(screen_capture_ms),
+        "perception_latency": _latency_summary(perception_total_ms),
+        "action_decision_latency": _latency_summary(decision_ms),
+        "action_execution_latency": _latency_summary(action_ms),
+        "post_action_verify_latency": _latency_summary(post_verify_ms),
+        "decision_count": step_count,
+        "replan_count": replan_count,
+        "replan_frequency_per_step": round(replan_count / steps, 3),
+        "replan_frequency_per_min": round(replan_count / minutes, 3),
+        "vlm_call_count": vlm_tool_calls + vlm_perception_calls,
+        "vlm_call_frequency_per_step": round((vlm_tool_calls + vlm_perception_calls) / steps, 3),
+        "skill_reuse_count": skill_reuse_count,
+        "skill_reuse_suggestions": skill_suggestions,
+        "skill_reuse_rate": round(skill_reuse_count / denominator, 3),
+        "screen_watch_auto_starts": auto_watch_starts,
+        "screen_watch_running_tool_events": watch_running_events,
+    }
+
+
 def _summarize_fast_gui(
     tool_events: list[dict[str, Any]],
+    batch_action_events: list[dict[str, Any]],
     run_state_events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     batch_calls = 0
     batch_actions = 0
+    batch_subgoals = 0
     round_trips_saved = 0
     screen_waits = 0
     needs_observe_batches = 0
     verified_batches = 0
+    controller_phases: Counter[str] = Counter()
     phases = Counter(str(e.get("phase") or "") for e in run_state_events if e.get("phase"))
     last_state = run_state_events[-1] if run_state_events else {}
     for event in tool_events:
@@ -60,6 +204,11 @@ def _summarize_fast_gui(
         meta = event.get("result_meta") or {}
         if not isinstance(meta, dict):
             continue
+        if str(meta.get("subgoal") or "").strip():
+            batch_subgoals += 1
+        controller_state = meta.get("controller_state")
+        if isinstance(controller_state, dict) and controller_state.get("phase"):
+            controller_phases[str(controller_state.get("phase"))] += 1
         metrics = meta.get("metrics") or {}
         if isinstance(metrics, dict):
             batch_actions += int(metrics.get("action_count") or 0)
@@ -69,14 +218,35 @@ def _summarize_fast_gui(
             needs_observe_batches += 1
         if meta.get("verified") is True:
             verified_batches += 1
+    anchor_clicks = 0
+    anchor_cache_hits = 0
+    anchor_failures = 0
+    for event in batch_action_events:
+        if event.get("tool") != "click_element":
+            continue
+        anchor_clicks += 1
+        meta = event.get("result_meta") or {}
+        if isinstance(meta, dict):
+            locator = meta.get("anchor_locator") or {}
+            if isinstance(locator, dict) and locator.get("cache_hit") is True:
+                anchor_cache_hits += 1
+            if event.get("ok") is False or (
+                isinstance(locator, dict) and locator.get("found") is False
+            ):
+                anchor_failures += 1
     return {
         "batch_calls": batch_calls,
         "batch_actions": batch_actions,
+        "batch_subgoals": batch_subgoals,
         "round_trips_saved": round_trips_saved,
         "screen_waits": screen_waits,
         "screen_watch_calls": sum(1 for e in tool_events if e.get("tool") == "screen_watch"),
         "needs_observe_batches": needs_observe_batches,
         "verified_batches": verified_batches,
+        "controller_phases": dict(controller_phases),
+        "anchor_clicks": anchor_clicks,
+        "anchor_cache_hits": anchor_cache_hits,
+        "anchor_failures": anchor_failures,
         "run_state_events": len(run_state_events),
         "run_state_phases": dict(phases),
         "last_run_state": {
@@ -97,6 +267,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     ended_ts: float | None = None
     usage_total: dict[str, Any] = {}
     tool_events: list[dict[str, Any]] = []
+    batch_action_events: list[dict[str, Any]] = []
     done_checks: list[dict[str, Any]] = []
     screenshots: list[str] = []
     perception_stats: list[dict[str, Any]] = []
@@ -116,6 +287,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             if event.get("screenshot"):
                 screenshots.append(str(event.get("screenshot")))
         elif etype == "agent_batch_action":
+            batch_action_events.append(event)
             if event.get("screenshot"):
                 screenshots.append(str(event.get("screenshot")))
         elif etype == "done_check":
@@ -143,7 +315,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             by_tool[str(event.get("tool") or "")].append(int(event.get("elapsed_ms") or 0))
 
     tool_counts = Counter(str(e.get("tool") or "") for e in tool_events)
-    fast_gui = _summarize_fast_gui(tool_events, run_state_events)
+    fast_gui = _summarize_fast_gui(tool_events, batch_action_events, run_state_events)
     tool_latency = {
         tool: {
             "count": len(values),
@@ -191,12 +363,13 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         for name, values in sorted(dim_latency.items())
     }
 
+    duration_s = round((ended_ts - started_ts), 2) if started_ts and ended_ts else 0
     return {
         "run_id": run_id,
         "task": task,
         "status": status,
         "result": result[:800],
-        "duration_s": round((ended_ts - started_ts), 2) if started_ts and ended_ts else 0,
+        "duration_s": duration_s,
         "tool_count": len(tool_events),
         "tool_counts": dict(tool_counts),
         "tool_latency": tool_latency,
@@ -208,6 +381,13 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "slow_tools": slow_tools,
         "perception": perception,
         "fast_gui": fast_gui,
+        "low_latency": _low_latency_metrics(
+            events,
+            tool_events,
+            batch_action_events,
+            perception_stats,
+            duration_s,
+        ),
         "done_checks": done_checks,
         "rejected_done_count": sum(1 for item in done_checks if item.get("passed") is False),
         "screenshots": screenshots,
@@ -294,11 +474,15 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "fast_gui": {
             "batch_calls": sum(int(f.get("batch_calls") or 0) for f in fast_items),
             "batch_actions": sum(int(f.get("batch_actions") or 0) for f in fast_items),
+            "batch_subgoals": sum(int(f.get("batch_subgoals") or 0) for f in fast_items),
             "round_trips_saved": sum(int(f.get("round_trips_saved") or 0) for f in fast_items),
             "screen_waits": sum(int(f.get("screen_waits") or 0) for f in fast_items),
             "screen_watch_calls": sum(int(f.get("screen_watch_calls") or 0) for f in fast_items),
             "needs_observe_batches": sum(int(f.get("needs_observe_batches") or 0) for f in fast_items),
             "verified_batches": sum(int(f.get("verified_batches") or 0) for f in fast_items),
+            "anchor_clicks": sum(int(f.get("anchor_clicks") or 0) for f in fast_items),
+            "anchor_cache_hits": sum(int(f.get("anchor_cache_hits") or 0) for f in fast_items),
+            "anchor_failures": sum(int(f.get("anchor_failures") or 0) for f in fast_items),
             "run_state_events": sum(int(f.get("run_state_events") or 0) for f in fast_items),
         },
         "slow_tools": slow,

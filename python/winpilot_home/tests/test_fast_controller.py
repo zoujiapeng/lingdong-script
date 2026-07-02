@@ -55,6 +55,43 @@ def test_element_cache_locates_visual_anchor_in_region():
     assert cache.stats()["hits"] == 1
 
 
+def test_element_cache_revalidates_cached_anchor_without_reusing_old_element_id():
+    from winpilot.fast.element_cache import ElementCache
+    from winpilot.fast.types import VisualAnchor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    first = Snapshot(
+        hwnd=1,
+        title="Demo",
+        region=Region(0, 0, 1000, 600),
+        elements=[
+            UIElement(elem_id=1, role="button", text="Cancel", cx=80, cy=50),
+            UIElement(elem_id=2, role="button", text="Export", cx=920, cy=50),
+        ],
+    )
+    second = Snapshot(
+        hwnd=1,
+        title="Demo",
+        region=Region(0, 0, 1000, 600),
+        elements=[
+            UIElement(elem_id=2, role="button", text="Cancel", cx=920, cy=50),
+            UIElement(elem_id=7, role="button", text="Export", cx=920, cy=50),
+        ],
+    )
+    cache = ElementCache()
+    anchor = VisualAnchor(label="Export", expected_region="top-right", role="button")
+
+    assert cache.locate(first, anchor).elem_id == 2
+    located = cache.locate_with_trace(second, anchor)
+
+    assert located.element is not None
+    assert located.element.elem_id == 7
+    assert located.cache_hit is True
+    assert cache.stats()["hits"] == 1
+
+
 def test_fast_controller_click_element_dispatches_click():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -82,7 +119,12 @@ def test_fast_controller_click_element_dispatches_click():
 
     assert out["ok"]
     assert calls == [("click", {"element_id": 5, "button": "left", "double": False})]
+    data = out["results"][0]["data"]
+    assert data["via"] == "click_element"
+    assert data["resolved_element"]["elem_id"] == 5
+    assert data["anchor_locator"]["found"] is True
     assert out["metrics"]["controller_round_trips_saved"] == 0
+    assert out["controller_state"]["phase"] == "verified"
 
 
 def test_fast_controller_accepts_single_key_shorthand():
@@ -192,6 +234,29 @@ def test_fast_controller_plain_action_error_fails_batch():
     assert not out["ok"]
     assert out["metrics"]["failed_at"] == 1
     assert "could not locate anchor" in out["results"][0]["preview"]
+    assert out["results"][0]["data"]["anchor_locator"]["found"] is False
+
+
+def test_fast_controller_records_subgoal_and_needs_observe_phase():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute(
+        [{"click": {"x": 1, "y": 2}}],
+        sync=False,
+        subgoal="open menu",
+    )
+
+    assert out["ok"]
+    assert out["subgoal"] == "open menu"
+    assert out["needs_observe"] is True
+    assert out["controller_state"]["phase"] == "needs_observe"
 
 
 def test_fast_controller_batches_visual_actions_without_extra_observe():
@@ -484,6 +549,30 @@ def test_screen_watcher_keeps_recent_changed_roi_after_stable_sample():
     assert recent["top"] <= 205
 
 
+def test_screen_watcher_records_action_delta_separately_from_recent_churn():
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.fast.watcher import ScreenWatcher
+    from winpilot.utils.screenshot import Region
+
+    watcher = ScreenWatcher(region_provider=lambda: Region(0, 0, 20, 20))
+    watcher.record_action_delta(
+        ScreenDelta(True, 0.02, [Region(100, 200, 30, 40)], 3),
+        Region(0, 0, 20, 20),
+        capture_ms=7,
+    )
+    watcher._update_bulletin(
+        ScreenDelta(True, 0.01, [Region(500, 600, 20, 20)], 2),
+        Region(0, 0, 20, 20),
+        capture_ms=5,
+        diff_ms=2,
+    )
+    status = watcher.status()
+
+    assert status["recent_changed_regions"][0]["left"] == 500
+    assert status["action_changed_regions"][0]["left"] == 100
+    assert status["last_action_change_age_ms"] >= 0
+
+
 def test_fast_controller_wait_change_uses_watcher():
     from winpilot.fast.controller import FastGuiController
     from winpilot.fast.types import ScreenDelta
@@ -550,8 +639,9 @@ def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
     captured = {}
 
     class Controller:
-        def execute(self, actions, stop_on_error=True, sync=None):
+        def execute(self, actions, stop_on_error=True, sync=None, subgoal=""):
             captured["sync"] = sync
+            captured["subgoal"] = subgoal
             return {"ok": True, "results": [], "metrics": {}}
 
     class Session(FastToolMixin):
@@ -561,9 +651,13 @@ def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
         def _fmt(self, obj):
             return json.dumps(obj)
 
-    Session()._t_run_action_batch({"actions": [{"click": {"x": 1, "y": 2}}]})
+    Session()._t_run_action_batch({
+        "subgoal": "open menu",
+        "actions": [{"click": {"x": 1, "y": 2}}],
+    })
 
     assert captured["sync"]["mode"] == "stable"
+    assert captured["subgoal"] == "open menu"
 
 
 def test_run_action_batch_tool_defaults_to_stable_sync_for_draw_strokes():
@@ -572,7 +666,7 @@ def test_run_action_batch_tool_defaults_to_stable_sync_for_draw_strokes():
     captured = {}
 
     class Controller:
-        def execute(self, actions, stop_on_error=True, sync=None):
+        def execute(self, actions, stop_on_error=True, sync=None, subgoal=""):
             captured["sync"] = sync
             return {"ok": True, "results": [], "metrics": {}}
 
@@ -596,7 +690,7 @@ def test_run_action_batch_tool_can_disable_default_sync():
     captured = {}
 
     class Controller:
-        def execute(self, actions, stop_on_error=True, sync=None):
+        def execute(self, actions, stop_on_error=True, sync=None, subgoal=""):
             captured["sync"] = sync
             return {"ok": True, "results": [], "metrics": {}}
 

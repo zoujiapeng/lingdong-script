@@ -51,6 +51,7 @@ class FastToolMixin:
             actions,
             stop_on_error=stop_on_error,
             sync=sync,
+            subgoal=str(args.get("subgoal") or ""),
         )
         return ToolResult(self._fmt(result))
 

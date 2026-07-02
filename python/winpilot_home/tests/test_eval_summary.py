@@ -74,6 +74,8 @@ def test_summarize_events_extracts_fast_gui_metrics():
             "elapsed_ms": 50,
             "result_meta": {
                 "ok": True,
+                "subgoal": "open menu",
+                "controller_state": {"phase": "needs_observe"},
                 "needs_observe": True,
                 "metrics": {
                     "action_count": 3,
@@ -82,6 +84,24 @@ def test_summarize_events_extracts_fast_gui_metrics():
                 },
             },
             "ts": 1.2,
+        },
+        {
+            "type": "agent_batch_action",
+            "tool": "click_element",
+            "ok": True,
+            "elapsed_ms": 30,
+            "result_meta": {
+                "via": "click_element",
+                "screen_delta": {"elapsed_ms": 9},
+                "screen_watch": {"running": True, "capture_latency_ms": 4},
+                "anchor_locator": {
+                    "found": True,
+                    "cache_hit": True,
+                    "score": 1.2,
+                    "reason": "cache_revalidated",
+                },
+            },
+            "ts": 1.25,
         },
         {"type": "agent_tool", "tool": "screen_watch", "elapsed_ms": 5, "ts": 1.3},
         {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 2.0},
@@ -95,7 +115,15 @@ def test_summarize_events_extracts_fast_gui_metrics():
     assert out["fast_gui"]["screen_waits"] == 1
     assert out["fast_gui"]["screen_watch_calls"] == 1
     assert out["fast_gui"]["needs_observe_batches"] == 1
+    assert out["fast_gui"]["batch_subgoals"] == 1
+    assert out["fast_gui"]["controller_phases"] == {"needs_observe": 1}
+    assert out["fast_gui"]["anchor_clicks"] == 1
+    assert out["fast_gui"]["anchor_cache_hits"] == 1
+    assert out["fast_gui"]["anchor_failures"] == 0
     assert out["fast_gui"]["run_state_phases"] == {"acting": 1}
+    assert out["low_latency"]["action_execution_latency"]["avg_ms"] == 30
+    assert out["low_latency"]["post_action_verify_latency"]["avg_ms"] == 9
+    assert out["low_latency"]["screen_capture_latency"]["avg_ms"] == 4
 
 
 def test_summarize_events_includes_batch_action_screenshots():
@@ -113,6 +141,54 @@ def test_summarize_events_includes_batch_action_screenshots():
     out = summary.summarize_events(events)
 
     assert out["screenshots"] == ["r1/batch_after_001.jpg"]
+
+
+def test_summarize_events_reports_low_latency_metrics():
+    events = [
+        {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
+        {"type": "agent_step", "step": 1, "ts": 1.4},
+        {
+            "type": "agent_tool",
+            "tool": "click",
+            "elapsed_ms": 120,
+            "result_meta": {
+                "screen_delta": {"elapsed_ms": 18},
+                "screen_watch": {"running": True, "capture_latency_ms": 7},
+            },
+            "ts": 1.55,
+        },
+        {
+            "type": "perception",
+            "dims": {
+                "ocr": {"count": 3, "ms": 80},
+                "vlm": {"count": 1, "ms": 200},
+            },
+            "ts": 1.6,
+        },
+        {"type": "screen_watch", "action": "auto_start", "ts": 1.61},
+        {"type": "agent_recovery", "kind": "structured_replan", "ts": 1.7},
+        {"type": "memory", "action": "reuse_suggested", "ts": 1.8},
+        {"type": "agent_step", "step": 2, "ts": 2.0},
+        {"type": "agent_tool", "tool": "reuse_skill", "elapsed_ms": 20, "ts": 2.05},
+        {"type": "agent_tool", "tool": "vlm_describe", "elapsed_ms": 300, "ts": 2.1},
+        {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 2.2},
+    ]
+
+    out = summary.summarize_events(events)
+    metrics = out["low_latency"]
+
+    assert metrics["action_decision_latency"]["count"] == 2
+    assert metrics["action_decision_latency"]["max_ms"] == 450
+    assert metrics["action_execution_latency"]["avg_ms"] == 120
+    assert metrics["post_action_verify_latency"]["avg_ms"] == 18
+    assert metrics["screen_capture_latency"]["avg_ms"] == 7
+    assert metrics["perception_latency"]["avg_ms"] == 280
+    assert metrics["replan_count"] == 1
+    assert metrics["vlm_call_count"] == 2
+    assert metrics["skill_reuse_count"] == 1
+    assert metrics["skill_reuse_rate"] == 1.0
+    assert metrics["screen_watch_auto_starts"] == 1
+    assert metrics["screen_watch_running_tool_events"] == 1
 
 
 def test_aggregate_reports_treats_policy_failure_as_not_passed():

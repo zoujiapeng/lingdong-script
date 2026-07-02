@@ -190,6 +190,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
             "run_action_batch",
             "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default. The controller may append an internal auto_visual_verify result after visual mutations.",
             {
+                "subgoal": _prop("string", "Optional short label for what this batch should accomplish."),
                 "actions": {
                     "type": "array",
                     "items": {

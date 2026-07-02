@@ -152,13 +152,22 @@ class PerceptionToolMixin:
                 f"{int(first.get('left', 0))},{int(first.get('top', 0))},"
                 f"{int(first.get('width', 0))}x{int(first.get('height', 0))}"
             )
+        action_regions = status.get("action_changed_regions") or []
+        action_roi = "none"
+        if action_regions:
+            first = action_regions[0]
+            action_roi = (
+                f"{int(first.get('left', 0))},{int(first.get('top', 0))},"
+                f"{int(first.get('width', 0))}x{int(first.get('height', 0))}"
+            )
         return (
             "Screen watch bulletin: "
             f"running={bool(status.get('running'))}, "
             f"changed={bool(status.get('last_changed'))}, "
             f"ratio={float(status.get('last_ratio') or 0.0):.4f}, "
-            f"roi={roi}, recent_roi={recent_roi}, "
+            f"roi={roi}, recent_roi={recent_roi}, action_roi={action_roi}, "
             f"recent_age_ms={int(status.get('last_change_age_ms') or 0)}, "
+            f"action_age_ms={int(status.get('last_action_change_age_ms') or 0)}, "
             f"samples={int(status.get('samples') or 0)}, "
             f"capture_ms={int(status.get('capture_latency_ms') or 0)}, "
             f"diff_ms={int(status.get('diff_latency_ms') or 0)}."
@@ -198,7 +207,13 @@ class PerceptionToolMixin:
         if not status:
             return []
         max_age_ms = int(CONFIG.get("fusion", "changed_region_recent_ms", default=30000))
-        if status.get("last_changed"):
+        action_age = int(status.get("last_action_change_age_ms") or 0)
+        if (
+            status.get("action_changed_regions")
+            and (not action_age or action_age <= max_age_ms)
+        ):
+            raw_regions = status.get("action_changed_regions") or []
+        elif status.get("last_changed"):
             raw_regions = status.get("changed_regions") or []
         elif int(status.get("last_change_age_ms") or 0) <= max_age_ms:
             raw_regions = status.get("recent_changed_regions") or []

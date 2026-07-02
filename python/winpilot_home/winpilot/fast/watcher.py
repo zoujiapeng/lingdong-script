@@ -28,10 +28,12 @@ class ScreenBulletin:
     last_ratio: float = 0.0
     changed_regions: list[Region] = field(default_factory=list)
     recent_changed_regions: list[Region] = field(default_factory=list)
+    action_changed_regions: list[Region] = field(default_factory=list)
     capture_latency_ms: int = 0
     diff_latency_ms: int = 0
     last_sample_ms: int = 0
     last_change_ms: int = 0
+    last_action_change_ms: int = 0
     last_change_ratio: float = 0.0
     samples: int = 0
 
@@ -58,11 +60,20 @@ class ScreenBulletin:
                 {"left": r.left, "top": r.top, "width": r.width, "height": r.height}
                 for r in self.recent_changed_regions
             ],
+            "action_changed_regions": [
+                {"left": r.left, "top": r.top, "width": r.width, "height": r.height}
+                for r in self.action_changed_regions
+            ],
             "capture_latency_ms": self.capture_latency_ms,
             "diff_latency_ms": self.diff_latency_ms,
             "last_sample_ms": self.last_sample_ms,
             "last_change_ms": self.last_change_ms,
             "last_change_age_ms": max(0, now - self.last_change_ms) if self.last_change_ms else 0,
+            "last_action_change_ms": self.last_action_change_ms,
+            "last_action_change_age_ms": (
+                max(0, now - self.last_action_change_ms)
+                if self.last_action_change_ms else 0
+            ),
             "last_change_ratio": round(float(self.last_change_ratio), 6),
             "samples": self.samples,
         }
@@ -133,6 +144,28 @@ class ScreenWatcher:
         self._update_bulletin(delta, region, capture_ms, diff_ms)
         return delta
 
+    def record_action_delta(
+        self,
+        delta: ScreenDelta,
+        region: Region | None,
+        capture_ms: int = 0,
+        diff_ms: int | None = None,
+    ) -> None:
+        """Publish an independently measured action delta.
+
+        The continuous watcher owns ``_prev`` and may sample between an action's
+        before/after frames. Action verification therefore computes its own
+        delta pair and records it here so changed-only perception can prefer
+        the freshest action-caused ROI instead of unrelated background churn.
+        """
+        self._update_bulletin(
+            delta,
+            region,
+            int(capture_ms),
+            int(delta.elapsed_ms if diff_ms is None else diff_ms),
+            action_delta=True,
+        )
+
     def wait_for_change(self, timeout_s: float = 3.0, min_ratio: float = 0.0005) -> ScreenDelta:
         deadline = time.monotonic() + float(timeout_s)
         last = self.sample_once()
@@ -177,6 +210,7 @@ class ScreenWatcher:
         region: Region | None,
         capture_ms: int,
         diff_ms: int,
+        action_delta: bool = False,
     ) -> None:
         now = _now_ms()
         with self._lock:
@@ -193,3 +227,6 @@ class ScreenWatcher:
                 self._bulletin.last_change_ms = now
                 self._bulletin.last_change_ratio = delta.ratio
                 self._bulletin.recent_changed_regions = list(delta.regions)
+                if action_delta:
+                    self._bulletin.last_action_change_ms = now
+                    self._bulletin.action_changed_regions = list(delta.regions)

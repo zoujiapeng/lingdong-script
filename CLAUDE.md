@@ -66,6 +66,7 @@
 - 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
 - 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
 - `run_action_batch` 的内部子动作会额外写 `agent_batch_action_start/agent_batch_action` 事件；可变更屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，用来核对快速内环到底有没有真的点、拖、输入、画。
+- `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch(sync=false)`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`auto_visual_verify`、`visual_change_detected` 这类证据；验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
 - UIA 关闭的绘图/画布任务会用 `canvas_fast_observe`：普通 `observe` 跳过全窗口 OCR，只给 Win32/CV/`likely_canvas` 摘要；如果要读菜单/工具栏文字，用 `observe(query="...")` 或 `observe(full=true)`。
@@ -108,11 +109,14 @@ npm run build
 - 新增网页靶场：`python/winpilot_home/eval_targets/gui_agent_target.html`。用 `python -m http.server 8877 --bind 127.0.0.1` 在该目录启动后访问 `http://127.0.0.1:8877/gui_agent_target.html`。它用于制造输入、局部状态变化、弹窗、拖拽、画布等可截图验证的 GUI 变化，不是生产逻辑的专属规则。
 - `launch` 现在支持直接 URL 或 `start msedge http://...` 这类包装命令，并且 `window_title` / `window_appears` 会做标题归一化匹配：`gui_agent_target` 可以匹配 `WinPilot GUI Agent Target - Google Chrome`。找到目标后会 `focus_window`，避免 Codex 或日志窗口遮挡目标。
 - `screen_watch` 会保留最近变化 ROI，`observe(changed_only=true)` 会优先只观察最近 ROI。默认最近窗口是 30 秒，目的是覆盖真实 LLM 推理延迟；超过窗口会明确 fallback 到普通 observe。
+- 普通可见动作的 `screen_delta` 现在用动作前/动作后独立截图计算，不再直接复用后台 watcher 的 `_prev`；watcher 另有 `action_changed_regions`，`observe(changed_only=true)` 会优先使用新鲜 action ROI，再退回普通 recent ROI。这是为了防止后台 8FPS watcher 抢帧或被弹层/动画噪声带偏。
+- `fusion.screen_watch_autostart=true`：ToolSession 在记住目标窗口或执行可见动作时会自动启动 watcher，run 结束时 `ToolSession.close()` 会停止 watcher。模型仍可手动调用 `screen_watch`，但不再必须先想起 start。
+- trace summary 新增 `low_latency` 和更细的 `fast_gui` 指标：screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage、batch subgoal、controller phase、anchor click/cache/failure。用于判断一次任务慢在哪里，而不是凭感觉优化。
 - `done_verifier.py` 增加“显式可见状态目标”确定性收束：任务写了“确认出现 LOCAL_COUNTER”这类目标时，必须在 fresh screen OCR 中看到对应文本才会跳过 LLM done judge。OCR 容错会把 `LOCAL_COUNTER` 和 `LOCAL COUNTER` 视为同一标签。
-- 最新 UIA-off 网页靶场验证：`20260703-015021-f7167c`，工具序列 `launch -> screen_watch -> observe(query) -> click -> wait(screen_stable) -> observe(changed_only=true) -> done`。截图 `after_002.jpg` 显示 `LOCAL_COUNTER_1`，`done_check` 理由为 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。
+- 最新 UIA-off 网页靶场验证：`20260703-025138-dcf2c6`，工具序列 `launch -> observe -> run_action_batch(subgoal, click+wait) -> observe(changed_only=true) -> done`。截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`；`changed_only` ROI 覆盖左侧状态卡并直接 OCR 到 `LOCAL COUNTER`；`done_check` 理由为 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。
 
 ## 15 项低延迟改造进度
 
-- 已落地或有骨架：`run_action_batch`、`screen_watch`、动作 `screen_delta/action_target`、changed ROI observe、部分 world model、部分 element cache、部分 skill replay、canvas fast observe、可见证据 done gate。
-- 部分落地但仍不成熟：LLM 下子目标而非逐步点击、视觉锚点点击、状态机、预测式感知、指标体系。现在还没有真正做到“常规动作完全由 controller 内环处理，LLM 只管异常”。
+- 已落地或有骨架：`run_action_batch`、batch `subgoal`、自动 `screen_watch`、动作独立 `screen_delta/action_target`、changed/action ROI observe、部分 world model、element cache 锚点复验、部分 skill replay、canvas fast observe、可见证据 done gate、低延迟 trace 指标。
+- 部分落地但仍不成熟：LLM 下子目标而非逐步点击、视觉锚点点击、状态机、预测式感知、指标体系。现在还没有真正做到“常规动作完全由 controller 内环处理，LLM 只管异常”；`click_element` 仍主要依赖 OCR/UIA/CV 元素和锚点文本/区域，不是真正轻量视觉模型。
 - 尚未真正完成：轻量 UI 视觉模型/YOLO 主循环、视觉伺服控制、跨任务稳定 skill 复用率、全量延迟 dashboard、强 VLM 只作兜底的成熟调度策略。

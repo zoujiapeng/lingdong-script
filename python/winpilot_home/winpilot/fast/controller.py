@@ -87,13 +87,37 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
     for key in (
         "ok",
         "verified",
+        "via",
         "visual_change_detected",
         "visual_change_ratio",
+        "screen_delta",
+        "screen_watch",
+        "action_target",
         "needs_observe",
         "verify_method",
+        "controller_state",
+        "subgoal",
+        "element_cache",
     ):
         if key in data:
             meta[key] = data[key]
+    locator = data.get("anchor_locator")
+    if isinstance(locator, dict):
+        meta["anchor_locator"] = {
+            "found": bool(locator.get("found")),
+            "cache_hit": bool(locator.get("cache_hit")),
+            "score": locator.get("score"),
+            "reason": locator.get("reason"),
+        }
+    resolved = data.get("resolved_element")
+    if isinstance(resolved, dict):
+        meta["resolved_element"] = {
+            "elem_id": resolved.get("elem_id"),
+            "text": resolved.get("text"),
+            "role": resolved.get("role"),
+            "source": resolved.get("source"),
+            "bbox": resolved.get("bbox"),
+        }
     return meta
 
 
@@ -115,6 +139,16 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             return name, dict(only_args)
         return name, {"value": only_args}
     return "", {}
+
+
+def _anchor_payload(anchor) -> dict[str, Any]:
+    return {
+        "label": anchor.label,
+        "expected_region": anchor.expected_region,
+        "visual_anchor": anchor.visual_anchor,
+        "fallback_text": list(anchor.fallback_text),
+        "role": anchor.role,
+    }
 
 
 def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -217,12 +251,20 @@ class FastGuiController:
             return ToolResult("No snapshot available for click_element")
         anchor_data = action.get("anchor") if isinstance(action.get("anchor"), dict) else action
         anchor = anchor_from_dict(anchor_data)
-        element = self.cache.locate(snapshot, anchor)
+        located = self.cache.locate_with_trace(snapshot, anchor)
+        element = located.element
         if element is None:
-            return ToolResult(
-                "click_element could not locate anchor; observe with a more specific query "
-                "or escalate perception before retrying."
-            )
+            return ToolResult(json.dumps({
+                "ok": False,
+                "blocked": True,
+                "error": (
+                    "click_element could not locate anchor; observe with a more "
+                    "specific query or escalate perception before retrying."
+                ),
+                "via": "click_element",
+                "anchor": _anchor_payload(anchor),
+                "anchor_locator": located.to_dict(),
+            }, ensure_ascii=False))
         args = {
             "element_id": element.elem_id,
             "button": action.get("button", "left"),
@@ -230,7 +272,19 @@ class FastGuiController:
         }
         if isinstance(action.get("expect"), dict):
             args["expect"] = action["expect"]
-        return self._dispatch("click", args)
+        result = self._dispatch("click", args)
+        data = _json_dict(result.text)
+        if data:
+            data.setdefault("ok", True)
+            data["via"] = "click_element"
+            data["anchor"] = _anchor_payload(anchor)
+            data["resolved_element"] = element.to_dict()
+            data["anchor_locator"] = located.to_dict()
+            result.text = json.dumps(data, ensure_ascii=False, default=str)
+            result.replay = result.replay or {}
+            result.replay.setdefault("anchor", _anchor_payload(anchor))
+            result.replay.setdefault("resolved_element", element.to_dict())
+        return result
 
     def _wait_change(self, action: dict[str, Any]) -> ToolResult:
         delta = self.watcher.wait_for_change(
@@ -394,6 +448,7 @@ class FastGuiController:
         actions: list[dict[str, Any]],
         stop_on_error: bool = True,
         sync: dict[str, Any] | bool | None = None,
+        subgoal: str = "",
     ) -> dict[str, Any]:
         metrics = BatchMetrics(started_ms=_now_ms())
         batch_id = f"batch-{metrics.started_ms}"
@@ -580,19 +635,36 @@ class FastGuiController:
                 metrics.failed_at = len(results)
         metrics.elapsed_ms = max(0, _now_ms() - metrics.started_ms)
         metrics.controller_round_trips_saved = max(0, metrics.action_count - 1)
+        needs_observe = (
+            metrics.failed_at is None
+            and metrics.action_count > 0
+            and not current_state_verified
+            and last_action not in BATCH_OBSERVE_ACTIONS
+        )
+        if metrics.failed_at is not None:
+            phase = "blocked"
+        elif current_state_verified:
+            phase = "verified"
+        elif needs_observe:
+            phase = "needs_observe"
+        else:
+            phase = "executed"
         payload = {
             "ok": metrics.failed_at is None,
+            "subgoal": str(subgoal or ""),
+            "controller_state": {
+                "phase": phase,
+                "verified": bool(current_state_verified and metrics.failed_at is None),
+                "needs_observe": bool(needs_observe),
+                "failed_at": metrics.failed_at,
+                "last_action": last_action,
+            },
             "results": results,
             "metrics": metrics.to_dict(),
             "element_cache": self.cache.stats(),
             "last_action": last_action,
             "sync": sync_result,
-            "needs_observe": (
-                metrics.failed_at is None
-                and metrics.action_count > 0
-                and not current_state_verified
-                and last_action not in BATCH_OBSERVE_ACTIONS
-            ),
+            "needs_observe": needs_observe,
         }
         if current_state_verified and metrics.failed_at is None:
             payload["verified"] = True

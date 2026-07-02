@@ -828,11 +828,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "visual_change_detected",
                     "visual_change_ratio",
                     "screen_delta",
+                    "screen_watch",
                     "action_target",
                     "fast_path_advice",
                     "needs_observe",
                     "last_action",
                     "metrics",
+                    "subgoal",
+                    "controller_state",
+                    "element_cache",
                 ):
                     if key in parsed_result:
                         result_meta[key] = parsed_result[key]
@@ -1089,6 +1093,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Score feedback for whatever recipes were injected this run.
         if self.status in ("done", "fail", "error"):
             experience.feedback(self._hint_ids, success=(self.status == "done"))
+
+        try:
+            self.session.close()
+        except Exception:
+            logger.debug("ToolSession close failed", exc_info=True)
 
         BUS.publish(
             "agent_done",

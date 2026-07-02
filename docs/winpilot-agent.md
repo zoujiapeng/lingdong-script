@@ -182,14 +182,18 @@ python -m http.server 8877 --bind 127.0.0.1
 推荐测试任务：
 
 ```text
-打开 http://127.0.0.1:8877/gui_agent_target.html。不要用shell、DOM或文件检查。主要走GUI：先启动 screen_watch，然后点击“只改局部状态”按钮，等待约1秒让画面稳定，再调用 observe(changed_only=true) 只观察最近变化区域，确认状态卡出现 LOCAL_COUNTER，然后 done。
+打开 http://127.0.0.1:8877/gui_agent_target.html。不要用shell、DOM或文件检查。主要走GUI：先观察页面，然后用 run_action_batch，subgoal 写成“触发局部状态变化”，点击页面左侧操作区从左到右第二个普通按钮（它在蓝色主按钮右边，会只改变局部状态卡），等待界面稳定，再调用 observe(changed_only=true) 只观察最近变化区域，确认状态卡出现 LOCAL_COUNTER，然后 done。
 ```
 
 复盘时看这些证据：
 
 - `agent_tool` 的 `launch` 应该 `verified=true`，并且目标窗口标题是 Chrome 靶场窗口，不应被 Codex 窗口遮挡。
-- `click` 的 `result_meta.screen_delta.regions` 应该包含左侧状态卡 ROI，`action_target.after.foreground_matches_target=true`。
+- 如果没有显式调用 `screen_watch start`，也可能看到 watcher 状态：`fusion.screen_watch_autostart=true` 时，ToolSession 会在目标窗口就绪或可见动作前自动启动 watcher，并在 run 结束时停止。
+- `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`，确认是缓存命中还是重新定位。
+- 普通可见动作会有 `result_meta.screen_delta` 和 `action_target.after.foreground_matches_target=true`。现在动作 delta 使用独立前后帧；`screen_watch` 还会保留 `action_changed_regions`。如果后台 watcher 被弹层、动画、画布噪声带偏，`observe(changed_only=true)` 应优先新鲜 action ROI，再退回 recent ROI。
 - `observe(changed_only=true)` 的 `result_text` 应该以 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)` 开头；如果出现 `returned the normal observe snapshot`，说明没有可用 ROI 或 ROI 过期。
 - `done_check` 对显式可见状态目标可直接通过，例如 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。这是 fresh screen OCR 证据，不是 agent 总结。
 
-已验证 run：`20260703-015021-f7167c`。截图 `python/winpilot_home/traces/20260703-015021-f7167c/after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。
+已验证 run：`20260703-025138-dcf2c6`。截图 `python/winpilot_home/traces/20260703-025138-dcf2c6/batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。这个 run 的 `observe(changed_only=true)` 在 ROI 内直接识别到 `LOCAL COUNTER`，没有再补一次全量 `query=LOCAL_COUNTER`。
+
+`/api/trace/<run_id>/summary` 会返回 `low_latency` 和 `fast_gui` 字段，用来定位瓶颈：截图耗时、感知耗时、LLM 决策耗时、动作执行耗时、动作后验证耗时、重规划频率、VLM 调用频率、skill 复用率、watcher 覆盖情况、batch subgoal、controller phase、anchor click/cache/failure。以后做速度优化先看这里，再决定该减少 VLM、减少 LLM round-trip，还是改 controller 内环。

@@ -114,16 +114,20 @@ stateDiagram-v2
 flowchart LR
     llm["Main LLM<br/>任务理解/异常推理"] --> tools["ToolSession.dispatch"]
     tools --> launch["launch/focus_window<br/>目标窗口保护"]
-    tools --> watcher["screen_watch<br/>cheap frame diff"]
-    watcher --> roi["recent changed ROI<br/>30s cache"]
+    tools --> watcher["auto screen_watch<br/>cheap frame diff"]
+    watcher --> roi["recent/action changed ROI<br/>30s cache"]
     roi --> observe["observe(changed_only=true)<br/>Win32/OCR/CV on ROI"]
-    tools --> batch["run_action_batch<br/>fast controller skeleton"]
+    tools --> batch["run_action_batch<br/>subgoal + fast controller"]
     observe --> world["WorldModel bulletin"]
     observe --> done["done_verifier<br/>fresh visible evidence"]
 ```
 
-- `screen_watch` 是低成本变化检测层，不做语义理解；它保留 `recent_changed_regions`，让 LLM 慢一拍调用 `observe(changed_only=true)` 时仍能只看局部。
-- `observe(changed_only=true)` 只在最近 ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。
+- `screen_watch` 是低成本变化检测层，不做语义理解；它保留 `recent_changed_regions` 和动作归因的 `action_changed_regions`，让 LLM 慢一拍调用 `observe(changed_only=true)` 时仍能只看局部。
+- `fusion.screen_watch_autostart=true` 时，ToolSession 在获得目标窗口或执行可见动作前自动启动 watcher，AgentRunner 结束时停止 watcher，避免每个任务都要求 LLM 手动启动。
+- 普通可见动作的 `screen_delta` 使用动作前/动作后独立截图 diff，不直接复用后台 watcher 的 `_prev`；这是为了避免连续采样线程在动作前后抢帧。动作 ROI 新鲜时，`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI。
+- `observe(changed_only=true)` 只在最近/action ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。
+- `run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`。
+- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、controller phase、anchor click/cache/failure，后续性能优化应优先看这些字段。
 - URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
 - `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
-- 最新验证 run：`20260703-015021-f7167c`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用最近 ROI，done gate 以 fresh screen evidence 通过。
+- 最新验证 run：`20260703-025138-dcf2c6`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用左侧状态卡 ROI 直接识别 `LOCAL COUNTER`，done gate 以 fresh screen evidence 通过。
