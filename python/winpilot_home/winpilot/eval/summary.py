@@ -41,6 +41,52 @@ def _percentile(values: list[int], pct: float) -> int:
     return int(ordered[idx])
 
 
+def _summarize_fast_gui(
+    tool_events: list[dict[str, Any]],
+    run_state_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    batch_calls = 0
+    batch_actions = 0
+    round_trips_saved = 0
+    screen_waits = 0
+    needs_observe_batches = 0
+    verified_batches = 0
+    phases = Counter(str(e.get("phase") or "") for e in run_state_events if e.get("phase"))
+    last_state = run_state_events[-1] if run_state_events else {}
+    for event in tool_events:
+        if event.get("tool") != "run_action_batch":
+            continue
+        batch_calls += 1
+        meta = event.get("result_meta") or {}
+        if not isinstance(meta, dict):
+            continue
+        metrics = meta.get("metrics") or {}
+        if isinstance(metrics, dict):
+            batch_actions += int(metrics.get("action_count") or 0)
+            round_trips_saved += int(metrics.get("controller_round_trips_saved") or 0)
+            screen_waits += int(metrics.get("screen_wait_count") or 0)
+        if meta.get("needs_observe") is True:
+            needs_observe_batches += 1
+        if meta.get("verified") is True:
+            verified_batches += 1
+    return {
+        "batch_calls": batch_calls,
+        "batch_actions": batch_actions,
+        "round_trips_saved": round_trips_saved,
+        "screen_waits": screen_waits,
+        "screen_watch_calls": sum(1 for e in tool_events if e.get("tool") == "screen_watch"),
+        "needs_observe_batches": needs_observe_batches,
+        "verified_batches": verified_batches,
+        "run_state_events": len(run_state_events),
+        "run_state_phases": dict(phases),
+        "last_run_state": {
+            "phase": last_state.get("phase", ""),
+            "last_tool": last_state.get("last_tool", ""),
+            "unverified_actions": last_state.get("unverified_actions", 0),
+        },
+    }
+
+
 def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Return compact performance/evidence metrics for one trace event list."""
     task = ""
@@ -54,6 +100,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     done_checks: list[dict[str, Any]] = []
     screenshots: list[str] = []
     perception_stats: list[dict[str, Any]] = []
+    run_state_events: list[dict[str, Any]] = []
 
     for event in events:
         etype = event.get("type")
@@ -79,6 +126,8 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                 usage_total = dict(total)
         elif etype == "perception":
             perception_stats.append(event)
+        elif etype == "run_state":
+            run_state_events.append(event)
         elif etype == "agent_done":
             status = str(event.get("status", "") or status)
             result = str(event.get("result", "") or result)
@@ -91,6 +140,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             by_tool[str(event.get("tool") or "")].append(int(event.get("elapsed_ms") or 0))
 
     tool_counts = Counter(str(e.get("tool") or "") for e in tool_events)
+    fast_gui = _summarize_fast_gui(tool_events, run_state_events)
     tool_latency = {
         tool: {
             "count": len(values),
@@ -154,6 +204,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "slow_tools": slow_tools,
         "perception": perception,
+        "fast_gui": fast_gui,
         "done_checks": done_checks,
         "rejected_done_count": sum(1 for item in done_checks if item.get("passed") is False),
         "screenshots": screenshots,
@@ -214,6 +265,10 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             slow.append(enriched)
     slow = sorted(slow, key=lambda item: int(item.get("elapsed_ms") or 0), reverse=True)[:12]
     usage_items = [r.get("usage") or r.get("status_endpoint", {}).get("usage") or {} for r in reports]
+    fast_items = [
+        r.get("fast_gui") or r.get("trace_summary", {}).get("fast_gui") or {}
+        for r in reports
+    ]
     def passed(report: dict[str, Any]) -> bool:
         if report.get("timed_out"):
             return False
@@ -230,6 +285,16 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "total_cost_cny": round(sum(float(u.get("cost_cny") or 0) for u in usage_items), 4),
         "total_prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in usage_items),
         "total_completion_tokens": sum(int(u.get("completion_tokens") or 0) for u in usage_items),
+        "fast_gui": {
+            "batch_calls": sum(int(f.get("batch_calls") or 0) for f in fast_items),
+            "batch_actions": sum(int(f.get("batch_actions") or 0) for f in fast_items),
+            "round_trips_saved": sum(int(f.get("round_trips_saved") or 0) for f in fast_items),
+            "screen_waits": sum(int(f.get("screen_waits") or 0) for f in fast_items),
+            "screen_watch_calls": sum(int(f.get("screen_watch_calls") or 0) for f in fast_items),
+            "needs_observe_batches": sum(int(f.get("needs_observe_batches") or 0) for f in fast_items),
+            "verified_batches": sum(int(f.get("verified_batches") or 0) for f in fast_items),
+            "run_state_events": sum(int(f.get("run_state_events") or 0) for f in fast_items),
+        },
         "slow_tools": slow,
         "reports": reports,
     }

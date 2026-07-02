@@ -591,12 +591,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
                 self._recent_results.append((tc.function.name, (result.text or "")[:limit]))
                 self._recent_results = self._recent_results[-6:]
+            result_meta: dict[str, Any] = {}
+            try:
+                parsed_result = json.loads(result.text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                parsed_result = {}
+            if isinstance(parsed_result, dict):
+                for key in ("ok", "verified", "needs_observe", "last_action", "metrics"):
+                    if key in parsed_result:
+                        result_meta[key] = parsed_result[key]
             BUS.publish(
                 "agent_tool",
                 run_id=self.run_id,
                 tool=tc.function.name,
                 args=args,
                 result_preview=result.text[:300],
+                result_meta=result_meta,
                 elapsed_ms=elapsed_ms,
                 terminal=result.terminal,
                 replay=result.replay,
