@@ -318,6 +318,35 @@ def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
     assert runner._done_verified is True
 
 
+def test_simple_drawing_done_accepts_batch_draw_strokes(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a triangle on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'run_action_batch({"actions": [{"action": "draw_strokes", "strokes": [[[10, 10], [50, 50]]]}]})'
+    ]
+    runner._recent_results = [
+        ("run_action_batch", '{"ok": true, "verified": true, "results": [{"action": "draw_strokes", "preview": "{\\"visual_change_detected\\": true}"}]}'),
+    ]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("LLM judge should not run with batch drawing evidence")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
 def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
@@ -347,6 +376,42 @@ def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
                 @staticmethod
                 def create(*_a, **_k):
                     raise AssertionError("LLM judge should not run with deterministic drag evidence")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
+def test_desktop_icon_drag_done_accepts_batch_drag(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'run_action_batch({"actions": [{"action": "drag", "x1": 100, "y1": 500, "x2": 1850, "y2": 80}]})'
+    ]
+    runner._recent_results = [
+        ("run_action_batch", '{"ok": true, "verified": true, "results": [{"action": "drag", "preview": "{\\"visual_change_detected\\": true}"}]}'),
+    ]
+
+    screen = (
+        'Window: "Program Manager" hwnd=1 rect=(0,0,1920x1080)\n'
+        '[160] listitem "WinPilotDragTest_123" center=(1852,58) '
+        'bbox=(1805,5,94,107) checked,selected,focused src=uia'
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: screen),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("LLM judge should not run with batch drag evidence")
 
     assert runner._verify_done(_Client()) is True
     assert runner._done_verified is True

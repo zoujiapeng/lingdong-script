@@ -44,6 +44,33 @@ def _config():
 
 
 class DoneVerifierMixin:
+    @staticmethod
+    def _evidence_has_true_flag(evidence: str, flag: str) -> bool:
+        normalized = (evidence or "").casefold()
+        # Tool results embedded inside run_action_batch previews are JSON
+        # strings, so quotes often appear as \" or double-escaped \\\".
+        normalized = normalized.replace("\\\\\"", '"').replace('\\"', '"')
+        flag = flag.casefold()
+        return (
+            f'{flag}": true' in normalized
+            or f"{flag}=true" in normalized
+            or f"{flag}: true" in normalized
+        )
+
+    def _history_mentions_action(self, *names: str) -> bool:
+        """Return true when a direct tool call or batch sub-action was recorded."""
+        if not names:
+            return False
+        joined = "\n".join(self._steps_log)
+        for name in names:
+            if any(step.startswith(f"{name}(") for step in self._steps_log):
+                return True
+            if re.search(rf'"(?:action|tool)"\s*:\s*"{re.escape(name)}"', joined):
+                return True
+            if re.search(rf'"{re.escape(name)}"\s*:', joined):
+                return True
+        return False
+
     def _reject_done(self, reason: str, content: str) -> bool:
         """Record a failed done-gate check and nudge the model to continue."""
         BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
@@ -110,8 +137,8 @@ class DoneVerifierMixin:
     def _verify_drawing_done(self, evidence: str) -> bool:
         if not _is_drawing_task(self.task):
             return True
-        saw_drag = any(step.startswith(("drag(", "draw_strokes(")) for step in self._steps_log)
-        saw_visual_change = "visual_change_detected\": true" in evidence.lower()
+        saw_drag = self._history_mentions_action("drag", "draw_strokes")
+        saw_visual_change = self._evidence_has_true_flag(evidence, "visual_change_detected")
         image_paths = _required_image_paths(self.task)
         missing_paths = [path for path in image_paths if not Path(path).exists()]
         required_colors = _required_drawing_colors(self.task)
@@ -184,11 +211,9 @@ class DoneVerifierMixin:
             return False
         if _required_image_paths(self.task) or _required_drawing_colors(self.task):
             return False
-        saw_stroke = any(
-            step.startswith(("drag(", "draw_strokes(")) for step in self._steps_log
-        )
+        saw_stroke = self._history_mentions_action("drag", "draw_strokes")
         normalized = evidence.lower()
-        saw_visual_change = 'visual_change_detected": true' in normalized
+        saw_visual_change = self._evidence_has_true_flag(normalized, "visual_change_detected")
         return saw_stroke and saw_visual_change
 
     def _desktop_drag_has_deterministic_done_evidence(self, screen: str, evidence: str) -> bool:
@@ -198,8 +223,8 @@ class DoneVerifierMixin:
         if not targets:
             return False
         normalized = evidence.lower()
-        saw_drag = any(step.startswith("drag(") for step in self._steps_log)
-        saw_visual_change = 'visual_change_detected": true' in normalized
+        saw_drag = self._history_mentions_action("drag")
+        saw_visual_change = self._evidence_has_true_flag(normalized, "visual_change_detected")
         if not (saw_drag and saw_visual_change):
             return False
         wants_top_right = any(term in (self.task or "").casefold() for term in ("top-right", "top right")) \

@@ -111,6 +111,148 @@ def test_fast_controller_accepts_single_key_shorthand():
     assert out["metrics"]["controller_round_trips_saved"] == 1
 
 
+def test_fast_controller_wait_shorthand_is_pause_not_condition_wait():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"wait": 5},
+    ])
+
+    assert out["ok"]
+    assert out["results"][0]["action"] == "wait"
+    assert "waited_ms" in out["results"][0]["preview"]
+    assert calls == []
+
+
+def test_fast_controller_invalid_wait_fails_batch():
+    from winpilot.fast.controller import FastGuiController
+
+    session = SimpleNamespace(snapshot=None, hwnd=None)
+    out = FastGuiController(session).execute([
+        {"wait": {}},
+        {"click": {"x": 1, "y": 2}},
+    ])
+
+    assert not out["ok"]
+    assert out["metrics"]["failed_at"] == 1
+    assert "requires condition or duration" in out["results"][0]["preview"]
+
+
+def test_fast_controller_adds_short_timeout_to_batch_expect():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"click": {"x": 1, "y": 2, "expect": {"text_appears": "Ready"}}},
+    ], sync=False)
+
+    assert out["ok"]
+    assert calls[0][1]["expect"]["timeout_s"] == 2.0
+    assert out["results"][0]["data"]["verified"] is True
+
+
+def test_fast_controller_plain_action_error_fails_batch():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = SimpleNamespace(
+        snapshot=Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 400, 300),
+            elements=[UIElement(elem_id=1, role="button", text="Cancel", cx=30, cy=30)],
+        ),
+        hwnd=1,
+    )
+    out = FastGuiController(session).execute([
+        {"click_element": {"label": "Export"}},
+    ])
+
+    assert not out["ok"]
+    assert out["metrics"]["failed_at"] == 1
+    assert "could not locate anchor" in out["results"][0]["preview"]
+
+
+def test_fast_controller_batches_visual_actions_without_extra_observe():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "draw_strokes":
+                return ToolResult(
+                    '{"ok": true, "visual_change_detected": true, '
+                    '"verified": true, "verify_method": "cv-diff"}'
+                )
+            if name == "zoom":
+                return ToolResult('{"ok": true, "nonvisual_summary": {"blankish": false}}')
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"click": {"x": 100, "y": 100}},
+        {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]], "duration": 0.1}},
+        {"zoom": {"x": 90, "y": 90, "width": 80, "height": 80}},
+    ], sync=False)
+
+    assert out["ok"]
+    assert out["needs_observe"] is False
+    assert out["metrics"]["controller_round_trips_saved"] == 2
+    assert out["metrics"]["observe_count"] == 1
+    assert calls == [
+        ("click", {"x": 100, "y": 100}),
+        ("draw_strokes", {"strokes": [[[100, 100], [150, 150]]], "duration": 0.1}),
+        ("zoom", {"x": 90, "y": 90, "width": 80, "height": 80}),
+    ]
+
+
+def test_fast_controller_unverified_mutation_after_verified_action_needs_observe():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            if name == "draw_strokes":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]]}},
+        {"click": {"x": 1, "y": 2}},
+    ], sync=False)
+
+    assert out["ok"]
+    assert out["needs_observe"] is True
+    assert "verified" not in out
+
+
 def test_fast_controller_marks_needs_observe_without_expect():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -287,6 +429,30 @@ def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
             return json.dumps(obj)
 
     Session()._t_run_action_batch({"actions": [{"click": {"x": 1, "y": 2}}]})
+
+    assert captured["sync"]["mode"] == "stable"
+
+
+def test_run_action_batch_tool_defaults_to_stable_sync_for_draw_strokes():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    captured = {}
+
+    class Controller:
+        def execute(self, actions, stop_on_error=True, sync=None):
+            captured["sync"] = sync
+            return {"ok": True, "results": [], "metrics": {}}
+
+    class Session(FastToolMixin):
+        def __init__(self):
+            self._fast_gui_controller = Controller()
+
+        def _fmt(self, obj):
+            return json.dumps(obj)
+
+    Session()._t_run_action_batch({
+        "actions": [{"draw_strokes": {"strokes": [[[1, 2], [3, 4]]]}}],
+    })
 
     assert captured["sync"]["mode"] == "stable"
 

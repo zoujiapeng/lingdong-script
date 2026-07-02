@@ -17,10 +17,15 @@ ALLOWED_BATCH_ACTIONS = {
     "click_element",
     "type_text",
     "hotkey",
+    "scroll",
+    "drag",
+    "draw_strokes",
+    "focus_window",
     "wait",
     "wait_change",
     "wait_stable",
     "read_text",
+    "zoom",
     "clipboard_write",
     "clipboard_paste",
 }
@@ -29,7 +34,17 @@ BATCH_MUTATING_ACTIONS = {
     "click_element",
     "type_text",
     "hotkey",
+    "scroll",
+    "drag",
+    "draw_strokes",
+    "focus_window",
     "clipboard_paste",
+}
+BATCH_OBSERVE_ACTIONS = {
+    "observe",
+    "read_text",
+    "vlm_describe",
+    "zoom",
 }
 
 
@@ -43,6 +58,10 @@ def _json_dict(text: str) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_json_object(text: str) -> bool:
+    return (text or "").lstrip().startswith("{")
 
 
 def _failed(result: ToolResult) -> bool:
@@ -76,6 +95,17 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             return name, dict(only_args)
         return name, {"value": only_args}
     return "", {}
+
+
+def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if name in BATCH_OBSERVE_ACTIONS:
+        return args
+    expect = args.get("expect")
+    if not isinstance(expect, dict) or "timeout_s" in expect:
+        return args
+    updated = dict(args)
+    updated["expect"] = {**expect, "timeout_s": 2.0}
+    return updated
 
 
 class FastGuiController:
@@ -161,6 +191,32 @@ class FastGuiController:
             "screen_watch": self.watcher.status(),
         }, ensure_ascii=False))
 
+    @staticmethod
+    def _pause(action: dict[str, Any]) -> ToolResult:
+        duration_s: float | None = None
+        if isinstance(action.get("duration_s"), (int, float)):
+            duration_s = float(action["duration_s"])
+        elif isinstance(action.get("seconds"), (int, float)):
+            duration_s = float(action["seconds"])
+        elif isinstance(action.get("duration_ms"), (int, float)):
+            duration_s = float(action["duration_ms"]) / 1000.0
+        elif isinstance(action.get("ms"), (int, float)):
+            duration_s = float(action["ms"]) / 1000.0
+        elif isinstance(action.get("value"), (int, float)):
+            # Shorthand {"wait": 500} means 500ms inside action batches.
+            duration_s = float(action["value"]) / 1000.0
+        if duration_s is None:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "error": "wait in run_action_batch requires condition or duration_ms/ms/value",
+            }, ensure_ascii=False))
+        duration_s = max(0.0, min(duration_s, 5.0))
+        time.sleep(duration_s)
+        return ToolResult(json.dumps({
+            "ok": True,
+            "waited_ms": int(duration_s * 1000),
+        }, ensure_ascii=False))
+
     def _sync_after_batch(self, sync: dict[str, Any] | bool) -> tuple[str, ToolResult]:
         if isinstance(sync, dict):
             mode = str(sync.get("mode") or "stable").casefold()
@@ -185,6 +241,7 @@ class FastGuiController:
         metrics = BatchMetrics(started_ms=_now_ms())
         results: list[dict[str, Any]] = []
         verified_any = False
+        current_state_verified = False
         verified_expect_any = False
         verified_expect_false_any = False
         last_action = ""
@@ -195,6 +252,7 @@ class FastGuiController:
                 results.append({"index": index, "ok": False, "error": "action must be an object"})
                 break
             name, normalised_args = _normalise_action(action)
+            normalised_args = _with_batch_expect_defaults(name, normalised_args)
             last_action = name
             if name in BATCH_MUTATING_ACTIONS:
                 mutating_seen = True
@@ -207,6 +265,8 @@ class FastGuiController:
             started = _now_ms()
             if name == "click_element":
                 result = self._click_element(normalised_args)
+            elif name == "wait" and not isinstance(normalised_args.get("condition"), dict):
+                result = self._pause(normalised_args)
             elif name == "wait_change":
                 result = self._wait_change(normalised_args)
             elif name == "wait_stable":
@@ -216,7 +276,7 @@ class FastGuiController:
             elapsed = max(0, _now_ms() - started)
             metrics.tool_latencies_ms.append(elapsed)
             metrics.action_count += 1
-            if name == "observe":
+            if name in BATCH_OBSERVE_ACTIONS:
                 metrics.observe_count += 1
             if isinstance(normalised_args.get("expect"), dict) or name == "wait":
                 metrics.verify_count += 1
@@ -233,18 +293,30 @@ class FastGuiController:
             has_expect = isinstance(normalised_args.get("expect"), dict)
             if data.get("verified") is True:
                 verified_any = True
+                current_state_verified = True
                 if has_expect:
                     verified_expect_any = True
             elif data.get("verified") is False:
+                if name in BATCH_MUTATING_ACTIONS:
+                    current_state_verified = False
                 if has_expect:
                     verified_expect_false_any = True
-            failed = _failed(result) or (
+            elif name in BATCH_MUTATING_ACTIONS:
+                current_state_verified = False
+            plain_error = (
+                not data
+                and not _is_json_object(result.text)
+                and name not in BATCH_OBSERVE_ACTIONS
+            )
+            failed = _failed(result) or plain_error or (
                 has_expect
                 and data.get("verified") is False
             )
             item["ok"] = not failed
             if "verified" in data:
                 item["verified"] = bool(data.get("verified"))
+            if data:
+                item["data"] = data
             results.append(item)
             if failed and stop_on_error:
                 metrics.failed_at = index
@@ -287,10 +359,12 @@ class FastGuiController:
             "needs_observe": (
                 metrics.failed_at is None
                 and metrics.action_count > 0
-                and not verified_any
-                and last_action not in {"observe", "read_text", "vlm_describe"}
+                and not current_state_verified
+                and last_action not in BATCH_OBSERVE_ACTIONS
             ),
         }
+        if current_state_verified and metrics.failed_at is None:
+            payload["verified"] = True
         if verified_expect_any or verified_expect_false_any:
             payload["verified"] = bool(
                 verified_expect_any

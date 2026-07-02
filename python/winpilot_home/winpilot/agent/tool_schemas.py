@@ -194,8 +194,9 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                         "type": "object",
                         "description": (
                             "Allowed action values: observe, click, click_element, "
-                            "type_text, hotkey, wait, wait_change, wait_stable, "
-                            "read_text, clipboard_write, clipboard_paste. "
+                            "type_text, hotkey, scroll, drag, draw_strokes, "
+                            "focus_window, wait, wait_change, wait_stable, "
+                            "read_text, zoom, clipboard_write, clipboard_paste. "
                             "Use either {'action':'click','element_id':1} or shorthand "
                             "{'click': {'element_id':1}}. click_element accepts "
                             "label/expected_region/visual_anchor/fallback_text/role."
