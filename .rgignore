@@ -1,0 +1,32 @@
+# Generated dependencies/build output
+node_modules/
+dist/
+release/
+python-runtime/
+
+# WinPilot runtime data; huge and noisy for code search
+python/winpilot_home/traces/
+python/winpilot_home/evals/
+python/winpilot_home/scripts/
+python/winpilot_home/templates_img/
+python/winpilot_home/config.json
+python/winpilot_home/experience_memory.json
+python/winpilot_home/winpilot/bin/
+
+# Caches and local tool state
+__pycache__/
+.pytest_cache/
+.playwright-cli/
+.playwright-mcp/
+.e2e/
+_e2e_shots/
+.claude/
+
+# Generated media/test artifacts
+*.pyc
+*.pyo
+*.log
+*.js.map
+browser_test_*.png
+web_screenshot_*.png
+output_*.png
