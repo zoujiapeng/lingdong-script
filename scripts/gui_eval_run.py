@@ -70,6 +70,158 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             "timeout_s": 240,
         },
     ],
+    "gui-deep-10": [
+        {
+            "id": "deep_calc_chain",
+            "task": "用计算器通过GUI计算 123 + 456 - 78 的结果，确认最终结果是501。必须通过GUI操作，不要用命令行计算。",
+            "timeout_s": 240,
+            "setup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
+            "cleanup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
+        },
+        {
+            "id": "deep_notepad_save_multiline",
+            "task": "打开记事本，通过GUI输入两行文字：第一行 深度测试A，第二行 GUI保存成功。然后另存为桌面 WinPilotDeep_note1.txt，并确认保存成功。",
+            "timeout_s": 360,
+            "setup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_note1.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "file_contains_multiline",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_note1.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_note1.txt\" -Raw -Encoding UTF8) -match '深度测试A') -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_note1.txt\" -Raw -Encoding UTF8) -match 'GUI保存成功')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_note1.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_notepad_append_existing",
+            "task": "桌面上已有 WinPilotDeep_append.txt。请通过GUI用记事本打开它，在末尾新增一行 追加行-通过GUI，然后保存关闭。不要用命令行改文件。",
+            "timeout_s": 420,
+            "setup": [
+                "Set-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_append.txt\" -Value \"初始行\" -Encoding UTF8; taskkill /f /im notepad.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "append_file_contains_new_line",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_append.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_append.txt\" -Raw -Encoding UTF8) -match '初始行') -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_append.txt\" -Raw -Encoding UTF8) -match '追加行-通过GUI')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_append.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_notepad_clipboard_paste",
+            "task": "打开记事本，通过GUI把文字 剪贴板粘贴验证-红蓝绿 输入进去，可以使用剪贴板粘贴，然后另存为桌面 WinPilotDeep_clipboard.txt。",
+            "timeout_s": 360,
+            "setup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_clipboard.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "clipboard_file_contains_payload",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_clipboard.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_clipboard.txt\" -Raw -Encoding UTF8) -match '剪贴板粘贴验证-红蓝绿')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_clipboard.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_desktop_drag_folder",
+            "task": "把桌面上的 WinPilotDeepDrag 文件夹图标通过鼠标拖动到桌面右上角附近。不要打开它，不要删除它，不要移动其他图标。必须通过GUI拖动完成。",
+            "timeout_s": 300,
+            "setup": [
+                "$p = Join-Path $env:USERPROFILE 'Desktop\\WinPilotDeepDrag'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Set-Content -LiteralPath (Join-Path $p 'marker.txt') -Value 'deep drag' -Encoding UTF8"
+            ],
+            "checks": [
+                {
+                    "name": "drag_folder_still_exists",
+                    "command": "if (Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepDrag\") { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepDrag\" -Recurse -Force -ErrorAction SilentlyContinue"
+            ],
+        },
+        {
+            "id": "deep_paint_triangle_no_save",
+            "task": "打开画图，在空白画布中间通过GUI画一个明显的小三角形，不用保存。完成前确认画布上确实有可见图形。",
+            "timeout_s": 300,
+            "setup": ["taskkill /f /im mspaint.exe 2>$null"],
+            "cleanup": ["taskkill /f /im mspaint.exe 2>$null"],
+        },
+        {
+            "id": "deep_paint_save_png",
+            "task": "打开画图，在画布上通过GUI画一个明显的矩形或三角形，然后通过GUI保存为桌面 WinPilotDeepPaint.png。必须确认文件已保存。",
+            "timeout_s": 480,
+            "setup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepPaint.png\" -Force -ErrorAction SilentlyContinue; taskkill /f /im mspaint.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "paint_png_exists",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepPaint.png\") -and ((Get-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepPaint.png\").Length -gt 1000)) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepPaint.png\" -Force -ErrorAction SilentlyContinue; taskkill /f /im mspaint.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_multi_window_calc_note",
+            "task": "先打开计算器通过GUI计算 9 × 9 得到81，再打开记事本写入 9乘9等于81，并另存为桌面 WinPilotDeep_multi.txt。必须通过GUI完成主要操作。",
+            "timeout_s": 540,
+            "setup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_multi.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null; taskkill /f /im CalculatorApp.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "multi_file_contains_result",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_multi.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_multi.txt\" -Raw -Encoding UTF8) -match '9乘9等于81')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_multi.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null; taskkill /f /im CalculatorApp.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_long_conditional_note",
+            "task": "完成一个稍复杂的GUI任务：如果计算器能打开，就用计算器算 24 × 7；如果结果是168，就打开记事本写入 条件分支通过：168，并保存到桌面 WinPilotDeep_conditional.txt；如果计算器打不开，则在记事本写入 计算器打不开。全程主要操作必须走GUI。",
+            "timeout_s": 540,
+            "setup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_conditional.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null; taskkill /f /im CalculatorApp.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "conditional_file_contains_expected_branch",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_conditional.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_conditional.txt\" -Raw -Encoding UTF8) -match '条件分支通过：168')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_conditional.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null; taskkill /f /im CalculatorApp.exe 2>$null"
+            ],
+        },
+        {
+            "id": "deep_notepad_save_in_folder",
+            "task": "桌面上已有文件夹 WinPilotDeepFolder。请通过GUI打开记事本，输入 文件夹内保存成功，然后另存为 WinPilotDeepFolder\\inside.txt，并确认保存成功。",
+            "timeout_s": 420,
+            "setup": [
+                "$p = Join-Path $env:USERPROFILE 'Desktop\\WinPilotDeepFolder'; New-Item -ItemType Directory -Force -Path $p | Out-Null; Remove-Item -LiteralPath (Join-Path $p 'inside.txt') -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "folder_file_contains_payload",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepFolder\\inside.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepFolder\\inside.txt\" -Raw -Encoding UTF8) -match '文件夹内保存成功')) { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
+            "cleanup": [
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeepFolder\" -Recurse -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+        },
+    ],
 }
 
 DEFAULT_BUDGETS = {
@@ -92,8 +244,8 @@ def _request_json(method: str, url: str, payload: dict[str, Any] | None = None) 
     return json.loads(raw) if raw else None
 
 
-def _run_powershell(command: str) -> None:
-    subprocess.run(
+def _run_powershell(command: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
         check=False,
         capture_output=True,
@@ -101,6 +253,29 @@ def _run_powershell(command: str) -> None:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def _run_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for check in checks:
+        name = str(check.get("name") or "check")
+        command = str(check.get("command") or "")
+        proc = _run_powershell(command)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        contains = check.get("contains")
+        passed = proc.returncode == 0
+        if contains is not None:
+            passed = passed and str(contains) in stdout
+        results.append({
+            "name": name,
+            "command": command,
+            "passed": bool(passed),
+            "exit_code": proc.returncode,
+            "stdout": stdout[:1000],
+            "stderr": stderr[:1000],
+        })
+    return results
 
 
 def _load_summary_module():
@@ -225,10 +400,14 @@ def run_eval(
 
 
 def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
-              budgets: dict[str, float]) -> Path:
+              budgets: dict[str, float], case_ids: set[str] | None = None) -> Path:
     cases = SUITES.get(suite_name)
     if not cases:
         raise SystemExit(f"Unknown suite {suite_name!r}. Available: {', '.join(sorted(SUITES))}")
+    if case_ids:
+        cases = [case for case in cases if str(case.get("id") or "") in case_ids]
+        if not cases:
+            raise SystemExit(f"No cases matched: {', '.join(sorted(case_ids))}")
     reports: list[dict[str, Any]] = []
     paths: list[str] = []
     for case in cases:
@@ -243,8 +422,14 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 case_id=str(case.get("id") or ""),
                 budgets=budgets,
             )
+            report = json.loads(path.read_text(encoding="utf-8"))
+            checks = _run_checks(list(case.get("checks", [])))
+            if checks:
+                report["ground_truth_checks"] = checks
+                report["ground_truth_passed"] = all(item["passed"] for item in checks)
+                path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             paths.append(str(path))
-            reports.append(json.loads(path.read_text(encoding="utf-8")))
+            reports.append(report)
         finally:
             for command in case.get("cleanup", []):
                 _run_powershell(command)
@@ -273,6 +458,8 @@ def main() -> int:
                         help="Maximum seconds to wait before stopping the run.")
     parser.add_argument("--suite", choices=sorted(SUITES),
                         help="Run a built-in GUI eval suite through /api/chat.")
+    parser.add_argument("--case", action="append", default=[],
+                        help="Run only a case id from the selected suite. Can be repeated.")
     parser.add_argument("--list-suites", action="store_true",
                         help="List built-in suites and exit.")
     parser.add_argument("--budget-duration", type=float, default=DEFAULT_BUDGETS["duration_s"])
@@ -293,7 +480,7 @@ def main() -> int:
     try:
         if args.suite:
             path = run_suite(args.base_url.rstrip("/"), args.suite, args.out_dir,
-                             args.timeout, budgets)
+                             args.timeout, budgets, case_ids=set(args.case) or None)
         else:
             if not args.task:
                 raise SystemExit("task is required unless --suite is used")

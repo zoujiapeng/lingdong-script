@@ -214,9 +214,16 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             slow.append(enriched)
     slow = sorted(slow, key=lambda item: int(item.get("elapsed_ms") or 0), reverse=True)[:12]
     usage_items = [r.get("usage") or r.get("status_endpoint", {}).get("usage") or {} for r in reports]
+    def passed(report: dict[str, Any]) -> bool:
+        if report.get("timed_out"):
+            return False
+        if "ground_truth_passed" in report:
+            return bool(report.get("ground_truth_passed"))
+        return report.get("status") == "done"
+
     return {
         "total": len(reports),
-        "passed_or_done": sum(1 for r in reports if r.get("status") == "done" and not r.get("timed_out")),
+        "passed_or_done": sum(1 for r in reports if passed(r)),
         "total_duration_s": round(sum(float(r.get("duration_s") or 0) for r in reports), 2),
         "total_cost_cny": round(sum(float(u.get("cost_cny") or 0) for u in usage_items), 4),
         "total_prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in usage_items),

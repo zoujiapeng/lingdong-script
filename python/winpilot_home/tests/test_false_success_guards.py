@@ -88,6 +88,8 @@ def test_gui_only_shell_policy():
     from winpilot.agent.loop import _gui_only_shell_allowed, _is_gui_only_task
 
     assert _is_gui_only_task("GUI-only test. Use Notepad.")
+    assert _is_gui_only_task("\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70GUI")
+    assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c\uff0c\u4e0d\u8981\u7528\u547d\u4ee4\u884c")
     assert _is_gui_only_task("GUI方式测试：打开画图，用鼠标拖动画布。")
     assert _is_gui_only_task("必须通过可见GUI操作，不要用脚本生成图片。")
     assert _gui_only_shell_allowed(
@@ -95,6 +97,49 @@ def test_gui_only_shell_policy():
     )
     assert not _gui_only_shell_allowed("Start-Process calc.exe")
     assert not _gui_only_shell_allowed("Set-Content C:\\Users\\zou\\Desktop\\x.txt hello")
+    assert not _gui_only_shell_allowed("powershell -ExecutionPolicy Bypass -File C:\\Users\\zou\\gui_final.ps1")
+
+
+def test_window_title_expect_condition(monkeypatch):
+    from winpilot.action import verify
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 456)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(verify.win32, "_window_text", lambda hwnd: "WinPilotDeep_append.txt - Notepad")
+
+    out = verify._eval_once({"window_title": "WinPilotDeep_append.txt"}, hwnd=123, level=0)
+
+    assert out.verified
+
+
+def test_save_task_refuses_cancel_button_click():
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(task="Save this file as C:\\Users\\zou\\Desktop\\x.txt")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Save As",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(elem_id=7, role="button", text="Cancel", cx=10, cy=10, source="uia")],
+    )
+
+    result = session._t_click({"element_id": 7})
+
+    assert "Refused to click" in result.text
+
+
+def test_assistant_history_truncates_verbose_content():
+    from winpilot.agent.loop import _sanitize_assistant
+
+    msg = SimpleNamespace(content="x" * 2000, tool_calls=[])
+
+    out = _sanitize_assistant(msg)
+
+    assert len(out["content"]) < 1100
+    assert "full response is kept in the LLM trace" in out["content"]
 
 
 def test_drawing_done_requires_drag(monkeypatch):

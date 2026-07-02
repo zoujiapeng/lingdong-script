@@ -57,9 +57,39 @@ def _looks_like_contact_list(text: str) -> bool:
     return long_lines < 3
 
 
+def _has_explicit_gui_only_marker(task: str) -> bool:
+    text = (task or "").casefold()
+    compact = re.sub(r"\s+", "", text)
+    return (
+        bool(re.search(r"\bgui[- ]only\b", text))
+        or "must use gui" in text
+        or "use gui" in text
+        or "through gui" in text
+        or "via gui" in text
+        or "not use command line" in text
+        or "do not use command line" in text
+        or "no command line" in text
+        or "\u5fc5\u987b\u8d70gui" in compact
+        or "\u5fc5\u987b\u901agui" in compact
+        or "\u901agui\u64cd\u4f5c" in compact
+        or "\u901a\u8fc7gui\u64cd\u4f5c" in compact
+        or "\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
+        or "\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
+        or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u8981\u4f7f\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u80fd\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u4f7f\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u8981\u7528\u811a\u672c" in compact
+        or "\u4e0d\u80fd\u7528\u811a\u672c" in compact
+        or "\u4e0d\u8981\u4f7f\u7528\u811a\u672c" in compact
+    )
+
+
 def _is_gui_only_task(task: str) -> bool:
     text = (task or "").casefold()
     return (
+        _has_explicit_gui_only_marker(task)
+        or
         bool(re.search(r"\bgui[- ]only\b", text))
         or "must use gui" in text
         or "gui方式" in text
