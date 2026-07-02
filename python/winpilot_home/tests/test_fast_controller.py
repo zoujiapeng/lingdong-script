@@ -135,6 +135,63 @@ def test_fast_controller_stops_on_failed_expect():
     assert len(calls) == 1
 
 
+def test_screen_watcher_updates_bulletin_with_changed_roi():
+    from winpilot.fast.watcher import ScreenWatcher
+    from winpilot.utils.screenshot import Region
+
+    frames = [
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        np.zeros((20, 20, 3), dtype=np.uint8),
+    ]
+    frames[1][5:13, 6:14] = 255
+    calls = []
+
+    def fake_capture(region):
+        calls.append(region)
+        return frames[min(len(calls) - 1, 1)]
+
+    watcher = ScreenWatcher(
+        region_provider=lambda: Region(100, 200, 20, 20),
+        capture_fn=fake_capture,
+        fps=10,
+    )
+
+    first = watcher.sample_once()
+    second = watcher.sample_once()
+    status = watcher.status()
+
+    assert not first.changed
+    assert second.changed
+    assert status["last_changed"]
+    changed = status["changed_regions"][0]
+    assert changed["left"] <= 106
+    assert changed["top"] <= 205
+    assert changed["left"] + changed["width"] >= 114
+    assert changed["top"] + changed["height"] >= 213
+
+
+def test_fast_controller_wait_change_uses_watcher():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.utils.screenshot import Region
+
+    class Watcher:
+        def wait_for_change(self, timeout_s=3.0, min_ratio=0.0005):
+            return ScreenDelta(True, 0.01, [Region(1, 2, 3, 4)], 5)
+
+        def status(self):
+            return {"samples": 2}
+
+    session = SimpleNamespace(snapshot=None, hwnd=None)
+    out = FastGuiController(session, watcher=Watcher()).execute([
+        {"wait_change": {"timeout_s": 1}},
+    ])
+
+    assert out["ok"]
+    assert out["metrics"]["screen_wait_count"] == 1
+    assert "changed" in out["results"][0]["preview"]
+
+
 def test_run_action_batch_tool_rejects_empty_actions():
     from winpilot.agent.fast_tools import FastToolMixin
 

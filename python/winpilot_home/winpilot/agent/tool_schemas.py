@@ -194,7 +194,8 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                         "type": "object",
                         "description": (
                             "Allowed action values: observe, click, click_element, "
-                            "type_text, hotkey, wait, read_text, clipboard_write, clipboard_paste. "
+                            "type_text, hotkey, wait, wait_change, wait_stable, "
+                            "read_text, clipboard_write, clipboard_paste. "
                             "Use either {'action':'click','element_id':1} or shorthand "
                             "{'click': {'element_id':1}}. click_element accepts "
                             "label/expected_region/visual_anchor/fallback_text/role."
@@ -204,6 +205,14 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                 "stop_on_error": _prop("boolean", "Default true."),
             },
             ["actions"],
+        ),
+        _tool(
+            "screen_watch",
+            "Low-cost screen change watcher. It continuously or manually samples cheap frame diffs and returns changed ROIs; it does not do OCR/VLM.",
+            {
+                "action": _prop("string", "start, stop, status, or sample.", enum=["start", "stop", "status", "sample"]),
+            },
+            ["action"],
         ),
         _tool("read_text", "Read visible text from a window using fused perception/OCR.",
               {"hwnd": _prop("integer", "Window handle. Omit for current target.")}),
