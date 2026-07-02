@@ -14,7 +14,8 @@ _EXPECT_SCHEMA = {
     "description": (
         "Verification condition. Examples: "
         '{"text_appears":"Save"}, {"text_gone":"Loading"}, '
-        '{"window_appears":"Notepad"}, {"screen_stable":true}, '
+        '{"window_appears":"Notepad"}, {"window_title":"file.txt - Notepad"}, '
+        '{"screen_stable":true}, '
         '{"file_exists":"C:\\\\path\\\\file.txt"}, '
         '{"process_running":"notepad"}, '
         '{"shell_true":"Test-Path C:\\\\x"}'

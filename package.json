@@ -23,6 +23,7 @@
     "eval:summary": "python scripts/eval_summary.py",
     "eval:gui:smoke": "python scripts/gui_eval_run.py --suite gui-smoke",
     "eval:gui:manipulation": "python scripts/gui_eval_run.py --suite gui-manipulation",
+    "eval:gui:deep": "python scripts/gui_eval_run.py --suite gui-deep-10",
     "cli": "node dist/cli/cli/index.js",
     "ai": "node dist/ai-interface/index.js",
     "ai:mcp": "node dist/ai-interface/index.js --mode mcp",

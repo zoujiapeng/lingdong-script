@@ -33,7 +33,7 @@ _DEFAULT_TIMEOUT_S = 6.0
 _COLOR_DEFAULT_TOLERANCE = 40
 
 SUPPORTED_CONDITIONS = (
-    "text_appears", "text_gone", "window_appears", "window_gone",
+    "text_appears", "text_gone", "window_appears", "window_gone", "window_title",
     "screen_stable", "color_match",
 ) + groundtruth.GROUNDTRUTH_KEYS
 
@@ -127,6 +127,12 @@ def _check_window(needle: str, want_present: bool) -> tuple[bool, str]:
     return (found is None), (found["title"] if found else "")
 
 
+def _check_window_title(needle: str, hwnd: int | None) -> tuple[bool, str]:
+    target = _target_hwnd(hwnd)
+    title = win32._window_text(target) if target else ""
+    return needle.casefold() in title.casefold(), title
+
+
 def _check_color(spec: dict, _hwnd: int | None) -> tuple[bool, str]:
     x, y = int(spec["x"]), int(spec["y"])
     expected = spec.get("rgb") or spec.get("color")
@@ -181,6 +187,10 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
             ok, title = _check_window(str(value), want_present=False)
             if not ok:
                 return VerifyOutcome(False, f'窗口 "{title}" 仍存在', "win32")
+        elif key == "window_title":
+            ok, title = _check_window_title(str(value), hwnd)
+            if not ok:
+                return VerifyOutcome(False, f'foreground window title "{title}" does not contain "{value}"', "win32")
         elif key == "screen_stable":
             ok, detail = _check_screen_stable(value, hwnd, deadline=deadline)
             if not ok:

@@ -14,6 +14,23 @@ from ..utils.screenshot import Region, capture
 from .tool_result import ToolResult
 
 
+_CANCEL_TEXTS = {"cancel", "\u53d6\u6d88"}
+
+
+def _looks_like_save_task(task: str) -> bool:
+    text = (task or "").casefold()
+    return any(marker in text for marker in (
+        "save", "save as", "export",
+        "\u4fdd\u5b58", "\u53e6\u5b58", "\u53e6\u5b58\u4e3a", "\u5bfc\u51fa",
+    ))
+
+
+def _looks_like_cancel_element(text: str, role: str) -> bool:
+    label = (text or "").strip().casefold()
+    role_text = (role or "").casefold()
+    return label in _CANCEL_TEXTS and ("button" in role_text or "\u6309\u94ae" in role_text or not role_text)
+
+
 def _tools_attr(name: str, default):
     """Preserve historical monkeypatch paths on winpilot.agent.tools."""
     tools_mod = sys.modules.get("winpilot.agent.tools")
@@ -41,6 +58,24 @@ class InteractionToolMixin:
                 "text": element.text, "role": element.role,
                 "coords": [x, y], "source": element.source,
             })
+            if (
+                button == "left"
+                and not double
+                and _looks_like_save_task(getattr(self, "task", ""))
+                and _looks_like_cancel_element(element.text, element.role)
+            ):
+                result = {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "error": (
+                        "Refused to click a Cancel/取消 button during a save/export task. "
+                        "Re-observe the active dialog, query for Save/保存, and click the "
+                        "actual confirm button or press Enter only after the filename field is correct."
+                    ),
+                    "post_state": verify_mod.post_state_summary(),
+                }
+                return ToolResult(self._fmt(result), replay=replay)
 
             def action() -> dict:
                 if button == "left" and not double and executor_mod.uia_invoke(element):

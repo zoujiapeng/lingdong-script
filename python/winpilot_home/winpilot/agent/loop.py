@@ -50,6 +50,7 @@ _RATE_LIMIT_BACKOFF_S = 5.0
 # Fold old observations only past this size (~12K tokens × ~4 chars/token).
 # Below it, history stays append-only so the DeepSeek prefix cache hits ~100%.
 _CONTEXT_FOLD_THRESHOLD_CHARS = 48000
+_MAX_ASSISTANT_HISTORY_CHARS = 900
 # DeepSeek pricing (¥ per 1M tokens). Adjust if the published rates change.
 _PRICE_CACHE_MISS_PER_M = 2.0
 _PRICE_CACHE_HIT_PER_M = 0.2
@@ -86,7 +87,13 @@ def _main_model_has_vision() -> bool:
 
 def _sanitize_assistant(msg) -> dict[str, Any]:
     """Assistant message for history — WITHOUT reasoning_content."""
-    out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+    content = msg.content or ""
+    if len(content) > _MAX_ASSISTANT_HISTORY_CHARS:
+        content = (
+            content[:_MAX_ASSISTANT_HISTORY_CHARS]
+            + "\n[assistant content truncated in history; full response is kept in the LLM trace]"
+        )
+    out: dict[str, Any] = {"role": "assistant", "content": content}
     if msg.tool_calls:
         out["tool_calls"] = [
             {
