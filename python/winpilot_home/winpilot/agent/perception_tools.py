@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 
+from ..config import CONFIG
 from ..perception import fusion, intent, ocr, vision_cv, vlm
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
@@ -133,8 +134,17 @@ class PerceptionToolMixin:
             return ToolResult("无法确定目标窗口，请先 list_windows + focus_window")
         include_icons = bool(args.get("include_icons", True))
         fusion_mod = _tools_attr("fusion", fusion)
-        self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
-                                           perception_mode=self._perception_mode())
+        perception_mode = self._perception_mode()
+        cache_key = (int(hwnd), bool(include_icons), perception_mode, self._screen_epoch)
+        cache_ttl = float(CONFIG.get("fusion", "observe_cache_ttl_s", default=2.0))
+        cached = self.cached_observe(cache_key, cache_ttl) if cache_ttl > 0 else None
+        if cached is not None:
+            self.snapshot = cached
+            self.snapshot.dim_stats["cache"] = {"count": len(self.snapshot.elements), "ms": 0}
+        else:
+            self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
+                                               perception_mode=perception_mode)
+            self.store_observe_cache(cache_key, self.snapshot)
         self._remember_target(hwnd, self.snapshot.title)
         query = str(args.get("query", "") or "")
         max_elements = int(args.get("max_elements", 160) or 160)

@@ -9,6 +9,7 @@ condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import win32gui
@@ -36,6 +37,13 @@ from .system_tools import SystemToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
 from .window_tools import WindowToolMixin
+
+_MUTATING_TOOLS = {
+    "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+    "focus_window", "wait", "tray_click", "run_shell", "run_detached",
+    "write_file", "clipboard_write", "clipboard_paste", "mouse_down",
+    "mouse_up", "move_mouse", "hold_key",
+}
 
 
 class ToolSession(
@@ -72,6 +80,8 @@ class ToolSession(
         self.plan: planner.Plan | None = None
         # Lightweight undo stack: things this run created that can be rolled back.
         self._undo_stack: list[tuple[str, object]] = []
+        self._screen_epoch = 0
+        self._observe_cache: dict[str, Any] | None = None
 
     # ----------------------------------------------------------- dispatch
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
@@ -90,7 +100,26 @@ class ToolSession(
                     self.world.observe_snapshot(self.snapshot)
             except Exception:
                 logger.exception("世界模型更新失败")  # never block tool flow
+        if name in _MUTATING_TOOLS:
+            self._screen_epoch += 1
+            self._observe_cache = None
         return result
+
+    def cached_observe(self, key: tuple, ttl_s: float) -> fusion.Snapshot | None:
+        cache = self._observe_cache
+        if not cache or cache.get("key") != key:
+            return None
+        if time.monotonic() - float(cache.get("created", 0.0)) > ttl_s:
+            return None
+        snapshot = cache.get("snapshot")
+        return snapshot if isinstance(snapshot, fusion.Snapshot) else None
+
+    def store_observe_cache(self, key: tuple, snapshot: fusion.Snapshot) -> None:
+        self._observe_cache = {
+            "key": key,
+            "snapshot": snapshot,
+            "created": time.monotonic(),
+        }
 
     @staticmethod
     def _norm_window_text(value: object) -> str:

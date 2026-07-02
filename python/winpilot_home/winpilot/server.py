@@ -29,6 +29,7 @@ from .agent.loop import AgentRunner
 from .agent.router import build_runner
 from .agent.session import SESSION
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
+from .eval import summary as eval_summary
 from .perception import ocr, vlm
 from .recorder import human as human_mod
 from .recorder import trace as trace_mod
@@ -252,6 +253,21 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/traces")
 def traces() -> list[dict[str, Any]]:
     return trace_mod.list_traces()
+
+
+@app.get("/api/evals")
+def evals(limit: int = 20) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 20), 100))
+    reports = eval_summary.list_eval_reports(limit=limit)
+    return eval_summary.aggregate_reports(reports)
+
+
+@app.get("/api/trace/{run_id}/summary")
+def trace_summary(run_id: str) -> dict[str, Any]:
+    summary = eval_summary.summarize_trace(run_id)
+    if not summary.get("run_id") and not summary.get("tool_count"):
+        raise HTTPException(404, "trace summary not found")
+    return summary
 
 
 @app.get("/api/trace/{run_id}")
