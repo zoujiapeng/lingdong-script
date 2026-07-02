@@ -94,6 +94,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                 "include_icons": _prop("boolean", "Whether to include CV icon candidates."),
                 "query": _prop("string", "Optional case-insensitive element text filter."),
                 "max_elements": _prop("integer", "Maximum elements to print after filtering. Default 160."),
+                "full": _prop("boolean", "Force full OCR/UIA observation; useful when text/menu grounding is needed."),
             },
         ),
         _tool(

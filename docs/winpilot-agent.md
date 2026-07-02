@@ -127,6 +127,7 @@
 - VLM：可选视觉语义描述。
 
 视觉模式下 UIA/OCR 可并行采集；VLM 可在配置有效且 UIA 不超过 assist 阈值时参与辅助。当前默认 `vlm_assist_threshold=60`。
+UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observe`：跳过全窗口 OCR，只返回 Win32/CV 元素和 `likely_canvas` 视觉摘要，适合先定位工作区再交给 `draw_strokes/drag`。如果确实需要读工具栏/菜单文字，调用 `observe(query="...")` 或 `observe(full=true)` 强制完整 OCR/UIA 感知。
 
 ## 动作
 

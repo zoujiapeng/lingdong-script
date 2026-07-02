@@ -304,7 +304,9 @@ def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
 
     monkeypatch.setattr(
         "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("deterministic drawing done should not run fresh observe")
+        ),
     )
 
     class _Client:
@@ -333,7 +335,9 @@ def test_simple_drawing_done_accepts_batch_draw_strokes(monkeypatch):
 
     monkeypatch.setattr(
         "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("deterministic batch drawing done should not run fresh observe")
+        ),
     )
 
     class _Client:
@@ -386,7 +390,9 @@ def test_simple_drawing_done_accepts_compacted_late_batch_visual_evidence(monkey
 
     monkeypatch.setattr(
         "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("deterministic compacted drawing done should not run fresh observe")
+        ),
     )
 
     class _Client:
@@ -419,7 +425,11 @@ def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
             "verified": True,
             "needs_observe": False,
             "last_action": "auto_visual_verify",
-            "fast_path_advice": "The controller already verified the visible local change; call done instead of adding another zoom/observe round.",
+            "fast_path_advice": (
+                "The controller already verified the visible local change for the last draw/drag action. "
+                "For a simple visible manipulation task, call done instead of adding another zoom/observe "
+                "round unless the user explicitly needs semantic inspection."
+            ),
             "metrics": {"action_count": 1, "observe_count": 1},
             "results": [
                 {
@@ -465,6 +475,8 @@ def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
     assert runner._last_verify_ok is True
     assert runner._recent_results[-1][0] == "draw_strokes"
     assert "visual_change_detected" in runner._recent_results[-1][1]
+    assert len(runner._recent_results[-1][1]) < 1600
+    assert "results" not in json.loads(runner._recent_results[-1][1])
     payload = json.loads(runner.messages[-1]["content"])
     assert payload["wrapped_by_fast_controller"] is True
     assert payload["verified"] is True
