@@ -29,6 +29,7 @@ from . import planner
 # them through their _tools_attr compatibility helper.
 from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
+from .fast_tools import FastToolMixin
 from .interaction_tools import InteractionToolMixin
 from .memory_tools import MemoryToolMixin
 from .perception_tools import PerceptionToolMixin
@@ -42,7 +43,7 @@ _MUTATING_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
     "write_file", "clipboard_write", "clipboard_paste", "mouse_down",
-    "mouse_up", "move_mouse", "hold_key",
+    "mouse_up", "move_mouse", "hold_key", "run_action_batch",
 }
 
 
@@ -54,6 +55,7 @@ class ToolSession(
     PerceptionToolMixin,
     InteractionToolMixin,
     SystemToolMixin,
+    FastToolMixin,
     PlanToolMixin,
 ):
     """Per-run state: latest snapshot + current target window."""
