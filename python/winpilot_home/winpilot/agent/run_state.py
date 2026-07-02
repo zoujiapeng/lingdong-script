@@ -37,6 +37,8 @@ OBSERVE_TOOLS = {
     "color_probe",
     "vlm_describe",
     "screen_watch",
+    "screenshot",
+    "zoom",
 }
 
 
@@ -146,6 +148,7 @@ class RunStateMachine:
             return
 
         if name in OBSERVE_TOOLS:
+            self.unverified_actions = 0
             self._transition("ready", name)
             return
 

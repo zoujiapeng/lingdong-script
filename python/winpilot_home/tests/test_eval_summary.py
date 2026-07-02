@@ -41,7 +41,7 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 3,
             "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost_cny": 0.2},
             "slow_tools": [{"tool": "click", "elapsed_ms": 80}],
-            "fast_gui": {"batch_calls": 2, "batch_actions": 4, "round_trips_saved": 2},
+            "summary": {"fast_gui": {"batch_calls": 2, "batch_actions": 4, "round_trips_saved": 2}},
         },
     ]
 

@@ -266,7 +266,10 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     slow = sorted(slow, key=lambda item: int(item.get("elapsed_ms") or 0), reverse=True)[:12]
     usage_items = [r.get("usage") or r.get("status_endpoint", {}).get("usage") or {} for r in reports]
     fast_items = [
-        r.get("fast_gui") or r.get("trace_summary", {}).get("fast_gui") or {}
+        r.get("fast_gui")
+        or r.get("summary", {}).get("fast_gui")
+        or r.get("trace_summary", {}).get("fast_gui")
+        or {}
         for r in reports
     ]
     def passed(report: dict[str, Any]) -> bool:

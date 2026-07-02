@@ -46,3 +46,16 @@ def test_run_state_batch_with_final_observe_is_ready():
 
     assert state.phase == "ready"
     assert state.guidance() == ""
+
+
+def test_run_state_observe_resets_pending_unverified_count():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool("click", {"x": 1, "y": 2}, json.dumps({"ok": True, "verified": False}))
+    assert state.unverified_actions == 1
+
+    state.after_tool("zoom", {"x": 1, "y": 2, "width": 10, "height": 10}, json.dumps({"ok": True}))
+
+    assert state.phase == "ready"
+    assert state.unverified_actions == 0
