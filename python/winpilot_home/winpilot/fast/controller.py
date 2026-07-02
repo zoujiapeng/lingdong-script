@@ -6,8 +6,10 @@ import time
 from typing import Any
 
 from ..agent.tool_result import ToolResult
+from ..utils.screenshot import window_region
 from .element_cache import ElementCache, anchor_from_dict
 from .types import BatchMetrics
+from .watcher import ScreenWatcher
 
 ALLOWED_BATCH_ACTIONS = {
     "observe",
@@ -16,6 +18,8 @@ ALLOWED_BATCH_ACTIONS = {
     "type_text",
     "hotkey",
     "wait",
+    "wait_change",
+    "wait_stable",
     "read_text",
     "clipboard_write",
     "clipboard_paste",
@@ -70,9 +74,27 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 class FastGuiController:
     """Small inner-loop executor owned by a ToolSession."""
 
-    def __init__(self, session, cache: ElementCache | None = None) -> None:
+    def __init__(
+        self,
+        session,
+        cache: ElementCache | None = None,
+        watcher: ScreenWatcher | None = None,
+    ) -> None:
         self.session = session
         self.cache = cache or ElementCache()
+        self.watcher = watcher or ScreenWatcher(region_provider=self._target_region)
+
+    def _target_region(self):
+        snapshot = getattr(self.session, "snapshot", None)
+        if snapshot is not None:
+            return snapshot.region
+        hwnd = getattr(self.session, "hwnd", None)
+        if hwnd:
+            try:
+                return window_region(hwnd)
+            except Exception:
+                return None
+        return None
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
@@ -107,6 +129,31 @@ class FastGuiController:
             args["expect"] = action["expect"]
         return self._dispatch("click", args)
 
+    def _wait_change(self, action: dict[str, Any]) -> ToolResult:
+        delta = self.watcher.wait_for_change(
+            timeout_s=float(action.get("timeout_s", 3.0)),
+            min_ratio=float(action.get("min_ratio", 0.0005)),
+        )
+        return ToolResult(json.dumps({
+            "ok": bool(delta.changed),
+            "changed": delta.changed,
+            "delta": delta.to_dict(),
+            "screen_watch": self.watcher.status(),
+        }, ensure_ascii=False))
+
+    def _wait_stable(self, action: dict[str, Any]) -> ToolResult:
+        result = self.watcher.wait_for_stable(
+            stable_ms=int(action.get("stable_ms", 500)),
+            timeout_s=float(action.get("timeout_s", 5.0)),
+            max_ratio=float(action.get("max_ratio", 0.0008)),
+        )
+        return ToolResult(json.dumps({
+            "ok": bool(result.get("stable")),
+            "stable": bool(result.get("stable")),
+            "delta": result.get("delta", {}),
+            "screen_watch": self.watcher.status(),
+        }, ensure_ascii=False))
+
     def execute(self, actions: list[dict[str, Any]], stop_on_error: bool = True) -> dict[str, Any]:
         metrics = BatchMetrics(started_ms=_now_ms())
         results: list[dict[str, Any]] = []
@@ -125,6 +172,10 @@ class FastGuiController:
             started = _now_ms()
             if name == "click_element":
                 result = self._click_element(normalised_args)
+            elif name == "wait_change":
+                result = self._wait_change(normalised_args)
+            elif name == "wait_stable":
+                result = self._wait_stable(normalised_args)
             else:
                 result = self._dispatch(name, normalised_args)
             elapsed = max(0, _now_ms() - started)
@@ -134,6 +185,8 @@ class FastGuiController:
                 metrics.observe_count += 1
             if isinstance(normalised_args.get("expect"), dict) or name == "wait":
                 metrics.verify_count += 1
+            if name in {"wait_change", "wait_stable"}:
+                metrics.screen_wait_count += 1
             item = {
                 "index": index,
                 "action": name,
