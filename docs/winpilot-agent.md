@@ -158,6 +158,8 @@ UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observ
 - `agent.verify_done=true`
 - `agent.llm_trace=true`
 - `agent.reflect_interval=8`
+- `fusion.screen_watch_autostart=true`
+- `fusion.observe_cache_ttl_s=2.0`
 - `coding.enabled=true`
 - `server.host=127.0.0.1`
 - `server.port=8765`
