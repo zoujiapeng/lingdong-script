@@ -186,7 +186,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "run_action_batch",
-            "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default.",
+            "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default. The controller may append an internal auto_visual_verify result after visual mutations.",
             {
                 "actions": {
                     "type": "array",
