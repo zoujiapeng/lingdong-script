@@ -184,6 +184,27 @@ def tool_schemas(planning: bool = False) -> list[dict]:
         ),
         _tool("wait", "Wait until a condition is true.",
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
+        _tool(
+            "run_action_batch",
+            "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default.",
+            {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "description": (
+                            "Allowed action values: observe, click, click_element, "
+                            "type_text, hotkey, wait, read_text, clipboard_write, clipboard_paste. "
+                            "Use either {'action':'click','element_id':1} or shorthand "
+                            "{'click': {'element_id':1}}. click_element accepts "
+                            "label/expected_region/visual_anchor/fallback_text/role."
+                        ),
+                    },
+                },
+                "stop_on_error": _prop("boolean", "Default true."),
+            },
+            ["actions"],
+        ),
         _tool("read_text", "Read visible text from a window using fused perception/OCR.",
               {"hwnd": _prop("integer", "Window handle. Omit for current target.")}),
         _tool("find_image", "Find an image template on screen and return matching coordinates.",

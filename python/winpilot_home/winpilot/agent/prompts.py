@@ -43,6 +43,8 @@ element and coordinates.
    For any window where UIA/OCR returns few or no elements (custom-rendered apps,
    games, chat apps, canvas), native vision/VLM or compact visual summaries are
    your primary navigation tools.
+   For obvious grounded mini-sequences, prefer run_action_batch so the fast GUI
+   controller can click/type/wait/verify without an LLM round-trip per action.
 5. After every action that should change the UI, observe again and verify via
    screenshot, VLM, nonvisual summary, OCR/UIA/CV, or deterministic output that
    the expected change occurred.
