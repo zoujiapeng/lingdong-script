@@ -67,6 +67,7 @@
 4. 打开 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。`TraceRecorder` 会给 `click`、`type_text`、`hotkey`、`launch`、`drag`、`scroll`、`draw_strokes` 保存前后截图，用来确认是否真的点击/输入/切换/滚动/绘制。
    `run_action_batch` 内部子动作会写 `agent_batch_action_start/agent_batch_action`；会改变屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，所以排查低延迟 batch 时要同时看这些截图，不能只看顶层 `run_action_batch` 的结果 JSON。
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
+   如果 LLM 顶层直接调用 `draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
 6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
    - 窗口/应用发现：`window_tools.py`
@@ -90,6 +91,7 @@
 | `agent/perception_tools.py` | `observe`、`read_text`、`find_image`、`vlm_describe`、视觉摘要等感知工具 mixin |
 | `agent/interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` 输入动作工具 mixin |
 | `agent/system_tools.py` | `run_shell`、`run_detached`、`launch`、`tray_click`、`search_files`、`undo_last` 系统/启动工具 mixin |
+| `agent/fast_tools.py` | `run_action_batch`、`screen_watch` 低延迟动作批处理和屏幕变化 watcher mixin |
 | `agent/plan_tools.py` | `revise_plan`、`complete_subgoal`、`done`、`fail` 计划和终止工具 mixin |
 | `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin |
 | `agent/memory_tools.py` | `remember`、`forget`、`reuse_skill` 经验记忆和 0-token replay 工具 mixin |
@@ -97,7 +99,7 @@
 
 当前 GUI agent 工具包括：
 
-`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`done`、`fail`。
+`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`run_action_batch`、`screen_watch`、`done`、`fail`。
 
 按配置动态加入：
 

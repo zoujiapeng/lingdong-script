@@ -566,6 +566,94 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
         return (result_text or "")[:1200]
 
+    @staticmethod
+    def _should_fast_wrap_visual_action(tool_name: str, args: dict[str, Any]) -> bool:
+        """Let the fast controller verify standalone visual mutations.
+
+        The model often calls draw/drag directly instead of using
+        run_action_batch. Wrapping only these high-value visual mutations gives
+        them the same cheap region-level verification without turning every
+        click or keystroke into noisy visual evidence.
+        """
+        if tool_name not in {"draw_strokes", "drag"}:
+            return False
+        return not isinstance(args.get("expect"), dict)
+
+    @staticmethod
+    def _normalise_fast_wrapped_action(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(args)
+        payload["action"] = tool_name
+        return payload
+
+    @staticmethod
+    def _fast_wrapped_result(tool_name: str, args: dict[str, Any], batch_result: ToolResult) -> ToolResult:
+        try:
+            data = json.loads(batch_result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        children = [item for item in (data.get("results") or []) if isinstance(item, dict)]
+        source_child = next((item for item in children if item.get("action") == tool_name), {})
+        auto_child = next((item for item in children if item.get("action") == "auto_visual_verify"), {})
+        source_data = source_child.get("data") if isinstance(source_child.get("data"), dict) else {}
+        auto_data = auto_child.get("data") if isinstance(auto_child.get("data"), dict) else {}
+
+        wrapped: dict[str, Any] = {
+            "ok": bool(data.get("ok")) if "ok" in data else not bool(data.get("error")),
+            "wrapped_by_fast_controller": True,
+            "tool": tool_name,
+            "source_batch_ok": data.get("ok"),
+            "source_batch_verified": data.get("verified"),
+            "needs_observe": data.get("needs_observe"),
+            "last_action": data.get("last_action"),
+            "metrics": data.get("metrics"),
+        }
+        if data.get("fast_path_advice"):
+            wrapped["fast_path_advice"] = data.get("fast_path_advice")
+        if source_child:
+            wrapped["source_action_ok"] = source_child.get("ok")
+            if "verified" in source_child:
+                wrapped["source_action_verified"] = source_child.get("verified")
+        if "verified" in source_data:
+            wrapped["source_action_verified"] = source_data.get("verified")
+        if auto_child:
+            wrapped["auto_visual_verify"] = auto_data or auto_child
+            if "verified" in auto_data:
+                wrapped["verified"] = bool(auto_data.get("verified"))
+            elif "verified" in auto_child:
+                wrapped["verified"] = bool(auto_child.get("verified"))
+        elif "verified" in data:
+            wrapped["verified"] = bool(data.get("verified"))
+        for source in (auto_data, source_data, data):
+            if not isinstance(source, dict):
+                continue
+            for key in (
+                "visual_change_detected",
+                "visual_change_ratio",
+                "verify_method",
+                "nonvisual_summary",
+            ):
+                if key in source and key not in wrapped:
+                    wrapped[key] = source[key]
+        wrapped["results"] = children
+        return ToolResult(
+            json.dumps(wrapped, ensure_ascii=False, default=str),
+            summary=batch_result.summary,
+            replay=batch_result.replay or {"tool": tool_name, **{k: v for k, v in args.items() if k != "expect"}},
+        )
+
+    def _dispatch_with_fast_visual_wrap(self, tool_name: str, args: dict[str, Any]) -> ToolResult:
+        if not self._should_fast_wrap_visual_action(tool_name, args):
+            return self.session.dispatch(tool_name, args)
+        batch_args = {
+            "actions": [self._normalise_fast_wrapped_action(tool_name, args)],
+            "sync": False,
+        }
+        batch_result = self.session.dispatch("run_action_batch", batch_args)
+        return self._fast_wrapped_result(tool_name, args, batch_result)
+
     def _drawing_should_stop_mutating(self) -> bool:
         """Guard against post-completion overwork on canvas tasks.
 
@@ -652,7 +740,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "Get-Content/Select-String verification."
                 )
             else:
-                result = self.session.dispatch(tc.function.name, args)
+                result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             self.run_state.after_tool(tc.function.name, args, result.text, result.terminal)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
@@ -703,7 +791,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (json.JSONDecodeError, TypeError):
                 parsed_result = {}
             if isinstance(parsed_result, dict):
-                for key in ("ok", "verified", "needs_observe", "last_action", "metrics"):
+                for key in (
+                    "ok",
+                    "verified",
+                    "wrapped_by_fast_controller",
+                    "visual_change_detected",
+                    "visual_change_ratio",
+                    "fast_path_advice",
+                    "needs_observe",
+                    "last_action",
+                    "metrics",
+                ):
                     if key in parsed_result:
                         result_meta[key] = parsed_result[key]
             BUS.publish(
@@ -782,23 +880,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "role": "user",
                 "content": (
                     "[Drawing/canvas task guidance] The goal is visible pixels, not just tool selection. "
-                    "Work in batches: observe ONCE to locate the canvas and tools, plan the whole figure "
+                    "Work in batches: observe ONCE to locate the canvas/work area, plan the whole figure "
                     "(all strokes), then commit them in as few calls as possible using draw_strokes "
                     "(many separate strokes in one call) rather than one drag per LLM round-trip. Once canvas "
                     "coordinates are grounded, use run_action_batch for the immediate action+verification "
-                    "sequence, including the common two-action case draw_strokes followed by zoom. Example "
-                    "shape batch: {'actions':[{'draw_strokes': {...}}, {'zoom': {'x':..., 'y':..., "
-                    "'width':..., 'height':...}}]}. This lets the fast controller execute and verify the "
-                    "mini-sequence together. For simple "
+                    "sequence, or call draw_strokes directly; standalone draw_strokes is automatically "
+                    "wrapped by the fast controller. Do not pre-explore toolbars unless direct strokes "
+                    "fail or the active mode is clearly wrong. For simple "
                     "shapes or marks, prefer direct strokes on the located canvas before spending steps on "
                     "toolbar shape menus; use toolbar/tool selection mainly when direct strokes report no "
                     "visual change or the current tool is clearly wrong. Do not attach text_appears expects "
                     "such as Pencil/Brush/Triangle to toolbar clicks; many drawing tool icons have no stable "
-                    "OCR text. Verify by canvas pixel change and zoom/nonvisual summaries instead. For simple "
-                    "requested figures, a "
-                    "coherent visible outline plus visual_change_detected=true and one observe/zoom check is "
-                    "enough; do not redraw just to make the result thicker or prettier. After a "
-                    "batch, observe again to check the result and only then draw corrections. "
+                    "OCR text. Verify by canvas pixel change and nonvisual summaries first. For simple "
+                    "requested figures, a coherent visible outline plus visual_change_detected=true is "
+                    "enough; if the tool result includes fast_path_advice, call done instead of adding a "
+                    "separate zoom/observe round. Only zoom/observe again when the result says "
+                    "needs_observe=true, visual_change_detected=false, or the task requires semantic visual "
+                    "inspection. Do not redraw just to make the result thicker or prettier. "
                     "Read the tool result: visual_change_detected=true means the strokes likely changed the "
                     "visible surface; false means you probably drew on a toolbar, popup, inactive surface, "
                     "or with a non-drawing mode. If a stroke batch reports visual_change_detected=false, do "

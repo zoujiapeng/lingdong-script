@@ -402,6 +402,7 @@ class FastGuiController:
         current_state_verified = False
         verified_expect_any = False
         verified_expect_false_any = False
+        auto_verified_visual = False
         last_action = ""
         mutating_seen = False
         last_visual_region: Region | None = None
@@ -550,6 +551,7 @@ class FastGuiController:
             if data.get("verified") is True:
                 verified_any = True
                 current_state_verified = True
+                auto_verified_visual = True
         sync_result: dict[str, Any] = {}
         if metrics.failed_at is None and sync and mutating_seen:
             sync_required = bool(sync.get("required")) if isinstance(sync, dict) else False
@@ -594,6 +596,13 @@ class FastGuiController:
         }
         if current_state_verified and metrics.failed_at is None:
             payload["verified"] = True
+        if auto_verified_visual and metrics.failed_at is None:
+            payload["fast_path_advice"] = (
+                "The controller already verified the visible local change for "
+                "the last draw/drag action. For a simple visible manipulation "
+                "task, call done instead of adding another zoom/observe round "
+                "unless the user explicitly needs semantic inspection."
+            )
         if verified_expect_any or verified_expect_false_any:
             payload["verified"] = bool(
                 verified_expect_any

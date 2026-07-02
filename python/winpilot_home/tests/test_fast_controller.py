@@ -275,6 +275,7 @@ def test_fast_controller_auto_verifies_visual_mutation_region():
     assert auto["nonvisual_summary"]["blankish"] is False
     assert captures
     assert out["needs_observe"] is False
+    assert "call done instead of adding another zoom/observe" in out["fast_path_advice"]
     assert out["metrics"]["action_count"] == 2
     assert out["metrics"]["observe_count"] == 1
 
