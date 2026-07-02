@@ -404,20 +404,22 @@ class DoneVerifierMixin:
             self._done_unverified = True
             return True
 
-        screen = self._fresh_done_screen()
         recent, evidence = self._done_evidence()
+        if _is_drawing_task(self.task):
+            if not self._verify_drawing_done(evidence):
+                return False
+            if self._drawing_has_deterministic_done_evidence(evidence):
+                reason = (
+                    "Drawing task accepted from deterministic evidence: recorded "
+                    "strokes and visual_change_detected=true."
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+                self._done_verified = True
+                return True
+
+        screen = self._fresh_done_screen()
         if not self._verify_visible_payloads(screen, evidence):
             return False
-        if not self._verify_drawing_done(evidence):
-            return False
-        if self._drawing_has_deterministic_done_evidence(evidence):
-            reason = (
-                "Drawing task accepted from deterministic evidence: recorded "
-                "strokes and visual_change_detected=true."
-            )
-            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-            self._done_verified = True
-            return True
         if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
             reason = (
                 "Desktop icon drag accepted from deterministic evidence: target "

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from ..config import CONFIG
-from ..perception import fusion, intent, ocr, vision_cv, vlm
+from ..perception import fusion, intent, ocr, vision_cv, vlm, win32
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
@@ -152,6 +153,67 @@ class PerceptionToolMixin:
             f"diff_ms={int(status.get('diff_latency_ms') or 0)}."
         )
 
+    def _canvas_fast_observe_enabled(self, args: dict, perception_mode: str) -> bool:
+        """Use a light visual snapshot for UIA-off canvas/drawing tasks.
+
+        Canvas tasks usually need the work-area bbox and coarse visual state,
+        not a full-window OCR pass over every toolbar label. Query/full observe
+        still forces the complete path when text grounding is actually needed.
+        """
+        if perception_mode != "visual":
+            return False
+        if not self._needs_visual_state_summary():
+            return False
+        if str(args.get("query", "") or "").strip():
+            return False
+        if bool(args.get("full") or args.get("force_full")):
+            return False
+        if not bool(CONFIG.get("fusion", "canvas_fast_observe", default=True)):
+            return False
+        # Keep UIA-enabled behaviour conservative; the fast path is primarily
+        # for UIA-off testing/custom surfaces where OCR is the dominant cost.
+        return "uia" not in set(CONFIG.enabled_dimensions())
+
+    def _fast_canvas_snapshot(self, hwnd: int, include_icons: bool) -> fusion.Snapshot:
+        region = _tools_attr("window_region", window_region)(hwnd)
+        title = _tools_attr("win32", win32)._window_text(hwnd)
+        snapshot = fusion.Snapshot(hwnd=hwnd, title=title, region=region)
+        order = CONFIG.enabled_dimensions()
+        fused = []
+        for dim in order:
+            if dim not in {"win32", "cv"}:
+                snapshot.dim_stats[dim] = {
+                    "count": 0,
+                    "ms": 0,
+                    "skipped": "canvas_fast_observe",
+                }
+                continue
+            started = time.monotonic()
+            collected = []
+            try:
+                if dim == "win32":
+                    win32_mod = _tools_attr("win32", win32)
+                    collected = win32_mod.collect(hwnd)
+                    collected.extend(win32_mod.explorer_items(hwnd))
+                elif dim == "cv":
+                    collected = vision_cv.detect_icon_candidates(region) if include_icons else []
+            except Exception as exc:
+                logger.warning("fast canvas observe %s failed: %s", dim, exc)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            snapshot.dim_stats[dim] = {"count": len(collected), "ms": elapsed_ms}
+            fused.extend(collected)
+        for idx, element in enumerate(fused, start=1):
+            element.elem_id = idx
+        snapshot.elements = fused
+        BUS.publish(
+            "perception",
+            hwnd=hwnd,
+            title=title,
+            dims=snapshot.dim_stats,
+            total=len(fused),
+        )
+        return snapshot
+
     def _t_observe(self, args: dict) -> ToolResult:
         hwnd = self._resolve_hwnd(args)
         if not hwnd:
@@ -159,15 +221,26 @@ class PerceptionToolMixin:
         include_icons = bool(args.get("include_icons", True))
         fusion_mod = _tools_attr("fusion", fusion)
         perception_mode = self._perception_mode()
-        cache_key = (int(hwnd), bool(include_icons), perception_mode, self._screen_epoch)
+        fast_canvas = self._canvas_fast_observe_enabled(args, perception_mode)
+        observe_profile = "canvas_fast" if fast_canvas else "full"
+        cache_key = (
+            int(hwnd),
+            bool(include_icons),
+            perception_mode,
+            observe_profile,
+            self._screen_epoch,
+        )
         cache_ttl = float(CONFIG.get("fusion", "observe_cache_ttl_s", default=2.0))
         cached = self.cached_observe(cache_key, cache_ttl) if cache_ttl > 0 else None
         if cached is not None:
             self.snapshot = cached
             self.snapshot.dim_stats["cache"] = {"count": len(self.snapshot.elements), "ms": 0}
         else:
-            self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
-                                               perception_mode=perception_mode)
+            if fast_canvas:
+                self.snapshot = self._fast_canvas_snapshot(hwnd, include_icons=include_icons)
+            else:
+                self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
+                                                   perception_mode=perception_mode)
             self.store_observe_cache(cache_key, self.snapshot)
         self._remember_target(hwnd, self.snapshot.title)
         query = str(args.get("query", "") or "")

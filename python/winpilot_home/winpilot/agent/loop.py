@@ -555,6 +555,36 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "results": compact_results,
             }
             return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
+        if tool_name in {"draw_strokes", "drag"} and data.get("wrapped_by_fast_controller"):
+            compact: dict[str, Any] = {
+                "ok": data.get("ok"),
+                "verified": data.get("verified"),
+                "wrapped_by_fast_controller": data.get("wrapped_by_fast_controller"),
+                "visual_change_detected": data.get("visual_change_detected"),
+                "visual_change_ratio": data.get("visual_change_ratio"),
+                "verify_method": data.get("verify_method"),
+                "needs_observe": data.get("needs_observe"),
+                "last_action": data.get("last_action"),
+                "metrics": data.get("metrics"),
+            }
+            auto = data.get("auto_visual_verify")
+            if isinstance(auto, dict):
+                compact["auto_visual_verify"] = {
+                    "source_action": auto.get("source_action"),
+                    "region": auto.get("region"),
+                    "verified": auto.get("verified"),
+                    "visual_change_detected": auto.get("visual_change_detected"),
+                    "visual_change_ratio": auto.get("visual_change_ratio"),
+                    "verify_method": auto.get("verify_method"),
+                    "nonvisual_summary": AgentRunner._compact_visual_summary(
+                        auto.get("nonvisual_summary")
+                    ),
+                }
+            if "nonvisual_summary" in data:
+                compact["nonvisual_summary"] = AgentRunner._compact_visual_summary(
+                    data.get("nonvisual_summary")
+                )
+            return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
         if tool_name in {"zoom", "screenshot"}:
             compact = {
                 "ok": data.get("ok"),
@@ -778,7 +808,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 or '"verified"' in (result.text or "")
                 or "visual_change_detected" in (result.text or "")
             ):
-                if tc.function.name in {"run_action_batch", "zoom", "screenshot"}:
+                if tc.function.name in {"run_action_batch", "zoom", "screenshot", "draw_strokes", "drag"}:
                     evidence_text = self._compact_tool_evidence(tc.function.name, result.text)
                 else:
                     limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600

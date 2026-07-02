@@ -38,6 +38,8 @@
 - 工具级复盘方法已写入 `CLAUDE.md` 和 `docs/winpilot-agent.md`：查 `<run_id>.jsonl` 的 `agent_step/agent_tool_start/agent_tool/done_check`，再打开前后截图和 `NNN_llm_request/response.json` 对照模型输入、工具参数、真实屏幕。`run_action_batch` 内部动作另有 `agent_batch_action_start/agent_batch_action` 和 `batch_before/batch_after` 截图。
 - 低延迟视觉动作路径：`run_action_batch` 在 `agent/fast_tools.py` -> `fast/controller.py`；controller 会给 `draw_strokes/drag` 追加 `auto_visual_verify`。顶层 `draw_strokes/drag` 现在也会在 `AgentRunner` 中自动包装成单动作 batch，结果里有 `wrapped_by_fast_controller` 和本地视觉变化证据。验证充分时会返回 `fast_path_advice`，提示模型直接 done 而不是再补 zoom/observe。
 - UIA-off 真实验证：`20260702-230125-aed7a2` 走 `/api/chat` 完成 Paint 三角形任务，工具序列为 `launch -> observe -> draw_strokes -> done`，`draw_strokes` 结果含 `wrapped_by_fast_controller=true`、`visual_change_detected=true`、`fast_path_advice`，截图 `after_003.jpg` 与模型思考一致。
+- UIA-off canvas 快速感知已实现：绘图/画布任务在 UIA 关闭、无 `query/full` observe 时走 `canvas_fast_observe`，跳过全窗口 OCR，只保留 Win32/CV/`likely_canvas` 摘要；需要文字/菜单时用 `observe(query=...)` 或 `observe(full=true)` 强制完整感知。
+- 最新 UIA-off 验证：`20260702-234823-a27fea` 走 `/api/chat` 完成同一 Paint 三角形任务，工具序列 `launch -> observe -> draw_strokes -> done`，`observe=220ms`，仅 1 次 perception 且 OCR 为 `skipped=canvas_fast_observe`，done gate 直接 deterministic pass，无第二次 OCR/LLM judge；eval 预算全过，duration 52.33s、cost 0.0692 CNY。
 - `npm run clean` 可删除 `dist/`、`release/`、缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
 - `python/core/screenshot.py` 补 `capture_screen()`，兼容 legacy Robot Framework keyword。
 - `server.py` 的启动守卫只拦真实 `uvicorn winpilot.server:app`，不拦测试导入。
@@ -52,7 +54,7 @@
 - GUI 任务必须看真实屏幕/trace/文件/进程证据，不能只看 done 日志。
 - 复盘时必须确认 LLM request、tool args、tool result、前后截图四者是否对得上。
 - 不要为了 QQ、计算器、网易云、抖音等软件写专属规则。
-- UIA-off 路径功能可用但还不够快；`20260702-230125-aed7a2` 的工具序列已压到 4 个，但 OCR observe 仍约 3.8s，性能预算里的 `observe_avg_ms<=2500` 仍失败。下一步应做 ROI/变化触发感知或更轻量的 canvas/work-area 识别。
+- UIA-off canvas 路径已明显提速，但这只是画布/绘图类 fast path；QQ/网易云/抖音等非画布 custom UI 仍需要继续做 ROI/变化触发 OCR、输入框识别和轻量视觉控制器。
 
 ## 推荐验证
 
