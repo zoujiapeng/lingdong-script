@@ -6,8 +6,9 @@ import time
 from typing import Any
 
 from ..agent.tool_result import ToolResult
+from ..perception import vision_cv
 from ..utils.log import BUS
-from ..utils.screenshot import window_region
+from ..utils.screenshot import Region, capture, window_region
 from .element_cache import ElementCache, anchor_from_dict
 from .types import BatchMetrics
 from .watcher import ScreenWatcher
@@ -46,6 +47,7 @@ BATCH_OBSERVE_ACTIONS = {
     "read_text",
     "vlm_describe",
     "zoom",
+    "auto_visual_verify",
 }
 
 
@@ -134,10 +136,12 @@ class FastGuiController:
         session,
         cache: ElementCache | None = None,
         watcher: ScreenWatcher | None = None,
+        capture_fn=capture,
     ) -> None:
         self.session = session
         self.cache = cache or ElementCache()
         self.watcher = watcher or ScreenWatcher(region_provider=self._target_region)
+        self.capture_fn = capture_fn
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -294,6 +298,97 @@ class FastGuiController:
             "max_ratio": args.get("max_ratio", 0.0008),
         })
 
+    @staticmethod
+    def _coords_region(coords: list[tuple[int, int]], pad: int = 40) -> Region | None:
+        if not coords:
+            return None
+        xs = [x for x, _ in coords]
+        ys = [y for _, y in coords]
+        return Region(
+            min(xs) - pad,
+            min(ys) - pad,
+            max(1, max(xs) - min(xs) + 2 * pad),
+            max(1, max(ys) - min(ys) + 2 * pad),
+        ).clamp_to_screen()
+
+    @staticmethod
+    def _action_region(name: str, args: dict[str, Any]) -> Region | None:
+        coords: list[tuple[int, int]] = []
+        try:
+            if name == "draw_strokes":
+                for stroke in args.get("strokes") or []:
+                    for point in stroke or []:
+                        coords.append((int(point[0]), int(point[1])))
+                return FastGuiController._coords_region(coords, pad=48)
+            if name == "drag":
+                coords.append((int(args["x1"]), int(args["y1"])))
+                coords.append((int(args["x2"]), int(args["y2"])))
+                for point in args.get("points") or []:
+                    coords.append((int(point[0]), int(point[1])))
+                return FastGuiController._coords_region(coords, pad=56)
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        return None
+
+    @staticmethod
+    def _compact_image_summary(image) -> dict[str, Any]:
+        ink = vision_cv.image_ink_stats_from_array(image)
+        colors = vision_cv.color_presence(image).get("colors", {})
+        visible_colors = {
+            name: {
+                key: value
+                for key, value in stats.items()
+                if key in {"pixels", "ratio", "bbox", "largest_bbox", "largest_area"}
+            }
+            for name, stats in colors.items()
+            if isinstance(stats, dict) and stats.get("visible")
+        }
+        return {
+            "width": ink.get("width"),
+            "height": ink.get("height"),
+            "blankish": ink.get("blankish"),
+            "ink_ratio": ink.get("ink_ratio"),
+            "ink_bbox": ink.get("ink_bbox"),
+            "component_count": ink.get("component_count"),
+            "visible_colors": visible_colors,
+        }
+
+    def _auto_visual_verify(
+        self,
+        region: Region,
+        source_action: str,
+        source_data: dict[str, Any],
+    ) -> ToolResult:
+        started = _now_ms()
+        payload: dict[str, Any] = {
+            "ok": True,
+            "source_action": source_action,
+            "region": {
+                "x": region.left,
+                "y": region.top,
+                "width": region.width,
+                "height": region.height,
+            },
+        }
+        try:
+            image = self.capture_fn(region)
+            payload["nonvisual_summary"] = self._compact_image_summary(image)
+            if "visual_change_detected" in source_data:
+                payload["visual_change_detected"] = bool(source_data.get("visual_change_detected"))
+            if "visual_change_ratio" in source_data:
+                payload["visual_change_ratio"] = source_data.get("visual_change_ratio")
+            if source_data.get("verified") is True:
+                payload["verified"] = True
+                payload["verify_method"] = "auto-region-summary"
+        except Exception as exc:
+            payload = {
+                "ok": False,
+                "source_action": source_action,
+                "error": f"auto visual verify capture failed: {exc}",
+            }
+        payload["elapsed_ms"] = max(0, _now_ms() - started)
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
     def execute(
         self,
         actions: list[dict[str, Any]],
@@ -309,6 +404,10 @@ class FastGuiController:
         verified_expect_false_any = False
         last_action = ""
         mutating_seen = False
+        last_visual_region: Region | None = None
+        last_visual_action = ""
+        last_visual_data: dict[str, Any] = {}
+        semantic_observe_after_visual = False
         for index, action in enumerate(actions, start=1):
             if not isinstance(action, dict):
                 metrics.failed_at = index
@@ -382,6 +481,23 @@ class FastGuiController:
             if data:
                 item["data"] = data
             results.append(item)
+            if name in BATCH_OBSERVE_ACTIONS:
+                last_visual_region = None
+                last_visual_action = ""
+                last_visual_data = {}
+                semantic_observe_after_visual = True
+            elif name in BATCH_MUTATING_ACTIONS:
+                region = self._action_region(name, normalised_args)
+                if region is not None:
+                    last_visual_region = region
+                    last_visual_action = name
+                    last_visual_data = data
+                    semantic_observe_after_visual = False
+                else:
+                    last_visual_region = None
+                    last_visual_action = ""
+                    last_visual_data = {}
+                    semantic_observe_after_visual = False
             self._publish_child_done(
                 batch_id,
                 index,
@@ -395,6 +511,45 @@ class FastGuiController:
             if failed and stop_on_error:
                 metrics.failed_at = index
                 break
+        if (
+            metrics.failed_at is None
+            and last_visual_region is not None
+            and not semantic_observe_after_visual
+        ):
+            index = len(results) + 1
+            started = _now_ms()
+            name = "auto_visual_verify"
+            args = {
+                "source_action": last_visual_action,
+                "region": {
+                    "x": last_visual_region.left,
+                    "y": last_visual_region.top,
+                    "width": last_visual_region.width,
+                    "height": last_visual_region.height,
+                },
+            }
+            self._publish_child_start(batch_id, index, name, args)
+            result = self._auto_visual_verify(last_visual_region, last_visual_action, last_visual_data)
+            elapsed = max(0, _now_ms() - started)
+            data = _json_dict(result.text)
+            ok = not _failed(result)
+            metrics.tool_latencies_ms.append(elapsed)
+            metrics.observe_count += 1
+            metrics.verify_count += 1
+            results.append({
+                "index": index,
+                "action": name,
+                "elapsed_ms": elapsed,
+                "terminal": result.terminal,
+                "preview": result.text[:800],
+                "ok": ok,
+                "verified": bool(data.get("verified")) if "verified" in data else False,
+                "data": data,
+            })
+            self._publish_child_done(batch_id, index, name, args, result, elapsed, ok, data)
+            if data.get("verified") is True:
+                verified_any = True
+                current_state_verified = True
         sync_result: dict[str, Any] = {}
         if metrics.failed_at is None and sync and mutating_seen:
             sync_required = bool(sync.get("required")) if isinstance(sync, dict) else False

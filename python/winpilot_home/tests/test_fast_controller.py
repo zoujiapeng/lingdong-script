@@ -231,12 +231,63 @@ def test_fast_controller_batches_visual_actions_without_extra_observe():
     ]
 
 
+def test_fast_controller_auto_verifies_visual_mutation_region():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+    captures = []
+
+    def fake_capture(region):
+        captures.append(region)
+        image = np.full((80, 100, 3), 255, dtype=np.uint8)
+        image[20:60, 45:55] = 0
+        image[50:60, 25:75] = 0
+        return image
+
+    class Session:
+        snapshot = None
+        run_id = "run-1"
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "draw_strokes":
+                return ToolResult(
+                    '{"ok": true, "verified": true, '
+                    '"visual_change_detected": true, "visual_change_ratio": 0.04}'
+                )
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session(), capture_fn=fake_capture).execute([
+        {"click": {"x": 100, "y": 100}},
+        {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]], "duration": 0.1}},
+    ], sync=False)
+
+    assert out["ok"]
+    assert [item["action"] for item in out["results"]] == [
+        "click",
+        "draw_strokes",
+        "auto_visual_verify",
+    ]
+    auto = out["results"][-1]["data"]
+    assert auto["source_action"] == "draw_strokes"
+    assert auto["visual_change_detected"] is True
+    assert auto["nonvisual_summary"]["blankish"] is False
+    assert captures
+    assert out["needs_observe"] is False
+    assert out["metrics"]["action_count"] == 2
+    assert out["metrics"]["observe_count"] == 1
+
+
 def test_fast_controller_publishes_batch_child_events():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
     from winpilot.utils.log import BUS
 
     events = []
+
+    def fake_capture(_region):
+        return np.full((20, 20, 3), 255, dtype=np.uint8)
 
     def sink(event):
         if str(event.get("type", "")).startswith("agent_batch_action"):
@@ -253,7 +304,7 @@ def test_fast_controller_publishes_batch_child_events():
 
     BUS.add_sink(sink)
     try:
-        out = FastGuiController(Session()).execute([
+        out = FastGuiController(Session(), capture_fn=fake_capture).execute([
             {"click": {"x": 100, "y": 100}},
             {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]]}}
         ], sync=False)
@@ -266,9 +317,11 @@ def test_fast_controller_publishes_batch_child_events():
         ("agent_batch_action", "click", 1),
         ("agent_batch_action_start", "draw_strokes", 2),
         ("agent_batch_action", "draw_strokes", 2),
+        ("agent_batch_action_start", "auto_visual_verify", 3),
+        ("agent_batch_action", "auto_visual_verify", 3),
     ]
     assert events[0]["run_id"] == "run-1"
-    assert events[-1]["result_meta"]["visual_change_detected"] is True
+    assert events[3]["result_meta"]["visual_change_detected"] is True
 
 
 def test_fast_controller_unverified_mutation_after_verified_action_needs_observe():
