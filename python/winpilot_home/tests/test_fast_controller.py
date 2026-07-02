@@ -110,6 +110,44 @@ def test_fast_controller_accepts_single_key_shorthand():
     assert out["metrics"]["controller_round_trips_saved"] == 1
 
 
+def test_fast_controller_marks_needs_observe_without_expect():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {"click": {"x": 1, "y": 2}},
+    ])
+
+    assert out["ok"]
+    assert out["needs_observe"] is True
+    assert "verified" not in out
+
+
+def test_fast_controller_aggregates_expected_verification():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"click": {"x": 1, "y": 2, "expect": {"text": "done"}}},
+    ])
+
+    assert out["ok"]
+    assert out["verified"] is True
+    assert out["needs_observe"] is False
+
+
 def test_fast_controller_stops_on_failed_expect():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

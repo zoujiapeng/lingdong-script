@@ -32,6 +32,12 @@ class ContextGuidanceMixin:
                 "role": "user",
                 "content": f"[visual state warning] {visual_note}",
             })
+        screen_note = self.session.world.screen_advisory()
+        if screen_note:
+            self.messages.append({"role": "user", "content": f"[screen watch] {screen_note}"})
+        run_note = self.run_state.guidance()
+        if run_note:
+            self.messages.append({"role": "user", "content": f"[run state] {run_note}"})
         note = self.session.world.advisory()
         if note:
             self.messages.append({"role": "user", "content": f"[系统观察] {note}"})

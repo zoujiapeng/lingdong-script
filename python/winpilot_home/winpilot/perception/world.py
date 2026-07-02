@@ -19,7 +19,7 @@ from dataclasses import dataclass
 # color_probe/find_image/vlm_describe) and ``wait`` (legitimately changes nothing).
 _ACTION_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag",
-    "focus_window", "tray_click", "run_shell",
+    "focus_window", "tray_click", "run_shell", "run_action_batch",
 }
 _STUCK_REPEAT = 3        # same action this many times in a row -> stuck
 _STUCK_NO_CHANGE = 3     # this many post-action observes with no change -> stuck
@@ -50,6 +50,9 @@ class WorldModel:
         self._action_since_observe = False
         self._last_change_line = ""
         self._stuck_announced = False                # edge-trigger guard for replan
+        self._screen_bulletin: dict = {}
+        self._screen_notice_seq = 0
+        self._screen_notice_sent_seq = 0
 
     # ---------------------------------------------------------------- feed
     @staticmethod
@@ -100,6 +103,25 @@ class WorldModel:
             self._last_change_line = self._describe_delta(prev, snapshot.title, fingerprint)
             self._stuck_announced = False  # the screen changed = progress
         self._last_observe = _ObserveState(snapshot.title, fingerprint, len(snapshot.elements))
+
+    def record_screen_bulletin(self, status: dict) -> None:
+        """Record the fast screen watcher bulletin without triggering capture."""
+        if not isinstance(status, dict):
+            return
+        sequence = int(status.get("sequence") or 0)
+        compact = {
+            "sequence": sequence,
+            "running": bool(status.get("running")),
+            "last_changed": bool(status.get("last_changed")),
+            "last_ratio": float(status.get("last_ratio") or 0.0),
+            "changed_regions": list(status.get("changed_regions") or [])[:3],
+            "samples": int(status.get("samples") or 0),
+            "capture_latency_ms": int(status.get("capture_latency_ms") or 0),
+            "diff_latency_ms": int(status.get("diff_latency_ms") or 0),
+        }
+        self._screen_bulletin = compact
+        if compact["last_changed"] and sequence > 0:
+            self._screen_notice_seq = sequence
 
     @staticmethod
     def _describe_delta(prev: _ObserveState | None, title: str,
@@ -157,6 +179,31 @@ class WorldModel:
             return f"提示：{self._last_change_line}，请确认上一步是否点对了目标。"
         return ""
 
+    def screen_advisory(self) -> str:
+        """Return one compact watcher notice per changed screen sequence."""
+        if self._screen_notice_seq <= self._screen_notice_sent_seq:
+            return ""
+        self._screen_notice_sent_seq = self._screen_notice_seq
+        status = self._screen_bulletin
+        regions = status.get("changed_regions") or []
+        roi = ""
+        if regions:
+            first = regions[0]
+            try:
+                left = int(first.get("left", 0))
+                top = int(first.get("top", 0))
+                width = int(first.get("width", 0))
+                height = int(first.get("height", 0))
+                roi = f" roi=({left},{top},{width}x{height})"
+            except AttributeError:
+                roi = ""
+        ratio = float(status.get("last_ratio") or 0.0)
+        return (
+            f"screen_watch changed: ratio={ratio:.4f}{roi}. "
+            "If the next action depends on loaded/changed UI, use observe/read_text/VLM "
+            "on the target area or wait_stable before acting."
+        )
+
     def state(self) -> dict:
         """Compact state for the UI / trace (not sent to the LLM)."""
         return {
@@ -165,4 +212,5 @@ class WorldModel:
             "identical_observes": self._identical_observes,
             "last_change": self._last_change_line,
             "last_title": self._last_observe.title if self._last_observe else "",
+            "screen_watch": dict(self._screen_bulletin),
         }

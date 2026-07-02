@@ -27,6 +27,7 @@ from .context_guidance import ContextGuidanceMixin
 from .done_verifier import DoneVerifierMixin
 from .planner import planning_enabled
 from .reflection import ReflectionMixin
+from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
 from .task_rules import (
     _blocks_store_search_action,
     _blocks_upload_media_analysis,
@@ -55,8 +56,7 @@ _MAX_ASSISTANT_HISTORY_CHARS = 900
 _PRICE_CACHE_MISS_PER_M = 2.0
 _PRICE_CACHE_HIT_PER_M = 0.2
 _PRICE_OUTPUT_PER_M = 8.0
-_ACTION_TOOLS = {"launch", "click", "type_text", "hotkey", "scroll", "drag",
-                 "draw_strokes", "focus_window", "wait", "tray_click", "run_shell"}
+_ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
 
 
 def _client():
@@ -140,6 +140,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
         self.max_steps_override = max_steps_override
+        self.run_state = RunStateMachine()
         # Coding tasks are excluded from the reusable experience system.
         self._is_coding = _is_coding_task(task)
 
@@ -497,6 +498,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (json.JSONDecodeError, ValueError) as exc:
                 error = f"工具参数 JSON 解析失败: {exc}。请重新调用并给出合法 JSON。"
                 self._append_tool_result(tc.id, error)
+                self.run_state.before_tool(tc.function.name, {})
+                self.run_state.after_tool(
+                    tc.function.name,
+                    {},
+                    json.dumps({"ok": False, "error": error}, ensure_ascii=False),
+                )
+                BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
                 self._trace_debug("tool_arg_error", {
                     "run_id": self.run_id,
                     "tool_call_id": tc.id,
@@ -508,6 +516,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             error=str(exc))
                 continue
 
+            self.run_state.before_tool(tc.function.name, args)
+            BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             BUS.publish("agent_tool_start", run_id=self.run_id,
                         tool=tc.function.name, args=args)
             started = time.monotonic()
@@ -545,6 +555,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 result = self.session.dispatch(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
+            self.run_state.after_tool(tc.function.name, args, result.text, result.terminal)
+            BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             self._trace_debug("tool_result", {
                 "run_id": self.run_id,
                 "tool_call_id": tc.id,
