@@ -49,7 +49,7 @@ _API_RETRIES = 4
 _RATE_LIMIT_BACKOFF_S = 5.0
 # Fold old observations only past this size (~12K tokens × ~4 chars/token).
 # Below it, history stays append-only so the DeepSeek prefix cache hits ~100%.
-_CONTEXT_FOLD_THRESHOLD_CHARS = 48000
+_CONTEXT_FOLD_THRESHOLD_CHARS = 32000
 _MAX_ASSISTANT_HISTORY_CHARS = 900
 # DeepSeek pricing (¥ per 1M tokens). Adjust if the published rates change.
 _PRICE_CACHE_MISS_PER_M = 2.0
@@ -244,7 +244,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
         while (
             len(self._foldable) > _KEEP_FULL_OBSERVATIONS
-            and total_chars() > _CONTEXT_FOLD_THRESHOLD_CHARS
+            and total_chars() > int(CONFIG.get(
+                "agent", "context_fold_threshold_chars",
+                default=_CONTEXT_FOLD_THRESHOLD_CHARS,
+            ))
         ):
             idx, summary = self._foldable.pop(0)
             content = self.messages[idx]["content"]

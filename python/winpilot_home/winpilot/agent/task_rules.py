@@ -175,15 +175,25 @@ def _required_drawing_colors(task: str) -> list[str]:
 
 def _gui_only_shell_allowed(command: str) -> bool:
     low = (command or "").casefold()
-    verification_markers = ("test-path", "get-content", "select-string")
+    verification_markers = (
+        "test-path", "get-content", "select-string",
+        "get-item", "get-childitem", "resolve-path",
+    )
     mutation_or_ui_automation = (
         "set-content", "add-content", "out-file", "new-item", "copy-item",
         "move-item", "remove-item", "start-process", "sendkeys", "clipboard",
         "windows.automation", "wscript.shell", "shell.application",
     )
+    execution_or_automation = (
+        "powershell -file", "-executionpolicy", ".ps1", ".bat", ".cmd",
+        "python ", "python.exe", "py ", "node ", "node.exe", "wscript",
+        "cscript", "mshta", "rundll32", "reg add", "reg delete",
+        "pyautogui", "pywinauto", "subprocess", "import ",
+    )
     return (
         any(marker in low for marker in verification_markers)
         and not any(marker in low for marker in mutation_or_ui_automation)
+        and not any(marker in low for marker in execution_or_automation)
     )
 
 

@@ -98,6 +98,10 @@ def test_gui_only_shell_policy():
     assert not _gui_only_shell_allowed("Start-Process calc.exe")
     assert not _gui_only_shell_allowed("Set-Content C:\\Users\\zou\\Desktop\\x.txt hello")
     assert not _gui_only_shell_allowed("powershell -ExecutionPolicy Bypass -File C:\\Users\\zou\\gui_final.ps1")
+    assert not _gui_only_shell_allowed(
+        'Test-Path "C:\\Users\\zou\\Desktop\\x.txt"; python C:\\Users\\zou\\gui_final.py'
+    )
+    assert _gui_only_shell_allowed('Get-Item "C:\\Users\\zou\\Desktop\\x.txt"')
 
 
 def test_window_title_expect_condition(monkeypatch):
@@ -140,6 +144,32 @@ def test_assistant_history_truncates_verbose_content():
 
     assert len(out["content"]) < 1100
     assert "full response is kept in the LLM trace" in out["content"]
+
+
+def test_gui_eval_policy_flags_scripted_gui_bypass():
+    from scripts.gui_eval_run import _run_policy_checks
+
+    case = {"task": "\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70GUI"}
+
+    readonly = _run_policy_checks([
+        {
+            "type": "agent_tool",
+            "tool": "run_shell",
+            "args": {"command": 'Test-Path "C:\\Users\\zou\\Desktop\\x.txt"; Get-Content "C:\\Users\\zou\\Desktop\\x.txt"'},
+        }
+    ], case)
+    scripted = _run_policy_checks([
+        {"type": "agent_tool", "tool": "write_file", "args": {"path": "gui_task.py"}},
+        {
+            "type": "agent_tool",
+            "tool": "run_shell",
+            "args": {"command": "python C:\\Users\\zou\\gui_task.py"},
+        },
+    ], case)
+
+    assert readonly["passed"]
+    assert not scripted["passed"]
+    assert len(scripted["violations"]) == 2
 
 
 def test_drawing_done_requires_drag(monkeypatch):

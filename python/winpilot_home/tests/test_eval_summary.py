@@ -51,3 +51,24 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
     assert out["total_cost_cny"] == 0.3
     assert out["total_prompt_tokens"] == 30
     assert out["slow_tools"][0]["tool"] == "click"
+
+
+def test_aggregate_reports_treats_policy_failure_as_not_passed():
+    reports = [
+        {
+            "run_id": "r1",
+            "status": "done",
+            "ground_truth_passed": True,
+            "policy_passed": False,
+        },
+        {
+            "run_id": "r2",
+            "status": "done",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+        },
+    ]
+
+    out = summary.aggregate_reports(reports)
+
+    assert out["passed_or_done"] == 1
