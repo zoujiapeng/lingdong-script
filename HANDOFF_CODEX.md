@@ -4,7 +4,7 @@
 
 ## 当前代码事实
 
-- 当前分支：`feat/winpilot-agent`。
+- 当前分支：`codex/low-latency-gui-agent`。
 - WinPilot 主体：`python/winpilot_home/winpilot/`。
 - Electron IPC adapter：`python/agent/__main__.py`。
 - GUI 任务：`AgentRunner`。
@@ -36,6 +36,8 @@
 - `scripts/gui_eval_run.py` 走 `/api/chat` 生成真实 GUI 评测证据报告，输出到忽略目录 `python/winpilot_home/evals/`。
 - `CLAUDE.md`、`docs/architecture.md`、`docs/winpilot-agent.md` 已补运行时状态链路：前端 `/api/chat` -> `server.py` `_RunState` -> runner -> `ToolSession.dispatch()` -> BUS/trace/done verifier。
 - 工具级复盘方法已写入 `CLAUDE.md` 和 `docs/winpilot-agent.md`：查 `<run_id>.jsonl` 的 `agent_step/agent_tool_start/agent_tool/done_check`，再打开前后截图和 `NNN_llm_request/response.json` 对照模型输入、工具参数、真实屏幕。`run_action_batch` 内部动作另有 `agent_batch_action_start/agent_batch_action` 和 `batch_before/batch_after` 截图。
+- 低延迟视觉动作路径：`run_action_batch` 在 `agent/fast_tools.py` -> `fast/controller.py`；controller 会给 `draw_strokes/drag` 追加 `auto_visual_verify`。顶层 `draw_strokes/drag` 现在也会在 `AgentRunner` 中自动包装成单动作 batch，结果里有 `wrapped_by_fast_controller` 和本地视觉变化证据。验证充分时会返回 `fast_path_advice`，提示模型直接 done 而不是再补 zoom/observe。
+- UIA-off 真实验证：`20260702-230125-aed7a2` 走 `/api/chat` 完成 Paint 三角形任务，工具序列为 `launch -> observe -> draw_strokes -> done`，`draw_strokes` 结果含 `wrapped_by_fast_controller=true`、`visual_change_detected=true`、`fast_path_advice`，截图 `after_003.jpg` 与模型思考一致。
 - `npm run clean` 可删除 `dist/`、`release/`、缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
 - `python/core/screenshot.py` 补 `capture_screen()`，兼容 legacy Robot Framework keyword。
 - `server.py` 的启动守卫只拦真实 `uvicorn winpilot.server:app`，不拦测试导入。
@@ -50,6 +52,7 @@
 - GUI 任务必须看真实屏幕/trace/文件/进程证据，不能只看 done 日志。
 - 复盘时必须确认 LLM request、tool args、tool result、前后截图四者是否对得上。
 - 不要为了 QQ、计算器、网易云、抖音等软件写专属规则。
+- UIA-off 路径功能可用但还不够快；`20260702-230125-aed7a2` 的工具序列已压到 4 个，但 OCR observe 仍约 3.8s，性能预算里的 `observe_avg_ms<=2500` 仍失败。下一步应做 ROI/变化触发感知或更轻量的 canvas/work-area 识别。
 
 ## 推荐验证
 

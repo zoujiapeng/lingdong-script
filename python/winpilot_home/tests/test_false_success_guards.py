@@ -402,6 +402,76 @@ def test_simple_drawing_done_accepts_compacted_late_batch_visual_evidence(monkey
     assert runner._done_verified is True
 
 
+def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("draw a triangle on the canvas")
+    calls = []
+
+    def fake_dispatch(name, args):
+        calls.append((name, args))
+        assert name == "run_action_batch"
+        return ToolResult(json.dumps({
+            "ok": True,
+            "verified": True,
+            "needs_observe": False,
+            "last_action": "auto_visual_verify",
+            "fast_path_advice": "The controller already verified the visible local change; call done instead of adding another zoom/observe round.",
+            "metrics": {"action_count": 1, "observe_count": 1},
+            "results": [
+                {
+                    "index": 1,
+                    "action": "draw_strokes",
+                    "ok": True,
+                    "verified": True,
+                    "data": {
+                        "ok": True,
+                        "visual_change_detected": True,
+                        "visual_change_ratio": 0.031,
+                    },
+                },
+                {
+                    "index": 2,
+                    "action": "auto_visual_verify",
+                    "ok": True,
+                    "verified": True,
+                    "data": {
+                        "ok": True,
+                        "source_action": "draw_strokes",
+                        "verified": True,
+                        "visual_change_detected": True,
+                        "visual_change_ratio": 0.031,
+                        "nonvisual_summary": {"blankish": False, "ink_ratio": 0.031},
+                    },
+                },
+            ],
+        }))
+
+    runner.session.dispatch = fake_dispatch
+    args = {"strokes": [[[10, 10], [50, 50]]], "duration": 0.1}
+    terminal = runner._handle_tool_calls([
+        SimpleNamespace(
+            id="call-1",
+            function=SimpleNamespace(name="draw_strokes", arguments=json.dumps(args)),
+        )
+    ])
+
+    assert terminal is None
+    assert calls == [("run_action_batch", {"actions": [{"action": "draw_strokes", **args}], "sync": False})]
+    assert runner._had_verified_action is True
+    assert runner._last_verify_ok is True
+    assert runner._recent_results[-1][0] == "draw_strokes"
+    assert "visual_change_detected" in runner._recent_results[-1][1]
+    payload = json.loads(runner.messages[-1]["content"])
+    assert payload["wrapped_by_fast_controller"] is True
+    assert payload["verified"] is True
+    assert "call done instead of adding another zoom/observe" in payload["fast_path_advice"]
+    assert payload["auto_visual_verify"]["nonvisual_summary"]["blankish"] is False
+
+
 def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
