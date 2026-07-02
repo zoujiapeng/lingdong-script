@@ -50,7 +50,7 @@ def main() -> int:
         f"tokens={aggregate['total_prompt_tokens']}/{aggregate['total_completion_tokens']}"
     )
     print("")
-    print(f"{'case/run':<28} {'status':<8} {'gt':<4} {'sec':>7} {'tools':>6} {'cost':>8} slowest")
+    print(f"{'case/run':<28} {'status':<8} {'gt':<4} {'pol':<4} {'sec':>7} {'tools':>6} {'cost':>8} slowest")
     for report in reports:
         usage = _usage(report)
         slowest = (report.get("slow_tools") or report.get("summary", {}).get("slow_tools") or [{}])[0]
@@ -60,8 +60,12 @@ def main() -> int:
             gt = "PASS" if report.get("ground_truth_passed") else "FAIL"
         else:
             gt = "-"
+        if "policy_passed" in report:
+            pol = "PASS" if report.get("policy_passed") else "FAIL"
+        else:
+            pol = "-"
         print(
-            f"{label:<28} {status:<8} {gt:<4} "
+            f"{label:<28} {status:<8} {gt:<4} {pol:<4} "
             f"{float(report.get('duration_s') or 0):>7.1f} "
             f"{int(report.get('tool_count') or 0):>6} "
             f"{_fmt_cost(usage.get('cost_cny')):>8} "

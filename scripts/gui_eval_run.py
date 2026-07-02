@@ -231,6 +231,23 @@ DEFAULT_BUDGETS = {
     "cost_cny": 1.5,
 }
 
+DEFAULT_GUI_FORBIDDEN_TOOLS = {"run_detached", "write_file", "read_file"}
+DEFAULT_GUI_FORBIDDEN_SHELL_PATTERNS = (
+    "python ",
+    "python.exe",
+    "py ",
+    "node ",
+    "node.exe",
+    ".ps1",
+    "-executionpolicy",
+    "pyautogui",
+    "pywinauto",
+    "subprocess",
+    "sendkeys",
+    "windows.automation",
+    "wscript.shell",
+)
+
 
 def _request_json(method: str, url: str, payload: dict[str, Any] | None = None) -> Any:
     data = None
@@ -276,6 +293,52 @@ def _run_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "stderr": stderr[:1000],
         })
     return results
+
+
+def _gui_policy_applies(case: dict[str, Any]) -> bool:
+    if "policy" in case:
+        return bool(case["policy"])
+    task = str(case.get("task") or "").casefold()
+    compact = "".join(task.split())
+    return (
+        "gui" in task
+        or "\u5fc5\u987b\u8d70gui" in compact
+        or "\u901a\u8fc7gui" in compact
+        or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
+    )
+
+
+def _run_policy_checks(events: list[dict[str, Any]], case: dict[str, Any]) -> dict[str, Any]:
+    if not _gui_policy_applies(case):
+        return {"passed": True, "violations": []}
+    forbidden_tools = set(DEFAULT_GUI_FORBIDDEN_TOOLS)
+    forbidden_tools.update(str(item) for item in case.get("forbid_tools", []))
+    allowed_tools = set(str(item) for item in case.get("allow_tools", []))
+    shell_patterns = list(DEFAULT_GUI_FORBIDDEN_SHELL_PATTERNS)
+    shell_patterns.extend(str(item).casefold() for item in case.get("forbid_shell_patterns", []))
+    violations: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "agent_tool":
+            continue
+        tool = str(event.get("tool") or "")
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        if tool in forbidden_tools and tool not in allowed_tools:
+            violations.append({
+                "tool": tool,
+                "reason": "forbidden_tool_in_gui_policy",
+                "args_preview": json.dumps(args, ensure_ascii=False)[:500],
+            })
+            continue
+        if tool == "run_shell":
+            command = str(args.get("command") or "").casefold()
+            hit = next((pattern for pattern in shell_patterns if pattern in command), "")
+            if hit:
+                violations.append({
+                    "tool": tool,
+                    "reason": f"forbidden_shell_pattern:{hit}",
+                    "command": str(args.get("command") or "")[:500],
+                })
+    return {"passed": not violations, "violations": violations[:20]}
 
 
 def _load_summary_module():
@@ -423,11 +486,22 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 budgets=budgets,
             )
             report = json.loads(path.read_text(encoding="utf-8"))
+            trace_path = REPO_ROOT / str(report.get("trace_file", ""))
+            events = []
+            if trace_path.exists():
+                events = [
+                    json.loads(line)
+                    for line in trace_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
             checks = _run_checks(list(case.get("checks", [])))
             if checks:
                 report["ground_truth_checks"] = checks
                 report["ground_truth_passed"] = all(item["passed"] for item in checks)
-                path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            policy = _run_policy_checks(events, case)
+            report["policy_checks"] = policy
+            report["policy_passed"] = bool(policy.get("passed"))
+            path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             paths.append(str(path))
             reports.append(report)
         finally:

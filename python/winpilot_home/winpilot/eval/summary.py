@@ -217,6 +217,8 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     def passed(report: dict[str, Any]) -> bool:
         if report.get("timed_out"):
             return False
+        if report.get("policy_passed") is False:
+            return False
         if "ground_truth_passed" in report:
             return bool(report.get("ground_truth_passed"))
         return report.get("status") == "done"
