@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import win32gui
 
@@ -18,6 +19,61 @@ def _tools_attr(name: str, default):
 
 
 class SystemToolMixin:
+    @staticmethod
+    def _launch_process_query(command: str, launch_result: dict) -> str:
+        """Best-effort process basename for a shell launch command.
+
+        This is intentionally conservative: URI launches and shell namespaces
+        do not map to a stable process name, while exe/bare commands usually do.
+        """
+        candidates = [
+            (str(launch_result.get("target") or ""), True),
+            (command, False),
+        ]
+        for candidate, is_resolved_target in candidates:
+            text = (candidate or "").strip().strip('"')
+            if not text:
+                continue
+            lower = text.casefold()
+            if (
+                "://" in lower
+                or lower.startswith(("shell:", "steam:", "http:", "https:", "ms-"))
+            ):
+                continue
+            if is_resolved_target:
+                head = text
+            elif text.startswith('"') and '"' in text[1:]:
+                head = text[1:].split('"', 1)[0]
+            else:
+                head = text.split()[0].strip('"')
+            name = Path(head).name or head
+            stem = Path(name).stem
+            if stem.casefold() in {"start", "explorer", "cmd", "powershell"}:
+                continue
+            if stem:
+                return stem
+        return ""
+
+    def _launch_visible_window(self, command: str, launch_result: dict, win32_mod) -> dict | None:
+        query = self._launch_process_query(command, launch_result)
+        if not query:
+            return None
+        try:
+            app_state = win32_mod.find_app(query)
+        except Exception:
+            return None
+        for window in app_state.get("windows") or []:
+            hwnd = int(window.get("hwnd") or 0)
+            if window.get("visible") and self._window_alive(hwnd):
+                return {
+                    "hwnd": hwnd,
+                    "title": str(window.get("title") or ""),
+                    "pid": window.get("pid"),
+                    "query": query,
+                    "process_count": app_state.get("process_count", 0),
+                }
+        return None
+
     def _t_run_shell(self, args: dict) -> ToolResult:
         shell_mod = _tools_attr("shell", shell)
         command = str(args["command"])
@@ -110,6 +166,23 @@ class SystemToolMixin:
             timeout_s=10.0,
             stop_event=self.stop_event,
         )
+        launch_window = None
+        if result.get("ok") and result.get("verified") is not True:
+            launch_window = self._launch_visible_window(command, result, win32_mod)
+            if launch_window:
+                hwnd = int(launch_window["hwnd"])
+                focus_result = executor_mod.focus_window(hwnd)
+                if focus_result.get("ok"):
+                    result["verified"] = True
+                    result["verify_method"] = "win32-process"
+                    result["verify_detail"] = (
+                        "visible launched app window detected: "
+                        f"{launch_window.get('title') or launch_window.get('query')} "
+                        f"(hwnd={hwnd})"
+                    )
+                result["target_hwnd"] = hwnd
+                result["launch_window"] = launch_window
+                result["focus_after_launch"] = focus_result
         if result.get("ok"):
             launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
             self._undo_stack.append(("app", launched_hwnd))
@@ -120,7 +193,12 @@ class SystemToolMixin:
                 found = win32_mod.find_window(want_title)
                 if found and self._window_alive(int(found.get("hwnd") or 0)):
                     title_hwnd = int(found["hwnd"])
-            if title_hwnd:
+            if launch_window:
+                self._remember_target(
+                    int(launch_window["hwnd"]),
+                    str(launch_window.get("title") or launch_window.get("query") or command),
+                )
+            elif title_hwnd:
                 self._remember_target(title_hwnd, want_title)
                 result["target_hwnd"] = title_hwnd
             elif resolved is not None:
