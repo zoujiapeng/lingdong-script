@@ -27,13 +27,16 @@ class ScreenBulletin:
     last_changed: bool = False
     last_ratio: float = 0.0
     changed_regions: list[Region] = field(default_factory=list)
+    recent_changed_regions: list[Region] = field(default_factory=list)
     capture_latency_ms: int = 0
     diff_latency_ms: int = 0
     last_sample_ms: int = 0
     last_change_ms: int = 0
+    last_change_ratio: float = 0.0
     samples: int = 0
 
     def to_dict(self) -> dict:
+        now = _now_ms()
         return {
             "sequence": self.sequence,
             "running": self.running,
@@ -51,10 +54,16 @@ class ScreenBulletin:
                 {"left": r.left, "top": r.top, "width": r.width, "height": r.height}
                 for r in self.changed_regions
             ],
+            "recent_changed_regions": [
+                {"left": r.left, "top": r.top, "width": r.width, "height": r.height}
+                for r in self.recent_changed_regions
+            ],
             "capture_latency_ms": self.capture_latency_ms,
             "diff_latency_ms": self.diff_latency_ms,
             "last_sample_ms": self.last_sample_ms,
             "last_change_ms": self.last_change_ms,
+            "last_change_age_ms": max(0, now - self.last_change_ms) if self.last_change_ms else 0,
+            "last_change_ratio": round(float(self.last_change_ratio), 6),
             "samples": self.samples,
         }
 
@@ -182,3 +191,5 @@ class ScreenWatcher:
             self._bulletin.samples += 1
             if delta.changed:
                 self._bulletin.last_change_ms = now
+                self._bulletin.last_change_ratio = delta.ratio
+                self._bulletin.recent_changed_regions = list(delta.regions)

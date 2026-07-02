@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import os
+import re
 import string
 import subprocess
 import time
@@ -497,11 +499,40 @@ def focus_window(hwnd: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+_URL_RE = re.compile(r"(?:https?://|file://|microsoft-edge:)[^\s\"']+", re.IGNORECASE)
+_BROWSER_LAUNCH_MARKERS = (
+    "start ",
+    "msedge",
+    "chrome",
+    "firefox",
+    "iexplore",
+    "browser",
+)
+
+
+def _url_from_launch_command(command: str) -> str:
+    text = (command or "").strip()
+    if _URL_RE.match(text):
+        return text.strip('"')
+    match = _URL_RE.search(text)
+    if not match:
+        return ""
+    lower = text.casefold()
+    if any(marker in lower for marker in _BROWSER_LAUNCH_MARKERS):
+        return match.group(0).strip('"')
+    return ""
+
+
 def launch(command: str) -> dict:
     """Launch an app: exe name, full path, or shell command."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
     try:
+        url = _url_from_launch_command(command)
+        if url:
+            os.startfile(url)  # noqa: S606 - Windows shell URL/protocol handler
+            BUS.publish("action", action="launch", command=command, url=url, via="os.startfile")
+            return {"ok": True, "command": command, "target": url, "via": "url"}
         subprocess.Popen(command, shell=True)
         BUS.publish("action", action="launch", command=command)
         return {"ok": True, "command": command}

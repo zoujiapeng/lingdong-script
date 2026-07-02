@@ -71,6 +71,139 @@ def test_observe_includes_fast_screen_bulletin_when_available(monkeypatch):
     assert "roi=5,6,7x8" in result.text
 
 
+def test_observe_changed_only_uses_recent_screen_delta_roi(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.agent import perception_tools, tools
+
+    session = ToolSession(task="demo")
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Changed App")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [
+        UIElement(source="win32", role="button", text="Inside", cx=115, cy=115, left=100, top=100, width=30, height=20),
+        UIElement(source="win32", role="button", text="Outside", cx=420, cy=320, left=400, top=300, width=40, height=30),
+    ])
+
+    captured_regions = []
+
+    def fake_ocr_collect(region, min_conf=None):
+        captured_regions.append(region)
+        return [
+            UIElement(source="ocr", role="text", text="Changed Text", cx=125, cy=120, left=100, top=110, width=80, height=20)
+        ]
+
+    monkeypatch.setattr(perception_tools.ocr, "collect", fake_ocr_collect)
+    monkeypatch.setattr(perception_tools.vision_cv, "detect_icon_candidates", lambda region: [])
+
+    def fail_full_observe(*_args, **_kwargs):
+        raise AssertionError("changed_only observe should not call full fusion.observe")
+
+    monkeypatch.setattr(perception_tools.fusion, "observe", fail_full_observe)
+
+    def fake_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "observe_cache_ttl_s":
+            return 0.0
+        if section == "fusion" and key == "changed_region_pad_px":
+            return 10
+        if section == "fusion" and key == "changed_region_max_regions":
+            return 3
+        return default
+
+    monkeypatch.setattr(perception_tools.CONFIG, "get", fake_config_get)
+
+    session._fast_gui_controller = SimpleNamespace(
+        watcher=SimpleNamespace(
+            status=lambda: {
+                "sequence": 2,
+                "running": False,
+                "last_changed": True,
+                "last_ratio": 0.01,
+                "changed_regions": [{"left": 95, "top": 95, "width": 40, "height": 30}],
+                "samples": 2,
+                "capture_latency_ms": 4,
+                "diff_latency_ms": 1,
+            }
+        )
+    )
+
+    result = session._t_observe({"changed_only": True, "include_icons": False})
+
+    assert "Changed-only observe" in result.text
+    assert "Changed Text" in result.text
+    assert "Inside" in result.text
+    assert "overlaps_changed_roi" in result.text
+    assert "Outside" not in result.text
+    assert captured_regions == [Region(85, 85, 60, 50)]
+    assert session.snapshot is not None
+    assert session.snapshot.region == Region(85, 85, 60, 50)
+
+
+def test_observe_changed_only_uses_recent_roi_after_screen_stabilizes(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.agent import perception_tools, tools
+
+    session = ToolSession(task="demo")
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Changed App")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [])
+    monkeypatch.setattr(perception_tools.ocr, "collect", lambda region, min_conf=None: [
+        UIElement(source="ocr", role="text", text="Recent ROI Text", cx=120, cy=120, left=100, top=110, width=90, height=20)
+    ])
+    monkeypatch.setattr(perception_tools.vision_cv, "detect_icon_candidates", lambda region: [])
+    monkeypatch.setattr(
+        perception_tools.fusion,
+        "observe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recent changed ROI should avoid full observe")
+        ),
+    )
+
+    def fake_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "observe_cache_ttl_s":
+            return 0.0
+        if section == "fusion" and key == "changed_region_pad_px":
+            return 10
+        if section == "fusion" and key == "changed_region_recent_ms":
+            return 30000
+        return default
+
+    monkeypatch.setattr(perception_tools.CONFIG, "get", fake_config_get)
+
+    session._fast_gui_controller = SimpleNamespace(
+        watcher=SimpleNamespace(
+            status=lambda: {
+                "sequence": 9,
+                "running": True,
+                "last_changed": False,
+                "last_ratio": 0.0,
+                "changed_regions": [],
+                "recent_changed_regions": [{"left": 95, "top": 95, "width": 40, "height": 30}],
+                "last_change_age_ms": 12000,
+                "samples": 20,
+                "capture_latency_ms": 4,
+                "diff_latency_ms": 1,
+            }
+        )
+    )
+
+    result = session._t_observe({"changed_only": True, "include_icons": False})
+
+    assert "Changed-only observe" in result.text
+    assert "Recent ROI Text" in result.text
+    assert "returned the normal observe" not in result.text
+
+
 def test_mutating_dispatch_invalidates_observe_cache(monkeypatch):
     session = ToolSession(task="demo")
     key = (123, True, "normal", session._screen_epoch)

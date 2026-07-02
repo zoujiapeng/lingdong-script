@@ -102,3 +102,17 @@ python -m pytest python/winpilot_home/tests -q
 npx vitest run
 npm run build
 ```
+
+## 2026-07-03 低延迟 GUI 更新
+
+- 新增网页靶场：`python/winpilot_home/eval_targets/gui_agent_target.html`。用 `python -m http.server 8877 --bind 127.0.0.1` 在该目录启动后访问 `http://127.0.0.1:8877/gui_agent_target.html`。它用于制造输入、局部状态变化、弹窗、拖拽、画布等可截图验证的 GUI 变化，不是生产逻辑的专属规则。
+- `launch` 现在支持直接 URL 或 `start msedge http://...` 这类包装命令，并且 `window_title` / `window_appears` 会做标题归一化匹配：`gui_agent_target` 可以匹配 `WinPilot GUI Agent Target - Google Chrome`。找到目标后会 `focus_window`，避免 Codex 或日志窗口遮挡目标。
+- `screen_watch` 会保留最近变化 ROI，`observe(changed_only=true)` 会优先只观察最近 ROI。默认最近窗口是 30 秒，目的是覆盖真实 LLM 推理延迟；超过窗口会明确 fallback 到普通 observe。
+- `done_verifier.py` 增加“显式可见状态目标”确定性收束：任务写了“确认出现 LOCAL_COUNTER”这类目标时，必须在 fresh screen OCR 中看到对应文本才会跳过 LLM done judge。OCR 容错会把 `LOCAL_COUNTER` 和 `LOCAL COUNTER` 视为同一标签。
+- 最新 UIA-off 网页靶场验证：`20260703-015021-f7167c`，工具序列 `launch -> screen_watch -> observe(query) -> click -> wait(screen_stable) -> observe(changed_only=true) -> done`。截图 `after_002.jpg` 显示 `LOCAL_COUNTER_1`，`done_check` 理由为 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。
+
+## 15 项低延迟改造进度
+
+- 已落地或有骨架：`run_action_batch`、`screen_watch`、动作 `screen_delta/action_target`、changed ROI observe、部分 world model、部分 element cache、部分 skill replay、canvas fast observe、可见证据 done gate。
+- 部分落地但仍不成熟：LLM 下子目标而非逐步点击、视觉锚点点击、状态机、预测式感知、指标体系。现在还没有真正做到“常规动作完全由 controller 内环处理，LLM 只管异常”。
+- 尚未真正完成：轻量 UI 视觉模型/YOLO 主循环、视觉伺服控制、跨任务稳定 skill 复用率、全量延迟 dashboard、强 VLM 只作兜底的成熟调度策略。

@@ -95,6 +95,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                 "query": _prop("string", "Optional case-insensitive element text filter."),
                 "max_elements": _prop("integer", "Maximum elements to print after filtering. Default 160."),
                 "full": _prop("boolean", "Force full OCR/UIA observation; useful when text/menu grounding is needed."),
+                "changed_only": _prop("boolean", "Observe only the latest screen_watch changed ROI when available."),
             },
         ),
         _tool(
@@ -122,7 +123,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
             },
             ["name"],
         ),
-        _tool("launch", "Launch a program by exe name, path, shell command, or installed app display name.",
+        _tool("launch", "Launch a program, installed app, or URL. For webpages, pass the URL directly, not 'start msedge ...'.",
               _expectable({"command": _prop("string", "Launch command or app name.")}), ["command"]),
         _tool(
             "click",

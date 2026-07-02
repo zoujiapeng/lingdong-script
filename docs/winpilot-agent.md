@@ -169,3 +169,27 @@ UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observ
 主文件：`agent/coding.py`，工具在 `agent/coding_tools.py`。
 
 工具包括 `list_dir`、`read_file`、`write_file`、`apply_patch`、`search_text`、`github_search`、`run_shell`、`done`、`fail`。clone/run 类任务有运行尝试 gate，避免“看了 README 就宣称成功”。
+
+## 2026-07-03 网页靶场和 changed ROI 复盘
+
+网页靶场在 `python/winpilot_home/eval_targets/gui_agent_target.html`。启动方式：
+
+```bash
+cd python/winpilot_home/eval_targets
+python -m http.server 8877 --bind 127.0.0.1
+```
+
+推荐测试任务：
+
+```text
+打开 http://127.0.0.1:8877/gui_agent_target.html。不要用shell、DOM或文件检查。主要走GUI：先启动 screen_watch，然后点击“只改局部状态”按钮，等待约1秒让画面稳定，再调用 observe(changed_only=true) 只观察最近变化区域，确认状态卡出现 LOCAL_COUNTER，然后 done。
+```
+
+复盘时看这些证据：
+
+- `agent_tool` 的 `launch` 应该 `verified=true`，并且目标窗口标题是 Chrome 靶场窗口，不应被 Codex 窗口遮挡。
+- `click` 的 `result_meta.screen_delta.regions` 应该包含左侧状态卡 ROI，`action_target.after.foreground_matches_target=true`。
+- `observe(changed_only=true)` 的 `result_text` 应该以 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)` 开头；如果出现 `returned the normal observe snapshot`，说明没有可用 ROI 或 ROI 过期。
+- `done_check` 对显式可见状态目标可直接通过，例如 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。这是 fresh screen OCR 证据，不是 agent 总结。
+
+已验证 run：`20260703-015021-f7167c`。截图 `python/winpilot_home/traces/20260703-015021-f7167c/after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。

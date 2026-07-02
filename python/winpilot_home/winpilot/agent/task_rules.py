@@ -28,8 +28,9 @@ _COMMUNICATION_HINTS = (
     "message", "send", "reply", "email", "chat",
 )
 _DRAWING_TASK_RE = re.compile(
-    r"draw|drawing|paint|sketch|canvas|whiteboard|"
-    r"\u753b|\u753b\u56fe|\u7ed8\u56fe|\u6d82\u9e26|\u753b\u677f|\u767d\u677f",
+    r"\b(draw|drawing|paint|sketch|canvas|whiteboard|doodle)\b|"
+    r"\u753b\u56fe|\u7ed8\u56fe|\u6d82\u9e26|\u753b\u677f|\u767d\u677f|\u7ed8\u5236|"
+    r"\u753b(?:\u4e00|\u4e2a|\u53ea|\u5f20|\u5e45|\u6761|\u4e9b|\u51fa|\u5728|\u6210)",
     re.IGNORECASE,
 )
 _DESKTOP_ICON_DRAG_RE = re.compile(
@@ -240,6 +241,31 @@ def _required_visible_payloads(task: str) -> list[str]:
         if payload and payload not in seen:
             unique.append(payload)
             seen.add(payload)
+    return unique
+
+
+def _visible_state_targets(task: str) -> list[str]:
+    """Extract explicit labels/text the user asks to see on screen."""
+    text = task or ""
+    patterns = (
+        r"(?:\u51fa\u73b0|\u663e\u793a|\u770b\u5230|\u53ef\u89c1|\u5305\u542b)\s*([A-Za-z0-9_\-]{3,80})",
+        r"(?:appear|appears|show|shows|visible|contains?|confirm)\s+([A-Za-z0-9_\-]{3,80})",
+        r"\b([A-Za-z][A-Za-z0-9_\-]{2,80})\b\s+(?:appear|appears|show|shows|is visible|are visible)",
+    )
+    targets: list[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            value = match if isinstance(match, str) else next((item for item in match if item), "")
+            value = value.strip().strip(".,;:!?()[]{}")
+            if value:
+                targets.append(value)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for target in targets:
+        key = target.casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(target)
     return unique
 
 

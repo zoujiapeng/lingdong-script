@@ -1,6 +1,38 @@
 from types import SimpleNamespace
 
 
+def test_drawing_task_does_not_trigger_on_screen_stability_phrase():
+    from winpilot.agent.task_rules import _is_drawing_task
+
+    assert not _is_drawing_task("点击按钮后等待约1秒让画面稳定，再观察最近变化区域")
+    assert _is_drawing_task("画一个三角形")
+    assert _is_drawing_task("draw a triangle on the canvas")
+
+
+def test_visible_state_done_accepts_fresh_screen_ocr_spacing(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("点击按钮后确认状态卡出现 LOCAL_COUNTER")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._recent_results = [("observe", "Changed-only observe found status card")]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "LOCAL COUNTER 1"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("visible state evidence should skip LLM judge")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
 def test_text_appears_scoped_to_target_window(monkeypatch):
     from winpilot.action import verify
 

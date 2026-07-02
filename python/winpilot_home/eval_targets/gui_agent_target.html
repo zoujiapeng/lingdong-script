@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WinPilot GUI Agent Target</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #667085;
+      --line: #d7dce5;
+      --blue: #1769e0;
+      --green: #0d8f58;
+      --red: #d92d20;
+      --yellow: #f2b84b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    header {
+      min-height: 72px;
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+    }
+
+    .run-id {
+      min-width: 240px;
+      text-align: right;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(360px, 480px) 1fr;
+      gap: 18px;
+      padding: 18px;
+    }
+
+    section,
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    section {
+      padding: 18px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    label {
+      display: block;
+      margin: 12px 0 6px;
+      color: #344054;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+      height: 42px;
+      padding: 0 12px;
+      border: 1px solid #b9c2d0;
+      border-radius: 6px;
+      font-size: 16px;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(23, 105, 224, 0.16);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    button {
+      height: 38px;
+      padding: 0 14px;
+      border: 1px solid #aab4c3;
+      border-radius: 6px;
+      background: #fff;
+      color: #17202a;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+
+    button:focus {
+      outline: 3px solid rgba(23, 105, 224, 0.18);
+      outline-offset: 1px;
+    }
+
+    .status-card {
+      margin-top: 18px;
+      padding: 14px;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcff;
+      min-height: 126px;
+    }
+
+    .status-card.changed {
+      border-color: var(--green);
+      background: #effaf5;
+    }
+
+    .status-card.warning {
+      border-color: var(--yellow);
+      background: #fffbeb;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: #344054;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .badge.ok {
+      background: #dff8ea;
+      color: #087443;
+    }
+
+    .status-line {
+      margin: 10px 0 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    .status-detail {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-rows: minmax(300px, 1fr) 180px;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      padding: 16px;
+      min-height: 360px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      min-height: 300px;
+      border: 1px solid #98a2b3;
+      border-radius: 6px;
+      background: #ffffff;
+      touch-action: none;
+      cursor: crosshair;
+      display: block;
+    }
+
+    .canvas-status {
+      position: absolute;
+      right: 24px;
+      bottom: 24px;
+      min-width: 190px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.94);
+      color: #344054;
+      font-size: 13px;
+    }
+
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .drop-zone {
+      position: relative;
+      min-height: 130px;
+      padding: 14px;
+      border: 2px dashed #98a2b3;
+      border-radius: 8px;
+      background: #fbfcff;
+    }
+
+    .token {
+      position: absolute;
+      left: 18px;
+      top: 54px;
+      width: 76px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 700;
+      cursor: grab;
+      user-select: none;
+    }
+
+    .target {
+      position: absolute;
+      right: 18px;
+      top: 44px;
+      width: 150px;
+      height: 62px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      border: 2px solid var(--green);
+      color: var(--green);
+      font-weight: 650;
+    }
+
+    .drop-zone.done {
+      border-color: var(--green);
+      background: #effaf5;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(17, 24, 39, 0.28);
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal {
+      width: min(440px, calc(100vw - 40px));
+      padding: 18px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+      box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
+    }
+
+    .modal p {
+      margin: 10px 0 0;
+      color: var(--muted);
+    }
+
+    @media (max-width: 860px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+
+      .bottom-row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>WinPilot GUI Agent Target</h1>
+      <div class="run-id" id="runId">靶场状态：READY</div>
+    </header>
+
+    <main>
+      <section>
+        <h2>局部变化测试区</h2>
+        <label for="targetInput">目标输入框</label>
+        <input id="targetInput" autocomplete="off" placeholder="在这里输入测试文字">
+
+        <div class="actions">
+          <button class="primary" id="applyBtn">应用输入</button>
+          <button id="smallChangeBtn">只改局部状态</button>
+          <button id="openModalBtn">打开弹窗</button>
+          <button id="resetBtn">重置</button>
+        </div>
+
+        <div class="status-card" id="statusCard" data-state="idle">
+          <span class="badge" id="statusBadge">IDLE</span>
+          <p class="status-line" id="statusLine">等待操作</p>
+          <p class="status-detail" id="statusDetail">
+            这里会发生小范围文本和颜色变化，适合验证 screen_delta、changed_only observe、OCR 和目标窗口约束。
+          </p>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <section class="canvas-wrap">
+          <h2>画布与拖拽测试区</h2>
+          <canvas id="drawCanvas" width="900" height="420" aria-label="绘图画布"></canvas>
+          <div class="canvas-status" id="canvasStatus">画布状态：空白</div>
+        </section>
+
+        <div class="bottom-row">
+          <section>
+            <h2>拖拽目标</h2>
+            <div class="drop-zone" id="dropZone">
+              <div class="token" id="dragToken" draggable="true">TOKEN</div>
+              <div class="target" id="dropTarget">拖到这里</div>
+            </div>
+          </section>
+
+          <section>
+            <h2>判定输出</h2>
+            <p class="status-detail" id="auditLog">暂无事件。</p>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <h2>局部弹窗已打开</h2>
+      <p id="modalText">MODAL_TARGET_VISIBLE：这是一个可由 OCR/VLM/changed ROI 验证的小弹窗。</p>
+      <div class="actions">
+        <button class="primary" id="closeModalBtn">关闭弹窗</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const input = document.getElementById('targetInput');
+    const applyBtn = document.getElementById('applyBtn');
+    const smallChangeBtn = document.getElementById('smallChangeBtn');
+    const openModalBtn = document.getElementById('openModalBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const statusCard = document.getElementById('statusCard');
+    const statusBadge = document.getElementById('statusBadge');
+    const statusLine = document.getElementById('statusLine');
+    const statusDetail = document.getElementById('statusDetail');
+    const auditLog = document.getElementById('auditLog');
+    const runId = document.getElementById('runId');
+    const modalBackdrop = document.getElementById('modalBackdrop');
+    const closeModalBtn = document.getElementById('closeModalBtn');
+    const canvas = document.getElementById('drawCanvas');
+    const ctx = canvas.getContext('2d');
+    const canvasStatus = document.getElementById('canvasStatus');
+    const dragToken = document.getElementById('dragToken');
+    const dropZone = document.getElementById('dropZone');
+    const dropTarget = document.getElementById('dropTarget');
+
+    let counter = 0;
+    let drawing = false;
+    let strokePoints = 0;
+
+    function stamp() {
+      return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    function log(message) {
+      auditLog.textContent = `${stamp()} - ${message}`;
+      runId.textContent = `靶场状态：${message}`;
+    }
+
+    function setStatus(kind, line, detail) {
+      statusCard.className = `status-card ${kind === 'ok' ? 'changed' : kind === 'warn' ? 'warning' : ''}`;
+      statusCard.dataset.state = kind;
+      statusBadge.className = `badge ${kind === 'ok' ? 'ok' : ''}`;
+      statusBadge.textContent = kind.toUpperCase();
+      statusLine.textContent = line;
+      statusDetail.textContent = detail;
+      log(line);
+    }
+
+    applyBtn.addEventListener('click', () => {
+      const value = input.value.trim() || 'EMPTY_INPUT';
+      counter += 1;
+      setStatus(
+        'ok',
+        `APPLIED_TEXT_${counter}: ${value}`,
+        `输入已应用。changed_only observe 应只需要关注这个状态卡和输入行附近的变化。`
+      );
+    });
+
+    smallChangeBtn.addEventListener('click', () => {
+      counter += 1;
+      setStatus('warn', `LOCAL_COUNTER_${counter}`, '只有这个状态卡发生变化，用来测试局部 ROI。');
+    });
+
+    openModalBtn.addEventListener('click', () => {
+      modalBackdrop.classList.add('open');
+      log('MODAL_TARGET_VISIBLE');
+    });
+
+    closeModalBtn.addEventListener('click', () => {
+      modalBackdrop.classList.remove('open');
+      log('MODAL_CLOSED');
+    });
+
+    resetBtn.addEventListener('click', () => {
+      input.value = '';
+      counter = 0;
+      strokePoints = 0;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvasStatus.textContent = '画布状态：空白';
+      dropZone.classList.remove('done');
+      dragToken.style.left = '18px';
+      dragToken.style.top = '54px';
+      setStatus('idle', '等待操作', '靶场已重置。');
+    });
+
+    function canvasPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (event.clientX - rect.left) * (canvas.width / rect.width),
+        y: (event.clientY - rect.top) * (canvas.height / rect.height),
+      };
+    }
+
+    canvas.addEventListener('pointerdown', (event) => {
+      drawing = true;
+      strokePoints = 0;
+      const p = canvasPoint(event);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      canvas.setPointerCapture(event.pointerId);
+    });
+
+    canvas.addEventListener('pointermove', (event) => {
+      if (!drawing) return;
+      const p = canvasPoint(event);
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = '#1769e0';
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      strokePoints += 1;
+      if (strokePoints > 4) {
+        canvasStatus.textContent = `画布状态：INK_DETECTED，点数 ${strokePoints}`;
+      }
+    });
+
+    canvas.addEventListener('pointerup', (event) => {
+      drawing = false;
+      canvas.releasePointerCapture(event.pointerId);
+      if (strokePoints > 4) {
+        log(`CANVAS_INK_DETECTED_${strokePoints}`);
+      }
+    });
+
+    dragToken.addEventListener('dragstart', (event) => {
+      event.dataTransfer.setData('text/plain', 'TOKEN');
+    });
+
+    dropTarget.addEventListener('dragover', (event) => {
+      event.preventDefault();
+    });
+
+    dropTarget.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dropZone.classList.add('done');
+      dragToken.style.left = 'calc(100% - 164px)';
+      dragToken.style.top = '54px';
+      log('DRAG_TOKEN_DROPPED');
+    });
+  </script>
+</body>
+</html>

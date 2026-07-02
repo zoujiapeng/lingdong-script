@@ -5,6 +5,7 @@ import sys
 import time
 
 from ..config import CONFIG
+from ..perception.model import UIElement
 from ..perception import fusion, intent, ocr, vision_cv, vlm, win32
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
@@ -143,15 +144,180 @@ class PerceptionToolMixin:
                 f"{int(first.get('left', 0))},{int(first.get('top', 0))},"
                 f"{int(first.get('width', 0))}x{int(first.get('height', 0))}"
             )
+        recent_regions = status.get("recent_changed_regions") or []
+        recent_roi = "none"
+        if recent_regions:
+            first = recent_regions[0]
+            recent_roi = (
+                f"{int(first.get('left', 0))},{int(first.get('top', 0))},"
+                f"{int(first.get('width', 0))}x{int(first.get('height', 0))}"
+            )
         return (
             "Screen watch bulletin: "
             f"running={bool(status.get('running'))}, "
             f"changed={bool(status.get('last_changed'))}, "
             f"ratio={float(status.get('last_ratio') or 0.0):.4f}, "
-            f"roi={roi}, samples={int(status.get('samples') or 0)}, "
+            f"roi={roi}, recent_roi={recent_roi}, "
+            f"recent_age_ms={int(status.get('last_change_age_ms') or 0)}, "
+            f"samples={int(status.get('samples') or 0)}, "
             f"capture_ms={int(status.get('capture_latency_ms') or 0)}, "
             f"diff_ms={int(status.get('diff_latency_ms') or 0)}."
         )
+
+    @staticmethod
+    def _regions_intersect(a: Region, b: Region) -> bool:
+        return a.left < b.right and a.right > b.left and a.top < b.bottom and a.bottom > b.top
+
+    @staticmethod
+    def _intersect_region(a: Region, b: Region) -> Region | None:
+        left = max(a.left, b.left)
+        top = max(a.top, b.top)
+        right = min(a.right, b.right)
+        bottom = min(a.bottom, b.bottom)
+        if right <= left or bottom <= top:
+            return None
+        return Region(left, top, right - left, bottom - top)
+
+    @staticmethod
+    def _union_region(regions: list[Region]) -> Region | None:
+        if not regions:
+            return None
+        left = min(region.left for region in regions)
+        top = min(region.top for region in regions)
+        right = max(region.right for region in regions)
+        bottom = max(region.bottom for region in regions)
+        return Region(left, top, right - left, bottom - top).clamp_to_screen()
+
+    @staticmethod
+    def _element_region(element: UIElement) -> Region:
+        return Region(int(element.left), int(element.top),
+                      max(1, int(element.width)), max(1, int(element.height)))
+
+    def _recent_changed_regions(self, hwnd: int) -> list[Region]:
+        status = self._fast_screen_status() if hasattr(self, "_fast_screen_status") else {}
+        if not status:
+            return []
+        max_age_ms = int(CONFIG.get("fusion", "changed_region_recent_ms", default=30000))
+        if status.get("last_changed"):
+            raw_regions = status.get("changed_regions") or []
+        elif int(status.get("last_change_age_ms") or 0) <= max_age_ms:
+            raw_regions = status.get("recent_changed_regions") or []
+        else:
+            raw_regions = []
+        if not raw_regions:
+            return []
+        try:
+            target = _tools_attr("window_region", window_region)(hwnd)
+        except Exception:
+            return []
+        pad = int(CONFIG.get("fusion", "changed_region_pad_px", default=24))
+        max_regions = int(CONFIG.get("fusion", "changed_region_max_regions", default=3))
+        regions: list[Region] = []
+        for item in raw_regions[:max(1, max_regions)]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                region = Region(
+                    int(item["left"]) - pad,
+                    int(item["top"]) - pad,
+                    int(item["width"]) + pad * 2,
+                    int(item["height"]) + pad * 2,
+                ).clamp_to_screen()
+            except (KeyError, TypeError, ValueError):
+                continue
+            clipped = self._intersect_region(region, target)
+            if clipped is not None:
+                regions.append(clipped)
+        return regions
+
+    @staticmethod
+    def _dedupe_elements(elements: list[UIElement]) -> list[UIElement]:
+        kept: list[UIElement] = []
+        for cand in elements:
+            duplicate = False
+            for existing in kept:
+                if cand.iou(existing) >= 0.5 and (
+                    not cand.text or cand.text == existing.text
+                    or (cand.text and cand.text in existing.text)
+                ):
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(cand)
+        return kept
+
+    def _changed_region_snapshot(
+        self,
+        hwnd: int,
+        include_icons: bool,
+        regions: list[Region],
+    ) -> fusion.Snapshot:
+        title = _tools_attr("win32", win32)._window_text(hwnd)
+        snapshot_region = self._union_region(regions) or regions[0]
+        snapshot = fusion.Snapshot(hwnd=hwnd, title=title, region=snapshot_region)
+        elements: list[UIElement] = []
+
+        started = time.monotonic()
+        win32_elements: list[UIElement] = []
+        try:
+            win32_mod = _tools_attr("win32", win32)
+            for element in win32_mod.collect(hwnd):
+                if any(self._regions_intersect(self._element_region(element), region)
+                       for region in regions):
+                    if "overlaps_changed_roi" not in element.states:
+                        element.states.append("overlaps_changed_roi")
+                    win32_elements.append(element)
+        except Exception as exc:
+            logger.warning("changed-only win32 observe failed: %s", exc)
+        snapshot.dim_stats["win32"] = {
+            "count": len(win32_elements),
+            "ms": int((time.monotonic() - started) * 1000),
+            "scope": "changed_roi",
+        }
+        elements.extend(win32_elements)
+
+        started = time.monotonic()
+        ocr_elements: list[UIElement] = []
+        try:
+            ocr_mod = _tools_attr("ocr", ocr)
+            for region in regions:
+                ocr_elements.extend(ocr_mod.collect(region))
+        except Exception as exc:
+            logger.warning("changed-only OCR observe failed: %s", exc)
+        snapshot.dim_stats["ocr"] = {
+            "count": len(ocr_elements),
+            "ms": int((time.monotonic() - started) * 1000),
+            "scope": "changed_roi",
+        }
+        elements.extend(ocr_elements)
+
+        started = time.monotonic()
+        cv_elements: list[UIElement] = []
+        if include_icons:
+            try:
+                for region in regions:
+                    cv_elements.extend(vision_cv.detect_icon_candidates(region))
+            except Exception as exc:
+                logger.warning("changed-only CV observe failed: %s", exc)
+        snapshot.dim_stats["cv"] = {
+            "count": len(cv_elements),
+            "ms": int((time.monotonic() - started) * 1000),
+            "scope": "changed_roi",
+        }
+        elements.extend(cv_elements)
+
+        elements = self._dedupe_elements(elements)
+        for idx, element in enumerate(elements, start=1):
+            element.elem_id = idx
+        snapshot.elements = elements
+        BUS.publish(
+            "perception",
+            hwnd=hwnd,
+            title=title,
+            dims=snapshot.dim_stats,
+            total=len(elements),
+        )
+        return snapshot
 
     def _canvas_fast_observe_enabled(self, args: dict, perception_mode: str) -> bool:
         """Use a light visual snapshot for UIA-off canvas/drawing tasks.
@@ -221,13 +387,19 @@ class PerceptionToolMixin:
         include_icons = bool(args.get("include_icons", True))
         fusion_mod = _tools_attr("fusion", fusion)
         perception_mode = self._perception_mode()
+        changed_regions = self._recent_changed_regions(hwnd) if bool(args.get("changed_only")) else []
         fast_canvas = self._canvas_fast_observe_enabled(args, perception_mode)
-        observe_profile = "canvas_fast" if fast_canvas else "full"
+        observe_profile = "changed_roi" if changed_regions else ("canvas_fast" if fast_canvas else "full")
+        roi_signature = tuple(
+            (region.left, region.top, region.width, region.height)
+            for region in changed_regions
+        )
         cache_key = (
             int(hwnd),
             bool(include_icons),
             perception_mode,
             observe_profile,
+            roi_signature,
             self._screen_epoch,
         )
         cache_ttl = float(CONFIG.get("fusion", "observe_cache_ttl_s", default=2.0))
@@ -236,7 +408,13 @@ class PerceptionToolMixin:
             self.snapshot = cached
             self.snapshot.dim_stats["cache"] = {"count": len(self.snapshot.elements), "ms": 0}
         else:
-            if fast_canvas:
+            if changed_regions:
+                self.snapshot = self._changed_region_snapshot(
+                    hwnd,
+                    include_icons=include_icons,
+                    regions=changed_regions,
+                )
+            elif fast_canvas:
                 self.snapshot = self._fast_canvas_snapshot(hwnd, include_icons=include_icons)
             else:
                 self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
@@ -246,6 +424,21 @@ class PerceptionToolMixin:
         query = str(args.get("query", "") or "")
         max_elements = int(args.get("max_elements", 160) or 160)
         text = self.snapshot.to_text(max_elements=max_elements, query=query)
+        if args.get("changed_only"):
+            if changed_regions:
+                rois = "; ".join(
+                    f"{region.left},{region.top},{region.width}x{region.height}"
+                    for region in changed_regions
+                )
+                text = (
+                    "Changed-only observe: OCR/CV/Win32 filtered to recent "
+                    f"screen_watch ROI(s): {rois}.\n" + text
+                )
+            else:
+                text = (
+                    "Changed-only observe requested but no recent changed ROI was "
+                    "available; returned the normal observe snapshot.\n" + text
+                )
         visual_summary = self._visual_state_summary(hwnd)
         if visual_summary:
             text = text + "\n" + visual_summary
