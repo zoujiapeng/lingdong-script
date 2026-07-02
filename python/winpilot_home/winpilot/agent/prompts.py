@@ -45,7 +45,7 @@ element and coordinates.
    your primary navigation tools.
    For obvious grounded mini-sequences, prefer run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
-   In a batch, use wait_change/wait_stable for cheap post-action screen sync.
+   Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
 5. After every action that should change the UI, observe again and verify via
    screenshot, VLM, nonvisual summary, OCR/UIA/CV, or deterministic output that
    the expected change occurred.
