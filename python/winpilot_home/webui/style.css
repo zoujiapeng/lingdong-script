@@ -151,6 +151,22 @@ button.mini { padding: 2px 10px; font-size: 12px; }
 .fail-mark { color: var(--err); }
 .dim-src { color: #9b8cff; }
 
+.run-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-raised) 86%, var(--accent) 14%);
+  font: 11px var(--mono);
+  color: var(--text-dim);
+}
+.run-metrics span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- drawer ---------- */
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0;

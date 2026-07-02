@@ -17,6 +17,8 @@ const logList = $("log-list");
 
 let config = null;
 let running = false;
+let runMetrics = null;
+let metricsTimer = null;
 
 /* ============================== utils ============================== */
 function el(tag, cls, text) {
@@ -44,6 +46,49 @@ const patchConfig = (patch) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   }).then((cfg) => { config = cfg; renderBadgesFromConfig(); });
+
+function resetRunMetrics(runId) {
+  runMetrics = {
+    runId,
+    startedAt: Date.now(),
+    toolCount: 0,
+    slowest: null,
+    doneReason: "",
+    usage: null,
+  };
+  renderRunMetrics();
+  if (metricsTimer) clearInterval(metricsTimer);
+  metricsTimer = setInterval(renderRunMetrics, 1000);
+}
+
+function finishRunMetrics() {
+  renderRunMetrics();
+  if (metricsTimer) clearInterval(metricsTimer);
+  metricsTimer = null;
+}
+
+function renderRunMetrics() {
+  const m = runMetrics;
+  const elapsed = $("metric-elapsed");
+  const tools = $("metric-tools");
+  const slowest = $("metric-slowest");
+  const done = $("metric-done");
+  if (!elapsed || !tools || !slowest || !done) return;
+  if (!m) {
+    elapsed.textContent = "耗时 0s";
+    tools.textContent = "工具 0";
+    slowest.textContent = "最慢 —";
+    done.textContent = "证据 —";
+    return;
+  }
+  const sec = Math.max(0, Math.round((Date.now() - m.startedAt) / 1000));
+  elapsed.textContent = `耗时 ${sec}s`;
+  tools.textContent = `工具 ${m.toolCount}`;
+  slowest.textContent = m.slowest
+    ? `最慢 ${m.slowest.tool} ${m.slowest.elapsed_ms}ms`
+    : "最慢 —";
+  done.textContent = m.doneReason ? `证据 ${m.doneReason}` : "证据 —";
+}
 
 /* ============================== chat ============================== */
 // Persist chat across iframe reloads (keyed by server port so a new app
@@ -169,6 +214,7 @@ function renderEvent(ev) {
       return;
     case "agent_start":
       running = true; updateRunBadge();
+      resetRunMetrics(ev.run_id);
       _plan = []; renderPlanPanel();
       if (ev.agent === "coding") addChat("system", "🧑‍💻 已切换到编程子 agent（文件/仓库工具）");
       addLog("agent", "agent", `任务开始 [${ev.run_id}]` +
@@ -186,6 +232,15 @@ function renderEvent(ev) {
       return;
     }
     case "agent_tool": {
+      if (runMetrics) {
+        runMetrics.toolCount += 1;
+        if (ev.elapsed_ms != null) {
+          const item = { tool: ev.tool, elapsed_ms: Number(ev.elapsed_ms) || 0 };
+          if (!runMetrics.slowest || item.elapsed_ms > runMetrics.slowest.elapsed_ms)
+            runMetrics.slowest = item;
+        }
+        renderRunMetrics();
+      }
       const frag = document.createDocumentFragment();
       const argsStr = ev.args ? JSON.stringify(ev.args) : "";
       frag.appendChild(document.createTextNode(
@@ -256,13 +311,25 @@ function renderEvent(ev) {
       return;
     case "agent_usage": {
       const t = ev.total || {};
+      if (runMetrics) runMetrics.usage = t;
       const cost = t.cost_cny != null ? ` ¥${Number(t.cost_cny).toFixed(4)}` : "";
       $("badge-tokens").textContent =
         `tokens: ${t.prompt_tokens || 0}/${t.completion_tokens || 0} (cache ${t.cache_hit_tokens || 0})${cost}`;
       return;
     }
+    case "done_check": {
+      if (runMetrics) {
+        const mark = ev.passed ? "通过" : "拒绝";
+        runMetrics.doneReason = `${mark}: ${(ev.reason || "").slice(0, 60)}`;
+        renderRunMetrics();
+      }
+      addLog("done", ev.passed ? "verify" : "error",
+        `${ev.passed ? "通过" : "拒绝"} ${ev.reason || ""}`, ev.ts);
+      return;
+    }
     case "agent_done": {
       running = false; updateRunBadge();
+      finishRunMetrics();
       const cls = ev.status === "done" ? "status-done" :
         (ev.status === "reply" ? "" : "status-fail");
       addChat("system", `—— 运行结束: ${ev.status} ——`);
@@ -270,6 +337,7 @@ function renderEvent(ev) {
       addLog("agent", ev.status === "done" ? "agent" : "error",
         `结束 status=${ev.status} 动作步数=${ev.steps}`, ev.ts);
       refreshTraces();
+      refreshEvals();
       refreshSession();
       return;
     }
@@ -564,6 +632,32 @@ async function refreshTraces() {
     });
   } catch (_e) { /* noop */ }
 }
+async function refreshEvals() {
+  try {
+    const data = await api("/api/evals?limit=8");
+    const wrap = $("eval-list");
+    if (!wrap) return;
+    wrap.textContent = "";
+    const head = el("div", "trace-row");
+    head.appendChild(el("span", "t-name",
+      `共 ${data.total || 0} 条 · done ${data.passed_or_done || 0} · ${data.total_duration_s || 0}s · ¥${Number(data.total_cost_cny || 0).toFixed(4)}`));
+    wrap.appendChild(head);
+    const slow = data.slow_tools || [];
+    if (slow.length) {
+      const row = el("div", "trace-row");
+      const s = slow[0];
+      row.appendChild(el("span", "t-name",
+        `最慢 ${s.tool || "?"} ${s.elapsed_ms || 0}ms · ${s.run_id || ""}`));
+      wrap.appendChild(row);
+    }
+    (data.reports || []).slice(0, 6).forEach((r) => {
+      const row = el("div", "trace-row");
+      row.appendChild(el("span", "t-name", `${r.case_id || r.run_id} · ${r.task || ""}`));
+      row.appendChild(el("span", "t-status", `${r.status || "?"} ${r.duration_s || 0}s`));
+      wrap.appendChild(row);
+    });
+  } catch (_e) { /* noop */ }
+}
 async function refreshScripts() {
   try {
     const scriptsArr = await api("/api/scripts");
@@ -601,6 +695,7 @@ async function main() {
   connectWs();
   refreshStatus();
   refreshTraces();
+  refreshEvals();
   refreshScripts();
   refreshMemory();
   refreshSession();

@@ -47,6 +47,7 @@ _draw_*.py
 
 # MCP config
 .mcp.json
+.claude/
 
 # OmniParser cloned repo (build from source with weights downloaded separately)
 omni_parser_repo/
