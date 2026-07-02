@@ -221,6 +221,13 @@ class SystemToolMixin:
             elif title_hwnd:
                 self._remember_target(title_hwnd, want_title)
                 result["target_hwnd"] = title_hwnd
+                if result.get("verified") is not True:
+                    result["verified"] = True
+                    result["verify_method"] = "win32-title"
+                    result["verify_detail"] = (
+                        f'visible window title matched "{want_title}" '
+                        f"(hwnd={title_hwnd})"
+                    )
             elif resolved is not None:
                 self._remember_target(launched_hwnd, str(resolved.get("name") or command))
                 target = self._find_target_window()

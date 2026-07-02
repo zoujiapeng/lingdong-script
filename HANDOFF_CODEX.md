@@ -4,7 +4,7 @@
 
 ## 当前代码事实
 
-- 当前分支：`codex/low-latency-gui-agent`。
+- 当前分支：`codex/low-latency-controller-next`。
 - WinPilot 主体：`python/winpilot_home/winpilot/`。
 - Electron IPC adapter：`python/agent/__main__.py`。
 - GUI 任务：`AgentRunner`。
@@ -37,6 +37,7 @@
 - `CLAUDE.md`、`docs/architecture.md`、`docs/winpilot-agent.md` 已补运行时状态链路：前端 `/api/chat` -> `server.py` `_RunState` -> runner -> `ToolSession.dispatch()` -> BUS/trace/done verifier。
 - 工具级复盘方法已写入 `CLAUDE.md` 和 `docs/winpilot-agent.md`：查 `<run_id>.jsonl` 的 `agent_step/agent_tool_start/agent_tool/done_check`，再打开前后截图和 `NNN_llm_request/response.json` 对照模型输入、工具参数、真实屏幕。`run_action_batch` 内部动作另有 `agent_batch_action_start/agent_batch_action` 和 `batch_before/batch_after` 截图。
 - 低延迟视觉动作路径：`run_action_batch` 在 `agent/fast_tools.py` -> `fast/controller.py`；controller 会给 `draw_strokes/drag` 追加 `auto_visual_verify`。顶层 `draw_strokes/drag` 现在也会在 `AgentRunner` 中自动包装成单动作 batch，结果里有 `wrapped_by_fast_controller` 和本地视觉变化证据。验证充分时会返回 `fast_path_advice`，提示模型直接 done 而不是再补 zoom/observe。
+- `run_action_batch(subgoal="...")` 会把高层子目标写入结果和 summary；`click_element` 使用 `fast/element_cache.py` 的锚点定位，成功/失败都会返回 `anchor_locator`。缓存复用不再相信旧 `elem_id`，会用当前 snapshot 的文本/角色/相对位置重新验证，防止跨 observe 误点同编号新元素。
 - UIA-off 真实验证：`20260702-230125-aed7a2` 走 `/api/chat` 完成 Paint 三角形任务，工具序列为 `launch -> observe -> draw_strokes -> done`，`draw_strokes` 结果含 `wrapped_by_fast_controller=true`、`visual_change_detected=true`、`fast_path_advice`，截图 `after_003.jpg` 与模型思考一致。
 - UIA-off canvas 快速感知已实现：绘图/画布任务在 UIA 关闭、无 `query/full` observe 时走 `canvas_fast_observe`，跳过全窗口 OCR，只保留 Win32/CV/`likely_canvas` 摘要；需要文字/菜单时用 `observe(query=...)` 或 `observe(full=true)` 强制完整感知。
 - 最新 UIA-off 验证：`20260702-234823-a27fea` 走 `/api/chat` 完成同一 Paint 三角形任务，工具序列 `launch -> observe -> draw_strokes -> done`，`observe=220ms`，仅 1 次 perception 且 OCR 为 `skipped=canvas_fast_observe`，done gate 直接 deterministic pass，无第二次 OCR/LLM judge；eval 预算全过，duration 52.33s、cost 0.0692 CNY。
@@ -68,15 +69,18 @@ npm run build
 
 ## 2026-07-03 本轮新增
 
-- 分支仍是 `codex/low-latency-gui-agent`。
+- 分支仍是 `codex/low-latency-controller-next`。
 - 新增网页靶场 `python/winpilot_home/eval_targets/gui_agent_target.html`，用于测试 GUI 局部变化、输入、弹窗、拖拽、画布和 trace 截图一致性。启动方式：在该目录运行 `python -m http.server 8877 --bind 127.0.0.1`。
 - `observe(changed_only=true)` 已接入 `screen_watch` 最近 ROI：当前帧有变化用 `changed_regions`，稳定后 30 秒内用 `recent_changed_regions`，并裁剪到目标窗口后再跑 Win32/OCR/CV。无可用 ROI 时会明确返回 fallback 文案。
+- 普通可见动作的 `screen_delta` 已改为动作前/动作后独立截图 diff，并把新鲜动作 ROI 写入 `screen_watch.action_changed_regions`。`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI，避免后台 watcher 抢帧或被弹层/动画噪声污染。
+- `fusion.screen_watch_autostart=true`：ToolSession 记住目标窗口或准备执行可见动作时会自动启动 watcher，AgentRunner 结束时调用 `ToolSession.close()` 停止 watcher。不要再假设模型必须手动 `screen_watch start` 才有公告板。
+- `winpilot/eval/summary.py` 新增 `low_latency` 指标：screen capture、perception、action decision、action execution、post-action verify、replan frequency、VLM frequency、skill reuse rate、watch auto-start/running coverage。`fast_gui` 还会统计 batch subgoal、controller phase、anchor click/cache/failure。
 - `launch`/窗口匹配修复：URL 直接走 Windows protocol handler；`window_title` 和 `window_appears` 都会用于 launch 后找窗口；标题匹配会忽略空格、下划线和连字符差异。实测把 `gui_agent_target` 正确聚焦到 Chrome 靶场窗口，避免 Codex 遮挡污染感知。
 - `done_verifier.py` 新增显式可见状态目标的确定性 done：例如“确认状态卡出现 LOCAL_COUNTER”，会从 fresh screen OCR 验证，且 `LOCAL_COUNTER` 可匹配 OCR 的 `LOCAL COUNTER`。这减少了完成后等待 LLM done judge 的延迟，但不会用 agent 自己总结当证据。
-- 成功 E2E：`20260703-015021-f7167c`，UIA-off，任务通过 `/api/chat` 跑。真实截图 `python/winpilot_home/traces/20260703-015021-f7167c/after_002.jpg` 显示 `LOCAL_COUNTER_1`；trace 中 `observe(changed_only=true)` 返回 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)`；`done_check` 为 true。
+- 最新成功 E2E：`20260703-025138-dcf2c6`，UIA-off，任务通过 `/api/chat` 跑。真实截图 `python/winpilot_home/traces/20260703-025138-dcf2c6/batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`；trace 中 `observe(changed_only=true)` 直接在左侧状态卡 ROI 内识别到 `LOCAL COUNTER`；`done_check` 为 true。对照失败苗头 run `20260703-024228-c3525b`：第一次 changed_only 被右侧弹层/画布噪声带偏，之后修复 action/recent ROI 优先级。
 
 ## 15 项改造状态
 
-- 已有基础：子目标/batch 雏形、持续 watcher、局部 ROI observe、动作变化检测、目标窗口保护、canvas fast path、部分 world model、部分 skill replay、可见证据 done gate。
+- 已有基础：子目标/batch 雏形、自动 watcher、局部/action ROI observe、动作独立 screen_delta、目标窗口保护、canvas fast path、部分 world model、锚点缓存复验、部分 skill replay、可见证据 done gate、低延迟指标。
 - 半成品：多层视觉调度、视觉锚点点击、状态机、探索慢复用快、预测式感知、延迟指标。它们有文件和局部逻辑，但没有形成稳定闭环。
 - 未完成：真正轻量 UI 模型/YOLO 常驻内环、视觉伺服、LLM 只处理异常、跨软件泛化 skill、完整性能 dashboard。后续不要为了单个软件写专属规则。

@@ -18,6 +18,7 @@ _GA_ROOT = 2
 
 from ..action import executor, shell, verify
 from ..config import CONFIG
+from ..fast.vision import changed_regions
 from ..perception import apps, fusion, ocr, search, tray, vision_cv, win32, world
 from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
@@ -97,6 +98,7 @@ class ToolSession(
         self._undo_stack: list[tuple[str, object]] = []
         self._screen_epoch = 0
         self._observe_cache: dict[str, Any] | None = None
+        self._screen_watch_auto_started = False
 
     # ----------------------------------------------------------- dispatch
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
@@ -126,6 +128,8 @@ class ToolSession(
         if name in _MUTATING_TOOLS:
             self._screen_epoch += 1
             self._observe_cache = None
+        if name in {"launch", "focus_window", "observe", "read_text"}:
+            self._ensure_screen_watch(f"after:{name}")
         return result
 
     def _action_screen_delta_enabled(self, name: str, args: dict[str, Any]) -> bool:
@@ -137,8 +141,21 @@ class ToolSession(
 
     def _prime_action_screen_delta(self) -> dict[str, Any]:
         context = self._action_target_context()
+        controller = None
         try:
-            self._fast_controller().watcher.sample_once()
+            self._ensure_screen_watch("visible_action")
+            controller = self._fast_controller()
+            capture_fn = getattr(controller, "capture_fn", None)
+            target_region_fn = getattr(controller, "_target_region", None)
+            if callable(capture_fn):
+                region = target_region_fn() if callable(target_region_fn) else None
+                started = time.monotonic()
+                frame = capture_fn(region)
+                context["_screen_delta_before_frame"] = frame
+                context["_screen_delta_region"] = region
+                context["_screen_delta_capture_ms"] = int((time.monotonic() - started) * 1000)
+            else:
+                controller.watcher.sample_once()
             context["screen_delta_primed"] = True
         except Exception:
             logger.debug("action screen-delta pre-sample failed", exc_info=True)
@@ -151,7 +168,30 @@ class ToolSession(
         before_context: dict[str, Any],
     ) -> ToolResult:
         try:
-            delta = self._fast_controller().watcher.sample_once()
+            controller = self._fast_controller()
+            watcher = controller.watcher
+            before_frame = before_context.get("_screen_delta_before_frame")
+            if before_frame is not None and callable(getattr(controller, "capture_fn", None)):
+                region = before_context.get("_screen_delta_region")
+                capture_started = time.monotonic()
+                after_frame = controller.capture_fn(region)
+                capture_ms = int((time.monotonic() - capture_started) * 1000)
+                delta = changed_regions(
+                    before_frame,
+                    after_frame,
+                    root_region=region,
+                    pixel_thresh=getattr(watcher, "pixel_thresh", 12),
+                )
+                if hasattr(watcher, "record_action_delta"):
+                    watcher.record_action_delta(
+                        delta,
+                        region,
+                        capture_ms=capture_ms,
+                        diff_ms=delta.elapsed_ms,
+                    )
+            else:
+                capture_ms = 0
+                delta = watcher.sample_once()
             status = self._fast_screen_status()
         except Exception:
             logger.debug("action screen-delta post-sample failed", exc_info=True)
@@ -162,10 +202,16 @@ class ToolSession(
             return result
         if not isinstance(data, dict):
             return result
+        public_before_context = {
+            key: value for key, value in before_context.items()
+            if not str(key).startswith("_")
+        }
         after_context = self._action_target_context()
         delta_data = delta.to_dict()
+        if capture_ms:
+            delta_data["capture_latency_ms"] = capture_ms
         target_region = self._region_from_dict(
-            after_context.get("target_region") or before_context.get("target_region")
+            after_context.get("target_region") or public_before_context.get("target_region")
         )
         if target_region is not None:
             changed_in_target = [
@@ -186,7 +232,7 @@ class ToolSession(
                 )
         data.setdefault("screen_delta", delta_data)
         data.setdefault("action_target", {
-            "before": before_context,
+            "before": public_before_context,
             "after": after_context,
         })
         if status:
@@ -332,6 +378,64 @@ class ToolSession(
         hint = (hint or "").strip()
         if hint:
             self.target_hint = hint
+        if self._window_alive(self.hwnd):
+            self._ensure_screen_watch("target")
+
+    def _ensure_screen_watch(self, reason: str = "") -> None:
+        if not CONFIG.get("fusion", "screen_watch_autostart", default=True):
+            return
+        if not getattr(self, "run_id", None):
+            return
+        if not (self._window_alive(self.hwnd) or self.snapshot is not None):
+            return
+        controller = self._fast_controller()
+        watcher = controller.watcher
+        try:
+            status = watcher.status()
+        except Exception:
+            status = {}
+        if status.get("running"):
+            return
+        watcher.start()
+        self._screen_watch_auto_started = True
+        try:
+            status = watcher.status()
+            if self.world_enabled and status:
+                self.world.record_screen_bulletin(status)
+            BUS.publish(
+                "screen_watch",
+                run_id=getattr(self, "run_id", None),
+                action="auto_start",
+                reason=reason,
+                screen_watch=status,
+            )
+        except Exception:
+            logger.debug("screen_watch auto-start status publish failed", exc_info=True)
+
+    def close(self) -> None:
+        controller = getattr(self, "_fast_gui_controller", None)
+        if controller is None:
+            return
+        watcher = getattr(controller, "watcher", None)
+        if watcher is None:
+            return
+        try:
+            status = watcher.status()
+        except Exception:
+            status = {}
+        if not status.get("running"):
+            return
+        try:
+            watcher.stop()
+            BUS.publish(
+                "screen_watch",
+                run_id=getattr(self, "run_id", None),
+                action="auto_stop",
+                reason="session_close",
+                screen_watch=watcher.status(),
+            )
+        except Exception:
+            logger.debug("screen_watch auto-stop failed", exc_info=True)
 
     def _find_target_window(self) -> int | None:
         if not self._norm_window_text(self.target_hint):

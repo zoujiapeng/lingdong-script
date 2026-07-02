@@ -22,6 +22,27 @@ class ElementCacheEntry:
     hits: int = 0
 
 
+@dataclass
+class LocateResult:
+    """Element lookup result with enough evidence for traces and the LLM."""
+
+    element: UIElement | None
+    score: float = 0.0
+    cache_hit: bool = False
+    reason: str = ""
+    candidates: list[dict] | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "found": self.element is not None,
+            "score": round(float(self.score), 3),
+            "cache_hit": bool(self.cache_hit),
+            "reason": self.reason,
+            "element": self.element.to_dict() if self.element is not None else None,
+            "candidates": list(self.candidates or []),
+        }
+
+
 def _region_match(element: UIElement, window: Region, expected: str) -> bool:
     expected = (expected or "").casefold().replace("_", "-").replace(" ", "-")
     if not expected:
@@ -76,12 +97,50 @@ def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
     return score
 
 
+def _rel_center(element: UIElement, window: Region) -> tuple[float, float]:
+    return (
+        (element.cx - window.left) / max(1, window.width),
+        (element.cy - window.top) / max(1, window.height),
+    )
+
+
+def _rel_distance(a: UIElement, a_window: Region, b: UIElement, b_window: Region) -> float:
+    ax, ay = _rel_center(a, a_window)
+    bx, by = _rel_center(b, b_window)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _text_compatible(previous: str, current: str) -> bool:
+    previous = (previous or "").strip().casefold()
+    current = (current or "").strip().casefold()
+    if not previous or not current:
+        return True
+    return previous == current or previous in current or current in previous
+
+
+def _role_compatible(previous: str, current: str) -> bool:
+    previous = (previous or "").strip().casefold()
+    current = (current or "").strip().casefold()
+    if not previous or not current:
+        return True
+    return previous == current or previous in current or current in previous
+
+
+def _candidate_trace(element: UIElement, score: float) -> dict:
+    data = element.to_dict()
+    data["score"] = round(float(score), 3)
+    return data
+
+
 class ElementCache:
     """Cache stable semantic anchors for a single run."""
 
     def __init__(self, ttl_s: float = 180.0) -> None:
         self.ttl_s = float(ttl_s)
         self._items: dict[str, ElementCacheEntry] = {}
+        self._hits = 0
+        self._misses = 0
+        self._stale = 0
 
     @staticmethod
     def key(snapshot: Snapshot, anchor: VisualAnchor) -> str:
@@ -103,22 +162,66 @@ class ElementCache:
         )
 
     def get(self, snapshot: Snapshot, anchor: VisualAnchor) -> UIElement | None:
+        result = self.get_with_trace(snapshot, anchor)
+        return result.element
+
+    def get_with_trace(self, snapshot: Snapshot, anchor: VisualAnchor) -> LocateResult:
         entry = self._items.get(self.key(snapshot, anchor))
         if not entry:
-            return None
+            self._misses += 1
+            return LocateResult(None, reason="cache_miss")
         if time.monotonic() - entry.created_at > self.ttl_s:
             self._items.pop(entry.key, None)
-            return None
-        # Only reuse if it is still visible in the latest snapshot.
-        current = snapshot.by_id(entry.element.elem_id)
-        if current is None:
-            return None
+            self._stale += 1
+            return LocateResult(None, reason="cache_expired")
+
+        # Element ids are valid only within one observe. Revalidate the cached
+        # anchor against the current snapshot by semantics and relative geometry.
+        scored: list[tuple[UIElement, float]] = []
+        for element in snapshot.elements:
+            anchor_score = _score(element, anchor, snapshot.region)
+            distance = _rel_distance(element, snapshot.region, entry.element, entry.region)
+            proximity = 0.35 if distance <= 0.04 else 0.22 if distance <= 0.09 else 0.08 if distance <= 0.16 else -0.30
+            compatibility = 0.0
+            if not _text_compatible(entry.element.text, element.text):
+                compatibility -= 0.45
+            if not _role_compatible(entry.element.role, element.role):
+                compatibility -= 0.18
+            scored.append((element, anchor_score + proximity + compatibility))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        if not scored:
+            self._misses += 1
+            return LocateResult(None, reason="cache_target_not_visible")
+        current, score = scored[0]
+        if score < 0.72:
+            self._misses += 1
+            return LocateResult(
+                None,
+                score=score,
+                reason="cache_revalidation_failed",
+                candidates=[_candidate_trace(e, s) for e, s in scored[:3]],
+            )
         entry.hits += 1
-        return current
+        self._hits += 1
+        return LocateResult(
+            current,
+            score=score,
+            cache_hit=True,
+            reason="cache_revalidated",
+            candidates=[_candidate_trace(e, s) for e, s in scored[:3]],
+        )
 
     def locate(self, snapshot: Snapshot, anchor: VisualAnchor, min_score: float = 0.55) -> UIElement | None:
-        cached = self.get(snapshot, anchor)
-        if cached is not None:
+        return self.locate_with_trace(snapshot, anchor, min_score=min_score).element
+
+    def locate_with_trace(
+        self,
+        snapshot: Snapshot,
+        anchor: VisualAnchor,
+        min_score: float = 0.55,
+    ) -> LocateResult:
+        cached = self.get_with_trace(snapshot, anchor)
+        if cached.element is not None:
             return cached
         candidates = sorted(
             ((element, _score(element, anchor, snapshot.region)) for element in snapshot.elements),
@@ -126,15 +229,28 @@ class ElementCache:
             reverse=True,
         )
         if not candidates or candidates[0][1] < min_score:
-            return None
+            return LocateResult(
+                None,
+                score=candidates[0][1] if candidates else 0.0,
+                reason="best_score_below_threshold",
+                candidates=[_candidate_trace(e, s) for e, s in candidates[:5]],
+            )
         element = candidates[0][0]
         self.remember(snapshot, anchor, element)
-        return element
+        return LocateResult(
+            element,
+            score=candidates[0][1],
+            cache_hit=False,
+            reason="located_from_snapshot",
+            candidates=[_candidate_trace(e, s) for e, s in candidates[:5]],
+        )
 
     def stats(self) -> dict:
         return {
             "entries": len(self._items),
-            "hits": sum(item.hits for item in self._items.values()),
+            "hits": self._hits,
+            "misses": self._misses,
+            "stale": self._stale,
         }
 
 

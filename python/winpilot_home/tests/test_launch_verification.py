@@ -297,3 +297,57 @@ def test_launch_focuses_window_title_expect_when_verify_passed(monkeypatch):
     assert session.hwnd == 123
     assert data["target_hwnd"] == 123
     assert data["foreground_matches_target"] is True
+
+
+def test_launch_window_title_fallback_marks_verified(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open web target")
+    session._resolve_launch_target = lambda _command: None
+    session._window_alive = lambda hwnd: bool(hwnd)
+    session._ensure_screen_watch = lambda reason="": None
+
+    monkeypatch.setattr(
+        tools,
+        "verify",
+        SimpleNamespace(
+            run_with_verify=lambda *args, **kwargs: {
+                "ok": True,
+                "verified": False,
+                "verify_detail": "initial foreground did not match",
+                "post_state": {"foreground_hwnd": 999, "foreground_title": "Codex"},
+            },
+            post_state_summary=lambda: {
+                "foreground_hwnd": 123,
+                "foreground_title": "WinPilot GUI Agent Target - Google Chrome",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(
+            launch=lambda command: {"ok": True, "command": command, "via": "url"},
+            focus_window=lambda hwnd: {"ok": True, "hwnd": hwnd},
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "win32",
+        SimpleNamespace(
+            find_app=lambda query: {"running": False, "process_count": 0, "windows": []},
+            find_window=lambda title: {"hwnd": 123, "title": "WinPilot GUI Agent Target - Google Chrome"},
+        ),
+    )
+    monkeypatch.setattr(tools.win32gui, "GetForegroundWindow", lambda: 123)
+
+    result = session._t_launch({
+        "command": "http://127.0.0.1:8877/gui_agent_target.html",
+        "expect": {"window_title": "gui_agent_target"},
+    })
+    data = json.loads(result.text)
+
+    assert data["verified"] is True
+    assert data["verify_method"] == "win32-title"
+    assert data["target_hwnd"] == 123
