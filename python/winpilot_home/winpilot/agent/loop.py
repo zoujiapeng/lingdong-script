@@ -116,6 +116,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
         self.session = ToolSession(stop_event=self.stop_event, task=task)
+        self.session.run_id = self.run_id
         # Prior finished tasks this session (list[SessionEntry]) for continuity.
         self.session_context = session_context or []
         self.messages: list[dict] = []
@@ -467,6 +468,104 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if ok:
                 self._had_verified_action = True
 
+    @staticmethod
+    def _compact_visual_summary(summary: Any) -> Any:
+        if not isinstance(summary, dict):
+            return summary
+        keep = {
+            "width",
+            "height",
+            "blankish",
+            "ink_ratio",
+            "ink_bbox",
+            "component_count",
+            "likely_canvas_bbox",
+        }
+        out = {key: summary[key] for key in keep if key in summary}
+        colors = summary.get("visible_colors")
+        if isinstance(colors, dict):
+            out["visible_colors"] = {
+                name: {
+                    key: value
+                    for key, value in stats.items()
+                    if key in {"pixels", "ratio", "bbox", "largest_bbox", "largest_area"}
+                }
+                for name, stats in colors.items()
+                if isinstance(stats, dict)
+            }
+        likely = summary.get("likely_canvas_summary")
+        if isinstance(likely, dict):
+            out["likely_canvas_summary"] = AgentRunner._compact_visual_summary(likely)
+        return out
+
+    @staticmethod
+    def _compact_tool_evidence(tool_name: str, result_text: str) -> str:
+        try:
+            data = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return (result_text or "")[:1200]
+        if not isinstance(data, dict):
+            return (result_text or "")[:1200]
+        if tool_name == "run_action_batch":
+            compact_results: list[dict[str, Any]] = []
+            for item in data.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                child: dict[str, Any] = {
+                    "action": item.get("action"),
+                    "ok": item.get("ok"),
+                }
+                for key in ("verified", "elapsed_ms"):
+                    if key in item:
+                        child[key] = item[key]
+                child_data = item.get("data")
+                if not isinstance(child_data, dict):
+                    child_data = {}
+                    preview = item.get("preview")
+                    if isinstance(preview, str):
+                        try:
+                            parsed_preview = json.loads(preview)
+                            if isinstance(parsed_preview, dict):
+                                child_data = parsed_preview
+                        except (json.JSONDecodeError, TypeError):
+                            child_data = {}
+                for key in (
+                    "verified",
+                    "visual_change_detected",
+                    "visual_change_ratio",
+                    "verify_method",
+                    "strokes_drawn",
+                    "changed",
+                    "stable",
+                    "waited_ms",
+                ):
+                    if key in child_data:
+                        child[key] = child_data[key]
+                if "nonvisual_summary" in child_data:
+                    child["nonvisual_summary"] = AgentRunner._compact_visual_summary(
+                        child_data.get("nonvisual_summary")
+                    )
+                compact_results.append(child)
+            compact = {
+                "ok": data.get("ok"),
+                "verified": data.get("verified"),
+                "needs_observe": data.get("needs_observe"),
+                "last_action": data.get("last_action"),
+                "metrics": data.get("metrics"),
+                "results": compact_results,
+            }
+            return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
+        if tool_name in {"zoom", "screenshot"}:
+            compact = {
+                "ok": data.get("ok"),
+                "region": data.get("region"),
+                "nonvisual_summary": AgentRunner._compact_visual_summary(
+                    data.get("nonvisual_summary")
+                ),
+            }
+            return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
+        return (result_text or "")[:1200]
+
     def _drawing_should_stop_mutating(self) -> bool:
         """Guard against post-completion overwork on canvas tasks.
 
@@ -582,14 +681,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "read_text",
                 "find_app",
                 "find_program",
+                "run_action_batch",
+                "zoom",
+                "screenshot",
             }
             if (
                 tc.function.name in evidence_tools
                 or '"verified"' in (result.text or "")
                 or "visual_change_detected" in (result.text or "")
             ):
-                limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
-                self._recent_results.append((tc.function.name, (result.text or "")[:limit]))
+                if tc.function.name in {"run_action_batch", "zoom", "screenshot"}:
+                    evidence_text = self._compact_tool_evidence(tc.function.name, result.text)
+                else:
+                    limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
+                    evidence_text = (result.text or "")[:limit]
+                self._recent_results.append((tc.function.name, evidence_text))
                 self._recent_results = self._recent_results[-6:]
             result_meta: dict[str, Any] = {}
             try:
@@ -679,8 +785,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "Work in batches: observe ONCE to locate the canvas and tools, plan the whole figure "
                     "(all strokes), then commit them in as few calls as possible using draw_strokes "
                     "(many separate strokes in one call) rather than one drag per LLM round-trip. Once canvas "
-                    "coordinates are grounded, prefer run_action_batch for click/focus + draw_strokes + zoom "
-                    "so the fast controller can execute and verify the mini-sequence together. For simple "
+                    "coordinates are grounded, use run_action_batch for the immediate action+verification "
+                    "sequence, including the common two-action case draw_strokes followed by zoom. Example "
+                    "shape batch: {'actions':[{'draw_strokes': {...}}, {'zoom': {'x':..., 'y':..., "
+                    "'width':..., 'height':...}}]}. This lets the fast controller execute and verify the "
+                    "mini-sequence together. For simple "
                     "shapes or marks, prefer direct strokes on the located canvas before spending steps on "
                     "toolbar shape menus; use toolbar/tool selection mainly when direct strokes report no "
                     "visual change or the current tool is clearly wrong. Do not attach text_appears expects "

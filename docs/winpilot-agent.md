@@ -64,7 +64,8 @@
    - `agent_tool`：工具执行后，包含 `result_preview`、`terminal`、`elapsed_ms`、`replay`，动作工具还可能包含 `screenshot`。
    - `done_check`：done gate 的判断结果和拒绝原因。
    - `agent_done`：最终状态，不等于真实成功，必须结合证据判断。
-4. 打开 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。`TraceRecorder` 会给 `click`、`type_text`、`hotkey`、`launch`、`drag`、`scroll` 保存前后截图，用来确认是否真的点击/输入/切换/滚动。
+4. 打开 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。`TraceRecorder` 会给 `click`、`type_text`、`hotkey`、`launch`、`drag`、`scroll`、`draw_strokes` 保存前后截图，用来确认是否真的点击/输入/切换/滚动/绘制。
+   `run_action_batch` 内部子动作会写 `agent_batch_action_start/agent_batch_action`；会改变屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，所以排查低延迟 batch 时要同时看这些截图，不能只看顶层 `run_action_batch` 的结果 JSON。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
 6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
    - 窗口/应用发现：`window_tools.py`

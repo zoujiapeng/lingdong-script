@@ -115,6 +115,9 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             tool_events.append(event)
             if event.get("screenshot"):
                 screenshots.append(str(event.get("screenshot")))
+        elif etype == "agent_batch_action":
+            if event.get("screenshot"):
+                screenshots.append(str(event.get("screenshot")))
         elif etype == "done_check":
             done_checks.append({
                 "passed": event.get("passed"),

@@ -65,6 +65,7 @@
 - 真实 GUI 评测用前端 Agent 页，或用 `scripts/gui_eval_run.py "任务"`；脚本同样 POST `/api/chat`，轮询 `/api/status`，读取 `/api/trace/<run_id>`，不会绕开前端路径。
 - 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
 - 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
+- `run_action_batch` 的内部子动作会额外写 `agent_batch_action_start/agent_batch_action` 事件；可变更屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，用来核对快速内环到底有没有真的点、拖、输入、画。
 - `click/type_text/hotkey/launch/drag/scroll` 会自动保存动作前后截图；必须人工打开截图确认真实画面和 agent 的推理是否一致。
 - 看 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`，确认模型每一步实际收到了什么感知文本、工具结果、用户插话、视觉图片，以及它返回了哪些 tool calls。
 - 如果“成功”可疑，查 `done_check` 事件和 `done_verifier.py`；没有截图/文件/进程/窗口/read_text 证据的 done 都不能算真成功。

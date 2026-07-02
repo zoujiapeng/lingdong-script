@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import win32gui
@@ -73,6 +74,24 @@ class SystemToolMixin:
                     "process_count": app_state.get("process_count", 0),
                 }
         return None
+
+    def _wait_launch_visible_window(
+        self,
+        command: str,
+        launch_result: dict,
+        win32_mod,
+        timeout_s: float = 7.0,
+    ) -> dict | None:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            found = self._launch_visible_window(command, launch_result, win32_mod)
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return None
+            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                return None
+            time.sleep(0.35)
 
     def _t_run_shell(self, args: dict) -> ToolResult:
         shell_mod = _tools_attr("shell", shell)
@@ -163,12 +182,13 @@ class SystemToolMixin:
             do_launch,
             expect=args.get("expect"),
             hwnd=self.hwnd,
-            timeout_s=10.0,
+            retryable=False,
+            timeout_s=3.0,
             stop_event=self.stop_event,
         )
         launch_window = None
         if result.get("ok") and result.get("verified") is not True:
-            launch_window = self._launch_visible_window(command, result, win32_mod)
+            launch_window = self._wait_launch_visible_window(command, result, win32_mod)
             if launch_window:
                 hwnd = int(launch_window["hwnd"])
                 focus_result = executor_mod.focus_window(hwnd)
