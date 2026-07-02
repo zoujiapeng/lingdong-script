@@ -33,6 +33,7 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 2,
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost_cny": 0.1},
             "slow_tools": [{"tool": "observe", "elapsed_ms": 50}],
+            "fast_gui": {"batch_calls": 1, "batch_actions": 3, "round_trips_saved": 2},
         },
         {
             "run_id": "r2",
@@ -40,6 +41,7 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 3,
             "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost_cny": 0.2},
             "slow_tools": [{"tool": "click", "elapsed_ms": 80}],
+            "fast_gui": {"batch_calls": 2, "batch_actions": 4, "round_trips_saved": 2},
         },
     ]
 
@@ -51,6 +53,49 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
     assert out["total_cost_cny"] == 0.3
     assert out["total_prompt_tokens"] == 30
     assert out["slow_tools"][0]["tool"] == "click"
+    assert out["fast_gui"]["batch_calls"] == 3
+    assert out["fast_gui"]["batch_actions"] == 7
+    assert out["fast_gui"]["round_trips_saved"] == 4
+
+
+def test_summarize_events_extracts_fast_gui_metrics():
+    events = [
+        {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
+        {
+            "type": "run_state",
+            "phase": "acting",
+            "last_tool": "run_action_batch",
+            "unverified_actions": 0,
+            "ts": 1.1,
+        },
+        {
+            "type": "agent_tool",
+            "tool": "run_action_batch",
+            "elapsed_ms": 50,
+            "result_meta": {
+                "ok": True,
+                "needs_observe": True,
+                "metrics": {
+                    "action_count": 3,
+                    "controller_round_trips_saved": 2,
+                    "screen_wait_count": 1,
+                },
+            },
+            "ts": 1.2,
+        },
+        {"type": "agent_tool", "tool": "screen_watch", "elapsed_ms": 5, "ts": 1.3},
+        {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 2.0},
+    ]
+
+    out = summary.summarize_events(events)
+
+    assert out["fast_gui"]["batch_calls"] == 1
+    assert out["fast_gui"]["batch_actions"] == 3
+    assert out["fast_gui"]["round_trips_saved"] == 2
+    assert out["fast_gui"]["screen_waits"] == 1
+    assert out["fast_gui"]["screen_watch_calls"] == 1
+    assert out["fast_gui"]["needs_observe_batches"] == 1
+    assert out["fast_gui"]["run_state_phases"] == {"acting": 1}
 
 
 def test_aggregate_reports_treats_policy_failure_as_not_passed():

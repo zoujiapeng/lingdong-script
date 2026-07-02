@@ -642,6 +642,13 @@ async function refreshEvals() {
     head.appendChild(el("span", "t-name",
       `共 ${data.total || 0} 条 · done ${data.passed_or_done || 0} · ${data.total_duration_s || 0}s · ¥${Number(data.total_cost_cny || 0).toFixed(4)}`));
     wrap.appendChild(head);
+    const fast = data.fast_gui || {};
+    if ((fast.batch_calls || 0) || (fast.run_state_events || 0) || (fast.screen_watch_calls || 0)) {
+      const row = el("div", "trace-row");
+      row.appendChild(el("span", "t-name",
+        `fast GUI: batch ${fast.batch_calls || 0}, actions ${fast.batch_actions || 0}, saved ${fast.round_trips_saved || 0}, waits ${fast.screen_waits || 0}, states ${fast.run_state_events || 0}`));
+      wrap.appendChild(row);
+    }
     const slow = data.slow_tools || [];
     if (slow.length) {
       const row = el("div", "trace-row");
