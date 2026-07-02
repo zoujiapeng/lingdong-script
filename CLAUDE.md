@@ -69,6 +69,8 @@
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch(sync=false)`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`auto_visual_verify`、`visual_change_detected` 这类证据；验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
 - UIA 关闭的绘图/画布任务会用 `canvas_fast_observe`：普通 `observe` 跳过全窗口 OCR，只给 Win32/CV/`likely_canvas` 摘要；如果要读菜单/工具栏文字，用 `observe(query="...")` 或 `observe(full=true)`。
+- 普通可见动作 `click/type_text/hotkey/scroll/focus_window/tray_click/clipboard_paste/mouse_*` 会自动附带廉价 `screen_delta`；`result_meta.action_target` 会记录动作前后 `target_hwnd`、foreground 和 `foreground_matches_target`。`screen_delta.changed=true` 只说明像素变化，不能单独证明成功；如果 foreground 不匹配 target，要先重新 focus/observe，不能据此 done。
+- `launch` 找到目标窗口后会主动置前并记录 `foreground_matches_target`；`action/verify.py` 在有目标 hwnd 时只接受目标本身或 owner/祖先弹窗，不再让 Codex、日志窗口、同进程其他窗口的 OCR 文本冒充成功。
 - `click/type_text/hotkey/launch/drag/scroll` 会自动保存动作前后截图；必须人工打开截图确认真实画面和 agent 的推理是否一致。
 - 看 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`，确认模型每一步实际收到了什么感知文本、工具结果、用户插话、视觉图片，以及它返回了哪些 tool calls。
 - 如果“成功”可疑，查 `done_check` 事件和 `done_verifier.py`；没有截图/文件/进程/窗口/read_text 证据的 done 都不能算真成功。

@@ -45,6 +45,19 @@ _MUTATING_TOOLS = {
     "write_file", "clipboard_write", "clipboard_paste", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch",
 }
+_ACTION_SCREEN_DELTA_TOOLS = {
+    "click",
+    "type_text",
+    "hotkey",
+    "scroll",
+    "focus_window",
+    "tray_click",
+    "clipboard_paste",
+    "mouse_down",
+    "mouse_up",
+    "move_mouse",
+    "hold_key",
+}
 
 
 class ToolSession(
@@ -90,11 +103,16 @@ class ToolSession(
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
             return ToolResult(f"未知工具: {name}")
+        screen_delta_context = None
+        if self._action_screen_delta_enabled(name, args):
+            screen_delta_context = self._prime_action_screen_delta()
         try:
             result = handler(args)
         except Exception as exc:
             logger.exception("工具 %s 执行异常", name)
             return ToolResult(f"工具 {name} 执行异常: {exc}")
+        if screen_delta_context is not None:
+            result = self._attach_action_screen_delta(result, screen_delta_context)
         if self.world_enabled:
             try:
                 self.world.record_action(name, args)
@@ -109,6 +127,148 @@ class ToolSession(
             self._screen_epoch += 1
             self._observe_cache = None
         return result
+
+    def _action_screen_delta_enabled(self, name: str, args: dict[str, Any]) -> bool:
+        if name not in _ACTION_SCREEN_DELTA_TOOLS:
+            return False
+        if args.get("skip_screen_delta") is True:
+            return False
+        return bool(CONFIG.get("fusion", "action_screen_delta", default=True))
+
+    def _prime_action_screen_delta(self) -> dict[str, Any]:
+        context = self._action_target_context()
+        try:
+            self._fast_controller().watcher.sample_once()
+            context["screen_delta_primed"] = True
+        except Exception:
+            logger.debug("action screen-delta pre-sample failed", exc_info=True)
+            context["screen_delta_primed"] = False
+        return context
+
+    def _attach_action_screen_delta(
+        self,
+        result: ToolResult,
+        before_context: dict[str, Any],
+    ) -> ToolResult:
+        try:
+            delta = self._fast_controller().watcher.sample_once()
+            status = self._fast_screen_status()
+        except Exception:
+            logger.debug("action screen-delta post-sample failed", exc_info=True)
+            return result
+        try:
+            data = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if not isinstance(data, dict):
+            return result
+        after_context = self._action_target_context()
+        delta_data = delta.to_dict()
+        target_region = self._region_from_dict(
+            after_context.get("target_region") or before_context.get("target_region")
+        )
+        if target_region is not None:
+            changed_in_target = [
+                r for r in delta.regions
+                if self._regions_intersect(r, target_region)
+            ]
+            delta_data["changed_in_target_region"] = bool(delta.changed and changed_in_target)
+            delta_data["target_region_changed_count"] = len(changed_in_target)
+        if after_context.get("target_hwnd"):
+            delta_data["foreground_matches_target"] = bool(
+                after_context.get("foreground_matches_target")
+            )
+            if delta.changed and not delta_data["foreground_matches_target"]:
+                delta_data["target_warning"] = (
+                    "screen changed while the foreground window did not match the "
+                    "session target; treat this as weak evidence and re-focus/observe "
+                    "the target before marking success."
+                )
+        data.setdefault("screen_delta", delta_data)
+        data.setdefault("action_target", {
+            "before": before_context,
+            "after": after_context,
+        })
+        if status:
+            data.setdefault("screen_watch", status)
+        result.text = self._fmt(data)
+        return result
+
+    @staticmethod
+    def _region_dict(region: Region | None) -> dict[str, int] | None:
+        if region is None:
+            return None
+        return {
+            "left": int(region.left),
+            "top": int(region.top),
+            "width": int(region.width),
+            "height": int(region.height),
+        }
+
+    @staticmethod
+    def _region_from_dict(data: object) -> Region | None:
+        if not isinstance(data, dict):
+            return None
+        try:
+            return Region(
+                int(data["left"]),
+                int(data["top"]),
+                int(data["width"]),
+                int(data["height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _regions_intersect(a: Region, b: Region) -> bool:
+        return a.left < b.right and a.right > b.left and a.top < b.bottom and a.bottom > b.top
+
+    def _window_related_to_target(self, hwnd: int | None, target: int | None) -> bool:
+        if not hwnd or not target:
+            return False
+        if int(hwnd) == int(target):
+            return True
+        try:
+            if win32gui.GetAncestor(int(hwnd), _GA_ROOT) == int(target):
+                return True
+        except Exception:
+            pass
+        try:
+            owner = win32gui.GetWindow(int(hwnd), 4)  # GW_OWNER
+            while owner:
+                if int(owner) == int(target):
+                    return True
+                owner = win32gui.GetWindow(int(owner), 4)
+        except Exception:
+            pass
+        return False
+
+    def _action_target_context(self) -> dict[str, Any]:
+        target = int(self.hwnd) if self._window_alive(self.hwnd) else None
+        try:
+            fg = int(win32gui.GetForegroundWindow() or 0) or None
+        except Exception:
+            fg = None
+        context: dict[str, Any] = {
+            "target_hwnd": target,
+            "foreground_hwnd": fg,
+            "foreground_matches_target": self._window_related_to_target(fg, target),
+        }
+        if target:
+            try:
+                context["target_title"] = win32._window_text(target)
+            except Exception:
+                pass
+            try:
+                context["target_region"] = self._region_dict(window_region(target))
+            except Exception:
+                pass
+        if fg:
+            try:
+                context["foreground_title"] = win32._window_text(fg)
+            except Exception:
+                pass
+        return context
 
     def cached_observe(self, key: tuple, ttl_s: float) -> fusion.Snapshot | None:
         cache = self._observe_cache

@@ -171,6 +171,7 @@ class SystemToolMixin:
         win32_mod = _tools_attr("win32", win32)
         command = str(args["command"]).strip()
         resolved = self._resolve_launch_target(command)
+        prior_hwnd = self.hwnd
 
         def do_launch() -> dict:
             if resolved is not None:
@@ -205,7 +206,6 @@ class SystemToolMixin:
                 result["focus_after_launch"] = focus_result
         if result.get("ok"):
             launched_hwnd = (result.get("post_state") or {}).get("foreground_hwnd")
-            self._undo_stack.append(("app", launched_hwnd))
             expect = args.get("expect") or {}
             want_title = str(expect.get("window_appears") or "").strip()
             title_hwnd = None
@@ -228,6 +228,32 @@ class SystemToolMixin:
                     self._remember_target(target)
             elif launched_hwnd:
                 self._remember_target(launched_hwnd)
+            target_hwnd = self.hwnd if self._window_alive(self.hwnd) else None
+            if target_hwnd:
+                result["target_hwnd"] = int(target_hwnd)
+                try:
+                    foreground = win32gui.GetForegroundWindow()
+                except Exception:
+                    foreground = 0
+                if not self._window_related_to_target(foreground, target_hwnd):
+                    focus_result = executor_mod.focus_window(target_hwnd)
+                    result["focus_after_launch"] = focus_result
+                    if focus_result.get("ok"):
+                        try:
+                            result["post_state"] = verify_mod.post_state_summary()
+                        except Exception:
+                            pass
+                try:
+                    result["foreground_matches_target"] = self._window_related_to_target(
+                        win32gui.GetForegroundWindow(),
+                        target_hwnd,
+                    )
+                except Exception:
+                    result["foreground_matches_target"] = False
+                if target_hwnd != prior_hwnd or result.get("target_hwnd"):
+                    self._undo_stack.append(("app", target_hwnd))
+            elif launched_hwnd and launched_hwnd != prior_hwnd:
+                self._undo_stack.append(("app", launched_hwnd))
         if resolved is not None:
             result["resolved_app"] = f'{resolved["name"]} [{resolved["kind"]}]'
             if self.hwnd:

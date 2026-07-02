@@ -50,3 +50,62 @@ def test_tool_session_records_fast_screen_bulletin_after_dispatch():
 
     assert result.text == "ok"
     assert session.world.state()["screen_watch"]["sequence"] == 7
+
+
+def test_tool_session_attaches_screen_delta_to_visible_action():
+    import json
+
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.utils.screenshot import Region
+
+    class Watcher:
+        def __init__(self):
+            self.samples = 0
+
+        def sample_once(self):
+            self.samples += 1
+            if self.samples == 1:
+                return ScreenDelta(False, 0.0, [], 1)
+            return ScreenDelta(True, 0.0123, [Region(10, 20, 30, 40)], 2)
+
+        def status(self):
+            return _status(sequence=self.samples)
+
+    watcher = Watcher()
+    session = ToolSession(task="demo")
+    session._fast_gui_controller = SimpleNamespace(watcher=watcher)
+    session._t_click = lambda args: ToolResult('{"ok": true, "verified": false}')
+
+    result = session.dispatch("click", {"x": 1, "y": 2})
+    data = json.loads(result.text)
+
+    assert watcher.samples == 2
+    assert data["screen_delta"]["changed"] is True
+    assert data["screen_delta"]["ratio"] == 0.0123
+    assert data["screen_delta"]["regions"][0]["left"] == 10
+    assert "action_target" in data
+    assert session.world.state()["screen_watch"]["sequence"] == 2
+
+
+def test_tool_session_can_skip_screen_delta_for_visible_action():
+    import json
+
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    class Watcher:
+        def sample_once(self):
+            raise AssertionError("screen delta should be skipped")
+
+        def status(self):
+            return {}
+
+    session = ToolSession(task="demo")
+    session._fast_gui_controller = SimpleNamespace(watcher=Watcher())
+    session._t_click = lambda args: ToolResult('{"ok": true}')
+
+    result = session.dispatch("click", {"x": 1, "y": 2, "skip_screen_delta": True})
+
+    assert "screen_delta" not in json.loads(result.text)

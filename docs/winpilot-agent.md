@@ -68,6 +68,7 @@
    `run_action_batch` 内部子动作会写 `agent_batch_action_start/agent_batch_action`；会改变屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，所以排查低延迟 batch 时要同时看这些截图，不能只看顶层 `run_action_batch` 的结果 JSON。
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
    如果 LLM 顶层直接调用 `draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
+   普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
 6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
    - 窗口/应用发现：`window_tools.py`

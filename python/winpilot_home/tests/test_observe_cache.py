@@ -84,7 +84,7 @@ def test_mutating_dispatch_invalidates_observe_cache(monkeypatch):
         "summary": "",
     })())
 
-    session.dispatch("click", {"x": 1, "y": 1})
+    session.dispatch("click", {"x": 1, "y": 1, "skip_screen_delta": True})
 
     assert session._screen_epoch == 1
     assert session.cached_observe(key, 10.0) is None

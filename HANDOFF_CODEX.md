@@ -40,6 +40,8 @@
 - UIA-off 真实验证：`20260702-230125-aed7a2` 走 `/api/chat` 完成 Paint 三角形任务，工具序列为 `launch -> observe -> draw_strokes -> done`，`draw_strokes` 结果含 `wrapped_by_fast_controller=true`、`visual_change_detected=true`、`fast_path_advice`，截图 `after_003.jpg` 与模型思考一致。
 - UIA-off canvas 快速感知已实现：绘图/画布任务在 UIA 关闭、无 `query/full` observe 时走 `canvas_fast_observe`，跳过全窗口 OCR，只保留 Win32/CV/`likely_canvas` 摘要；需要文字/菜单时用 `observe(query=...)` 或 `observe(full=true)` 强制完整感知。
 - 最新 UIA-off 验证：`20260702-234823-a27fea` 走 `/api/chat` 完成同一 Paint 三角形任务，工具序列 `launch -> observe -> draw_strokes -> done`，`observe=220ms`，仅 1 次 perception 且 OCR 为 `skipped=canvas_fast_observe`，done gate 直接 deterministic pass，无第二次 OCR/LLM judge；eval 预算全过，duration 52.33s、cost 0.0692 CNY。
+- 普通可见动作现已自动附加 `screen_delta` 和 `action_target`：`click/type_text/hotkey/scroll/focus_window/tray_click/clipboard_paste/mouse_*` 在 `ToolSession.dispatch()` 前后做廉价帧差采样，trace 的 `result_meta` 可直接看到目标窗口、foreground 和像素变化。`screen_delta.changed` 不是完成证明，必须结合 `action_target.after.foreground_matches_target`、截图和目标窗口感知。
+- 修复了一类假成功：旧逻辑会让 `type_text` 优先使用当前 foreground，导致 Codex 窗口在前台时文字打进 Codex 输入框；现在输入动作优先 session target，`launch` 找到目标后会置前，`action/verify.py` 在有目标 hwnd 时忽略无关 foreground（仅目标本身或 owner/祖先弹窗可接管）。最终代码 UIA-off 复测 `20260703-004322-6fd304` 走 `/api/chat` 完成 Notepad 输入任务，截图 `after_002.jpg` 确认文字在记事本编辑区，`type_text.result_meta.action_target.after.foreground_matches_target=true`，duration 88.61s、cost 0.06 CNY。
 - `npm run clean` 可删除 `dist/`、`release/`、缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
 - `python/core/screenshot.py` 补 `capture_screen()`，兼容 legacy Robot Framework keyword。
 - `server.py` 的启动守卫只拦真实 `uvicorn winpilot.server:app`，不拦测试导入。

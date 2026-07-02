@@ -14,6 +14,20 @@ def test_resolve_hwnd_prefers_live_session_target(monkeypatch):
     assert session._resolve_hwnd({}) == 100
 
 
+def test_action_hwnd_prefers_session_target_over_unrelated_foreground(monkeypatch):
+    session = ToolSession()
+    session.hwnd = 100
+
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.IsWindow", lambda hwnd: hwnd in {100, 200})
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetForegroundWindow", lambda: 200)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetAncestor", lambda hwnd, flag: hwnd)
+    monkeypatch.setattr("winpilot.agent.tools.win32gui.GetClassName", lambda hwnd: "Window")
+    monkeypatch.setattr("winpilot.agent.tools.win32._window_text", lambda hwnd: "Codex")
+
+    assert session._action_hwnd() == 100
+
+
 def test_resolve_hwnd_prefers_matching_foreground_over_stale_target(monkeypatch):
     session = ToolSession()
     session.hwnd = 100
