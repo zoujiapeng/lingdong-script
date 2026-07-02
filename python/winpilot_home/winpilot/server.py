@@ -109,6 +109,7 @@ STATE = _RunState()
 # -------------------------------------------------------------------- models
 class ChatRequest(BaseModel):
     task: str
+    max_steps: int | None = None
 
 
 class MemoryAddRequest(BaseModel):
@@ -150,8 +151,10 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
         if STATE.busy():
             raise HTTPException(409, "已有任务在运行，请先停止")
         STATE.stop_event = threading.Event()
+        max_steps = req.max_steps if req.max_steps and req.max_steps > 0 else None
         runner = build_runner(task, stop_event=STATE.stop_event,
-                              session_context=SESSION.recent())
+                              session_context=SESSION.recent(),
+                              max_steps_override=max_steps)
         STATE.runner = runner
         trace_mod.RECORDER.start(runner.run_id)
         BUS.publish("chat", run_id=runner.run_id, role="user", content=task)

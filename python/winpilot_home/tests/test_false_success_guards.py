@@ -135,6 +135,40 @@ def test_save_task_refuses_cancel_button_click():
     assert "Refused to click" in result.text
 
 
+def test_type_text_reuses_last_clicked_input(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: False,
+        click=lambda *args, **kwargs: {"ok": True},
+        uia_set_value=lambda element, text: calls.append((element.elem_id, text)) or True,
+        type_text=lambda text, hwnd=None: {"ok": True, "typed": len(text)},
+        focus_window=lambda hwnd: {"ok": True},
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+
+    session = ToolSession(task="Save this file through GUI")
+    session.hwnd = 10
+    session.snapshot = Snapshot(
+        hwnd=10,
+        title="Save As",
+        region=Region(0, 0, 800, 600),
+        elements=[UIElement(elem_id=3, role="edit", text="File name:=*.txt", cx=100, cy=100, source="uia")],
+    )
+
+    session._t_click({"element_id": 3})
+    result = session._t_type_text({"text": "C:\\Users\\zou\\Desktop\\x.txt"})
+
+    assert calls == [(3, "C:\\Users\\zou\\Desktop\\x.txt")]
+    assert "uia_set_value" in result.text
+
+
 def test_assistant_history_truncates_verbose_content():
     from winpilot.agent.loop import _sanitize_assistant
 
