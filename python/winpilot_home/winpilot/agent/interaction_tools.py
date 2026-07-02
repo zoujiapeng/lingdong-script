@@ -15,6 +15,7 @@ from .tool_result import ToolResult
 
 
 _CANCEL_TEXTS = {"cancel", "\u53d6\u6d88"}
+_INPUT_ROLES = {"edit", "combobox", "\u7f16\u8f91", "\u7ec4\u5408\u6846"}
 
 
 def _looks_like_save_task(task: str) -> bool:
@@ -31,6 +32,11 @@ def _looks_like_cancel_element(text: str, role: str) -> bool:
     return label in _CANCEL_TEXTS and ("button" in role_text or "\u6309\u94ae" in role_text or not role_text)
 
 
+def _looks_like_input_element(role: str) -> bool:
+    role_text = (role or "").strip().casefold()
+    return role_text in _INPUT_ROLES or "edit" in role_text or "combo" in role_text
+
+
 def _tools_attr(name: str, default):
     """Preserve historical monkeypatch paths on winpilot.agent.tools."""
     tools_mod = sys.modules.get("winpilot.agent.tools")
@@ -38,6 +44,15 @@ def _tools_attr(name: str, default):
 
 
 class InteractionToolMixin:
+    def _action_hwnd(self) -> int | None:
+        try:
+            fg = win32gui.GetForegroundWindow()
+            if fg and win32gui.IsWindowVisible(fg):
+                return int(fg)
+        except Exception:
+            pass
+        return self.hwnd
+
     def _t_click(self, args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)
         verify_mod = _tools_attr("verify", verify)
@@ -58,6 +73,8 @@ class InteractionToolMixin:
                 "text": element.text, "role": element.role,
                 "coords": [x, y], "source": element.source,
             })
+            if _looks_like_input_element(element.role):
+                self._last_input_element = element
             if (
                 button == "left"
                 and not double
@@ -82,13 +99,13 @@ class InteractionToolMixin:
                     BUS.publish("action", action="uia_invoke", elem_id=element.elem_id,
                                 text=element.text)
                     return {"ok": True, "via": "uia_invoke"}
-                return executor_mod.click(x, y, button=button, double=double, hwnd=self.hwnd)
+                return executor_mod.click(x, y, button=button, double=double, hwnd=self._action_hwnd())
         elif "x" in args and "y" in args:
             x, y = int(args["x"]), int(args["y"])
             replay["coords"] = [x, y]
 
             def action() -> dict:
-                return executor_mod.click(x, y, button=button, double=double, hwnd=self.hwnd)
+                return executor_mod.click(x, y, button=button, double=double, hwnd=self._action_hwnd())
         else:
             return ToolResult("click 需要 element_id 或 x,y 坐标")
 
@@ -117,18 +134,25 @@ class InteractionToolMixin:
                 "element_text": element.text, "coords": [element.cx, element.cy],
             })
         else:
-            element = None
+            element = getattr(self, "_last_input_element", None)
+            if element is not None:
+                replay.update({
+                    "element_text": getattr(element, "text", ""),
+                    "coords": [getattr(element, "cx", 0), getattr(element, "cy", 0)],
+                    "source": "last_clicked_input",
+                })
 
         def action() -> dict:
             if element is not None:
                 if executor_mod.uia_set_value(element, text):
                     return {"ok": True, "via": "uia_set_value"}
-                executor_mod.click(element.cx, element.cy, hwnd=self.hwnd)
+                executor_mod.click(element.cx, element.cy, hwnd=self._action_hwnd())
                 time.sleep(0.15)
-            elif self.hwnd and win32gui_mod.GetForegroundWindow() != self.hwnd:
-                executor_mod.focus_window(self.hwnd)
+            target = self._action_hwnd()
+            if target and win32gui_mod.GetForegroundWindow() != target:
+                executor_mod.focus_window(target)
                 time.sleep(0.12)
-            return executor_mod.type_text(text, hwnd=self.hwnd)
+            return executor_mod.type_text(text, hwnd=target)
 
         result = verify_mod.run_with_verify(
             "type_text", action, expect=args.get("expect"),
@@ -145,8 +169,9 @@ class InteractionToolMixin:
         keys = [str(k) for k in args["keys"]]
 
         def action() -> dict:
-            if self.hwnd and win32gui_mod.GetForegroundWindow() != self.hwnd:
-                executor_mod.focus_window(self.hwnd)
+            target = self._action_hwnd()
+            if target and win32gui_mod.GetForegroundWindow() != target:
+                executor_mod.focus_window(target)
                 time.sleep(0.12)
             return executor_mod.press_keys(keys)
 

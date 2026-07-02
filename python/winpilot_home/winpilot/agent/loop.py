@@ -110,7 +110,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     """One task execution. Designed to run on a background thread."""
 
     def __init__(self, task: str, stop_event: threading.Event | None = None,
-                 session_context: list | None = None) -> None:
+                 session_context: list | None = None,
+                 max_steps_override: int | None = None) -> None:
         self.task = task
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
@@ -138,6 +139,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
+        self.max_steps_override = max_steps_override
         # Coding tasks are excluded from the reusable experience system.
         self._is_coding = _is_coding_task(task)
 
@@ -600,7 +602,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     # ------------------------------------------------------------------ run
     def run(self) -> dict[str, Any]:
         self.status = "running"
-        max_steps = int(CONFIG.get("agent", "max_steps", default=40))
+        max_steps = int(self.max_steps_override or CONFIG.get("agent", "max_steps", default=40))
         plan_on = planning_enabled()
         # Coding tasks are excluded from action-replay reuse, but relevant
         # factual project notes (manual 'remember' entries) still help — inject

@@ -191,6 +191,7 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             "id": "deep_long_conditional_note",
             "task": "完成一个稍复杂的GUI任务：如果计算器能打开，就用计算器算 24 × 7；如果结果是168，就打开记事本写入 条件分支通过：168，并保存到桌面 WinPilotDeep_conditional.txt；如果计算器打不开，则在记事本写入 计算器打不开。全程主要操作必须走GUI。",
             "timeout_s": 540,
+            "max_steps": 70,
             "setup": [
                 "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotDeep_conditional.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null; taskkill /f /im CalculatorApp.exe 2>$null"
             ],
@@ -411,9 +412,13 @@ def run_eval(
     timeout_s: float,
     case_id: str = "",
     budgets: dict[str, float] | None = None,
+    max_steps: int | None = None,
 ) -> Path:
     started_at = time.time()
-    started = _request_json("POST", f"{base_url}/api/chat", {"task": task})
+    payload: dict[str, Any] = {"task": task}
+    if max_steps:
+        payload["max_steps"] = int(max_steps)
+    started = _request_json("POST", f"{base_url}/api/chat", payload)
     run_id = str(started["run_id"])
     deadline = time.time() + timeout_s
     last_status: dict[str, Any] = {}
@@ -484,6 +489,7 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 float(case.get("timeout_s") or timeout_s),
                 case_id=str(case.get("id") or ""),
                 budgets=budgets,
+                max_steps=int(case.get("max_steps") or 0) or None,
             )
             report = json.loads(path.read_text(encoding="utf-8"))
             trace_path = REPO_ROOT / str(report.get("trace_file", ""))
