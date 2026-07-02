@@ -57,11 +57,33 @@ class VerifyOutcome:
 
 
 # ------------------------------------------------------------ target window
+def _related_window(hwnd: int | None, target: int | None) -> bool:
+    if not hwnd or not target:
+        return False
+    if int(hwnd) == int(target):
+        return True
+    try:
+        if win32gui.GetAncestor(int(hwnd), 2) == int(target):  # GA_ROOT
+            return True
+    except Exception:
+        pass
+    try:
+        owner = win32gui.GetWindow(int(hwnd), 4)  # GW_OWNER
+        while owner:
+            if int(owner) == int(target):
+                return True
+            owner = win32gui.GetWindow(int(owner), 4)
+    except Exception:
+        pass
+    return False
+
+
 def _target_hwnd(hwnd: int | None) -> int | None:
-    """Prefer the foreground window (dialogs are separate top-levels)."""
+    """Use foreground only when it belongs to the scoped target."""
     fg = win32gui.GetForegroundWindow()
     if fg and win32gui.IsWindowVisible(fg):
-        return fg
+        if not hwnd or _related_window(fg, hwnd):
+            return fg
     return hwnd
 
 

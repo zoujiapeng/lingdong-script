@@ -29,6 +29,29 @@ def test_text_appears_can_use_fullscreen_without_target(monkeypatch):
     assert out.verified
 
 
+def test_verify_ignores_unrelated_foreground_when_target_scoped(monkeypatch):
+    from winpilot.action import verify
+
+    observed = []
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 200)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(verify.win32gui, "GetAncestor", lambda hwnd, flag: hwnd)
+    monkeypatch.setattr(verify.win32gui, "GetWindow", lambda hwnd, flag: 0)
+
+    def observe(hwnd, *args, **kwargs):
+        observed.append(hwnd)
+        text = "target text" if hwnd == 100 else "wrong foreground text"
+        return SimpleNamespace(elements=[SimpleNamespace(text=text, source="win32")])
+
+    monkeypatch.setattr(verify.fusion, "observe", observe)
+
+    out = verify._eval_once({"text_appears": "target text"}, hwnd=100, level=0)
+
+    assert out.verified
+    assert observed == [100]
+
+
 def test_communication_done_requires_final_visible_payload(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 

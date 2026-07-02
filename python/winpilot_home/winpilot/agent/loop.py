@@ -827,6 +827,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "wrapped_by_fast_controller",
                     "visual_change_detected",
                     "visual_change_ratio",
+                    "screen_delta",
+                    "action_target",
                     "fast_path_advice",
                     "needs_observe",
                     "last_action",

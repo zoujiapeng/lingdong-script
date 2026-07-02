@@ -56,6 +56,12 @@ def _expect_timeout(args: dict, default: float = 6.0) -> float:
 class InteractionToolMixin:
     def _action_hwnd(self) -> int | None:
         try:
+            target = self._resolve_hwnd({})
+            if target:
+                return int(target)
+        except Exception:
+            pass
+        try:
             fg = win32gui.GetForegroundWindow()
             if fg and win32gui.IsWindowVisible(fg):
                 return int(fg)
