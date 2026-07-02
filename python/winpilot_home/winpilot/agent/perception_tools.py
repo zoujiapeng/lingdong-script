@@ -128,6 +128,29 @@ class PerceptionToolMixin:
         self._pending_visual_advisory = ""
         return note
 
+    def _screen_bulletin_summary(self) -> str:
+        get_status = getattr(self, "_fast_screen_status", None)
+        status = get_status() if callable(get_status) else {}
+        if not status:
+            return ""
+        regions = status.get("changed_regions") or []
+        roi = "none"
+        if regions:
+            first = regions[0]
+            roi = (
+                f"{int(first.get('left', 0))},{int(first.get('top', 0))},"
+                f"{int(first.get('width', 0))}x{int(first.get('height', 0))}"
+            )
+        return (
+            "Screen watch bulletin: "
+            f"running={bool(status.get('running'))}, "
+            f"changed={bool(status.get('last_changed'))}, "
+            f"ratio={float(status.get('last_ratio') or 0.0):.4f}, "
+            f"roi={roi}, samples={int(status.get('samples') or 0)}, "
+            f"capture_ms={int(status.get('capture_latency_ms') or 0)}, "
+            f"diff_ms={int(status.get('diff_latency_ms') or 0)}."
+        )
+
     def _t_observe(self, args: dict) -> ToolResult:
         hwnd = self._resolve_hwnd(args)
         if not hwnd:
@@ -152,6 +175,9 @@ class PerceptionToolMixin:
         visual_summary = self._visual_state_summary(hwnd)
         if visual_summary:
             text = text + "\n" + visual_summary
+        screen_summary = self._screen_bulletin_summary()
+        if screen_summary:
+            text = text + "\n" + screen_summary
         summary = (
             f'[已折叠] observe "{self.snapshot.title}" '
             f"{len(self.snapshot.elements)}个元素"

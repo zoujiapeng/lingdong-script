@@ -15,6 +15,15 @@ class FastToolMixin:
             self._fast_gui_controller = controller
         return controller
 
+    def _fast_screen_status(self) -> dict:
+        controller = getattr(self, "_fast_gui_controller", None)
+        if controller is None:
+            return {}
+        try:
+            return controller.watcher.status()
+        except Exception:
+            return {}
+
     def _t_run_action_batch(self, args: dict) -> ToolResult:
         actions = args.get("actions")
         if not isinstance(actions, list) or not actions:

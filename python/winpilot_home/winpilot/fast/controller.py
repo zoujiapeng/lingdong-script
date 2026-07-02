@@ -157,12 +157,17 @@ class FastGuiController:
     def execute(self, actions: list[dict[str, Any]], stop_on_error: bool = True) -> dict[str, Any]:
         metrics = BatchMetrics(started_ms=_now_ms())
         results: list[dict[str, Any]] = []
+        verified_any = False
+        verified_expect_any = False
+        verified_expect_false_any = False
+        last_action = ""
         for index, action in enumerate(actions, start=1):
             if not isinstance(action, dict):
                 metrics.failed_at = index
                 results.append({"index": index, "ok": False, "error": "action must be an object"})
                 break
             name, normalised_args = _normalise_action(action)
+            last_action = name
             if name not in ALLOWED_BATCH_ACTIONS:
                 metrics.failed_at = index
                 results.append({"index": index, "ok": False, "error": f"batch action not allowed: {name}"})
@@ -195,20 +200,44 @@ class FastGuiController:
                 "preview": result.text[:800],
             }
             data = _json_dict(result.text)
+            has_expect = isinstance(normalised_args.get("expect"), dict)
+            if data.get("verified") is True:
+                verified_any = True
+                if has_expect:
+                    verified_expect_any = True
+            elif data.get("verified") is False:
+                if has_expect:
+                    verified_expect_false_any = True
             failed = _failed(result) or (
-                isinstance(normalised_args.get("expect"), dict)
+                has_expect
                 and data.get("verified") is False
             )
             item["ok"] = not failed
+            if "verified" in data:
+                item["verified"] = bool(data.get("verified"))
             results.append(item)
             if failed and stop_on_error:
                 metrics.failed_at = index
                 break
         metrics.elapsed_ms = max(0, _now_ms() - metrics.started_ms)
         metrics.controller_round_trips_saved = max(0, metrics.action_count - 1)
-        return {
+        payload = {
             "ok": metrics.failed_at is None,
             "results": results,
             "metrics": metrics.to_dict(),
             "element_cache": self.cache.stats(),
+            "last_action": last_action,
+            "needs_observe": (
+                metrics.failed_at is None
+                and metrics.action_count > 0
+                and not verified_any
+                and last_action not in {"observe", "read_text", "vlm_describe"}
+            ),
         }
+        if verified_expect_any or verified_expect_false_any:
+            payload["verified"] = bool(
+                verified_expect_any
+                and not verified_expect_false_any
+                and metrics.failed_at is None
+            )
+        return payload

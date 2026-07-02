@@ -100,6 +100,9 @@ class ToolSession(
                 self.world.record_action(name, args)
                 if result.is_observe and self.snapshot is not None:
                     self.world.observe_snapshot(self.snapshot)
+                screen_status = self._fast_screen_status()
+                if screen_status:
+                    self.world.record_screen_bulletin(screen_status)
             except Exception:
                 logger.exception("世界模型更新失败")  # never block tool flow
         if name in _MUTATING_TOOLS:
