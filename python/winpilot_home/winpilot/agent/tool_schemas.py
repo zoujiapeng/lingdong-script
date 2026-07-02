@@ -203,6 +203,14 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                     },
                 },
                 "stop_on_error": _prop("boolean", "Default true."),
+                "sync": {
+                    "oneOf": [{"type": "boolean"}, {"type": "object"}],
+                    "description": (
+                        "Optional cheap post-batch screen sync. Omit for default stable sync "
+                        "after mutating batches; set false to disable. Fields: mode='stable' "
+                        "or 'change', stable_ms, timeout_s, required."
+                    ),
+                },
             },
             ["actions"],
         ),

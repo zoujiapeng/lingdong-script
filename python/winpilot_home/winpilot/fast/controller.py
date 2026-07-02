@@ -24,6 +24,13 @@ ALLOWED_BATCH_ACTIONS = {
     "clipboard_write",
     "clipboard_paste",
 }
+BATCH_MUTATING_ACTIONS = {
+    "click",
+    "click_element",
+    "type_text",
+    "hotkey",
+    "clipboard_paste",
+}
 
 
 def _now_ms() -> int:
@@ -154,13 +161,34 @@ class FastGuiController:
             "screen_watch": self.watcher.status(),
         }, ensure_ascii=False))
 
-    def execute(self, actions: list[dict[str, Any]], stop_on_error: bool = True) -> dict[str, Any]:
+    def _sync_after_batch(self, sync: dict[str, Any] | bool) -> tuple[str, ToolResult]:
+        if isinstance(sync, dict):
+            mode = str(sync.get("mode") or "stable").casefold()
+            args = dict(sync)
+        else:
+            mode = "stable"
+            args = {}
+        if mode == "change":
+            return "sync_change", self._wait_change(args)
+        return "sync_stable", self._wait_stable({
+            "stable_ms": args.get("stable_ms", 250),
+            "timeout_s": args.get("timeout_s", 2.0),
+            "max_ratio": args.get("max_ratio", 0.0008),
+        })
+
+    def execute(
+        self,
+        actions: list[dict[str, Any]],
+        stop_on_error: bool = True,
+        sync: dict[str, Any] | bool | None = None,
+    ) -> dict[str, Any]:
         metrics = BatchMetrics(started_ms=_now_ms())
         results: list[dict[str, Any]] = []
         verified_any = False
         verified_expect_any = False
         verified_expect_false_any = False
         last_action = ""
+        mutating_seen = False
         for index, action in enumerate(actions, start=1):
             if not isinstance(action, dict):
                 metrics.failed_at = index
@@ -168,6 +196,8 @@ class FastGuiController:
                 break
             name, normalised_args = _normalise_action(action)
             last_action = name
+            if name in BATCH_MUTATING_ACTIONS:
+                mutating_seen = True
             if name not in ALLOWED_BATCH_ACTIONS:
                 metrics.failed_at = index
                 results.append({"index": index, "ok": False, "error": f"batch action not allowed: {name}"})
@@ -219,6 +249,32 @@ class FastGuiController:
             if failed and stop_on_error:
                 metrics.failed_at = index
                 break
+        sync_result: dict[str, Any] = {}
+        if metrics.failed_at is None and sync and mutating_seen:
+            sync_required = bool(sync.get("required")) if isinstance(sync, dict) else False
+            started = _now_ms()
+            sync_name, result = self._sync_after_batch(sync)
+            elapsed = max(0, _now_ms() - started)
+            ok = not _failed(result)
+            metrics.tool_latencies_ms.append(elapsed)
+            metrics.verify_count += 1
+            metrics.screen_wait_count += 1
+            sync_result = {
+                "action": sync_name,
+                "ok": ok,
+                "required": sync_required,
+                "elapsed_ms": elapsed,
+            }
+            results.append({
+                "index": len(results) + 1,
+                "action": sync_name,
+                "elapsed_ms": elapsed,
+                "terminal": result.terminal,
+                "preview": result.text[:800],
+                "ok": ok or not sync_required,
+            })
+            if sync_required and not ok:
+                metrics.failed_at = len(results)
         metrics.elapsed_ms = max(0, _now_ms() - metrics.started_ms)
         metrics.controller_round_trips_saved = max(0, metrics.action_count - 1)
         payload = {
@@ -227,6 +283,7 @@ class FastGuiController:
             "metrics": metrics.to_dict(),
             "element_cache": self.cache.stats(),
             "last_action": last_action,
+            "sync": sync_result,
             "needs_observe": (
                 metrics.failed_at is None
                 and metrics.action_count > 0

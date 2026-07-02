@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -230,6 +231,33 @@ def test_fast_controller_wait_change_uses_watcher():
     assert "changed" in out["results"][0]["preview"]
 
 
+def test_fast_controller_can_auto_sync_after_batch():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Watcher:
+        def wait_for_stable(self, stable_ms=500, timeout_s=5.0, max_ratio=0.0008):
+            return {"stable": True, "delta": {"changed": False}}
+
+        def status(self):
+            return {"samples": 2}
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session(), watcher=Watcher()).execute([
+        {"click": {"x": 1, "y": 2}},
+    ], sync={"mode": "stable"})
+
+    assert out["ok"]
+    assert out["metrics"]["screen_wait_count"] == 1
+    assert out["results"][-1]["action"] == "sync_stable"
+    assert out["sync"]["ok"] is True
+
+
 def test_run_action_batch_tool_rejects_empty_actions():
     from winpilot.agent.fast_tools import FastToolMixin
 
@@ -239,3 +267,50 @@ def test_run_action_batch_tool_rejects_empty_actions():
     result = Session()._t_run_action_batch({"actions": []})
 
     assert "requires" in result.text
+
+
+def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    captured = {}
+
+    class Controller:
+        def execute(self, actions, stop_on_error=True, sync=None):
+            captured["sync"] = sync
+            return {"ok": True, "results": [], "metrics": {}}
+
+    class Session(FastToolMixin):
+        def __init__(self):
+            self._fast_gui_controller = Controller()
+
+        def _fmt(self, obj):
+            return json.dumps(obj)
+
+    Session()._t_run_action_batch({"actions": [{"click": {"x": 1, "y": 2}}]})
+
+    assert captured["sync"]["mode"] == "stable"
+
+
+def test_run_action_batch_tool_can_disable_default_sync():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    captured = {}
+
+    class Controller:
+        def execute(self, actions, stop_on_error=True, sync=None):
+            captured["sync"] = sync
+            return {"ok": True, "results": [], "metrics": {}}
+
+    class Session(FastToolMixin):
+        def __init__(self):
+            self._fast_gui_controller = Controller()
+
+        def _fmt(self, obj):
+            return json.dumps(obj)
+
+    Session()._t_run_action_batch({
+        "actions": [{"click": {"x": 1, "y": 2}}],
+        "sync": False,
+    })
+
+    assert captured["sync"] is None

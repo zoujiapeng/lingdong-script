@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from ..fast.controller import FastGuiController
+from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
 from .tool_result import ToolResult
 
 
@@ -24,12 +24,34 @@ class FastToolMixin:
         except Exception:
             return {}
 
+    @staticmethod
+    def _batch_has_mutation(actions: list) -> bool:
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            name = str(action.get("action") or action.get("tool") or "")
+            if not name and len(action) == 1:
+                name = str(next(iter(action.keys())))
+            if name in BATCH_MUTATING_ACTIONS:
+                return True
+        return False
+
     def _t_run_action_batch(self, args: dict) -> ToolResult:
         actions = args.get("actions")
         if not isinstance(actions, list) or not actions:
             return ToolResult("run_action_batch requires a non-empty actions array")
         stop_on_error = bool(args.get("stop_on_error", True))
-        result = self._fast_controller().execute(actions, stop_on_error=stop_on_error)
+        if "sync" in args:
+            sync = args.get("sync") or None
+        elif self._batch_has_mutation(actions):
+            sync = {"mode": "stable", "stable_ms": 250, "timeout_s": 2.0}
+        else:
+            sync = None
+        result = self._fast_controller().execute(
+            actions,
+            stop_on_error=stop_on_error,
+            sync=sync,
+        )
         return ToolResult(self._fmt(result))
 
     def _t_screen_watch(self, args: dict) -> ToolResult:
