@@ -83,15 +83,16 @@ class PerceptionToolMixin:
                 visible_parts.append(f"{name}@({sx1},{sy1},{sx2},{sy2})")
             else:
                 visible_parts.append(name)
-        popup_terms = (
-            "PopupHost", "Line", "Fill", "Color 1:", "No fill", "Brush",
-            "Edit colors", "OK", "Cancel", "RGB",
+        modal_terms = (
+            "PopupHost", "Edit colors", "OK", "Cancel", "RGB",
+            "\u786e\u5b9a", "\u53d6\u6d88",
         )
+        popup_roles = ("popup", "dialog", "menu", "popover", "\u5bf9\u8bdd", "\u83dc\u5355")
         popup_open = False
         if self.snapshot is not None:
             popup_open = any(
-                any(term in (element.text or "") for term in popup_terms)
-                or "popup" in (element.role or "").casefold()
+                any(term in (element.text or "") for term in modal_terms)
+                or any(role in (element.role or "").casefold() for role in popup_roles)
                 for element in self.snapshot.elements[:80]
             )
         colors_text = ", ".join(visible_parts) if visible_parts else "none"

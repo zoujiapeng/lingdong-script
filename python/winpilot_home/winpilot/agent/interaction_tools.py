@@ -217,7 +217,14 @@ class InteractionToolMixin:
                 after = capture_fn(region)
                 ratio = vision_cv.diff_ratio(before, after)
                 result["visual_change_ratio"] = round(float(ratio), 5)
-                result["visual_change_detected"] = bool(ratio >= 0.0008)
+                changed = bool(ratio >= 0.0008)
+                result["visual_change_detected"] = changed
+                if changed:
+                    result["verified"] = True
+                    result["verify_method"] = "cv-diff"
+                    result["verify_detail"] = (
+                        "visible pixels changed across the requested action region"
+                    )
                 if ratio < 0.0008:
                     result["visual_feedback"] = (
                         "drag completed but the local screen region barely changed; "
@@ -300,12 +307,21 @@ class InteractionToolMixin:
                 after = capture_fn(region)
                 ratio = vision_cv.diff_ratio(before, after)
                 result["visual_change_ratio"] = round(float(ratio), 5)
-                result["visual_change_detected"] = bool(ratio >= 0.0008)
+                changed = bool(ratio >= 0.0008)
+                result["visual_change_detected"] = changed
+                if changed:
+                    result["verified"] = True
+                    result["verify_method"] = "cv-diff"
+                    result["verify_detail"] = (
+                        "visible pixels changed across the requested action region"
+                    )
                 result["visual_feedback"] = (
                     f"drew {result.get('strokes_drawn', 0)} strokes; "
                     + ("visible pixels changed across the figure region — good evidence "
-                       "the strokes landed on the canvas. Re-observe to check the result."
-                       if ratio >= 0.0008 else
+                       "the strokes landed on the canvas. Re-observe/zoom once if needed; "
+                       "when a requested simple visible shape is confirmed, call done "
+                       "instead of redrawing for thickness or aesthetics."
+                       if changed else
                        "the region barely changed; the strokes may have hit toolbar/popup "
                        "chrome or an inactive surface. Re-observe, ensure a Pencil/Brush "
                        "tool is selected and the canvas is focused, then retry.")

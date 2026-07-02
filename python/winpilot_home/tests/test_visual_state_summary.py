@@ -25,7 +25,7 @@ def test_visual_state_summary_for_drawing_task(monkeypatch):
 
     assert "Visual state summary" in summary
     assert "blue@(90,60,161,121)" in summary
-    assert "popup/tool panel appears open" in summary
+    assert "popup/tool panel appears open" not in summary
 
 
 def test_visual_state_summary_skipped_for_plain_task():
