@@ -347,6 +347,61 @@ def test_simple_drawing_done_accepts_batch_draw_strokes(monkeypatch):
     assert runner._done_verified is True
 
 
+def test_simple_drawing_done_accepts_compacted_late_batch_visual_evidence(monkeypatch):
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a triangle on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'run_action_batch({"actions": [{"action": "click", "x": 1, "y": 2}, '
+        '{"action": "draw_strokes", "strokes": [[[10, 10], [50, 50]]]}]})'
+    ]
+    raw_result = json.dumps({
+        "ok": True,
+        "verified": True,
+        "results": [
+            {
+                "action": "click",
+                "ok": True,
+                "preview": "x" * 900,
+            },
+            {
+                "action": "draw_strokes",
+                "ok": True,
+                "data": {
+                    "ok": True,
+                    "verified": True,
+                    "visual_change_detected": True,
+                    "visual_change_ratio": 0.04,
+                    "verify_method": "cv-diff",
+                },
+            },
+        ],
+    })
+    compact = runner._compact_tool_evidence("run_action_batch", raw_result)
+    runner._recent_results = [("run_action_batch", compact)]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Paint"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("LLM judge should not run with compacted batch evidence")
+
+    assert "visual_change_detected" in compact
+    assert len(compact) < 900
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
 def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 

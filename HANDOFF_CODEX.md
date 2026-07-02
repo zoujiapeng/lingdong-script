@@ -35,7 +35,7 @@
 - `python/engine/executor_types.py` 从 `python/engine/executor.py` 拆出 legacy executor 状态、上下文和控制流异常。
 - `scripts/gui_eval_run.py` 走 `/api/chat` 生成真实 GUI 评测证据报告，输出到忽略目录 `python/winpilot_home/evals/`。
 - `CLAUDE.md`、`docs/architecture.md`、`docs/winpilot-agent.md` 已补运行时状态链路：前端 `/api/chat` -> `server.py` `_RunState` -> runner -> `ToolSession.dispatch()` -> BUS/trace/done verifier。
-- 工具级复盘方法已写入 `CLAUDE.md` 和 `docs/winpilot-agent.md`：查 `<run_id>.jsonl` 的 `agent_step/agent_tool_start/agent_tool/done_check`，再打开前后截图和 `NNN_llm_request/response.json` 对照模型输入、工具参数、真实屏幕。
+- 工具级复盘方法已写入 `CLAUDE.md` 和 `docs/winpilot-agent.md`：查 `<run_id>.jsonl` 的 `agent_step/agent_tool_start/agent_tool/done_check`，再打开前后截图和 `NNN_llm_request/response.json` 对照模型输入、工具参数、真实屏幕。`run_action_batch` 内部动作另有 `agent_batch_action_start/agent_batch_action` 和 `batch_before/batch_after` 截图。
 - `npm run clean` 可删除 `dist/`、`release/`、缓存和 pycache；`npm run clean:runtime` 才额外删 `python-runtime/`。
 - `python/core/screenshot.py` 补 `capture_screen()`，兼容 legacy Robot Framework keyword。
 - `server.py` 的启动守卫只拦真实 `uvicorn winpilot.server:app`，不拦测试导入。

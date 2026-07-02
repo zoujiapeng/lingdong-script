@@ -98,6 +98,23 @@ def test_summarize_events_extracts_fast_gui_metrics():
     assert out["fast_gui"]["run_state_phases"] == {"acting": 1}
 
 
+def test_summarize_events_includes_batch_action_screenshots():
+    events = [
+        {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
+        {
+            "type": "agent_batch_action",
+            "tool": "draw_strokes",
+            "screenshot": "r1/batch_after_001.jpg",
+            "ts": 1.1,
+        },
+        {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 2.0},
+    ]
+
+    out = summary.summarize_events(events)
+
+    assert out["screenshots"] == ["r1/batch_after_001.jpg"]
+
+
 def test_aggregate_reports_treats_policy_failure_as_not_passed():
     reports = [
         {

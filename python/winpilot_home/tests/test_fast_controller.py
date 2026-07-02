@@ -231,6 +231,46 @@ def test_fast_controller_batches_visual_actions_without_extra_observe():
     ]
 
 
+def test_fast_controller_publishes_batch_child_events():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.log import BUS
+
+    events = []
+
+    def sink(event):
+        if str(event.get("type", "")).startswith("agent_batch_action"):
+            events.append(event)
+
+    class Session:
+        snapshot = None
+        run_id = "run-1"
+
+        def dispatch(self, name, args):
+            if name == "draw_strokes":
+                return ToolResult('{"ok": true, "verified": true, "visual_change_detected": true}')
+            return ToolResult('{"ok": true}')
+
+    BUS.add_sink(sink)
+    try:
+        out = FastGuiController(Session()).execute([
+            {"click": {"x": 100, "y": 100}},
+            {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]]}}
+        ], sync=False)
+    finally:
+        BUS.remove_sink(sink)
+
+    assert out["ok"]
+    assert [(e["type"], e["tool"], e["batch_index"]) for e in events] == [
+        ("agent_batch_action_start", "click", 1),
+        ("agent_batch_action", "click", 1),
+        ("agent_batch_action_start", "draw_strokes", 2),
+        ("agent_batch_action", "draw_strokes", 2),
+    ]
+    assert events[0]["run_id"] == "run-1"
+    assert events[-1]["result_meta"]["visual_change_detected"] is True
+
+
 def test_fast_controller_unverified_mutation_after_verified_action_needs_observe():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

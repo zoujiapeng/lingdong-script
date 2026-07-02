@@ -1,4 +1,5 @@
 import base64
+import json
 
 import cv2
 import numpy as np
@@ -27,9 +28,47 @@ def test_fold_base64_adds_text_only_note_and_nonvisual_summary():
 
 
 def test_trace_saves_draw_strokes_before_after_screenshots():
-    from winpilot.recorder.trace import _SCREENSHOT_TOOLS
+    from winpilot.recorder.trace import _BATCH_SCREENSHOT_TOOLS, _SCREENSHOT_TOOLS
 
     assert "draw_strokes" in _SCREENSHOT_TOOLS
+    assert "draw_strokes" in _BATCH_SCREENSHOT_TOOLS
+
+
+def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch):
+    from winpilot.recorder import trace as trace_mod
+
+    recorder = trace_mod.TraceRecorder()
+    trace_mod.BUS.remove_sink(recorder._on_event)
+    image = np.full((40, 60, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "capture", lambda: image.copy())
+
+    try:
+        recorder.start("r1")
+        recorder._on_event({
+            "type": "agent_batch_action_start",
+            "tool": "draw_strokes",
+            "batch_index": 1,
+        })
+        recorder._on_event({
+            "type": "agent_batch_action",
+            "tool": "draw_strokes",
+            "batch_index": 1,
+            "elapsed_ms": 12,
+        })
+    finally:
+        recorder.stop()
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "r1.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    screenshots = [event.get("screenshot") for event in events]
+
+    assert "r1/batch_before_001.jpg" in screenshots
+    assert "r1/batch_after_001.jpg" in screenshots
+    assert (tmp_path / "r1" / "batch_before_001.jpg").exists()
+    assert (tmp_path / "r1" / "batch_after_001.jpg").exists()
 
 
 def test_fold_base64_adds_likely_canvas_summary_for_mixed_zoom():

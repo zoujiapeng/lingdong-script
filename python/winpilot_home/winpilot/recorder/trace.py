@@ -34,6 +34,18 @@ _SCREENSHOT_TOOLS = {
     "scroll",
     "draw_strokes",
 }
+_BATCH_SCREENSHOT_TOOLS = {
+    "click",
+    "click_element",
+    "type_text",
+    "hotkey",
+    "launch",
+    "drag",
+    "scroll",
+    "draw_strokes",
+    "focus_window",
+    "clipboard_paste",
+}
 _SCREENSHOT_MAX_W = 960
 
 # Volatile tokens that make a text selector unstable across runs (unread
@@ -108,6 +120,19 @@ class TraceRecorder:
             elif event.get("type") == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
                 step = self._step or 1
                 phase = "after"
+            elif (
+                event.get("type") == "agent_batch_action_start"
+                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
+            ):
+                self._step += 1
+                step = self._step
+                phase = "batch_before"
+            elif (
+                event.get("type") == "agent_batch_action"
+                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
+            ):
+                step = self._step or 1
+                phase = "batch_after"
         # Phase 2 (unlocked): screen grab + JPEG encode are slow.
         record = dict(event)
         if step is not None:

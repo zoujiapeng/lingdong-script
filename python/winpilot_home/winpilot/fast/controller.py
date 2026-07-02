@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from ..agent.tool_result import ToolResult
+from ..utils.log import BUS
 from ..utils.screenshot import window_region
 from .element_cache import ElementCache, anchor_from_dict
 from .types import BatchMetrics
@@ -77,6 +78,23 @@ def _failed(result: ToolResult) -> bool:
     return False
 
 
+def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    if data is None:
+        data = _json_dict(result.text)
+    meta: dict[str, Any] = {}
+    for key in (
+        "ok",
+        "verified",
+        "visual_change_detected",
+        "visual_change_ratio",
+        "needs_observe",
+        "verify_method",
+    ):
+        if key in data:
+            meta[key] = data[key]
+    return meta
+
+
 def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Accept both explicit and natural shorthand action formats.
 
@@ -140,6 +158,50 @@ class FastGuiController:
         result.replay = result.replay or {}
         result.replay.setdefault("elapsed_ms", elapsed)
         return result
+
+    def _publish_child_start(
+        self,
+        batch_id: str,
+        index: int,
+        name: str,
+        args: dict[str, Any],
+    ) -> None:
+        BUS.publish(
+            "agent_batch_action_start",
+            run_id=getattr(self.session, "run_id", None),
+            parent_tool="run_action_batch",
+            batch_id=batch_id,
+            batch_index=index,
+            tool=name,
+            args=args,
+        )
+
+    def _publish_child_done(
+        self,
+        batch_id: str,
+        index: int,
+        name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+        elapsed_ms: int,
+        ok: bool,
+        data: dict[str, Any],
+    ) -> None:
+        BUS.publish(
+            "agent_batch_action",
+            run_id=getattr(self.session, "run_id", None),
+            parent_tool="run_action_batch",
+            batch_id=batch_id,
+            batch_index=index,
+            tool=name,
+            args=args,
+            ok=ok,
+            result_preview=result.text[:300],
+            result_meta=_result_meta(result, data),
+            elapsed_ms=elapsed_ms,
+            terminal=result.terminal,
+            replay=result.replay,
+        )
 
     def _click_element(self, action: dict[str, Any]) -> ToolResult:
         if self.session.snapshot is None:
@@ -239,6 +301,7 @@ class FastGuiController:
         sync: dict[str, Any] | bool | None = None,
     ) -> dict[str, Any]:
         metrics = BatchMetrics(started_ms=_now_ms())
+        batch_id = f"batch-{metrics.started_ms}"
         results: list[dict[str, Any]] = []
         verified_any = False
         current_state_verified = False
@@ -263,6 +326,7 @@ class FastGuiController:
                     break
                 continue
             started = _now_ms()
+            self._publish_child_start(batch_id, index, name, normalised_args)
             if name == "click_element":
                 result = self._click_element(normalised_args)
             elif name == "wait" and not isinstance(normalised_args.get("condition"), dict):
@@ -318,6 +382,16 @@ class FastGuiController:
             if data:
                 item["data"] = data
             results.append(item)
+            self._publish_child_done(
+                batch_id,
+                index,
+                name,
+                normalised_args,
+                result,
+                elapsed,
+                item["ok"],
+                data,
+            )
             if failed and stop_on_error:
                 metrics.failed_at = index
                 break
