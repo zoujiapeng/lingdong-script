@@ -10,11 +10,11 @@
 
 - 基础/状态：`GET/POST /api/ping`、`GET /api/get-state`
 - UI：`POST /api/set-view-mode`、`POST /api/set-ui`、`POST /api/fit-screen`
-- 脚本/画布：`POST /api/load-script`、`/api/new-script`、`/api/save-script`、`/api/set-script-name`
+- 脚本/画布：`POST /api/load-script`、`/api/new-script`、`/api/save-script`、`/api/set-script-name`、`/api/check-params`、`/api/auto-layout`
 - 节点/边：`/api/add-node`、`/api/update-node`、`/api/update-node-params`、`/api/delete-nodes`、`/api/add-edge`、`/api/delete-edges`
 - 编辑命令：`/api/undo`、`/api/redo`、`/api/select-all`、`/api/clear-selection`、`/api/copy-selected`、`/api/cut-selected`、`/api/paste`、`/api/duplicate-nodes`
 - 执行：`/api/run-dsl`、`/api/generate-dsl`、`/api/create-flow`、`/api/engine/start`、`/api/engine/pause`、`/api/engine/resume`
-- 截图/OCR：`/api/screenshot/capture`、`/api/screenshot/select-region`、`/api/ocr/region`
+- 截图/OCR：`/api/screenshot/capture`、`/api/screenshot/select-region`、`/api/ocr/region`、`/api/wheel-select`
 - 宏：`/api/macro/start-recording`、`/api/macro/stop-recording`、`/api/macro/play`、`/api/macro/list`、`/api/macro/delete`、`/api/macro/get-events`、`/api/macro/recording-status`
 - `@feature`：`/api/features/list`、`/api/features/reload`、`/api/features/call`
 - 模板/标记：`/api/save-template`、`/api/list-templates`、`/api/search-templates`、`/api/marks/save`、`/api/marks/load`
@@ -37,6 +37,8 @@
 | POST | `/api/elevate` | 权限提升/辅助启动 |
 | GET/PATCH | `/api/config` | 读取/更新配置 |
 | GET | `/api/traces` | 列 trace |
+| GET | `/api/evals` | 列本机 GUI eval 报告摘要 |
+| GET | `/api/trace/{run_id}/summary` | trace 低延迟/工具/证据摘要 |
 | GET | `/api/trace/{run_id}` | 读取 trace |
 | GET | `/api/trace/{run_id}/shot/{name}` | 读取 trace 截图 |
 | POST | `/api/export/{run_id}` | 导出 `.wps.json` |
@@ -49,6 +51,8 @@
 | GET/DELETE | `/api/session` | 会话记忆 |
 | WS | `/ws/events` | BUS 事件流 |
 | GET | `/` | WinPilot webui |
+
+`/api/trace/{run_id}/summary` 里的 `low_latency` / `fast_gui` 字段是当前性能复盘入口：包含截图、感知、LLM 决策、动作执行、动作后验证、VLM/重规划/skill 复用频率，以及 batch subgoal、controller phase、锚点点击/缓存/失败统计。
 
 ## Electron IPC
 

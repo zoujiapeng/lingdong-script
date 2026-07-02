@@ -4,7 +4,7 @@
 
 ## 当前代码事实
 
-- 当前分支：`codex/low-latency-controller-next`。
+- 当前低延迟改造分支：`codex/low-latency-controller-next`；合并后 `master` 应包含同一提交。
 - WinPilot 主体：`python/winpilot_home/winpilot/`。
 - Electron IPC adapter：`python/agent/__main__.py`。
 - GUI 任务：`AgentRunner`。

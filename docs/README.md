@@ -12,11 +12,12 @@
 | [replay-recording.md](replay-recording.md) | trace、`.wps.json`、replay、导入流程图 |
 | [flow-editor.md](flow-editor.md) | 流程图/DSL/`@feature` 体系 |
 | [现状评估与改进路线-2026-06.md](现状评估与改进路线-2026-06.md) | 当前工程债和改进路线 |
-| [项目导览-面试版.md](项目导览-面试版.md) | 面试/自学长文档，本轮不改 |
+| [项目导览-面试版.md](项目导览-面试版.md) | 面试/自学长文档，含通俗架构图和低延迟 GUI 复盘 |
 
 ## 可信边界
 
 - 当前 agent 主体：`python/winpilot_home/winpilot/`。
 - 旧流程图体系：`src/renderer/`、`python/engine/`、`python/features/`。
+- 低延迟 GUI 当前事实以 `CLAUDE.md`、`architecture.md`、`winpilot-agent.md` 为准：已有 batch/subgoal、自动 watcher、recent/action ROI、锚点缓存复验和 summary 指标；没有完成视觉伺服或常驻轻量 UI 模型。
 - 本机运行数据：`python/winpilot_home/config.json`、`traces/`、`scripts/`、`experience_memory.json`。
 - 临时截图、日志、trace、缓存不作为架构事实。

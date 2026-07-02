@@ -47,6 +47,17 @@
 - Documented the actual Electron HTTP endpoints from `src/main/api.ts`.
 - Documented current WinPilot defaults from `config.py`, including `llm_trace`, `verify_done`, `prompt_style`, `world_model`, VLM toggles, and coding sub-agent config.
 - Updated testing guidance to distinguish current WinPilot tests from root-level historical/legacy tests.
+- Documented the low-latency GUI controller path: batch subgoals, automatic screen watcher, recent/action ROI, anchor-cache revalidation, `low_latency`/`fast_gui` summary metrics, and the current limitations.
+
+### Low-latency GUI agent
+
+- Added automatic `screen_watch` startup/shutdown around target windows and visible actions.
+- Added `run_action_batch(subgoal=...)` so traces can connect a controller batch to the high-level intent.
+- Added `click_element` anchor evidence (`anchor_locator`, `resolved_element`) and made `ElementCache` revalidate cached anchors against the current snapshot instead of reusing stale `elem_id` values across observes.
+- Added independent before/after frame diffing for visible action `screen_delta`; the watcher now records action-attributed ROIs in `action_changed_regions`.
+- Made `observe(changed_only=true)` prefer fresh action ROIs before falling back to regular recent watcher ROIs.
+- Extended trace summaries with `low_latency` and `fast_gui` metrics for screen capture, perception, LLM decision, action execution, post-action verification, batch subgoals, controller phases, and anchor click/cache/failure counts.
+- Verified the webpage GUI target through the real `/api/chat` path with UIA disabled: run `20260703-025138-dcf2c6` reached `LOCAL_COUNTER_1` via `run_action_batch` + `observe(changed_only=true)` and passed fresh-screen done verification.
 
 ### Agent hardening already present on this branch
 
