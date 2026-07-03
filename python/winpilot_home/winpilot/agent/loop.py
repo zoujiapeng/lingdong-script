@@ -143,6 +143,11 @@ def _draw_spec_region(spec: dict[str, Any]) -> str:
     return str(spec.get("expected_region") or spec.get("region") or "").casefold()
 
 
+def _draw_spec_key(spec: dict[str, Any]) -> tuple[str, str, str]:
+    shape, color = _draw_spec_signature(spec)
+    return shape, color, _draw_spec_region(spec)
+
+
 def _sanitize_assistant(msg) -> dict[str, Any]:
     """Assistant message for history — WITHOUT reasoning_content."""
     content = msg.content or ""
@@ -827,6 +832,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "subgoal_route": data.get("subgoal_route"),
                 "controller_state": data.get("controller_state"),
                 "needs_llm_reason": data.get("needs_llm_reason"),
+                "actions_executed": compact_actions,
                 "matched_texts": packet.get("matched_texts"),
                 "missing_texts": packet.get("missing_texts"),
                 "matched_visual_colors": packet.get("matched_visual_colors"),
@@ -834,8 +840,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "visible_colors": packet.get("visible_colors"),
                 "candidate_click_labels": packet.get("candidate_click_labels"),
                 "fast_path_advice": data.get("fast_path_advice"),
+                "auto_completed_plan_items": data.get("auto_completed_plan_items"),
+                "plan_after_auto_complete": str(data.get("plan_after_auto_complete") or "")[:500],
                 "metrics": data.get("metrics"),
-                "actions_executed": compact_actions,
             }
             return json.dumps(compact, ensure_ascii=False, default=str)[:1800]
         if tool_name == "run_action_batch":
@@ -1222,6 +1229,121 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             )
         return None
 
+    @staticmethod
+    def _draw_specs_from_args(args: dict[str, Any]) -> list[dict[str, Any]]:
+        specs: list[dict[str, Any]] = []
+        if isinstance(args.get("draws"), list):
+            specs.extend(item for item in args["draws"] if isinstance(item, dict))
+        elif isinstance(args.get("draw"), dict):
+            specs.append(args["draw"])
+        return specs
+
+    def _verified_draw_keys_from_result(
+        self,
+        args: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> set[tuple[str, str, str]]:
+        if payload.get("verified") is not True:
+            return set()
+        packet = payload.get("evidence_packet")
+        if not isinstance(packet, dict):
+            return set()
+        matched_colors = {
+            str(color).casefold()
+            for color in (packet.get("matched_visual_colors") or [])
+        }
+        if not matched_colors:
+            return set()
+        action_sigs = {
+            _draw_spec_signature({
+                "shape": action.get("shape"),
+                "color": action.get("requested_color"),
+            })
+            for action in (payload.get("actions_executed") or [])
+            if isinstance(action, dict) and action.get("action") == "draw_strokes"
+        }
+        verified: set[tuple[str, str, str]] = set()
+        for spec in self._draw_specs_from_args(args):
+            if spec.get("strokes"):
+                continue
+            sig = _draw_spec_signature(spec)
+            if not all(sig):
+                continue
+            if sig in action_sigs and sig[1] in matched_colors:
+                verified.add(_draw_spec_key(spec))
+        return verified
+
+    def _maybe_auto_complete_draw_plan_items(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+    ) -> ToolResult:
+        if tool_name != "execute_subgoal" or not _is_drawing_task(self.task):
+            return result
+        if not isinstance(args.get("draws"), list) or len(args.get("draws") or []) < 2:
+            return result
+        plan = getattr(self.session, "plan", None)
+        steps = getattr(plan, "steps", None) or []
+        if not steps:
+            return result
+        try:
+            payload = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        verified_keys = self._verified_draw_keys_from_result(args, payload)
+        if not verified_keys:
+            return result
+        verified_sigs = {(shape, color) for shape, color, _region in verified_keys}
+        completed: list[dict[str, Any]] = []
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict) or step.get("done") or step.get("check"):
+                continue
+            spec = _parse_plan_draw_spec(str(step.get("goal") or ""))
+            if not spec:
+                continue
+            key = _draw_spec_key(spec)
+            sig = _draw_spec_signature(spec)
+            region = _draw_spec_region(spec)
+            if key not in verified_keys and not (not region and sig in verified_sigs):
+                continue
+            if plan.complete(index):
+                item = {"index": index, "goal": str(step.get("goal") or "")[:160]}
+                completed.append(item)
+                BUS.publish(
+                    "agent_plan",
+                    action="auto_complete",
+                    index=index,
+                    source="execute_subgoal.draws",
+                    plan=plan.snapshot(),
+                )
+        if not completed:
+            return result
+        payload["auto_completed_plan_items"] = completed
+        payload["plan_after_auto_complete"] = plan.render()
+        existing_advice = str(payload.get("fast_path_advice") or "").strip()
+        auto_advice = (
+            "Auto-completed drawing plan items "
+            + ", ".join(str(item["index"]) for item in completed)
+            + " from verified controller draw evidence; continue with next unfinished item."
+        )
+        payload["fast_path_advice"] = (existing_advice + " " + auto_advice).strip()
+        self._trace_debug("execute_subgoal_draw_plan_auto_completed", {
+            "run_id": self.run_id,
+            "completed": completed,
+            "args": args,
+        })
+        return ToolResult(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            is_observe=result.is_observe,
+            terminal=result.terminal,
+            summary=result.summary,
+            replay=result.replay,
+            image_b64=result.image_b64,
+        )
+
     def _score_experience_feedback(self) -> None:
         """Score memory only when it was actually tried, not merely injected.
 
@@ -1415,6 +1537,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
                 if result is None:
                     result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
+            result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
             self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
@@ -1509,6 +1632,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "subgoal_route",
                     "controller_state",
                     "evidence_packet",
+                    "auto_completed_plan_items",
+                    "plan_after_auto_complete",
                     "needs_llm_reason",
                     "element_cache",
                 ):

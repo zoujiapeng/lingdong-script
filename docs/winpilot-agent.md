@@ -255,7 +255,7 @@ Paint 绘图/选色验证：`20260704-041425-bbbe11`。任务通过 `/api/chat` 
 
 Paint 多图形验证：`20260704-045155-a9dc21`。在 `mimo-v2.5` 下要求只用 GUI 从空白 Paint 画布绘制左侧蓝色三角形和右侧红色矩形，最终 `done`。真实画面和 trace 证据一致：蓝色三角形 `visible_colors.blue.pixels=3835`，红色矩形 `visible_colors.red.pixels=2856`，两个 `execute_subgoal.draw` 都 `verified=true`。这轮验证了 canvas-ready wait、`draw.expected_region` 左右区域、视觉颜色 evidence ledger，以及绘图计划项不再把颜色词当屏幕文字核验。
 
-`execute_subgoal.draws[]` 是当前多图形 routine 的优先路径：相邻的简单 shape/color/region 计划项会在 `AgentRunner` 中被保守合并为一次 controller 调用；自定义 `strokes`、确认/截图/保存类计划项不会被合并。若后续 LLM 又请求最近 controller 已真实执行且颜色证据匹配的同一 shape/color/region，loop 会返回 `subgoal_route=controller_evidence_reuse`，让模型完成计划项而不是重复绘制。
+`execute_subgoal.draws[]` 是当前多图形 routine 的优先路径：相邻的简单 shape/color/region 计划项会在 `AgentRunner` 中被保守合并为一次 controller 调用；自定义 `strokes`、确认/截图/保存类计划项不会被合并。无额外 check 的简单绘图 plan 项可由 verified `draws[]` 证据自动标记完成；带 check 的项仍走 `complete_subgoal`，由当前 controller 颜色证据核验。若后续 LLM 又请求最近 controller 已真实执行且颜色证据匹配的同一 shape/color/region，loop 会返回 `subgoal_route=controller_evidence_reuse`，让模型完成计划项而不是重复绘制。
 
 成本/步数回归验证：`20260704-053455-7b33d3`。同一 GUI-only Paint 多图形任务在便宜模型 `mimo-v2.5`、`max_steps=9` 下 8 个工具完成，序列为 `launch -> complete_subgoal -> execute_subgoal(draw blue) -> complete_subgoal -> execute_subgoal(draw red) -> complete_subgoal -> screenshot -> done`；真实截图 `python/winpilot_home/traces/manual_screen_20260704_053535.jpg` 显示两个图形。该 run 验证了两条成本/假证据修复：verify-only `execute_subgoal` 没有 target hwnd 时会快速返回 `needs_target_window=true`，不再从前台杂音里读 app 标题；planner 会丢弃绘图/视觉确认项里的弱文本 app-title check，避免把可见像素证据误核验成 `Paint/画图` 文字。`prompt_tokens=92863`，比 `20260704-052452-04bc28` 的 10 步成功 run `119532` 更低。
 
@@ -267,4 +267,4 @@ schema/计划成本回归：`20260704-055208-e16c54`。同一任务在 `mimo-v2.
 
 plan tool history 压缩回归：`20260704-063415-fcd39d`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_063504.jpg` 显示两个图形。`complete_subgoal` 原始结果仍完整写 trace，但 LLM history 里只保留 JSON 摘要：完成项、`remaining_steps`、`next_unfinished` 和简短 guidance；最后一个 LLM request 中相关 tool message 为 361-487 字符且不含 `Plan hint:`，`prompt_tokens=81545`、`cache_miss_tokens=4233`。
 
-相邻绘图子目标合并/证据复用回归：`20260704-072034-7eb125`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_072118.jpg` 显示左侧蓝色三角形和右侧红色矩形。第一次 `execute_subgoal(draw blue)` 自动扩展为 `draws=[blue triangle left, red rectangle right]`，模型随后重复请求红色矩形时返回 `subgoal_route=controller_evidence_reuse` 且 `actions_executed=[]`，没有重复绘制；`prompt_tokens=81116`、`cache_miss_tokens=3804`。
+相邻绘图子目标合并/压缩证据回归：`20260704-073655-e7b108`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_073736.jpg` 显示左侧蓝色三角形和右侧红色矩形。第一次 `execute_subgoal(draw blue)` 自动扩展为 `draws=[blue triangle left, red rectangle right]`，整轮只有 1 次 `execute_subgoal`；压缩后的 tool evidence 保留 `draw_strokes` 和视觉颜色证据，done gate 通过 `red, blue` 接受，`prompt_tokens=70113`、`cache_miss_tokens=3937`。

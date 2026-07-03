@@ -1163,6 +1163,114 @@ def test_execute_subgoal_draw_reuse_is_conservative():
     ) is None
 
 
+def test_execute_subgoal_draws_auto_complete_matching_plan_items():
+    import json
+
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle")
+    runner.session.plan = planner.Plan([
+        "draw a blue triangle",
+        "draw a red rectangle on the right",
+        "verify both shapes are visible",
+    ])
+    args = {
+        "draws": [
+            {"shape": "triangle", "color": "blue", "expected_region": "left"},
+            {"shape": "rectangle", "color": "red", "expected_region": "right"},
+        ],
+    }
+    result = ToolResult(json.dumps({
+        "ok": True,
+        "verified": True,
+        "actions_executed": [
+            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
+            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+        ],
+        "evidence_packet": {
+            "matched_visual_colors": ["blue", "red"],
+            "missing_visual_colors": [],
+        },
+    }))
+
+    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
+    payload = json.loads(updated.text)
+
+    assert [step["done"] for step in runner.session.plan.steps] == [True, True, False]
+    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2]
+    assert "plan_after_auto_complete" in payload
+
+
+def test_execute_subgoal_draws_auto_complete_requires_matched_color():
+    import json
+
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle")
+    runner.session.plan = planner.Plan([
+        "draw a blue triangle",
+        "draw a red rectangle on the right",
+    ])
+    args = {
+        "draws": [
+            {"shape": "triangle", "color": "blue", "expected_region": "left"},
+            {"shape": "rectangle", "color": "red", "expected_region": "right"},
+        ],
+    }
+    result = ToolResult(json.dumps({
+        "ok": True,
+        "verified": False,
+        "actions_executed": [
+            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
+            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+        ],
+        "evidence_packet": {
+            "matched_visual_colors": ["blue"],
+            "missing_visual_colors": ["red"],
+        },
+    }))
+
+    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
+
+    assert updated is result
+    assert [step["done"] for step in runner.session.plan.steps] == [False, False]
+
+
+def test_compact_execute_subgoal_keeps_draw_actions_before_plan_summary():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    raw = json.dumps({
+        "ok": True,
+        "verified": True,
+        "subgoal": "draw shapes",
+        "subgoal_route": "controller_first",
+        "actions_executed": [
+            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
+            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+        ],
+        "evidence_packet": {
+            "matched_visual_colors": ["blue", "red"],
+            "missing_visual_colors": [],
+        },
+        "auto_completed_plan_items": [
+            {"index": 2, "goal": "draw blue triangle"},
+            {"index": 3, "goal": "draw red rectangle"},
+        ],
+        "plan_after_auto_complete": "x" * 2000,
+    })
+
+    compact = AgentRunner._compact_tool_evidence("execute_subgoal", raw)
+
+    assert '"action": "draw_strokes"' in compact
+    assert "auto_completed_plan_items" in compact
+
+
 def test_plan_draw_parser_ignores_visual_verification_items():
     from winpilot.agent.loop import _parse_plan_draw_spec
 
