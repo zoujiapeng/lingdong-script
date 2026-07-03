@@ -19,11 +19,15 @@ def _tools_attr(name: str, default):
 _HISTORICAL_VISIBLE_SOURCES = {
     "observe",
     "read_text",
+    "execute_subgoal:evidence_packet",
     "click:verified_expect",
     "type_text:verified_expect",
     "hotkey:verified_expect",
     "launch:verified_expect",
     "run_action_batch:verified_expect",
+}
+_CURRENT_CONTROLLER_VISIBLE_SOURCES = {
+    "execute_subgoal:evidence_packet",
 }
 
 
@@ -54,6 +58,30 @@ def _visible_check_values(check: dict | None) -> list[str]:
 
 
 class PlanToolMixin:
+    def _current_controller_visible_subgoal_ok(
+        self,
+        check: dict | None,
+    ) -> tuple[bool, str]:
+        targets = _visible_check_values(check)
+        if not targets:
+            return False, "subgoal check has no visible text target"
+        ledger = getattr(self, "visible_evidence_ledger", [])
+        recent = [
+            item for item in ledger[-8:]
+            if item.get("source") in _CURRENT_CONTROLLER_VISIBLE_SOURCES
+        ]
+        seen = {
+            _normalize_visible_text(str(item.get("target") or ""))
+            for item in recent
+        }
+        missing = [
+            target for target in targets
+            if _normalize_visible_text(target) not in seen
+        ]
+        if missing:
+            return False, "controller evidence missing: " + ", ".join(missing)
+        return True, "current controller evidence: " + ", ".join(targets)
+
     def _historical_visible_subgoal_ok(
         self,
         check: dict | None,
@@ -100,18 +128,31 @@ class PlanToolMixin:
         check_expect = self.plan.check_for(index)
         if check_expect:
             goal = str(self.plan.steps[index - 1].get("goal") or "")
+            current_ok, current_detail = self._current_controller_visible_subgoal_ok(check_expect)
+            if current_ok:
+                BUS.publish("agent_plan", action="subgoal_check", index=index,
+                            verified=True, detail=current_detail,
+                            source="current_controller_evidence")
+            else:
+                outcome = None
             historical_ok, historical_detail = self._historical_visible_subgoal_ok(
                 check_expect,
                 goal,
             )
-            outcome = verify_mod.check(check_expect, hwnd=self.hwnd, timeout_s=4.0)
-            BUS.publish("agent_plan", action="subgoal_check", index=index,
-                        verified=outcome.verified, detail=outcome.detail)
-            if historical_ok and not outcome.verified:
+            if not current_ok:
+                outcome = verify_mod.check(check_expect, hwnd=self.hwnd, timeout_s=4.0)
+                BUS.publish("agent_plan", action="subgoal_check", index=index,
+                            verified=outcome.verified, detail=outcome.detail)
+            if historical_ok and not current_ok and outcome is not None and not outcome.verified:
                 BUS.publish("agent_plan", action="subgoal_check", index=index,
                             verified=True, detail=historical_detail,
                             source="historical_visible_evidence")
-            if not outcome.verified and not historical_ok:
+            if (
+                not current_ok
+                and outcome is not None
+                and not outcome.verified
+                and not historical_ok
+            ):
                 return ToolResult(
                     f"子目标 {index} 核验未通过（{outcome.detail}）——尚未真正完成，"
                     "请先达成该子目标再标完成，不要跳步。")

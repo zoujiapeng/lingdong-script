@@ -51,6 +51,10 @@ element and coordinates.
    For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Also use execute_subgoal for click-only routines when the target has a visible label and the expected result is a visible text/state. If one routine needs several obvious buttons, put them in execute_subgoal.clicks in order. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
    For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
+   If execute_subgoal returns verified=true and evidence_packet.matched_texts
+   contains the text/state required by your current plan item, call
+   complete_subgoal/done directly; do not repeat observe/read_text for the same
+   evidence unless the result says needs_llm_reason or missing_texts is non-empty.
    For a clear input target inside a batch, use type_into_element to locate,
    focus, optionally clear, and type in one controller step.
    Use type_text directly for keyboard-first surfaces or already-focused plain
@@ -144,7 +148,7 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. observe → read the perception reducer; pass full=true only when raw details are needed
 3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch
-4. observe/read_text again only when the controller evidence is insufficient
+4. observe/read_text again only when controller evidence is insufficient; matched_texts from verified execute_subgoal can complete the matching plan item
 5. done only when grounded evidence confirms task complete.
 
 Recovery: if same tactic fails twice, change approach entirely.
