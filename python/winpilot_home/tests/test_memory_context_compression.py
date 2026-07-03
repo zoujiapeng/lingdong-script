@@ -102,3 +102,37 @@ def test_fold_checkpoint_preserves_goal_screen_and_recent_evidence():
     assert "recent_tool_evidence:" in folded
     assert "Sync is still off" in folded
     assert "folded_item: [folded] bulky observation 0" in folded
+
+
+def test_legacy_playbook_gets_conditions_and_evidence(tmp_path, monkeypatch):
+    import json
+
+    from winpilot.agent import playbooks
+
+    playbook_file = tmp_path / "generic-dialog.json"
+    playbook_file.write_text(
+        json.dumps(
+            {
+                "name": "generic-dialog",
+                "description": "dialog tactic",
+                "keywords": ["dialog"],
+                "window_triggers": ["Dialog"],
+                "content": "Use the dialog carefully.",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(playbooks, "PLAYBOOKS_DIR", tmp_path)
+    monkeypatch.setattr(playbooks, "_cache", None)
+
+    [book] = playbooks.load_all()
+    rendered = playbooks.render_section([book])
+
+    assert book.conditions
+    assert book.evidence
+    assert "# Playbook: generic-dialog" in rendered
+    assert "Conditions:" in rendered
+    assert "Task keyword anchors: dialog." in rendered
+    assert "Evidence required:" in rendered
+    assert "verify the requested result" in rendered
