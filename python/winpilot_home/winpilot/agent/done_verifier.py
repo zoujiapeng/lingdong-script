@@ -22,6 +22,7 @@ from .task_rules import (
     _is_drawing_task,
     _is_gui_search_task,
     _looks_like_contact_list,
+    _historical_visible_state_targets,
     _quoted_payloads,
     _required_drawing_colors,
     _required_image_paths,
@@ -157,10 +158,14 @@ class DoneVerifierMixin:
         return any(marker in text for marker in markers)
 
     def _visible_state_has_deterministic_done_evidence(self, screen: str, evidence: str = "") -> bool:
-        targets = _visible_state_targets(self.task)
+        historical = self._task_accepts_historical_visible_state(self.task)
+        targets = (
+            _historical_visible_state_targets(self.task)
+            if historical else _visible_state_targets(self.task)
+        )
         if not targets:
             return False
-        if self._task_accepts_historical_visible_state(self.task):
+        if historical:
             allowed_sources = {
                 "observe",
                 "read_text",

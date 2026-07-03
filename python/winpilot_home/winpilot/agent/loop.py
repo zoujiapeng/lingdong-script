@@ -526,9 +526,27 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def _visible_snippet(self, text: str, target: str, limit: int = 260) -> str:
         target_norm = self._normalize_visible_text(target)
         lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        negative_markers = (
+            "no elements matched",
+            "did not contain query",
+            "does not contain query",
+            "not contain query",
+            "no match",
+            "not found",
+            "未匹配",
+            "没有命中",
+            "未找到",
+            "没有找到",
+        )
+        matched_negative = False
         for line in lines:
             if target_norm and target_norm in self._normalize_visible_text(line):
+                if any(marker in line.casefold() for marker in negative_markers):
+                    matched_negative = True
+                    continue
                 return line[:limit]
+        if matched_negative:
+            return ""
         compact = re.sub(r"\s+", " ", text or "").strip()
         return compact[:limit]
 
@@ -553,6 +571,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         }
         self._visible_evidence_ledger.append(entry)
         self._visible_evidence_ledger = self._visible_evidence_ledger[-30:]
+        if getattr(self, "session", None) is not None:
+            self.session.visible_evidence_ledger = self._visible_evidence_ledger
         BUS.publish("visible_evidence", run_id=self.run_id, **entry)
 
     @staticmethod

@@ -41,6 +41,28 @@ def test_visible_state_targets_extract_historical_list():
     ) == ["APPLIED_TEXT", "LOCAL_COUNTER", "MODAL_TARGET_VISIBLE"]
 
 
+def test_visible_evidence_ledger_ignores_negative_query_hits():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("confirm APPLIED_TEXT appeared")
+
+    runner._track_visible_evidence(
+        "observe",
+        {},
+        'No elements matched query "APPLIED_TEXT" among 70 elements',
+    )
+
+    assert runner._visible_evidence_ledger == []
+
+    runner._track_visible_evidence(
+        "observe",
+        {},
+        '[12] text "APPLIED_TEXT: STAGING_INPUT_731"',
+    )
+
+    assert runner._visible_evidence_ledger[-1]["target"] == "APPLIED_TEXT"
+
+
 def test_visible_state_done_accepts_historical_evidence_for_appeared_task(monkeypatch):
     import queue
 
@@ -138,6 +160,20 @@ def test_historical_visible_done_ignores_agent_summary_without_tool_evidence(mon
                     )
 
     assert runner._verify_done(_Client()) is False
+
+
+def test_visible_evidence_ignores_negative_query_result():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("确认 LOCAL_COUNTER 出现过后再完成")
+
+    runner._track_visible_evidence(
+        "observe",
+        {},
+        'No elements matched query "local_counter" among 74 elements.',
+    )
+
+    assert runner._visible_evidence_ledger == []
 
 
 def test_text_appears_scoped_to_target_window(monkeypatch):
