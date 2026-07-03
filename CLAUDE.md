@@ -63,7 +63,7 @@
 ## 记忆和上下文
 
 - 长期经验：`python/winpilot_home/winpilot/memory/experience.py` 读写本机 `experience_memory.json`。recipe/note 带 `conditions` 和 `evidence`；自动动作 recipe 不进 coding 任务。
-- `reuse_skill` 在 `agent/memory_tools.py`，只对强任务匹配的已验证 replay 脚本做 0-token 重放。replay 成功只说明步骤执行完，仍要看当前屏幕/文本/VLM/文件等证据才能 `done`。
+- `reuse_skill` 在 `agent/memory_tools.py`，只对强任务匹配的已验证 replay 脚本做 0-token 重放。replay 成功只说明步骤执行完，仍要看当前屏幕/文本/VLM/文件等证据才能 `done`；只有 replay 成功且最终 run 完成的 recipe 才会获得正反馈，失败 replay 后兜底完成不算成功复用。
 - session memory 在 `agent/session.py`，只对“再来/继续/刚才那个/previous/same/it”等指代任务注入；普通新任务不要带历史噪声。
 - world advisory 在 `context_guidance.py` / `perception/world.py` / `agent/run_state.py`，只提示卡住、重复、screen watcher 变化和 need_observe，不做额外感知。
 - 上下文折叠在 `agent/loop.py`：超过阈值后折叠旧大结果，checkpoint 必须保留任务目标、关键屏幕状态、失败/恢复原因和最近工具证据。
