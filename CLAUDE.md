@@ -79,6 +79,7 @@
 - `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到；如果当前 snapshot 没找到文本锚点，controller 会自己做一次 `observe(query=label)` 并重试，结果里看 `controller_auto_observe` 和 `metrics.auto_observe_count`。
 - `type_into_element` 是 `run_action_batch` 内部组合动作：定位锚点、点击聚焦、可选 `Ctrl+A` 清空、再 `type_text`。结果里看 `subresults`、`controller_internal_action_count`、`metrics.compound_round_trips_saved`，用于判断卡在定位、聚焦、清空还是输入验证。
 - `type_into_element` 和 `execute_subgoal` 会使用 UIA/OCR/CV 组合的通用 `input_locator`；UIA 关闭时会用 label、placeholder/search-like OCR、附近矩形、focused non-button 和 synthetic candidate，不写 QQ/计算器/靶场专属规则。
+- `execute_subgoal` 在没有 snapshot 且 click 带 `expected_region` 时，会先对该粗区域做 targeted initial OCR/CV；只有裁剪区真的识别到目标 label 才使用该 snapshot，否则回退全窗口 observe。snapshot 的 region 仍保持完整目标窗口，避免 watcher 被裁剪区带偏。
 - `observe(changed_only=true, query="...")` 先查 recent/action ROI；如果 ROI 里没有 query 命中，会明确标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部变化不含目标时误导模型。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据；`draw_strokes/drag` 仍用 `sync=false` 并可带 `auto_visual_verify`、`visual_change_detected`，验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
@@ -134,6 +135,7 @@ npm run build
 - 最新 controller-first GUI-only 网页靶场验证：`20260704-005515-7f70a7`，工具序列 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`；11 个工具、1 次 observe、done 一次通过，截图 `batch_after_003.jpg` 显示 `SUBGOAL_OK_078` 和 `LOCAL_COUNTER_2`。对照失败 run `20260704-002852-1e75a4`：`execute_subgoal` 误把全局 `LOCAL_COUNTER` 继承进输入子目标，导致输入已成功仍返回 `ok=false`；已修为只继承当前 subgoal/args 中提到的全局 literal。
 - 最新 click-only controller-first 验证：`20260704-014433-99e853`，工具序列 `launch -> complete_subgoal -> execute_subgoal(click+verify LOCAL_COUNTER) -> complete_subgoal -> done`，5 个工具完成；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，`fast_gui.subgoal_calls=1`，`vlm_call_count=0`。
 - 最新 changed-only click-only 验证：`20260704-020133-18f863`，`execute_subgoal` 内部为 `click_element -> wait_stable -> observe(changed_only=true, query=LOCAL_COUNTER)`，工具耗时约 5.9s；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`。`20260704-020623-8f8903` 进一步验证 `complete_subgoal` 可直接使用 controller evidence，计划核验降到 1ms，但模型仍可能额外 `observe(query=LOCAL_COUNTER)`，后续要继续减少这类 LLM 习惯性复验。
+- targeted initial ROI 验证：`20260704-022217-2eeead`。模型传入 `expected_region=left`，`execute_subgoal` 内部没有全窗口 prelude，`subgoal_overhead_ms=327`，截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`；该 run 仍有一次模型主动 `observe(full=true)`，说明下一步应继续减少 LLM 执行前的习惯性全量观察。
 
 ## 15 项低延迟改造进度
 

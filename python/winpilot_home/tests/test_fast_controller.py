@@ -1129,3 +1129,58 @@ def test_subgoal_click_only_uses_changed_observe_without_read_text():
     assert payload["evidence_packet"]["verified_expect_texts"] == []
     assert [action["action"] for action in payload["actions_executed"]] == ["click_element", "observe"]
     assert [name for name, _args in calls] == ["focus_window", "click", "observe"]
+
+
+def test_subgoal_uses_targeted_initial_roi_when_region_hint_matches(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    captured_regions = []
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: Region(0, 0, 1000, 800))
+    monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda hwnd: "Target")
+
+    def fake_ocr_collect(region, min_conf=None):
+        captured_regions.append(region)
+        return [
+            UIElement(source="ocr", role="text", text="Export", cx=870, cy=90, left=830, top=78, width=80, height=24),
+        ]
+
+    monkeypatch.setattr(subgoal_mod.ocr, "collect", fake_ocr_collect)
+    monkeypatch.setattr(subgoal_mod.vision_cv, "detect_icon_candidates", lambda region: [])
+
+    class Session:
+        task = "Click Export"
+        hwnd = 1
+        run_id = "run-targeted-roi"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "observe":
+                raise AssertionError("targeted initial ROI should avoid full observe")
+            if name == "click":
+                assert args["element_id"] == 1
+                return ToolResult('{"ok": true, "verified": false}')
+            return ToolResult('{"ok": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "click Export",
+        "click": {"label": "Export", "expected_region": "top-right"},
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert any(item["action"] == "targeted_observe" for item in payload["evidence_packet"]["prelude"])
+    assert session.snapshot is not None
+    assert session.snapshot.region == Region(0, 0, 1000, 800)
+    assert session.snapshot.elements[0].states == ["targeted_initial_roi"]
+    assert captured_regions == [Region(450, 0, 550, 384)]
+    assert [name for name, _args in calls] == ["focus_window", "click"]
