@@ -373,6 +373,21 @@ class FastGuiController:
         cx, cy = wanted[0]["center"]
         return region.left + int(cx), region.top + int(cy)
 
+    @staticmethod
+    def _palette_component_summary(image) -> dict[str, Any]:
+        try:
+            components = _small_color_components(np.asarray(image))
+        except Exception as exc:
+            return {"error": str(exc)}
+        counts: dict[str, int] = {}
+        for item in components:
+            color = str(item.get("color") or "")
+            counts[color] = counts.get(color, 0) + 1
+        return {
+            "component_count": len(components),
+            "color_counts": counts,
+        }
+
     def _open_color_palette(self, region: Region) -> ToolResult:
         toolbar = Region(
             region.left,
@@ -431,12 +446,13 @@ class FastGuiController:
             }, ensure_ascii=False))
         attempts: list[dict[str, Any]] = []
 
-        def capture_palette_point() -> tuple[int, int] | None:
+        def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any]]:
             image = self.capture_fn(region)
-            return self._palette_swatch_point(image, region, color)
+            return self._palette_swatch_point(image, region, color), self._palette_component_summary(image)
 
         try:
-            point = capture_palette_point()
+            point, summary = capture_palette_point()
+            attempts.append({"action": "scan_color_palette", "ok": point is not None, "summary": summary})
         except Exception as exc:
             attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
             point = None
@@ -457,12 +473,15 @@ class FastGuiController:
                     "attempts": attempts,
                     "error": "could not open a visible color palette",
                 }, ensure_ascii=False, default=str))
-            time.sleep(0.25)
-            try:
-                point = capture_palette_point()
-            except Exception as exc:
-                attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
-                point = None
+            deadline = time.monotonic() + 1.6
+            while time.monotonic() < deadline and point is None:
+                time.sleep(0.18)
+                try:
+                    point, summary = capture_palette_point()
+                    attempts.append({"action": "scan_after_open", "ok": point is not None, "summary": summary})
+                except Exception as exc:
+                    attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
+                    point = None
         if point is None:
             return ToolResult(json.dumps({
                 "ok": False,

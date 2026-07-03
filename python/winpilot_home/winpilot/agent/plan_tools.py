@@ -28,6 +28,17 @@ _HISTORICAL_VISIBLE_SOURCES = {
 }
 _CURRENT_CONTROLLER_VISIBLE_SOURCES = {
     "execute_subgoal:evidence_packet",
+    "execute_subgoal:visual_color",
+}
+
+_COLOR_ALIASES = {
+    "blue": {"blue", "蓝", "蓝色"},
+    "red": {"red", "红", "红色"},
+    "green": {"green", "绿", "绿色"},
+    "yellow": {"yellow", "黄", "黄色"},
+    "black": {"black", "黑", "黑色"},
+    "purple": {"purple", "紫", "紫色"},
+    "orange": {"orange", "橙", "橙色"},
 }
 
 
@@ -57,6 +68,15 @@ def _visible_check_values(check: dict | None) -> list[str]:
     return values
 
 
+def _color_keys_in_text(text: str) -> set[str]:
+    compact = _normalize_visible_text(text)
+    keys: set[str] = set()
+    for color, aliases in _COLOR_ALIASES.items():
+        if any(_normalize_visible_text(alias) in compact for alias in aliases):
+            keys.add(color)
+    return keys
+
+
 class PlanToolMixin:
     def _current_controller_visible_subgoal_ok(
         self,
@@ -73,10 +93,17 @@ class PlanToolMixin:
         seen = {
             _normalize_visible_text(str(item.get("target") or ""))
             for item in recent
+            if item.get("source") != "execute_subgoal:visual_color"
+        }
+        seen_visual_colors = {
+            str(item.get("target") or "").casefold()
+            for item in recent
+            if item.get("source") == "execute_subgoal:visual_color"
         }
         missing = [
             target for target in targets
             if _normalize_visible_text(target) not in seen
+            and not (_color_keys_in_text(target) & seen_visual_colors)
         ]
         if missing:
             return False, "controller evidence missing: " + ", ".join(missing)
