@@ -26,6 +26,10 @@ from ..utils.log import logger
 
 _MAX_RECIPES = 50
 _MAX_HINTS = 3
+_MAX_RENDERED_STEPS = 8
+_MAX_CONDITIONS = 5
+_MAX_EVIDENCE = 5
+_MAX_META_CHARS = 220
 # Evict a recipe once it has been tried this many times without ever helping.
 _EVICT_MIN_USES = 3
 _lock = threading.Lock()
@@ -33,6 +37,61 @@ _lock = threading.Lock()
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:10]
+
+
+def _string_list(values, max_items: int, max_chars: int = _MAX_META_CHARS) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text:
+            out.append(text[:max_chars])
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _default_conditions(recipe: dict) -> list[str]:
+    app = str(recipe.get("app") or "").strip()
+    if recipe.get("manual"):
+        conditions = [
+            "Use only when this user-provided note is relevant to the current task.",
+        ]
+    else:
+        conditions = [
+            "Use only for the same workflow goal, not just a shared keyword.",
+        ]
+        if app:
+            conditions.append(
+                f'Current target app/window should match "{app}" or be intentionally equivalent.'
+            )
+        if recipe.get("script"):
+            conditions.append(
+                "Replay only after the target screen has been observed in the current run."
+            )
+    conditions.append(
+        "Do not apply to live-state questions about current foreground, login, status, or visibility."
+    )
+    return conditions[:_MAX_CONDITIONS]
+
+
+def _default_evidence(recipe: dict) -> list[str]:
+    if recipe.get("manual"):
+        return [
+            "Treat as a hint; verify against current files, UI, or deterministic output before relying on it.",
+        ]
+    evidence = [
+        "Before reuse, observe/list_windows or equivalent evidence must confirm the current target.",
+        "After replay/actions, verify final state with observe/read_text/VLM/nonvisual summary or deterministic checks before done.",
+    ]
+    if recipe.get("provisional"):
+        evidence.append("This recipe is provisional until a later verified run proves it useful.")
+    return evidence[:_MAX_EVIDENCE]
 
 
 def _normalize(recipe: dict) -> dict:
@@ -43,6 +102,18 @@ def _normalize(recipe: dict) -> dict:
     recipe.setdefault("provisional", False)
     recipe.setdefault("manual", False)
     recipe.setdefault("script", "")  # linked .wps.json for 0-token reuse
+    recipe["conditions"] = _string_list(
+        recipe.get("conditions") or recipe.get("applicability"),
+        _MAX_CONDITIONS,
+    )
+    if not recipe["conditions"]:
+        recipe["conditions"] = _default_conditions(recipe)
+    recipe["evidence"] = _string_list(
+        recipe.get("evidence") or recipe.get("evidence_requirements"),
+        _MAX_EVIDENCE,
+    )
+    if not recipe["evidence"]:
+        recipe["evidence"] = _default_evidence(recipe)
     return recipe
 
 
@@ -130,8 +201,15 @@ def enabled() -> bool:
 
 
 # ------------------------------------------------------------------ recording
-def record(task: str, app_hint: str, steps: list[str],
-           verified: bool = True, script: str = "") -> None:
+def record(
+    task: str,
+    app_hint: str,
+    steps: list[str],
+    verified: bool = True,
+    script: str = "",
+    conditions: list[str] | None = None,
+    evidence: list[str] | None = None,
+) -> None:
     """Persist a recipe from a finished run (newest first, capped).
 
     ``verified=False`` marks the recipe provisional. ``script`` links a
@@ -149,6 +227,8 @@ def record(task: str, app_hint: str, steps: list[str],
         "ts": int(time.time()),
         "provisional": not verified,
         "script": script,
+        "conditions": conditions or [],
+        "evidence": evidence or [],
     })
     with _lock:
         recipes = [r for r in _load() if r.get("task") != recipe["task"]]
@@ -230,18 +310,31 @@ def hints_with_ids(task: str, notes_only: bool = False) -> tuple[str, list[str]]
     scored.sort(key=lambda item: item[0], reverse=True)
     blocks, ids = [], []
     for rank, (score, recipe) in enumerate(scored[:_MAX_HINTS]):
-        steps = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(recipe["steps"]))
-        # Strong match + linked replay script → promote to "reusable procedure".
-        strong = rank == 0 and recipe.get("script") and _strong_match(task, recipe["task"])
+        title = recipe.get("task", "")
+        app = recipe.get("app", "")
+        steps = _render_steps(recipe.get("steps", []))
+        conditions = _render_bullets("Conditions", recipe.get("conditions", []))
+        evidence = _render_bullets("Evidence required", recipe.get("evidence", []))
+        meta = "\n".join(part for part in (conditions, evidence) if part)
+        # Strong match + linked replay script -> promote to "reusable procedure".
+        strong = rank == 0 and recipe.get("script") and _strong_match(task, title)
         if strong:
             blocks.append(
-                f'⭐ 上次成功流程（匹配度高，可直接复用）"{recipe["task"]}" (应用:{recipe["app"]})：\n'
-                f'{steps}\n'
-                f'  → 若当前任务与此基本相同，可调用 reuse_skill("{recipe["task"]}") '
-                f'直接 0-token 重放上次步骤；失败会自动回退到实时操作。')
+                f'[reusable skill candidate] Past verified workflow "{title}" '
+                f'(app:{app}, score:{score:.1f}).\n'
+                f'{meta}\n'
+                f'Steps preview:\n{steps}\n'
+                'If the current observed screen satisfies the conditions, call '
+                f'reuse_skill(task="{title}") first. Replay completion is not task '
+                'completion; verify final state before done.'
+            )
         else:
-            tag = "（未验证，谨慎参考）" if recipe.get("provisional") else ""
-            blocks.append(f'任务"{recipe["task"]}"{tag} (应用:{recipe["app"]}):\n{steps}')
+            tag = " provisional/unverified" if recipe.get("provisional") else ""
+            blocks.append(
+                f'[memory{tag}] "{title}" (app:{app}, score:{score:.1f}).\n'
+                f'{meta}\n'
+                f'Steps/notes:\n{steps}'
+            )
         ids.append(recipe["id"])
     return "\n".join(blocks), ids
 
@@ -265,6 +358,24 @@ def _strong_match(query: str, recipe_task: str) -> bool:
     return overlap >= 0.7
 
 
+def _render_steps(steps: list) -> str:
+    clean = [str(s).strip()[:300] for s in steps if str(s).strip()]
+    shown = clean[:_MAX_RENDERED_STEPS]
+    lines = [f"  {i + 1}. {s}" for i, s in enumerate(shown)]
+    if len(clean) > len(shown):
+        lines.append(f"  ... {len(clean) - len(shown)} more step(s) kept in memory")
+    return "\n".join(lines) if lines else "  (no reusable action steps)"
+
+
+def _render_bullets(label: str, items: list[str]) -> str:
+    clean = _string_list(items, _MAX_CONDITIONS if "Condition" in label else _MAX_EVIDENCE)
+    if not clean:
+        return ""
+    lines = [f"{label}:"]
+    lines.extend(f"  - {item}" for item in clean)
+    return "\n".join(lines)
+
+
 def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | None]:
     """Resolve a task (or explicit recipe id) to its linked .wps.json script.
 
@@ -274,13 +385,23 @@ def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | Non
         return "", None
     if recipe_id:
         recipe = get(recipe_id)
-        if recipe and recipe.get("script") and not is_volatile_state_task(recipe.get("task", "")):
+        if (
+            recipe
+            and recipe.get("script")
+            and not recipe.get("provisional")
+            and not is_volatile_state_task(recipe.get("task", ""))
+        ):
             return recipe["script"], recipe
         return "", recipe
     _text, ids = hints_with_ids(task)
     for rid in ids:  # best match first
         recipe = get(rid)
-        if recipe and recipe.get("script"):
+        if (
+            recipe
+            and recipe.get("script")
+            and not recipe.get("provisional")
+            and _strong_match(task, recipe.get("task", ""))
+        ):
             return recipe["script"], recipe
     return "", None
 
@@ -308,8 +429,14 @@ def get(recipe_id: str) -> dict | None:
     return None
 
 
-def add(task: str, app: str = "", steps: list[str] | None = None,
-        manual: bool = True) -> dict:
+def add(
+    task: str,
+    app: str = "",
+    steps: list[str] | None = None,
+    manual: bool = True,
+    conditions: list[str] | None = None,
+    evidence: list[str] | None = None,
+) -> dict:
     """Manually add a recipe/note (UI form or agent ``remember`` tool)."""
     recipe = _normalize({
         "task": (task or "")[:200],
@@ -317,6 +444,8 @@ def add(task: str, app: str = "", steps: list[str] | None = None,
         "steps": [str(s)[:300] for s in (steps or [])][:30],
         "ts": int(time.time()),
         "manual": manual,
+        "conditions": conditions or [],
+        "evidence": evidence or [],
     })
     with _lock:
         recipes = _load()
@@ -327,7 +456,7 @@ def add(task: str, app: str = "", steps: list[str] | None = None,
 
 def update(recipe_id: str, patch: dict) -> dict | None:
     """Edit a single recipe; only whitelisted fields are touched."""
-    allowed = {"task", "app", "steps", "provisional"}
+    allowed = {"task", "app", "steps", "provisional", "conditions", "evidence"}
     with _lock:
         recipes = _load()
         for r in recipes:
@@ -337,6 +466,10 @@ def update(recipe_id: str, patch: dict) -> dict | None:
                         continue
                     if key == "steps":
                         r["steps"] = [str(s)[:300] for s in (value or [])][:30]
+                    elif key == "conditions":
+                        r["conditions"] = _string_list(value, _MAX_CONDITIONS)
+                    elif key == "evidence":
+                        r["evidence"] = _string_list(value, _MAX_EVIDENCE)
                     elif key == "provisional":
                         r["provisional"] = bool(value)
                     else:

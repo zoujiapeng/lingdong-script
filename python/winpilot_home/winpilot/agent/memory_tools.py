@@ -11,8 +11,15 @@ class MemoryToolMixin:
         note = str(args.get("note", "")).strip()
         if not note:
             return ToolResult("remember 需要 note 内容")
-        recipe = experience.add(note, app=str(args.get("app", "")).strip(),
-                                steps=[note])
+        conditions = args.get("conditions") or []
+        evidence = args.get("evidence") or []
+        recipe = experience.add(
+            note,
+            app=str(args.get("app", "")).strip(),
+            steps=[note],
+            conditions=conditions if isinstance(conditions, list) else [str(conditions)],
+            evidence=evidence if isinstance(evidence, list) else [str(evidence)],
+        )
         BUS.publish("memory", action="remember", id=recipe["id"], note=note[:120])
         return ToolResult(f"已记住（id={recipe['id']}）: {note}")
 

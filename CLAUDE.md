@@ -60,13 +60,21 @@
 - 每一步是：构造/折叠 messages -> 调 LLM function calling -> `ToolSession.dispatch()` -> 工具 mixin 执行 -> 写 BUS 事件和 trace -> 可能注入 world/playbook/reflect。
 - LLM 每步真实收到/返回的信息在 `python/winpilot_home/traces/<run_id>/NNN_*.json`；UI 事件和截图索引在 `python/winpilot_home/traces/<run_id>.jsonl`。
 
+## 记忆和上下文
+
+- 长期经验：`python/winpilot_home/winpilot/memory/experience.py` 读写本机 `experience_memory.json`。recipe/note 带 `conditions` 和 `evidence`；自动动作 recipe 不进 coding 任务。
+- `reuse_skill` 在 `agent/memory_tools.py`，只对强任务匹配的已验证 replay 脚本做 0-token 重放。replay 成功只说明步骤执行完，仍要看当前屏幕/文本/VLM/文件等证据才能 `done`。
+- session memory 在 `agent/session.py`，只对“再来/继续/刚才那个/previous/same/it”等指代任务注入；普通新任务不要带历史噪声。
+- world advisory 在 `context_guidance.py` / `perception/world.py` / `agent/run_state.py`，只提示卡住、重复、screen watcher 变化和 need_observe，不做额外感知。
+- 上下文折叠在 `agent/loop.py`：超过阈值后折叠旧大结果，checkpoint 必须保留任务目标、关键屏幕状态、失败/恢复原因和最近工具证据。
+
 ## 如何复盘工具细节
 
 - 真实 GUI 评测用前端 Agent 页，或用 `scripts/gui_eval_run.py "任务"`；脚本同样 POST `/api/chat`，轮询 `/api/status`，读取 `/api/trace/<run_id>`，不会绕开前端路径。
 - 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
 - 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
 - `run_action_batch` 的内部子动作会额外写 `agent_batch_action_start/agent_batch_action` 事件；可变更屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，用来核对快速内环到底有没有真的点、拖、输入、画。
-- `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到。
+- `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到；如果当前 snapshot 没找到文本锚点，controller 会自己做一次 `observe(query=label)` 并重试，结果里看 `controller_auto_observe` 和 `metrics.auto_observe_count`。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch(sync=false)`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`auto_visual_verify`、`visual_change_detected` 这类证据；验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
 - UIA 关闭的绘图/画布任务会用 `canvas_fast_observe`：普通 `observe` 跳过全窗口 OCR，只给 Win32/CV/`likely_canvas` 摘要；如果要读菜单/工具栏文字，用 `observe(query="...")` 或 `observe(full=true)`。
