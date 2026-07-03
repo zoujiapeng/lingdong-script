@@ -1127,6 +1127,7 @@ def test_subgoal_click_only_uses_changed_observe_without_read_text():
     assert payload["verified"] is True
     assert payload["evidence_packet"]["matched_texts"] == ["READY_STATE"]
     assert payload["evidence_packet"]["verified_expect_texts"] == []
+    assert "complete the matching" in payload["fast_path_advice"].lower()
     assert [action["action"] for action in payload["actions_executed"]] == ["click_element", "observe"]
     assert [name for name, _args in calls] == ["focus_window", "click", "observe"]
 
@@ -1184,3 +1185,52 @@ def test_subgoal_uses_targeted_initial_roi_when_region_hint_matches(monkeypatch)
     assert session.snapshot.elements[0].states == ["targeted_initial_roi"]
     assert captured_regions == [Region(450, 0, 550, 384)]
     assert [name for name, _args in calls] == ["focus_window", "click"]
+
+
+def test_subgoal_anchor_failure_returns_visible_region_candidates():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Click Local Counter and verify LOCAL_COUNTER"
+        hwnd = 1
+        run_id = "run-subgoal-candidates"
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Target",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=1, source="ocr", role="text", text="局部变化测试区", cx=100, cy=120, left=40, top=108, width=130, height=24),
+                UIElement(elem_id=2, source="ocr", role="text", text="应用输入", cx=90, cy=200, left=60, top=188, width=72, height=24),
+                UIElement(elem_id=3, source="ocr", role="text", text="只改局部状态", cx=210, cy=200, left=155, top=188, width=110, height=24),
+                UIElement(elem_id=4, source="ocr", role="text", text="打开弹窗", cx=330, cy=200, left=292, top=188, width=76, height=24),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "click Local Counter",
+        "click": {"label": "Local Counter", "expected_region": "left"},
+        "verify_texts": ["LOCAL_COUNTER"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["needs_llm_reason"] is True
+    assert "只改局部状态" in payload["evidence_packet"]["candidate_click_labels"]
+    assert "retry execute_subgoal" in payload["fast_path_advice"]
+    assert calls == [
+        ("focus_window", {"hwnd": 1}),
+        ("observe", {"query": "Local Counter", "max_elements": 160}),
+    ]

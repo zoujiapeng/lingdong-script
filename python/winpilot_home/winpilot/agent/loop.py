@@ -680,6 +680,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "needs_llm_reason": data.get("needs_llm_reason"),
                 "matched_texts": packet.get("matched_texts"),
                 "missing_texts": packet.get("missing_texts"),
+                "candidate_click_labels": packet.get("candidate_click_labels"),
+                "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
                 "actions_executed": data.get("actions_executed"),
             }

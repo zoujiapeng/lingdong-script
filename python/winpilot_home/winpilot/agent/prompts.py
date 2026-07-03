@@ -35,7 +35,12 @@ element and coordinates.
    → tray_click → launch (only when confirmed not running).
    To open a webpage, call launch with the URL directly, e.g.
    launch(command="https://example.com"); do not wrap it as "start msedge ...".
-2. focus_window the target, then observe.
+2. focus_window the target. Observe before acting when the app/page state or
+   target location is ambiguous. For a clear labeled routine where you know the
+   visible label and a rough region from the task, current page, or recent
+   state, call execute_subgoal directly; it performs its own targeted
+   observe/locator/verification and will return needs_llm_reason when it cannot
+   ground the routine.
 3. Native-vision models: look at the screenshot to understand the screen.
    Text-only models: read OCR/UIA/CV and nonvisual summaries; use coordinate
    actions only from grounded facts.
@@ -62,13 +67,16 @@ element and coordinates.
    after focus is already established. For labeled/search/message inputs with
    an Apply/Search/Send button, prefer execute_subgoal or type_into_element.
    Reserve hotkey for real shortcuts such as Ctrl+S, Enter, Escape, or Alt+F4.
-   Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
+   Mutating batches do cheap stable screen sync by default; still observe/read_text before done
+   unless a verified execute_subgoal or fast_path_advice already provides the
+   exact required evidence.
    If a recent tool result or screen_watch says only a local ROI changed, use
    observe(changed_only=true) to inspect that changed area before doing a full
    window observe.
-5. After every action that should change the UI, observe again and verify via
-   screenshot, VLM, nonvisual summary, OCR/UIA/CV, or deterministic output that
-   the expected change occurred.
+5. After every action that should change the UI, verify via screenshot, VLM,
+   nonvisual summary, OCR/UIA/CV, deterministic output, or the controller
+   evidence packet. Do not add a separate observe/read_text when the current
+   verified execute_subgoal already matched the required evidence.
 
 # Action priority
 a) Click/type by grounded pixel coordinates — this works for
@@ -146,9 +154,9 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 # Core loop
 1. list_windows / find_app / focus_window
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
-2. observe → read the perception reducer; pass full=true only when raw details are needed
-3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch
-4. observe/read_text again only when controller evidence is insufficient; matched_texts from verified execute_subgoal can complete the matching plan item
+2. Observe when state or target location is ambiguous; pass full=true only when raw details are needed. For clear labeled routines with a known rough region, execute_subgoal may be called directly after focus_window because it performs targeted observe/locator/verification internally.
+3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch.
+4. observe/read_text again only when controller evidence is insufficient; matched_texts or fast_path_advice from verified execute_subgoal can complete the matching plan item.
 5. done only when grounded evidence confirms task complete.
 
 Recovery: if same tactic fails twice, change approach entirely.

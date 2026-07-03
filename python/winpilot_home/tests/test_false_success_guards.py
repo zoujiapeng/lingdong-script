@@ -391,6 +391,8 @@ def test_gui_only_shell_policy():
     assert _gui_only_forbids_shell("必须通过真实GUI操作，不要用shell")
     assert _gui_only_forbids_shell("Use GUI only; do not use shell.")
     assert _gui_only_forbids_shell("Use GUI only; no shell.")
+    assert _gui_only_forbids_shell("请只用GUI完成这个任务")
+    assert _gui_only_forbids_shell("GUI only, complete it visibly.")
     assert _gui_only_launch_uses_shell("powershell -NoExit -Command python -m http.server 8878")
     assert not _gui_only_launch_uses_shell("calc")
 
@@ -919,6 +921,35 @@ def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
     assert payload["verified"] is True
     assert "call done instead of adding another zoom/observe" in payload["fast_path_advice"]
     assert payload["auto_visual_verify"]["nonvisual_summary"]["blankish"] is False
+
+
+def test_execute_subgoal_compact_evidence_keeps_fast_path_advice():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    raw = json.dumps({
+        "ok": True,
+        "verified": True,
+        "subgoal": "click refresh",
+        "subgoal_route": "controller_first",
+        "controller_state": {"phase": "verified", "needs_llm_reason": False},
+        "fast_path_advice": "Controller already verified matched_texts; call done.",
+        "evidence_packet": {
+            "matched_texts": ["READY_STATE"],
+            "missing_texts": [],
+            "candidate_click_labels": ["Refresh status"],
+        },
+        "metrics": {"action_count": 2},
+        "actions_executed": [{"action": "click_element"}, {"action": "observe"}],
+    })
+
+    compact = json.loads(AgentRunner._compact_tool_evidence("execute_subgoal", raw))
+
+    assert compact["verified"] is True
+    assert compact["matched_texts"] == ["READY_STATE"]
+    assert compact["candidate_click_labels"] == ["Refresh status"]
+    assert "call done" in compact["fast_path_advice"]
 
 
 def test_top_level_click_uses_fast_controller_without_explicit_batch():

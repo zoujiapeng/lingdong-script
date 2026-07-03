@@ -219,11 +219,19 @@ def _gui_only_forbids_shell(task: str) -> bool:
         or "don't use shell" in text
         or "no shell" in text
         or "without shell" in text
+        or "gui only" in text
+        or "only use gui" in text
+        or "use gui only" in text
         or "do not use command line" in text
         or "no command line" in text
         or "\u4e0d\u8981\u7528shell" in compact
         or "\u4e0d\u80fd\u7528shell" in compact
         or "\u7981\u6b62\u7528shell" in compact
+        or "\u53ea\u7528gui" in compact
+        or "\u4ec5\u7528gui" in compact
+        or "\u53ea\u901a\u8fc7gui" in compact
+        or "\u53ea\u7528\u56fe\u5f62\u754c\u9762" in compact
+        or "\u4ec5\u7528\u56fe\u5f62\u754c\u9762" in compact
         or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
         or "\u4e0d\u8981\u4f7f\u7528\u547d\u4ee4\u884c" in compact
         or "\u4e0d\u80fd\u7528\u547d\u4ee4\u884c" in compact
