@@ -23,7 +23,7 @@ from ..perception import apps, fusion, ocr, search, tray, vision_cv, win32, worl
 from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
-from . import planner
+from . import planner, scope_guard
 
 # Several imports above are retained as stable monkeypatch targets for older
 # tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
@@ -46,7 +46,7 @@ _MUTATING_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
     "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "mouse_down",
-    "mouse_up", "move_mouse", "hold_key", "run_action_batch",
+    "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
 }
 _ACTION_SCREEN_DELTA_TOOLS = {
     "click",
@@ -124,6 +124,9 @@ class ToolSession(
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
             return ToolResult(f"未知工具: {name}")
+        guard_result = scope_guard.ensure_scope(self, name, args)
+        if guard_result is not None:
+            return guard_result
         screen_delta_context = None
         if self._action_screen_delta_enabled(name, args):
             screen_delta_context = self._prime_action_screen_delta()

@@ -1,12 +1,13 @@
 """Perception and visual-inspection tool handlers for ToolSession."""
 from __future__ import annotations
 
+import json
 import sys
 import time
 
-from ..config import CONFIG
+from ..config import CONFIG, TRACES_DIR
 from ..perception.model import UIElement
-from ..perception import fusion, intent, ocr, vision_cv, vlm, win32
+from ..perception import fusion, intent, ocr, reducer, vision_cv, vlm, win32
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
@@ -195,7 +196,7 @@ class PerceptionToolMixin:
         top = min(region.top for region in regions)
         right = max(region.right for region in regions)
         bottom = max(region.bottom for region in regions)
-        return Region(left, top, right - left, bottom - top).clamp_to_screen()
+        return Region(left, top, right - left, bottom - top)
 
     @staticmethod
     def _element_region(element: UIElement) -> Region:
@@ -237,7 +238,7 @@ class PerceptionToolMixin:
                     int(item["top"]) - pad,
                     int(item["width"]) + pad * 2,
                     int(item["height"]) + pad * 2,
-                ).clamp_to_screen()
+                )
             except (KeyError, TypeError, ValueError):
                 continue
             clipped = self._intersect_region(region, target)
@@ -395,6 +396,103 @@ class PerceptionToolMixin:
         )
         return snapshot
 
+    def _snapshot_debug_payload(
+        self,
+        snapshot: fusion.Snapshot,
+        reduction: dict,
+        observe_profile: str,
+        query: str,
+        args: dict,
+    ) -> dict:
+        return {
+            "hwnd": int(snapshot.hwnd),
+            "title": snapshot.title,
+            "region": self._region_dict(snapshot.region),
+            "observe_profile": observe_profile,
+            "query": query,
+            "args": {k: v for k, v in args.items() if k != "image_b64"},
+            "dim_stats": snapshot.dim_stats,
+            "reduction": reduction,
+            "elements": [element.to_dict() for element in snapshot.elements],
+        }
+
+    def _write_perception_trace(
+        self,
+        snapshot: fusion.Snapshot,
+        reduction: dict,
+        observe_profile: str,
+        query: str,
+        args: dict,
+    ) -> str:
+        """Persist full observe data outside the LLM hot path."""
+        if not CONFIG.get("agent", "llm_trace", default=True):
+            return ""
+        run_id = str(getattr(self, "run_id", "") or "")
+        if not run_id:
+            return ""
+        try:
+            index = int(getattr(self, "_perception_trace_index", 0)) + 1
+            self._perception_trace_index = index
+            run_dir = TRACES_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            path = run_dir / f"perception_{index:03d}_{observe_profile}.json"
+            path.write_text(
+                json.dumps(
+                    self._snapshot_debug_payload(snapshot, reduction, observe_profile, query, args),
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+            return str(path.relative_to(TRACES_DIR))
+        except Exception:
+            logger.debug("perception trace write failed", exc_info=True)
+            return ""
+
+    def _render_observe_text(
+        self,
+        snapshot: fusion.Snapshot,
+        args: dict,
+        observe_profile: str,
+        query: str,
+        max_elements: int,
+    ) -> tuple[str, dict, str]:
+        recent_changes = self._fast_screen_status() if hasattr(self, "_fast_screen_status") else {}
+        max_candidates = int(CONFIG.get("fusion", "perception_reducer_max_candidates", default=12) or 12)
+        reduction = reducer.reduce_snapshot(
+            snapshot,
+            task=self.task,
+            query=query,
+            recent_changes=recent_changes,
+            max_candidates=max_candidates,
+        )
+        trace_rel = self._write_perception_trace(snapshot, reduction, observe_profile, query, args)
+        full_requested = bool(args.get("full") or args.get("force_full"))
+        reducer_enabled = bool(CONFIG.get("fusion", "perception_reducer", default=True))
+        raw_text = snapshot.to_text(max_elements=max_elements, query=query)
+        if not reducer_enabled or full_requested:
+            if trace_rel:
+                raw_text += f"\nPerception trace: {trace_rel}"
+            return raw_text, reduction, trace_rel
+        raw_sample_limit = int(CONFIG.get("fusion", "perception_reducer_raw_sample", default=40) or 40)
+        raw_sample_limit = max(1, min(max_elements, raw_sample_limit))
+        reduced_text = reducer.render_reduced_snapshot(
+            snapshot,
+            task=self.task,
+            query=query,
+            recent_changes=recent_changes,
+            max_candidates=max_candidates,
+        )
+        text = (
+            reduced_text
+            + "\nRaw element sample (debug; pass full=true for all raw elements):\n"
+            + snapshot.to_text(max_elements=raw_sample_limit, query=query)
+        )
+        if trace_rel:
+            text += f"\nPerception trace: {trace_rel}"
+        return text, reduction, trace_rel
+
     def _t_observe(self, args: dict) -> ToolResult:
         hwnd = self._resolve_hwnd(args)
         if not hwnd:
@@ -465,7 +563,14 @@ class PerceptionToolMixin:
                 self.store_observe_cache(full_cache_key, self.snapshot)
             self._remember_target(hwnd, self.snapshot.title)
             changed_query_fallback = True
-        text = self.snapshot.to_text(max_elements=max_elements, query=query)
+        render_profile = "full_query_fallback" if changed_query_fallback else observe_profile
+        text, _reduction, _trace_rel = self._render_observe_text(
+            self.snapshot,
+            args=args,
+            observe_profile=render_profile,
+            query=query,
+            max_elements=max_elements,
+        )
         if args.get("changed_only"):
             if changed_query_fallback:
                 rois = "; ".join(

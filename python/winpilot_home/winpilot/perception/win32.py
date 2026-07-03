@@ -98,7 +98,9 @@ def list_windows() -> list[dict]:
 
 
 def _title_key(text: str) -> str:
-    return re.sub(r"[\s_\-]+", "", (text or "").casefold())
+    value = (text or "").casefold()
+    value = re.sub(r"\.(?:html?|aspx?|php|jsp)\b", "", value)
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
 
 
 def title_contains(title: str, needle: str) -> bool:

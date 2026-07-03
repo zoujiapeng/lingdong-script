@@ -913,3 +913,108 @@ def test_run_action_batch_tool_can_disable_default_sync():
     })
 
     assert captured["sync"] is None
+
+
+def test_type_into_element_uses_synthetic_nearby_input_locator():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Custom Target",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=1, source="ocr", role="text", text="Target", cx=65, cy=50, left=30, top=40, width=70, height=20),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {"type_into_element": {"label": "Target", "text": "hello", "clear": False}}
+    ], sync=False)
+
+    assert out["ok"]
+    assert calls[0][0] == "click"
+    assert "x" in calls[0][1] and "y" in calls[0][1]
+    assert calls[1] == ("type_text", {"text": "hello"})
+    data = out["results"][0]["data"]
+    assert data["input_locator"]["found"] is True
+    assert data["input_locator"]["candidate"]["source"] == "synthetic_near_label"
+
+
+def test_subgoal_executor_runs_input_click_verify_routine():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Type FAST_WRAP_OK_099 and verify LOCAL_COUNTER"
+        hwnd = 1
+        run_id = "run-subgoal"
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Target",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=1, source="uia", role="edit", text="Target Input", cx=250, cy=100, left=100, top=80, width=300, height=36),
+                UIElement(elem_id=2, source="uia", role="button", text="Apply Input", cx=470, cy=100, left=420, top=80, width=100, height=36),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "read_text":
+                return ToolResult("FAST_WRAP_OK_099\nLOCAL_COUNTER_1")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "fill target and apply",
+        "input": {"label": "Target Input", "text": "FAST_WRAP_OK_099", "clear": False},
+        "click": {"label": "Apply Input"},
+        "verify_texts": ["FAST_WRAP_OK_099", "LOCAL_COUNTER"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert payload["subgoal_route"] == "controller_first"
+    assert payload["evidence_packet"]["matched_texts"] == ["FAST_WRAP_OK_099", "LOCAL_COUNTER"]
+    assert [name for name, _args in calls] == ["focus_window", "click", "type_text", "click", "read_text"]
+
+
+def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
+    from winpilot.fast.subgoal import parse_subgoal_request
+
+    task = "Type FAST_WRAP_OK_099 into the input, then verify LOCAL_COUNTER before done."
+
+    input_request = parse_subgoal_request({
+        "subgoal": "type FAST_WRAP_OK_099 into the input",
+        "input": {"text": "FAST_WRAP_OK_099"},
+        "verify_texts": ["FAST_WRAP_OK_099"],
+    }, task=task)
+    assert input_request.verify_texts == ["FAST_WRAP_OK_099"]
+
+    verify_request = parse_subgoal_request({
+        "subgoal": "verify LOCAL_COUNTER is visible",
+    }, task=task)
+    assert verify_request.verify_texts == ["LOCAL_COUNTER"]

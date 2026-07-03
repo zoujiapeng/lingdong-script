@@ -75,8 +75,10 @@
 - 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
 - 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
 - `run_action_batch` 的内部子动作会额外写 `agent_batch_action_start/agent_batch_action` 事件；可变更屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，用来核对快速内环到底有没有真的点、拖、输入、画。
+- `execute_subgoal` 是同一 `AgentRunner/ToolSession` 里的 controller-first routine，不是第二个 agent。它把输入、点击、等待、验证收进本地 controller；结果里看 `subgoal_route=controller_first`、`actions_executed`、`controller_state`、`evidence_packet.matched_texts/missing_texts`。如果 `needs_llm_reason=true`，说明 routine 没法自证，需要 LLM 重新观察或换策略。
 - `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到；如果当前 snapshot 没找到文本锚点，controller 会自己做一次 `observe(query=label)` 并重试，结果里看 `controller_auto_observe` 和 `metrics.auto_observe_count`。
 - `type_into_element` 是 `run_action_batch` 内部组合动作：定位锚点、点击聚焦、可选 `Ctrl+A` 清空、再 `type_text`。结果里看 `subresults`、`controller_internal_action_count`、`metrics.compound_round_trips_saved`，用于判断卡在定位、聚焦、清空还是输入验证。
+- `type_into_element` 和 `execute_subgoal` 会使用 UIA/OCR/CV 组合的通用 `input_locator`；UIA 关闭时会用 label、placeholder/search-like OCR、附近矩形、focused non-button 和 synthetic candidate，不写 QQ/计算器/靶场专属规则。
 - `observe(changed_only=true, query="...")` 先查 recent/action ROI；如果 ROI 里没有 query 命中，会明确标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部变化不含目标时误导模型。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据；`draw_strokes/drag` 仍用 `sync=false` 并可带 `auto_visual_verify`、`visual_change_detected`，验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
@@ -127,9 +129,10 @@ npm run build
 - trace summary 新增 `low_latency` 和更细的 `fast_gui` 指标：screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage、batch subgoal、controller phase、anchor click/cache/failure。用于判断一次任务慢在哪里，而不是凭感觉优化。
 - `done_verifier.py` 增加“显式可见状态目标”确定性收束：任务写了“确认出现 LOCAL_COUNTER”这类目标时，必须在 fresh screen OCR 中看到对应文本才会跳过 LLM done judge。OCR 容错会把 `LOCAL_COUNTER` 和 `LOCAL COUNTER` 视为同一标签。
 - 最新严格 GUI-only 网页靶场验证：`20260703-231829-586255`，工具序列包含 `launch -> click -> type_text -> click(expect FAST_WRAP_OK_073) -> click(expect LOCAL_COUNTER) -> read_text -> done`；`run_shell` 未暴露；普通 `click` 结果带 `wrapped_by_fast_controller`；截图 `after_006.jpg` 显示输入框 `FAST_WRAP_OK_073` 和状态卡 `LOCAL_COUNTER_2`。对照失败 run `20260703-225332-4fb92a`：当时 agent 没输入 `FAST_WRAP_OK_071` 却把“功能等价”当完成；现在 done gate 会要求显著字面量 token 出现在最终证据中。
+- 最新 controller-first GUI-only 网页靶场验证：`20260704-005515-7f70a7`，工具序列 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`；11 个工具、1 次 observe、done 一次通过，截图 `batch_after_003.jpg` 显示 `SUBGOAL_OK_078` 和 `LOCAL_COUNTER_2`。对照失败 run `20260704-002852-1e75a4`：`execute_subgoal` 误把全局 `LOCAL_COUNTER` 继承进输入子目标，导致输入已成功仍返回 `ok=false`；已修为只继承当前 subgoal/args 中提到的全局 literal。
 
 ## 15 项低延迟改造进度
 
-- 已落地或有骨架：`run_action_batch`、batch `subgoal`、自动 `screen_watch`、动作独立 `screen_delta/action_target`、changed/action ROI observe、部分 world model、element cache 锚点复验、部分 skill replay、canvas fast observe、可见证据 done gate、低延迟 trace 指标。
-- 部分落地但仍不成熟：LLM 下子目标而非逐步点击、视觉锚点点击、状态机、预测式感知、指标体系。现在还没有真正做到“常规动作完全由 controller 内环处理，LLM 只管异常”；`click_element` 仍主要依赖 OCR/UIA/CV 元素和锚点文本/区域，不是真正轻量视觉模型。
+- 已落地或有骨架：`execute_subgoal` controller-first routine、`run_action_batch`、batch `subgoal`、自动 `screen_watch`、动作独立 `screen_delta/action_target`、changed/action ROI observe、perception reducer、UIA-off input locator、scope guard、部分 world model、element cache 锚点复验、部分 skill replay、canvas fast observe、可见证据 done gate、低延迟 trace 指标。
+- 部分落地但仍不成熟：视觉锚点点击、状态机、预测式感知、指标体系。现在已经能让清晰输入/按钮 routine 由 controller 内环处理，但还没有真正做到“所有常规动作都不经 LLM，LLM 只管异常”；`click_element` 仍主要依赖 OCR/UIA/CV 元素和锚点文本/区域，不是真正轻量视觉模型。
 - 尚未真正完成：轻量 UI 视觉模型/YOLO 主循环、视觉伺服控制、跨任务稳定 skill 复用率、全量延迟 dashboard、强 VLM 只作兜底的成熟调度策略。

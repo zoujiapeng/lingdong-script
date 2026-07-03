@@ -10,6 +10,7 @@ from ..perception import vision_cv
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .element_cache import ElementCache, anchor_from_dict
+from .input_locator import locate_input
 from .types import BatchMetrics
 from .watcher import ScreenWatcher
 
@@ -406,13 +407,86 @@ class FastGuiController:
         }
         internal: list[dict[str, Any]] = []
 
-        click_result = self._click_element(click_args)
-        click_data = _json_dict(click_result.text)
-        internal.append({
-            "action": "click_element",
-            "ok": not _failed(click_result),
-            "data": click_data if click_data else {"preview": click_result.text[:240]},
-        })
+        # UIA-off/custom UI input fallback: before relying on the generic
+        # text-anchor ElementCache, try an input-specific locator that can use
+        # edit roles, focused state, OCR labels, and synthetic nearby boxes.
+        if self.session.snapshot is None:
+            observe = self._dispatch("observe", {})
+            internal.append({
+                "action": "observe",
+                "ok": not _failed(observe),
+                "data": _json_dict(observe.text) or {"preview": observe.text[:240]},
+            })
+            if _failed(observe):
+                return observe
+
+        snapshot = self.session.snapshot
+        input_locator_data: dict[str, Any] = {}
+        click_data: dict[str, Any] = {}
+        click_result: ToolResult | None = None
+        if snapshot is not None:
+            anchor_data = action.get("anchor") if isinstance(action.get("anchor"), dict) else click_args
+            fallback = anchor_data.get("fallback_text") or anchor_data.get("fallback") or []
+            if isinstance(fallback, str):
+                fallback = [fallback]
+            located_input = locate_input(
+                snapshot,
+                label=str(anchor_data.get("label") or ""),
+                expected_region=str(anchor_data.get("expected_region") or ""),
+                fallback_text=tuple(str(item) for item in fallback if item),
+            )
+            input_locator_data = located_input.to_dict()
+            candidate = located_input.candidate if located_input.found else None
+            if candidate is not None:
+                if candidate.element is not None and candidate.element.elem_id is not None and candidate.element.elem_id >= 0:
+                    click_payload = {
+                        "element_id": int(candidate.element.elem_id),
+                        "button": action.get("button", "left"),
+                        "double": bool(action.get("double", False)),
+                    }
+                else:
+                    click_payload = {
+                        "x": int(candidate.center[0]),
+                        "y": int(candidate.center[1]),
+                        "button": action.get("button", "left"),
+                        "double": bool(action.get("double", False)),
+                    }
+                click_result = self._dispatch("click", click_payload)
+                click_data = _json_dict(click_result.text)
+                if click_data:
+                    click_data.setdefault("via", "input_locator")
+                    click_data["input_locator"] = input_locator_data
+                    if candidate.element is not None:
+                        click_data["resolved_element"] = candidate.element.to_dict()
+                        click_data["anchor_locator"] = {
+                            "found": True,
+                            "score": input_locator_data.get("score"),
+                            "cache_hit": False,
+                            "reason": input_locator_data.get("reason"),
+                        }
+                    else:
+                        click_data["resolved_element"] = candidate.to_dict()
+                    click_result.text = json.dumps(click_data, ensure_ascii=False, default=str)
+                internal.append({
+                    "action": "click_element",
+                    "via": "input_locator",
+                    "ok": not _failed(click_result),
+                    "data": click_data if click_data else {"preview": click_result.text[:240]},
+                })
+
+        if click_result is None or _failed(click_result):
+            # Fallback to the existing visual-anchor cache path for buttons,
+            # labels that are themselves editable controls, and legacy tests.
+            click_result = self._click_element(click_args)
+            click_data = _json_dict(click_result.text)
+            if input_locator_data and click_data:
+                click_data.setdefault("input_locator", input_locator_data)
+                click_result.text = json.dumps(click_data, ensure_ascii=False, default=str)
+            internal.append({
+                "action": "click_element",
+                "ok": not _failed(click_result),
+                "data": click_data if click_data else {"preview": click_result.text[:240]},
+            })
         if _failed(click_result):
             payload = {
                 "ok": False,
@@ -423,6 +497,8 @@ class FastGuiController:
                 "subresults": internal,
                 "controller_internal_action_count": len(internal),
             }
+            if input_locator_data:
+                payload["input_locator"] = input_locator_data
             for key in (
                 "anchor", "anchor_locator", "initial_anchor_locator",
                 "controller_auto_observe", "resolved_element",
@@ -481,6 +557,8 @@ class FastGuiController:
             payload["blocked"] = True
             payload["stage"] = "type_text"
             payload["error"] = "type_into_element text entry did not verify"
+        if input_locator_data:
+            payload["input_locator"] = input_locator_data
         for key in (
             "anchor", "anchor_locator", "initial_anchor_locator",
             "controller_auto_observe", "resolved_element",
