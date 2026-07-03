@@ -4,7 +4,7 @@
 
 ## 当前真实机制
 
-- 主 GUI agent 入口是 `python/winpilot_home/winpilot/agent/loop.py`，coding 子 agent 入口是 `python/winpilot_home/winpilot/agent/coding.py`。
+- 用户面对的是一个 WinPilot Agent；主 GUI / Computer Use capability 入口是 `python/winpilot_home/winpilot/agent/loop.py`，Coding capability 入口是 `python/winpilot_home/winpilot/agent/coding.py`。
 - 两者仍然调用 OpenAI-compatible Chat Completions，不引入代理服务，也不改变 WinPilot GUI computer-use controller 主线。
 - 通用适配层在 `python/winpilot_home/winpilot/model_adapter.py`：
   - `ModelProfile` 负责按 `api.provider/base_url/model` 推断 provider family。
