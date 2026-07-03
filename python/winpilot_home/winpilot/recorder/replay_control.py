@@ -125,6 +125,9 @@ def exec_loop(replayer: Any, step: dict, idx: str) -> bool:
         return True
 
     if loop_type == "until":
+        if not cond:
+            logger.warning("until loop requires cond; aborting instead of running to max_iters")
+            return False
         while iters < cap:
             if replayer._should_stop():
                 return False
@@ -146,7 +149,7 @@ def exec_loop(replayer: Any, step: dict, idx: str) -> bool:
         return True
 
     logger.warning("未知 loop_type: %s（跳过）", loop_type)
-    return True
+    return False
 
 
 def count_leaves(steps: list[dict]) -> int:

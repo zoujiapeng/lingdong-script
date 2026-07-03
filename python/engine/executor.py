@@ -246,6 +246,9 @@ class DSLExecutor:
         elif node.type == NodeType.TYPE:
             self._exec_type(node, ctx)
 
+        elif node.type == NodeType.INPUT_TEXT:
+            self._exec_input_text(node, ctx)
+
         elif node.type == NodeType.LAUNCH:
             self._exec_launch(node, ctx)
 
@@ -321,6 +324,9 @@ class DSLExecutor:
         elif node.type == NodeType.OCR_FIND:
             self._exec_ocr_find(node, ctx)
 
+        elif node.type == NodeType.CLICK_TEXT:
+            self._exec_click_text(node, ctx)
+
         elif node.type == NodeType.OCR_EXTRACT:
             self._exec_ocr_extract(node, ctx)
 
@@ -331,6 +337,9 @@ class DSLExecutor:
             self._exec_image_find(node, ctx)
 
         elif node.type == NodeType.IMAGE_CLICK:
+            self._exec_image_click(node, ctx)
+
+        elif node.type == NodeType.CLICK_IMAGE:
             self._exec_image_click(node, ctx)
 
         elif node.type == NodeType.TEMPLATE_CAPTURE:
@@ -463,6 +472,31 @@ class DSLExecutor:
         self._log(f"TYPE: {text}")
         self._call_action("type", text=text, ctx=ctx)
         self._emit("node_done", node_type="TYPE", args=text, line=node.line)
+
+    def _exec_input_text(self, node: ASTNode, ctx: ExecutionContext):
+        """INPUT_TEXT x y "text" -> click coordinate, then type text.
+
+        Older parser/converter paths already accepted INPUT_TEXT, but the
+        executor had no branch for it. Keep the action surface simple by using
+        the existing click/type actions instead of adding a new handler API.
+        """
+        raw = self._interpolate(node.args)
+        x = y = None
+        text = raw.strip()
+        parts = raw.strip().split(None, 2)
+        if len(parts) >= 3:
+            try:
+                x, y = int(parts[0]), int(parts[1])
+                text = parts[2]
+            except ValueError:
+                x = y = None
+        text = text.strip().strip('"').strip("'")
+        self._emit("node_start", node_type="INPUT_TEXT", args=raw, line=node.line)
+        self._log(f"INPUT_TEXT: {raw}")
+        if x is not None and y is not None:
+            self._call_action("click", target=f"{x},{y}", ctx=ctx)
+        self._call_action("type", text=text, ctx=ctx)
+        self._emit("node_done", node_type="INPUT_TEXT", args=raw, line=node.line)
 
     def _exec_launch(self, node: ASTNode, ctx: ExecutionContext):
         target = self._interpolate(node.args)
@@ -720,6 +754,13 @@ class DSLExecutor:
             self._set_var("_ocr_confidence", result.get("confidence"))
         self._emit("node_done", node_type="OCR_FIND", args=query, line=node.line)
 
+    def _exec_click_text(self, node: ASTNode, ctx: ExecutionContext):
+        text = self._interpolate(node.args).strip().strip('"').strip("'")
+        self._emit("node_start", node_type="CLICK_TEXT", args=text, line=node.line)
+        self._log(f"CLICK_TEXT: {text}")
+        self._call_action("click", target=text, ctx=ctx)
+        self._emit("node_done", node_type="CLICK_TEXT", args=text, line=node.line)
+
     def _exec_ocr_extract(self, node: ASTNode, ctx: ExecutionContext):
         self._emit("node_start", node_type="OCR_EXTRACT", args="", line=node.line)
         self._log("OCR_EXTRACT: 提取屏幕所有文字")
@@ -777,7 +818,8 @@ class DSLExecutor:
                 k, v = p.split("=", 1)
                 kwargs[k.lower()] = v
             else:
-                targets_str += " " + p if targets_str else p
+                target = p.strip().strip('"').strip("'").rstrip(",")
+                targets_str += " " + target if targets_str else target
 
         if not targets_str:
             self._log("IMAGE_CLICK: 需要至少一个模板名")

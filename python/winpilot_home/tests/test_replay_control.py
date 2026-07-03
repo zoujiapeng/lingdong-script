@@ -163,6 +163,13 @@ def test_loop_until_runs_at_least_once_then_until_true():
     assert r.executed == ["Q", "Q"]  # body-first, checked after each iter
 
 
+def test_loop_until_without_cond_aborts_instead_of_running_to_cap():
+    r = FakeReplayer()
+    step = {"tool": "ctrl.loop", "loop_type": "until", "body": [leaf("Q")]}
+    assert rc.exec_loop(r, step, "1") is False
+    assert r.executed == []
+
+
 def test_loop_infinite_bounded_by_max_iters():
     r = FakeReplayer()
     step = {"tool": "ctrl.loop", "loop_type": "infinite", "max_iters": 4,

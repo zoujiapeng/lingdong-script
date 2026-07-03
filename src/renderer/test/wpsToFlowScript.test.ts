@@ -102,16 +102,21 @@ describe('wpsToFlowScript -> native FlowScript', () => {
       steps: [
         { tool: 'draw_strokes', strokes: [[[1, 1], [2, 2]]], duration: 0.1 },
         { tool: 'run_detached', script: 'Start-Sleep 1', name: 'demo' },
+        { tool: 'tray_click', name: 'QQ' },
         { tool: 'custom.future', answer: 42 },
       ],
     });
     const calls = nodesOf(s, 'tool_call').map((n) => P(n));
     expect(calls[0].feature_name).toBe('draw_strokes');
     expect(calls[0].params.strokes).toEqual([[[1, 1], [2, 2]]]);
+    expect(calls[0].params._requires_wps_replay).toBe(true);
     expect(calls[1].feature_name).toBe('run_detached');
     expect(calls[1].params.script).toBe('Start-Sleep 1');
-    expect(calls[2].feature_name).toBe('custom.future');
-    expect(calls[2].params.answer).toBe(42);
+    expect(calls[1].params._requires_wps_replay).toBe(true);
+    expect(calls[2].feature_name).toBe('tray_click');
+    expect(calls[2].params._requires_wps_replay).toBe(true);
+    expect(calls[3].feature_name).toBe('custom.future');
+    expect(calls[3].params.answer).toBe(42);
   });
 
   it('maps clipboard and screenshot ext steps to native nodes', () => {

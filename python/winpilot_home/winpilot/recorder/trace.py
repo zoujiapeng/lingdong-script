@@ -405,6 +405,12 @@ def _validate_steps(steps: Any, where: str) -> str | None:
             loop_type = step.get("loop_type", "count")
             if loop_type not in ("count", "while", "until", "infinite"):
                 return f"{loc} invalid loop_type: {loop_type!r}"
+            if loop_type == "count" and step.get("count") is not None and not _is_number(step.get("count")):
+                return f"{loc} ctrl.loop count requires numeric count"
+            if loop_type in ("while", "until") and not isinstance(step.get("cond"), dict):
+                return f"{loc} ctrl.loop {loop_type} requires cond object"
+            if step.get("max_iters") is not None and not _is_number(step.get("max_iters")):
+                return f"{loc} ctrl.loop max_iters must be numeric"
             err = _validate_steps(step.get("body") or [], f"{loc}.body")
             if err:
                 return err
@@ -454,9 +460,13 @@ class Replayer:
     def _relocate(self, step: dict) -> tuple[int, int] | None:
         """Find click target on the live screen: text match → recorded coords."""
         text = (step.get("text") or step.get("element_text") or "").strip()
-        if text and self.hwnd:
+        if text:
+            hwnd = self._observe_hwnd()
+            if not hwnd:
+                coords = step.get("coords")
+                return (int(coords[0]), int(coords[1])) if coords else None
             try:
-                snapshot = fusion.observe(self.hwnd, include_icons=False)
+                snapshot = fusion.observe(hwnd, include_icons=False)
                 exact = [e for e in snapshot.elements if e.text.strip() == text]
                 partial = [e for e in snapshot.elements if text in e.text]
                 hit = (exact or partial or [None])[0]
@@ -466,6 +476,19 @@ class Replayer:
                 logger.debug("replay 重定位失败: %s", exc)
         coords = step.get("coords")
         return (int(coords[0]), int(coords[1])) if coords else None
+
+    def _observe_hwnd(self) -> int | None:
+        """Return a window anchor for semantic replay relocation."""
+        if self.hwnd:
+            return self.hwnd
+        try:
+            windows = win32.list_windows()
+            if windows:
+                self.hwnd = int(windows[0]["hwnd"])
+                return self.hwnd
+        except Exception as exc:
+            logger.debug("replay anchor window lookup failed: %s", exc)
+        return None
 
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
         tool = step.get("tool", "")
