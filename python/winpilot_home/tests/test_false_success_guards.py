@@ -975,6 +975,7 @@ Plan hint: this todo is already active; do not call revise_plan just to restate 
     assert payload["verified"] is True
     assert payload["next_unfinished"]["index"] == 3
     assert payload["remaining_steps"][0]["goal"].startswith("在蓝色三角形右边")
+    assert "combine obvious adjacent" in payload["guidance"]
     assert "Plan hint:" not in content
 
 
@@ -995,6 +996,186 @@ def test_complete_subgoal_append_preserves_raw_trace_but_compacts_message():
     assert len(runner.messages[-1]["content"]) < 700
     assert '"next_unfinished"' in runner.messages[-1]["content"]
     assert "Plan hint:" not in runner.messages[-1]["content"]
+
+
+def test_execute_subgoal_draw_expands_adjacent_plan_draws():
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("打开画图，画蓝色三角形和红色矩形")
+    runner.session.plan = planner.Plan([
+        "打开画图",
+        "在左边绘制蓝色三角形",
+        "在右边绘制红色矩形",
+        "确认画布上同时存在蓝色三角形和红色矩形",
+    ])
+    runner.session.plan.complete(1)
+    args = {
+        "subgoal": "Draw a blue triangle",
+        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
+    }
+
+    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
+
+    assert expanded is not args
+    assert expanded["draws"] == [
+        {"shape": "triangle", "color": "blue", "expected_region": "left"},
+        {"shape": "rectangle", "color": "red", "expected_region": "right"},
+    ]
+    assert "combined adjacent drawing plan items" in expanded["subgoal"]
+
+
+def test_execute_subgoal_draw_does_not_expand_custom_strokes():
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw custom strokes")
+    runner.session.plan = planner.Plan([
+        "绘制蓝色三角形",
+        "绘制红色矩形",
+    ])
+    args = {
+        "subgoal": "Draw exact custom stroke",
+        "draw": {
+            "shape": "triangle",
+            "color": "blue",
+            "strokes": [[[1, 2], [3, 4]]],
+        },
+    }
+
+    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
+
+
+def test_execute_subgoal_draw_only_expands_adjacent_plan_items():
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw shapes with a verification break")
+    runner.session.plan = planner.Plan([
+        "open paint",
+        "draw blue triangle on the left",
+        "verify the blue triangle is visible",
+        "draw red rectangle on the right",
+    ])
+    runner.session.plan.complete(1)
+    args = {
+        "subgoal": "Draw a blue triangle",
+        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
+    }
+
+    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
+
+
+def test_execute_subgoal_draw_does_not_expand_before_current_plan_item():
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw shapes in order")
+    runner.session.plan = planner.Plan([
+        "draw blue triangle on the left",
+        "draw red rectangle on the right",
+    ])
+    args = {
+        "subgoal": "Draw a red rectangle",
+        "draw": {"shape": "rectangle", "color": "red", "expected_region": "right"},
+    }
+
+    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
+
+
+def test_execute_subgoal_draw_reuses_recent_controller_evidence():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle on the canvas")
+    runner._tool_history = [(
+        "execute_subgoal",
+        {
+            "subgoal": "Draw requested shapes",
+            "draws": [
+                {"shape": "triangle", "color": "blue", "expected_region": "left"},
+                {"shape": "rectangle", "color": "red", "expected_region": "right"},
+            ],
+        },
+        json.dumps({
+            "ok": True,
+            "verified": True,
+            "actions_executed": [
+                {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
+                {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+            ],
+            "evidence_packet": {
+                "matched_visual_colors": ["blue", "red"],
+                "missing_visual_colors": [],
+            },
+        }),
+    )]
+
+    result = runner._maybe_reuse_recent_draw_evidence(
+        "execute_subgoal",
+        {
+            "subgoal": "Draw a red rectangle on the right side",
+            "draw": {"shape": "rectangle", "color": "red", "expected_region": "right"},
+        },
+    )
+
+    assert result is not None
+    payload = json.loads(result.text)
+    assert payload["subgoal_route"] == "controller_evidence_reuse"
+    assert payload["actions_executed"] == []
+    assert payload["evidence_packet"]["matched_visual_colors"] == ["red"]
+
+
+def test_execute_subgoal_draw_reuse_is_conservative():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle on the canvas")
+    runner._tool_history = [(
+        "execute_subgoal",
+        {"draw": {"shape": "rectangle", "color": "red", "expected_region": "left"}},
+        json.dumps({
+            "ok": True,
+            "verified": True,
+            "actions_executed": [
+                {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+            ],
+            "evidence_packet": {
+                "matched_visual_colors": ["red"],
+                "missing_visual_colors": [],
+            },
+        }),
+    )]
+
+    assert runner._maybe_reuse_recent_draw_evidence(
+        "execute_subgoal",
+        {"draw": {"shape": "rectangle", "color": "red", "expected_region": "right"}},
+    ) is None
+    assert runner._maybe_reuse_recent_draw_evidence(
+        "execute_subgoal",
+        {"draw": {"shape": "rectangle", "color": "red", "strokes": [[[1, 2], [3, 4]]]}},
+    ) is None
+    assert runner._maybe_reuse_recent_draw_evidence(
+        "execute_subgoal",
+        {"draw": {"shape": "triangle", "color": "red", "expected_region": "left"}},
+    ) is None
+
+
+def test_plan_draw_parser_ignores_visual_verification_items():
+    from winpilot.agent.loop import _parse_plan_draw_spec
+
+    assert _parse_plan_draw_spec("确认画布上同时存在蓝色三角形和红色矩形") == {}
+    assert _parse_plan_draw_spec("在画布上绘制蓝色三角形") == {
+        "shape": "triangle",
+        "color": "blue",
+    }
+    assert _parse_plan_draw_spec("在蓝色三角形右边绘制一个红色矩形") == {
+        "shape": "rectangle",
+        "color": "red",
+        "expected_region": "right",
+    }
 
 
 def test_done_gate_sees_nested_execute_subgoal_draw_strokes():

@@ -62,6 +62,34 @@ _RATE_LIMIT_BACKOFF_S = 5.0
 _CONTEXT_FOLD_THRESHOLD_CHARS = 32000
 _MAX_ASSISTANT_HISTORY_CHARS = 900
 _ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
+_DRAW_COLOR_TERMS = {
+    "blue": ("blue", "蓝色", "蓝"),
+    "red": ("red", "红色", "红"),
+    "green": ("green", "绿色", "绿"),
+    "yellow": ("yellow", "黄色", "黄"),
+    "black": ("black", "黑色", "黑"),
+    "purple": ("purple", "紫色", "紫"),
+    "orange": ("orange", "橙色", "橙"),
+}
+_DRAW_SHAPE_TERMS = {
+    "triangle": ("triangle", "三角形", "三角"),
+    "rectangle": ("rectangle", "square", "矩形", "正方形", "方形"),
+    "circle": ("circle", "圆形", "圆"),
+    "line": ("line", "直线", "线"),
+}
+_DRAW_REGION_TERMS = {
+    "left": ("left", "左侧", "左边", "左"),
+    "right": ("right", "右侧", "右边", "右"),
+    "center": ("center", "middle", "中间", "中央", "中部"),
+    "top": ("top", "上方", "上面", "顶部"),
+    "bottom": ("bottom", "下方", "下面", "底部"),
+}
+_DRAW_NON_ACTION_TERMS = (
+    "confirm", "verify", "verification", "check", "visible", "exist", "exists",
+    "screenshot", "screen shot", "capture", "save",
+    "确认", "核验", "验证", "检查", "可见", "存在", "截图", "截屏", "保存",
+)
+_DRAW_ACTION_RE = re.compile(r"(draw|paint|sketch|绘制|画)")
 
 
 def _client():
@@ -77,6 +105,42 @@ def _main_model_has_vision() -> bool:
     """True when the configured main model natively supports image input."""
     api = CONFIG.get("api", default={})
     return model_profile_from_config(api).supports_vision
+
+
+def _find_term(text: str, term_map: dict[str, tuple[str, ...]]) -> str:
+    haystack = (text or "").casefold()
+    for value, terms in term_map.items():
+        if any(term.casefold() in haystack for term in terms):
+            return value
+    return ""
+
+
+def _parse_plan_draw_spec(text: str) -> dict[str, str]:
+    lowered = (text or "").casefold()
+    if any(term.casefold() in lowered for term in _DRAW_NON_ACTION_TERMS):
+        return {}
+    action_matches = list(_DRAW_ACTION_RE.finditer(text or ""))
+    target_text = (text or "")[action_matches[-1].end():] if action_matches else (text or "")
+    shape = _find_term(target_text, _DRAW_SHAPE_TERMS) or _find_term(text, _DRAW_SHAPE_TERMS)
+    color = _find_term(target_text, _DRAW_COLOR_TERMS) or _find_term(text, _DRAW_COLOR_TERMS)
+    if not (shape and color):
+        return {}
+    spec = {"shape": shape, "color": color}
+    region = _find_term(text, _DRAW_REGION_TERMS)
+    if region:
+        spec["expected_region"] = region
+    return spec
+
+
+def _draw_spec_signature(spec: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(spec.get("shape") or "").casefold(),
+        str(spec.get("color") or spec.get("colour") or "").casefold(),
+    )
+
+
+def _draw_spec_region(spec: dict[str, Any]) -> str:
+    return str(spec.get("expected_region") or spec.get("region") or "").casefold()
 
 
 def _sanitize_assistant(msg) -> dict[str, Any]:
@@ -721,7 +785,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     None,
                 )
             compact["guidance"] = (
-                "continue with next_unfinished; do not revise_plan just to restate the same todo"
+                "continue with next_unfinished; combine obvious adjacent drawing/click routines "
+                "in one execute_subgoal when possible; do not revise_plan just to restate the same todo"
             )
             return json.dumps(compact, ensure_ascii=False, default=str)[:1000]
         try:
@@ -987,6 +1052,176 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         paths = _required_image_paths(self.task)
         return bool(paths) and any(Path(path).exists() for path in paths)
 
+    def _maybe_expand_execute_subgoal_draws_from_plan(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        if tool_name != "execute_subgoal" or not _is_drawing_task(self.task):
+            return args
+        if not isinstance(args.get("draw"), dict) or args.get("draws"):
+            return args
+        current_draw = dict(args.get("draw") or {})
+        if current_draw.get("strokes"):
+            return args
+        current_sig = _draw_spec_signature(current_draw)
+        if not all(current_sig):
+            return args
+        plan = getattr(self.session, "plan", None)
+        steps = getattr(plan, "steps", None) or []
+        if not steps:
+            return args
+        extras: list[dict[str, str]] = []
+        skipped_current = False
+        for step in steps:
+            if not isinstance(step, dict) or step.get("done"):
+                continue
+            spec = _parse_plan_draw_spec(str(step.get("goal") or ""))
+            if not spec:
+                if skipped_current:
+                    break
+                continue
+            sig = _draw_spec_signature(spec)
+            if sig == current_sig and not skipped_current:
+                skipped_current = True
+                if not current_draw.get("expected_region") and spec.get("expected_region"):
+                    current_draw["expected_region"] = spec["expected_region"]
+                continue
+            if not skipped_current:
+                continue
+            if sig != current_sig and spec not in extras:
+                extras.append(spec)
+            if len(extras) >= 3:
+                break
+        if not extras:
+            return args
+        expanded = dict(args)
+        expanded["draw"] = current_draw
+        expanded["draws"] = [current_draw, *extras]
+        expanded["subgoal"] = (
+            str(args.get("subgoal") or "Draw requested shapes")
+            + " (combined adjacent drawing plan items)"
+        )[:240]
+        self._trace_debug("execute_subgoal_draws_auto_combined", {
+            "run_id": self.run_id,
+            "original": args,
+            "expanded": expanded,
+        })
+        return expanded
+
+    def _maybe_reuse_recent_draw_evidence(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        if tool_name != "execute_subgoal" or not _is_drawing_task(self.task):
+            return None
+        if args.get("draws") or not isinstance(args.get("draw"), dict):
+            return None
+        requested = dict(args.get("draw") or {})
+        if requested.get("strokes"):
+            return None
+        requested_sig = _draw_spec_signature(requested)
+        if not all(requested_sig):
+            return None
+        requested_region = _draw_spec_region(requested)
+
+        for previous_tool, previous_args, previous_text in reversed(self._tool_history[-12:]):
+            if previous_tool != "execute_subgoal":
+                continue
+            previous_specs = []
+            if isinstance(previous_args.get("draws"), list):
+                previous_specs.extend(
+                    item for item in previous_args.get("draws", [])
+                    if isinstance(item, dict)
+                )
+            if isinstance(previous_args.get("draw"), dict):
+                previous_specs.append(previous_args["draw"])
+            if not any(
+                _draw_spec_signature(spec) == requested_sig
+                and (not requested_region or _draw_spec_region(spec) == requested_region)
+                for spec in previous_specs
+            ):
+                continue
+            try:
+                payload = json.loads(previous_text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            packet = payload.get("evidence_packet")
+            if not isinstance(packet, dict):
+                continue
+            matched_colors = {
+                str(color).casefold()
+                for color in (packet.get("matched_visual_colors") or [])
+            }
+            if requested_sig[1] not in matched_colors:
+                continue
+            missing_colors = {
+                str(color).casefold()
+                for color in (packet.get("missing_visual_colors") or [])
+            }
+            if requested_sig[1] in missing_colors:
+                continue
+            actions = payload.get("actions_executed") or []
+            if not any(
+                isinstance(action, dict)
+                and action.get("action") == "draw_strokes"
+                and _draw_spec_signature({
+                    "shape": action.get("shape"),
+                    "color": action.get("requested_color"),
+                }) == requested_sig
+                for action in actions
+            ):
+                continue
+            result_payload = {
+                "ok": True,
+                "verified": True,
+                "subgoal": str(args.get("subgoal") or "Draw requested shape"),
+                "subgoal_route": "controller_evidence_reuse",
+                "reused_recent_evidence": True,
+                "controller_state": {
+                    "phase": "verified",
+                    "verified": True,
+                    "needs_observe": False,
+                    "needs_llm_reason": False,
+                },
+                "actions_executed": [],
+                "evidence_packet": {
+                    "matched_texts": [],
+                    "missing_texts": [],
+                    "matched_visual_colors": [requested_sig[1]],
+                    "missing_visual_colors": [],
+                    "reused_from": {
+                        "tool": previous_tool,
+                        "shape": requested_sig[0],
+                        "color": requested_sig[1],
+                        "region": requested_region,
+                    },
+                },
+                "needs_llm_reason": False,
+                "fast_path_advice": (
+                    "Recent controller evidence already covered this draw. "
+                    "Complete the matching plan item instead of redrawing."
+                ),
+            }
+            self._trace_debug("execute_subgoal_draw_evidence_reused", {
+                "run_id": self.run_id,
+                "requested": requested,
+                "previous_args": previous_args,
+                "result": result_payload,
+            })
+            return ToolResult(
+                json.dumps(result_payload, ensure_ascii=False, default=str),
+                replay={
+                    "tool": "execute_subgoal",
+                    "subgoal": result_payload["subgoal"],
+                    "reused_recent_evidence": True,
+                },
+            )
+        return None
+
     def _score_experience_feedback(self) -> None:
         """Score memory only when it was actually tried, not merely injected.
 
@@ -1117,6 +1352,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             error=str(exc))
                 continue
 
+            args = self._maybe_expand_execute_subgoal_draws_from_plan(tc.function.name, args)
             self.run_state.before_tool(tc.function.name, args)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             BUS.publish("agent_tool_start", run_id=self.run_id,
@@ -1176,7 +1412,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             elif blocked_gui_only_action:
                 result = ToolResult(blocked_gui_only_action)
             else:
-                result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
+                result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
+                if result is None:
+                    result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
             self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
@@ -1365,7 +1603,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "draws=[{'shape':'triangle','color':'blue','expected_region':'left'}, "
                     "{'shape':'rectangle','color':'red','expected_region':'right'}]. The controller waits "
                     "for a ready canvas, selects requested colors when possible, draws, and returns "
-                    "matched_visual_colors/visible_colors. Do not pre-explore toolbar text or add "
+                    "matched_visual_colors/visible_colors. "
+                    "If several requested shapes/colors are already known, combine them in one draws[] "
+                    "routine and then complete the affected plan items from that controller evidence. "
+                    "Do not pre-explore toolbar text or add "
                     "text_appears checks for tool names like Pencil/Brush/Triangle. Use draw_strokes/"
                     "run_action_batch only when coordinates are already grounded or execute_subgoal "
                     "returns needs_llm_reason. Verify by pixel/color evidence, screenshot/nonvisual "
