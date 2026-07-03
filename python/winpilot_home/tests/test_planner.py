@@ -59,3 +59,29 @@ def test_plan_drops_drawing_color_as_text_check():
     )
 
     assert plan.steps[0]["check"] is None
+
+
+def test_plan_drops_weak_app_title_check_for_visual_confirmation():
+    plan = planner.Plan(
+        [
+            {
+                "goal": "Confirm the canvas visibly contains a blue triangle and a red rectangle",
+                "check": {"text_appears": "Paint"},
+            }
+        ]
+    )
+
+    assert plan.steps[0]["check"] is None
+
+
+def test_plan_keeps_state_token_check_for_visual_confirmation():
+    plan = planner.Plan(
+        [
+            {
+                "goal": "Confirm the drawing screen shows DRAW_DONE_42",
+                "check": {"text_appears": "DRAW_DONE_42"},
+            }
+        ]
+    )
+
+    assert plan.steps[0]["check"] == {"text_appears": "DRAW_DONE_42"}

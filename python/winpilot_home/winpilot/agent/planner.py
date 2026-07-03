@@ -140,6 +140,22 @@ def _check_is_visual_drawing_word(goal: str, key: str, value: str) -> bool:
     return any(_compact_text(word) == compact for word in _VISUAL_DRAWING_WORDS)
 
 
+def _check_is_weak_visual_confirmation_text(goal: str, key: str, value: str) -> bool:
+    if key not in _VISIBLE_CHECK_KEYS:
+        return False
+    if not (_DRAWING_GOAL_RE.search(goal or "") and _VERIFY_GOAL_RE.search(goal or "")):
+        return False
+    if _looks_like_state_token(value):
+        return False
+    compact_value = _compact_text(value)
+    if not compact_value:
+        return False
+    # Visual drawing checks should be proven by pixel/color/controller evidence.
+    # A text check that is not named in the visual goal is usually just an app
+    # title or stale OCR label, and can turn a successful drawing into a blocker.
+    return compact_value not in _compact_text(goal)
+
+
 def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     valid = _valid_check(check)
     if not valid:
@@ -151,6 +167,9 @@ def _sanitize_check_for_goal(goal: str, check) -> dict | None:
             dropped.append(f"{key}={value!r}")
             sanitized.pop(key, None)
         elif isinstance(value, str) and _check_is_visual_drawing_word(goal, key, value):
+            dropped.append(f"{key}={value!r}")
+            sanitized.pop(key, None)
+        elif isinstance(value, str) and _check_is_weak_visual_confirmation_text(goal, key, value):
             dropped.append(f"{key}={value!r}")
             sanitized.pop(key, None)
     if dropped:
@@ -368,6 +387,12 @@ class Plan:
             "locate/click/wait/verify. If the requested label is not visible but "
             "a semantically related localized control is visible, use that visible "
             "label/fallback_text instead of scrolling for an exact wording match."
+        )
+        lines.append(
+            "Drawing evidence hint: if recent execute_subgoal.draw returned "
+            "matched_visual_colors for the requested colors, complete the matching "
+            "drawing/verification item or call done; do not add a weak text-only "
+            "verify_texts check such as an app title just to confirm visible pixels."
         )
         return "\n".join(lines)
 
