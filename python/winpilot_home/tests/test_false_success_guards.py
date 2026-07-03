@@ -283,9 +283,15 @@ def test_input_done_requires_required_visible_text(monkeypatch):
 
 
 def test_gui_only_shell_policy():
-    from winpilot.agent.loop import _gui_only_shell_allowed, _is_gui_only_task
+    from winpilot.agent.loop import (
+        _gui_only_forbids_shell,
+        _gui_only_launch_uses_shell,
+        _gui_only_shell_allowed,
+        _is_gui_only_task,
+    )
 
     assert _is_gui_only_task("GUI-only test. Use Notepad.")
+    assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7\u771f\u5b9eGUI\u64cd\u4f5c")
     assert _is_gui_only_task("\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70GUI")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c\uff0c\u4e0d\u8981\u7528\u547d\u4ee4\u884c")
     assert _is_gui_only_task("GUI方式测试：打开画图，用鼠标拖动画布。")
@@ -300,6 +306,9 @@ def test_gui_only_shell_policy():
         'Test-Path "C:\\Users\\zou\\Desktop\\x.txt"; python C:\\Users\\zou\\gui_final.py'
     )
     assert _gui_only_shell_allowed('Get-Item "C:\\Users\\zou\\Desktop\\x.txt"')
+    assert _gui_only_forbids_shell("必须通过真实GUI操作，不要用shell")
+    assert _gui_only_launch_uses_shell("powershell -NoExit -Command python -m http.server 8878")
+    assert not _gui_only_launch_uses_shell("calc")
 
 
 def test_window_title_expect_condition(monkeypatch):

@@ -37,6 +37,8 @@ from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
 from .task_rules import (
     _blocks_store_search_action,
     _blocks_upload_media_analysis,
+    _gui_only_forbids_shell,
+    _gui_only_launch_uses_shell,
     _gui_only_shell_allowed,
     _is_coding_task,
     _is_communication_task,
@@ -895,6 +897,43 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             started = time.monotonic()
             blocked_store_action = _blocks_store_search_action(self.task, tc.function.name, args)
             blocked_upload_action = _blocks_upload_media_analysis(self.task, tc.function.name, args)
+            blocked_gui_only_action = ""
+            if _is_gui_only_task(self.task):
+                strict_no_shell = _gui_only_forbids_shell(self.task)
+                command = str(args.get("command", ""))
+                condition = args.get("condition")
+                if (
+                    tc.function.name in {
+                        "run_shell", "run_detached", "write_file", "read_file", "list_dir",
+                        "apply_patch", "search_files",
+                    }
+                    and not (
+                        tc.function.name == "run_shell"
+                        and not strict_no_shell
+                        and _gui_only_shell_allowed(command)
+                    )
+                ):
+                    blocked_gui_only_action = (
+                        f"GUI-only mode blocked {tc.function.name}: use GUI tools "
+                        "such as launch/focus_window/observe/click/type_text/hotkey "
+                        "for the work. Shell is allowed only for final Test-Path/"
+                        "Get-Content/Select-String verification when the user did not forbid shell."
+                    )
+                elif tc.function.name == "launch" and _gui_only_launch_uses_shell(command):
+                    blocked_gui_only_action = (
+                        "GUI-only mode blocked launching a shell command. Launch the target app/URL "
+                        "directly, then use focus_window/observe/click/type_text/hotkey."
+                    )
+                elif (
+                    tc.function.name == "wait"
+                    and strict_no_shell
+                    and isinstance(condition, dict)
+                    and condition.get("shell_true")
+                ):
+                    blocked_gui_only_action = (
+                        "GUI-only mode blocked wait(shell_true) because the user forbade shell. "
+                        "Use observe/read_text or GUI waits instead."
+                    )
             if blocked_store_action or blocked_upload_action:
                 result = ToolResult(blocked_store_action or blocked_upload_action)
             elif (
@@ -907,23 +946,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "Do not keep mutating the canvas for optional polish. Use final Test-Path/"
                     "file_exists verification if needed, then call done."
                 )
-            elif (
-                _is_gui_only_task(self.task)
-                and tc.function.name in {
-                    "run_shell", "run_detached", "write_file", "read_file", "list_dir",
-                    "apply_patch", "search_files",
-                }
-                and not (
-                    tc.function.name == "run_shell"
-                    and _gui_only_shell_allowed(str(args.get("command", "")))
-                )
-            ):
-                result = ToolResult(
-                    f"GUI-only mode blocked {tc.function.name}: use GUI tools "
-                    "such as launch/focus_window/observe/click/type_text/hotkey "
-                    "for the work. Shell is allowed only for final Test-Path/"
-                    "Get-Content/Select-String verification."
-                )
+            elif blocked_gui_only_action:
+                result = ToolResult(blocked_gui_only_action)
             else:
                 result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1121,7 +1145,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "content": (
                     "[GUI-only task guidance] The user explicitly asked for visible GUI operation. "
                     "Do not use shell/search_files/run_detached/read_file/write_file to perform or "
-                    "prepare the work. Use list_windows/find_app/find_program/launch/focus_window/"
+                    "prepare the work, and do not launch PowerShell/cmd as a workaround. "
+                    "Use list_windows/find_app/find_program/launch/focus_window/"
                     "observe/click/type_text/hotkey/drag/scroll. Shell is only for final read-only "
                     "verification such as Test-Path/Get-Content/Select-String after the GUI work."
                 ),
