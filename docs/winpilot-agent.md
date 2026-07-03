@@ -67,6 +67,7 @@
 4. 打开 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。`TraceRecorder` 会给 `click`、`type_text`、`hotkey`、`launch`、`drag`、`scroll`、`draw_strokes` 保存前后截图，用来确认是否真的点击/输入/切换/滚动/绘制。
    `run_action_batch` 内部子动作会写 `agent_batch_action_start/agent_batch_action`；会改变屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，所以排查低延迟 batch 时要同时看这些截图，不能只看顶层 `run_action_batch` 的结果 JSON。
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
+   `click_element` 如果先前 snapshot 没找到文本锚点，会由 controller 自动做一次 `observe(query=label)` 并重试；排查时看 `controller_auto_observe`、`retry_anchor_locator` 和 `metrics.auto_observe_count`。
    如果 LLM 顶层直接调用 `draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
    普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
@@ -114,6 +115,25 @@
 `clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。
 
 `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、计划/终止、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和目标窗口解析。
+
+## 记忆、经验复用和上下文折叠
+
+当前实现不是一个单独的“大脑记忆库”，而是几层很小的运行时机制：
+
+- 长期经验在 `memory/experience.py`，落盘到本机 `experience_memory.json`。每条 recipe 有 `id`、`task`、`app`、`steps`、`uses/successes`、`provisional`、`manual`、可选 replay `script`，现在还会带 `conditions` 和 `evidence`。老数据读取时会自动补默认适用条件和证据要求。
+- `remember`/`forget`/`reuse_skill` 在 `agent/memory_tools.py`。`remember` 适合用户明确要求保存的长期事实或偏好；可以写入适用条件和证据要求。自动记录的动作 recipe 来自成功 GUI run，不用于 coding 任务。
+- `reuse_skill` 只是 0-token 重放已导出的 `.wps.json`，不是语义成功证明。隐式复用必须是强任务匹配；弱关键词匹配只作为普通提示，不会自动 replay。replay 完成后仍必须用 `observe/read_text/VLM/nonvisual_summary` 或确定性工具结果确认最终状态，才能 `done`。
+- 易变状态任务（当前窗口、是否登录、前台可见状态、状态检查等）不会记录或复用动作 recipe，避免旧 hwnd/旧屏幕结论污染新任务。
+- session memory 在 `agent/session.py`，只保留本服务生命周期内最近完成任务，供“再来一次/继续/刚才那个/previous/same/it”等指代任务解析。普通新任务不会注入 session history，减少无效上下文。
+- skill/playbook 是 `agent/playbooks.py` 加载的 JSON 情境攻略，有 task keyword 和 window title 两条注入路径。它是通用情境提示，不应变成单个软件的硬编码规则。
+- world advisory 在 `perception/world.py`、`agent/context_guidance.py` 和 `agent/run_state.py`：只在 screen watcher 变化、重复动作、动作后无变化、need_observe/recovering 等有信号时追加短提示；它不主动感知，也不替代 done 证据。
+- prompt/context 折叠在 `agent/loop.py`。旧的大型 observe/read_text/list_windows/截图消息只在上下文超过阈值后折叠，且保留最近两个全量观察。折叠后的 checkpoint 会保留任务目标、当前屏幕标题/hwnd/元素数、run_state、world 摘要、最近工具证据和被折叠项摘要。
+
+上下文压缩子分支提示词：
+
+```text
+你负责 WinPilot GUI Agent 的上下文压缩子分支。先读当前代码，不要相信旧文档：agent/loop.py 的 messages/_fold_old/_fold_checkpoint，agent/session.py，agent/context_guidance.py，agent/run_state.py，perception/world.py，memory/experience.py，以及 done_verifier.py 的证据使用方式。目标是设计一个确定性、低风险的 context compactor：在不额外调用 LLM 的前提下，把历史消息压缩成结构化状态。必须保留 task goal、当前/最近屏幕标题和 target hwnd、关键 UI 状态、失败原因、run_state phase、最近工具结果、done gate 拒绝理由、用户 interjection、最近 plan 状态、已验证/未验证动作、replay/skill 结果及其证据要求。不得把 action ok 或 replay ok 改写成任务成功；不得为单个软件写专属规则；不得删除仍需模型引用的最近全量 observe。先补单元测试，再调整阈值和 trace 字段，最后跑 python -m pytest python/winpilot_home/tests -q。
+```
 
 ## 感知
 
@@ -195,7 +215,7 @@ python -m http.server 8877 --bind 127.0.0.1
 
 - `agent_tool` 的 `launch` 应该 `verified=true`，并且目标窗口标题是 Chrome 靶场窗口，不应被 Codex 窗口遮挡。
 - 如果没有显式调用 `screen_watch start`，也可能看到 watcher 状态：`fusion.screen_watch_autostart=true` 时，ToolSession 会在目标窗口就绪或可见动作前自动启动 watcher，并在 run 结束时停止。
-- `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`，确认是缓存命中还是重新定位。
+- `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`、`controller_auto_observe`，确认是缓存命中、snapshot 重新定位、目标 observe 后命中，还是锚点失败。
 - 普通可见动作会有 `result_meta.screen_delta` 和 `action_target.after.foreground_matches_target=true`。现在动作 delta 使用独立前后帧；`screen_watch` 还会保留 `action_changed_regions`。如果后台 watcher 被弹层、动画、画布噪声带偏，`observe(changed_only=true)` 应优先新鲜 action ROI，再退回 recent ROI。
 - `observe(changed_only=true)` 的 `result_text` 应该以 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)` 开头；如果出现 `returned the normal observe snapshot`，说明没有可用 ROI 或 ROI 过期。
 - `done_check` 对显式可见状态目标可直接通过，例如 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。这是 fresh screen OCR 证据，不是 agent 总结。

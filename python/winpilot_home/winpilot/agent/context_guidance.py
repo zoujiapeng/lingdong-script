@@ -73,7 +73,10 @@ class ContextGuidanceMixin:
         self._injected_playbooks.add(book.name)
         self.messages.append({
             "role": "user",
-            "content": f"[情境提示] 检测到「{title}」相关界面，适用以下方法：\n{book.content}",
+            "content": (
+                f"[情境提示] 检测到「{title}」相关界面，适用以下方法：\n"
+                f"{playbooks.render_playbook(book)}"
+            ),
         })
         BUS.publish("playbook", run_id=self.run_id, name=book.name, trigger=title[:60])
         logger.info("运行中注入 playbook: %s (窗口: %s)", book.name, title[:40])

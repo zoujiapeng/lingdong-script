@@ -10,12 +10,44 @@ matches the intuitive notion of a session boundary. Not persisted to disk.
 """
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 
 _MAX_ENTRIES = 8
 _RECENT_FOR_PROMPT = 3
 _SUMMARY_CHARS = 160
+_REFERENCE_WORDS = (
+    "again",
+    "same",
+    "previous",
+    "last",
+    "continue",
+    "repeat",
+    "it",
+    "that",
+)
+_REFERENCE_PHRASES = (
+    "do it again",
+    "same one",
+    "last one",
+    "previous one",
+    "close it",
+)
+_REFERENCE_CUES_CN = (
+    "再来",
+    "再",
+    "继续",
+    "刚才",
+    "上一个",
+    "上次",
+    "之前",
+    "同样",
+    "重复",
+    "那个",
+    "它",
+    "把它",
+)
 
 
 @dataclass(frozen=True)
@@ -77,4 +109,20 @@ def render_context(entries: list[SessionEntry]) -> str:
         "若当前指令含'再来一次/再来/重复/刚才那个/那个/把它关了/继续'等指代，"
         "通常指上面【最后一条】任务——据此理解并执行，必要时仍先 observe 确认当前界面。"
     )
+    lines.append(
+        "This session context is only for resolving references; do not treat it "
+        "as evidence that the current screen is already in that state."
+    )
     return "\n".join(lines)
+
+
+def should_include_context(task: str) -> bool:
+    """Return True when the new task appears to refer to prior session state."""
+    text = (task or "").casefold()
+    if not text:
+        return False
+    if any(phrase in text for phrase in _REFERENCE_PHRASES):
+        return True
+    if any(cue in text for cue in _REFERENCE_CUES_CN):
+        return True
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in _REFERENCE_WORDS)
