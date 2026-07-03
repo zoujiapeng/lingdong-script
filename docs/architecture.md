@@ -112,7 +112,7 @@ stateDiagram-v2
 - `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
 - `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
 - `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。
-- 回放/DSL 节点改动要同时检查 `.wps.json` schema、`wpsToFlowScript.ts`、前端 `store/executor.ts`、`python/engine/dsl_flow_converter.py` 和 `python/engine/executor.py`；WinPilot-only `.wps.json` 步骤在 FlowScript 中必须显式占位或 fail-fast，不能静默成功。
+- 回放/DSL 节点改动要同时检查 `.wps.json` schema、`wpsToFlowScript.ts`、前端 `store/executor.ts`、`python/engine/dsl_flow_converter.py` 和 `python/engine/executor.py`；WinPilot-only `.wps.json` 步骤在 FlowScript 中必须显式占位或 fail-fast，feature 桥接返回 `success: false` / `false` 也必须让节点失败，不能静默成功。
 
 ## 2026-07-03 低延迟 GUI 链路
 

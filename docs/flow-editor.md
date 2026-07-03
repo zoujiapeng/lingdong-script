@@ -32,7 +32,7 @@
 当前可靠性边界：
 
 - `INPUT_TEXT`、`CLICK_TEXT`、`CLICK_IMAGE` / `IMAGE_CLICK` 已在 legacy `DSLExecutor` 中落到现有 `click`、`type`、`image_click` action handler，不再解析成功后静默 no-op。
-- 前端 `store/executor.ts` 是浏览器侧 FlowScript 模拟/桥接执行器，不等同于 WinPilot Replayer。`wait_process` 会通过 `wait_process_start` / `wait_process_exit` feature 桥接；feature 返回 `success: false` 时应视为节点失败。
+- 前端 `store/executor.ts` 是浏览器侧 FlowScript 模拟/桥接执行器，不等同于 WinPilot Replayer。`tool_call`、`process_action`、`clipboard_action`、`window_control`、`dialog_action`、`a11y_action`、`wifi_action`、`web_browser`、`system_power` 以及 `FEATURE_MAP` 节点会通过 feature 桥执行；feature 返回 `success: false` 或 `false` 时必须视为节点失败。无 Electron 桥时仅用于浏览器预览模拟，`wait_process` 仍要求真实桥接。
 
 ## @feature
 

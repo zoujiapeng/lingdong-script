@@ -77,6 +77,40 @@ export function createFlowExecutor(
     if (_stopped) throw new Error('stopped');
   }
 
+  async function callFeatureOrThrow(
+    featureName: string,
+    featureParams: Record<string, any>,
+    nodeId: string,
+    simulateMessage?: string,
+    requireBridge = false,
+  ): Promise<any | undefined> {
+    const win = window as any;
+    if (!win.electronAPI?.callFeature) {
+      if (requireBridge) throw new Error(`${featureName} requires electronAPI.callFeature`);
+      log('warn', simulateMessage || `模拟工具调用: ${featureName}`, nodeId);
+      await delay(300);
+      return undefined;
+    }
+    const res = await win.electronAPI.callFeature(featureName, featureParams);
+    if (res === false || res?.success === false) {
+      throw new Error(res?.error || `${featureName} failed`);
+    }
+    return res;
+  }
+
+  function buildPowerParams(featureName: string, nodeParams: Record<string, any>): Record<string, any> {
+    if (featureName === 'shutdown' || featureName === 'reboot') {
+      return {
+        delay_seconds: nodeParams.delay_seconds ?? 0,
+        confirm: nodeParams.confirm ?? true,
+      };
+    }
+    if (featureName === 'logoff' || featureName === 'hibernate' || featureName === 'system_sleep') {
+      return { confirm: nodeParams.confirm ?? true };
+    }
+    return {};
+  }
+
   async function executeNode(nodeId: string): Promise<string> {
     const node = nodeMap.get(nodeId);
     if (!node) { log('error', `节点未找到: ${nodeId}`); return ''; }
@@ -382,7 +416,8 @@ export function createFlowExecutor(
           };
           const delay = params.delay_seconds ?? 0;
           log('info', `${cmdLabels[node.type]}` + (delay > 0 ? ` (${delay}秒后)` : ''), nodeId);
-          await delay(100);
+          const res = await callFeatureOrThrow(node.type, buildPowerParams(node.type, params), nodeId, `${cmdLabels[node.type]}（模拟）`);
+          if (res !== undefined) log('info', `系统电源结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -392,30 +427,22 @@ export function createFlowExecutor(
           const action = actionLabels[params.action] || params.action || '未知';
           const target = params.url || params.selector || '';
           log('info', `🌐 浏览器操作: ${action} ${target}`, nodeId);
-          const win = window as any;
-          if (win.electronAPI?.callFeature) {
-            try {
-              const res = await win.electronAPI.callFeature('web_browser_execute', {
-                action: params.action,
-                url: params.url,
-                selector: params.selector,
-                text: params.text,
-                wait_seconds: params.wait_seconds,
-                extract_attr: params.extract_attr,
-                scroll_direction: params.scroll_direction,
-                timeout: params.timeout || 30,
-                headless: params.headless || false,
-              });
-              log('info', `🌐 浏览器结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-              if (res?.result?.extracted) {
-                log('info', `📄 提取内容: ${String(res.result.extracted).slice(0, 500)}`, nodeId);
-              }
-            } catch (e: any) {
-              log('error', `🌐 浏览器操作失败: ${e.message}`, nodeId);
+          const res = await callFeatureOrThrow('web_browser_execute', {
+            action: params.action,
+            url: params.url,
+            selector: params.selector,
+            text: params.text,
+            wait_seconds: params.wait_seconds,
+            extract_attr: params.extract_attr,
+            scroll_direction: params.scroll_direction,
+            timeout: params.timeout || 30,
+            headless: params.headless || false,
+          }, nodeId, `🌐 浏览器操作模拟: ${action} ${target}`);
+          if (res !== undefined) {
+            log('info', `🌐 浏览器结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            if (res?.result?.extracted) {
+              log('info', `📄 提取内容: ${String(res.result.extracted).slice(0, 500)}`, nodeId);
             }
-          } else {
-            log('warn', `🌐 浏览器操作模拟: ${action} ${target}`, nodeId);
-            await delay(500);
           }
           result = 'output';
           break;
@@ -430,22 +457,8 @@ export function createFlowExecutor(
             );
           }
           log('info', `调用工具: ${featureName}`, nodeId);
-          const win = window as any;
-          if (win.electronAPI?.callFeature) {
-            try {
-              const res = await win.electronAPI.callFeature(featureName, featureParams);
-              if (res?.success === false) {
-                throw new Error(res.error || `${featureName} failed`);
-              }
-              log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) {
-              log('error', `工具调用失败: ${e.message}`, nodeId);
-              throw e;
-            }
-          } else {
-            log('warn', `工具调用模拟: ${featureName}`, nodeId);
-            await delay(300);
-          }
+          const res = await callFeatureOrThrow(featureName, featureParams, nodeId, `工具调用模拟: ${featureName}`);
+          if (res !== undefined) log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -453,21 +466,38 @@ export function createFlowExecutor(
         // ── 聚合类型 ──
         case 'system_power': {
           const action = params.action || 'shutdown';
+          const featureName = action === 'lock_workstation' ? 'lock_workstation'
+            : action === 'system_sleep' ? 'system_sleep'
+            : action === 'display_off' ? 'display_off'
+            : action;
           log('info', `系统电源: ${action}`, nodeId);
-          await delay(100);
+          const res = await callFeatureOrThrow(featureName, buildPowerParams(featureName, params), nodeId, `系统电源模拟: ${action}`);
+          if (res !== undefined) log('info', `系统电源结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
         case 'audio_action': {
+          const featureName = params.action === 'volume_mute' ? 'volume_mute' : 'volume_set';
+          const featureParams = featureName === 'volume_mute'
+            ? { mute: params.mute ?? null }
+            : { level: params.level ?? 50 };
           log('info', params.action === 'volume_mute' ? '静音控制' : `音量: ${params.level ?? 50}%`, nodeId);
-          await delay(100);
+          const res = await callFeatureOrThrow(featureName, featureParams, nodeId, `音频操作模拟: ${featureName}`);
+          if (res !== undefined) log('info', `音频操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
         case 'desktop_action': {
           const al: Record<string, string> = { show_desktop:'显示桌面', set_wallpaper:'设置壁纸', empty_recycle_bin:'清空回收站' };
-          log('info', al[params.action] || params.action || '桌面操作', nodeId);
-          await delay(100);
+          const action = params.action || 'show_desktop';
+          const featureParams = action === 'set_wallpaper'
+            ? { path: params.path || '', style: params.style || 'fill' }
+            : action === 'empty_recycle_bin'
+              ? { confirm: params.confirm ?? true }
+              : {};
+          log('info', al[action] || action || '桌面操作', nodeId);
+          const res = await callFeatureOrThrow(action, featureParams, nodeId, `桌面操作模拟: ${action}`);
+          if (res !== undefined) log('info', `桌面操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -476,16 +506,11 @@ export function createFlowExecutor(
           const clipFn: Record<string, string> = { set:'clipboard_set_text', get:'clipboard_get_text', get_image:'clipboard_get_image', get_files:'clipboard_get_files', clear:'clipboard_clear' };
           const sub = params.action || 'get';
           log('info', clipLogs[sub] || '剪贴板操作', nodeId);
-          const cw = window as any;
-          if (cw.electronAPI?.callFeature) {
-            try {
-              const cp: any = {};
-              if (sub === 'set') cp.text = params.text || '';
-              if (sub === 'get_image') { cp.format_ = params.format_ || 'base64'; cp.save_path = params.save_path || ''; }
-              const res = await cw.electronAPI.callFeature(clipFn[sub] || 'clipboard_get_text', cp);
-              log('info', `剪贴板结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) { log('error', `剪贴板操作失败: ${e.message}`, nodeId); }
-          } else { log('warn', `剪贴板操作模拟: ${clipLogs[sub]}`, nodeId); await delay(100); }
+          const cp: any = {};
+          if (sub === 'set') cp.text = params.text || '';
+          if (sub === 'get_image') { cp.format_ = params.format_ || 'base64'; cp.save_path = params.save_path || ''; }
+          const res = await callFeatureOrThrow(clipFn[sub] || 'clipboard_get_text', cp, nodeId, `剪贴板操作模拟: ${clipLogs[sub]}`);
+          if (res !== undefined) log('info', `剪贴板结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -494,23 +519,32 @@ export function createFlowExecutor(
           const winFn: Record<string, string> = { minimize:'window_minimize', maximize:'window_maximize', restore:'window_restore', close:'window_close', resize:'window_resize', snap:'window_snap' };
           const op = params.operation || 'minimize';
           log('info', winLogs[op] || '窗口操作', nodeId);
-          const ww = window as any;
-          if (ww.electronAPI?.callFeature) {
-            try {
-              const wp: any = { title: params.title || '' };
-              if (op === 'resize') { wp.width = params.width ?? 800; wp.height = params.height ?? 600; }
-              if (op === 'snap') wp.position = params.snap_position || 'left';
-              const res = await ww.electronAPI.callFeature(winFn[op] || 'window_minimize', wp);
-              log('info', `窗口操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) { log('error', `窗口操作失败: ${e.message}`, nodeId); }
-          } else { log('warn', `窗口操作模拟: ${winLogs[op]}`, nodeId); await delay(300); }
+          const wp: any = { title: params.title || '' };
+          if (op === 'resize') { wp.width = params.width ?? 800; wp.height = params.height ?? 600; }
+          if (op === 'snap') wp.position = params.snap_position || 'left';
+          const res = await callFeatureOrThrow(winFn[op] || 'window_minimize', wp, nodeId, `窗口操作模拟: ${winLogs[op]}`);
+          if (res !== undefined) log('info', `窗口操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
         case 'process_action': {
           const al: Record<string, string> = { launch:'启动程序', kill:'终止进程', wait_start:'等待启动', wait_exit:'等待退出', focus:'激活窗口' };
-          log('info', `${al[params.action] || params.action}: ${params.target || params.name || params.title || ''}`, nodeId);
-          await delay(100);
+          const action = params.action || 'launch';
+          const featureName = action === 'launch' ? 'launch_program'
+            : action === 'kill' ? 'kill_process'
+            : action === 'wait_exit' ? 'wait_process_exit'
+            : action === 'wait_start' ? 'wait_process_start'
+            : 'focus_window';
+          const featureParams = action === 'launch'
+            ? { target: params.target || '', args: params.args || '', wait: !!params.wait, force_new: !!params.force_new }
+            : action === 'kill'
+              ? { name: params.name || params.target || '', force: !!params.force }
+              : action === 'focus'
+                ? { title: params.title || params.target || '', exact: !!params.exact }
+                : { name: params.name || '', timeout: params.timeout ?? (action === 'wait_exit' ? 60 : 30) };
+          log('info', `${al[action] || action}: ${params.target || params.name || params.title || ''}`, nodeId);
+          const res = await callFeatureOrThrow(featureName, featureParams, nodeId, `进程操作模拟: ${featureName}`);
+          if (res !== undefined) log('info', `进程操作结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -519,18 +553,11 @@ export function createFlowExecutor(
           const waitFor = params.wait_for === 'exit' ? 'exit' : 'start';
           const featureName = waitFor === 'exit' ? 'wait_process_exit' : 'wait_process_start';
           log('info', `wait_process: ${waitFor} ${params.name || ''}`, nodeId);
-          const win = window as any;
-          if (!win.electronAPI?.callFeature) {
-            throw new Error('wait_process requires electronAPI.callFeature');
-          }
-          const res = await win.electronAPI.callFeature(featureName, {
+          const res = await callFeatureOrThrow(featureName, {
             name: params.name || '',
             timeout: params.timeout ?? (waitFor === 'exit' ? 60 : 30),
-          });
+          }, nodeId, undefined, true);
           log('info', `wait_process result: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-          if (res?.success === false) {
-            throw new Error(res.error || `${featureName} failed`);
-          }
           result = 'output';
           break;
         }
@@ -585,58 +612,43 @@ export function createFlowExecutor(
 
         case 'dialog_action': {
           log('info', `对话框操作: ${params.action || 'handle'}`, nodeId);
-          const win = window as any;
-          if (win.electronAPI?.callFeature) {
-            try {
-              const featureName = params.action === 'handle' ? 'handle_dialog'
-                : params.action === 'list' ? 'dialog_list'
-                : params.action === 'take_action' ? 'dialog_take_action'
-                : 'fill_save_dialog';
-              const featureParams: any = {};
-              if (params.action === 'handle') featureParams.timeout = params.timeout ?? 10;
-              if (params.action === 'take_action') { featureParams.action = `click:${params.button || ''}`; featureParams.timeout = params.timeout ?? 10; }
-              if (params.action === 'fill_save') { featureParams.filepath = params.path || ''; featureParams.timeout = params.timeout ?? 10; }
-              const res = await win.electronAPI.callFeature(featureName, featureParams);
-              log('info', `对话框结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) { log('error', `对话框操作失败: ${e.message}`, nodeId); }
-          } else { log('warn', '对话框操作模拟', nodeId); await delay(300); }
+          const featureName = params.action === 'handle' ? 'handle_dialog'
+            : params.action === 'list' ? 'dialog_list'
+            : params.action === 'take_action' ? 'dialog_take_action'
+            : 'fill_save_dialog';
+          const featureParams: any = {};
+          if (params.action === 'handle') featureParams.timeout = params.timeout ?? 10;
+          if (params.action === 'take_action') { featureParams.action = `click:${params.button || ''}`; featureParams.timeout = params.timeout ?? 10; }
+          if (params.action === 'fill_save') { featureParams.filepath = params.path || ''; featureParams.timeout = params.timeout ?? 10; }
+          const res = await callFeatureOrThrow(featureName, featureParams, nodeId, '对话框操作模拟');
+          if (res !== undefined) log('info', `对话框结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
         case 'a11y_action': {
           log('info', `无障碍操作: ${params.action || 'get_tree'}`, nodeId);
-          const win2 = window as any;
-          if (win2.electronAPI?.callFeature) {
-            try {
-              const fn = params.action === 'get_tree' ? 'a11y_get_tree'
-                : params.action === 'find_element' ? 'a11y_find_element'
-                : 'a11y_click_element';
-              const fp: any = {};
-              if (params.action === 'get_tree') { fp.max_depth = params.max_depth ?? 5; fp.filter_visible = params.filter_visible !== false; }
-              if (params.action !== 'get_tree') fp.name = params.name || '';
-              if (params.action === 'find_element') { fp.role = params.role || ''; fp.control_type = params.control_type || ''; }
-              if (params.action === 'click_element') fp.role = params.role || '';
-              const res = await win2.electronAPI.callFeature(fn, fp);
-              log('info', `无障碍结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) { log('error', `无障碍操作失败: ${e.message}`, nodeId); }
-          } else { log('warn', '无障碍操作模拟', nodeId); await delay(300); }
+          const fn = params.action === 'get_tree' ? 'a11y_get_tree'
+            : params.action === 'find_element' ? 'a11y_find_element'
+            : 'a11y_click_element';
+          const fp: any = {};
+          if (params.action === 'get_tree') { fp.max_depth = params.max_depth ?? 5; fp.filter_visible = params.filter_visible !== false; }
+          if (params.action !== 'get_tree') fp.name = params.name || '';
+          if (params.action === 'find_element') { fp.role = params.role || ''; fp.control_type = params.control_type || ''; }
+          if (params.action === 'click_element') fp.role = params.role || '';
+          const res = await callFeatureOrThrow(fn, fp, nodeId, '无障碍操作模拟');
+          if (res !== undefined) log('info', `无障碍结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
         case 'wifi_action': {
           log('info', `WiFi操作: ${params.action || 'list'}`, nodeId);
-          const win3 = window as any;
-          if (win3.electronAPI?.callFeature) {
-            try {
-              const fn = params.action === 'list' ? 'wifi_list'
-                : params.action === 'connect' ? 'wifi_connect'
-                : 'wifi_disconnect';
-              const fp: any = {};
-              if (params.action === 'connect') { fp.ssid = params.ssid || ''; fp.password = params.password || ''; }
-              const res = await win3.electronAPI.callFeature(fn, fp);
-              log('info', `WiFi结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-            } catch (e: any) { log('error', `WiFi操作失败: ${e.message}`, nodeId); }
-          } else { log('warn', 'WiFi操作模拟', nodeId); await delay(300); }
+          const fn = params.action === 'list' ? 'wifi_list'
+            : params.action === 'connect' ? 'wifi_connect'
+            : 'wifi_disconnect';
+          const fp: any = {};
+          if (params.action === 'connect') { fp.ssid = params.ssid || ''; fp.password = params.password || ''; }
+          const res = await callFeatureOrThrow(fn, fp, nodeId, 'WiFi操作模拟');
+          if (res !== undefined) log('info', `WiFi结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -662,18 +674,8 @@ export function createFlowExecutor(
           const featureName = FEATURE_MAP[node.type];
           if (featureName) {
             log('info', `调用系统工具: ${featureName}`, nodeId);
-            const win = window as any;
-            if (win.electronAPI?.callFeature) {
-              try {
-                const res = await win.electronAPI.callFeature(featureName, params);
-                log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
-              } catch (e: any) {
-                log('error', `工具调用失败: ${e.message}`, nodeId);
-              }
-            } else {
-              log('warn', `模拟系统工具: ${featureName}`, nodeId);
-              await delay(300);
-            }
+            const res = await callFeatureOrThrow(featureName, params, nodeId, `模拟系统工具: ${featureName}`);
+            if (res !== undefined) log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           } else {
             log('warn', `未知节点类型: ${node.type}`, nodeId);
           }
