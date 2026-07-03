@@ -745,14 +745,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
     @staticmethod
     def _should_fast_wrap_visual_action(tool_name: str, args: dict[str, Any]) -> bool:
-        """Let the fast controller verify standalone visual mutations.
+        """Route standalone GUI mutations through the fast controller.
 
-        The model often calls draw/drag directly instead of using
-        run_action_batch. Wrapping only these high-value visual mutations gives
-        them the same cheap region-level verification without turning every
-        click or keystroke into noisy visual evidence.
+        The model still decides the next subgoal, but routine visible actions
+        should go through the controller so they get batching metadata,
+        screen-sync, anchor upgrades, and needs-observe feedback even when the
+        model did not explicitly call run_action_batch.
         """
-        if tool_name not in {"draw_strokes", "drag"}:
+        if tool_name not in {
+            "click",
+            "type_text",
+            "hotkey",
+            "scroll",
+            "focus_window",
+            "draw_strokes",
+            "drag",
+        }:
             return False
         return not isinstance(args.get("expect"), dict)
 
@@ -772,7 +780,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             data = {}
 
         children = [item for item in (data.get("results") or []) if isinstance(item, dict)]
-        source_child = next((item for item in children if item.get("action") == tool_name), {})
+        action_aliases = {tool_name}
+        if tool_name == "click":
+            action_aliases.add("click_element")
+        if tool_name == "type_text":
+            action_aliases.add("type_into_element")
+        source_child = next((item for item in children if item.get("action") in action_aliases), {})
         auto_child = next((item for item in children if item.get("action") == "auto_visual_verify"), {})
         source_data = source_child.get("data") if isinstance(source_child.get("data"), dict) else {}
         auto_data = auto_child.get("data") if isinstance(auto_child.get("data"), dict) else {}
@@ -781,6 +794,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "ok": bool(data.get("ok")) if "ok" in data else not bool(data.get("error")),
             "wrapped_by_fast_controller": True,
             "tool": tool_name,
+            "source_action": source_child.get("action") or tool_name,
             "source_batch_ok": data.get("ok"),
             "source_batch_verified": data.get("verified"),
             "needs_observe": data.get("needs_observe"),
@@ -826,8 +840,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return self.session.dispatch(tool_name, args)
         batch_args = {
             "actions": [self._normalise_fast_wrapped_action(tool_name, args)],
-            "sync": False,
         }
+        if tool_name in {"draw_strokes", "drag"}:
+            batch_args["sync"] = False
         batch_result = self.session.dispatch("run_action_batch", batch_args)
         return self._fast_wrapped_result(tool_name, args, batch_result)
 
@@ -1281,7 +1296,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
             except Exception as exc:
                 logger.debug("复用建议注入失败: %s", exc)
-        tools = tool_schemas(planning=plan_on, coding_runtime=self._is_coding)
+        allow_shell_tools = not (
+            _is_gui_only_task(self.task)
+            and _gui_only_forbids_shell(self.task)
+        )
+        tools = tool_schemas(
+            planning=plan_on,
+            coding_runtime=self._is_coding,
+            allow_shell=allow_shell_tools,
+        )
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints),
                     agent="unified", runtime=self.runtime_profile.to_dict())

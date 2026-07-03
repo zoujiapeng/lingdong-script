@@ -41,6 +41,69 @@ def test_visible_state_targets_extract_historical_list():
     ) == ["APPLIED_TEXT", "LOCAL_COUNTER", "MODAL_TARGET_VISIBLE"]
 
 
+def test_required_literal_tokens_extracts_distinctive_payloads_not_urls():
+    from winpilot.agent.task_rules import _required_literal_tokens
+
+    assert _required_literal_tokens(
+        "Open http://127.0.0.1:8878/gui_agent_target.html, type FAST_WRAP_OK_071, "
+        "then confirm LOCAL_COUNTER and result 75765."
+    ) == ["FAST_WRAP_OK_071", "LOCAL_COUNTER", "75765"]
+
+
+def test_done_rejects_missing_distinctive_literal_even_when_other_state_changed(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "Open the target page, type FAST_WRAP_OK_071 into the input, then confirm LOCAL_COUNTER."
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done; clicked the local counter instead"
+    runner._recent_results = [
+        ("click", '{"ok": true, "verified": true, "verify_detail": "LOCAL_COUNTER appeared"}'),
+    ]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "LOCAL_COUNTER_1"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("missing exact literal should reject before LLM judge")
+
+    assert runner._verify_done(_Client()) is False
+    assert "FAST_WRAP_OK_071" in runner._last_done_reject_reason
+
+
+def test_done_allows_present_distinctive_literals_to_reach_judge(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("Type FAST_WRAP_OK_071 into the visible input.")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._recent_results = [("observe", "APPLIED_TEXT_1: FAST_WRAP_OK_071")]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "FAST_WRAP_OK_071"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content='{"done": true, "reason": "literal visible"}'))]
+                    )
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+
+
 def test_visible_evidence_ledger_ignores_negative_query_hits():
     from winpilot.agent.loop import AgentRunner
 
@@ -204,6 +267,24 @@ def test_text_appears_can_use_fullscreen_without_target(monkeypatch):
     assert out.verified
 
 
+def test_text_appears_tolerates_ocr_separator_errors(monkeypatch):
+    from winpilot.action import verify
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(
+        verify.fusion,
+        "observe",
+        lambda *a, **k: SimpleNamespace(
+            elements=[SimpleNamespace(text="FAST WRAP OK 072", source="ocr")]
+        ),
+    )
+
+    out = verify._eval_once({"text_appears": "FAST_WRAP_OK_072"}, hwnd=123, level=0)
+
+    assert out.verified
+
+
 def test_verify_ignores_unrelated_foreground_when_target_scoped(monkeypatch):
     from winpilot.action import verify
 
@@ -291,6 +372,7 @@ def test_gui_only_shell_policy():
     )
 
     assert _is_gui_only_task("GUI-only test. Use Notepad.")
+    assert _is_gui_only_task("Use GUI only; do not use shell.")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7\u771f\u5b9eGUI\u64cd\u4f5c")
     assert _is_gui_only_task("\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70GUI")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c\uff0c\u4e0d\u8981\u7528\u547d\u4ee4\u884c")
@@ -307,8 +389,21 @@ def test_gui_only_shell_policy():
     )
     assert _gui_only_shell_allowed('Get-Item "C:\\Users\\zou\\Desktop\\x.txt"')
     assert _gui_only_forbids_shell("必须通过真实GUI操作，不要用shell")
+    assert _gui_only_forbids_shell("Use GUI only; do not use shell.")
+    assert _gui_only_forbids_shell("Use GUI only; no shell.")
     assert _gui_only_launch_uses_shell("powershell -NoExit -Command python -m http.server 8878")
     assert not _gui_only_launch_uses_shell("calc")
+
+
+def test_tool_schemas_can_hide_shell_for_strict_gui_only():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    names = {tool["function"]["name"] for tool in tool_schemas(allow_shell=False)}
+
+    assert "run_shell" not in names
+    assert "run_detached" not in names
+    assert "click" in names
+    assert "run_action_batch" in names
 
 
 def test_window_title_expect_condition(monkeypatch):
@@ -824,6 +919,87 @@ def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
     assert payload["verified"] is True
     assert "call done instead of adding another zoom/observe" in payload["fast_path_advice"]
     assert payload["auto_visual_verify"]["nonvisual_summary"]["blankish"] is False
+
+
+def test_top_level_click_uses_fast_controller_without_explicit_batch():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("open the visible menu")
+    calls = []
+
+    def fake_dispatch(name, args):
+        calls.append((name, args))
+        assert name == "run_action_batch"
+        return ToolResult(json.dumps({
+            "ok": True,
+            "needs_observe": True,
+            "last_action": "click",
+            "metrics": {"action_count": 1, "screen_wait_count": 1},
+            "results": [
+                {
+                    "index": 1,
+                    "action": "click",
+                    "ok": True,
+                    "data": {"ok": True, "verified": False},
+                },
+                {
+                    "index": 2,
+                    "action": "sync_stable",
+                    "ok": True,
+                    "data": {"ok": True, "stable": True},
+                },
+            ],
+        }))
+
+    runner.session.dispatch = fake_dispatch
+    out = runner._dispatch_with_fast_visual_wrap("click", {"x": 10, "y": 20})
+    payload = json.loads(out.text)
+
+    assert calls == [("run_action_batch", {"actions": [{"action": "click", "x": 10, "y": 20}]})]
+    assert payload["wrapped_by_fast_controller"] is True
+    assert payload["source_action"] == "click"
+    assert payload["needs_observe"] is True
+    assert payload["metrics"]["screen_wait_count"] == 1
+
+
+def test_top_level_semantic_click_reports_anchor_source_action():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("click export")
+
+    def fake_dispatch(name, args):
+        assert name == "run_action_batch"
+        return ToolResult(json.dumps({
+            "ok": True,
+            "verified": True,
+            "needs_observe": False,
+            "last_action": "click_element",
+            "metrics": {"action_count": 1},
+            "results": [
+                {
+                    "index": 1,
+                    "action": "click_element",
+                    "upgraded_from": "click",
+                    "ok": True,
+                    "verified": True,
+                    "data": {"ok": True, "via": "click_element", "verified": True},
+                },
+            ],
+        }))
+
+    runner.session.dispatch = fake_dispatch
+    out = runner._dispatch_with_fast_visual_wrap("click", {"label": "Export", "role": "button"})
+    payload = json.loads(out.text)
+
+    assert payload["source_action"] == "click_element"
+    assert payload["source_action_verified"] is True
+    assert payload["verified"] is True
 
 
 def test_desktop_icon_drag_done_uses_final_uia_position(monkeypatch):

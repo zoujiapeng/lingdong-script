@@ -33,6 +33,7 @@ from .eval import summary as eval_summary
 from .perception import ocr, vlm
 from .recorder import human as human_mod
 from .recorder import trace as trace_mod
+from .runtime_info import runtime_fingerprint
 from .utils.log import BUS, logger
 
 WEBUI_DIR = ROOT_DIR / "webui"
@@ -210,6 +211,7 @@ def status() -> dict[str, Any]:
         "enabled_dimensions": CONFIG.enabled_dimensions(),
         "is_admin": _is_admin(),
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
+        "runtime": runtime_fingerprint(),
     }
 
 

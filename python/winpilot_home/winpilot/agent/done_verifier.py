@@ -26,6 +26,7 @@ from .task_rules import (
     _quoted_payloads,
     _required_drawing_colors,
     _required_image_paths,
+    _required_literal_tokens,
     _required_visible_payloads,
     _visible_state_targets,
 )
@@ -140,6 +141,30 @@ class DoneVerifierMixin:
             reason,
             f"[完成校验未通过] {reason}。请先在目标窗口真正输入这些文本，"
             "然后重新 observe/read_text 验证文本可见，再调用 done。",
+        )
+
+    def _verify_required_literal_tokens(self, screen: str, evidence: str) -> bool:
+        tokens = _required_literal_tokens(self.task)
+        if not tokens:
+            return True
+        haystack = f"{screen}\n{evidence}"
+        normalized_haystack = self._normalize_visible_text(haystack)
+        missing = [
+            token for token in tokens
+            if token not in haystack
+            and self._normalize_visible_text(token) not in normalized_haystack
+        ]
+        if not missing:
+            return True
+        reason = (
+            "Task-specific literal evidence is missing from the final screen/tool evidence: "
+            + ", ".join(missing[:5])
+            + ". Do not treat a different/equivalent UI state as completion."
+        )
+        return self._reject_done(
+            reason,
+            f"[done check failed] {reason} Put or reveal the exact requested literal(s), "
+            "then use observe/read_text or an expect check so the exact text appears before done.",
         )
 
     @staticmethod
@@ -489,6 +514,8 @@ class DoneVerifierMixin:
 
         screen = self._fresh_done_screen()
         if not self._verify_visible_payloads(screen, evidence):
+            return False
+        if not self._verify_required_literal_tokens(screen, evidence):
             return False
         if self._visible_state_has_deterministic_done_evidence(screen, evidence):
             return True

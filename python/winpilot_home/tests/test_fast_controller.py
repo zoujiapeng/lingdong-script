@@ -236,6 +236,76 @@ def test_fast_controller_type_into_element_clicks_clears_and_types():
     assert out["controller_state"]["phase"] == "verified"
 
 
+def test_fast_controller_upgrades_semantic_click_to_anchor_click():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=9, role="button", text="Export", cx=920, cy=50)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"click": {"label": "Export", "expected_region": "top-right", "role": "button"}}
+    ])
+
+    assert out["ok"]
+    assert calls == [("click", {"element_id": 9, "button": "left", "double": False})]
+    assert out["results"][0]["action"] == "click_element"
+    assert out["results"][0]["upgraded_from"] == "click"
+    assert out["results"][0]["data"]["via"] == "click_element"
+    assert out["results"][0]["data"]["resolved_element"]["elem_id"] == 9
+
+
+def test_fast_controller_upgrades_semantic_type_text_to_type_into_element():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=11, role="edit", text="Search", cx=300, cy=80)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"action": "type_text", "label": "Search", "role": "edit", "text": "hello", "clear": True}
+    ])
+
+    assert out["ok"]
+    assert calls == [
+        ("click", {"element_id": 11, "button": "left", "double": False}),
+        ("hotkey", {"keys": ["ctrl", "a"]}),
+        ("type_text", {"text": "hello"}),
+    ]
+    assert out["results"][0]["action"] == "type_into_element"
+    assert out["results"][0]["upgraded_from"] == "type_text"
+    assert out["results"][0]["data"]["via"] == "type_into_element"
+    assert out["metrics"]["compound_round_trips_saved"] == 2
+
+
 def test_fast_controller_accepts_single_key_shorthand():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

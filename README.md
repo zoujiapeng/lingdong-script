@@ -17,7 +17,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - 用户始终面对一个 WinPilot Agent；`agent/router.py` 不再切换子 runner，所有任务都进入 `AgentRunner`。编程/仓库任务由 `RuntimeProfile` 在同一主循环内启用 Coding Runtime。
 - Agent 任务规则在 `agent/task_rules.py`，runtime 开关在 `agent/runtime_profile.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 负责唯一主循环和 LLM 编排。
 - 记忆系统分层很轻：`memory/experience.py` 管长期 recipe/note 和 `experience_memory.json`，`agent/session.py` 管本服务生命周期内的指代型 session memory，`context_guidance.py` 管 world/playbook 提示，`loop.py` 管超过阈值后的上下文折叠 checkpoint。`reuse_skill` 只能复用强匹配的已验证 replay，完成 replay 不等于任务 done；只有 replay 成功且最终 run 完成的 recipe 才会获得正反馈，失败 replay 后兜底完成不算成功复用。
-- 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI 与 query miss fallback、`click_element` 目标 observe 重试、batch 内部 `type_into_element` 组合输入、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
+- 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI 与 query miss fallback、`click_element` 目标 observe 重试、batch 内部 `type_into_element` 组合输入、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 现在也会自动进入 fast controller 单动作 batch，严格 GUI-only 且明确禁 shell 的任务不会向模型暴露 shell 工具。它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 快速启动
@@ -61,6 +61,8 @@ python -m http.server 8877 --bind 127.0.0.1
 ```
 
 然后让前端 Agent 或 `/api/chat` 打开 `http://127.0.0.1:8877/gui_agent_target.html`，测试 `run_action_batch`、`screen_watch`、`observe(changed_only=true)` 和 done gate 是否对得上真实截图。
+
+排查端口/工作区混淆时先看 `/api/status.runtime` 或前端顶部 `runtime` badge：它会显示当前服务的 repo root、branch、commit、dirty 状态、PID 和端口。严格 GUI-only 测试建议写明 `do not use shell`，此时 schema 会隐藏 `run_shell/run_detached`，避免模型先绕去命令行。
 
 旧根目录测试需要额外路径：
 

@@ -72,9 +72,13 @@
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
    `click_element` 如果先前 snapshot 没找到文本锚点，会由 controller 自动做一次 `observe(query=label)` 并重试；排查时看 `controller_auto_observe`、`retry_anchor_locator` 和 `metrics.auto_observe_count`。
    `type_into_element` 是 batch 内部组合输入动作，会在一个 controller 子动作内完成锚点定位、点击聚焦、可选清空和输入；排查时看 `subresults`、`controller_internal_action_count` 和 `metrics.compound_round_trips_saved`。
-   如果 LLM 顶层直接调用 `draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
+   如果 LLM 顶层直接调用 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据。`draw_strokes/drag` 还可能出现 `auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
+   对带语义锚点的动作，controller 会把 `click(label=...)` 升级为 `click_element`，把 `type_text(label=..., text=...)` 升级为 `type_into_element`。看 `results[].upgraded_from`、`anchor_locator`、`resolved_element`、`subresults`，可以判断卡在锚点定位、聚焦、清空还是输入。
    普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
+   严格 GUI-only 且用户明确禁 shell 时，`run_shell/run_detached` 不应出现在 `NNN_llm_request.json` 的 tools 列表里；如果仍出现，先查 `task_rules._gui_only_forbids_shell()` 和 `tool_schemas(..., allow_shell=False)` 的路径。
+   done gate 会要求显著字面量 token 出现在最终证据中，例如 `FAST_WRAP_OK_073`、`75765`。OCR/verify 会容忍 `_`、空格、连字符、冒号差异，所以 `FAST WRAP OK 073` 可以证明 `FAST_WRAP_OK_073`，但完全缺失该 token 不能用“功能等价”替代。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
+   `/api/status.runtime` 和前端顶部 `runtime` badge 用来确认当前服务来自哪个 worktree/commit/端口/PID。先确认 runtime，再解释 trace；否则很容易把旧服务的行为误当成新分支结果。
 6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
    - 窗口/应用发现：`window_tools.py`
    - 感知/OCR/VLM：`perception_tools.py`

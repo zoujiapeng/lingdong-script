@@ -79,7 +79,9 @@
 - `type_into_element` 是 `run_action_batch` 内部组合动作：定位锚点、点击聚焦、可选 `Ctrl+A` 清空、再 `type_text`。结果里看 `subresults`、`controller_internal_action_count`、`metrics.compound_round_trips_saved`，用于判断卡在定位、聚焦、清空还是输入验证。
 - `observe(changed_only=true, query="...")` 先查 recent/action ROI；如果 ROI 里没有 query 命中，会明确标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部变化不含目标时误导模型。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
-- 顶层 `draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch(sync=false)`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`auto_visual_verify`、`visual_change_detected` 这类证据；验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
+- 顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据；`draw_strokes/drag` 仍用 `sync=false` 并可带 `auto_visual_verify`、`visual_change_detected`，验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
+- 严格 GUI-only 且用户明确禁 shell 时，`tool_schemas.py` 不会向模型暴露 `run_shell/run_detached`；执行层的 GUI-only guard 仍会兜底拦截 shell/文件/脚本工具。排查“它为什么还想走命令行”时先看该 run 的 `NNN_llm_request.json` tools 列表。
+- `/api/status.runtime` 和前端顶部 `runtime` badge 会显示 repo root、branch、commit、dirty、PID、端口。怀疑测错前端/旧服务时先查这里。
 - UIA 关闭的绘图/画布任务会用 `canvas_fast_observe`：普通 `observe` 跳过全窗口 OCR，只给 Win32/CV/`likely_canvas` 摘要；如果要读菜单/工具栏文字，用 `observe(query="...")` 或 `observe(full=true)`。
 - 普通可见动作 `click/type_text/hotkey/scroll/focus_window/tray_click/clipboard_paste/mouse_*` 会自动附带廉价 `screen_delta`；`result_meta.action_target` 会记录动作前后 `target_hwnd`、foreground 和 `foreground_matches_target`。`screen_delta.changed=true` 只说明像素变化，不能单独证明成功；如果 foreground 不匹配 target，要先重新 focus/observe，不能据此 done。
 - `launch` 找到目标窗口后会主动置前并记录 `foreground_matches_target`；`action/verify.py` 在有目标 hwnd 时只接受目标本身或 owner/祖先弹窗，不再让 Codex、日志窗口、同进程其他窗口的 OCR 文本冒充成功。
@@ -124,7 +126,7 @@ npm run build
 - `fusion.screen_watch_autostart=true`：ToolSession 在记住目标窗口或执行可见动作时会自动启动 watcher，run 结束时 `ToolSession.close()` 会停止 watcher。模型仍可手动调用 `screen_watch`，但不再必须先想起 start。
 - trace summary 新增 `low_latency` 和更细的 `fast_gui` 指标：screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage、batch subgoal、controller phase、anchor click/cache/failure。用于判断一次任务慢在哪里，而不是凭感觉优化。
 - `done_verifier.py` 增加“显式可见状态目标”确定性收束：任务写了“确认出现 LOCAL_COUNTER”这类目标时，必须在 fresh screen OCR 中看到对应文本才会跳过 LLM done judge。OCR 容错会把 `LOCAL_COUNTER` 和 `LOCAL COUNTER` 视为同一标签。
-- 最新 UIA-off 网页靶场验证：`20260703-025138-dcf2c6`，工具序列 `launch -> observe -> run_action_batch(subgoal, click+wait) -> observe(changed_only=true) -> done`。截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`；`changed_only` ROI 覆盖左侧状态卡并直接 OCR 到 `LOCAL COUNTER`；`done_check` 理由为 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。
+- 最新严格 GUI-only 网页靶场验证：`20260703-231829-586255`，工具序列包含 `launch -> click -> type_text -> click(expect FAST_WRAP_OK_073) -> click(expect LOCAL_COUNTER) -> read_text -> done`；`run_shell` 未暴露；普通 `click` 结果带 `wrapped_by_fast_controller`；截图 `after_006.jpg` 显示输入框 `FAST_WRAP_OK_073` 和状态卡 `LOCAL_COUNTER_2`。对照失败 run `20260703-225332-4fb92a`：当时 agent 没输入 `FAST_WRAP_OK_071` 却把“功能等价”当完成；现在 done gate 会要求显著字面量 token 出现在最终证据中。
 
 ## 15 项低延迟改造进度
 

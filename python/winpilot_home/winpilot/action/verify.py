@@ -17,6 +17,7 @@ Expect DSL (keys may be combined; all must pass):
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -36,6 +37,16 @@ SUPPORTED_CONDITIONS = (
     "text_appears", "text_gone", "window_appears", "window_gone", "window_title",
     "screen_stable", "color_match",
 ) + groundtruth.GROUNDTRUTH_KEYS
+
+
+def _match_visible_text(needle: str, text: str) -> bool:
+    needle_lower = (needle or "").casefold()
+    text_lower = (text or "").casefold()
+    if needle_lower in text_lower:
+        return True
+    norm_needle = re.sub(r"[\s_\-:：]+", "", needle_lower)
+    norm_text = re.sub(r"[\s_\-:：]+", "", text_lower)
+    return bool(norm_needle and norm_needle in norm_text)
 
 
 @dataclass
@@ -95,7 +106,6 @@ def _full_screen_region() -> Region:
 # --------------------------------------------------------- condition checks
 def _find_text(needle: str, hwnd: int | None, level: int) -> tuple[bool, str]:
     """Search for text with escalating perception. Returns (found, method)."""
-    needle_lower = needle.lower()
     target = _target_hwnd(hwnd)
 
     # Level 0: fused observe with whatever dimensions are enabled (fast path).
@@ -103,7 +113,7 @@ def _find_text(needle: str, hwnd: int | None, level: int) -> tuple[bool, str]:
         try:
             snapshot = fusion.observe(target, include_icons=False)
             for element in snapshot.elements:
-                if needle_lower in element.text.lower():
+                if _match_visible_text(needle, element.text):
                     return True, element.source
         except Exception as exc:
             logger.debug("verify: fused observe 失败: %s", exc)
