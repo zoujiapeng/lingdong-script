@@ -438,9 +438,46 @@ class PerceptionToolMixin:
         self._remember_target(hwnd, self.snapshot.title)
         query = str(args.get("query", "") or "")
         max_elements = int(args.get("max_elements", 160) or 160)
+        query_norm = query.strip().casefold()
+        changed_query_fallback = False
+        if changed_regions and query_norm and not any(
+            query_norm in (element.text or "").casefold()
+            for element in self.snapshot.elements
+        ):
+            full_cache_key = (
+                int(hwnd),
+                bool(include_icons),
+                perception_mode,
+                "full_query_fallback",
+                (),
+                self._screen_epoch,
+            )
+            cached = self.cached_observe(full_cache_key, cache_ttl) if cache_ttl > 0 else None
+            if cached is not None:
+                self.snapshot = cached
+                self.snapshot.dim_stats["cache"] = {"count": len(self.snapshot.elements), "ms": 0}
+            else:
+                self.snapshot = fusion_mod.observe(
+                    hwnd,
+                    include_icons=include_icons,
+                    perception_mode=perception_mode,
+                )
+                self.store_observe_cache(full_cache_key, self.snapshot)
+            self._remember_target(hwnd, self.snapshot.title)
+            changed_query_fallback = True
         text = self.snapshot.to_text(max_elements=max_elements, query=query)
         if args.get("changed_only"):
-            if changed_regions:
+            if changed_query_fallback:
+                rois = "; ".join(
+                    f"{region.left},{region.top},{region.width}x{region.height}"
+                    for region in changed_regions
+                )
+                text = (
+                    "Changed-only observe query fallback: recent screen_watch "
+                    f"ROI(s) did not contain query \"{query_norm}\" ({rois}); "
+                    "returned a full observe snapshot.\n" + text
+                )
+            elif changed_regions:
                 rois = "; ".join(
                     f"{region.left},{region.top},{region.width}x{region.height}"
                     for region in changed_regions
