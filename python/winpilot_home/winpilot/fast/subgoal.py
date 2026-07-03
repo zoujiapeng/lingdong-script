@@ -461,7 +461,7 @@ class SubgoalExecutor:
         self.session = session
         self.controller = controller
 
-    def _target_hwnd(self, request: SubgoalRequest) -> int | None:
+    def _target_hwnd(self, request: SubgoalRequest, allow_foreground: bool = True) -> int | None:
         target = request.target_window or {}
         hwnd = target.get("hwnd")
         try:
@@ -472,6 +472,8 @@ class SubgoalExecutor:
         session_hwnd = getattr(self.session, "hwnd", None)
         if session_hwnd:
             return session_hwnd
+        if not allow_foreground:
+            return None
         try:
             foreground = int(win32gui.GetForegroundWindow())
             if foreground:
@@ -487,7 +489,8 @@ class SubgoalExecutor:
     def _ensure_observed(self, request: SubgoalRequest) -> tuple[Snapshot | None, list[dict[str, Any]], bool]:
         prelude: list[dict[str, Any]] = []
         skip_click_auto_observe = False
-        hwnd = self._target_hwnd(request)
+        pure_draw = bool(_draw_specs(request) and not request.input and not request.clicks and not request.verify_texts)
+        hwnd = self._target_hwnd(request, allow_foreground=not pure_draw)
         if hwnd:
             try:
                 focus = self.session.dispatch("focus_window", {"hwnd": hwnd})
@@ -629,9 +632,7 @@ class SubgoalExecutor:
                 })
                 actions.append(action)
         wait_spec = request.constraints.get("wait") if isinstance(request.constraints, dict) else None
-        if wait_spec is False:
-            pass
-        else:
+        if wait_spec is not False and actions:
             actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
         if request.verify_texts:
             if changed_query_text:
@@ -676,7 +677,7 @@ class SubgoalExecutor:
         return None, attempts
 
     def _build_draw_action(self, request: SubgoalRequest, draw_spec: dict[str, Any]) -> dict[str, Any] | None:
-        hwnd = self._target_hwnd(request)
+        hwnd = self._target_hwnd(request, allow_foreground=False)
         if not hwnd:
             return None
         try:

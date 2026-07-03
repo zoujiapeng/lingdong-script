@@ -219,12 +219,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     # ------------------------------------------------------------- history
     def _append_tool_result(self, tool_call_id: str, result_text: str,
                             summary: str = "",
-                            image_b64: str = "") -> None:
+                            image_b64: str = "",
+                            tool_name: str = "") -> None:
         # NOTE: mime API does not support multipart tool results (image_url in tool role).
         # Always use plain text; screenshot is injected as a separate user message via
         # _inject_observe_screenshot when image_b64 is empty (fallback path).
+        content = result_text
+        if tool_name in {"execute_subgoal", "run_action_batch", "zoom", "screenshot", "draw_strokes", "drag"}:
+            content = self._compact_tool_evidence(tool_name, result_text)
         self.messages.append(
-            {"role": "tool", "tool_call_id": tool_call_id, "content": result_text})
+            {"role": "tool", "tool_call_id": tool_call_id, "content": content})
         if summary:
             self._foldable.append((len(self.messages) - 1, summary))
             self._fold_old()
@@ -681,6 +685,29 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return (result_text or "")[:1200]
         if tool_name == "execute_subgoal":
             packet = data.get("evidence_packet") if isinstance(data.get("evidence_packet"), dict) else {}
+            compact_actions: list[dict[str, Any]] = []
+            for action in data.get("actions_executed") or []:
+                if not isinstance(action, dict):
+                    continue
+                compact_action = {
+                    key: action.get(key)
+                    for key in (
+                        "action",
+                        "color",
+                        "shape",
+                        "requested_color",
+                        "canvas_region",
+                        "draw_region",
+                        "button",
+                        "label",
+                        "expected_region",
+                    )
+                    if key in action
+                }
+                if action.get("strokes"):
+                    compact_action["stroke_count"] = len(action.get("strokes") or [])
+                if compact_action:
+                    compact_actions.append(compact_action)
             compact = {
                 "ok": data.get("ok"),
                 "verified": data.get("verified"),
@@ -696,7 +723,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "candidate_click_labels": packet.get("candidate_click_labels"),
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
-                "actions_executed": data.get("actions_executed"),
+                "actions_executed": compact_actions,
             }
             return json.dumps(compact, ensure_ascii=False, default=str)[:1800]
         if tool_name == "run_action_batch":
@@ -744,6 +771,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "verified": data.get("verified"),
                 "needs_observe": data.get("needs_observe"),
                 "last_action": data.get("last_action"),
+                "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
                 "results": compact_results,
             }
@@ -758,6 +786,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "verify_method": data.get("verify_method"),
                 "needs_observe": data.get("needs_observe"),
                 "last_action": data.get("last_action"),
+                "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
             }
             auto = data.get("auto_visual_verify")
@@ -1211,7 +1240,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 terminal=None if result.terminal == "done" else result.terminal,
                 replay=result.replay,
             )
-            self._append_tool_result(tc.id, result.text, summary=result.summary)
+            self._append_tool_result(tc.id, result.text, summary=result.summary, tool_name=tc.function.name)
             if result.is_observe:
                 # Inject screenshot as separate user message (mime does not support
                 # multipart tool results, so we cannot inline image_b64 in tool role).
