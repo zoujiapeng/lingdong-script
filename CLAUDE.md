@@ -75,7 +75,7 @@
 - 先拿 `run_id`，看 `python/winpilot_home/traces/<run_id>.jsonl`：`agent_step` 是第几轮 LLM，`agent_tool_start` 是工具调用前，`agent_tool` 是工具结果，`agent_done` 是最终状态。
 - 每个 `agent_tool` 里重点看 `tool`、`args`、`result_preview`、`terminal`、`elapsed_ms`、`replay`；动作工具还会带 `screenshot`，指向 `python/winpilot_home/traces/<run_id>/<before|after>_NNN.jpg`。
 - `run_action_batch` 的内部子动作会额外写 `agent_batch_action_start/agent_batch_action` 事件；可变更屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，用来核对快速内环到底有没有真的点、拖、输入、画。
-- `execute_subgoal` 是同一 `AgentRunner/ToolSession` 里的 controller-first routine，不是第二个 agent。它把输入、单个或多个有序点击、等待、验证收进本地 controller；也可用于“可见按钮 + 可验证状态”的 click-only routine。结果里看 `subgoal_route=controller_first`、`actions_executed`、`controller_state`、`evidence_packet.matched_texts/missing_texts`。如果 `needs_llm_reason=true`，说明 routine 没法自证，需要 LLM 重新观察或换策略。
+- `execute_subgoal` 是同一 `AgentRunner/ToolSession` 里的 controller-first routine，不是第二个 agent。它把输入、单个或多个有序点击、等待、验证收进本地 controller；也可用于“可见按钮 + 可验证状态”的 click-only routine。click-only 单状态验证会优先用动作后的 `observe(changed_only=true, query=目标状态)`，避免无条件全窗口 `read_text`。结果里看 `subgoal_route=controller_first`、`actions_executed`、`controller_state`、`evidence_packet.matched_texts/missing_texts`。如果 `needs_llm_reason=true`，说明 routine 没法自证，需要 LLM 重新观察或换策略。
 - `run_action_batch(subgoal="...")` 会把子目标写入工具结果和 trace summary。`click_element` 走视觉锚点/文本锚点时会返回 `anchor_locator`、`resolved_element`、`element_cache`，用于判断是缓存命中、重新定位，还是锚点没找到；如果当前 snapshot 没找到文本锚点，controller 会自己做一次 `observe(query=label)` 并重试，结果里看 `controller_auto_observe` 和 `metrics.auto_observe_count`。
 - `type_into_element` 是 `run_action_batch` 内部组合动作：定位锚点、点击聚焦、可选 `Ctrl+A` 清空、再 `type_text`。结果里看 `subresults`、`controller_internal_action_count`、`metrics.compound_round_trips_saved`，用于判断卡在定位、聚焦、清空还是输入验证。
 - `type_into_element` 和 `execute_subgoal` 会使用 UIA/OCR/CV 组合的通用 `input_locator`；UIA 关闭时会用 label、placeholder/search-like OCR、附近矩形、focused non-button 和 synthetic candidate，不写 QQ/计算器/靶场专属规则。
@@ -105,6 +105,7 @@
 - run_shell/run_detached/launch/tray/search/undo 系统工具 handler 已拆到 `agent/system_tools.py`。
 - revise_plan/complete_subgoal/done/fail 计划和终止 handler 已拆到 `agent/plan_tools.py`。
 - `planner.py` 会清理危险的按钮标签回声 check：例如 “点击 Apply/Input 按钮” 不应生成 `text_appears=Apply/Input`，因为该文字点击前就存在；只有点击后的新状态、文件、进程、窗口或显著状态 token 才适合作为 `complete_subgoal` 核验。
+- `complete_subgoal` 会接受当前 `execute_subgoal:evidence_packet` 中刚匹配到的可见文本，避免 controller 已验证后再跑一轮 full verify；普通 `observe/read_text` 的历史证据仍只在任务或子目标明确“曾出现/出现过”时接受。
 - 真实 GUI 评测脚本在 `scripts/gui_eval_run.py`，它走 `/api/chat`，与前端 Agent 页面同路径，并把报告写到忽略的 `python/winpilot_home/evals/`。
 - WinPilot GUI 任务分类/guard 规则已拆到 `agent/task_rules.py`；done 二次核验已拆到 `agent/done_verifier.py`；planning/world/playbook 提示已拆到 `agent/context_guidance.py`；反思检查点已拆到 `agent/reflection.py`。
 - legacy Flow/DSL executor 的共享状态/异常类型已拆到 `python/engine/executor_types.py`，`executor.py` 仍只按 legacy 执行器维护。
@@ -132,6 +133,7 @@ npm run build
 - 最新严格 GUI-only 网页靶场验证：`20260703-231829-586255`，工具序列包含 `launch -> click -> type_text -> click(expect FAST_WRAP_OK_073) -> click(expect LOCAL_COUNTER) -> read_text -> done`；`run_shell` 未暴露；普通 `click` 结果带 `wrapped_by_fast_controller`；截图 `after_006.jpg` 显示输入框 `FAST_WRAP_OK_073` 和状态卡 `LOCAL_COUNTER_2`。对照失败 run `20260703-225332-4fb92a`：当时 agent 没输入 `FAST_WRAP_OK_071` 却把“功能等价”当完成；现在 done gate 会要求显著字面量 token 出现在最终证据中。
 - 最新 controller-first GUI-only 网页靶场验证：`20260704-005515-7f70a7`，工具序列 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`；11 个工具、1 次 observe、done 一次通过，截图 `batch_after_003.jpg` 显示 `SUBGOAL_OK_078` 和 `LOCAL_COUNTER_2`。对照失败 run `20260704-002852-1e75a4`：`execute_subgoal` 误把全局 `LOCAL_COUNTER` 继承进输入子目标，导致输入已成功仍返回 `ok=false`；已修为只继承当前 subgoal/args 中提到的全局 literal。
 - 最新 click-only controller-first 验证：`20260704-014433-99e853`，工具序列 `launch -> complete_subgoal -> execute_subgoal(click+verify LOCAL_COUNTER) -> complete_subgoal -> done`，5 个工具完成；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，`fast_gui.subgoal_calls=1`，`vlm_call_count=0`。
+- 最新 changed-only click-only 验证：`20260704-020133-18f863`，`execute_subgoal` 内部为 `click_element -> wait_stable -> observe(changed_only=true, query=LOCAL_COUNTER)`，工具耗时约 5.9s；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`。`20260704-020623-8f8903` 进一步验证 `complete_subgoal` 可直接使用 controller evidence，计划核验降到 1ms，但模型仍可能额外 `observe(query=LOCAL_COUNTER)`，后续要继续减少这类 LLM 习惯性复验。
 
 ## 15 项低延迟改造进度
 

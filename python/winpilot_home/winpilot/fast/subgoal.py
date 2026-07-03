@@ -129,6 +129,23 @@ def _pick_text(data: dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
+def _verified_expect_texts(actions: list[dict[str, Any]], data: dict[str, Any]) -> list[str]:
+    matched: list[str] = []
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return matched
+    for action, result in zip(actions, results):
+        if not isinstance(result, dict):
+            continue
+        result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        verified = result.get("verified") is True or result_data.get("verified") is True
+        expect = action.get("expect") if isinstance(action.get("expect"), dict) else {}
+        text = expect.get("text_appears")
+        if verified and isinstance(text, str) and text.strip():
+            matched.append(text.strip())
+    return _unique(matched)
+
+
 class SubgoalExecutor:
     """Execute one high-level GUI routine inside the fast controller."""
 
@@ -190,7 +207,10 @@ class SubgoalExecutor:
                     action["expect"] = {"text_appears": expect_text.strip()}
                 actions.append(action)
         click_specs = request.clicks or ([request.click] if request.click else [])
-        for click_spec in click_specs:
+        changed_query_text = ""
+        if not input_spec and click_specs and len(request.verify_texts) == 1:
+            changed_query_text = request.verify_texts[0]
+        for index, click_spec in enumerate(click_specs):
             label = click_spec.get("label") or click_spec.get("text") or click_spec.get("name")
             if label or click_spec.get("anchor"):
                 action = self._anchor_fields(click_spec, default_role="button")
@@ -208,7 +228,15 @@ class SubgoalExecutor:
         else:
             actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
         if request.verify_texts:
-            actions.append({"action": "read_text"})
+            if changed_query_text:
+                actions.append({
+                    "action": "observe",
+                    "changed_only": True,
+                    "query": changed_query_text,
+                    "max_elements": 80,
+                })
+            else:
+                actions.append({"action": "read_text"})
         return actions
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
@@ -250,12 +278,18 @@ class SubgoalExecutor:
             subgoal=request.subgoal,
         )
         visible_text = _pick_text(batch)
-        matched = [text for text in request.verify_texts if _match_visible_text(text, visible_text)]
+        expect_matched = _verified_expect_texts(actions, batch)
+        matched = [
+            text for text in request.verify_texts
+            if _match_visible_text(text, visible_text)
+            or any(_match_visible_text(text, verified) for verified in expect_matched)
+        ]
         missing = [text for text in request.verify_texts if text not in matched]
         verified = bool(batch.get("ok")) and not missing if request.verify_texts else bool(batch.get("verified"))
         evidence_packet = {
             "matched_texts": matched,
             "missing_texts": missing,
+            "verified_expect_texts": expect_matched,
             "visible_text_preview": visible_text[:1200],
             "perception_reducer": reduction,
             "prelude": prelude,

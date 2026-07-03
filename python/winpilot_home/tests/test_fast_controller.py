@@ -1077,3 +1077,55 @@ def test_subgoal_executor_runs_ordered_clicks_in_one_routine():
         "click",
         "read_text",
     ]
+
+
+def test_subgoal_click_only_uses_changed_observe_without_read_text():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Click status button until READY_STATE appears"
+        hwnd = 1
+        run_id = "run-subgoal-click-expect"
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Target",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=7, source="uia", role="button", text="Refresh status", cx=250, cy=100, left=100, top=80, width=180, height=36),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "click":
+                assert "expect" not in args
+                return ToolResult('{"ok": true, "verified": false}')
+            if name == "observe":
+                assert args["changed_only"] is True
+                assert args["query"] == "READY_STATE"
+                return ToolResult("READY_STATE")
+            if name == "read_text":
+                raise AssertionError("click-only verified subgoal should not fall back to read_text")
+            return ToolResult('{"ok": true}')
+
+    result = SubgoalExecutor(Session(), FastGuiController(Session())).execute({
+        "subgoal": "click Refresh status until READY_STATE appears",
+        "click": {"label": "Refresh status"},
+        "verify_texts": ["READY_STATE"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert payload["evidence_packet"]["matched_texts"] == ["READY_STATE"]
+    assert payload["evidence_packet"]["verified_expect_texts"] == []
+    assert [action["action"] for action in payload["actions_executed"]] == ["click_element", "observe"]
+    assert [name for name, _args in calls] == ["focus_window", "click", "observe"]
