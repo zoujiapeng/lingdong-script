@@ -4,7 +4,7 @@
 
 ## 当前代码事实
 
-- 当前低延迟改造分支：`codex/low-latency-controller-next`；合并后 `master` 应包含同一提交。
+- 当前主线：`master`，已包含低延迟 controller 改造和文档同步提交。
 - WinPilot 主体：`python/winpilot_home/winpilot/`。
 - Electron IPC adapter：`python/agent/__main__.py`。
 - GUI 任务：`AgentRunner`。
@@ -69,7 +69,7 @@ npm run build
 
 ## 2026-07-03 本轮新增
 
-- 分支仍是 `codex/low-latency-controller-next`。
+- 分支已合并回 `master`；低延迟 controller 改造对应提交在 `f1ea48b`，文档同步提交在 `c75ecf7`。
 - 新增网页靶场 `python/winpilot_home/eval_targets/gui_agent_target.html`，用于测试 GUI 局部变化、输入、弹窗、拖拽、画布和 trace 截图一致性。启动方式：在该目录运行 `python -m http.server 8877 --bind 127.0.0.1`。
 - `observe(changed_only=true)` 已接入 `screen_watch` 最近 ROI：当前帧有变化用 `changed_regions`，稳定后 30 秒内用 `recent_changed_regions`，并裁剪到目标窗口后再跑 Win32/OCR/CV。无可用 ROI 时会明确返回 fallback 文案。
 - 普通可见动作的 `screen_delta` 已改为动作前/动作后独立截图 diff，并把新鲜动作 ROI 写入 `screen_watch.action_changed_regions`。`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI，避免后台 watcher 抢帧或被弹层/动画噪声污染。

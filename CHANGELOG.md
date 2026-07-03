@@ -58,6 +58,7 @@
 - Made `observe(changed_only=true)` prefer fresh action ROIs before falling back to regular recent watcher ROIs.
 - Extended trace summaries with `low_latency` and `fast_gui` metrics for screen capture, perception, LLM decision, action execution, post-action verification, batch subgoals, controller phases, and anchor click/cache/failure counts.
 - Verified the webpage GUI target through the real `/api/chat` path with UIA disabled: run `20260703-025138-dcf2c6` reached `LOCAL_COUNTER_1` via `run_action_batch` + `observe(changed_only=true)` and passed fresh-screen done verification.
+- Verified the merged state with `python -m pytest python/winpilot_home/tests -q`, `npx vitest run`, and `npm run build`.
 
 ### Agent hardening already present on this branch
 
