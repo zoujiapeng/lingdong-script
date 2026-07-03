@@ -219,6 +219,49 @@ def _elements_contain_terms(elements: list[UIElement], terms: list[str]) -> bool
     )
 
 
+_CHROME_TEXT_RE = re.compile(r"^(?:win!?|chat\(?|https?://|127\.0\.0\.1|ch\b)", re.IGNORECASE)
+
+
+def _point_in_region(element: UIElement, region: Region) -> bool:
+    try:
+        return region.left <= int(element.cx) <= region.right and region.top <= int(element.cy) <= region.bottom
+    except (TypeError, ValueError):
+        return False
+
+
+def _visible_region_text_candidates(
+    snapshot: Snapshot | None,
+    request: SubgoalRequest,
+    limit: int = 16,
+) -> list[str]:
+    if snapshot is None:
+        return []
+    hint = _region_hint(request)
+    region = _rough_region(snapshot.region, hint) if hint else snapshot.region
+    if region is None:
+        region = snapshot.region
+    # Skip browser/title chrome for candidate hints; the raw snapshot remains in
+    # trace, this list is only a recovery nudge after an anchor miss.
+    top_cutoff = snapshot.region.top + max(72, int(snapshot.region.height * 0.08))
+    texts: list[str] = []
+    for element in snapshot.elements:
+        text = str(getattr(element, "text", "") or "").strip()
+        if not text or len(text) > 42:
+            continue
+        if _CHROME_TEXT_RE.search(text):
+            continue
+        if not _point_in_region(element, region):
+            continue
+        if getattr(element, "cy", 0) < top_cutoff:
+            continue
+        width = int(getattr(element, "width", 0) or 0)
+        height = int(getattr(element, "height", 0) or 0)
+        if width > 280 or height > 56:
+            continue
+        texts.append(text)
+    return _unique(texts)[:limit]
+
+
 class SubgoalExecutor:
     """Execute one high-level GUI routine inside the fast controller."""
 
@@ -416,10 +459,12 @@ class SubgoalExecutor:
         ]
         missing = [text for text in request.verify_texts if text not in matched]
         verified = bool(batch.get("ok")) and not missing if request.verify_texts else bool(batch.get("verified"))
+        recovery_candidates = _visible_region_text_candidates(snapshot, request)
         evidence_packet = {
             "matched_texts": matched,
             "missing_texts": missing,
             "verified_expect_texts": expect_matched,
+            "candidate_click_labels": recovery_candidates,
             "visible_text_preview": visible_text[:1200],
             "perception_reducer": reduction,
             "prelude": prelude,
@@ -439,9 +484,27 @@ class SubgoalExecutor:
             "evidence_packet": evidence_packet,
             "needs_llm_reason": bool(missing or not batch.get("ok")),
         }
+        if verified and not missing:
+            payload["fast_path_advice"] = (
+                "The controller already executed and verified this GUI subgoal"
+                " with matched_texts in evidence_packet. Complete the matching"
+                " plan item or call done instead of repeating observe/read_text"
+                " for the same evidence."
+            )
         if missing:
             payload["error"] = "subgoal routine completed but required visible text evidence is missing"
             payload["blocked"] = True
+            if recovery_candidates:
+                payload["fast_path_advice"] = (
+                    "The requested anchor label was not verified. For GUI tasks,"
+                    " retry execute_subgoal with one of evidence_packet.candidate_click_labels"
+                    " that best matches the intended visible state; do not inspect"
+                    " source files or shell output just to find a GUI label."
+                )
+                payload["recovery_candidates"] = {
+                    "candidate_click_labels": recovery_candidates,
+                    "expected_visible_texts": request.verify_texts,
+                }
         return ToolResult(
             json.dumps(payload, ensure_ascii=False, default=str),
             replay={"tool": "execute_subgoal", "subgoal": request.subgoal, "actions": actions},

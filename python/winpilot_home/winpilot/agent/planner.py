@@ -136,6 +136,73 @@ def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     return sanitized or None
 
 
+_ACTION_GOAL_RE = re.compile(
+    r"(click|press|tap|select|type|input|search|send|open|button|btn|"
+    r"\u70b9\u51fb|\u6309\u4e0b|\u9009\u62e9|\u8f93\u5165|"
+    r"\u641c\u7d22|\u53d1\u9001|\u6253\u5f00|\u6309\u94ae)",
+    re.IGNORECASE,
+)
+_VERIFY_GOAL_RE = re.compile(
+    r"(verify|confirm|appear|appears|visible|show|shows|state|result|"
+    r"\u786e\u8ba4|\u51fa\u73b0|\u53ef\u89c1|\u663e\u793a|"
+    r"\u6838\u9a8c|\u9a8c\u8bc1|\u72b6\u6001|\u7ed3\u679c)",
+    re.IGNORECASE,
+)
+_STATE_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+
+
+def _is_gui_action_goal(goal: str) -> bool:
+    return bool(_ACTION_GOAL_RE.search(goal or ""))
+
+
+def _visible_text_from_verify_step(step: dict) -> str | None:
+    check = step.get("check") if isinstance(step, dict) else None
+    if isinstance(check, dict):
+        for key in _VISIBLE_CHECK_KEYS:
+            value = check.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    goal = str(step.get("goal", "") if isinstance(step, dict) else "")
+    if not _VERIFY_GOAL_RE.search(goal):
+        return None
+    for token in _STATE_TOKEN_RE.findall(goal):
+        if _looks_like_state_token(token):
+            return token
+    return None
+
+
+def _merge_adjacent_visible_verification_steps(steps: list[dict]) -> list[dict]:
+    """Merge "click/type X" + "verify Y appears" into one controller routine.
+
+    Keeping the visible result check on the action subgoal nudges the main
+    model toward execute_subgoal, where the fast controller can locate, click,
+    wait, and verify without LLM observe/click/observe round-trips.
+    """
+    merged: list[dict] = []
+    i = 0
+    while i < len(steps):
+        current = dict(steps[i])
+        next_step = steps[i + 1] if i + 1 < len(steps) else None
+        visible_text = _visible_text_from_verify_step(next_step or {})
+        if (
+            next_step
+            and visible_text
+            and _is_gui_action_goal(str(current.get("goal", "")))
+            and not current.get("check")
+        ):
+            current["check"] = {"text_appears": visible_text}
+            if visible_text not in str(current.get("goal", "")):
+                current["goal"] = (
+                    f"{current.get('goal', '')} and verify {visible_text}"
+                ).strip()[:_MAX_GOAL_CHARS]
+            merged.append(current)
+            i += 2
+            continue
+        merged.append(current)
+        i += 1
+    return merged
+
+
 _MAX_STEPS = 6
 _MAX_GOAL_CHARS = 60
 # Sequence markers that hint at a multi-step task.
@@ -196,7 +263,7 @@ def _parse_steps(raw: str) -> list[dict]:
             goal, check = str(item).strip()[:_MAX_GOAL_CHARS], None
         if goal:
             out.append({"goal": goal, "check": check})
-    return out[:_MAX_STEPS]
+    return _merge_adjacent_visible_verification_steps(out)[:_MAX_STEPS]
 
 
 def make_plan(client, model: str, task: str, temperature: float = 0.2) -> list[dict]:
@@ -239,6 +306,7 @@ class Plan:
                 self.steps.append({"goal": str(s).strip()[:_MAX_GOAL_CHARS],
                                    "done": False, "check": None})
         self.steps = [s for s in self.steps if s["goal"]]
+        self.steps = _merge_adjacent_visible_verification_steps(self.steps)
 
     def active(self) -> bool:
         return bool(self.steps)
@@ -267,6 +335,13 @@ class Plan:
             lines.append(f"[{mark}] {i}. {step['goal']}{tag}")
         lines.append(
             "完成一项就调用 complete_subgoal(index=序号)；计划不合适就调用 revise_plan 重列。"
+        )
+        lines.append(
+            "GUI routine hint: when an item has a visible text/state check, prefer "
+            "execute_subgoal(..., verify_texts=[...]) so the controller handles "
+            "locate/click/wait/verify. If the requested label is not visible but "
+            "a semantically related localized control is visible, use that visible "
+            "label/fallback_text instead of scrolling for an exact wording match."
         )
         return "\n".join(lines)
 
