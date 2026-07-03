@@ -47,12 +47,26 @@ class MemoryToolMixin:
         script_path = SCRIPTS_DIR / script
         if not script_path.exists():
             return ToolResult(f"复用脚本 {script} 已丢失，请实时操作。")
+        recipe_id = str((recipe or {}).get("id") or "")
+
+        def record_attempt(replay_ok: bool) -> None:
+            if not recipe_id:
+                return
+            used = getattr(self, "used_memory_recipe_ids", None)
+            if isinstance(used, list) and recipe_id not in used:
+                used.append(recipe_id)
+            attempts = getattr(self, "memory_recipe_attempts", None)
+            if isinstance(attempts, list):
+                attempts.append({"id": recipe_id, "replay_ok": bool(replay_ok)})
+
         BUS.publish("memory", action="reuse", task=(recipe or {}).get("task", task))
         try:
             result = trace_mod.replay(script_path, stop_event=self.stop_event)
         except Exception as exc:
+            record_attempt(False)
             return ToolResult(f"复用重放异常: {exc}。请改用实时操作。")
         steps = result.get("results", [])
+        record_attempt(bool(result.get("ok")))
         if result.get("ok"):
             return ToolResult(
                 f"✅ 已 0-token 复用上次成功流程（{len(steps)}步全部重放成功）。"

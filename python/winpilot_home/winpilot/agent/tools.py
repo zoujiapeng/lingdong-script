@@ -100,6 +100,12 @@ class ToolSession(
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
         self.visible_evidence_ledger: list[dict[str, Any]] = []
+        # Recipe ids whose replay was actually attempted via reuse_skill.
+        # Prompt-injected hints alone must not be scored as successful reuse.
+        self.used_memory_recipe_ids: list[str] = []
+        # Per-attempt replay outcome: {"id": recipe_id, "replay_ok": bool}.
+        # A live fallback after failed replay must not promote the recipe.
+        self.memory_recipe_attempts: list[dict[str, Any]] = []
 
     # ----------------------------------------------------------- dispatch
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:

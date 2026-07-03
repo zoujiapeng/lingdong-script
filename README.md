@@ -16,7 +16,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
 - GUI 任务走 `AgentRunner`；编程/仓库任务走 `CodingRunner`。
 - GUI runner 的任务规则在 `agent/task_rules.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 LLM 编排。
-- 记忆系统分层很轻：`memory/experience.py` 管长期 recipe/note 和 `experience_memory.json`，`agent/session.py` 管本服务生命周期内的指代型 session memory，`context_guidance.py` 管 world/playbook 提示，`loop.py` 管超过阈值后的上下文折叠 checkpoint。`reuse_skill` 只能复用强匹配的已验证 replay，完成 replay 不等于任务 done。
+- 记忆系统分层很轻：`memory/experience.py` 管长期 recipe/note 和 `experience_memory.json`，`agent/session.py` 管本服务生命周期内的指代型 session memory，`context_guidance.py` 管 world/playbook 提示，`loop.py` 管超过阈值后的上下文折叠 checkpoint。`reuse_skill` 只能复用强匹配的已验证 replay，完成 replay 不等于任务 done；只有 replay 成功且最终 run 完成的 recipe 才会获得正反馈，失败 replay 后兜底完成不算成功复用。
 - 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI 与 query miss fallback、`click_element` 目标 observe 重试、batch 内部 `type_into_element` 组合输入、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
