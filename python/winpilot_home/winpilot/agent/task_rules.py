@@ -74,6 +74,7 @@ def _has_explicit_gui_only_marker(task: str) -> bool:
         or "\u5fc5\u987b\u901agui" in compact
         or "\u901agui\u64cd\u4f5c" in compact
         or "\u901a\u8fc7gui\u64cd\u4f5c" in compact
+        or bool(re.search(r"\u901a\u8fc7.{0,6}gui\u64cd\u4f5c", compact))
         or "\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
         or "\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
         or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
@@ -195,6 +196,35 @@ def _gui_only_shell_allowed(command: str) -> bool:
         any(marker in low for marker in verification_markers)
         and not any(marker in low for marker in mutation_or_ui_automation)
         and not any(marker in low for marker in execution_or_automation)
+    )
+
+
+def _gui_only_forbids_shell(task: str) -> bool:
+    text = (task or "").casefold()
+    compact = re.sub(r"\s+", "", text)
+    return (
+        "do not use shell" in text
+        or "don't use shell" in text
+        or "no shell" in text
+        or "without shell" in text
+        or "do not use command line" in text
+        or "no command line" in text
+        or "\u4e0d\u8981\u7528shell" in compact
+        or "\u4e0d\u80fd\u7528shell" in compact
+        or "\u7981\u6b62\u7528shell" in compact
+        or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u8981\u4f7f\u7528\u547d\u4ee4\u884c" in compact
+        or "\u4e0d\u80fd\u7528\u547d\u4ee4\u884c" in compact
+    )
+
+
+def _gui_only_launch_uses_shell(command: str) -> bool:
+    low = (command or "").casefold().strip()
+    return (
+        bool(re.search(r"\b(?:powershell|pwsh|cmd(?:\.exe)?|wscript|cscript|mshta)\b", low))
+        or "-command" in low
+        or ".ps1" in low
+        or "python -m http.server" in low
     )
 
 

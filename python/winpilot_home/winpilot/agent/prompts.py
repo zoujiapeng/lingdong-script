@@ -51,6 +51,9 @@ element and coordinates.
    focus, optionally clear, and type in one controller step.
    Use type_text for printable character sequences such as 6+7=; reserve
    hotkey for real shortcuts such as Ctrl+S, Enter, Escape, or Alt+F4.
+   If the target window is already focused and the next action is a literal
+   printable sequence, type_text it directly; do not wait for button OCR or
+   process checks.
    Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
    If a recent tool result or screen_watch says only a local ROI changed, use
    observe(changed_only=true) to inspect that changed area before doing a full
@@ -133,6 +136,7 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 
 # Core loop
 1. list_windows / find_app / focus_window
+Use type_text for focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. observe → read grounded perception → act by coordinates
 3. observe again → verify the change happened
 4. done only when grounded evidence confirms task complete.
