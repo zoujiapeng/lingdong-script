@@ -1,7 +1,7 @@
 def test_clone_run_task_requires_real_run_attempt():
-    from winpilot.agent.coding import CodingRunner
+    from winpilot.agent.loop import AgentRunner
 
-    runner = CodingRunner("clone github project cc-haha and run it")
+    runner = AgentRunner("clone github project cc-haha and run it")
     runner._tool_history = [
         ("github_search", {"query": "cc-haha"}, '{"ok": true}'),
         ("run_shell", {"command": "git clone https://github.com/NanmiCoder/cc-haha.git"}, '{"ok": true}'),
@@ -14,9 +14,9 @@ def test_clone_run_task_requires_real_run_attempt():
 
 
 def test_clone_run_task_accepts_runtime_check_as_attempt():
-    from winpilot.agent.coding import CodingRunner
+    from winpilot.agent.loop import AgentRunner
 
-    runner = CodingRunner("clone github project cc-haha and run it")
+    runner = AgentRunner("clone github project cc-haha and run it")
     runner._tool_history = [
         ("run_shell", {"command": "git clone https://github.com/NanmiCoder/cc-haha.git"}, '{"ok": true}'),
         ("run_shell", {"command": "Get-Command bun; bun --version"}, '{"ok": false}'),

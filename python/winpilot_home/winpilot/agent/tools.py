@@ -28,6 +28,7 @@ from . import planner
 # Several imports above are retained as stable monkeypatch targets for older
 # tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
 # them through their _tools_attr compatibility helper.
+from .coding_tools import CodingSession
 from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
@@ -38,12 +39,13 @@ from .plan_tools import PlanToolMixin
 from .system_tools import SystemToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
+from .runtime_profile import build_runtime_profile
 from .window_tools import WindowToolMixin
 
 _MUTATING_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
-    "write_file", "clipboard_write", "clipboard_paste", "mouse_down",
+    "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch",
 }
 _ACTION_SCREEN_DELTA_TOOLS = {
@@ -78,12 +80,22 @@ class ToolSession(
         self.snapshot: fusion.Snapshot | None = None
         self.hwnd: int | None = None
         self.task = task or ""
-        self._pending_visual_advisory = ""
-        self._last_visual_advisory = ""
-        self.target_hint: str = ""
         # Shared with the runner so long ops (reuse_skill replay) honor Stop.
         import threading
         self.stop_event = stop_event or threading.Event()
+        self.runtime_profile = build_runtime_profile(self.task)
+        self.coding_runtime = (
+            CodingSession(
+                self.runtime_profile.coding_workspace,
+                stop_event=self.stop_event,
+                task=self.task,
+            )
+            if self.runtime_profile.coding and self.runtime_profile.coding_workspace is not None
+            else None
+        )
+        self._pending_visual_advisory = ""
+        self._last_visual_advisory = ""
+        self.target_hint: str = ""
         # World model is fed from dispatch(); read once per run (runs are
         # short-lived, created per task) so a runtime toggle change applies
         # to the next task rather than mid-run.

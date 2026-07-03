@@ -1,11 +1,9 @@
-"""Agent loop: deepseek tool-calling with WinPilot-specific adaptations.
+"""Unified WinPilot Agent loop.
 
-DeepSeek adaptations (per official docs + live testing):
-- ``reasoning_content`` must be stripped before sending history back
-- append-only history keeps the prompt-cache prefix warm; old bulky tool
-  results (observe / read_text / list_windows) are folded to one-line
-  summaries, keeping only the 2 most recent full observations
-- malformed tool-call JSON is bounced back to the model for self-repair
+One AgentRunner now owns desktop GUI work, Coding Runtime work, tool dispatch,
+trace, usage accounting, and done verification. Provider-specific chat details
+are centralized in ``winpilot.model_adapter``; this loop keeps the stable
+function-calling history, context folding, and tool-result repair behaviors.
 """
 from __future__ import annotations
 
@@ -19,6 +17,12 @@ from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
 from ..memory import experience
+from ..model_adapter import (
+    accumulate_usage,
+    build_model_adapter,
+    empty_usage_total,
+    model_profile_from_config,
+)
 from ..perception import fusion, intent, vlm
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
@@ -28,6 +32,7 @@ from .done_verifier import DoneVerifierMixin
 from .planner import planning_enabled
 from .reflection import ReflectionMixin
 from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
+from .runtime_profile import build_runtime_profile
 from .task_rules import (
     _blocks_store_search_action,
     _blocks_upload_media_analysis,
@@ -56,10 +61,6 @@ _RATE_LIMIT_BACKOFF_S = 5.0
 # Below it, history stays append-only so the DeepSeek prefix cache hits ~100%.
 _CONTEXT_FOLD_THRESHOLD_CHARS = 32000
 _MAX_ASSISTANT_HISTORY_CHARS = 900
-# DeepSeek pricing (¥ per 1M tokens). Adjust if the published rates change.
-_PRICE_CACHE_MISS_PER_M = 2.0
-_PRICE_CACHE_HIT_PER_M = 0.2
-_PRICE_OUTPUT_PER_M = 8.0
 _ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
 
 
@@ -73,20 +74,9 @@ def _client():
 
 
 def _main_model_has_vision() -> bool:
-    """True when the main API model natively supports image input.
-
-    Plain MiMo chat models such as mimo-v2.5-pro reject image input on the
-    OpenAI-compatible endpoint. Only explicitly multimodal/vision model names
-    should receive image_url content. DeepSeek chat models are text-only in
-    the API path we tested.
-    """
-    model = str(CONFIG.get("api", "model", default="")).lower()
-    return (
-        "omni" in model
-        or "-vl" in model
-        or "vision" in model
-        or "gpt-4o" in model
-    )
+    """True when the configured main model natively supports image input."""
+    api = CONFIG.get("api", default={})
+    return model_profile_from_config(api).supports_vision
 
 
 def _sanitize_assistant(msg) -> dict[str, Any]:
@@ -141,15 +131,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._last_reflect_step = 0                  # step number of last reflect injection
         self.status = "pending"                     # running/done/fail/reply/stopped/error
         self.result_text = ""
-        self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
-                            "cache_hit_tokens": 0, "cost_cny": 0.0}
+        self.usage_total = empty_usage_total()
+        self._model_adapter = None
+        self._last_llm_model = ""
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
         self.max_steps_override = max_steps_override
         self.run_state = RunStateMachine()
-        # Coding tasks are excluded from the reusable experience system.
-        self._is_coding = _is_coding_task(task)
+        self.runtime_profile = build_runtime_profile(task)
+        # Coding is now an in-process runtime capability of this AgentRunner,
+        # not a separate sub-agent / runner loop.
+        self._is_coding = self.runtime_profile.coding
+        self._tool_history: list[tuple[str, dict[str, Any], str]] = []
+        self._completion_rejects = 0
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -354,6 +349,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
 
         box: dict[str, Any] = {}
+        self._last_llm_model = model
         self._trace_debug("llm_request", {
             "run_id": self.run_id,
             "task": self.task,
@@ -437,30 +433,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
-        usage = getattr(resp, "usage", None)
-        if not usage:
+        api = CONFIG.get("api", default={})
+        profile = model_profile_from_config({
+            **api,
+            "model": self._last_llm_model or api.get("model", ""),
+        })
+        adapter = getattr(self, "_model_adapter", None)
+        if adapter is not None and not self._last_llm_model:
+            profile = getattr(adapter, "profile", profile)
+        step_usage = accumulate_usage(self.usage_total, resp, profile=profile, api=api)
+        if not step_usage:
             return
-        prompt = getattr(usage, "prompt_tokens", 0) or 0
-        completion = getattr(usage, "completion_tokens", 0) or 0
-        cache_hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-        cache_miss = max(0, prompt - cache_hit)
-        step_cost = (
-            cache_miss / 1_000_000 * _PRICE_CACHE_MISS_PER_M
-            + cache_hit / 1_000_000 * _PRICE_CACHE_HIT_PER_M
-            + completion / 1_000_000 * _PRICE_OUTPUT_PER_M
+        BUS.publish(
+            "agent_usage",
+            run_id=self.run_id,
+            step_usage=step_usage,
+            total=dict(self.usage_total),
         )
-        self.usage_total["prompt_tokens"] += prompt
-        self.usage_total["completion_tokens"] += completion
-        self.usage_total["cache_hit_tokens"] += cache_hit
-        self.usage_total["cost_cny"] = round(self.usage_total["cost_cny"] + step_cost, 4)
-        BUS.publish("agent_usage", run_id=self.run_id,
-                    step_usage={
-                        "prompt_tokens": prompt,
-                        "completion_tokens": completion,
-                        "cache_hit_tokens": cache_hit,
-                        "cost_cny": round(step_cost, 4),
-                    },
-                    total=dict(self.usage_total))
 
     # ---------------------------------------------------------------- steps
     def _record_step(self, name: str, args: dict, replay: dict | None = None) -> None:
@@ -898,6 +887,68 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         else:
             experience.feedback(self._hint_ids, success=False)
 
+    def _requires_run_attempt(self) -> bool:
+        """True for coding clone/open-source tasks that must actually be run.
+
+        This gate used to live in the old CodingRunner. It now belongs to the
+        unified AgentRunner so coding tasks keep the same anti-fake-success
+        behavior while sharing the same trace, planner, and done gate as GUI
+        tasks.
+        """
+        if not self._is_coding:
+            return False
+        text = self.task.lower()
+        has_repo = any(k in text for k in (
+            "clone", "github", "repo", "repository", "open-source", "opensource",
+            "克隆", "开源", "仓库",
+        ))
+        wants_run = any(k in text for k in (
+            "run", "start", "launch", "serve", "build", "test", "verify",
+            "跑起来", "运行", "启动", "打开", "构建", "测试", "验证",
+        ))
+        return has_repo and wants_run
+
+    def _has_run_attempt(self) -> bool:
+        markers = (
+            "npm", "pnpm", "yarn", "bun", "node ", "python", "pip", "pytest",
+            "cargo", "go ", "dotnet", "mvn", "gradle", "make", "cmake",
+            "get-command", "--version", "test-netconnection", "netstat",
+            "get-process", "invoke-webrequest", "curl", "start-process",
+        )
+        for name, args, _out in self._tool_history:
+            if name != "run_shell":
+                continue
+            cmd = str(args.get("command") or "").lower()
+            if "git clone" in cmd and not any(m in cmd for m in markers if m != "get-command"):
+                continue
+            if any(marker in cmd for marker in markers):
+                return True
+        return False
+
+    def _reject_incomplete_run_task(self) -> bool:
+        if not self._requires_run_attempt() or self._has_run_attempt():
+            return False
+        if self._completion_rejects >= 2:
+            return False
+        self._completion_rejects += 1
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "[completion check failed] The user asked to clone and run/start/verify the project. "
+                "You have not actually attempted dependency/runtime checks, install/build/run, or "
+                "deterministic verification. Do not just summarize README commands. Continue with "
+                "run_shell checks such as Get-Command for the required runtime, then install/build/run "
+                "or fail with the exact missing prerequisite/output."
+            ),
+        })
+        BUS.publish(
+            "done_check",
+            run_id=self.run_id,
+            passed=False,
+            reason="clone/run task has no real run/build/runtime verification attempt",
+        )
+        return True
+
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
         for tc in tool_calls:
@@ -1006,6 +1057,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
             self._track_visible_evidence(tc.function.name, args, result.text)
+            self._tool_history.append((tc.function.name, args, result.text or ""))
+            self._tool_history = self._tool_history[-40:]
             # Keep recent tool outputs as evidence for the done-gate judge
             # (esp. run_shell stdout / verify results — deterministic proof
             # the GUI screen can't show).
@@ -1013,6 +1066,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "run_shell",
                 "run_detached",
                 "search_files",
+                "list_dir",
+                "read_file",
+                "search_text",
+                "github_search",
+                "apply_patch",
+                "write_file",
                 "list_windows",
                 "scan_windows",
                 "read_text",
@@ -1076,6 +1135,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 # multipart tool results, so we cannot inline image_b64 in tool role).
                 self._inject_observe_screenshot()
             if result.terminal:
+                if result.terminal == "done" and self._reject_incomplete_run_task():
+                    continue
                 self.result_text = result.text
                 return result.terminal
         return None
@@ -1083,7 +1144,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     # ------------------------------------------------------------------ run
     def run(self) -> dict[str, Any]:
         self.status = "running"
-        max_steps = int(self.max_steps_override or CONFIG.get("agent", "max_steps", default=40))
+        max_steps = int(
+            self.max_steps_override
+            or self.runtime_profile.max_steps
+            or CONFIG.get("agent", "max_steps", default=40)
+        )
         plan_on = planning_enabled()
         # Coding tasks are excluded from action-replay reuse, but relevant
         # factual project notes (manual 'remember' entries) still help — inject
@@ -1099,7 +1164,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             planning_enabled=plan_on,
             playbook_text=playbooks.render_section(matched_books),
             style=str(CONFIG.get("agent", "prompt_style", default="full")),
-            main_model_has_vision=_main_model_has_vision())
+            main_model_has_vision=_main_model_has_vision(),
+            runtime_section=self.runtime_profile.prompt_section())
         self.messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},
@@ -1215,11 +1281,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
             except Exception as exc:
                 logger.debug("复用建议注入失败: %s", exc)
-        tools = tool_schemas(planning=plan_on)
+        tools = tool_schemas(planning=plan_on, coding_runtime=self._is_coding)
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
-                    max_steps=max_steps, has_experience=bool(hints))
+                    max_steps=max_steps, has_experience=bool(hints),
+                    agent="unified", runtime=self.runtime_profile.to_dict())
         try:
-            client = _client()
+            raw_client = _client()
+            client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
+            self._model_adapter = client
             self._maybe_plan_upfront(client)
             for step in range(1, max_steps + 1):
                 if self.stop_event.is_set():
@@ -1242,6 +1311,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     self.result_text = msg.content or ""
                     BUS.publish("agent_step", run_id=self.run_id, step=step,
                                 reasoning="", content="", n_tool_calls=0)
+                    if self._reject_incomplete_run_task():
+                        BUS.publish("chat", run_id=self.run_id, role="assistant",
+                                    content=self.result_text[:500], reasoning=reasoning[:800])
+                        continue
                     if self._recent_results:
                         if not self._verify_done(client, steps_left=max_steps - step):
                             continue

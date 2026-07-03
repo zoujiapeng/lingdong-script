@@ -1,8 +1,9 @@
-"""File-management tool handlers for the GUI agent.
+"""File and repository tool handlers for the unified Agent.
 
-These are intentionally small, generic filesystem helpers exposed to the main
-agent. They are separate from desktop GUI handlers so `tools.py` stays focused
-on window/session state and screen interaction.
+For ordinary desktop tasks these remain generic filesystem helpers. When the
+per-run Coding Runtime is active, the same tool names are delegated to the
+workspace-confined coding tool implementation, so coding no longer needs a
+separate runner or sub-agent loop.
 """
 from __future__ import annotations
 
@@ -29,7 +30,23 @@ _SKIP_DIRS = {
 
 
 class FileToolMixin:
+    @staticmethod
+    def _from_coding_result(result) -> ToolResult:
+        return ToolResult(result.text, terminal=result.terminal, summary=result.summary)
+
+    def _coding_runtime(self):
+        return getattr(self, "coding_runtime", None)
+
+    def _dispatch_coding_file_tool(self, name: str, args: dict) -> ToolResult | None:
+        runtime = self._coding_runtime()
+        if runtime is None:
+            return None
+        return self._from_coding_result(runtime.dispatch(name, args))
+
     def _t_list_dir(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("list_dir", args)
+        if delegated is not None:
+            return delegated
         path = str(args.get("path") or ".")
         p = Path(path).resolve()
         if not p.exists():
@@ -48,6 +65,9 @@ class FileToolMixin:
         return ToolResult(body, summary=f"[已折叠] list_dir {len(entries)}项")
 
     def _t_read_file(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("read_file", args)
+        if delegated is not None:
+            return delegated
         p = Path(str(args["path"])).resolve()
         if not p.is_file():
             return ToolResult(f"文件不存在: {args['path']}")
@@ -65,6 +85,9 @@ class FileToolMixin:
         return ToolResult(numbered, summary=f"[已折叠] read_file {p.name} {len(chunk)}行")
 
     def _t_write_file(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("write_file", args)
+        if delegated is not None:
+            return delegated
         p = Path(str(args["path"])).resolve()
         content = str(args.get("content", ""))
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +98,9 @@ class FileToolMixin:
         )
 
     def _t_search_text(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("search_text", args)
+        if delegated is not None:
+            return delegated
         query = str(args.get("query", ""))
         search_path = Path(str(args.get("path", "."))).resolve()
         glob_pattern = str(args.get("glob", "*"))
@@ -108,3 +134,16 @@ class FileToolMixin:
             "\n".join(matches) or f'未找到 "{query}" 的匹配',
             summary=f"[已折叠] search_text {len(matches)}个匹配",
         )
+
+
+    def _t_apply_patch(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("apply_patch", args)
+        if delegated is not None:
+            return delegated
+        return ToolResult("apply_patch is available only when Coding Runtime is active for a repository/coding task.")
+
+    def _t_github_search(self, args: dict) -> ToolResult:
+        delegated = self._dispatch_coding_file_tool("github_search", args)
+        if delegated is not None:
+            return delegated
+        return ToolResult("github_search is available only when Coding Runtime is active for a repository/coding task.")

@@ -94,15 +94,31 @@ class SystemToolMixin:
             time.sleep(0.35)
 
     def _t_run_shell(self, args: dict) -> ToolResult:
-        shell_mod = _tools_attr("shell", shell)
         command = str(args["command"])
         shell_kind = str(args.get("shell", "powershell"))
         timeout_s = float(args.get("timeout_s", 30))
-        result = shell_mod.run(command, shell=shell_kind, timeout_s=timeout_s)
+        coding_runtime = getattr(self, "coding_runtime", None)
+        if coding_runtime is not None:
+            result = coding_runtime.dispatch("run_shell", args)
+            replay = {
+                "tool": "run_shell",
+                "command": command,
+                "shell": shell_kind,
+                "timeout_s": timeout_s,
+            }
+            if args.get("cwd"):
+                replay["cwd"] = str(args.get("cwd"))
+            return ToolResult(result.text, summary=result.summary, replay=replay)
+        shell_mod = _tools_attr("shell", shell)
+        cwd = str(args.get("cwd") or "") or None
+        result = shell_mod.run(command, shell=shell_kind, timeout_s=timeout_s, cwd=cwd)
+        replay = {"tool": "run_shell", "command": command, "shell": shell_kind,
+                  "timeout_s": timeout_s}
+        if cwd:
+            replay["cwd"] = cwd
         return ToolResult(
             self._fmt(result),
-            replay={"tool": "run_shell", "command": command, "shell": shell_kind,
-                    "timeout_s": timeout_s},
+            replay=replay,
         )
 
     def _t_run_detached(self, args: dict) -> ToolResult:

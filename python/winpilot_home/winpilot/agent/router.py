@@ -1,35 +1,33 @@
-"""Runner router: pick the coding sub-agent or the GUI agent for a task.
+"""Runner construction for the single WinPilot Agent.
 
-Single source of truth used by both entry points (Electron IPC adapter and the
-FastAPI server) so routing stays consistent. Coding tasks (detected by the
-coding-project playbook keywords) go to CodingRunner when coding is enabled;
-everything else to the GUI AgentRunner.
+Older builds routed repository/coding tasks into ``CodingRunner``. That split
+created two planners, two prompts, and two tool loops. Coding is now an optional
+runtime capability inside ``AgentRunner``; the router only constructs the single
+runner so all tasks share Trace/BUS/done-gate/memory semantics.
 """
 from __future__ import annotations
 
 import threading
 
-from ..config import CONFIG
 from ..utils.log import logger
-from .loop import AgentRunner, _is_coding_task, _is_gui_only_task
+from .loop import AgentRunner
+from .runtime_profile import build_runtime_profile
 
 
-def build_runner(task: str, stop_event: threading.Event | None = None,
-                 session_context: list | None = None,
-                 max_steps_override: int | None = None):
-    """Return a runner (AgentRunner | CodingRunner) for the task. Both share the
-    run() / run_id / status / result_text / interject interface."""
-    if (
-        CONFIG.get("coding", "enabled", default=True)
-        and _is_coding_task(task)
-        and not _is_gui_only_task(task)
-    ):
-        try:
-            from .coding import CodingRunner
-            logger.info("路由到编程子agent: %s", task[:60])
-            return CodingRunner(task, stop_event=stop_event, session_context=session_context)
-        except Exception as exc:  # never block on a coding-agent import problem
-            logger.warning("编程子agent 不可用，回退到 GUI agent: %s", exc)
+def build_runner(
+    task: str,
+    stop_event: threading.Event | None = None,
+    session_context: list | None = None,
+    max_steps_override: int | None = None,
+) -> AgentRunner:
+    """Return the unified AgentRunner for every task.
+
+    Capability selection happens inside the runner via RuntimeProfile. For
+    example, a repository task enables Coding Runtime tools without becoming a
+    separate coding sub-agent.
+    """
+    profile = build_runtime_profile(task)
+    logger.info("构建统一 AgentRunner: runtime=%s task=%s", profile.label, task[:60])
     return AgentRunner(
         task,
         stop_event=stop_event,

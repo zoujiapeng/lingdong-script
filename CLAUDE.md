@@ -6,9 +6,9 @@
 
 1. `python/winpilot_home/winpilot/`
    - 当前 WinPilot desktop agent；用户始终面对一个 Agent。
-   - GUI / Computer Use capability：`agent/loop.py` 的 `AgentRunner`。
-   - Coding capability：`agent/coding.py` 的 `CodingRunner`。
-   - 路由入口：`agent/router.py`，只做内部 capability/runner 选择。
+   - 唯一 runner：`agent/loop.py` 的 `AgentRunner`。
+   - GUI / Computer Use 是默认主 Runtime；编程/仓库任务由 `agent/runtime_profile.py` 在同一 runner 内启用 Coding Runtime。
+   - `agent/coding.py` 只保留兼容别名，不再实现独立编程子 agent。
 
 2. `src/renderer/` + `python/engine/` + `python/features/`
    - 旧流程图/DSL/`@feature` 自动化系统。
@@ -22,18 +22,19 @@
 | `python/winpilot_home/serve.py` | WinPilot 唯一支持的服务启动入口 |
 | `python/winpilot_home/winpilot/server.py` | WinPilot REST/WebSocket |
 | `python/winpilot_home/winpilot/config.py` | 真实默认配置 |
-| `python/winpilot_home/winpilot/agent/tool_schemas.py` | GUI agent OpenAI function schema |
-| `python/winpilot_home/winpilot/agent/task_rules.py` | GUI 任务分类和 done gate 规则辅助函数 |
+| `python/winpilot_home/winpilot/agent/tool_schemas.py` | 统一 Agent OpenAI function schema；Coding Runtime 激活时动态加入 repo 工具 |
+| `python/winpilot_home/winpilot/agent/task_rules.py` | 任务分类、GUI-only guard、coding runtime 规则辅助函数 |
+| `python/winpilot_home/winpilot/agent/runtime_profile.py` | 每次 run 的 RuntimeProfile，决定是否启用 Coding Runtime |
 | `python/winpilot_home/winpilot/agent/done_verifier.py` | GUI agent done 二次核验 mixin |
 | `python/winpilot_home/winpilot/agent/context_guidance.py` | GUI agent planning/world/playbook 上下文提示 mixin |
 | `python/winpilot_home/winpilot/agent/reflection.py` | GUI agent 反思检查点 mixin |
-| `python/winpilot_home/winpilot/agent/tools.py` | GUI agent `ToolSession` 状态、dispatch、目标窗口解析 |
+| `python/winpilot_home/winpilot/agent/tools.py` | 统一 Agent `ToolSession` 状态、dispatch、目标窗口解析和 runtime 挂载 |
 | `python/winpilot_home/winpilot/agent/window_tools.py` | GUI agent 窗口列表、扫描、聚焦、应用发现工具 mixin |
 | `python/winpilot_home/winpilot/agent/perception_tools.py` | GUI agent observe/read_text/VLM/template/color 感知工具 mixin |
 | `python/winpilot_home/winpilot/agent/interaction_tools.py` | GUI agent click/type/hotkey/scroll/drag/draw/wait 输入动作工具 mixin |
 | `python/winpilot_home/winpilot/agent/system_tools.py` | GUI agent run_shell/run_detached/launch/tray/search/undo 系统工具 mixin |
 | `python/winpilot_home/winpilot/agent/plan_tools.py` | GUI agent revise_plan/complete_subgoal/done/fail 计划和终止工具 mixin |
-| `python/winpilot_home/winpilot/agent/file_tools.py` | GUI agent 通用文件工具 mixin |
+| `python/winpilot_home/winpilot/agent/file_tools.py` | 通用文件工具；Coding Runtime 激活时委托到 workspace-confined `CodingSession` |
 | `python/winpilot_home/winpilot/agent/memory_tools.py` | GUI agent 经验记忆/0-token replay 工具 mixin |
 | `python/winpilot_home/winpilot/agent/desktop_tools.py` | GUI agent 剪贴板、鼠标细控、截图、显示器、应用列表工具 mixin |
 | `python/winpilot_home/winpilot/agent/tool_result.py` | GUI agent 工具返回对象 |
@@ -55,7 +56,7 @@
 ## 运行时状态
 
 - 前端/Electron 调 `python/winpilot_home/serve.py` 启动 FastAPI；任务从 `/api/chat` 进入，`server.py` 的 `_RunState` 保证一次只跑一个 agent/replay/人工录制。
-- `agent/router.py` 只做内部 capability 选择：GUI 任务进 `AgentRunner`，编程/仓库任务在非 GUI-only 时走 `CodingRunner`。不要把这些能力描述成用户需要面对的多个独立 agent。
+- `agent/router.py` 只构建一个 `AgentRunner`：GUI、编程、shell、文件等都在同一主循环中作为 Runtime/工具被调度。不要把这些能力描述成用户需要面对的多个独立 agent。
 - `AgentRunner.status` 状态集合：`pending`、`running`、`done`、`fail`、`reply`、`stopped`、`error`。`done` 还要经过 `done_verifier.py`，否则会被打回继续工作。
 - 每一步是：构造/折叠 messages -> 调 LLM function calling -> `ToolSession.dispatch()` -> 工具 mixin 执行 -> 写 BUS 事件和 trace -> 可能注入 world/playbook/reflect。
 - LLM 每步真实收到/返回的信息在 `python/winpilot_home/traces/<run_id>/NNN_*.json`；UI 事件和截图索引在 `python/winpilot_home/traces/<run_id>.jsonl`。

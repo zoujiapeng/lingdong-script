@@ -2,16 +2,17 @@
 
 当前 WinPilot 主体在 `python/winpilot_home/winpilot/`。
 
-## 路由
+## 路由和 Runtime
 
-`agent/router.py` 根据任务选择 runner：
+`agent/router.py` 不再根据任务切换 runner：
 
-- 用户始终面对一个 WinPilot Agent；`AgentRunner`、`CodingRunner` 只是内部 runner/capability。
-- GUI/桌面任务：主要走 `AgentRunner`。
-- 编程/仓库任务：走 `CodingRunner` 这类 Coding capability。
-- GUI-only 任务不会路由到 Coding capability。
+- 用户始终面对一个 WinPilot Agent。
+- 所有任务都进入 `agent/loop.py` 的 `AgentRunner`。
+- `agent/runtime_profile.py` 根据任务决定是否在同一主循环内启用 Coding Runtime。
+- GUI-only 任务会关闭 Coding Runtime，并继续受 GUI-only guard 约束。
+- `agent/coding.py` 只保留兼容旧导入的 `CodingRunner` 别名，不再有独立 planner/tool loop。
 
-## GUI AgentRunner
+## AgentRunner
 
 主文件：`agent/loop.py`。
 
@@ -24,25 +25,26 @@
 - 可选 planning、playbook、experience memory、world advisory。
 - 视觉模型可用时，`observe` 后可把当前窗口截图注入为 `image_url` 消息。
 
-`loop.py` 仍是 GUI runner 主循环，但部分纯逻辑已拆出：
+`loop.py` 是唯一主循环，但部分纯逻辑已拆出：
 
 | 文件 | 职责 |
 | --- | --- |
-| `agent/task_rules.py` | 任务分类、GUI-only guard、done gate 需要的纯字符串规则 |
+| `agent/task_rules.py` | 任务分类、GUI-only guard、coding runtime 触发、done gate 需要的纯字符串规则 |
+| `agent/runtime_profile.py` | 每次 run 的 RuntimeProfile；决定 Coding Runtime 是否启用、workspace 和 max_steps |
 | `agent/done_verifier.py` | done 二次核验 mixin，集中处理假成功防护 |
 | `agent/context_guidance.py` | upfront plan、world advisory、stuck recovery、playbook 注入 |
 | `agent/reflection.py` | 反思检查点 mixin，不额外调用 LLM |
 | `agent/loop.py` | LLM 编排、工具调用循环、上下文折叠和终止收尾 |
 
-后续优先继续拆 `agent/tools.py`，不要把新规则继续塞回 `loop.py`。
+后续优先继续拆 `agent/tools.py` 和 runtime 模块，不要把新规则继续塞回 `loop.py`。
 
-## GUI 执行时序
+## 统一执行时序
 
-一次 GUI 任务的真实路径：
+一次任务的真实路径：
 
 1. 前端 Agent 页或 `scripts/gui_eval_run.py` 调 `/api/chat`。
 2. `server.py` 创建 `_RunState.stop_event`、`runner`、后台线程，并启动 `recorder/trace.py`。
-3. `agent/router.py` 在同一个用户可见 Agent 内选择 `AgentRunner` 或 Coding capability；GUI-only 任务不会进入 Coding capability。
+3. `agent/router.py` 构建唯一 `AgentRunner`；`RuntimeProfile` 在同一主循环内选择 desktop/coding 等 runtime 能力。
 4. `AgentRunner.run()` 组装 system/user messages、经验记忆、playbook、上下文提示和工具 schema。
 5. 每一步调用 LLM function calling；返回 tool calls 后由 `_handle_tool_calls()` 交给 `ToolSession.dispatch()`。
 6. `ToolSession` 维护最近 `Snapshot`、目标窗口 `hwnd`、plan、world model、undo stack；具体 handler 在各 mixin 中执行。
@@ -84,24 +86,25 @@
 
 ## 工具结构
 
-当前 GUI agent 工具被拆成几层：
+当前统一 Agent 工具被拆成几层：
 
 | 文件 | 职责 |
 | --- | --- |
-| `agent/tool_schemas.py` | 构造短 OpenAI function-calling schema，直接发给 LLM |
+| `agent/tool_schemas.py` | 构造短 OpenAI function-calling schema；Coding Runtime 激活时动态加入 repo 工具 |
 | `agent/tool_result.py` | `ToolResult` 返回对象 |
-| `agent/tools.py` | `ToolSession` 状态、dispatch、目标窗口解析 |
+| `agent/tools.py` | `ToolSession` 状态、dispatch、目标窗口解析和 runtime 挂载 |
 | `agent/window_tools.py` | `list_windows`、`scan_windows`、`focus_window`、`find_app`、`find_program` 窗口/应用工具 mixin |
 | `agent/perception_tools.py` | `observe`、`read_text`、`find_image`、`vlm_describe`、视觉摘要等感知工具 mixin |
 | `agent/interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` 输入动作工具 mixin |
-| `agent/system_tools.py` | `run_shell`、`run_detached`、`launch`、`tray_click`、`search_files`、`undo_last` 系统/启动工具 mixin |
+| `agent/system_tools.py` | `run_shell`、`run_detached`、`launch`、`tray_click`、`search_files`、`undo_last` 系统/启动工具 mixin；Coding Runtime 激活时 `run_shell` 委托到 workspace |
 | `agent/fast_tools.py` | `run_action_batch`、`screen_watch` 低延迟动作批处理和屏幕变化 watcher mixin |
 | `agent/plan_tools.py` | `revise_plan`、`complete_subgoal`、`done`、`fail` 计划和终止工具 mixin |
-| `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin |
+| `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin；Coding Runtime 激活时委托到 workspace-confined `CodingSession` |
+| `agent/coding_tools.py` | Coding Runtime 的 repo 文件/patch/GitHub/shell 工具实现 |
 | `agent/memory_tools.py` | `remember`、`forget`、`reuse_skill` 经验记忆和 0-token replay 工具 mixin |
 | `agent/desktop_tools.py` | 剪贴板、鼠标细控、截图、显示器、已安装应用等桌面杂项工具 mixin |
 
-当前 GUI agent 工具包括：
+默认 desktop/GUI 工具包括：
 
 `list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`run_action_batch`、`screen_watch`、`done`、`fail`。
 
@@ -114,7 +117,7 @@
 
 额外桌面/文件工具：
 
-`clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。
+`clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。Coding Runtime 激活时还会加入 `apply_patch`、`github_search`，并把 `run_shell`、文件工具限定到 coding workspace。
 
 `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、计划/终止、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和目标窗口解析。
 
@@ -192,11 +195,11 @@ UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observ
 
 模型 provider、MiMo/Reasonix thinking 默认值、cache hit 字段兼容、usage/cost 统计见 `docs/model-providers.md`。当前真实实现是轻量 OpenAI-compatible Chat Completions adapter，不是完整 provider proxy。
 
-## 编程子 Agent
+## Coding Runtime
 
-主文件：`agent/coding.py`，工具在 `agent/coding_tools.py`。
+主开关：`agent/runtime_profile.py`。工具实现：`agent/coding_tools.py`。兼容旧导入：`agent/coding.py`。
 
-工具包括 `list_dir`、`read_file`、`write_file`、`apply_patch`、`search_text`、`github_search`、`run_shell`、`done`、`fail`。clone/run 类任务有运行尝试 gate，避免“看了 README 就宣称成功”。
+Coding Runtime 不再是独立子 agent。它只在 `RuntimeProfile.coding=true` 时挂到 `AgentRunner` 的同一工具循环里，提供 workspace-confined 的 `list_dir`、`read_file`、`write_file`、`apply_patch`、`search_text`、`github_search`、`run_shell`。`done`、`fail` 仍走统一 `PlanToolMixin` 和统一 done gate。clone/run 类任务的运行尝试 gate 已迁入 `AgentRunner`，避免“看了 README 就宣称成功”。
 
 ## 2026-07-03 网页靶场和 changed ROI 复盘
 

@@ -1,8 +1,9 @@
-"""Small execution-state machine for the GUI agent loop.
+"""Small execution-state machine for the unified Agent loop.
 
-This is deliberately state tracking, not planning. It watches tool flow and
-surfaces compact phase information so the main model can spend less effort
-reconstructing whether the last action still needs verification.
+This is deliberately state tracking, not planning. It watches GUI, file, shell,
+and Coding Runtime tool flow and surfaces compact phase information so the main
+model can spend less effort reconstructing whether the last action still needs
+verification.
 """
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ ACTION_TOOLS = {
     "wait",
     "tray_click",
     "run_shell",
+    "write_file",
+    "apply_patch",
     "run_action_batch",
 }
 OBSERVE_TOOLS = {
@@ -37,6 +40,10 @@ OBSERVE_TOOLS = {
     "color_probe",
     "vlm_describe",
     "screen_watch",
+    "list_dir",
+    "read_file",
+    "search_text",
+    "github_search",
     "screenshot",
     "zoom",
 }
