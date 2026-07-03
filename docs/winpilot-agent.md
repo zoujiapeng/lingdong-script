@@ -234,7 +234,7 @@ python -m http.server 8877 --bind 127.0.0.1
 
 已验证 run：`20260703-025138-dcf2c6`。截图 `python/winpilot_home/traces/20260703-025138-dcf2c6/batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。这个 run 的 `observe(changed_only=true)` 在 ROI 内直接识别到 `LOCAL COUNTER`，没有再补一次全量 `query=LOCAL_COUNTER`。
 
-`/api/trace/<run_id>/summary` 会返回 `low_latency` 和 `fast_gui` 字段，用来定位瓶颈：截图耗时、感知耗时、LLM 决策耗时、动作执行耗时、动作后验证耗时、重规划频率、VLM 调用频率、skill 复用率、watcher 覆盖情况、batch/subgoal routine、controller phase、anchor click/cache/failure。以后做速度优化先看这里，再决定该减少 VLM、减少 LLM round-trip，还是改 controller 内环。注意 `vlm_call_count` 只统计真实 VLM 工作：`count>0` 或 `ms>0`；未配置 VLM 时 fusion 里的 0ms 占位不会计数。
+`/api/trace/<run_id>/summary` 会返回 `low_latency` 和 `fast_gui` 字段，用来定位瓶颈：截图耗时、感知耗时、LLM 决策耗时、动作执行耗时、动作后验证耗时、重规划频率、VLM 调用频率、skill 复用率、watcher 覆盖情况、batch/subgoal routine、controller phase、anchor click/cache/failure。`subgoal_elapsed_ms/subgoal_controller_elapsed_ms/subgoal_overhead_ms` 能区分慢在 controller 内部，还是慢在 `execute_subgoal` 前置 observe/包装开销。以后做速度优化先看这里，再决定该减少 VLM、减少 LLM round-trip，还是改 controller 内环。注意 `vlm_call_count` 只统计真实 VLM 工作：`count>0` 或 `ms>0`；未配置 VLM 时 fusion 里的 0ms 占位不会计数。
 
 最新 controller-first 靶场验证：`20260704-005515-7f70a7`。任务通过 `/api/chat` 进入，最终工具序列为 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`，只有 11 个工具和 1 次 observe，done gate 一次通过；真实截图 `python/winpilot_home/traces/20260704-005515-7f70a7/batch_after_003.jpg` 显示输入框 `SUBGOAL_OK_078` 与状态卡 `LOCAL_COUNTER_2`。
 

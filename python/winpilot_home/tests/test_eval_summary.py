@@ -33,7 +33,16 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 2,
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost_cny": 0.1},
             "slow_tools": [{"tool": "observe", "elapsed_ms": 50}],
-            "fast_gui": {"batch_calls": 1, "batch_actions": 3, "subgoal_calls": 1, "subgoal_actions": 4, "round_trips_saved": 2},
+            "fast_gui": {
+                "batch_calls": 1,
+                "batch_actions": 3,
+                "subgoal_calls": 1,
+                "subgoal_actions": 4,
+                "subgoal_elapsed_ms": 120,
+                "subgoal_controller_elapsed_ms": 90,
+                "subgoal_overhead_ms": 30,
+                "round_trips_saved": 2,
+            },
         },
         {
             "run_id": "r2",
@@ -57,6 +66,9 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
     assert out["fast_gui"]["batch_actions"] == 7
     assert out["fast_gui"]["subgoal_calls"] == 1
     assert out["fast_gui"]["subgoal_actions"] == 4
+    assert out["fast_gui"]["subgoal_elapsed_ms"] == 120
+    assert out["fast_gui"]["subgoal_controller_elapsed_ms"] == 90
+    assert out["fast_gui"]["subgoal_overhead_ms"] == 30
     assert out["fast_gui"]["round_trips_saved"] == 4
 
 
@@ -145,6 +157,7 @@ def test_summarize_events_extracts_execute_subgoal_metrics():
                 ],
                 "controller_state": {"phase": "verified"},
                 "metrics": {
+                    "elapsed_ms": 70,
                     "controller_round_trips_saved": 4,
                     "screen_wait_count": 1,
                 },
@@ -165,6 +178,9 @@ def test_summarize_events_extracts_execute_subgoal_metrics():
     assert out["fast_gui"]["verified_subgoals"] == 1
     assert out["fast_gui"]["subgoals_needing_llm"] == 0
     assert out["fast_gui"]["subgoal_missing_evidence"] == 0
+    assert out["fast_gui"]["subgoal_elapsed_ms"] == 90
+    assert out["fast_gui"]["subgoal_controller_elapsed_ms"] == 70
+    assert out["fast_gui"]["subgoal_overhead_ms"] == 20
     assert out["fast_gui"]["round_trips_saved"] == 4
     assert out["fast_gui"]["screen_waits"] == 1
     assert out["fast_gui"]["controller_phases"] == {"verified": 1}

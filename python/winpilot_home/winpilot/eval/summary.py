@@ -235,6 +235,9 @@ def _summarize_fast_gui(
     verified_subgoals = 0
     subgoals_needing_llm = 0
     subgoal_missing_evidence = 0
+    subgoal_elapsed_ms = 0
+    subgoal_controller_elapsed_ms = 0
+    subgoal_overhead_ms = 0
     for event in batch_action_events:
         if event.get("tool") != "click_element":
             continue
@@ -252,6 +255,8 @@ def _summarize_fast_gui(
         if event.get("tool") != "execute_subgoal":
             continue
         subgoal_calls += 1
+        elapsed = int(event.get("elapsed_ms") or 0)
+        subgoal_elapsed_ms += elapsed
         meta = event.get("result_meta") or {}
         if not isinstance(meta, dict):
             continue
@@ -262,6 +267,9 @@ def _summarize_fast_gui(
             counted_actions = True
         metrics = meta.get("metrics") or {}
         if isinstance(metrics, dict):
+            controller_elapsed = int(metrics.get("elapsed_ms") or 0)
+            subgoal_controller_elapsed_ms += controller_elapsed
+            subgoal_overhead_ms += max(0, elapsed - controller_elapsed)
             if not counted_actions:
                 subgoal_actions += int(metrics.get("action_count") or 0)
             round_trips_saved += int(metrics.get("controller_round_trips_saved") or 0)
@@ -285,6 +293,9 @@ def _summarize_fast_gui(
         "verified_subgoals": verified_subgoals,
         "subgoals_needing_llm": subgoals_needing_llm,
         "subgoal_missing_evidence": subgoal_missing_evidence,
+        "subgoal_elapsed_ms": subgoal_elapsed_ms,
+        "subgoal_controller_elapsed_ms": subgoal_controller_elapsed_ms,
+        "subgoal_overhead_ms": subgoal_overhead_ms,
         "round_trips_saved": round_trips_saved,
         "screen_waits": screen_waits,
         "screen_watch_calls": sum(1 for e in tool_events if e.get("tool") == "screen_watch"),
@@ -527,6 +538,9 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "verified_subgoals": sum(int(f.get("verified_subgoals") or 0) for f in fast_items),
             "subgoals_needing_llm": sum(int(f.get("subgoals_needing_llm") or 0) for f in fast_items),
             "subgoal_missing_evidence": sum(int(f.get("subgoal_missing_evidence") or 0) for f in fast_items),
+            "subgoal_elapsed_ms": sum(int(f.get("subgoal_elapsed_ms") or 0) for f in fast_items),
+            "subgoal_controller_elapsed_ms": sum(int(f.get("subgoal_controller_elapsed_ms") or 0) for f in fast_items),
+            "subgoal_overhead_ms": sum(int(f.get("subgoal_overhead_ms") or 0) for f in fast_items),
             "round_trips_saved": sum(int(f.get("round_trips_saved") or 0) for f in fast_items),
             "screen_waits": sum(int(f.get("screen_waits") or 0) for f in fast_items),
             "screen_watch_calls": sum(int(f.get("screen_watch_calls") or 0) for f in fast_items),
