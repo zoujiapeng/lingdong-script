@@ -28,6 +28,9 @@ class TestDSLtoFlow:
         wait_nodes = [n for n in flow["nodes"] if n["type"] == "wait"]
         assert len(click_nodes) >= 1
         assert len(wait_nodes) >= 1
+        assert click_nodes[0]["params"]["x"] == 100
+        assert click_nodes[0]["params"]["y"] == 200
+        assert "sub_operation" not in click_nodes[0]["params"]
 
     def test_empty_dsl(self):
         flow = dsl_to_flow("")
@@ -81,6 +84,16 @@ class TestDSLtoFlow:
         assert p["start_y"] == 200
         assert p["end_x"] == 300
         assert p["end_y"] == 400
+
+    def test_drag_conversion_uses_swipe_shape(self):
+        flow = dsl_to_flow("DRAG 10 20 30 40")
+        swipe_nodes = [n for n in flow["nodes"] if n["type"] == "swipe"]
+        assert len(swipe_nodes) >= 1
+        p = swipe_nodes[0]["params"]
+        assert p["start_x"] == 10
+        assert p["start_y"] == 20
+        assert p["end_x"] == 30
+        assert p["end_y"] == 40
 
     def test_screenshot_conversion(self):
         flow = dsl_to_flow("SCREENSHOT")
@@ -208,6 +221,7 @@ class TestRegistryFlowTypes:
             ('TYPE "hello"', "input_text"),
             ("HOTKEY ctrl+c", "keyboard"),
             ("SWIPE 0 0 100 100", "swipe"),
+            ("DRAG 0 0 100 100", "swipe"),
             ("SCROLL down", "swipe"),
             ("SCREENSHOT", "screenshot"),
             ("FOCUS Paint", "focus_window"),
