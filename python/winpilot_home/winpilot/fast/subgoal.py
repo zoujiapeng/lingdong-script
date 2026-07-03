@@ -25,6 +25,7 @@ class SubgoalRequest:
     target_window: dict[str, Any] = field(default_factory=dict)
     input: dict[str, Any] = field(default_factory=dict)
     click: dict[str, Any] = field(default_factory=dict)
+    clicks: list[dict[str, Any]] = field(default_factory=list)
     verify_texts: list[str] = field(default_factory=list)
     constraints: dict[str, Any] = field(default_factory=dict)
 
@@ -73,6 +74,12 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         input_spec = {"text": args.get("text"), "label": args.get("input_label") or args.get("label") or ""}
     if not click_spec and args.get("button_label"):
         click_spec = {"label": args.get("button_label"), "role": "button"}
+    clicks: list[dict[str, Any]] = []
+    if click_spec:
+        clicks.append(click_spec)
+    raw_clicks = args.get("clicks") or args.get("buttons") or []
+    if isinstance(raw_clicks, list):
+        clicks.extend(item for item in raw_clicks if isinstance(item, dict))
     verify_texts = _as_text_list(args.get("verify_texts") or args.get("verify") or [])
     if not verify_texts and input_spec.get("text"):
         verify_texts.append(str(input_spec.get("text") or ""))
@@ -86,6 +93,7 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
             "subgoal": subgoal_text,
             "input": input_spec,
             "click": click_spec,
+            "clicks": clicks,
             "verify_texts": verify_texts,
         },
         ensure_ascii=False,
@@ -99,6 +107,7 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         target_window=_as_dict(args.get("target_window") or {}),
         input=input_spec,
         click=click_spec,
+        clicks=clicks,
         verify_texts=_unique(verify_texts),
         constraints=_as_dict(args.get("constraints") or {}),
     )
@@ -180,8 +189,8 @@ class SubgoalExecutor:
                 elif isinstance(expect_text, str) and expect_text.strip():
                     action["expect"] = {"text_appears": expect_text.strip()}
                 actions.append(action)
-        click_spec = request.click
-        if click_spec:
+        click_specs = request.clicks or ([request.click] if request.click else [])
+        for click_spec in click_specs:
             label = click_spec.get("label") or click_spec.get("text") or click_spec.get("name")
             if label or click_spec.get("anchor"):
                 action = self._anchor_fields(click_spec, default_role="button")

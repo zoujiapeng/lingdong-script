@@ -29,6 +29,7 @@ _ACTION_TOOL_NAMES = {
     "wait",
     "tray_click",
     "run_action_batch",
+    "execute_subgoal",
     "clipboard_paste",
     "mouse_down",
     "mouse_up",
@@ -67,6 +68,14 @@ def _latency_summary(values: list[int]) -> dict[str, Any]:
         "max_ms": max(values) if values else 0,
         "p95_ms": _percentile(values, 0.95),
     }
+
+
+def _perception_dim_called(name: str, stat: dict[str, Any]) -> bool:
+    if str(name) != "vlm":
+        return stat.get("ms") is not None
+    # Fusion may emit a placeholder VLM dimension when no VLM is configured.
+    # Treat only non-empty or non-zero-latency VLM entries as strong VLM calls.
+    return int(stat.get("count") or 0) > 0 or int(stat.get("ms") or 0) > 0
 
 
 def _screen_watch_status(event: dict[str, Any]) -> dict[str, Any]:
@@ -137,7 +146,7 @@ def _low_latency_metrics(
             if stat.get("ms") is not None:
                 total += int(stat.get("ms") or 0)
                 saw_dim = True
-            if str(name) == "vlm":
+            if str(name) == "vlm" and _perception_dim_called(str(name), stat):
                 vlm_perception_calls += 1
         if saw_dim:
             perception_total_ms.append(total)
@@ -221,6 +230,11 @@ def _summarize_fast_gui(
     anchor_clicks = 0
     anchor_cache_hits = 0
     anchor_failures = 0
+    subgoal_calls = 0
+    subgoal_actions = 0
+    verified_subgoals = 0
+    subgoals_needing_llm = 0
+    subgoal_missing_evidence = 0
     for event in batch_action_events:
         if event.get("tool") != "click_element":
             continue
@@ -234,10 +248,43 @@ def _summarize_fast_gui(
                 isinstance(locator, dict) and locator.get("found") is False
             ):
                 anchor_failures += 1
+    for event in tool_events:
+        if event.get("tool") != "execute_subgoal":
+            continue
+        subgoal_calls += 1
+        meta = event.get("result_meta") or {}
+        if not isinstance(meta, dict):
+            continue
+        actions = meta.get("actions_executed")
+        counted_actions = False
+        if isinstance(actions, list):
+            subgoal_actions += len(actions)
+            counted_actions = True
+        metrics = meta.get("metrics") or {}
+        if isinstance(metrics, dict):
+            if not counted_actions:
+                subgoal_actions += int(metrics.get("action_count") or 0)
+            round_trips_saved += int(metrics.get("controller_round_trips_saved") or 0)
+            screen_waits += int(metrics.get("screen_wait_count") or 0)
+        controller_state = meta.get("controller_state")
+        if isinstance(controller_state, dict) and controller_state.get("phase"):
+            controller_phases[str(controller_state.get("phase"))] += 1
+        if meta.get("verified") is True:
+            verified_subgoals += 1
+        if meta.get("needs_llm_reason") is True:
+            subgoals_needing_llm += 1
+        packet = meta.get("evidence_packet")
+        if isinstance(packet, dict) and packet.get("missing_texts"):
+            subgoal_missing_evidence += 1
     return {
         "batch_calls": batch_calls,
         "batch_actions": batch_actions,
         "batch_subgoals": batch_subgoals,
+        "subgoal_calls": subgoal_calls,
+        "subgoal_actions": subgoal_actions,
+        "verified_subgoals": verified_subgoals,
+        "subgoals_needing_llm": subgoals_needing_llm,
+        "subgoal_missing_evidence": subgoal_missing_evidence,
         "round_trips_saved": round_trips_saved,
         "screen_waits": screen_waits,
         "screen_watch_calls": sum(1 for e in tool_events if e.get("tool") == "screen_watch"),
@@ -350,7 +397,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         for name, stat in dims.items():
             if isinstance(stat, dict):
                 dim_counts[str(name)] += int(stat.get("count") or 0)
-                if stat.get("ms") is not None:
+                if _perception_dim_called(str(name), stat):
                     dim_latency[str(name)].append(int(stat.get("ms") or 0))
 
     perception = {
@@ -475,6 +522,11 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "batch_calls": sum(int(f.get("batch_calls") or 0) for f in fast_items),
             "batch_actions": sum(int(f.get("batch_actions") or 0) for f in fast_items),
             "batch_subgoals": sum(int(f.get("batch_subgoals") or 0) for f in fast_items),
+            "subgoal_calls": sum(int(f.get("subgoal_calls") or 0) for f in fast_items),
+            "subgoal_actions": sum(int(f.get("subgoal_actions") or 0) for f in fast_items),
+            "verified_subgoals": sum(int(f.get("verified_subgoals") or 0) for f in fast_items),
+            "subgoals_needing_llm": sum(int(f.get("subgoals_needing_llm") or 0) for f in fast_items),
+            "subgoal_missing_evidence": sum(int(f.get("subgoal_missing_evidence") or 0) for f in fast_items),
             "round_trips_saved": sum(int(f.get("round_trips_saved") or 0) for f in fast_items),
             "screen_waits": sum(int(f.get("screen_waits") or 0) for f in fast_items),
             "screen_watch_calls": sum(int(f.get("screen_watch_calls") or 0) for f in fast_items),
