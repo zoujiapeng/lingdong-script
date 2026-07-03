@@ -99,6 +99,9 @@ class ToolSession(
         self._screen_epoch = 0
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
+        # Recipe ids whose replay was actually attempted via reuse_skill.
+        # Prompt-injected hints alone must not be scored as successful reuse.
+        self.used_memory_recipe_ids: list[str] = []
 
     # ----------------------------------------------------------- dispatch
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:

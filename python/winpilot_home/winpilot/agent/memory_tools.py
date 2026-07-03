@@ -47,6 +47,10 @@ class MemoryToolMixin:
         script_path = SCRIPTS_DIR / script
         if not script_path.exists():
             return ToolResult(f"复用脚本 {script} 已丢失，请实时操作。")
+        if recipe and recipe.get("id"):
+            used = getattr(self, "used_memory_recipe_ids", None)
+            if isinstance(used, list) and recipe["id"] not in used:
+                used.append(recipe["id"])
         BUS.publish("memory", action="reuse", task=(recipe or {}).get("task", task))
         try:
             result = trace_mod.replay(script_path, stop_event=self.stop_event)
