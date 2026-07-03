@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import win32gui
+
 from ..action.verify import _match_visible_text
 from ..agent.task_rules import _required_literal_tokens, _required_visible_payloads, _visible_state_targets
 from ..agent.tool_result import ToolResult
@@ -161,10 +163,12 @@ def _rough_region(window: Region, hint: str) -> Region | None:
         h = max(80, int(height * 0.46))
         return Region(left, top + height - h, width, h).clamp_to_screen()
     if hint == "left":
-        return Region(left, top, max(100, int(width * 0.46)), height).clamp_to_screen()
+        trim = min(96, max(0, int(height * 0.08))) if height >= 420 else 0
+        return Region(left, top + trim, max(100, int(width * 0.36)), max(80, height - trim)).clamp_to_screen()
     if hint == "right":
-        w = max(100, int(width * 0.46))
-        return Region(left + width - w, top, w, height).clamp_to_screen()
+        trim = min(96, max(0, int(height * 0.08))) if height >= 420 else 0
+        w = max(100, int(width * 0.36))
+        return Region(left + width - w, top + trim, w, max(80, height - trim)).clamp_to_screen()
     if hint in {"top-right", "upper-right"}:
         w = max(100, int(width * 0.55))
         h = max(80, int(height * 0.48))
@@ -277,10 +281,24 @@ class SubgoalExecutor:
                 return int(hwnd)
         except (TypeError, ValueError):
             pass
-        return getattr(self.session, "hwnd", None)
+        session_hwnd = getattr(self.session, "hwnd", None)
+        if session_hwnd:
+            return session_hwnd
+        try:
+            foreground = int(win32gui.GetForegroundWindow())
+            if foreground:
+                try:
+                    setattr(self.session, "hwnd", foreground)
+                except Exception:
+                    pass
+                return foreground
+        except Exception:
+            pass
+        return None
 
-    def _ensure_observed(self, request: SubgoalRequest) -> tuple[Snapshot | None, list[dict[str, Any]]]:
+    def _ensure_observed(self, request: SubgoalRequest) -> tuple[Snapshot | None, list[dict[str, Any]], bool]:
         prelude: list[dict[str, Any]] = []
+        skip_click_auto_observe = False
         hwnd = self._target_hwnd(request)
         if hwnd:
             try:
@@ -292,17 +310,20 @@ class SubgoalExecutor:
             targeted = self._targeted_initial_snapshot(request)
             if targeted is not None:
                 self.session.snapshot = targeted
+                targeted_meta = targeted.dim_stats.get("targeted_initial", {})
+                skip_click_auto_observe = targeted_meta.get("label_matched") is False
                 prelude.append({
                     "action": "targeted_observe",
                     "ok": True,
                     "preview": targeted.to_text(max_elements=12)[:320],
+                    "label_matched": targeted_meta.get("label_matched"),
                     "dim_stats": targeted.dim_stats,
                 })
             else:
                 observe = self.session.dispatch("observe", {})
                 prelude.append({"action": "observe", "ok": not bool(observe.terminal), "preview": observe.text[:320]})
         snapshot = getattr(self.session, "snapshot", None)
-        return snapshot, prelude
+        return snapshot, prelude, skip_click_auto_observe
 
     def _targeted_initial_snapshot(self, request: SubgoalRequest) -> Snapshot | None:
         hwnd = self._target_hwnd(request)
@@ -337,12 +358,20 @@ class SubgoalExecutor:
             "roi": [roi.left, roi.top, roi.width, roi.height],
         }
         elements.extend(cv_elements)
-        if not _elements_contain_terms(elements, terms):
+        label_matched = _elements_contain_terms(elements, terms)
+        if not label_matched and not elements:
             return None
         for idx, element in enumerate(elements, start=1):
             element.elem_id = idx
             if "targeted_initial_roi" not in element.states:
                 element.states.append("targeted_initial_roi")
+        dim_stats["targeted_initial"] = {
+            "count": len(elements),
+            "ms": 0,
+            "scope": "targeted_initial_roi",
+            "label_matched": label_matched,
+            "term_count": len(terms),
+        }
         return Snapshot(
             hwnd=int(hwnd),
             title=win32._window_text(int(hwnd)),
@@ -414,7 +443,7 @@ class SubgoalExecutor:
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
         request = parse_subgoal_request(args, task=getattr(self.session, "task", ""))
-        snapshot, prelude = self._ensure_observed(request)
+        snapshot, prelude, skip_click_auto_observe = self._ensure_observed(request)
         recent_changes = {}
         try:
             recent_changes = self.controller.watcher.status()
@@ -427,6 +456,10 @@ class SubgoalExecutor:
             recent_changes=recent_changes,
         ) if snapshot is not None else {}
         actions = self._build_actions(request)
+        if skip_click_auto_observe:
+            for action in actions:
+                if action.get("action") == "click_element":
+                    action["skip_auto_observe"] = True
         if not actions:
             payload = {
                 "ok": False,

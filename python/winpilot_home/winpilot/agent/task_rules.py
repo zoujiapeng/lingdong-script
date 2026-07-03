@@ -79,6 +79,11 @@ def _has_explicit_gui_only_marker(task: str) -> bool:
         or "use gui" in text
         or "through gui" in text
         or "via gui" in text
+        or "\u53ea\u7528gui" in compact
+        or "\u4ec5\u7528gui" in compact
+        or "\u53ea\u901a\u8fc7gui" in compact
+        or "\u53ea\u7528\u56fe\u5f62\u754c\u9762" in compact
+        or "\u4ec5\u7528\u56fe\u5f62\u754c\u9762" in compact
         or "not use command line" in text
         or "do not use command line" in text
         or "no command line" in text

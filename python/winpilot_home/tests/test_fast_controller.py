@@ -1145,6 +1145,7 @@ def test_subgoal_uses_targeted_initial_roi_when_region_hint_matches(monkeypatch)
 
     monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: Region(0, 0, 1000, 800))
     monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda hwnd: "Target")
+    monkeypatch.setattr(subgoal_mod.win32gui, "GetForegroundWindow", lambda: 1)
 
     def fake_ocr_collect(region, min_conf=None):
         captured_regions.append(region)
@@ -1185,6 +1186,58 @@ def test_subgoal_uses_targeted_initial_roi_when_region_hint_matches(monkeypatch)
     assert session.snapshot.elements[0].states == ["targeted_initial_roi"]
     assert captured_regions == [Region(450, 0, 550, 384)]
     assert [name for name, _args in calls] == ["focus_window", "click"]
+
+
+def test_subgoal_targeted_roi_no_label_match_returns_candidates_without_full_observe(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: Region(0, 0, 1000, 800))
+    monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda hwnd: "Target")
+    monkeypatch.setattr(subgoal_mod.win32gui, "GetForegroundWindow", lambda: 1)
+    monkeypatch.setattr(
+        subgoal_mod.ocr,
+        "collect",
+        lambda region, min_conf=None: [
+            UIElement(source="ocr", role="text", text="只改局部状态", cx=210, cy=200, left=155, top=188, width=110, height=24),
+            UIElement(source="ocr", role="text", text="打开弹窗", cx=340, cy=200, left=300, top=188, width=80, height=24),
+        ],
+    )
+    monkeypatch.setattr(subgoal_mod.vision_cv, "detect_icon_candidates", lambda region: [])
+
+    class Session:
+        task = "Click Local Counter and verify LOCAL_COUNTER"
+        hwnd = None
+        run_id = "run-targeted-roi-miss"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "observe":
+                raise AssertionError("label-miss targeted ROI should not fall back to full observe")
+            return ToolResult('{"ok": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "click Local Counter",
+        "click": {"label": "Local Counter", "expected_region": "left"},
+        "verify_texts": ["LOCAL_COUNTER"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["actions_executed"][0]["skip_auto_observe"] is True
+    assert payload["evidence_packet"]["prelude"][1]["action"] == "targeted_observe"
+    assert payload["evidence_packet"]["prelude"][1]["label_matched"] is False
+    assert "只改局部状态" in payload["evidence_packet"]["candidate_click_labels"]
+    assert calls == [("focus_window", {"hwnd": 1})]
 
 
 def test_subgoal_anchor_failure_returns_visible_region_candidates():

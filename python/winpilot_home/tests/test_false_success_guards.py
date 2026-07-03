@@ -373,6 +373,7 @@ def test_gui_only_shell_policy():
 
     assert _is_gui_only_task("GUI-only test. Use Notepad.")
     assert _is_gui_only_task("Use GUI only; do not use shell.")
+    assert _is_gui_only_task("请只用GUI完成这个任务")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7\u771f\u5b9eGUI\u64cd\u4f5c")
     assert _is_gui_only_task("\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70GUI")
     assert _is_gui_only_task("\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c\uff0c\u4e0d\u8981\u7528\u547d\u4ee4\u884c")

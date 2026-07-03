@@ -327,7 +327,8 @@ class FastGuiController:
             initial_locator = located
             query = _anchor_query(anchor)
             dispatch = getattr(self.session, "dispatch", None)
-            if query and callable(dispatch):
+            skip_auto_observe = bool(action.get("skip_auto_observe"))
+            if query and callable(dispatch) and not skip_auto_observe:
                 try:
                     max_elements = max(1, int(action.get("max_elements") or 160))
                 except (TypeError, ValueError):
@@ -353,13 +354,20 @@ class FastGuiController:
                     "blocked": True,
                     "error": (
                         "click_element could not locate anchor after the available "
-                        "snapshot and one targeted observe retry."
+                        "snapshot"
+                        + (
+                            " without an extra observe retry."
+                            if skip_auto_observe
+                            else " and one targeted observe retry."
+                        )
                     ),
                     "via": "click_element",
                     "anchor": _anchor_payload(anchor),
                     "anchor_locator": located.to_dict(),
                     "initial_anchor_locator": initial_locator.to_dict(),
                 }
+                if skip_auto_observe:
+                    payload["skipped_auto_observe"] = True
                 if auto_observe is not None:
                     payload["controller_auto_observe"] = auto_observe
                 return ToolResult(json.dumps(payload, ensure_ascii=False))
