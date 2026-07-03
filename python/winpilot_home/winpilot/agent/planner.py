@@ -42,6 +42,18 @@ _RESULT_CONTEXT_MARKERS = (
 )
 _BUTTON_NOUN_PATTERN = r"(?:button|btn|menu|link|按钮|按键|菜单|链接)"
 _CLICK_VERB_PATTERN = r"(?:click|press|tap|select|点击|按下|按|选择)"
+_DRAWING_GOAL_RE = re.compile(
+    r"(draw|paint|sketch|canvas|whiteboard|shape|triangle|rectangle|circle|"
+    r"绘制|画|画布|白板|图形|三角|三角形|矩形|方形|圆形)",
+    re.IGNORECASE,
+)
+_VISUAL_DRAWING_WORDS = {
+    "blue", "red", "green", "yellow", "black", "purple", "orange",
+    "蓝", "蓝色", "红", "红色", "绿", "绿色", "黄", "黄色", "黑", "黑色",
+    "紫", "紫色", "橙", "橙色",
+    "triangle", "rectangle", "square", "circle", "line", "shape",
+    "三角", "三角形", "矩形", "方形", "正方形", "圆", "圆形", "线", "直线", "图形",
+}
 
 
 def _compact_text(text: str) -> str:
@@ -117,6 +129,17 @@ def _check_echoes_button_label(goal: str, key: str, value: str) -> bool:
     return any(re.search(pattern, goal, re.IGNORECASE) for pattern in patterns)
 
 
+def _check_is_visual_drawing_word(goal: str, key: str, value: str) -> bool:
+    if key not in _VISIBLE_CHECK_KEYS:
+        return False
+    if not _DRAWING_GOAL_RE.search(goal or ""):
+        return False
+    compact = _compact_text(value)
+    if not compact:
+        return False
+    return any(_compact_text(word) == compact for word in _VISUAL_DRAWING_WORDS)
+
+
 def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     valid = _valid_check(check)
     if not valid:
@@ -125,6 +148,9 @@ def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     dropped: list[str] = []
     for key, value in list(sanitized.items()):
         if isinstance(value, str) and _check_echoes_button_label(goal, key, value):
+            dropped.append(f"{key}={value!r}")
+            sanitized.pop(key, None)
+        elif isinstance(value, str) and _check_is_visual_drawing_word(goal, key, value):
             dropped.append(f"{key}={value!r}")
             sanitized.pop(key, None)
     if dropped:

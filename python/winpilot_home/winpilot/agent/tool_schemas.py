@@ -265,7 +265,7 @@ def tool_schemas(
                 },
                 "draw": {
                     "type": "object",
-                    "description": "Optional drawing routine for canvas/whiteboard/editor tasks. The controller locates the likely canvas/work surface, optionally selects a requested visible color through generic color palette/swatch detection, generates simple shape strokes, draws them, and verifies pixel change. Use this instead of spending steps on toolbar text when the task is to draw visible pixels.",
+                    "description": "Optional single drawing routine for canvas/whiteboard/editor tasks. The controller waits for a ready canvas/work surface, optionally selects a requested visible color through generic color palette/swatch detection, uses expected_region to place the shape inside the canvas, generates simple shape strokes, draws them, and verifies pixel/color change. Use this instead of spending steps on toolbar text when the task is to draw visible pixels.",
                     "properties": {
                         "shape": _prop("string", "Simple shape/object such as triangle, rectangle, circle, line, check, or freeform."),
                         "color": _prop("string", "Requested color, e.g. blue/red/green. The routine records this intent; select visible color controls separately if the app requires it."),
@@ -275,6 +275,24 @@ def tool_schemas(
                             "type": "array",
                             "description": "Optional explicit absolute screen-coordinate strokes; omit to let the controller generate strokes inside the likely canvas.",
                             "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                        },
+                    },
+                },
+                "draws": {
+                    "type": "array",
+                    "description": "Optional ordered drawing routines for multi-shape canvas tasks. Use this to draw several simple colored shapes in one controller-first subgoal, e.g. blue triangle on the left then red rectangle on the right.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "shape": _prop("string", "Simple shape/object such as triangle, rectangle, circle, line, check, or freeform."),
+                            "color": _prop("string", "Requested color, e.g. blue/red/green."),
+                            "expected_region": _prop("string", "Rough canvas region such as left, right, center-left, center-right."),
+                            "duration": _prop("number", "Duration per stroke in seconds; default 0.28."),
+                            "strokes": {
+                                "type": "array",
+                                "description": "Optional explicit absolute screen-coordinate strokes; omit to let the controller generate strokes inside the requested canvas subregion.",
+                                "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                            },
                         },
                     },
                 },

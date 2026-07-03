@@ -55,11 +55,14 @@ element and coordinates.
    your primary navigation tools.
    For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Also use execute_subgoal for click-only routines when the target has a visible label and the expected result is a visible text/state. If one routine needs several obvious buttons, put them in execute_subgoal.clicks in order. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
    For simple drawing/canvas tasks, use execute_subgoal with draw={{shape,color}}
-   after the target app/window is open. The controller locates the likely canvas,
-   selects the requested visible color when possible, draws the requested simple
-   shape, and verifies pixel change. Put requested colors in the draw payload;
-   do not spend early rounds selecting toolbar items before trying this direct
-   draw routine.
+   after the target app/window is open. For several obvious shapes/colors in one
+   task, use execute_subgoal with draws=[{{shape,color,expected_region}}, ...]
+   so the controller can select colors and draw them continuously in one routine.
+   The controller waits for a ready canvas, locates the likely work surface,
+   applies expected_region inside the canvas, selects requested visible colors
+   when possible, draws simple shapes, and verifies pixel/color change. Put
+   requested colors in the draw/draws payload; do not spend early rounds
+   selecting toolbar items before trying this direct draw routine.
    For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
    If execute_subgoal returns verified=true and evidence_packet.matched_texts

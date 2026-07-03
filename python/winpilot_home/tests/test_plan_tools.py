@@ -90,3 +90,33 @@ def test_complete_subgoal_accepts_current_execute_subgoal_evidence(monkeypatch):
 
     assert session.plan.steps[0]["done"] is True
 
+
+def test_complete_subgoal_accepts_current_visual_color_evidence(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(tools_mod, "verify", _false_verify())
+    session = ToolSession(task="画一个蓝色三角形")
+    session.hwnd = 123
+    session.plan = planner.Plan([
+        {
+            "goal": "在画布上绘制一个蓝色三角形",
+            "check": {"text_appears": "蓝色"},
+        }
+    ])
+    # Simulate older/in-flight plans created before drawing color checks were
+    # sanitized out by the planner.
+    session.plan.steps[0]["check"] = {"text_appears": "蓝色"}
+    session.visible_evidence_ledger = [
+        {
+            "source": "execute_subgoal:visual_color",
+            "target": "blue",
+            "snippet": "subgoal matched visual color: blue",
+        }
+    ]
+
+    session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is True
+

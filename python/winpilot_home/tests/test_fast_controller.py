@@ -1456,6 +1456,124 @@ def test_execute_subgoal_draw_rejects_missing_requested_color(monkeypatch):
     assert "required color evidence is missing" in payload["error"]
 
 
+def test_execute_subgoal_draw_waits_for_ready_canvas(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+    from winpilot.utils.screenshot import Region
+
+    window = Region(10, 20, 500, 400)
+    dark = np.zeros((400, 500, 3), dtype=np.uint8)
+    ready = np.zeros((400, 500, 3), dtype=np.uint8)
+    ready[120:360, 80:460] = 255
+    captures = []
+    bbox_calls = []
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
+    monkeypatch.setattr(subgoal_mod.time, "sleep", lambda _seconds: None)
+
+    def fake_bbox(_image):
+        bbox_calls.append(1)
+        return None if len(bbox_calls) == 1 else (80, 120, 460, 360)
+
+    monkeypatch.setattr(subgoal_mod.vision_cv, "likely_canvas_bbox", fake_bbox)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+
+        @staticmethod
+        def capture_fn(region):
+            captures.append(region)
+            return dark if len(captures) == 1 else ready
+
+    class Session:
+        task = "draw a blue triangle on the canvas"
+        hwnd = 7
+        run_id = "run-draw-ready"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    executor = SubgoalExecutor(Session(), Controller())
+    request = parse_subgoal_request({
+        "subgoal": "draw a blue triangle",
+        "draw": {"shape": "triangle", "color": "blue"},
+    })
+    action = executor._build_draw_action(request, request.draw)
+
+    assert action is not None
+    assert len(captures) >= 2
+    assert action["canvas_region"] == {"x": 90, "y": 140, "width": 380, "height": 240}
+    assert action["canvas_ready_attempts"][0]["looks_unready"] is True
+
+
+def test_execute_subgoal_builds_multi_draws_with_canvas_regions(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+    from winpilot.utils.screenshot import Region
+
+    window = Region(10, 20, 500, 400)
+    image = np.zeros((400, 500, 3), dtype=np.uint8)
+    image[120:360, 80:460] = 255
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+        capture_fn = staticmethod(lambda region: image)
+
+    class Session:
+        task = "draw a blue triangle and red rectangle on the canvas"
+        hwnd = 7
+        run_id = "run-draws"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    executor = SubgoalExecutor(Session(), Controller())
+    request = parse_subgoal_request({
+        "subgoal": "draw two colored shapes",
+        "draws": [
+            {"shape": "triangle", "color": "blue", "expected_region": "center-left"},
+            {"shape": "rectangle", "color": "red", "expected_region": "center-right"},
+        ],
+        "constraints": {"wait": False},
+    })
+    actions = executor._build_actions(request)
+
+    assert [item["action"] for item in actions] == [
+        "select_color",
+        "draw_strokes",
+        "select_color",
+        "draw_strokes",
+    ]
+    assert actions[0]["color"] == "blue"
+    assert actions[2]["color"] == "red"
+    blue_draw = actions[1]
+    red_draw = actions[3]
+    assert blue_draw["shape"] == "triangle"
+    assert red_draw["shape"] == "rectangle"
+    assert blue_draw["draw_region"]["x"] < red_draw["draw_region"]["x"]
+    blue_xs = [point[0] for stroke in blue_draw["strokes"] for point in stroke]
+    red_xs = [point[0] for stroke in red_draw["strokes"] for point in stroke]
+    assert max(blue_xs) < max(red_xs)
+
+
 def test_fast_controller_select_color_clicks_visible_palette_swatch():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

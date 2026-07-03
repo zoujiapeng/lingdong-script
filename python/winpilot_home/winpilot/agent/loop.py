@@ -622,6 +622,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                                 text,
                                 self._visible_snippet(preview, text) or f"subgoal matched visible text: {text}",
                             )
+                visual_colors = packet.get("matched_visual_colors") or []
+                if isinstance(visual_colors, list):
+                    for value in visual_colors:
+                        color = str(value or "").strip().casefold()
+                        if color:
+                            self._append_visible_evidence(
+                                "execute_subgoal:visual_color",
+                                color,
+                                f"subgoal matched visual color: {color}",
+                            )
         if not (isinstance(data, dict) and data.get("verified") is True):
             return
         for value in self._expect_visible_values(args):
@@ -680,6 +690,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "needs_llm_reason": data.get("needs_llm_reason"),
                 "matched_texts": packet.get("matched_texts"),
                 "missing_texts": packet.get("missing_texts"),
+                "matched_visual_colors": packet.get("matched_visual_colors"),
+                "missing_visual_colors": packet.get("missing_visual_colors"),
+                "visible_colors": packet.get("visible_colors"),
                 "candidate_click_labels": packet.get("candidate_click_labels"),
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
@@ -1274,10 +1287,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "[Drawing/canvas task guidance] The goal is visible pixels, not just tool selection. "
                     "For simple shapes or marks, prefer execute_subgoal with a draw payload, e.g. "
                     "execute_subgoal(subgoal='draw a blue triangle on the visible canvas', "
-                    "draw={'shape':'triangle','color':'blue'}). The local controller will locate the "
-                    "likely canvas/work area, select the requested color when possible, generate strokes, "
-                    "draw them, wait, and return pixel-change evidence. If a color is requested, put it in "
-                    "the draw payload; do not spend early steps on separate Color 1/Color 2/Edit colors "
+                    "draw={'shape':'triangle','color':'blue'}). For multiple simple shapes/colors, use one "
+                    "execute_subgoal with draws=[{'shape':'triangle','color':'blue','expected_region':'left'}, "
+                    "{'shape':'rectangle','color':'red','expected_region':'right'}] so the controller can "
+                    "select colors and draw continuously. The local controller will wait for a ready canvas, "
+                    "locate the likely work area, apply expected_region inside the canvas, select the requested "
+                    "color when possible, generate strokes, draw them, wait, and return pixel/color evidence. "
+                    "If a color is requested, put it in the draw/draws payload; do not spend early steps on separate Color 1/Color 2/Edit colors "
                     "subgoals unless the draw routine fails or returns a visible color mismatch. Use direct draw_strokes/run_action_batch only when you already have grounded "
                     "coordinates or execute_subgoal says needs_llm_reason. Do not pre-explore toolbars unless "
                     "direct drawing fails or the active mode is clearly wrong. Prefer direct strokes on the "
