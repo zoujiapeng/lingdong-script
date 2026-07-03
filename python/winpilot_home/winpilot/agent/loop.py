@@ -225,7 +225,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Always use plain text; screenshot is injected as a separate user message via
         # _inject_observe_screenshot when image_b64 is empty (fallback path).
         content = result_text
-        if tool_name in {"execute_subgoal", "run_action_batch", "zoom", "screenshot", "draw_strokes", "drag"}:
+        if tool_name in {
+            "execute_subgoal",
+            "run_action_batch",
+            "zoom",
+            "screenshot",
+            "draw_strokes",
+            "drag",
+            "complete_subgoal",
+            "revise_plan",
+        }:
             content = self._compact_tool_evidence(tool_name, result_text)
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": content})
@@ -677,6 +686,44 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
     @staticmethod
     def _compact_tool_evidence(tool_name: str, result_text: str) -> str:
+        if tool_name in {"complete_subgoal", "revise_plan"}:
+            plan_items: list[dict[str, Any]] = []
+            for line in (result_text or "").splitlines():
+                match = re.match(r"\[(?P<done>[xX ])\]\s*(?P<index>\d+)\.\s*(?P<goal>.+)", line.strip())
+                if not match:
+                    continue
+                plan_items.append({
+                    "index": int(match.group("index")),
+                    "done": match.group("done").casefold() == "x",
+                    "goal": match.group("goal")[:180],
+                })
+            first_line = (result_text or "").splitlines()[0] if (result_text or "").splitlines() else ""
+            compact: dict[str, Any] = {
+                "tool": tool_name,
+                "message": first_line[:240],
+            }
+            completed_match = re.search(r"子目标\s*(\d+)", first_line)
+            if completed_match:
+                compact["completed_index"] = int(completed_match.group(1))
+            if "已核验" in first_line:
+                compact["verified"] = True
+            if "所有子目标均完成" in (result_text or ""):
+                compact["all_done"] = True
+            if plan_items:
+                compact["completed_indices"] = [
+                    item["index"] for item in plan_items if item["done"]
+                ]
+                compact["remaining_steps"] = [
+                    item for item in plan_items if not item["done"]
+                ][:6]
+                compact["next_unfinished"] = next(
+                    (item for item in plan_items if not item["done"]),
+                    None,
+                )
+            compact["guidance"] = (
+                "continue with next_unfinished; do not revise_plan just to restate the same todo"
+            )
+            return json.dumps(compact, ensure_ascii=False, default=str)[:1000]
         try:
             data = json.loads(result_text or "{}")
         except (json.JSONDecodeError, TypeError):
