@@ -232,6 +232,40 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._foldable.append((len(self.messages) - 1, summary))
             self._fold_old()
 
+    def _fold_checkpoint(self, folded_summary: str) -> str:
+        """Compact state that survives when an old bulky tool result is folded."""
+        parts = ["[folded context checkpoint]", f"goal: {self.task[:200]}"]
+        snapshot = self.session.snapshot
+        if snapshot is not None:
+            elements = getattr(snapshot, "elements", []) or []
+            parts.append(
+                f'screen: title="{getattr(snapshot, "title", "")[:80]}" '
+                f'hwnd={getattr(snapshot, "hwnd", "")} elements={len(elements)}'
+            )
+        state = self.run_state.to_dict()
+        if state.get("phase") and state.get("phase") != "idle":
+            issue = str(state.get("last_issue") or "")[:180]
+            parts.append(
+                f'run_state: phase={state.get("phase")} '
+                f'last_tool={state.get("last_tool")} issue="{issue}"'
+            )
+        if self.session.world_enabled:
+            world_state = self.session.world.state()
+            if world_state.get("last_change") or world_state.get("screen_watch"):
+                parts.append(
+                    "world: "
+                    f'last_change="{str(world_state.get("last_change") or "")[:180]}" '
+                    f'repeated={world_state.get("repeated")} '
+                    f'identical_observes={world_state.get("identical_observes")}'
+                )
+        if self._recent_results:
+            parts.append("recent_tool_evidence:")
+            for name, text in self._recent_results[-3:]:
+                one_line = re.sub(r"\s+", " ", str(text)).strip()[:260]
+                parts.append(f"- {name}: {one_line}")
+        parts.append(f"folded_item: {folded_summary}")
+        return "\n".join(parts)[:1800]
+
     def _fold_old(self) -> None:
         """Compress old bulky observations — but ONLY when the context is large.
 
@@ -259,9 +293,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         ):
             idx, summary = self._foldable.pop(0)
             content = self.messages[idx]["content"]
-            already_folded = isinstance(content, str) and content.startswith("[已折叠]")
+            already_folded = (
+                isinstance(content, str)
+                and (
+                    content.startswith("[已折叠]")
+                    or content.startswith("[folded context checkpoint]")
+                )
+            )
             if not already_folded:
-                self.messages[idx]["content"] = summary
+                self.messages[idx]["content"] = self._fold_checkpoint(summary)
 
     def _inject_observe_screenshot(self) -> None:
         """After an observe, embed the current window screenshot into history as
@@ -968,7 +1008,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "verification such as Test-Path/Get-Content/Select-String after the GUI work."
                 ),
             })
-        if self.session_context and CONFIG.get("agent", "session_memory", default=True):
+        if (
+            self.session_context
+            and CONFIG.get("agent", "session_memory", default=True)
+            and session_mod.should_include_context(self.task)
+        ):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
                 self.messages.append({"role": "user", "content": ctx})

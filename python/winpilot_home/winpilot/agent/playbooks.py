@@ -39,6 +39,8 @@ class Playbook:
     content: str
     keywords: tuple[str, ...] = field(default_factory=tuple)
     window_triggers: tuple[str, ...] = field(default_factory=tuple)
+    conditions: tuple[str, ...] = field(default_factory=tuple)
+    evidence: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _render(content: str) -> str:
@@ -47,6 +49,45 @@ def _render(content: str) -> str:
     for var, value in _PATH_VARS.items():
         content = content.replace(var, value)
     return content
+
+
+def _tuple_of_strings(values, limit: int = 5) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return ()
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text:
+            out.append(_render(text)[:220])
+        if len(out) >= limit:
+            break
+    return tuple(out)
+
+
+def _default_conditions(data: dict) -> tuple[str, ...]:
+    name = str(data.get("name") or "playbook")
+    keywords = ", ".join(str(k) for k in data.get("keywords", [])[:4])
+    triggers = ", ".join(str(t) for t in data.get("window_triggers", [])[:4])
+    conditions = [
+        "Use only when the current task and observed UI match this situation.",
+        f"Playbook name: {name}.",
+    ]
+    if keywords:
+        conditions.append(f"Task keyword anchors: {keywords}.")
+    if triggers:
+        conditions.append(f"Runtime window/title anchors: {triggers}.")
+    return tuple(conditions[:5])
+
+
+def _default_evidence(_data: dict) -> tuple[str, ...]:
+    return (
+        "Before applying, observe or otherwise confirm the current UI matches the playbook situation.",
+        "After applying, verify the requested result with current screen/text/VLM/nonvisual summary or deterministic output before done.",
+    )
 
 
 _cache: tuple[float, list[Playbook]] | None = None  # (dir mtime, books)
@@ -79,6 +120,8 @@ def load_all() -> list[Playbook]:
                 content=_render(str(data["content"])),
                 keywords=tuple(str(k).lower() for k in data.get("keywords", [])),
                 window_triggers=tuple(str(t) for t in data.get("window_triggers", [])),
+                conditions=_tuple_of_strings(data.get("conditions")) or _default_conditions(data),
+                evidence=_tuple_of_strings(data.get("evidence")) or _default_evidence(data),
             ))
         except (json.JSONDecodeError, OSError, KeyError) as exc:
             logger.warning("playbook %s 加载失败: %s", path.name, exc)
@@ -135,4 +178,17 @@ def render_section(books: list[Playbook]) -> str:
     """Concatenated playbook bodies for prompt injection ('' when none)."""
     if not books:
         return ""
-    return "\n\n" + "\n\n".join(b.content for b in books)
+    return "\n\n" + "\n\n".join(render_playbook(b) for b in books)
+
+
+def render_playbook(book: Playbook) -> str:
+    """Render one playbook with applicability and evidence guardrails."""
+    parts = [f"# Playbook: {book.name}"]
+    if book.description:
+        parts.append(f"Description: {book.description}")
+    if book.conditions:
+        parts.append("Conditions:\n" + "\n".join(f"- {item}" for item in book.conditions))
+    if book.evidence:
+        parts.append("Evidence required:\n" + "\n".join(f"- {item}" for item in book.evidence))
+    parts.append(book.content)
+    return "\n".join(parts)
