@@ -143,6 +143,76 @@ def test_observe_changed_only_uses_recent_screen_delta_roi(monkeypatch):
     assert session.snapshot.region == Region(85, 85, 60, 50)
 
 
+def test_observe_changed_only_query_miss_falls_back_to_full_observe(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.agent import perception_tools, tools
+    from winpilot.perception.fusion import Snapshot
+
+    session = ToolSession(task="demo")
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Changed App")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [])
+    monkeypatch.setattr(perception_tools.ocr, "collect", lambda region, min_conf=None: [
+        UIElement(source="ocr", role="text", text="Unrelated ROI", cx=120, cy=120, left=100, top=110, width=90, height=20)
+    ])
+    monkeypatch.setattr(perception_tools.vision_cv, "detect_icon_candidates", lambda region: [])
+
+    full_observe_calls = []
+
+    def fake_full_observe(hwnd, include_icons=True, perception_mode="normal"):
+        full_observe_calls.append((hwnd, include_icons, perception_mode))
+        return Snapshot(
+            hwnd=hwnd,
+            title="Changed App",
+            region=Region(0, 0, 500, 400),
+            elements=[
+                UIElement(source="ocr", role="text", text="Target Text", cx=300, cy=200, left=260, top=190, width=100, height=20),
+            ],
+        )
+
+    monkeypatch.setattr(perception_tools.fusion, "observe", fake_full_observe)
+
+    def fake_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "observe_cache_ttl_s":
+            return 0.0
+        if section == "fusion" and key == "changed_region_pad_px":
+            return 10
+        return default
+
+    monkeypatch.setattr(perception_tools.CONFIG, "get", fake_config_get)
+
+    session._fast_gui_controller = SimpleNamespace(
+        watcher=SimpleNamespace(
+            status=lambda: {
+                "sequence": 2,
+                "running": False,
+                "last_changed": True,
+                "last_ratio": 0.01,
+                "changed_regions": [{"left": 95, "top": 95, "width": 40, "height": 30}],
+                "samples": 2,
+                "capture_latency_ms": 4,
+                "diff_latency_ms": 1,
+            }
+        )
+    )
+
+    result = session._t_observe({"changed_only": True, "query": "Target", "include_icons": False})
+
+    assert "Changed-only observe query fallback" in result.text
+    assert "Filtered elements matching query \"target\"" in result.text
+    assert "Target Text" in result.text
+    assert "Unrelated ROI" not in result.text
+    assert full_observe_calls == [(123, False, "normal")]
+    assert session.snapshot is not None
+    assert session.snapshot.region == Region(0, 0, 500, 400)
+
+
 def test_observe_changed_only_uses_recent_roi_after_screen_stabilizes(monkeypatch):
     from types import SimpleNamespace
 
