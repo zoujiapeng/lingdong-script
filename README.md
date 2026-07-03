@@ -16,7 +16,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
 - GUI 任务走 `AgentRunner`；编程/仓库任务走 `CodingRunner`。
 - GUI runner 的任务规则在 `agent/task_rules.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 LLM 编排。
-- 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
+- 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI、`click_element` 目标 observe 重试、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 快速启动

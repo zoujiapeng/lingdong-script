@@ -98,6 +98,7 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
         "controller_state",
         "subgoal",
         "element_cache",
+        "controller_auto_observe",
     ):
         if key in data:
             meta[key] = data[key]
@@ -149,6 +150,18 @@ def _anchor_payload(anchor) -> dict[str, Any]:
         "fallback_text": list(anchor.fallback_text),
         "role": anchor.role,
     }
+
+
+def _anchor_query(anchor) -> str:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw in (anchor.label, *anchor.fallback_text):
+        term = str(raw or "").strip()
+        key = term.casefold()
+        if term and key not in seen:
+            seen.add(key)
+            terms.append(term)
+    return terms[0] if terms else ""
 
 
 def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -253,18 +266,47 @@ class FastGuiController:
         anchor = anchor_from_dict(anchor_data)
         located = self.cache.locate_with_trace(snapshot, anchor)
         element = located.element
+        auto_observe: dict[str, Any] | None = None
         if element is None:
-            return ToolResult(json.dumps({
-                "ok": False,
-                "blocked": True,
-                "error": (
-                    "click_element could not locate anchor; observe with a more "
-                    "specific query or escalate perception before retrying."
-                ),
-                "via": "click_element",
-                "anchor": _anchor_payload(anchor),
-                "anchor_locator": located.to_dict(),
-            }, ensure_ascii=False))
+            initial_locator = located
+            query = _anchor_query(anchor)
+            dispatch = getattr(self.session, "dispatch", None)
+            if query and callable(dispatch):
+                try:
+                    max_elements = max(1, int(action.get("max_elements") or 160))
+                except (TypeError, ValueError):
+                    max_elements = 160
+                observe_args = {"query": query, "max_elements": max_elements}
+                observe = self._dispatch("observe", observe_args)
+                auto_observe = {
+                    "used": True,
+                    "query": query,
+                    "ok": not _failed(observe),
+                    "elapsed_ms": int((observe.replay or {}).get("elapsed_ms") or 0),
+                    "preview": observe.text[:240],
+                }
+                if not _failed(observe):
+                    snapshot = self.session.snapshot
+                    if snapshot is not None:
+                        located = self.cache.locate_with_trace(snapshot, anchor)
+                        element = located.element
+                        auto_observe["retry_anchor_locator"] = located.to_dict()
+            if element is None:
+                payload = {
+                    "ok": False,
+                    "blocked": True,
+                    "error": (
+                        "click_element could not locate anchor after the available "
+                        "snapshot and one targeted observe retry."
+                    ),
+                    "via": "click_element",
+                    "anchor": _anchor_payload(anchor),
+                    "anchor_locator": located.to_dict(),
+                    "initial_anchor_locator": initial_locator.to_dict(),
+                }
+                if auto_observe is not None:
+                    payload["controller_auto_observe"] = auto_observe
+                return ToolResult(json.dumps(payload, ensure_ascii=False))
         args = {
             "element_id": element.elem_id,
             "button": action.get("button", "left"),
@@ -280,6 +322,9 @@ class FastGuiController:
             data["anchor"] = _anchor_payload(anchor)
             data["resolved_element"] = element.to_dict()
             data["anchor_locator"] = located.to_dict()
+            if auto_observe is not None:
+                auto_observe["found_after_retry"] = True
+                data["controller_auto_observe"] = auto_observe
             result.text = json.dumps(data, ensure_ascii=False, default=str)
             result.replay = result.replay or {}
             result.replay.setdefault("anchor", _anchor_payload(anchor))
@@ -536,6 +581,10 @@ class FastGuiController:
                 item["verified"] = bool(data.get("verified"))
             if data:
                 item["data"] = data
+                auto_observe = data.get("controller_auto_observe")
+                if isinstance(auto_observe, dict) and auto_observe.get("used"):
+                    metrics.observe_count += 1
+                    metrics.auto_observe_count += 1
             results.append(item)
             if name in BATCH_OBSERVE_ACTIONS:
                 last_visual_region = None
@@ -634,7 +683,9 @@ class FastGuiController:
             if sync_required and not ok:
                 metrics.failed_at = len(results)
         metrics.elapsed_ms = max(0, _now_ms() - metrics.started_ms)
-        metrics.controller_round_trips_saved = max(0, metrics.action_count - 1)
+        metrics.controller_round_trips_saved = (
+            max(0, metrics.action_count - 1) + metrics.auto_observe_count
+        )
         needs_observe = (
             metrics.failed_at is None
             and metrics.action_count > 0

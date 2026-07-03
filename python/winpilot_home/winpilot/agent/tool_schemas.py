@@ -202,7 +202,8 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                             "read_text, zoom, clipboard_write, clipboard_paste. "
                             "Use either {'action':'click','element_id':1} or shorthand "
                             "{'click': {'element_id':1}}. click_element accepts "
-                            "label/expected_region/visual_anchor/fallback_text/role."
+                            "label/expected_region/visual_anchor/fallback_text/role "
+                            "and may do one targeted observe(query=label) retry."
                         ),
                     },
                 },

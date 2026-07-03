@@ -55,6 +55,7 @@ class BatchMetrics:
     observe_count: int = 0
     verify_count: int = 0
     screen_wait_count: int = 0
+    auto_observe_count: int = 0
     controller_round_trips_saved: int = 0
     tool_latencies_ms: list[int] = field(default_factory=list)
 
@@ -70,6 +71,7 @@ class BatchMetrics:
             "observe_count": int(self.observe_count),
             "verify_count": int(self.verify_count),
             "screen_wait_count": int(self.screen_wait_count),
+            "auto_observe_count": int(self.auto_observe_count),
             "controller_round_trips_saved": int(self.controller_round_trips_saved),
             "avg_tool_latency_ms": round(avg, 1),
             "tool_latencies_ms": list(self.tool_latencies_ms),
