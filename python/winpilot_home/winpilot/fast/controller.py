@@ -17,6 +17,7 @@ ALLOWED_BATCH_ACTIONS = {
     "observe",
     "click",
     "click_element",
+    "type_into_element",
     "type_text",
     "hotkey",
     "scroll",
@@ -34,6 +35,7 @@ ALLOWED_BATCH_ACTIONS = {
 BATCH_MUTATING_ACTIONS = {
     "click",
     "click_element",
+    "type_into_element",
     "type_text",
     "hotkey",
     "scroll",
@@ -67,6 +69,14 @@ def _is_json_object(text: str) -> bool:
     return (text or "").lstrip().startswith("{")
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _failed(result: ToolResult) -> bool:
     if result.terminal == "fail":
         return True
@@ -98,6 +108,8 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
         "controller_state",
         "subgoal",
         "element_cache",
+        "controller_auto_observe",
+        "controller_internal_action_count",
     ):
         if key in data:
             meta[key] = data[key]
@@ -149,6 +161,18 @@ def _anchor_payload(anchor) -> dict[str, Any]:
         "fallback_text": list(anchor.fallback_text),
         "role": anchor.role,
     }
+
+
+def _anchor_query(anchor) -> str:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw in (anchor.label, *anchor.fallback_text):
+        term = str(raw or "").strip()
+        key = term.casefold()
+        if term and key not in seen:
+            seen.add(key)
+            terms.append(term)
+    return terms[0] if terms else ""
 
 
 def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -253,18 +277,47 @@ class FastGuiController:
         anchor = anchor_from_dict(anchor_data)
         located = self.cache.locate_with_trace(snapshot, anchor)
         element = located.element
+        auto_observe: dict[str, Any] | None = None
         if element is None:
-            return ToolResult(json.dumps({
-                "ok": False,
-                "blocked": True,
-                "error": (
-                    "click_element could not locate anchor; observe with a more "
-                    "specific query or escalate perception before retrying."
-                ),
-                "via": "click_element",
-                "anchor": _anchor_payload(anchor),
-                "anchor_locator": located.to_dict(),
-            }, ensure_ascii=False))
+            initial_locator = located
+            query = _anchor_query(anchor)
+            dispatch = getattr(self.session, "dispatch", None)
+            if query and callable(dispatch):
+                try:
+                    max_elements = max(1, int(action.get("max_elements") or 160))
+                except (TypeError, ValueError):
+                    max_elements = 160
+                observe_args = {"query": query, "max_elements": max_elements}
+                observe = self._dispatch("observe", observe_args)
+                auto_observe = {
+                    "used": True,
+                    "query": query,
+                    "ok": not _failed(observe),
+                    "elapsed_ms": int((observe.replay or {}).get("elapsed_ms") or 0),
+                    "preview": observe.text[:240],
+                }
+                if not _failed(observe):
+                    snapshot = self.session.snapshot
+                    if snapshot is not None:
+                        located = self.cache.locate_with_trace(snapshot, anchor)
+                        element = located.element
+                        auto_observe["retry_anchor_locator"] = located.to_dict()
+            if element is None:
+                payload = {
+                    "ok": False,
+                    "blocked": True,
+                    "error": (
+                        "click_element could not locate anchor after the available "
+                        "snapshot and one targeted observe retry."
+                    ),
+                    "via": "click_element",
+                    "anchor": _anchor_payload(anchor),
+                    "anchor_locator": located.to_dict(),
+                    "initial_anchor_locator": initial_locator.to_dict(),
+                }
+                if auto_observe is not None:
+                    payload["controller_auto_observe"] = auto_observe
+                return ToolResult(json.dumps(payload, ensure_ascii=False))
         args = {
             "element_id": element.elem_id,
             "button": action.get("button", "left"),
@@ -280,11 +333,117 @@ class FastGuiController:
             data["anchor"] = _anchor_payload(anchor)
             data["resolved_element"] = element.to_dict()
             data["anchor_locator"] = located.to_dict()
+            if auto_observe is not None:
+                auto_observe["found_after_retry"] = True
+                data["controller_auto_observe"] = auto_observe
             result.text = json.dumps(data, ensure_ascii=False, default=str)
             result.replay = result.replay or {}
             result.replay.setdefault("anchor", _anchor_payload(anchor))
             result.replay.setdefault("resolved_element", element.to_dict())
         return result
+
+    def _type_into_element(self, action: dict[str, Any]) -> ToolResult:
+        text_marker = object()
+        raw_text = action.get("text", action.get("text_input", action.get("value", text_marker)))
+        if raw_text is text_marker:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "blocked": True,
+                "error": "type_into_element requires text/text_input/value",
+                "via": "type_into_element",
+            }, ensure_ascii=False))
+        text = str(raw_text)
+        click_args = {
+            k: v for k, v in action.items()
+            if k not in {
+                "text", "text_input", "value", "clear", "replace",
+                "clear_existing", "clear_method", "expect",
+            }
+        }
+        internal: list[dict[str, Any]] = []
+
+        click_result = self._click_element(click_args)
+        click_data = _json_dict(click_result.text)
+        internal.append({
+            "action": "click_element",
+            "ok": not _failed(click_result),
+            "data": click_data if click_data else {"preview": click_result.text[:240]},
+        })
+        if _failed(click_result):
+            payload = {
+                "ok": False,
+                "blocked": True,
+                "stage": "focus",
+                "error": "type_into_element could not focus the target element",
+                "via": "type_into_element",
+                "subresults": internal,
+                "controller_internal_action_count": len(internal),
+            }
+            for key in (
+                "anchor", "anchor_locator", "initial_anchor_locator",
+                "controller_auto_observe", "resolved_element",
+            ):
+                if key in click_data:
+                    payload[key] = click_data[key]
+            return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
+        if _truthy(action.get("clear") or action.get("replace") or action.get("clear_existing")):
+            clear_result = self._dispatch("hotkey", {"keys": ["ctrl", "a"]})
+            clear_data = _json_dict(clear_result.text)
+            internal.append({
+                "action": "hotkey",
+                "ok": not _failed(clear_result),
+                "data": clear_data if clear_data else {"preview": clear_result.text[:240]},
+            })
+            if _failed(clear_result):
+                payload = {
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "clear",
+                    "error": "type_into_element could not select existing text",
+                    "via": "type_into_element",
+                    "subresults": internal,
+                    "controller_internal_action_count": len(internal),
+                }
+                return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
+        type_args = {"text": text}
+        if isinstance(action.get("expect"), dict):
+            type_args["expect"] = action["expect"]
+        type_result = self._dispatch("type_text", type_args)
+        type_data = _json_dict(type_result.text)
+        type_failed = _failed(type_result) or (
+            isinstance(action.get("expect"), dict)
+            and type_data.get("verified") is False
+        )
+        internal.append({
+            "action": "type_text",
+            "ok": not type_failed,
+            "data": type_data if type_data else {"preview": type_result.text[:240]},
+        })
+        payload = {
+            "ok": not type_failed,
+            "via": "type_into_element",
+            "text_length": len(text),
+            "subresults": internal,
+            "controller_internal_action_count": len(internal),
+            "type_result": type_data,
+        }
+        if isinstance(action.get("expect"), dict):
+            payload["expect"] = action["expect"]
+        if "verified" in type_data:
+            payload["verified"] = bool(type_data.get("verified"))
+        if type_failed:
+            payload["blocked"] = True
+            payload["stage"] = "type_text"
+            payload["error"] = "type_into_element text entry did not verify"
+        for key in (
+            "anchor", "anchor_locator", "initial_anchor_locator",
+            "controller_auto_observe", "resolved_element",
+        ):
+            if key in click_data:
+                payload[key] = click_data[key]
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
     def _wait_change(self, action: dict[str, Any]) -> ToolResult:
         delta = self.watcher.wait_for_change(
@@ -484,6 +643,8 @@ class FastGuiController:
             self._publish_child_start(batch_id, index, name, normalised_args)
             if name == "click_element":
                 result = self._click_element(normalised_args)
+            elif name == "type_into_element":
+                result = self._type_into_element(normalised_args)
             elif name == "wait" and not isinstance(normalised_args.get("condition"), dict):
                 result = self._pause(normalised_args)
             elif name == "wait_change":
@@ -536,6 +697,14 @@ class FastGuiController:
                 item["verified"] = bool(data.get("verified"))
             if data:
                 item["data"] = data
+                auto_observe = data.get("controller_auto_observe")
+                if isinstance(auto_observe, dict) and auto_observe.get("used"):
+                    metrics.observe_count += 1
+                    metrics.auto_observe_count += 1
+                internal_count = data.get("controller_internal_action_count")
+                if isinstance(internal_count, int) and internal_count > 0:
+                    metrics.internal_action_count += internal_count
+                    metrics.compound_round_trips_saved += max(0, internal_count - 1)
             results.append(item)
             if name in BATCH_OBSERVE_ACTIONS:
                 last_visual_region = None
@@ -634,7 +803,11 @@ class FastGuiController:
             if sync_required and not ok:
                 metrics.failed_at = len(results)
         metrics.elapsed_ms = max(0, _now_ms() - metrics.started_ms)
-        metrics.controller_round_trips_saved = max(0, metrics.action_count - 1)
+        metrics.controller_round_trips_saved = (
+            max(0, metrics.action_count - 1)
+            + metrics.auto_observe_count
+            + metrics.compound_round_trips_saved
+        )
         needs_observe = (
             metrics.failed_at is None
             and metrics.action_count > 0
