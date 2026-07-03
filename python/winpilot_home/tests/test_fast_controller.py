@@ -127,6 +127,60 @@ def test_fast_controller_click_element_dispatches_click():
     assert out["controller_state"]["phase"] == "verified"
 
 
+def test_fast_controller_click_element_auto_observes_then_retries_anchor():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    initial = Snapshot(
+        hwnd=1,
+        title="Demo",
+        region=Region(0, 0, 1000, 600),
+        elements=[UIElement(elem_id=1, role="button", text="Cancel", cx=60, cy=50)],
+    )
+    refreshed = Snapshot(
+        hwnd=1,
+        title="Demo",
+        region=Region(0, 0, 1000, 600),
+        elements=[
+            UIElement(elem_id=1, role="button", text="Cancel", cx=60, cy=50),
+            UIElement(elem_id=8, role="button", text="Export", cx=920, cy=50),
+        ],
+    )
+
+    class Session:
+        def __init__(self):
+            self.snapshot = initial
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "observe":
+                self.snapshot = refreshed
+                return ToolResult('{"ok": true}')
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"action": "click_element", "label": "Export", "expected_region": "top-right", "role": "button"}
+    ])
+
+    assert out["ok"]
+    assert calls == [
+        ("observe", {"query": "Export", "max_elements": 160}),
+        ("click", {"element_id": 8, "button": "left", "double": False}),
+    ]
+    data = out["results"][0]["data"]
+    assert data["via"] == "click_element"
+    assert data["resolved_element"]["elem_id"] == 8
+    assert data["controller_auto_observe"]["used"] is True
+    assert data["controller_auto_observe"]["found_after_retry"] is True
+    assert out["metrics"]["auto_observe_count"] == 1
+    assert out["metrics"]["observe_count"] == 1
+    assert out["metrics"]["controller_round_trips_saved"] == 1
+
+
 def test_fast_controller_accepts_single_key_shorthand():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

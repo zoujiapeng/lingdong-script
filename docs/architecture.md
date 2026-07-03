@@ -126,8 +126,8 @@ flowchart LR
 - `fusion.screen_watch_autostart=true` 时，ToolSession 在获得目标窗口或执行可见动作前自动启动 watcher，AgentRunner 结束时停止 watcher，避免每个任务都要求 LLM 手动启动。
 - 普通可见动作的 `screen_delta` 使用动作前/动作后独立截图 diff，不直接复用后台 watcher 的 `_prev`；这是为了避免连续采样线程在动作前后抢帧。动作 ROI 新鲜时，`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI。
 - `observe(changed_only=true)` 只在最近/action ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。
-- `run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`。
-- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、controller phase、anchor click/cache/failure，后续性能优化应优先看这些字段。
+- `run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`；如果当前 snapshot 漏掉文本锚点，controller 会做一次目标 `observe(query=label)` 并重试，证据写入 `controller_auto_observe`。
+- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、controller phase、anchor click/cache/failure，batch `metrics.auto_observe_count` 记录 controller 内部为了定位元素主动做的目标 observe，后续性能优化应优先看这些字段。
 - URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
 - `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
 - 最新验证 run：`20260703-025138-dcf2c6`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用左侧状态卡 ROI 直接识别 `LOCAL COUNTER`，done gate 以 fresh screen evidence 通过。
