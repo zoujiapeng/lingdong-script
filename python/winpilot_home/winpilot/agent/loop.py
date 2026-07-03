@@ -45,6 +45,8 @@ from .task_rules import (
     _is_upload_publish_task,
     _quoted_payloads,
     _required_image_paths,
+    _required_visible_payloads,
+    _visible_state_targets,
 )
 from .tools import ToolResult, ToolSession, tool_schemas
 
@@ -135,6 +137,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._done_unverified = False                # forced-accept after max rejects
         self._done_verified = False                  # done-gate judge genuinely passed
         self._recent_results: list[tuple[str, str]] = []  # tool outputs as done-gate evidence
+        self._visible_evidence_ledger: list[dict[str, Any]] = []
+        self._last_done_reject_reason = ""
         self._escalate_next = False                  # use stronger model on next _chat
         self._consecutive_unverified = 0             # steps without a verified=true action
         self._last_reflect_step = 0                  # step number of last reflect injection
@@ -507,6 +511,98 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if ok:
                 self._had_verified_action = True
 
+    def _visible_evidence_targets(self) -> list[str]:
+        targets = [*_visible_state_targets(self.task), *_required_visible_payloads(self.task)]
+        seen: set[str] = set()
+        out: list[str] = []
+        for target in targets:
+            target = str(target or "").strip()
+            key = self._normalize_visible_text(target)
+            if target and key and key not in seen:
+                seen.add(key)
+                out.append(target)
+        return out
+
+    def _visible_snippet(self, text: str, target: str, limit: int = 260) -> str:
+        target_norm = self._normalize_visible_text(target)
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        for line in lines:
+            if target_norm and target_norm in self._normalize_visible_text(line):
+                return line[:limit]
+        compact = re.sub(r"\s+", " ", text or "").strip()
+        return compact[:limit]
+
+    def _append_visible_evidence(self, source: str, target: str, snippet: str) -> None:
+        target = str(target or "").strip()
+        snippet = str(snippet or "").strip()
+        if not target or not snippet:
+            return
+        key = (source, self._normalize_visible_text(target), self._normalize_visible_text(snippet))
+        for item in self._visible_evidence_ledger:
+            existing = (
+                str(item.get("source") or ""),
+                self._normalize_visible_text(str(item.get("target") or "")),
+                self._normalize_visible_text(str(item.get("snippet") or "")),
+            )
+            if existing == key:
+                return
+        entry = {
+            "source": source,
+            "target": target,
+            "snippet": snippet[:260],
+        }
+        self._visible_evidence_ledger.append(entry)
+        self._visible_evidence_ledger = self._visible_evidence_ledger[-30:]
+        BUS.publish("visible_evidence", run_id=self.run_id, **entry)
+
+    @staticmethod
+    def _expect_visible_values(args: Any) -> list[str]:
+        if not isinstance(args, dict):
+            return []
+        values: list[str] = []
+        expect = args.get("expect")
+        if isinstance(expect, dict):
+            for key in ("text_appears", "text_contains", "window_title", "window_appears"):
+                value = expect.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.append(value.strip())
+        actions = args.get("actions")
+        if isinstance(actions, list):
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                payload = action
+                if len(action) == 1 and not ("action" in action or "tool" in action):
+                    only_args = next(iter(action.values()))
+                    payload = only_args if isinstance(only_args, dict) else {}
+                values.extend(AgentRunner._expect_visible_values(payload))
+        return values
+
+    def _track_visible_evidence(self, tool_name: str, args: dict, result_text: str) -> None:
+        targets = self._visible_evidence_targets()
+        if tool_name in {"observe", "read_text"}:
+            haystack = self._normalize_visible_text(result_text)
+            for target in targets:
+                if self._normalize_visible_text(target) in haystack:
+                    self._append_visible_evidence(
+                        tool_name,
+                        target,
+                        self._visible_snippet(result_text, target),
+                    )
+            return
+        try:
+            data = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        if not (isinstance(data, dict) and data.get("verified") is True):
+            return
+        for value in self._expect_visible_values(args):
+            self._append_visible_evidence(
+                f"{tool_name}:verified_expect",
+                value,
+                f"verified expect text appeared: {value}",
+            )
+
     @staticmethod
     def _compact_visual_summary(summary: Any) -> Any:
         if not isinstance(summary, dict):
@@ -811,7 +907,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            self.run_state.after_tool(tc.function.name, args, result.text, result.terminal)
+            state_terminal = None if result.terminal == "done" else result.terminal
+            self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             self._trace_debug("tool_result", {
                 "run_id": self.run_id,
@@ -826,6 +923,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             })
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
+            self._track_visible_evidence(tc.function.name, args, result.text)
             # Keep recent tool outputs as evidence for the done-gate judge
             # (esp. run_shell stdout / verify results — deterministic proof
             # the GUI screen can't show).
@@ -887,7 +985,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 result_preview=result.text[:300],
                 result_meta=result_meta,
                 elapsed_ms=elapsed_ms,
-                terminal=result.terminal,
+                terminal=None if result.terminal == "done" else result.terminal,
                 replay=result.replay,
             )
             self._append_tool_result(tc.id, result.text, summary=result.summary)
@@ -1093,6 +1191,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     if action_names & _ACTION_TOOLS:
                         self._consecutive_unverified += 1
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
+                    self.run_state.terminal_rejected("done", self._last_done_reject_reason)
+                    BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
                     continue  # done-gate rejected the claim → keep working
                 if terminal:
                     self.status = terminal

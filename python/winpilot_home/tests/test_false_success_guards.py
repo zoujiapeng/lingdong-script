@@ -33,6 +33,113 @@ def test_visible_state_done_accepts_fresh_screen_ocr_spacing(monkeypatch):
     assert runner._done_verified is True
 
 
+def test_visible_state_targets_extract_historical_list():
+    from winpilot.agent.task_rules import _visible_state_targets
+
+    assert _visible_state_targets(
+        "确认 APPLIED_TEXT、LOCAL_COUNTER、MODAL_TARGET_VISIBLE 都曾出现后再完成"
+    ) == ["APPLIED_TEXT", "LOCAL_COUNTER", "MODAL_TARGET_VISIBLE"]
+
+
+def test_visible_state_done_accepts_historical_evidence_for_appeared_task(monkeypatch):
+    import queue
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.log import BUS
+
+    runner = AgentRunner(
+        "确认 APPLIED_TEXT、LOCAL_COUNTER、MODAL_TARGET_VISIBLE 都曾出现后再完成"
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._track_visible_evidence("observe", {}, "APPLIED_TEXT_1: demo")
+    runner._track_visible_evidence("read_text", {}, "LOCAL_COUNTER_4")
+    runner._track_visible_evidence("observe", {}, "靶场状态：MODAL_TARGET_VISIBLE")
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "MODAL_CLOSED"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("historical visible evidence should skip LLM judge")
+
+    events = BUS.subscribe()
+    try:
+        assert runner._verify_done(_Client()) is True
+        seen = []
+        while True:
+            try:
+                seen.append(events.get_nowait())
+            except queue.Empty:
+                break
+    finally:
+        BUS.unsubscribe(events)
+
+    done_checks = [event for event in seen if event.get("type") == "done_check"]
+    assert runner._done_verified is True
+    assert done_checks[-1]["passed"] is True
+    assert "historical visible evidence" in done_checks[-1]["reason"]
+
+
+def test_visible_state_done_still_requires_fresh_screen_without_appeared_word(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("确认 APPLIED_TEXT、LOCAL_COUNTER、MODAL_TARGET_VISIBLE 当前可见")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._recent_results = [
+        ("observe", "APPLIED_TEXT_1: demo\nLOCAL_COUNTER_4\nMODAL_TARGET_VISIBLE"),
+    ]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "MODAL_CLOSED"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content='{"done": false, "reason": "missing fresh visible states"}'))]
+                    )
+
+    assert runner._verify_done(_Client()) is False
+
+
+def test_historical_visible_done_ignores_agent_summary_without_tool_evidence(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("确认 APPLIED_TEXT、LOCAL_COUNTER、MODAL_TARGET_VISIBLE 都曾出现后再完成")
+    runner.session.hwnd = 123
+    runner.result_text = "我看到三个目标都曾出现"
+    runner._recent_results = [
+        ("done", "agent summary says APPLIED_TEXT LOCAL_COUNTER MODAL_TARGET_VISIBLE appeared"),
+    ]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.fusion.observe",
+        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "MODAL_CLOSED"'),
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content='{"done": false, "reason": "missing historical tool evidence"}'))]
+                    )
+
+    assert runner._verify_done(_Client()) is False
+
+
 def test_text_appears_scoped_to_target_window(monkeypatch):
     from winpilot.action import verify
 
@@ -222,6 +329,33 @@ def test_type_text_reuses_last_clicked_input(monkeypatch):
 
     assert calls == [(3, "C:\\Users\\zou\\Desktop\\x.txt")]
     assert "uia_set_value" in result.text
+
+
+def test_hotkey_printable_sequence_is_typed_as_text(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+
+    fake_executor = SimpleNamespace(
+        type_text=lambda text, hwnd=None: calls.append(("type_text", text, hwnd)) or {"ok": True, "typed": len(text)},
+        press_keys=lambda keys: calls.append(("press_keys", keys)) or {"ok": True},
+        focus_window=lambda hwnd: {"ok": True},
+        uia_set_value=lambda element, text: False,
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+
+    session = ToolSession(task="enter calculator expression")
+    result = session._t_hotkey({"keys": ["6", "+", "7", "="]})
+
+    assert len(calls) == 1
+    assert calls[0][0] == "type_text"
+    assert calls[0][1] == "6+7="
+    assert "coerced_from_hotkey" in result.text
 
 
 def test_assistant_history_truncates_verbose_content():

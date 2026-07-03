@@ -74,6 +74,7 @@ class DoneVerifierMixin:
 
     def _reject_done(self, reason: str, content: str) -> bool:
         """Record a failed done-gate check and nudge the model to continue."""
+        self._last_done_reject_reason = reason
         BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
         self._done_rejects += 1
         self.messages.append({"role": "user", "content": content})
@@ -101,6 +102,11 @@ class DoneVerifierMixin:
         recent = "；".join(self._steps_log[-6:]) or "(无动作记录)"
         evidence = "\n".join(f"- {name}: {out}" for name, out in self._recent_results) \
             or "(无)"
+        ledger = getattr(self, "_visible_evidence_ledger", [])
+        if ledger:
+            evidence += "\n- historical_visible_evidence: " + json.dumps(
+                ledger[-20:], ensure_ascii=False
+            )[:2000]
         if _is_drawing_task(self.task):
             stats = []
             for path in _required_image_paths(self.task):
@@ -139,19 +145,53 @@ class DoneVerifierMixin:
     def _normalize_visible_text(text: str) -> str:
         return re.sub(r"[\s_\-:：]+", "", text or "").casefold()
 
-    def _visible_state_has_deterministic_done_evidence(self, screen: str) -> bool:
+    @staticmethod
+    def _task_accepts_historical_visible_state(task: str) -> bool:
+        text = (task or "").casefold()
+        markers = (
+            "appeared", "has appeared", "have appeared", "ever appeared",
+            "showed up", "confirmed earlier",
+            "曾出现", "曾经出现", "出现过", "都曾出现", "曾经可见",
+            "都出现过", "已经出现", "曾显示",
+        )
+        return any(marker in text for marker in markers)
+
+    def _visible_state_has_deterministic_done_evidence(self, screen: str, evidence: str = "") -> bool:
         targets = _visible_state_targets(self.task)
         if not targets:
             return False
-        haystack = self._normalize_visible_text(screen)
-        missing = [
-            target for target in targets
-            if self._normalize_visible_text(target) not in haystack
-        ]
+        if self._task_accepts_historical_visible_state(self.task):
+            allowed_sources = {
+                "observe",
+                "read_text",
+                "click:verified_expect",
+                "type_text:verified_expect",
+                "hotkey:verified_expect",
+                "launch:verified_expect",
+                "run_action_batch:verified_expect",
+            }
+            ledger = getattr(self, "_visible_evidence_ledger", [])
+            seen = {
+                self._normalize_visible_text(str(item.get("target") or ""))
+                for item in ledger
+                if item.get("source") in allowed_sources
+            }
+            missing = [
+                target for target in targets
+                if self._normalize_visible_text(target) not in seen
+            ]
+            source = "historical visible evidence"
+        else:
+            haystack = self._normalize_visible_text(screen)
+            missing = [
+                target for target in targets
+                if self._normalize_visible_text(target) not in haystack
+            ]
+            source = "fresh screen evidence"
         if missing:
             return False
         reason = (
-            "Visible state accepted from fresh screen evidence: "
+            f"Visible state accepted from {source}: "
             + ", ".join(targets[:3])
         )
         BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
@@ -409,6 +449,7 @@ class DoneVerifierMixin:
         if is_done:
             self._done_verified = True
             return True
+        self._last_done_reject_reason = reason
         self._done_rejects += 1
         self.messages.append({
             "role": "user",
@@ -444,7 +485,7 @@ class DoneVerifierMixin:
         screen = self._fresh_done_screen()
         if not self._verify_visible_payloads(screen, evidence):
             return False
-        if self._visible_state_has_deterministic_done_evidence(screen):
+        if self._visible_state_has_deterministic_done_evidence(screen, evidence):
             return True
         if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
             reason = (
