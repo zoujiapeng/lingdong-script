@@ -46,6 +46,7 @@ def test_plan_merges_click_then_visible_state_verify():
     assert len(plan.steps) == 1
     assert plan.steps[0]["check"] == {"text_appears": "LOCAL_COUNTER"}
     assert "GUI routine hint" in plan.render()
+    assert "do not call revise_plan just to restate it" in plan.render()
 
 
 def test_plan_drops_drawing_color_as_text_check():

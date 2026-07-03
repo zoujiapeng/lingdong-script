@@ -58,6 +58,8 @@ class TestVisionPrompt:
         assert "draw={shape,color}" in prompt
         assert "verify-only execute_subgoal" in prompt
         assert "launch/find_app/focus_window" in prompt
+        prompt_with_plan = system_prompt(main_model_has_vision=False, planning_enabled=True)
+        assert "If a current todo plan is already shown, follow it" in prompt_with_plan
 
     def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision

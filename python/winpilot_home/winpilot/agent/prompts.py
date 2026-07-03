@@ -181,8 +181,9 @@ screens that OCR/CV cannot describe.
 
 _PLANNING_SECTION = """
 # Todo planning
-For tasks with several dependent steps, call revise_plan(steps=[...]) first.
-Mark each completed subgoal with complete_subgoal(index=...). Revise when wrong.
+If no current todo plan is shown, call revise_plan(steps=[...]) for dependent tasks.
+If a current todo plan is already shown, follow it; do not revise just to rephrase.
+Mark each completed subgoal with complete_subgoal(index=...). Revise only when wrong.
 """
 
 _EXPERIENCE_HEADER = """

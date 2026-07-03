@@ -382,6 +382,10 @@ class Plan:
             "完成一项就调用 complete_subgoal(index=序号)；计划不合适就调用 revise_plan 重列。"
         )
         lines.append(
+            "Plan hint: this todo is already active; do not call revise_plan just "
+            "to restate it. Execute the next unfinished item, then complete_subgoal."
+        )
+        lines.append(
             "GUI routine hint: when an item has a visible text/state check, prefer "
             "execute_subgoal(..., verify_texts=[...]) so the controller handles "
             "locate/click/wait/verify. If the requested label is not visible but "

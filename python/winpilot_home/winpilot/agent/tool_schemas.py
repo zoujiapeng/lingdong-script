@@ -212,35 +212,35 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click one or more Apply/Search/Send-style buttons, draw a simple shape on a visible canvas/work area, wait briefly, and verify visible text/state or pixel change. Also use for labeled click-only routines when the target label and expected visible result/state are known. This keeps low-level click/type/draw/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason. Verify-only execute_subgoal requires an existing target window/session hwnd; use launch/find_app/focus_window first when opening or discovering an app.",
+            "Controller-first GUI routine: locate/type/click/draw/wait/verify inside local controller. Use for clear input+button, labeled click, or simple canvas drawing routines. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd; use launch/find_app/focus_window first when opening or discovering an app.",
             {
-                "subgoal": _prop("string", "One short high-level GUI subgoal for this routine."),
+                "subgoal": _prop("string", "Short GUI subgoal."),
                 "target_window": {
                     "type": "object",
-                    "description": "Optional target scope, e.g. {'hwnd':123,'title':'...'}; omit to use current target window.",
+                    "description": "Optional target scope.",
                     "properties": {
-                        "hwnd": _prop("integer", "Target window handle."),
-                        "title": _prop("string", "Expected title substring for trace/debug."),
-                        "process": _prop("string", "Expected process/app hint for trace/debug."),
+                        "hwnd": _prop("integer", "Target hwnd."),
+                        "title": _prop("string", "Title hint."),
+                        "process": _prop("string", "Process/app hint."),
                     },
                 },
                 "input": {
                     "type": "object",
-                    "description": "Optional text-entry routine. The controller locates the input from role, label, nearby OCR/CV rectangle, focused state, or a synthetic nearby box.",
+                    "description": "Optional locate+type routine.",
                     "properties": {
-                        "label": _prop("string", "Input/search field label or nearby OCR text."),
+                        "label": _prop("string", "Input/search label or nearby text."),
                         "text": _prop("string", "Exact literal text to type."),
                         "clear": _prop("boolean", "Default true: Ctrl+A before typing."),
-                        "expected_region": _prop("string", "Optional rough region such as top, bottom, left, right, center, top-right."),
+                        "expected_region": _prop("string", "Rough region, e.g. top/right/center."),
                         "fallback_text": {"type": "array", "items": {"type": "string"}},
                         "expect_text": {"oneOf": [{"type": "boolean"}, {"type": "string"}]},
                     },
                 },
                 "click": {
                     "type": "object",
-                    "description": "Optional button/action click routine after the input routine.",
+                    "description": "Optional button/menu click.",
                     "properties": {
-                        "label": _prop("string", "Button/menu/link visible label, e.g. Apply, Search, Send."),
+                        "label": _prop("string", "Visible label."),
                         "role": _prop("string", "Default button."),
                         "expected_region": _prop("string", "Optional rough region."),
                         "fallback_text": {"type": "array", "items": {"type": "string"}},
@@ -250,11 +250,11 @@ def tool_schemas(
                 },
                 "clicks": {
                     "type": "array",
-                    "description": "Optional ordered button/action click routines after the input routine, for one controller-first subgoal with multiple obvious buttons.",
+                    "description": "Optional ordered clicks.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "label": _prop("string", "Button/menu/link visible label, e.g. Apply, Search, Send."),
+                            "label": _prop("string", "Visible label."),
                             "role": _prop("string", "Default button."),
                             "expected_region": _prop("string", "Optional rough region."),
                             "fallback_text": {"type": "array", "items": {"type": "string"}},
@@ -265,32 +265,32 @@ def tool_schemas(
                 },
                 "draw": {
                     "type": "object",
-                    "description": "Optional single drawing routine for canvas/whiteboard/editor tasks. The controller waits for a ready canvas/work surface, optionally selects a requested visible color through generic color palette/swatch detection, uses expected_region to place the shape inside the canvas, generates simple shape strokes, draws them, and verifies pixel/color change. Use this instead of spending steps on toolbar text when the task is to draw visible pixels.",
+                    "description": "Optional single canvas drawing routine.",
                     "properties": {
-                        "shape": _prop("string", "Simple shape/object such as triangle, rectangle, circle, line, check, or freeform."),
-                        "color": _prop("string", "Requested color, e.g. blue/red/green. The routine records this intent; select visible color controls separately if the app requires it."),
-                        "expected_region": _prop("string", "Optional rough canvas region such as center, left, right, bottom."),
-                        "duration": _prop("number", "Duration per stroke in seconds; default 0.28."),
+                        "shape": _prop("string", "triangle/rectangle/circle/line/check/freeform."),
+                        "color": _prop("string", "Requested visible color."),
+                        "expected_region": _prop("string", "Rough canvas region."),
+                        "duration": _prop("number", "Seconds per stroke; default 0.28."),
                         "strokes": {
                             "type": "array",
-                            "description": "Optional explicit absolute screen-coordinate strokes; omit to let the controller generate strokes inside the likely canvas.",
+                            "description": "Optional absolute screen-coordinate strokes.",
                             "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
                         },
                     },
                 },
                 "draws": {
                     "type": "array",
-                    "description": "Optional ordered drawing routines for multi-shape canvas tasks. Use this to draw several simple colored shapes in one controller-first subgoal, e.g. blue triangle on the left then red rectangle on the right.",
+                    "description": "Optional ordered drawing routines.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "shape": _prop("string", "Simple shape/object such as triangle, rectangle, circle, line, check, or freeform."),
-                            "color": _prop("string", "Requested color, e.g. blue/red/green."),
-                            "expected_region": _prop("string", "Rough canvas region such as left, right, center-left, center-right."),
-                            "duration": _prop("number", "Duration per stroke in seconds; default 0.28."),
+                            "shape": _prop("string", "triangle/rectangle/circle/line/check/freeform."),
+                            "color": _prop("string", "Requested visible color."),
+                            "expected_region": _prop("string", "Rough canvas region."),
+                            "duration": _prop("number", "Seconds per stroke; default 0.28."),
                             "strokes": {
                                 "type": "array",
-                                "description": "Optional explicit absolute screen-coordinate strokes; omit to let the controller generate strokes inside the requested canvas subregion.",
+                                "description": "Optional absolute screen-coordinate strokes.",
                                 "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
                             },
                         },
@@ -299,11 +299,11 @@ def tool_schemas(
                 "verify_texts": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Visible strings/states that must appear before the routine is considered verified.",
+                    "description": "Visible strings/states to verify.",
                 },
                 "constraints": {
                     "type": "object",
-                    "description": "Optional routine constraints, currently supports {'wait': false} to skip stable wait.",
+                    "description": "Optional constraints; {'wait':false} skips stable wait.",
                 },
             },
             ["subgoal"],
