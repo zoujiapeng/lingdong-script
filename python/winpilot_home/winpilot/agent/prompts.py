@@ -47,6 +47,8 @@ element and coordinates.
    your primary navigation tools.
    For obvious grounded mini-sequences, prefer run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
+   For a clear input target, use the batch action type_into_element to locate,
+   focus, optionally clear, and type in one controller step.
    Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
    If a recent tool result or screen_watch says only a local ROI changed, use
    observe(changed_only=true) to inspect that changed area before doing a full

@@ -68,6 +68,7 @@
    `run_action_batch` 内部子动作会写 `agent_batch_action_start/agent_batch_action`；会改变屏幕的子动作会保存 `batch_before_NNN.jpg` / `batch_after_NNN.jpg`，所以排查低延迟 batch 时要同时看这些截图，不能只看顶层 `run_action_batch` 的结果 JSON。
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
    `click_element` 如果先前 snapshot 没找到文本锚点，会由 controller 自动做一次 `observe(query=label)` 并重试；排查时看 `controller_auto_observe`、`retry_anchor_locator` 和 `metrics.auto_observe_count`。
+   `type_into_element` 是 batch 内部组合输入动作，会在一个 controller 子动作内完成锚点定位、点击聚焦、可选清空和输入；排查时看 `subresults`、`controller_internal_action_count` 和 `metrics.compound_round_trips_saved`。
    如果 LLM 顶层直接调用 `draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
    普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
@@ -192,7 +193,7 @@ python -m http.server 8877 --bind 127.0.0.1
 
 - `agent_tool` 的 `launch` 应该 `verified=true`，并且目标窗口标题是 Chrome 靶场窗口，不应被 Codex 窗口遮挡。
 - 如果没有显式调用 `screen_watch start`，也可能看到 watcher 状态：`fusion.screen_watch_autostart=true` 时，ToolSession 会在目标窗口就绪或可见动作前自动启动 watcher，并在 run 结束时停止。
-- `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`、`controller_auto_observe`，确认是缓存命中、snapshot 重新定位、目标 observe 后命中，还是锚点失败。
+- `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`、`controller_auto_observe`，确认是缓存命中、snapshot 重新定位、目标 observe 后命中，还是锚点失败。`type_into_element` 还要看 `subresults`，确认失败阶段是 focus、clear 还是 type_text。
 - 普通可见动作会有 `result_meta.screen_delta` 和 `action_target.after.foreground_matches_target=true`。现在动作 delta 使用独立前后帧；`screen_watch` 还会保留 `action_changed_regions`。如果后台 watcher 被弹层、动画、画布噪声带偏，`observe(changed_only=true)` 应优先新鲜 action ROI，再退回 recent ROI。
 - `observe(changed_only=true)` 的 `result_text` 应该以 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)` 开头；如果出现 `returned the normal observe snapshot`，说明没有可用 ROI 或 ROI 过期。
 - `done_check` 对显式可见状态目标可直接通过，例如 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。这是 fresh screen OCR 证据，不是 agent 总结。
