@@ -33,6 +33,14 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 
 ## .wps.json
 
+当前边界：
+
+- 新导出的 agent 脚本使用 `format: "wps/2"`；`wps/1` 只作为旧脚本兼容输入保留。
+- `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；`auto_visual_verify`、`observe` 等观测/校验事件不会变成重放动作。
+- 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。
+- Replayer 当前支持 `click`、`type_text`、`hotkey`、`launch`、`focus_window`、`scroll`、`drag`、`draw_strokes`、`wait`、`run_shell`、`run_detached`、`tray_click`，以及 `ctrl.if` / `ctrl.loop` 和 `ext.*` 便利步骤。
+- `elapsed_ms` 等 trace 计时字段不是重放语义，导出时会剥离；selector 文本会去掉未读数、消息数等易变噪声。
+
 `.wps.json` 是 WinPilot 侧的语义重放格式，不是 FlowScript。
 
 它应尽量记录：
@@ -64,6 +72,12 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 ## 导入流程图
 
 前端转换器：`src/renderer/utils/wpsToFlowScript.ts`。
+
+转换边界：
+
+- 能被现有 FlowScript 节点准确表达的步骤会落到原生节点，例如 `click` / `click_text`、`input_text`、`keyboard`、`swipe`、`wait`、`clipboard_set/get`、`screenshot`。
+- `run_shell` 会导入为旧 `@feature` 注册表里的 `run_command`；shell 类型保留在 `_wps_shell` 中，供人工调整。
+- `draw_strokes`、`run_detached`、`tray_click` 和未来未知步骤会导入为 `tool_call` 占位，并保留原始 payload；这表示“语义已保留”，不表示当前 FlowScript executor 一定能直接执行。
 
 测试重点：
 

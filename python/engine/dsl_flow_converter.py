@@ -348,10 +348,10 @@ def _dsl_args_to_params(ntype: str, args: str,
         parts = args.split()
         coords = [p for p in parts if p.lstrip("-").isdigit()]
         params = {
-            "sub_operation": "click",
-            "mode": "coordinate",
             "x": int(coords[0]) if len(coords) > 0 else 0,
             "y": int(coords[1]) if len(coords) > 1 else 0,
+            "offsetX": 0,
+            "offsetY": 0,
             "method": "single",
             "delay_after": 0.5,
         }
@@ -397,7 +397,6 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype == "CLICK_TEXT":
         text = args.strip().strip("\"'")
         params = {
-            "mode": "text",
             "text": text,
             "similarity": 80,
             "method": "single",
@@ -415,7 +414,7 @@ def _dsl_args_to_params(ntype: str, args: str,
         params = {"keys": keys or keys_parts, "modifiers": modifiers,
                    "delay_after": 0.5}
 
-    elif ntype == "SWIPE":
+    elif ntype in ("SWIPE", "DRAG"):
         nums = re.findall(r"-?\d+", args)
         params = {
             "start_x": int(nums[0]) if len(nums) > 0 else 0,
@@ -469,7 +468,6 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype in ("IMAGE_CLICK", "CLICK_IMAGE"):
         paths = re.findall(r'"([^"]*)"', args)
         params = {
-            "mode": "image",
             "targets": [{"path": p} for p in paths],
             "similarity": 90, "timeout": 5,
             "method": "single", "offset_x": 0, "offset_y": 0,
@@ -497,7 +495,6 @@ def _dsl_args_to_params(ntype: str, args: str,
     elif ntype == "OCR_FIND":
         text = args.strip().strip("\"'")
         params = {
-            "mode": "text",
             "text": text, "similarity": 80,
             "method": "single", "offset_x": 0, "offset_y": 0,
             "timeout": 5, "delay_after": 0.5,
