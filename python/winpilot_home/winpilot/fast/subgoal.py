@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..action.verify import _match_visible_text
 from ..agent.task_rules import _required_literal_tokens, _required_visible_payloads, _visible_state_targets
 from ..agent.tool_result import ToolResult
+from ..perception import ocr, vision_cv, win32
 from ..perception import reducer
 from ..perception.fusion import Snapshot
+from ..perception.model import UIElement
+from ..utils.screenshot import Region, window_region
 from .controller import FastGuiController
 
 
@@ -146,6 +150,75 @@ def _verified_expect_texts(actions: list[dict[str, Any]], data: dict[str, Any]) 
     return _unique(matched)
 
 
+def _rough_region(window: Region, hint: str) -> Region | None:
+    hint = (hint or "").strip().casefold().replace("_", "-").replace(" ", "-")
+    if not hint:
+        return None
+    left, top, width, height = window.left, window.top, window.width, window.height
+    if hint in {"top", "upper"}:
+        return Region(left, top, width, max(80, int(height * 0.46))).clamp_to_screen()
+    if hint in {"bottom", "lower"}:
+        h = max(80, int(height * 0.46))
+        return Region(left, top + height - h, width, h).clamp_to_screen()
+    if hint == "left":
+        return Region(left, top, max(100, int(width * 0.46)), height).clamp_to_screen()
+    if hint == "right":
+        w = max(100, int(width * 0.46))
+        return Region(left + width - w, top, w, height).clamp_to_screen()
+    if hint in {"top-right", "upper-right"}:
+        w = max(100, int(width * 0.55))
+        h = max(80, int(height * 0.48))
+        return Region(left + width - w, top, w, h).clamp_to_screen()
+    if hint in {"top-left", "upper-left"}:
+        return Region(left, top, max(100, int(width * 0.55)), max(80, int(height * 0.48))).clamp_to_screen()
+    if hint in {"bottom-right", "lower-right"}:
+        w = max(100, int(width * 0.55))
+        h = max(80, int(height * 0.48))
+        return Region(left + width - w, top + height - h, w, h).clamp_to_screen()
+    if hint in {"bottom-left", "lower-left"}:
+        w = max(100, int(width * 0.55))
+        h = max(80, int(height * 0.48))
+        return Region(left, top + height - h, w, h).clamp_to_screen()
+    if hint in {"center", "middle"}:
+        w = max(140, int(width * 0.82))
+        h = max(100, int(height * 0.72))
+        return Region(left + (width - w) // 2, top + (height - h) // 2, w, h).clamp_to_screen()
+    return None
+
+
+def _click_terms(request: SubgoalRequest) -> list[str]:
+    terms: list[str] = []
+    for spec in request.clicks or ([request.click] if request.click else []):
+        for key in ("label", "text", "name"):
+            value = str(spec.get(key) or "").strip()
+            if value:
+                terms.append(value)
+        fallback = spec.get("fallback_text") or spec.get("fallback") or []
+        if isinstance(fallback, str):
+            fallback = [fallback]
+        if isinstance(fallback, list):
+            terms.extend(str(item or "").strip() for item in fallback if str(item or "").strip())
+    return _unique(terms)
+
+
+def _region_hint(request: SubgoalRequest) -> str:
+    for spec in request.clicks or ([request.click] if request.click else []):
+        value = str(spec.get("expected_region") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _elements_contain_terms(elements: list[UIElement], terms: list[str]) -> bool:
+    if not terms:
+        return bool(elements)
+    return any(
+        _scope_mentions(term, element.text)
+        for term in terms
+        for element in elements
+    )
+
+
 class SubgoalExecutor:
     """Execute one high-level GUI routine inside the fast controller."""
 
@@ -173,10 +246,67 @@ class SubgoalExecutor:
             except Exception:
                 pass
         if getattr(self.session, "snapshot", None) is None:
-            observe = self.session.dispatch("observe", {})
-            prelude.append({"action": "observe", "ok": not bool(observe.terminal), "preview": observe.text[:320]})
+            targeted = self._targeted_initial_snapshot(request)
+            if targeted is not None:
+                self.session.snapshot = targeted
+                prelude.append({
+                    "action": "targeted_observe",
+                    "ok": True,
+                    "preview": targeted.to_text(max_elements=12)[:320],
+                    "dim_stats": targeted.dim_stats,
+                })
+            else:
+                observe = self.session.dispatch("observe", {})
+                prelude.append({"action": "observe", "ok": not bool(observe.terminal), "preview": observe.text[:320]})
         snapshot = getattr(self.session, "snapshot", None)
         return snapshot, prelude
+
+    def _targeted_initial_snapshot(self, request: SubgoalRequest) -> Snapshot | None:
+        hwnd = self._target_hwnd(request)
+        hint = _region_hint(request)
+        if not hwnd or not hint:
+            return None
+        try:
+            full_region = window_region(hwnd)
+        except Exception:
+            return None
+        roi = _rough_region(full_region, hint)
+        if roi is None:
+            return None
+        terms = _click_terms(request)
+        dim_stats: dict[str, dict[str, Any]] = {}
+        elements: list[UIElement] = []
+        started = time.monotonic()
+        ocr_elements = ocr.collect(roi)
+        dim_stats["ocr"] = {
+            "count": len(ocr_elements),
+            "ms": int((time.monotonic() - started) * 1000),
+            "scope": "targeted_initial_roi",
+            "roi": [roi.left, roi.top, roi.width, roi.height],
+        }
+        elements.extend(ocr_elements)
+        started = time.monotonic()
+        cv_elements = vision_cv.detect_icon_candidates(roi)
+        dim_stats["cv"] = {
+            "count": len(cv_elements),
+            "ms": int((time.monotonic() - started) * 1000),
+            "scope": "targeted_initial_roi",
+            "roi": [roi.left, roi.top, roi.width, roi.height],
+        }
+        elements.extend(cv_elements)
+        if not _elements_contain_terms(elements, terms):
+            return None
+        for idx, element in enumerate(elements, start=1):
+            element.elem_id = idx
+            if "targeted_initial_roi" not in element.states:
+                element.states.append("targeted_initial_roi")
+        return Snapshot(
+            hwnd=int(hwnd),
+            title=win32._window_text(int(hwnd)),
+            region=full_region,
+            elements=elements,
+            dim_stats=dim_stats,
+        )
 
     @staticmethod
     def _anchor_fields(spec: dict[str, Any], default_role: str = "") -> dict[str, Any]:
