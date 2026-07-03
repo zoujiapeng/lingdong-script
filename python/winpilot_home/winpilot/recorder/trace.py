@@ -221,15 +221,34 @@ def _distill_steps(steps: list[dict]) -> list[dict]:
     prev_key = None
     for raw in steps:
         step = dict(raw)
+        step.pop("elapsed_ms", None)
         for field in ("text", "element_text"):
             if step.get(field):
                 step[field] = clean_selector_text(step[field])
-        key = json.dumps(step, ensure_ascii=False, sort_keys=True, default=str)
+        key = _semantic_step_key(step)
         if key == prev_key:  # identical consecutive step → drop the repeat
             continue
         prev_key = key
         distilled.append(step)
     return distilled
+
+
+def _semantic_step_key(step: dict) -> str:
+    clean = {k: v for k, v in step.items() if k not in {"elapsed_ms"}}
+    return json.dumps(clean, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
+    steps: list[dict] = []
+    for event in events:
+        replay = event.get("replay")
+        if not replay:
+            continue
+        if event.get("type") == "agent_batch_action":
+            steps.append(replay)
+        elif event.get("type") == "agent_tool" and event.get("tool") != "run_action_batch":
+            steps.append(replay)
+    return steps
 
 
 def export_script(run_id: str, name: str | None = None) -> Path:
@@ -239,15 +258,12 @@ def export_script(run_id: str, name: str | None = None) -> Path:
         raise FileNotFoundError(f"trace 不存在: {run_id}")
     task = next(
         (e.get("task", "") for e in events if e.get("type") == "agent_start"), "")
-    steps = [
-        e["replay"] for e in events
-        if e.get("type") == "agent_tool" and e.get("replay")
-    ]
+    steps = _extract_replay_steps(events)
     if not steps:
         raise ValueError("trace 中没有可重放的动作步骤")
     steps = _distill_steps(steps)
     script = {
-        "format": "wps/1",
+        "format": "wps/2",
         "name": name or task[:60] or run_id,
         "task": task,
         "source": "agent",
@@ -255,6 +271,9 @@ def export_script(run_id: str, name: str | None = None) -> Path:
         "created": int(time.time()),
         "steps": steps,
     }
+    err = validate_script(script)
+    if err:
+        raise ValueError(f"exported .wps.json is not replayable: {err}")
     SCRIPTS_DIR.mkdir(exist_ok=True)
     path = SCRIPTS_DIR / f"{name or run_id}.wps.json"
     path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -282,6 +301,7 @@ def list_scripts() -> list[dict[str, Any]]:
 LEAF_TOOLS = frozenset({
     "click", "type_text", "hotkey", "launch", "focus_window",
     "scroll", "drag", "wait", "run_shell", "tray_click",
+    "draw_strokes", "run_detached",
 })
 CTRL_TOOLS = frozenset({"ctrl.if", "ctrl.loop"})
 EXT_TOOLS = frozenset({
@@ -289,6 +309,80 @@ EXT_TOOLS = frozenset({
     "ext.clipboard_get", "ext.run_shell", "ext.screenshot",
 })
 KNOWN_TOOLS = LEAF_TOOLS | CTRL_TOOLS | EXT_TOOLS
+
+
+def _nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_point(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) >= 2
+        and _is_number(value[0])
+        and _is_number(value[1])
+    )
+
+
+def _has_click_target(step: dict) -> bool:
+    return (
+        _nonempty_str(step.get("text"))
+        or _nonempty_str(step.get("element_text"))
+        or _is_point(step.get("coords"))
+    )
+
+
+def _valid_strokes(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return any(
+        isinstance(stroke, list)
+        and sum(1 for point in stroke if _is_point(point)) >= 2
+        for stroke in value
+    )
+
+
+def _validate_leaf_step(step: dict, loc: str) -> str | None:
+    tool = step.get("tool")
+    if tool == "click" and not _has_click_target(step):
+        return f"{loc} click requires text/element_text or coords"
+    if tool == "type_text" and "text_input" not in step:
+        return f"{loc} type_text requires text_input"
+    if tool == "hotkey" and not isinstance(step.get("keys"), list):
+        return f"{loc} hotkey requires keys[]"
+    if tool == "launch" and not _nonempty_str(step.get("command")):
+        return f"{loc} launch requires command"
+    if tool == "focus_window" and not _nonempty_str(step.get("title")):
+        return f"{loc} focus_window requires title"
+    if tool == "scroll" and not _is_point(step.get("coords")):
+        return f"{loc} scroll requires coords"
+    if tool == "drag" and (not _is_point(step.get("from")) or not _is_point(step.get("to"))):
+        return f"{loc} drag requires from/to points"
+    if tool == "draw_strokes" and not _valid_strokes(step.get("strokes")):
+        return f"{loc} draw_strokes requires at least one stroke with two points"
+    if tool == "wait" and not isinstance(step.get("condition"), dict):
+        return f"{loc} wait requires condition object"
+    if tool == "run_shell" and not _nonempty_str(step.get("command")):
+        return f"{loc} run_shell requires command"
+    if tool == "run_detached" and not _nonempty_str(step.get("script")):
+        return f"{loc} run_detached requires script"
+    if tool == "tray_click" and not _nonempty_str(step.get("name")):
+        return f"{loc} tray_click requires name"
+    if tool == "ext.delay" and not _is_number(step.get("seconds", 0)):
+        return f"{loc} ext.delay requires numeric seconds"
+    if tool == "ext.var_set" and not _nonempty_str(step.get("name")):
+        return f"{loc} ext.var_set requires name"
+    if tool == "ext.clipboard_set" and "text" not in step:
+        return f"{loc} ext.clipboard_set requires text"
+    if tool == "ext.clipboard_get" and step.get("into") is not None and not _nonempty_str(step.get("into")):
+        return f"{loc} ext.clipboard_get into must be a non-empty string"
+    if tool == "ext.run_shell" and not _nonempty_str(step.get("command")):
+        return f"{loc} ext.run_shell requires command"
+    return None
 
 
 def _validate_steps(steps: Any, where: str) -> str | None:
@@ -308,7 +402,14 @@ def _validate_steps(steps: Any, where: str) -> str | None:
                     if err:
                         return err
         elif tool == "ctrl.loop":
+            loop_type = step.get("loop_type", "count")
+            if loop_type not in ("count", "while", "until", "infinite"):
+                return f"{loc} invalid loop_type: {loop_type!r}"
             err = _validate_steps(step.get("body") or [], f"{loc}.body")
+            if err:
+                return err
+        else:
+            err = _validate_leaf_step(step, loc)
             if err:
                 return err
     return None
@@ -330,6 +431,14 @@ def validate_script(data: Any) -> str | None:
 
 
 # ------------------------------------------------------------------- replay
+def _normalize_hotkeys(keys: Any) -> list[str]:
+    out = []
+    for key in keys or []:
+        value = str(key).strip().lower()
+        out.append("win" if value == "cmd" else value)
+    return out
+
+
 class Replayer:
     """Offline script execution: selector-based re-location + verify."""
 
@@ -397,7 +506,7 @@ class Replayer:
                 stop_event=self.stop_event)
         if tool == "hotkey":
             return verify.run_with_verify(
-                "hotkey", lambda: executor.press_keys(step.get("keys", [])),
+                "hotkey", lambda: executor.press_keys(_normalize_hotkeys(step.get("keys", []))),
                 expect=expect, hwnd=self.hwnd, retryable=False,
                 stop_event=self.stop_event)
         if tool == "scroll":
@@ -405,12 +514,27 @@ class Replayer:
             return executor.scroll(coords[0], coords[1], int(step.get("amount", 0)))
         if tool == "drag":
             frm, to = step.get("from", [0, 0]), step.get("to", [0, 0])
-            return executor.drag(frm[0], frm[1], to[0], to[1])
+            return executor.drag(frm[0], frm[1], to[0], to[1],
+                                 duration_s=float(step.get("duration", 0.4)),
+                                 points=step.get("points"), hwnd=self.hwnd)
+        if tool == "draw_strokes":
+            return verify.run_with_verify(
+                "draw_strokes",
+                lambda: executor.draw_strokes(
+                    step.get("strokes", []),
+                    duration_s=float(step.get("duration", 0.4)),
+                    hwnd=self.hwnd,
+                ),
+                expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
         if tool == "run_shell":
             from ..action import shell
             return shell.run(step.get("command", ""),
                              shell=step.get("shell", "powershell"),
                              timeout_s=float(step.get("timeout_s", 30)))
+        if tool == "run_detached":
+            from ..action import shell
+            return shell.run_detached(str(step.get("script", "")),
+                                      name=str(step.get("name", "task")))
         if tool == "tray_click":
             from ..perception import tray
             return tray.click_tray_icon(

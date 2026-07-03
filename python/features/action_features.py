@@ -166,7 +166,7 @@ def swipe_action(start_x: int, start_y: int, end_x: int, end_y: int, duration: f
     returns="bool - 是否成功",
     dsl_keyword="DRAG",
     dsl_template="DRAG {from_target} TO {to_target}",
-    flow_type="click",
+    flow_type="swipe",
     examples=["DRAG 文件图标 TO 目标文件夹"],
 )
 def drag(from_target: str, to_target: str, duration: float = 0.5) -> bool:
