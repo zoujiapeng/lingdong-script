@@ -12,7 +12,7 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - 主线分支是 `master`；较大的实验/改造先在 `codex/*` 分支完成，验证后再合并回 `master`。不要把某个开发分支名当成架构事实。
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。
 - WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
-- WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`。
+- WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`；provider/cache/usage/cost 真实机制见 `docs/model-providers.md`。
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
 - GUI 任务走 `AgentRunner`；编程/仓库任务走 `CodingRunner`。
 - GUI runner 的任务规则在 `agent/task_rules.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 LLM 编排。

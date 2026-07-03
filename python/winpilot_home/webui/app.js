@@ -47,6 +47,12 @@ const patchConfig = (patch) =>
     body: JSON.stringify(patch),
   }).then((cfg) => { config = cfg; renderBadgesFromConfig(); });
 
+function usageCostText(usage) {
+  if (!usage || usage.cost_estimated === false) return "";
+  if (usage.cost_cny != null) return ` ¥${Number(usage.cost_cny).toFixed(4)}`;
+  return "";
+}
+
 function resetRunMetrics(runId) {
   runMetrics = {
     runId,
@@ -312,7 +318,7 @@ function renderEvent(ev) {
     case "agent_usage": {
       const t = ev.total || {};
       if (runMetrics) runMetrics.usage = t;
-      const cost = t.cost_cny != null ? ` ¥${Number(t.cost_cny).toFixed(4)}` : "";
+      const cost = usageCostText(t);
       $("badge-tokens").textContent =
         `tokens: ${t.prompt_tokens || 0}/${t.completion_tokens || 0} (cache ${t.cache_hit_tokens || 0})${cost}`;
       return;
@@ -410,7 +416,10 @@ async function requestStop() {
 }
 function renderBadgesFromConfig() {
   if (!config) return;
-  $("badge-model").textContent = config.api.model;
+  const provider = config.api.provider && config.api.provider !== "auto"
+    ? `${config.api.provider}:`
+    : "";
+  $("badge-model").textContent = `${provider}${config.api.model}`;
   const dims = Object.entries(config.perception)
     .filter(([, v]) => v.enabled)
     .sort((a, b) => a[1].priority - b[1].priority)
@@ -446,7 +455,7 @@ async function refreshStatus() {
     }
     if (typeof st.shell_enabled === "boolean") $("cfg-shell").checked = st.shell_enabled;
     if (st.usage) {
-      const cost = st.usage.cost_cny != null ? ` ¥${Number(st.usage.cost_cny).toFixed(4)}` : "";
+      const cost = usageCostText(st.usage);
       $("badge-tokens").textContent =
         `tokens: ${st.usage.prompt_tokens}/${st.usage.completion_tokens} (cache ${st.usage.cache_hit_tokens})${cost}`;
     }
@@ -480,8 +489,11 @@ function fillSettings() {
   $("cfg-dry-run").checked = !!config.agent.dry_run;
   $("cfg-experience").checked = !!config.agent.experience_memory;
   if ($("cfg-no-steal")) $("cfg-no-steal").checked = !!config.agent.no_mouse_steal;
+  if ($("cfg-provider")) $("cfg-provider").value = config.api.provider || "auto";
+  if ($("cfg-api-base")) $("cfg-api-base").value = config.api.base_url || "";
   $("cfg-model").value = config.api.model;
   $("cfg-temperature").value = config.api.temperature;
+  if ($("cfg-thinking")) $("cfg-thinking").checked = config.api.thinking === true;
   $("cfg-vlm-enabled").checked = !!config.vlm.enabled;
   $("cfg-vlm-url").value = config.vlm.base_url || "";
   $("cfg-vlm-model").value = config.vlm.model || "";
@@ -494,8 +506,11 @@ function bindSettings() {
   $("cfg-experience").onchange = (e) => patchConfig({ agent: { experience_memory: e.target.checked } });
   $("cfg-shell").onchange = (e) => patchConfig({ agent: { shell_enabled: e.target.checked } });
   $("cfg-no-steal").onchange = (e) => patchConfig({ agent: { no_mouse_steal: e.target.checked } });
-  $("cfg-model").onchange = (e) => patchConfig({ api: { model: e.target.value } });
+  if ($("cfg-provider")) $("cfg-provider").onchange = (e) => patchConfig({ api: { provider: e.target.value } });
+  if ($("cfg-api-base")) $("cfg-api-base").onchange = (e) => patchConfig({ api: { base_url: e.target.value.trim() } });
+  $("cfg-model").onchange = (e) => patchConfig({ api: { model: e.target.value.trim() } });
   $("cfg-temperature").onchange = (e) => patchConfig({ api: { temperature: Number(e.target.value) } });
+  if ($("cfg-thinking")) $("cfg-thinking").onchange = (e) => patchConfig({ api: { thinking: e.target.checked } });
   $("cfg-api-key").onchange = (e) => {
     if (e.target.value.trim()) patchConfig({ api: { api_key: e.target.value.trim() } });
     e.target.value = "";

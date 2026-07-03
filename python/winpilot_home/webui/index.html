@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DeepSeek 电脑操控 Agent</title>
+<title>WinPilot 电脑操控 Agent</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
   <div class="brand">
     <span class="logo">◈</span>
-    <span class="tagline">deepseek-v4-flash · 多维感知操控</span>
+    <span class="tagline">多模型 · 多维感知操控</span>
   </div>
   <div class="badges">
     <span class="badge" id="badge-run">空闲</span>
@@ -19,7 +19,7 @@
     <span class="badge" id="badge-vlm" title="VLM 状态">VLM: —</span>
     <span class="badge" id="badge-dims" title="启用的感知维度(按优先级)">维度: —</span>
     <span class="badge" id="badge-admin" title="进程权限">权限: —</span>
-    <span class="badge" id="badge-tokens" title="prompt/completion/cache命中 + 费用估算">tokens: 0/0 (cache 0) ¥0</span>
+    <span class="badge" id="badge-tokens" title="prompt/completion/cache命中 + 费用估算">tokens: 0/0 (cache 0)</span>
     <button class="iconbtn" id="btn-settings" title="设置">⚙</button>
   </div>
 </header>
@@ -117,14 +117,30 @@
 
     <h3>模型</h3>
     <div class="form-grid">
-      <label>模型
-        <select id="cfg-model">
-          <option value="deepseek-v4-flash">deepseek-v4-flash</option>
-          <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+      <label>Provider
+        <select id="cfg-provider">
+          <option value="auto">auto</option>
+          <option value="deepseek">deepseek</option>
+          <option value="mimo">mimo</option>
+          <option value="reasonix">reasonix</option>
+          <option value="openai_compatible">openai_compatible</option>
         </select>
+      </label>
+      <label>Base URL <input type="text" id="cfg-api-base" placeholder="https://api.deepseek.com"></label>
+      <label>模型
+        <input type="text" id="cfg-model" list="cfg-model-options" placeholder="deepseek-v4-flash">
+        <datalist id="cfg-model-options">
+          <option value="deepseek-v4-flash"></option>
+          <option value="deepseek-v4-pro"></option>
+          <option value="deepseek-chat"></option>
+          <option value="deepseek-reasoner"></option>
+          <option value="mimo-v2.5-pro"></option>
+          <option value="mimo-v2-omni"></option>
+        </datalist>
       </label>
       <label>Temperature <input type="number" id="cfg-temperature" step="0.1" min="0" max="2"></label>
       <label>API Key <input type="password" id="cfg-api-key" placeholder="不修改请留空"></label>
+      <label class="row"><input type="checkbox" id="cfg-thinking"> 启用 provider reasoning/thinking</label>
     </div>
 
     <h3>VLM（可选多模态）</h3>

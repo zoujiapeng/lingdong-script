@@ -8,6 +8,7 @@
 | [../CLAUDE.md](../CLAUDE.md) | AI 接手最短说明 |
 | [architecture.md](architecture.md) | 当前架构和边界 |
 | [winpilot-agent.md](winpilot-agent.md) | WinPilot agent 运行机制 |
+| [model-providers.md](model-providers.md) | 模型 provider、缓存命中、usage/cost 统计 |
 | [apis.md](apis.md) | API/IPC/MCP |
 | [replay-recording.md](replay-recording.md) | trace、`.wps.json`、replay、导入流程图 |
 | [flow-editor.md](flow-editor.md) | 流程图/DSL/`@feature` 体系 |

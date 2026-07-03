@@ -19,6 +19,12 @@ from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
 from ..memory import experience
+from ..model_adapter import (
+    accumulate_usage,
+    build_model_adapter,
+    empty_usage_total,
+    model_profile_from_config,
+)
 from ..perception import fusion, intent, vlm
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
@@ -76,13 +82,12 @@ def _main_model_has_vision() -> bool:
     should receive image_url content. DeepSeek chat models are text-only in
     the API path we tested.
     """
-    model = str(CONFIG.get("api", "model", default="")).lower()
-    return (
-        "omni" in model
-        or "-vl" in model
-        or "vision" in model
-        or "gpt-4o" in model
-    )
+    api = {
+        "provider": CONFIG.get("api", "provider", default="auto"),
+        "base_url": CONFIG.get("api", "base_url", default=""),
+        "model": CONFIG.get("api", "model", default=""),
+    }
+    return model_profile_from_config(api).supports_vision
 
 
 def _sanitize_assistant(msg) -> dict[str, Any]:
@@ -135,8 +140,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._last_reflect_step = 0                  # step number of last reflect injection
         self.status = "pending"                     # running/done/fail/reply/stopped/error
         self.result_text = ""
-        self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
-                            "cache_hit_tokens": 0, "cost_cny": 0.0}
+        self.usage_total = empty_usage_total()
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
@@ -295,6 +299,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         120s request timeout. Returns the response, or None if stopped."""
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
+        profile = getattr(client, "profile", model_profile_from_config(api))
         # Escalate ONE decision to a stronger model when we just got stuck
         # (model-tier mitigation): the weak model flails, the strong model
         # picks the next move, then we drop back to cheap.
@@ -311,6 +316,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._trace_debug("llm_request", {
             "run_id": self.run_id,
             "task": self.task,
+            "provider": profile.provider,
             "model": model,
             "temperature": float(api.get("temperature", 0.3)),
             "max_tokens": int(api.get("max_tokens", 4096)),
@@ -370,6 +376,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 logger.info("Stop 请求：放弃进行中的 LLM 调用")
                 self._trace_debug("llm_abandoned", {
                     "run_id": self.run_id,
+                    "provider": profile.provider,
                     "model": model,
                     "reason": "stop_event",
                 })
@@ -378,6 +385,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if "exc" in box:
             self._trace_debug("llm_error", {
                 "run_id": self.run_id,
+                "provider": profile.provider,
                 "model": model,
                 "error": str(box["exc"]),
             })
@@ -385,35 +393,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if box.get("resp") is not None:
             self._trace_debug("llm_response", {
                 "run_id": self.run_id,
+                "provider": profile.provider,
                 "model": model,
                 "response": box.get("resp"),
             })
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
-        usage = getattr(resp, "usage", None)
-        if not usage:
-            return
-        prompt = getattr(usage, "prompt_tokens", 0) or 0
-        completion = getattr(usage, "completion_tokens", 0) or 0
-        cache_hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-        cache_miss = max(0, prompt - cache_hit)
-        step_cost = (
-            cache_miss / 1_000_000 * _PRICE_CACHE_MISS_PER_M
-            + cache_hit / 1_000_000 * _PRICE_CACHE_HIT_PER_M
-            + completion / 1_000_000 * _PRICE_OUTPUT_PER_M
+        api = CONFIG.get("api", default={})
+        adapter = getattr(self, "_model_adapter", None)
+        profile = getattr(adapter, "profile", model_profile_from_config(api))
+        step_usage = accumulate_usage(
+            self.usage_total,
+            resp,
+            profile=profile,
+            api=api,
         )
-        self.usage_total["prompt_tokens"] += prompt
-        self.usage_total["completion_tokens"] += completion
-        self.usage_total["cache_hit_tokens"] += cache_hit
-        self.usage_total["cost_cny"] = round(self.usage_total["cost_cny"] + step_cost, 4)
+        if not step_usage:
+            return
         BUS.publish("agent_usage", run_id=self.run_id,
-                    step_usage={
-                        "prompt_tokens": prompt,
-                        "completion_tokens": completion,
-                        "cache_hit_tokens": cache_hit,
-                        "cost_cny": round(step_cost, 4),
-                    },
+                    step_usage=step_usage,
                     total=dict(self.usage_total))
 
     # ---------------------------------------------------------------- steps
@@ -995,7 +994,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints))
         try:
-            client = _client()
+            raw_client = _client()
+            client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
+            self._model_adapter = client
             self._maybe_plan_upfront(client)
             for step in range(1, max_steps + 1):
                 if self.stop_event.is_set():
