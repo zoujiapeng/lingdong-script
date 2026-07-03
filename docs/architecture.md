@@ -1,13 +1,13 @@
 # 当前架构
 
-项目不是一个单体 agent，而是两个系统并存。
+项目对用户呈现为一个 WinPilot Agent，内部由多个 capability/runner 和流程图系统协作。
 
 ## 两条主线
 
 | 系统 | 路径 | 职责 | 边界 |
 | --- | --- | --- | --- |
-| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆、编程子 agent | 不直接使用 `@feature`，不直接编辑流程图 |
-| 流程图/DSL 系统 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编排、DSL 执行、`@feature`、MCP/HTTP/CLI | 不等同于 WinPilot 主 agent |
+| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆，以及 Coding capability | 不直接使用 `@feature`，不直接编辑流程图 |
+| 流程图/DSL 系统 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编排、DSL 执行、`@feature`、MCP/HTTP/CLI | 不等同于用户面对的 WinPilot Agent |
 
 ## 进程和端口
 

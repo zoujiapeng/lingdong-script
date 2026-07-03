@@ -5,10 +5,10 @@
 ## 项目主线
 
 1. `python/winpilot_home/winpilot/`
-   - 当前 WinPilot desktop agent。
-   - GUI 任务：`agent/loop.py` 的 `AgentRunner`。
-   - 编程/仓库任务：`agent/coding.py` 的 `CodingRunner`。
-   - 路由入口：`agent/router.py`。
+   - 当前 WinPilot desktop agent；用户始终面对一个 Agent。
+   - GUI / Computer Use capability：`agent/loop.py` 的 `AgentRunner`。
+   - Coding capability：`agent/coding.py` 的 `CodingRunner`。
+   - 路由入口：`agent/router.py`，只做内部 capability/runner 选择。
 
 2. `src/renderer/` + `python/engine/` + `python/features/`
    - 旧流程图/DSL/`@feature` 自动化系统。
@@ -55,7 +55,7 @@
 ## 运行时状态
 
 - 前端/Electron 调 `python/winpilot_home/serve.py` 启动 FastAPI；任务从 `/api/chat` 进入，`server.py` 的 `_RunState` 保证一次只跑一个 agent/replay/人工录制。
-- `agent/router.py` 只决定 runner：GUI 任务进 `AgentRunner`，编程/仓库任务在非 GUI-only 时进 `CodingRunner`。
+- `agent/router.py` 只做内部 capability 选择：GUI 任务进 `AgentRunner`，编程/仓库任务在非 GUI-only 时走 `CodingRunner`。不要把这些能力描述成用户需要面对的多个独立 agent。
 - `AgentRunner.status` 状态集合：`pending`、`running`、`done`、`fail`、`reply`、`stopped`、`error`。`done` 还要经过 `done_verifier.py`，否则会被打回继续工作。
 - 每一步是：构造/折叠 messages -> 调 LLM function calling -> `ToolSession.dispatch()` -> 工具 mixin 执行 -> 写 BUS 事件和 trace -> 可能注入 world/playbook/reflect。
 - LLM 每步真实收到/返回的信息在 `python/winpilot_home/traces/<run_id>/NNN_*.json`；UI 事件和截图索引在 `python/winpilot_home/traces/<run_id>.jsonl`。

@@ -6,9 +6,10 @@
 
 `agent/router.py` 根据任务选择 runner：
 
-- GUI/桌面任务：`AgentRunner`。
-- 编程/仓库任务：`CodingRunner`。
-- GUI-only 任务不会路由到 `CodingRunner`。
+- 用户始终面对一个 WinPilot Agent；`AgentRunner`、`CodingRunner` 只是内部 runner/capability。
+- GUI/桌面任务：主要走 `AgentRunner`。
+- 编程/仓库任务：走 `CodingRunner` 这类 Coding capability。
+- GUI-only 任务不会路由到 Coding capability。
 
 ## GUI AgentRunner
 
@@ -41,7 +42,7 @@
 
 1. 前端 Agent 页或 `scripts/gui_eval_run.py` 调 `/api/chat`。
 2. `server.py` 创建 `_RunState.stop_event`、`runner`、后台线程，并启动 `recorder/trace.py`。
-3. `agent/router.py` 选择 `AgentRunner` 或 `CodingRunner`；GUI-only 任务不会进入编程子 agent。
+3. `agent/router.py` 在同一个用户可见 Agent 内选择 `AgentRunner` 或 Coding capability；GUI-only 任务不会进入 Coding capability。
 4. `AgentRunner.run()` 组装 system/user messages、经验记忆、playbook、上下文提示和工具 schema。
 5. 每一步调用 LLM function calling；返回 tool calls 后由 `_handle_tool_calls()` 交给 `ToolSession.dispatch()`。
 6. `ToolSession` 维护最近 `Snapshot`、目标窗口 `hwnd`、plan、world model、undo stack；具体 handler 在各 mixin 中执行。
