@@ -212,7 +212,7 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click one or more Apply/Search/Send-style buttons, wait briefly, and verify visible text/state. Also use for labeled click-only routines when the target label and expected visible result/state are known. This keeps low-level click/type/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason.",
+            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click one or more Apply/Search/Send-style buttons, draw a simple shape on a visible canvas/work area, wait briefly, and verify visible text/state or pixel change. Also use for labeled click-only routines when the target label and expected visible result/state are known. This keeps low-level click/type/draw/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason.",
             {
                 "subgoal": _prop("string", "One short high-level GUI subgoal for this routine."),
                 "target_window": {
@@ -263,6 +263,21 @@ def tool_schemas(
                         },
                     },
                 },
+                "draw": {
+                    "type": "object",
+                    "description": "Optional drawing routine for canvas/whiteboard/editor tasks. The controller locates the likely canvas/work surface, optionally selects a requested visible color through generic color palette/swatch detection, generates simple shape strokes, draws them, and verifies pixel change. Use this instead of spending steps on toolbar text when the task is to draw visible pixels.",
+                    "properties": {
+                        "shape": _prop("string", "Simple shape/object such as triangle, rectangle, circle, line, check, or freeform."),
+                        "color": _prop("string", "Requested color, e.g. blue/red/green. The routine records this intent; select visible color controls separately if the app requires it."),
+                        "expected_region": _prop("string", "Optional rough canvas region such as center, left, right, bottom."),
+                        "duration": _prop("number", "Duration per stroke in seconds; default 0.28."),
+                        "strokes": {
+                            "type": "array",
+                            "description": "Optional explicit absolute screen-coordinate strokes; omit to let the controller generate strokes inside the likely canvas.",
+                            "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                        },
+                    },
+                },
                 "verify_texts": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -286,7 +301,7 @@ def tool_schemas(
                         "type": "object",
                         "description": (
                             "Allowed action values: observe, click, click_element, "
-                            "type_into_element, type_text, hotkey, scroll, drag, draw_strokes, "
+                            "type_into_element, type_text, hotkey, scroll, drag, draw_strokes, select_color, "
                             "focus_window, wait, wait_change, wait_stable, "
                             "read_text, zoom, clipboard_write, clipboard_paste. "
                             "Use either {'action':'click','element_id':1} or shorthand "

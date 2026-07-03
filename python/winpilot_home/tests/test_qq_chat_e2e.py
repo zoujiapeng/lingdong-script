@@ -50,6 +50,13 @@ class TestVisionPrompt:
         assert _VISION_TEXT_ONLY in prompt_without_vision
         assert _VISION_NATIVE not in prompt_without_vision
 
+    def test_system_prompt_allows_literal_braces_in_tool_examples(self):
+        from winpilot.agent.prompts import system_prompt
+
+        prompt = system_prompt(main_model_has_vision=False)
+
+        assert "draw={shape,color}" in prompt
+
     def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision
 

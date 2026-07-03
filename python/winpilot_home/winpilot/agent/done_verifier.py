@@ -64,7 +64,14 @@ class DoneVerifierMixin:
         """Return true when a direct tool call or batch sub-action was recorded."""
         if not names:
             return False
-        joined = "\n".join(self._steps_log)
+        recent_results = getattr(self, "_recent_results", [])
+        joined = "\n".join([
+            *getattr(self, "_steps_log", []),
+            *[
+                f"{tool}\n{text}"
+                for tool, text in recent_results
+            ],
+        ])
         for name in names:
             if any(step.startswith(f"{name}(") for step in self._steps_log):
                 return True
@@ -73,6 +80,21 @@ class DoneVerifierMixin:
             if re.search(rf'"{re.escape(name)}"\s*:', joined):
                 return True
         return False
+
+    def _recent_missing_visual_colors(self, colors: list[str]) -> list[str]:
+        if not colors:
+            return []
+        status = {color: "" for color in colors}
+        for _tool, text in getattr(self, "_recent_results", []):
+            normalized = str(text or "").casefold()
+            normalized = normalized.replace("\\\\\"", '"').replace('\\"', '"')
+            for color in colors:
+                color_key = color.casefold()
+                if re.search(rf'"matched_visual_colors"\s*:\s*\[[^\]]*"{re.escape(color_key)}"', normalized):
+                    status[color] = "matched"
+                elif re.search(rf'"missing_visual_colors"\s*:\s*\[[^\]]*"{re.escape(color_key)}"', normalized):
+                    status[color] = "missing"
+        return [color for color, value in status.items() if value == "missing"]
 
     def _reject_done(self, reason: str, content: str) -> bool:
         """Record a failed done-gate check and nudge the model to continue."""
@@ -236,6 +258,18 @@ class DoneVerifierMixin:
         image_paths = _required_image_paths(self.task)
         missing_paths = [path for path in image_paths if not Path(path).exists()]
         required_colors = _required_drawing_colors(self.task)
+        missing_recent_colors = self._recent_missing_visual_colors(required_colors)
+        if missing_recent_colors:
+            reason = (
+                "Drawing/canvas task requested specific colors, but recent controller "
+                "evidence says those colors are still missing: "
+                + ", ".join(missing_recent_colors)
+            )
+            return self._reject_done(
+                reason,
+                f"[done check failed] {reason}. Select the requested visible color, "
+                "draw again on the canvas, and verify matched_visual_colors before done.",
+            )
         if not saw_drag:
             reason = (
                 "Drawing/canvas task has no recorded drag stroke. Tool selection or clicks "

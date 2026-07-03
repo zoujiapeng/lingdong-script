@@ -7,6 +7,7 @@ local GUI controller performs the low-level click/type/wait/verify steps.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ class SubgoalRequest:
     input: dict[str, Any] = field(default_factory=dict)
     click: dict[str, Any] = field(default_factory=dict)
     clicks: list[dict[str, Any]] = field(default_factory=list)
+    draw: dict[str, Any] = field(default_factory=dict)
     verify_texts: list[str] = field(default_factory=list)
     constraints: dict[str, Any] = field(default_factory=dict)
 
@@ -76,6 +78,9 @@ def _scope_mentions(target: str, *parts: Any) -> bool:
 def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalRequest:
     input_spec = _as_dict(args.get("input") or args.get("type") or args.get("text_input"))
     click_spec = _as_dict(args.get("click") or args.get("button") or args.get("press"))
+    draw_spec = _as_dict(args.get("draw") or args.get("drawing") or {})
+    if not draw_spec and args.get("shape"):
+        draw_spec = {"shape": args.get("shape")}
     if not input_spec and args.get("text"):
         input_spec = {"text": args.get("text"), "label": args.get("input_label") or args.get("label") or ""}
     if not click_spec and args.get("button_label"):
@@ -100,6 +105,7 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
             "input": input_spec,
             "click": click_spec,
             "clicks": clicks,
+            "draw": draw_spec,
             "verify_texts": verify_texts,
         },
         ensure_ascii=False,
@@ -114,6 +120,7 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         input=input_spec,
         click=click_spec,
         clicks=clicks,
+        draw=draw_spec,
         verify_texts=_unique(verify_texts),
         constraints=_as_dict(args.get("constraints") or {}),
     )
@@ -150,6 +157,19 @@ def _verified_expect_texts(actions: list[dict[str, Any]], data: dict[str, Any]) 
         if verified and isinstance(text, str) and text.strip():
             matched.append(text.strip())
     return _unique(matched)
+
+
+def _visual_colors_from_batch(data: dict[str, Any]) -> dict[str, Any]:
+    colors: dict[str, Any] = {}
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        item_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        summary = item_data.get("nonvisual_summary") if isinstance(item_data.get("nonvisual_summary"), dict) else {}
+        visible = summary.get("visible_colors") if isinstance(summary.get("visible_colors"), dict) else {}
+        for color, stats in visible.items():
+            colors[str(color)] = stats
+    return colors
 
 
 def _rough_region(window: Region, hint: str) -> Region | None:
@@ -210,6 +230,10 @@ def _region_hint(request: SubgoalRequest) -> str:
         value = str(spec.get("expected_region") or "").strip()
         if value:
             return value
+    if request.draw:
+        value = str(request.draw.get("expected_region") or request.draw.get("region") or "").strip()
+        if value:
+            return value
     return ""
 
 
@@ -266,6 +290,121 @@ def _visible_region_text_candidates(
     return _unique(texts)[:limit]
 
 
+def _draw_shape_name(draw_spec: dict[str, Any], subgoal: str, task: str) -> str:
+    raw = " ".join([
+        str(draw_spec.get("shape") or ""),
+        str(draw_spec.get("object") or ""),
+        subgoal or "",
+        task or "",
+    ]).casefold()
+    if any(term in raw for term in ("triangle", "三角", "三角形")):
+        return "triangle"
+    if any(term in raw for term in ("rectangle", "square", "方形", "矩形", "正方形")):
+        return "rectangle"
+    if any(term in raw for term in ("circle", "sun", "圆", "圆形")):
+        return "circle"
+    if any(term in raw for term in ("line", "线", "直线")):
+        return "line"
+    if any(term in raw for term in ("check", "勾", "对号")):
+        return "check"
+    return "freeform"
+
+
+def _requested_color(draw_spec: dict[str, Any], subgoal: str, task: str) -> str:
+    raw = " ".join([
+        str(draw_spec.get("color") or ""),
+        str(draw_spec.get("colour") or ""),
+        subgoal or "",
+        task or "",
+    ]).casefold()
+    color_terms = {
+        "blue": ("blue", "蓝", "蓝色"),
+        "red": ("red", "红", "红色"),
+        "green": ("green", "绿", "绿色"),
+        "yellow": ("yellow", "黄", "黄色"),
+        "black": ("black", "黑", "黑色"),
+        "purple": ("purple", "紫", "紫色"),
+        "orange": ("orange", "橙", "橙色"),
+    }
+    for color, terms in color_terms.items():
+        if any(term in raw for term in terms):
+            return color
+    return ""
+
+
+def _canvas_region_from_image(window: Region, image) -> Region | None:
+    bbox = vision_cv.likely_canvas_bbox(image)
+    if not bbox:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    return Region(
+        window.left + x1,
+        window.top + y1,
+        max(1, x2 - x1),
+        max(1, y2 - y1),
+    ).clamp_to_screen()
+
+
+def _fallback_canvas_region(window: Region) -> Region:
+    left = window.left + max(24, int(window.width * 0.12))
+    top = window.top + max(96, int(window.height * 0.24))
+    width = max(120, int(window.width * 0.72))
+    height = max(90, int(window.height * 0.48))
+    return Region(left, top, width, height).clamp_to_screen()
+
+
+def _inset_region(region: Region, margin_ratio: float = 0.16) -> tuple[int, int, int, int]:
+    mx = max(12, int(region.width * margin_ratio))
+    my = max(12, int(region.height * margin_ratio))
+    left = region.left + mx
+    top = region.top + my
+    right = region.right - mx
+    bottom = region.bottom - my
+    if right <= left:
+        left = region.left + 8
+        right = region.right - 8
+    if bottom <= top:
+        top = region.top + 8
+        bottom = region.bottom - 8
+    return left, top, right, bottom
+
+
+def _shape_strokes(shape: str, canvas: Region) -> list[list[list[int]]]:
+    left, top, right, bottom = _inset_region(canvas)
+    cx = (left + right) // 2
+    cy = (top + bottom) // 2
+    width = max(24, right - left)
+    height = max(24, bottom - top)
+    size = max(28, min(width, height, 360))
+    half = size // 2
+    if shape == "triangle":
+        p1 = [cx, cy - half]
+        p2 = [cx - half, cy + half]
+        p3 = [cx + half, cy + half]
+        return [[p1, p2, p3, p1]]
+    if shape == "rectangle":
+        p1 = [cx - half, cy - half]
+        p2 = [cx + half, cy - half]
+        p3 = [cx + half, cy + half]
+        p4 = [cx - half, cy + half]
+        return [[p1, p2, p3, p4, p1]]
+    if shape == "circle":
+        radius = half
+        points: list[list[int]] = []
+        for i in range(33):
+            angle = (math.tau * i) / 32
+            points.append([int(cx + radius * math.cos(angle)), int(cy + radius * math.sin(angle))])
+        return [points]
+    if shape == "line":
+        return [[[left, top], [right, bottom]]]
+    if shape == "check":
+        return [[[cx - half, cy], [cx - half // 4, cy + half], [cx + half, cy - half]]]
+    return [
+        [[left, top], [right, bottom]],
+        [[right, top], [left, bottom]],
+    ]
+
+
 class SubgoalExecutor:
     """Execute one high-level GUI routine inside the fast controller."""
 
@@ -307,6 +446,13 @@ class SubgoalExecutor:
             except Exception:
                 pass
         if getattr(self.session, "snapshot", None) is None:
+            if request.draw and not request.input and not request.clicks and not request.verify_texts:
+                prelude.append({
+                    "action": "draw_direct_canvas_capture",
+                    "ok": True,
+                    "preview": "pure draw routine skipped initial observe; controller will capture the target window and locate the likely canvas",
+                })
+                return None, prelude, skip_click_auto_observe
             targeted = self._targeted_initial_snapshot(request)
             if targeted is not None:
                 self.session.snapshot = targeted
@@ -408,6 +554,13 @@ class SubgoalExecutor:
                 elif isinstance(expect_text, str) and expect_text.strip():
                     action["expect"] = {"text_appears": expect_text.strip()}
                 actions.append(action)
+        if request.draw:
+            draw_action = self._build_draw_action(request)
+            if draw_action:
+                color = draw_action.get("requested_color")
+                if color:
+                    actions.append({"action": "select_color", "color": color})
+                actions.append(draw_action)
         click_specs = request.clicks or ([request.click] if request.click else [])
         changed_query_text = ""
         if not input_spec and click_specs and len(request.verify_texts) == 1:
@@ -441,6 +594,45 @@ class SubgoalExecutor:
                 actions.append({"action": "read_text"})
         return actions
 
+    def _build_draw_action(self, request: SubgoalRequest) -> dict[str, Any] | None:
+        hwnd = self._target_hwnd(request)
+        if not hwnd:
+            return None
+        try:
+            window = window_region(hwnd)
+        except Exception:
+            snapshot = getattr(self.session, "snapshot", None)
+            window = snapshot.region if snapshot is not None else None
+        if window is None:
+            return None
+        try:
+            image = self.controller.capture_fn(window)
+        except Exception:
+            image = None
+        canvas = _canvas_region_from_image(window, image) if image is not None else None
+        if canvas is None:
+            canvas = _fallback_canvas_region(window)
+        shape = _draw_shape_name(request.draw, request.subgoal, getattr(self.session, "task", ""))
+        strokes = request.draw.get("strokes") if isinstance(request.draw.get("strokes"), list) else None
+        if not strokes:
+            strokes = _shape_strokes(shape, canvas)
+        action = {
+            "action": "draw_strokes",
+            "strokes": strokes,
+            "duration": float(request.draw.get("duration", 0.28)),
+            "canvas_region": {
+                "x": canvas.left,
+                "y": canvas.top,
+                "width": canvas.width,
+                "height": canvas.height,
+            },
+            "shape": shape,
+        }
+        color = _requested_color(request.draw, request.subgoal, getattr(self.session, "task", ""))
+        if color:
+            action["requested_color"] = color
+        return action
+
     def execute(self, args: dict[str, Any]) -> ToolResult:
         request = parse_subgoal_request(args, task=getattr(self.session, "task", ""))
         snapshot, prelude, skip_click_auto_observe = self._ensure_observed(request)
@@ -473,7 +665,7 @@ class SubgoalExecutor:
                     "missing_texts": request.verify_texts,
                     "perception_reducer": reduction,
                 },
-                "error": "execute_subgoal needs an input.text routine, a click.label routine, or verify_texts.",
+                "error": "execute_subgoal needs an input.text routine, a click.label routine, a draw routine, or verify_texts.",
                 "needs_llm_reason": True,
             }
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
@@ -485,37 +677,48 @@ class SubgoalExecutor:
         )
         visible_text = _pick_text(batch)
         expect_matched = _verified_expect_texts(actions, batch)
+        visible_colors = _visual_colors_from_batch(batch)
+        requested_color = _requested_color(request.draw, request.subgoal, getattr(self.session, "task", "")) if request.draw else ""
+        matched_visual_colors = [requested_color] if requested_color and requested_color in visible_colors else []
+        missing_visual_colors = [requested_color] if requested_color and requested_color not in visible_colors else []
         matched = [
             text for text in request.verify_texts
             if _match_visible_text(text, visible_text)
             or any(_match_visible_text(text, verified) for verified in expect_matched)
         ]
         missing = [text for text in request.verify_texts if text not in matched]
-        verified = bool(batch.get("ok")) and not missing if request.verify_texts else bool(batch.get("verified"))
+        verified = (
+            bool(batch.get("ok"))
+            and not missing
+            and not missing_visual_colors
+        ) if (request.verify_texts or requested_color) else bool(batch.get("verified"))
         recovery_candidates = _visible_region_text_candidates(snapshot, request)
         evidence_packet = {
             "matched_texts": matched,
             "missing_texts": missing,
             "verified_expect_texts": expect_matched,
+            "visible_colors": visible_colors,
+            "matched_visual_colors": matched_visual_colors,
+            "missing_visual_colors": missing_visual_colors,
             "candidate_click_labels": recovery_candidates,
             "visible_text_preview": visible_text[:1200],
             "perception_reducer": reduction,
             "prelude": prelude,
         }
         payload = {
-            "ok": bool(batch.get("ok")) and (not missing if request.verify_texts else True),
+            "ok": bool(batch.get("ok")) and not missing and not missing_visual_colors,
             "verified": bool(verified),
             "subgoal": request.subgoal,
             "subgoal_route": "controller_first",
             "controller_state": {
                 **(batch.get("controller_state") or {}),
-                "needs_llm_reason": bool(missing or not batch.get("ok")),
+                "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
             },
             "actions_executed": actions,
             "results": batch.get("results") or [],
             "metrics": batch.get("metrics") or {},
             "evidence_packet": evidence_packet,
-            "needs_llm_reason": bool(missing or not batch.get("ok")),
+            "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
         }
         if verified and not missing:
             payload["fast_path_advice"] = (
@@ -538,6 +741,17 @@ class SubgoalExecutor:
                     "candidate_click_labels": recovery_candidates,
                     "expected_visible_texts": request.verify_texts,
                 }
+        if missing_visual_colors:
+            payload["error"] = (
+                "subgoal routine drew visible pixels but required color evidence is missing: "
+                + ", ".join(missing_visual_colors)
+            )
+            payload["blocked"] = True
+            payload["fast_path_advice"] = (
+                "The drawing changed pixels but auto_visual_verify did not see the requested color. "
+                "Retry execute_subgoal with the same draw.color so the controller can select a palette "
+                "swatch before drawing, or use a visible color control and then draw again."
+            )
         return ToolResult(
             json.dumps(payload, ensure_ascii=False, default=str),
             replay={"tool": "execute_subgoal", "subgoal": request.subgoal, "actions": actions},

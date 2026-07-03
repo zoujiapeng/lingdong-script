@@ -5,8 +5,11 @@ import json
 import time
 from typing import Any
 
+import cv2
+import numpy as np
+
 from ..agent.tool_result import ToolResult
-from ..perception import vision_cv
+from ..perception import ocr, vision_cv
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .element_cache import ElementCache, anchor_from_dict
@@ -24,6 +27,7 @@ ALLOWED_BATCH_ACTIONS = {
     "scroll",
     "drag",
     "draw_strokes",
+    "select_color",
     "focus_window",
     "wait",
     "wait_change",
@@ -42,6 +46,7 @@ BATCH_MUTATING_ACTIONS = {
     "scroll",
     "drag",
     "draw_strokes",
+    "select_color",
     "focus_window",
     "clipboard_paste",
 }
@@ -85,6 +90,62 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _norm_text(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").casefold() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def _color_mask(image: np.ndarray, color: str) -> np.ndarray | None:
+    if image is None or getattr(image, "size", 0) == 0:
+        return None
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    chroma = (sat > 70) & (val > 50)
+    color = str(color or "").casefold()
+    masks = {
+        "red": chroma & ((hue <= 10) | (hue >= 170)),
+        "orange": chroma & (hue > 10) & (hue <= 24),
+        "yellow": chroma & (hue > 24) & (hue <= 38),
+        "green": chroma & (hue > 38) & (hue <= 88),
+        "blue": chroma & (hue >= 95) & (hue <= 135),
+        "purple": chroma & (hue > 135) & (hue < 170),
+        "black": gray < 80,
+    }
+    return masks.get(color)
+
+
+def _small_color_components(image: np.ndarray) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    if image is None or getattr(image, "size", 0) == 0:
+        return components
+    total = int(image.shape[0] * image.shape[1])
+    min_area = max(18, int(total * 0.000015))
+    max_area = max(420, int(total * 0.004))
+    for color in ("red", "orange", "yellow", "green", "blue", "purple", "black"):
+        mask = _color_mask(image, color)
+        if mask is None:
+            continue
+        num_labels, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask.astype("uint8"), connectivity=8
+        )
+        for label in range(1, num_labels):
+            x, y, w, h, area = [int(v) for v in stats[label].tolist()]
+            if area < min_area or area > max_area:
+                continue
+            if w < 6 or h < 6 or w > 64 or h > 64:
+                continue
+            aspect = w / max(1, h)
+            if aspect < 0.45 or aspect > 2.2:
+                continue
+            components.append({
+                "color": color,
+                "bbox": [x, y, x + w, y + h],
+                "area": area,
+                "center": [x + w // 2, y + h // 2],
+            })
+    return components
 
 
 def _failed(result: ToolResult) -> bool:
@@ -257,6 +318,167 @@ class FastGuiController:
             except Exception:
                 return None
         return None
+
+    @staticmethod
+    def _palette_swatch_point(image, region: Region, color: str) -> tuple[int, int] | None:
+        try:
+            arr = np.asarray(image)
+        except Exception:
+            return None
+        if arr is None or getattr(arr, "size", 0) == 0:
+            return None
+        components = _small_color_components(arr)
+        # A real color palette normally exposes many compact color choices. This
+        # prevents single colored icons, scrollbars, or accent lines from being
+        # treated as selectable swatches.
+        # Palette swatches live in a dropdown/panel below the titlebar and main
+        # toolbar. Colorful app/tool icons above this line are not selectable
+        # drawing colors.
+        title_cutoff = max(96, int(arr.shape[0] * 0.24))
+        compact_components = []
+        for item in components:
+            bbox = item.get("bbox") or [0, 0, 0, 0]
+            center = item.get("center") or [0, 0]
+            if int(bbox[3]) >= int(arr.shape[0] * 0.75):
+                continue
+            if int(center[1]) < title_cutoff:
+                continue
+            compact_components.append(item)
+        if len(compact_components) < 8:
+            return None
+        wanted = []
+        for item in compact_components:
+            if str(item.get("color") or "").casefold() != str(color or "").casefold():
+                continue
+            cx, cy = item.get("center") or [0, 0]
+            cluster_count = sum(
+                1 for other in compact_components
+                if abs(int((other.get("center") or [0, 0])[0]) - int(cx)) <= 260
+                and abs(int((other.get("center") or [0, 0])[1]) - int(cy)) <= 72
+            )
+            if cluster_count >= 6:
+                enriched = dict(item)
+                enriched["cluster_count"] = cluster_count
+                wanted.append(enriched)
+        if not wanted:
+            return None
+        wanted.sort(
+            key=lambda item: (
+                int(item.get("cluster_count") or 0),
+                int(item.get("area") or 0),
+                -int((item.get("center") or [0, 0])[1]),
+            ),
+            reverse=True,
+        )
+        cx, cy = wanted[0]["center"]
+        return region.left + int(cx), region.top + int(cy)
+
+    def _open_color_palette(self, region: Region) -> ToolResult:
+        toolbar = Region(
+            region.left,
+            region.top,
+            region.width,
+            max(96, min(region.height, int(region.height * 0.36))),
+        ).clamp_to_screen()
+        try:
+            elements = ocr.collect(toolbar)
+        except Exception as exc:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "error": f"color palette OCR failed: {exc}",
+            }, ensure_ascii=False))
+        label_terms = {"colors", "colour", "color", "颜色", "色彩", "顏色"}
+        candidates = []
+        for element in elements:
+            text = _norm_text(getattr(element, "text", ""))
+            if not text:
+                continue
+            if text in label_terms or any(term in text for term in label_terms):
+                candidates.append(element)
+        if not candidates:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "error": "no visible Colors/颜色 toolbar label found",
+            }, ensure_ascii=False))
+        candidates.sort(key=lambda element: int(getattr(element, "cy", 0) or 0))
+        label = candidates[0]
+        x = int(getattr(label, "cx", 0) or 0)
+        y = int(getattr(label, "cy", 0) or 0)
+        offset = max(34, min(82, int(region.height * 0.10)))
+        click_y = max(region.top + 8, y - offset)
+        return self._dispatch("click", {"x": x, "y": click_y})
+
+    def _select_color(self, action: dict[str, Any]) -> ToolResult:
+        color = str(action.get("color") or action.get("name") or "").strip().casefold()
+        if not color:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "error": "select_color requires color",
+            }, ensure_ascii=False))
+        region = self._target_region()
+        if region is None:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "error": "select_color has no target window/region",
+            }, ensure_ascii=False))
+        attempts: list[dict[str, Any]] = []
+
+        def capture_palette_point() -> tuple[int, int] | None:
+            image = self.capture_fn(region)
+            return self._palette_swatch_point(image, region, color)
+
+        try:
+            point = capture_palette_point()
+        except Exception as exc:
+            attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
+            point = None
+        if point is None:
+            opened = self._open_color_palette(region)
+            opened_data = _json_dict(opened.text)
+            attempts.append({
+                "action": "open_color_palette",
+                "ok": not _failed(opened),
+                "data": opened_data,
+                "preview": opened.text[:240],
+            })
+            if _failed(opened):
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "color": color,
+                    "attempts": attempts,
+                    "error": "could not open a visible color palette",
+                }, ensure_ascii=False, default=str))
+            time.sleep(0.25)
+            try:
+                point = capture_palette_point()
+            except Exception as exc:
+                attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
+                point = None
+        if point is None:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "verified": False,
+                "color": color,
+                "attempts": attempts,
+                "error": f"no compact {color} swatch found in visible palette",
+            }, ensure_ascii=False, default=str))
+        click = self._dispatch("click", {"x": point[0], "y": point[1]})
+        attempts.append({
+            "action": "click_color_swatch",
+            "ok": not _failed(click),
+            "point": {"x": point[0], "y": point[1]},
+            "preview": click.text[:240],
+        })
+        ok = not _failed(click)
+        return ToolResult(json.dumps({
+            "ok": ok,
+            "verified": ok,
+            "color": color,
+            "point": {"x": point[0], "y": point[1]},
+            "verify_method": "cv-color-swatch",
+            "attempts": attempts,
+        }, ensure_ascii=False, default=str))
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
@@ -776,6 +998,8 @@ class FastGuiController:
                 result = self._click_element(normalised_args)
             elif name == "type_into_element":
                 result = self._type_into_element(normalised_args)
+            elif name == "select_color":
+                result = self._select_color(normalised_args)
             elif name == "wait" and not isinstance(normalised_args.get("condition"), dict):
                 result = self._pause(normalised_args)
             elif name == "wait_change":

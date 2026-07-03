@@ -169,6 +169,14 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
                 result = runner.run()
                 SESSION.append(task, runner.status, runner.result_text, runner.run_id)
                 BUS.publish("session", action="append", count=len(SESSION.all()))
+            except Exception as exc:
+                logger.exception("agent worker crashed")
+                runner.status = "error"
+                runner.result_text = f"Agent worker crashed: {exc}"
+                SESSION.append(task, runner.status, runner.result_text, runner.run_id)
+                BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
+                BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
+                BUS.publish("session", action="append", count=len(SESSION.all()))
             finally:
                 trace_mod.RECORDER.stop()
 
