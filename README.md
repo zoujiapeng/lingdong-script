@@ -62,7 +62,7 @@ python -m http.server 8877 --bind 127.0.0.1
 
 然后让前端 Agent 或 `/api/chat` 打开 `http://127.0.0.1:8877/gui_agent_target.html`，测试 `execute_subgoal`、`run_action_batch`、`screen_watch`、`observe(changed_only=true)` 和 done gate 是否对得上真实截图。
 
-排查端口/工作区混淆时先看 `/api/status.runtime` 或前端顶部 `runtime` badge：它会显示当前服务的 repo root、branch、commit、dirty 状态、PID 和端口。严格 GUI-only 测试可写 `do not use shell`、`GUI only` 或 `只用GUI`，此时 schema 会隐藏 `run_shell/run_detached`，避免模型先绕去命令行。
+排查端口/工作区混淆时先看 `/api/status.runtime` 或前端顶部 `runtime` badge：它会显示当前服务的 repo root、branch、commit、dirty 状态、PID 和端口。严格 GUI-only 测试可写 `do not use shell`、`GUI only` 或 `只用GUI`，此时 schema 会隐藏 `run_shell/run_detached` 和通用文件/搜索工具，避免模型先绕去命令行或读文件。
 
 旧根目录测试需要额外路径：
 

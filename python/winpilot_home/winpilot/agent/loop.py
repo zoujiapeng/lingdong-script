@@ -1384,6 +1384,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             planning=plan_on,
             coding_runtime=self._is_coding,
             allow_shell=allow_shell_tools,
+            allow_files=allow_shell_tools,
         )
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints),
