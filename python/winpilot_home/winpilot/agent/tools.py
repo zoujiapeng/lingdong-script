@@ -99,6 +99,7 @@ class ToolSession(
         self._screen_epoch = 0
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
+        self.visible_evidence_ledger: list[dict[str, Any]] = []
 
     # ----------------------------------------------------------- dispatch
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:

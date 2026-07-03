@@ -244,6 +244,34 @@ def _required_visible_payloads(task: str) -> list[str]:
     return unique
 
 
+def _dedupe_targets(targets: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for target in targets:
+        target = target.strip()
+        key = target.casefold()
+        if target and key not in seen:
+            seen.add(key)
+            unique.append(target)
+    return unique
+
+
+def _historical_visible_state_targets(task: str) -> list[str]:
+    text = task or ""
+    targets: list[str] = []
+    historical_patterns = (
+        r"([A-Za-z0-9_\-\u3001,\uff0c\s]+?)(?:\u90fd|\u5747|all)?\s*(?:\u66fe\u7ecf?\u51fa\u73b0|\u51fa\u73b0\u8fc7)",
+        r"([A-Za-z0-9_\-\u3001,\uff0c\s]+?)\s*(?:have|has|had|all)?\s*(?:appeared|been visible)",
+    )
+    for pattern in historical_patterns:
+        for match in re.findall(pattern, text, flags=re.IGNORECASE):
+            clause = re.split(r"[。；;\n]", match)[-1]
+            for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_\-]{2,80}\b", clause):
+                if "_" in token or token.isupper() or any(ch.isdigit() for ch in token):
+                    targets.append(token.strip(".,;:!?()[]{}"))
+    return _dedupe_targets(targets)
+
+
 def _visible_state_targets(task: str) -> list[str]:
     """Extract explicit labels/text the user asks to see on screen."""
     text = task or ""
@@ -259,28 +287,8 @@ def _visible_state_targets(task: str) -> list[str]:
             value = value.strip().strip(".,;:!?()[]{}")
             if value:
                 targets.append(value)
-    historical_patterns = (
-        r"([A-Za-z0-9_\-\u3001,\uff0c\s]+?)(?:\u90fd|\u5747|all)?\s*(?:\u66fe\u7ecf?\u51fa\u73b0|\u51fa\u73b0\u8fc7)",
-        r"([A-Za-z0-9_\-\u3001,\uff0c\s]+?)\s*(?:have|has|had|all)?\s*(?:appeared|been visible)",
-    )
-    for pattern in historical_patterns:
-        for match in re.findall(pattern, text, flags=re.IGNORECASE):
-            clause = re.split(r"[。；;\n]", match)[-1]
-            for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_\-]{2,80}\b", clause):
-                if "_" in token or token.isupper() or any(ch.isdigit() for ch in token):
-                    targets.append(token.strip(".,;:!?()[]{}"))
-    if re.search(r"曾经?出现|出现过|曾显示|appeared|been visible", text, flags=re.IGNORECASE):
-        for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_\-]{2,80}\b", text):
-            if "_" in token or token.isupper() or any(ch.isdigit() for ch in token):
-                targets.append(token.strip(".,;:!?()[]{}"))
-    seen: set[str] = set()
-    unique: list[str] = []
-    for target in targets:
-        key = target.casefold()
-        if key not in seen:
-            seen.add(key)
-            unique.append(target)
-    return unique
+    targets.extend(_historical_visible_state_targets(task))
+    return _dedupe_targets(targets)
 
 
 def _gui_search_payloads(task: str) -> list[str]:
