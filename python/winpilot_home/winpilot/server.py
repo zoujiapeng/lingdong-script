@@ -116,12 +116,16 @@ class MemoryAddRequest(BaseModel):
     task: str
     app: str = ""
     steps: list[str] = []
+    conditions: list[str] = []
+    evidence: list[str] = []
 
 
 class MemoryPatchRequest(BaseModel):
     task: str | None = None
     app: str | None = None
     steps: list[str] | None = None
+    conditions: list[str] | None = None
+    evidence: list[str] | None = None
     provisional: bool | None = None
 
 
@@ -396,7 +400,13 @@ def memory_add(req: MemoryAddRequest) -> dict[str, Any]:
     from .memory import experience
     if not req.task.strip():
         raise HTTPException(400, "task 不能为空")
-    return experience.add(req.task.strip(), req.app.strip(), req.steps)
+    return experience.add(
+        req.task.strip(),
+        req.app.strip(),
+        req.steps,
+        conditions=req.conditions,
+        evidence=req.evidence,
+    )
 
 
 @app.put("/api/memory/{recipe_id}")

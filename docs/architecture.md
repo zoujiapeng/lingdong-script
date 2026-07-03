@@ -91,6 +91,10 @@ stateDiagram-v2
 - `launch` 的目标窗口会在发现后置前；`interaction_tools.py` 的输入动作优先使用 session target，而不是无条件使用当前 foreground；`action/verify.py` 在目标已知时会忽略无关 foreground，避免 Codex/日志/其他窗口 OCR 造成假成功。
 - `agent/perception_tools.py` 在 UIA-off 绘图/画布任务上有 `canvas_fast_observe`：无 `query/full` 的 `observe` 跳过全窗口 OCR，直接提供 Win32/CV 和 `likely_canvas` 摘要；需要文字 grounding 时用 `observe(query=...)` 或 `observe(full=true)` 回到完整感知。
 - BUS/WebSocket 给前端显示进度；`recorder/trace.py` 写可回放事件和截图；`agent/loop.py` 的 LLM trace 写每步真实 prompt/response，失败复盘必须优先看这些证据。
+- 长期经验记忆在 `memory/experience.py`，落盘到本机 `experience_memory.json`，通过 `agent/memory_tools.py` 的 `remember/forget/reuse_skill` 暴露给 GUI agent。recipe 现在显式带 `conditions` 和 `evidence`，隐式 `reuse_skill` 只允许强任务匹配；普通匹配只进入 prompt 提示，不会自动 replay。
+- session memory 在 `agent/session.py`，只保存当前服务生命周期内最近任务，并且只对“再来/继续/刚才那个/previous/same/it”等指代型任务注入 prompt。普通新任务不带 session history。
+- world advisory 是 `perception/world.py`、`agent/run_state.py`、`agent/context_guidance.py` 的运行态提示层：它只报告重复动作、动作后无变化、screen watcher 变化、need_observe/recovering 等信号，不主动截图，不替代 done 证据。
+- 上下文折叠仍在 `agent/loop.py`：超过阈值后折叠旧大型工具结果，保留最近全量观察，并用 checkpoint 保存任务目标、关键屏幕状态、失败/恢复原因和最近工具证据。
 
 ## 最近结构调整
 
@@ -126,8 +130,8 @@ flowchart LR
 - `fusion.screen_watch_autostart=true` 时，ToolSession 在获得目标窗口或执行可见动作前自动启动 watcher，AgentRunner 结束时停止 watcher，避免每个任务都要求 LLM 手动启动。
 - 普通可见动作的 `screen_delta` 使用动作前/动作后独立截图 diff，不直接复用后台 watcher 的 `_prev`；这是为了避免连续采样线程在动作前后抢帧。动作 ROI 新鲜时，`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI。
 - `observe(changed_only=true)` 只在最近/action ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。
-- `run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`。
-- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、controller phase、anchor click/cache/failure，后续性能优化应优先看这些字段。
+- `run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`；如果当前 snapshot 漏掉文本锚点，controller 会做一次目标 `observe(query=label)` 并重试，证据写入 `controller_auto_observe`。
+- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、controller phase、anchor click/cache/failure，batch `metrics.auto_observe_count` 记录 controller 内部为了定位元素主动做的目标 observe，后续性能优化应优先看这些字段。
 - URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
 - `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
 - 最新验证 run：`20260703-025138-dcf2c6`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用左侧状态卡 ROI 直接识别 `LOCAL COUNTER`，done gate 以 fresh screen evidence 通过。

@@ -54,6 +54,8 @@
 
 `/api/trace/{run_id}/summary` 里的 `low_latency` / `fast_gui` 字段是当前性能复盘入口：包含截图、感知、LLM 决策、动作执行、动作后验证、VLM/重规划/skill 复用频率，以及 batch subgoal、controller phase、锚点点击/缓存/失败统计。
 
+`/api/memory` 的 recipe/note 结构包含 `task`、`app`、`steps`，并可带 `conditions` 和 `evidence` 数组；`PUT /api/memory/{recipe_id}` 也允许更新这两个字段。它们用于说明该记忆何时适用、复用前后需要什么证据，不能把 replay 执行成功当成任务完成证明。
+
 ## Electron IPC
 
 实现：`python/agent/__main__.py`。名称仍叫 `agent`，但当前作用是 IPC adapter：接收 Electron 启动命令后调用 `winpilot.agent.router.build_runner()`。
