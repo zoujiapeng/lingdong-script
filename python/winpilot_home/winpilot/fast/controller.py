@@ -149,6 +149,11 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         name = str(only_name)
         if isinstance(only_args, dict):
             return name, dict(only_args)
+        if name == "hotkey":
+            keys = list(only_args) if isinstance(only_args, list) else [only_args]
+            return name, {"keys": [str(key) for key in keys]}
+        if name in {"type_text", "type_into_element"}:
+            return name, {"text": str(only_args)}
         return name, {"value": only_args}
     return "", {}
 

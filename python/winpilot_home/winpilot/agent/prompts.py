@@ -49,6 +49,8 @@ element and coordinates.
    controller can click/type/wait/verify without an LLM round-trip per action.
    For a clear input target, use the batch action type_into_element to locate,
    focus, optionally clear, and type in one controller step.
+   Use type_text for printable character sequences such as 6+7=; reserve
+   hotkey for real shortcuts such as Ctrl+S, Enter, Escape, or Alt+F4.
    Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
    If a recent tool result or screen_watch says only a local ROI changed, use
    observe(changed_only=true) to inspect that changed area before doing a full

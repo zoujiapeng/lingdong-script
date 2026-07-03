@@ -87,3 +87,17 @@ def test_run_state_observe_resets_pending_unverified_count():
 
     assert state.phase == "ready"
     assert state.unverified_actions == 0
+
+
+def test_run_state_done_rejection_is_not_terminal_done():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.before_tool("done", {"summary": "claimed"})
+    state.after_tool("done", {"summary": "claimed"}, "任务完成: claimed", terminal=None)
+    state.terminal_rejected("done", "missing visible evidence")
+
+    assert state.phase == "recovering"
+    assert state.last_tool == "done"
+    assert "missing visible evidence" in state.last_issue
+    assert all(item["phase"] != "terminal:done" for item in state.history)

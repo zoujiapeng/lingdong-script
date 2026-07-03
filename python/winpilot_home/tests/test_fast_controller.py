@@ -252,14 +252,41 @@ def test_fast_controller_accepts_single_key_shorthand():
     out = FastGuiController(Session()).execute([
         {"click": {"element_id": 1}},
         {"hotkey": {"keys": ["enter"]}},
+        {"hotkey": ["6"]},
     ])
 
     assert out["ok"]
     assert calls == [
         ("click", {"element_id": 1}),
         ("hotkey", {"keys": ["enter"]}),
+        ("hotkey", {"keys": ["6"]}),
     ]
-    assert out["metrics"]["controller_round_trips_saved"] == 1
+    assert out["metrics"]["controller_round_trips_saved"] == 2
+
+
+def test_fast_controller_hotkey_list_shorthand_maps_to_keys():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"hotkey": ["6"]},
+        {"hotkey": ["+"]},
+    ], sync=False)
+
+    assert out["ok"]
+    assert calls == [
+        ("hotkey", {"keys": ["6"]}),
+        ("hotkey", {"keys": ["+"]}),
+    ]
 
 
 def test_fast_controller_wait_shorthand_is_pause_not_condition_wait():

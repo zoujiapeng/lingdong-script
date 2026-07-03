@@ -1,6 +1,7 @@
 """Input and visible-action tool handlers for ToolSession."""
 from __future__ import annotations
 
+import json
 import sys
 import time
 from typing import Any
@@ -51,6 +52,23 @@ def _expect_timeout(args: dict, default: float = 6.0) -> float:
         except (TypeError, ValueError):
             return default
     return default
+
+
+def _printable_text_sequence(keys: list[str]) -> str:
+    if len(keys) <= 1:
+        return ""
+    aliases = {"space": " ", "plus": "+", "equals": "=", "equal": "="}
+    chars: list[str] = []
+    for key in keys:
+        value = str(key)
+        low = value.casefold()
+        if low in aliases:
+            chars.append(aliases[low])
+        elif len(value) == 1 and value.isprintable():
+            chars.append(value)
+        else:
+            return ""
+    return "".join(chars)
 
 
 class InteractionToolMixin:
@@ -184,6 +202,20 @@ class InteractionToolMixin:
         verify_mod = _tools_attr("verify", verify)
         win32gui_mod = _tools_attr("win32gui", win32gui)
         keys = [str(k) for k in args["keys"]]
+        printable_text = _printable_text_sequence(keys)
+        if printable_text:
+            result = self._t_type_text({
+                "text": printable_text,
+                "expect": args.get("expect"),
+            })
+            try:
+                data = json.loads(result.text or "{}")
+                if isinstance(data, dict):
+                    data["coerced_from_hotkey"] = keys
+                    result.text = self._fmt(data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return result
 
         def action() -> dict:
             target = self._action_hwnd()

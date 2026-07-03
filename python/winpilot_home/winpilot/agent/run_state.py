@@ -180,6 +180,9 @@ class RunStateMachine:
 
         self._transition("ready", name)
 
+    def terminal_rejected(self, name: str, issue: str = "") -> None:
+        self._transition("recovering", name, issue or "terminal claim rejected by done_check")
+
     def guidance(self) -> str:
         key = (self.phase, self.last_tool, self.unverified_actions)
         if key == self._last_guidance_key:
