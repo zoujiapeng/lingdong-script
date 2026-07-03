@@ -1287,3 +1287,238 @@ def test_subgoal_anchor_failure_returns_visible_region_candidates():
         ("focus_window", {"hwnd": 1}),
         ("observe", {"query": "Local Counter", "max_elements": 160}),
     ]
+
+
+def test_execute_subgoal_draw_generates_strokes_inside_likely_canvas(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.utils.screenshot import Region
+
+    window = Region(10, 20, 500, 400)
+    image = np.zeros((400, 500, 3), dtype=np.uint8)
+    image[120:360, 80:460] = 255
+    captured_actions = []
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+        capture_fn = staticmethod(lambda region: image)
+
+        def execute(self, actions, **kwargs):
+            captured_actions.extend(actions)
+            return {
+                "ok": True,
+                "verified": True,
+                "controller_state": {"phase": "verified"},
+                "metrics": {"action_count": len(actions)},
+                "results": [
+                    {
+                        "action": "draw_strokes",
+                        "verified": True,
+                        "data": {
+                            "ok": True,
+                            "verified": True,
+                            "visual_change_detected": True,
+                        },
+                    },
+                    {
+                        "action": "auto_visual_verify",
+                        "verified": True,
+                        "data": {
+                            "ok": True,
+                            "verified": True,
+                            "visual_change_detected": True,
+                            "nonvisual_summary": {
+                                "visible_colors": {
+                                    "blue": {"pixels": 120, "ratio": 0.02},
+                                },
+                            },
+                        },
+                    },
+                ],
+            }
+
+    class Session:
+        task = "draw a blue triangle on the canvas"
+        hwnd = 7
+        run_id = "run-draw-subgoal"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    result = SubgoalExecutor(Session(), Controller()).execute({
+        "subgoal": "draw a blue triangle on the visible canvas",
+        "draw": {"shape": "triangle", "color": "blue"},
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert captured_actions[0] == {"action": "select_color", "color": "blue"}
+    draw = captured_actions[1]
+    canvas = draw["canvas_region"]
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert draw["action"] == "draw_strokes"
+    assert draw["shape"] == "triangle"
+    assert draw["requested_color"] == "blue"
+    assert canvas == {"x": 90, "y": 140, "width": 380, "height": 240}
+    for stroke in draw["strokes"]:
+        for x, y in stroke:
+            assert canvas["x"] <= x <= canvas["x"] + canvas["width"]
+            assert canvas["y"] <= y <= canvas["y"] + canvas["height"]
+    assert "controller already executed and verified" in payload["fast_path_advice"].casefold()
+
+
+def test_execute_subgoal_draw_rejects_missing_requested_color(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.utils.screenshot import Region
+
+    window = Region(0, 0, 400, 300)
+    image = np.full((300, 400, 3), 255, dtype=np.uint8)
+    captured_actions = []
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+        capture_fn = staticmethod(lambda region: image)
+
+        def execute(self, actions, **kwargs):
+            captured_actions.extend(actions)
+            return {
+                "ok": True,
+                "verified": True,
+                "controller_state": {"phase": "verified"},
+                "metrics": {"action_count": len(actions)},
+                "results": [
+                    {
+                        "action": "draw_strokes",
+                        "verified": True,
+                        "data": {
+                            "ok": True,
+                            "verified": True,
+                            "visual_change_detected": True,
+                        },
+                    },
+                    {
+                        "action": "auto_visual_verify",
+                        "verified": True,
+                        "data": {
+                            "ok": True,
+                            "verified": True,
+                            "visual_change_detected": True,
+                            "nonvisual_summary": {
+                                "visible_colors": {
+                                    "black": {"pixels": 120, "ratio": 0.02},
+                                },
+                            },
+                        },
+                    },
+                ],
+            }
+
+    class Session:
+        task = "draw a blue triangle on the canvas"
+        hwnd = 7
+        run_id = "run-draw-color-miss"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    result = SubgoalExecutor(Session(), Controller()).execute({
+        "subgoal": "draw a blue triangle on the visible canvas",
+        "draw": {"shape": "triangle", "color": "blue"},
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["verified"] is False
+    assert payload["evidence_packet"]["missing_visual_colors"] == ["blue"]
+    assert "required color evidence is missing" in payload["error"]
+
+
+def test_fast_controller_select_color_clicks_visible_palette_swatch():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.utils.screenshot import Region
+
+    image = np.full((220, 300, 3), 96, dtype=np.uint8)
+    swatches = [
+        ((20, 110), (0, 0, 255)),      # red
+        ((50, 110), (0, 128, 255)),    # orange
+        ((80, 110), (0, 255, 255)),    # yellow
+        ((110, 110), (0, 180, 0)),     # green
+        ((140, 110), (255, 0, 0)),     # blue
+        ((170, 110), (180, 0, 180)),   # purple
+        ((20, 145), (0, 0, 255)),
+        ((50, 145), (0, 255, 255)),
+        ((80, 145), (0, 180, 0)),
+        ((110, 145), (255, 0, 0)),
+    ]
+    for (x, y), color in swatches:
+        image[y:y + 18, x:x + 18] = color
+
+    clicks = []
+
+    class Session:
+        task = "draw a blue triangle"
+        hwnd = 1
+        run_id = "run-select-color"
+        snapshot = Snapshot(hwnd=1, title="Palette", region=Region(100, 200, 300, 220), elements=[])
+
+        def dispatch(self, name, args):
+            assert name == "click"
+            clicks.append(args)
+            return ToolResult('{"ok": true}')
+
+    controller = FastGuiController(Session(), capture_fn=lambda region: image)
+    out = controller.execute([{"action": "select_color", "color": "blue"}], sync=False)
+
+    assert out["ok"] is True
+    assert out["verified"] is True
+    assert clicks
+    assert 235 <= clicks[0]["x"] <= 258
+    assert 305 <= clicks[0]["y"] <= 322
+
+
+def test_palette_swatch_detection_ignores_titlebar_colorful_icon():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.screenshot import Region
+
+    image = np.full((220, 300, 3), 96, dtype=np.uint8)
+    # A colorful app icon in the title bar should not be treated as an open
+    # palette; there is no local cluster of color choices.
+    title_colors = [
+        ((12, 12), (255, 0, 0)),
+        ((26, 12), (0, 255, 0)),
+        ((12, 26), (0, 0, 255)),
+        ((26, 26), (0, 255, 255)),
+        ((150, 90), (255, 0, 0)),
+        ((190, 110), (0, 255, 0)),
+        ((230, 130), (0, 0, 255)),
+        ((260, 150), (180, 0, 180)),
+    ]
+    for (x, y), color in title_colors:
+        image[y:y + 10, x:x + 10] = color
+
+    assert FastGuiController._palette_swatch_point(image, Region(100, 200, 300, 220), "blue") is None

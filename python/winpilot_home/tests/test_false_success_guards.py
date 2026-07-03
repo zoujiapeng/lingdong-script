@@ -953,6 +953,47 @@ def test_execute_subgoal_compact_evidence_keeps_fast_path_advice():
     assert "call done" in compact["fast_path_advice"]
 
 
+def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a triangle on the canvas")
+    runner._steps_log = ["execute_subgoal \"draw triangle\""]
+    runner._recent_results = [
+        ("execute_subgoal", json.dumps({
+            "actions_executed": [{"action": "draw_strokes"}],
+            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
+        })),
+    ]
+
+    assert runner._history_mentions_action("draw_strokes") is True
+
+
+def test_done_gate_rejects_recent_missing_visual_color():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle on the canvas")
+    runner._recent_results = [
+        ("execute_subgoal", json.dumps({
+            "actions_executed": [{"action": "draw_strokes"}],
+            "evidence_packet": {
+                "missing_visual_colors": ["blue"],
+                "matched_visual_colors": [],
+            },
+            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
+        })),
+    ]
+
+    assert runner._verify_drawing_done(json.dumps({
+        "visual_change_detected": True,
+        "missing_visual_colors": ["blue"],
+    })) is False
+    assert "still missing: blue" in runner._last_done_reject_reason
+
+
 def test_top_level_click_uses_fast_controller_without_explicit_batch():
     import json
 

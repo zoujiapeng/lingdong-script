@@ -54,6 +54,12 @@ element and coordinates.
    games, chat apps, canvas), native vision/VLM or compact visual summaries are
    your primary navigation tools.
    For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Also use execute_subgoal for click-only routines when the target has a visible label and the expected result is a visible text/state. If one routine needs several obvious buttons, put them in execute_subgoal.clicks in order. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
+   For simple drawing/canvas tasks, use execute_subgoal with draw={{shape,color}}
+   after the target app/window is open. The controller locates the likely canvas,
+   selects the requested visible color when possible, draws the requested simple
+   shape, and verifies pixel change. Put requested colors in the draw payload;
+   do not spend early rounds selecting toolbar items before trying this direct
+   draw routine.
    For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
    If execute_subgoal returns verified=true and evidence_packet.matched_texts
@@ -155,7 +161,7 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 1. list_windows / find_app / focus_window
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. Observe when state or target location is ambiguous; pass full=true only when raw details are needed. For clear labeled routines with a known rough region, execute_subgoal may be called directly after focus_window because it performs targeted observe/locator/verification internally.
-3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch.
+3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch. For simple drawing/canvas tasks, call execute_subgoal with draw={{shape,color}} after the window is open; let the controller select requested color, locate the likely canvas, and verify pixel change before you inspect toolbars.
 4. observe/read_text again only when controller evidence is insufficient; matched_texts or fast_path_advice from verified execute_subgoal can complete the matching plan item.
 5. done only when grounded evidence confirms task complete.
 
