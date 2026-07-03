@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
+from ..fast.subgoal import SubgoalExecutor
 from .tool_result import ToolResult
 
 
@@ -35,6 +36,9 @@ class FastToolMixin:
             if name in BATCH_MUTATING_ACTIONS:
                 return True
         return False
+
+    def _t_execute_subgoal(self, args: dict) -> ToolResult:
+        return SubgoalExecutor(self, self._fast_controller()).execute(args)
 
     def _t_run_action_batch(self, args: dict) -> ToolResult:
         actions = args.get("actions")

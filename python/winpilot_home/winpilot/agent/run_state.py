@@ -28,6 +28,7 @@ ACTION_TOOLS = {
     "write_file",
     "apply_patch",
     "run_action_batch",
+    "execute_subgoal",
 }
 OBSERVE_TOOLS = {
     "observe",

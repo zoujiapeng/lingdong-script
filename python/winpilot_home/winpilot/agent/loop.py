@@ -483,6 +483,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         elif name == "wait":
             cond = meta.get("condition") or args.get("condition") or {}
             line = f"wait {json.dumps(cond, ensure_ascii=False)}"
+        elif name == "execute_subgoal":
+            line = f'execute_subgoal "{str(args.get("subgoal") or meta.get("subgoal") or "")[:120]}"'
         if not line:  # scroll/drag stay positional by nature
             compact = {k: v for k, v in args.items() if k != "expect"}
             line = f"{name}({json.dumps(compact, ensure_ascii=False)})"
@@ -606,6 +608,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             data = json.loads(result_text or "{}")
         except (json.JSONDecodeError, TypeError):
             data = {}
+        if isinstance(data, dict) and tool_name == "execute_subgoal":
+            packet = data.get("evidence_packet")
+            if isinstance(packet, dict):
+                matched = packet.get("matched_texts") or []
+                preview = str(packet.get("visible_text_preview") or "")
+                if isinstance(matched, list):
+                    for value in matched:
+                        text = str(value or "").strip()
+                        if text:
+                            self._append_visible_evidence(
+                                "execute_subgoal:evidence_packet",
+                                text,
+                                self._visible_snippet(preview, text) or f"subgoal matched visible text: {text}",
+                            )
         if not (isinstance(data, dict) and data.get("verified") is True):
             return
         for value in self._expect_visible_values(args):
@@ -653,6 +669,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return (result_text or "")[:1200]
         if not isinstance(data, dict):
             return (result_text or "")[:1200]
+        if tool_name == "execute_subgoal":
+            packet = data.get("evidence_packet") if isinstance(data.get("evidence_packet"), dict) else {}
+            compact = {
+                "ok": data.get("ok"),
+                "verified": data.get("verified"),
+                "subgoal": data.get("subgoal"),
+                "subgoal_route": data.get("subgoal_route"),
+                "controller_state": data.get("controller_state"),
+                "needs_llm_reason": data.get("needs_llm_reason"),
+                "matched_texts": packet.get("matched_texts"),
+                "missing_texts": packet.get("missing_texts"),
+                "metrics": data.get("metrics"),
+                "actions_executed": data.get("actions_executed"),
+            }
+            return json.dumps(compact, ensure_ascii=False, default=str)[:1800]
         if tool_name == "run_action_batch":
             compact_results: list[dict[str, Any]] = []
             for item in data.get("results") or []:
@@ -1093,6 +1124,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "find_app",
                 "find_program",
                 "run_action_batch",
+                "execute_subgoal",
                 "zoom",
                 "screenshot",
             }
@@ -1101,7 +1133,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 or '"verified"' in (result.text or "")
                 or "visual_change_detected" in (result.text or "")
             ):
-                if tc.function.name in {"run_action_batch", "zoom", "screenshot", "draw_strokes", "drag"}:
+                if tc.function.name in {"run_action_batch", "execute_subgoal", "zoom", "screenshot", "draw_strokes", "drag"}:
                     evidence_text = self._compact_tool_evidence(tc.function.name, result.text)
                 else:
                     limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
@@ -1128,7 +1160,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "last_action",
                     "metrics",
                     "subgoal",
+                    "subgoal_route",
                     "controller_state",
+                    "evidence_packet",
+                    "needs_llm_reason",
                     "element_cache",
                 ):
                     if key in parsed_result:

@@ -13,8 +13,10 @@ Current physical screen size: {screen_w}x{screen_h}.
 
 # Observation protocol
 After each observe call you receive:
-- Structured text: Window title, hwnd, rect, then a list of UI elements with
-  id/role/text/center/bbox/source.
+- A compact perception reducer summary: screen stage, target window, top candidates,
+  uncertainties, recent changes, and recommended controller actions.
+- A raw element sample with id/role/text/center/bbox/source. Pass full=true only
+  when you need all raw UIA/OCR/CV elements; full raw snapshots remain in trace.
 - Screenshot (only when native vision is enabled): a JPEG of the actual window pixels.
 - For text-only models, screenshot/zoom base64 is trace/debug evidence only.
   You cannot inspect image bytes directly. Use OCR/UIA/CV, nonvisual_summary,
@@ -46,15 +48,16 @@ element and coordinates.
    For any window where UIA/OCR returns few or no elements (custom-rendered apps,
    games, chat apps, canvas), native vision/VLM or compact visual summaries are
    your primary navigation tools.
-   For obvious grounded mini-sequences, prefer run_action_batch so the fast GUI
+   For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
+   For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
-   For a clear input target, use the batch action type_into_element to locate,
+   For a clear input target inside a batch, use type_into_element to locate,
    focus, optionally clear, and type in one controller step.
-   Use type_text for printable character sequences such as 6+7=; reserve
-   hotkey for real shortcuts such as Ctrl+S, Enter, Escape, or Alt+F4.
-   If the target window is already focused and the next action is a literal
-   printable sequence, type_text it directly; do not wait for button OCR or
-   process checks.
+   Use type_text directly for keyboard-first surfaces or already-focused plain
+   editors, such as calculator expressions like 6+7= or typing into Notepad
+   after focus is already established. For labeled/search/message inputs with
+   an Apply/Search/Send button, prefer execute_subgoal or type_into_element.
+   Reserve hotkey for real shortcuts such as Ctrl+S, Enter, Escape, or Alt+F4.
    Mutating batches do cheap stable screen sync by default; still observe/read_text before done.
    If a recent tool result or screen_watch says only a local ROI changed, use
    observe(changed_only=true) to inspect that changed area before doing a full
@@ -138,10 +141,11 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 
 # Core loop
 1. list_windows / find_app / focus_window
-Use type_text for focused printable sequences such as 6+7=; hotkey is only for shortcuts.
-2. observe → read grounded perception → act by coordinates
-3. observe again → verify the change happened
-4. done only when grounded evidence confirms task complete.
+Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
+2. observe → read the perception reducer; pass full=true only when raw details are needed
+3. For clear labeled input/button routines, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch
+4. observe/read_text again only when the controller evidence is insufficient
+5. done only when grounded evidence confirms task complete.
 
 Recovery: if same tactic fails twice, change approach entirely.
 {vlm_section}{planning_section}{playbook_section}{experience_section}"""

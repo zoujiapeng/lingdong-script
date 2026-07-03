@@ -58,6 +58,20 @@ def _expectable(props: dict | None = None) -> dict:
     return out
 
 
+def _tool_name(tool: dict) -> str:
+    return str((tool.get("function") or {}).get("name") or "")
+
+
+def _promote_tools(tools: list[dict], names: list[str], before: str) -> None:
+    wanted = set(names)
+    promoted = [tool for tool in tools if _tool_name(tool) in wanted]
+    if not promoted:
+        return
+    rest = [tool for tool in tools if _tool_name(tool) not in wanted]
+    insert_at = next((idx for idx, tool in enumerate(rest) if _tool_name(tool) == before), len(rest))
+    tools[:] = [*rest[:insert_at], *promoted, *rest[insert_at:]]
+
+
 def tool_schemas(
     planning: bool = False,
     coding_runtime: bool = False,
@@ -148,7 +162,7 @@ def tool_schemas(
         ),
         _tool(
             "type_text",
-            "Type literal text. Optionally focus an element first.",
+            "Type literal text into an already-focused keyboard-first control. For labeled/search/message inputs that still need locating or an Apply/Search/Send click, prefer execute_subgoal or run_action_batch/type_into_element.",
             _expectable({
                 "text": _prop("string", "Literal text."),
                 "element_id": _prop("integer", "Optional input element id."),
@@ -196,6 +210,56 @@ def tool_schemas(
         ),
         _tool("wait", "Wait until a condition is true.",
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
+        _tool(
+            "execute_subgoal",
+            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click an Apply/Search/Send button, wait briefly, and verify visible text/state. This keeps low-level click/type/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason.",
+            {
+                "subgoal": _prop("string", "One short high-level GUI subgoal for this routine."),
+                "target_window": {
+                    "type": "object",
+                    "description": "Optional target scope, e.g. {'hwnd':123,'title':'...'}; omit to use current target window.",
+                    "properties": {
+                        "hwnd": _prop("integer", "Target window handle."),
+                        "title": _prop("string", "Expected title substring for trace/debug."),
+                        "process": _prop("string", "Expected process/app hint for trace/debug."),
+                    },
+                },
+                "input": {
+                    "type": "object",
+                    "description": "Optional text-entry routine. The controller locates the input from role, label, nearby OCR/CV rectangle, focused state, or a synthetic nearby box.",
+                    "properties": {
+                        "label": _prop("string", "Input/search field label or nearby OCR text."),
+                        "text": _prop("string", "Exact literal text to type."),
+                        "clear": _prop("boolean", "Default true: Ctrl+A before typing."),
+                        "expected_region": _prop("string", "Optional rough region such as top, bottom, left, right, center, top-right."),
+                        "fallback_text": {"type": "array", "items": {"type": "string"}},
+                        "expect_text": {"oneOf": [{"type": "boolean"}, {"type": "string"}]},
+                    },
+                },
+                "click": {
+                    "type": "object",
+                    "description": "Optional button/action click routine after the input routine.",
+                    "properties": {
+                        "label": _prop("string", "Button/menu/link visible label, e.g. Apply, Search, Send."),
+                        "role": _prop("string", "Default button."),
+                        "expected_region": _prop("string", "Optional rough region."),
+                        "fallback_text": {"type": "array", "items": {"type": "string"}},
+                        "button": _prop("string", "Mouse button.", enum=["left", "right", "middle"]),
+                        "double": _prop("boolean", "Double click."),
+                    },
+                },
+                "verify_texts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Visible strings/states that must appear before the routine is considered verified.",
+                },
+                "constraints": {
+                    "type": "object",
+                    "description": "Optional routine constraints, currently supports {'wait': false} to skip stable wait.",
+                },
+            },
+            ["subgoal"],
+        ),
         _tool(
             "run_action_batch",
             "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default. The controller may append an internal auto_visual_verify result after visual mutations.",
@@ -270,6 +334,7 @@ def tool_schemas(
         _tool("fail", "Finish with an honest failure reason when the task cannot be completed.",
               {"reason": _prop("string", "Failure reason.")}, ["reason"]),
     ])
+    _promote_tools(tools, ["execute_subgoal"], before="click")
 
     if planning:
         tools.extend([

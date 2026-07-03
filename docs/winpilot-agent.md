@@ -72,7 +72,7 @@
    对 `draw_strokes/drag` 这类强视觉动作，controller 还可能追加内部 `auto_visual_verify` 结果，提供动作区域的 `nonvisual_summary`，避免模型必须再走一轮独立 `zoom`。
    `click_element` 如果先前 snapshot 没找到文本锚点，会由 controller 自动做一次 `observe(query=label)` 并重试；排查时看 `controller_auto_observe`、`retry_anchor_locator` 和 `metrics.auto_observe_count`。
    `type_into_element` 是 batch 内部组合输入动作，会在一个 controller 子动作内完成锚点定位、点击聚焦、可选清空和输入；排查时看 `subresults`、`controller_internal_action_count` 和 `metrics.compound_round_trips_saved`。
-   如果 LLM 顶层直接调用 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据。`draw_strokes/drag` 还可能出现 `auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
+   清晰的输入/按钮 routine 应优先看 `execute_subgoal`：它在同一 `ToolSession` 下调用 fast controller 完成定位、输入、点击、等待和 `read_text` 验证；工具结果里看 `subgoal_route=controller_first`、`actions_executed`、`controller_state`、`evidence_packet.matched_texts/missing_texts`。如果 LLM 顶层直接调用 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 而不是 `run_action_batch`，`AgentRunner` 会自动把它包装成单动作 batch；工具结果里应出现 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据。`draw_strokes/drag` 还可能出现 `auto_visual_verify` 或 `visual_change_detected`。验证充分时还会有 `fast_path_advice`，用于减少额外 zoom/observe 回合。
    对带语义锚点的动作，controller 会把 `click(label=...)` 升级为 `click_element`，把 `type_text(label=..., text=...)` 升级为 `type_into_element`。看 `results[].upgraded_from`、`anchor_locator`、`resolved_element`、`subresults`，可以判断卡在锚点定位、聚焦、清空还是输入。
    普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
    严格 GUI-only 且用户明确禁 shell 时，`run_shell/run_detached` 不应出现在 `NNN_llm_request.json` 的 tools 列表里；如果仍出现，先查 `task_rules._gui_only_forbids_shell()` 和 `tool_schemas(..., allow_shell=False)` 的路径。
@@ -101,7 +101,7 @@
 | `agent/perception_tools.py` | `observe`、`read_text`、`find_image`、`vlm_describe`、视觉摘要等感知工具 mixin |
 | `agent/interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` 输入动作工具 mixin |
 | `agent/system_tools.py` | `run_shell`、`run_detached`、`launch`、`tray_click`、`search_files`、`undo_last` 系统/启动工具 mixin；Coding Runtime 激活时 `run_shell` 委托到 workspace |
-| `agent/fast_tools.py` | `run_action_batch`、`screen_watch` 低延迟动作批处理和屏幕变化 watcher mixin |
+| `agent/fast_tools.py` | `execute_subgoal`、`run_action_batch`、`screen_watch` 低延迟 routine、动作批处理和屏幕变化 watcher mixin |
 | `agent/plan_tools.py` | `revise_plan`、`complete_subgoal`、`done`、`fail` 计划和终止工具 mixin |
 | `agent/file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` 文件工具 mixin；Coding Runtime 激活时委托到 workspace-confined `CodingSession` |
 | `agent/coding_tools.py` | Coding Runtime 的 repo 文件/patch/GitHub/shell 工具实现 |
@@ -110,7 +110,7 @@
 
 默认 desktop/GUI 工具包括：
 
-`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`run_action_batch`、`screen_watch`、`done`、`fail`。
+`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`execute_subgoal`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`run_action_batch`、`screen_watch`、`done`、`fail`。
 
 按配置动态加入：
 
@@ -225,6 +225,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - `agent_tool` 的 `launch` 应该 `verified=true`，并且目标窗口标题是 Chrome 靶场窗口，不应被 Codex 窗口遮挡。
 - 如果没有显式调用 `screen_watch start`，也可能看到 watcher 状态：`fusion.screen_watch_autostart=true` 时，ToolSession 会在目标窗口就绪或可见动作前自动启动 watcher，并在 run 结束时停止。
 - `run_action_batch` 的 `result_meta` 应该含 `subgoal`、`controller_state`、`metrics`；内部动作看 `agent_batch_action`。如果用了 `click_element`，还要看 `anchor_locator`、`resolved_element`、`element_cache`、`controller_auto_observe`，确认是缓存命中、snapshot 重新定位、目标 observe 后命中，还是锚点失败。`type_into_element` 还要看 `subresults`，确认失败阶段是 focus、clear 还是 type_text。
+- `execute_subgoal` 的结果应该含 `actions_executed`、`controller_state` 和 `evidence_packet`。如果一个输入 routine 已输入成功但 `missing_texts` 包含后续才会出现的全局状态，说明证据作用域又被改坏了；当前规则只会继承当前 subgoal/args 中提到的全局 literal。
 - 普通可见动作会有 `result_meta.screen_delta` 和 `action_target.after.foreground_matches_target=true`。现在动作 delta 使用独立前后帧；`screen_watch` 还会保留 `action_changed_regions`。如果后台 watcher 被弹层、动画、画布噪声带偏，`observe(changed_only=true)` 应优先新鲜 action ROI，再退回 recent ROI。
 - `observe(changed_only=true)` 的 `result_text` 应该以 `Changed-only observe: OCR/CV/Win32 filtered to recent screen_watch ROI(s)` 开头；如果出现 `returned the normal observe snapshot`，说明没有可用 ROI 或 ROI 过期。如果是 `Changed-only observe query fallback`，说明 ROI 可用但没有命中 query，系统主动退回全窗口 observe。
 - `done_check` 对显式可见状态目标可直接通过，例如 `Visible state accepted from fresh screen evidence: LOCAL_COUNTER`。这是 fresh screen OCR 证据，不是 agent 总结。
@@ -232,3 +233,5 @@ python -m http.server 8877 --bind 127.0.0.1
 已验证 run：`20260703-025138-dcf2c6`。截图 `python/winpilot_home/traces/20260703-025138-dcf2c6/batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。这个 run 的 `observe(changed_only=true)` 在 ROI 内直接识别到 `LOCAL COUNTER`，没有再补一次全量 `query=LOCAL_COUNTER`。
 
 `/api/trace/<run_id>/summary` 会返回 `low_latency` 和 `fast_gui` 字段，用来定位瓶颈：截图耗时、感知耗时、LLM 决策耗时、动作执行耗时、动作后验证耗时、重规划频率、VLM 调用频率、skill 复用率、watcher 覆盖情况、batch subgoal、controller phase、anchor click/cache/failure。以后做速度优化先看这里，再决定该减少 VLM、减少 LLM round-trip，还是改 controller 内环。
+
+最新 controller-first 靶场验证：`20260704-005515-7f70a7`。任务通过 `/api/chat` 进入，最终工具序列为 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`，只有 11 个工具和 1 次 observe，done gate 一次通过；真实截图 `python/winpilot_home/traces/20260704-005515-7f70a7/batch_after_003.jpg` 显示输入框 `SUBGOAL_OK_078` 与状态卡 `LOCAL_COUNTER_2`。

@@ -21,12 +21,15 @@ def screen_point_to_roi(region: Region, x: int, y: int) -> tuple[int, int]:
 
 
 def inflate_region(region: Region, pad: int) -> Region:
+    # Do not clamp here: unit/headless test environments may report a 1x1
+    # screen while changed_regions is operating on synthetic frames with an
+    # explicit root_region. Capture paths clamp at the final screen IO boundary.
     return Region(
         region.left - int(pad),
         region.top - int(pad),
         region.width + int(pad) * 2,
         region.height + int(pad) * 2,
-    ).clamp_to_screen()
+    )
 
 
 def _merge_regions(regions: list[Region], pad: int = 6) -> list[Region]:
@@ -46,7 +49,7 @@ def _merge_regions(regions: list[Region], pad: int = 6) -> list[Region]:
                 top = min(existing.top, candidate.top)
                 right = max(existing.right, candidate.right)
                 bottom = max(existing.bottom, candidate.bottom)
-                merged[i] = Region(left, top, right - left, bottom - top).clamp_to_screen()
+                merged[i] = Region(left, top, right - left, bottom - top)
                 absorbed = True
                 break
         if not absorbed:
