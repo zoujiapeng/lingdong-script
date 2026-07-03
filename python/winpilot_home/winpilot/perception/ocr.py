@@ -8,6 +8,7 @@ screen coordinates.
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -22,6 +23,16 @@ from .model import UIElement
 _engine = None
 _engine_lock = threading.Lock()
 _active_provider = "uninitialized"
+
+
+def _match_text(needle: str, text: str) -> bool:
+    needle_lower = (needle or "").casefold()
+    text_lower = (text or "").casefold()
+    if needle_lower in text_lower:
+        return True
+    norm_needle = re.sub(r"[\s_\-:：]+", "", needle_lower)
+    norm_text = re.sub(r"[\s_\-:：]+", "", text_lower)
+    return bool(norm_needle and norm_needle in norm_text)
 
 
 def _rebuild_with_dml(engine) -> bool:
@@ -144,7 +155,6 @@ def collect(region: Region, min_conf: float | None = None) -> list[UIElement]:
 
 def find_text(region: Region, needle: str,
               min_conf: float | None = None) -> list[UIElement]:
-    """All OCR hits containing the substring (case-insensitive)."""
-    needle_lower = needle.lower()
+    """All OCR hits containing the substring, tolerant of OCR separators."""
     return [e for e in collect(region, min_conf=min_conf)
-            if needle_lower in e.text.lower()]
+            if _match_text(needle, e.text)]

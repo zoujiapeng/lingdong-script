@@ -430,6 +430,16 @@ async function refreshStatus() {
   try {
     const st = await api("/api/status");
     running = st.running; updateRunBadge();
+    const runtimeBadge = $("badge-runtime");
+    if (runtimeBadge && st.runtime) {
+      const git = st.runtime.git || {};
+      const branch = git.branch || "?";
+      const commit = git.commit || "?";
+      const dirty = git.dirty ? "*" : "";
+      const port = st.runtime.port ? `:${st.runtime.port}` : "";
+      runtimeBadge.textContent = `runtime: ${branch}@${commit}${dirty}`;
+      runtimeBadge.title = `${st.runtime.repo_root || ""}\nPID ${st.runtime.pid || "?"}${port}`;
+    }
     const ocrBadge = $("badge-ocr");
     const isGpu = st.ocr_provider === "DmlExecutionProvider";
     ocrBadge.textContent = "OCR: " + (st.ocr_provider === "uninitialized" ? "未初始化"

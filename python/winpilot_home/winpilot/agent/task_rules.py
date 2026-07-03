@@ -292,6 +292,38 @@ def _required_visible_payloads(task: str) -> list[str]:
     return unique
 
 
+def _required_literal_tokens(task: str) -> list[str]:
+    """Extract distinctive user literals that must be proven before done.
+
+    This is deliberately broader than write/input payload extraction. If the
+    user mentions a unique token such as FAST_WRAP_OK_071 or a long numeric
+    result, accepting a "functionally equivalent" outcome is usually fake
+    success.
+    """
+    text = task or ""
+    text = re.sub(r"https?://\S+", " ", text)
+    tokens: list[str] = []
+    for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{3,80}\b|\b\d{4,18}\b", text):
+        value = token.strip(".,;:!?()[]{}<>\"'")
+        if not value:
+            continue
+        low = value.casefold()
+        if low in {
+            "http", "https", "localhost", "gui", "shell", "dom",
+            "chrome", "edge", "windows", "winpilot",
+        }:
+            continue
+        has_digit = any(ch.isdigit() for ch in value)
+        distinctive = (
+            "_" in value
+            or has_digit
+            or (len(value) >= 6 and value.upper() == value and any(ch.isalpha() for ch in value))
+        )
+        if distinctive:
+            tokens.append(value)
+    return _dedupe_targets(tokens)
+
+
 def _dedupe_targets(targets: list[str]) -> list[str]:
     seen: set[str] = set()
     unique: list[str] = []

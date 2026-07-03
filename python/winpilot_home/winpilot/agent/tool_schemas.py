@@ -58,7 +58,11 @@ def _expectable(props: dict | None = None) -> dict:
     return out
 
 
-def tool_schemas(planning: bool = False, coding_runtime: bool = False) -> list[dict]:
+def tool_schemas(
+    planning: bool = False,
+    coding_runtime: bool = False,
+    allow_shell: bool = True,
+) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
     When coding_runtime=True, repository-specific tools are added to the same
@@ -66,7 +70,7 @@ def tool_schemas(planning: bool = False, coding_runtime: bool = False) -> list[d
     """
     tools = []
 
-    if shell.shell_enabled():
+    if allow_shell and shell.shell_enabled():
         tools.extend([
             _tool(
                 "run_shell",

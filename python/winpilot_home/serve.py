@@ -28,6 +28,8 @@ import uvicorn
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+    os.environ["WINPILOT_SERVE_PORT"] = str(port)
+    os.environ["WINPILOT_SERVE_HOST"] = host
     uvicorn.run("winpilot.server:app", host=host, port=port, log_level="warning")
 
 

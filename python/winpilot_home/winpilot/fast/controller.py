@@ -51,6 +51,15 @@ BATCH_OBSERVE_ACTIONS = {
     "zoom",
     "auto_visual_verify",
 }
+_ANCHOR_HINT_KEYS = {
+    "anchor",
+    "label",
+    "expected_region",
+    "visual_anchor",
+    "fallback_text",
+    "role",
+    "text_query",
+}
 
 
 def _now_ms() -> int:
@@ -189,6 +198,36 @@ def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, An
     updated = dict(args)
     updated["expect"] = {**expect, "timeout_s": 2.0}
     return updated
+
+
+def _has_anchor_hint(args: dict[str, Any]) -> bool:
+    if any(key in args and args.get(key) not in (None, "", []) for key in _ANCHOR_HINT_KEYS):
+        return True
+    anchor = args.get("anchor")
+    return isinstance(anchor, dict) and any(
+        key in anchor and anchor.get(key) not in (None, "", [])
+        for key in _ANCHOR_HINT_KEYS
+    )
+
+
+def _has_direct_click_target(args: dict[str, Any]) -> bool:
+    if args.get("element_id") is not None:
+        return True
+    return args.get("x") is not None and args.get("y") is not None
+
+
+def _upgrade_semantic_action(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    """Route semantic click/type hints through the visual-anchor controller.
+
+    Models naturally emit things like click(label="Export"). Raw click cannot
+    execute that safely; click_element can locate, cache, retry observe, and
+    return resolved evidence.
+    """
+    if name == "click" and not _has_direct_click_target(args) and _has_anchor_hint(args):
+        return "click_element", args, name
+    if name == "type_text" and _has_anchor_hint(args):
+        return "type_into_element", args, name
+    return name, args, ""
 
 
 class FastGuiController:
@@ -634,6 +673,7 @@ class FastGuiController:
                 results.append({"index": index, "ok": False, "error": "action must be an object"})
                 break
             name, normalised_args = _normalise_action(action)
+            name, normalised_args, upgraded_from = _upgrade_semantic_action(name, normalised_args)
             normalised_args = _with_batch_expect_defaults(name, normalised_args)
             last_action = name
             if name in BATCH_MUTATING_ACTIONS:
@@ -674,6 +714,8 @@ class FastGuiController:
                 "terminal": result.terminal,
                 "preview": result.text[:800],
             }
+            if upgraded_from:
+                item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)
             has_expect = isinstance(normalised_args.get("expect"), dict)
             if data.get("verified") is True:
