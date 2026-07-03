@@ -415,7 +415,15 @@ class FastGuiController:
                 "ok": False,
                 "error": "select_color requires color",
             }, ensure_ascii=False))
-        region = self._target_region()
+        hwnd = getattr(self.session, "hwnd", None)
+        region = None
+        if hwnd:
+            try:
+                region = window_region(hwnd)
+            except Exception:
+                region = None
+        if region is None:
+            region = self._target_region()
         if region is None:
             return ToolResult(json.dumps({
                 "ok": False,
