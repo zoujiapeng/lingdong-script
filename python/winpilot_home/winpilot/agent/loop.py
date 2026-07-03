@@ -999,6 +999,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
+        post_tool_hints: list[str] = []
         for tc in tool_calls:
             if self.stop_event.is_set():
                 return "stopped"
@@ -1148,6 +1149,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (json.JSONDecodeError, TypeError):
                 parsed_result = {}
             if isinstance(parsed_result, dict):
+                if tc.function.name == "execute_subgoal":
+                    packet = parsed_result.get("evidence_packet")
+                    if isinstance(packet, dict):
+                        candidates = [
+                            str(item)
+                            for item in (packet.get("candidate_click_labels") or [])
+                            if str(item or "").strip()
+                        ][:8]
+                        if parsed_result.get("needs_llm_reason") and candidates:
+                            post_tool_hints.append(
+                                "[controller recovery] execute_subgoal could not match the requested "
+                                "anchor label, but the target region has visible candidate labels: "
+                                f"{', '.join(candidates)}. Retry execute_subgoal with the best "
+                                "semantically matching visible/localized label and the same verify_texts "
+                                "before doing a full observe or any shell/source-code inspection."
+                            )
                 for key in (
                     "ok",
                     "verified",
@@ -1191,6 +1208,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     continue
                 self.result_text = result.text
                 return result.terminal
+        for hint in post_tool_hints[-2:]:
+            self.messages.append({"role": "user", "content": hint})
         return None
 
     # ------------------------------------------------------------------ run

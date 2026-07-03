@@ -136,7 +136,7 @@ npm run build
 - 最新 click-only controller-first 验证：`20260704-014433-99e853`，工具序列 `launch -> complete_subgoal -> execute_subgoal(click+verify LOCAL_COUNTER) -> complete_subgoal -> done`，5 个工具完成；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，`fast_gui.subgoal_calls=1`，`vlm_call_count=0`。
 - 最新 changed-only click-only 验证：`20260704-020133-18f863`，`execute_subgoal` 内部为 `click_element -> wait_stable -> observe(changed_only=true, query=LOCAL_COUNTER)`，工具耗时约 5.9s；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`。`20260704-020623-8f8903` 进一步验证 `complete_subgoal` 可直接使用 controller evidence，计划核验降到 1ms，但模型仍可能额外 `observe(query=LOCAL_COUNTER)`，后续要继续减少这类 LLM 习惯性复验。
 - targeted initial ROI 验证：`20260704-022217-2eeead`。模型传入 `expected_region=left`，`execute_subgoal` 内部没有全窗口 prelude，`subgoal_overhead_ms=327`，截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`；该 run 仍有一次模型主动 `observe(full=true)`，说明下一步应继续减少 LLM 执行前的习惯性全量观察。
-- 本地化标签恢复验证：`20260704-025137-0923e3`。同一个 `/api/chat` GUI-only 任务要求点击英文 `Local Counter`，实际页面只有中文“只改局部状态”。第一次 `execute_subgoal` 锚点失败后返回 `candidate_click_labels`，模型第二次用可见中文标签重试并成功；工具序列 `execute_subgoal(fail) -> observe -> execute_subgoal(success) -> complete_subgoal -> done`，没有 shell，截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，done gate 理由为 fresh screen evidence。
+- 本地化标签恢复验证：`20260704-031451-4d2852`。同一个 `/api/chat` GUI-only 任务要求点击英文 `Local Counter`，实际页面只有中文“只改局部状态”。首次 `execute_subgoal` 在无 session hwnd 时使用 foreground hwnd 做 targeted ROI，锚点失败后返回 `candidate_click_labels` 和 controller recovery hint，模型第二次用可见中文标签重试并成功；工具序列 `execute_subgoal(fail) -> observe -> execute_subgoal(success) -> complete_subgoal -> done`，schema 中没有 `run_shell`，截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，done gate 理由为 fresh screen evidence。
 
 ## 15 项低延迟改造进度
 
