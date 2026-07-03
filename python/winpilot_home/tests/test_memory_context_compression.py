@@ -177,6 +177,35 @@ def test_reuse_skill_records_actual_recipe_use(tmp_path, monkeypatch):
 
     assert "observe" in result.text
     assert session.used_memory_recipe_ids == ["rid-1"]
+    assert session.memory_recipe_attempts == [{"id": "rid-1", "replay_ok": True}]
+
+
+def test_reuse_skill_records_failed_replay_attempt(tmp_path, monkeypatch):
+    from winpilot import config
+    from winpilot.agent.tools import ToolSession
+    from winpilot.agent import memory_tools
+    from winpilot.recorder import trace as trace_mod
+
+    script = tmp_path / "demo.wps.json"
+    script.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    monkeypatch.setattr(config, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        memory_tools.experience,
+        "reusable_script_for",
+        lambda task, recipe_id="": ("demo.wps.json", {"id": "rid-1", "task": task}),
+    )
+    monkeypatch.setattr(
+        trace_mod,
+        "replay",
+        lambda *a, **k: {"ok": False, "results": [{"index": 2, "tool": "click"}]},
+    )
+
+    session = ToolSession(task="demo task")
+    result = session._t_reuse_skill({"task": "demo task"})
+
+    assert "observe" in result.text
+    assert session.used_memory_recipe_ids == ["rid-1"]
+    assert session.memory_recipe_attempts == [{"id": "rid-1", "replay_ok": False}]
 
 
 def test_experience_feedback_scores_used_recipe_not_all_hints(monkeypatch):
@@ -186,7 +215,10 @@ def test_experience_feedback_scores_used_recipe_not_all_hints(monkeypatch):
     runner = AgentRunner("task")
     runner.status = "done"
     runner._hint_ids = ["hinted"]
-    runner.session.used_memory_recipe_ids = ["used", "used"]
+    runner.session.memory_recipe_attempts = [
+        {"id": "used", "replay_ok": True},
+        {"id": "used", "replay_ok": True},
+    ]
 
     monkeypatch.setattr(
         "winpilot.agent.loop.experience.feedback",
@@ -196,6 +228,25 @@ def test_experience_feedback_scores_used_recipe_not_all_hints(monkeypatch):
     runner._score_experience_feedback()
 
     assert calls == [(["used"], True)]
+
+
+def test_done_after_failed_replay_scores_reuse_failure(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    calls = []
+    runner = AgentRunner("task")
+    runner.status = "done"
+    runner._hint_ids = ["hinted"]
+    runner.session.memory_recipe_attempts = [{"id": "failed-replay", "replay_ok": False}]
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.experience.feedback",
+        lambda ids, success: calls.append((list(ids), success)),
+    )
+
+    runner._score_experience_feedback()
+
+    assert calls == [(["failed-replay"], False)]
 
 
 def test_failed_run_without_reuse_still_penalizes_injected_hints(monkeypatch):

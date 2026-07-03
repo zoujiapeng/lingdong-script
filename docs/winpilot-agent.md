@@ -122,7 +122,7 @@
 
 - 长期经验在 `memory/experience.py`，落盘到本机 `experience_memory.json`。每条 recipe 有 `id`、`task`、`app`、`steps`、`uses/successes`、`provisional`、`manual`、可选 replay `script`，现在还会带 `conditions` 和 `evidence`。老数据读取时会自动补默认适用条件和证据要求。
 - `remember`/`forget`/`reuse_skill` 在 `agent/memory_tools.py`。`remember` 适合用户明确要求保存的长期事实或偏好；可以写入适用条件和证据要求。自动记录的动作 recipe 来自成功 GUI run，不用于 coding 任务。
-- `reuse_skill` 只是 0-token 重放已导出的 `.wps.json`，不是语义成功证明。隐式复用必须是强任务匹配；弱关键词匹配只作为普通提示，不会自动 replay。只有实际调用 `reuse_skill` 的 recipe 才能因为成功 run 获得正反馈；prompt 里出现过的 hint 不算成功复用。replay 完成后仍必须用 `observe/read_text/VLM/nonvisual_summary` 或确定性工具结果确认最终状态，才能 `done`。
+- `reuse_skill` 只是 0-token 重放已导出的 `.wps.json`，不是语义成功证明。隐式复用必须是强任务匹配；弱关键词匹配只作为普通提示，不会自动 replay。只有 replay 本身成功且最终 run 完成的 recipe 才能获得正反馈；prompt 里出现过的 hint、或 replay 失败后靠实时操作兜底完成，都不算成功复用。replay 完成后仍必须用 `observe/read_text/VLM/nonvisual_summary` 或确定性工具结果确认最终状态，才能 `done`。
 - 易变状态任务（当前窗口、是否登录、前台可见状态、状态检查等）不会记录或复用动作 recipe，避免旧 hwnd/旧屏幕结论污染新任务。
 - session memory 在 `agent/session.py`，只保留本服务生命周期内最近完成任务，供“再来一次/继续/刚才那个/previous/same/it”等指代任务解析。普通新任务不会注入 session history，减少无效上下文。
 - skill/playbook 是 `agent/playbooks.py` 加载的 JSON 情境攻略，有 task keyword 和 window title 两条注入路径。它是通用情境提示，不应变成单个软件的硬编码规则。
