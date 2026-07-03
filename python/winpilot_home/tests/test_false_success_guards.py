@@ -953,6 +953,50 @@ def test_execute_subgoal_compact_evidence_keeps_fast_path_advice():
     assert "call done" in compact["fast_path_advice"]
 
 
+def test_complete_subgoal_tool_history_is_compacted_for_llm():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    raw = """已完成子目标 2（已核验）。
+当前计划(todo)：
+[x] 1. 打开 Windows 画图应用
+[x] 2. 在画布上绘制一个蓝色三角形
+[ ] 3. 在蓝色三角形右边绘制一个红色矩形
+[ ] 4. 通过可见画面确认两个图形和颜色都存在
+完成一项就调用 complete_subgoal(index=序号)；计划不合适就调用 revise_plan 重列。
+Plan hint: this todo is already active; do not call revise_plan just to restate it."""
+
+    content = AgentRunner._compact_tool_evidence("complete_subgoal", raw)
+    payload = json.loads(content)
+
+    assert len(content) < 700
+    assert payload["completed_index"] == 2
+    assert payload["verified"] is True
+    assert payload["next_unfinished"]["index"] == 3
+    assert payload["remaining_steps"][0]["goal"].startswith("在蓝色三角形右边")
+    assert "Plan hint:" not in content
+
+
+def test_complete_subgoal_append_preserves_raw_trace_but_compacts_message():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw shapes")
+    raw = "\n".join([
+        "已完成子目标 1。",
+        "当前计划(todo)：",
+        "[x] 1. 打开应用",
+        "[ ] 2. 绘图",
+        "Plan hint: this todo is already active; do not call revise_plan just to restate it.",
+    ])
+
+    runner._append_tool_result("call-plan", raw, tool_name="complete_subgoal")
+
+    assert len(runner.messages[-1]["content"]) < 700
+    assert '"next_unfinished"' in runner.messages[-1]["content"]
+    assert "Plan hint:" not in runner.messages[-1]["content"]
+
+
 def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
     import json
 
