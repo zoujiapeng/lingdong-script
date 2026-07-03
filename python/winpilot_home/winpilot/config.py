@@ -22,11 +22,20 @@ MEMORY_PATH = ROOT_DIR / "experience_memory.json"
 
 _DEFAULTS: dict[str, Any] = {
     "api": {
+        "provider": "auto",
         "base_url": "https://api.deepseek.com",
         "api_key": "",
         "model": "deepseek-v4-flash",
         "temperature": 0.3,
         "max_tokens": 4096,
+        "thinking": False,
+        "pricing": {
+            "provider": "deepseek",
+            "currency": "CNY",
+            "input_per_m": 2.0,
+            "cache_hit_input_per_m": 0.2,
+            "output_per_m": 8.0,
+        },
     },
     "vlm": {"enabled": False, "base_url": "", "api_key": "", "model": "",
             "thinking": False},

@@ -150,6 +150,8 @@ UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observ
 真实默认值在 `config.py`：
 
 - `api.model=deepseek-v4-flash`
+- `api.provider=auto`
+- `api.pricing.provider=deepseek`
 - `agent.max_steps=40`
 - `agent.shell_enabled=true`
 - `agent.world_model=true`
@@ -165,6 +167,8 @@ UIA 关闭且任务是绘图/画布时，`observe` 默认走 `canvas_fast_observ
 - `server.port=8765`
 
 本机配置文件：`python/winpilot_home/config.json`，不提交。
+
+模型 provider、MiMo/Reasonix thinking 默认值、cache hit 字段兼容、usage/cost 统计见 `docs/model-providers.md`。当前真实实现是轻量 OpenAI-compatible Chat Completions adapter，不是完整 provider proxy。
 
 ## 编程子 Agent
 

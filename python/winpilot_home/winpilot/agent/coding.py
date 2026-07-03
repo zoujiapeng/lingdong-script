@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
+from ..model_adapter import (
+    accumulate_usage,
+    build_model_adapter,
+    empty_usage_total,
+    model_profile_from_config,
+)
 from ..utils.log import BUS, logger
 from . import loop as _loop
 from .coding_tools import CodingSession, coding_tool_schemas
@@ -80,8 +86,7 @@ class CodingRunner:
         self.messages: list[dict] = []
         self.status = "pending"
         self.result_text = ""
-        self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
-                            "cache_hit_tokens": 0, "cost_cny": 0.0}
+        self.usage_total = empty_usage_total()
         self._interjections: list[str] = []
         self._lock = threading.Lock()
         self._llm_trace_index = 0
@@ -186,21 +191,20 @@ class CodingRunner:
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
-        usage = getattr(resp, "usage", None)
-        if not usage:
+        api = CONFIG.get("api", default={})
+        adapter = getattr(self, "_model_adapter", None)
+        profile = getattr(adapter, "profile", model_profile_from_config(api))
+        step_usage = accumulate_usage(
+            self.usage_total,
+            resp,
+            profile=profile,
+            api=api,
+        )
+        if not step_usage:
             return
-        prompt = getattr(usage, "prompt_tokens", 0) or 0
-        completion = getattr(usage, "completion_tokens", 0) or 0
-        cache_hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-        miss = max(0, prompt - cache_hit)
-        cost = (miss / 1e6 * _loop._PRICE_CACHE_MISS_PER_M
-                + cache_hit / 1e6 * _loop._PRICE_CACHE_HIT_PER_M
-                + completion / 1e6 * _loop._PRICE_OUTPUT_PER_M)
-        self.usage_total["prompt_tokens"] += prompt
-        self.usage_total["completion_tokens"] += completion
-        self.usage_total["cache_hit_tokens"] += cache_hit
-        self.usage_total["cost_cny"] = round(self.usage_total["cost_cny"] + cost, 4)
-        BUS.publish("agent_usage", run_id=self.run_id, total=dict(self.usage_total))
+        BUS.publish("agent_usage", run_id=self.run_id,
+                    step_usage=step_usage,
+                    total=dict(self.usage_total))
 
     def _handle_tool_calls(self, tool_calls) -> str | None:
         for tc in tool_calls:
@@ -319,7 +323,9 @@ class CodingRunner:
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, agent="coding", has_experience=False)
         try:
-            client = _loop._client()
+            raw_client = _loop._client()
+            client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
+            self._model_adapter = client
             for step in range(1, max_steps + 1):
                 if self.stop_event.is_set():
                     self.status = "stopped"
