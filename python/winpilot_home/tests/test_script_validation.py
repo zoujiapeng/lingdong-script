@@ -76,6 +76,21 @@ def test_reject_bad_loop_type():
     assert "loop_type" in err
 
 
+def test_reject_unbounded_conditional_loop_without_cond():
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.loop", "loop_type": "until", "body": []}]})
+    assert "requires cond" in err
+
+
+def test_reject_bad_loop_count_and_max_iters():
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.loop", "loop_type": "count", "count": "many", "body": []}]})
+    assert "count" in err
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.loop", "max_iters": "many", "body": []}]})
+    assert "max_iters" in err
+
+
 def test_reject_bad_vars():
     assert "vars" in trace_mod.validate_script(
         {"format": "wps/2", "steps": [], "vars": "nope"})

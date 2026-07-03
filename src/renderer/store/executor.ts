@@ -423,14 +423,24 @@ export function createFlowExecutor(
 
         case 'tool_call': {
           const featureName = params.feature_name || 'unknown';
+          const featureParams = params.params || {};
+          if (featureParams._requires_wps_replay) {
+            throw new Error(
+              `WinPilot-only replay step "${featureParams._wps_tool || featureName}" must run through the original .wps.json Replayer`
+            );
+          }
           log('info', `调用工具: ${featureName}`, nodeId);
           const win = window as any;
           if (win.electronAPI?.callFeature) {
             try {
-              const res = await win.electronAPI.callFeature(featureName, params.params || {});
+              const res = await win.electronAPI.callFeature(featureName, featureParams);
+              if (res?.success === false) {
+                throw new Error(res.error || `${featureName} failed`);
+              }
               log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
             } catch (e: any) {
               log('error', `工具调用失败: ${e.message}`, nodeId);
+              throw e;
             }
           } else {
             log('warn', `工具调用模拟: ${featureName}`, nodeId);
@@ -501,6 +511,26 @@ export function createFlowExecutor(
           const al: Record<string, string> = { launch:'启动程序', kill:'终止进程', wait_start:'等待启动', wait_exit:'等待退出', focus:'激活窗口' };
           log('info', `${al[params.action] || params.action}: ${params.target || params.name || params.title || ''}`, nodeId);
           await delay(100);
+          result = 'output';
+          break;
+        }
+
+        case 'wait_process': {
+          const waitFor = params.wait_for === 'exit' ? 'exit' : 'start';
+          const featureName = waitFor === 'exit' ? 'wait_process_exit' : 'wait_process_start';
+          log('info', `wait_process: ${waitFor} ${params.name || ''}`, nodeId);
+          const win = window as any;
+          if (!win.electronAPI?.callFeature) {
+            throw new Error('wait_process requires electronAPI.callFeature');
+          }
+          const res = await win.electronAPI.callFeature(featureName, {
+            name: params.name || '',
+            timeout: params.timeout ?? (waitFor === 'exit' ? 60 : 30),
+          });
+          log('info', `wait_process result: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          if (res?.success === false) {
+            throw new Error(res.error || `${featureName} failed`);
+          }
           result = 'output';
           break;
         }

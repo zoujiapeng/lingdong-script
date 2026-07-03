@@ -87,7 +87,7 @@ stateDiagram-v2
 - `AgentRunner.run()` 是 GUI agent 主循环：注入任务/上下文/记忆 -> 调 LLM -> 处理 tool calls -> `ToolSession.dispatch()` -> 工具 mixin -> done gate/world/playbook/reflect。
 - `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；具体工具按窗口、感知、交互、系统、低延迟 batch、计划/终止、文件、记忆、桌面杂项拆到 mixin。
 - `run_action_batch` 和 `screen_watch` 在 `agent/fast_tools.py`，内部进入 `fast/controller.py`。controller 会给 `draw_strokes/drag` 追加本地 `auto_visual_verify`；顶层 `draw_strokes/drag` 也会被 `AgentRunner` 自动包装成单动作 batch。验证充分时结果会带 `fast_path_advice`，减少额外 LLM round-trip。
-- `.wps.json` 是 WinPilot trace 到离线重放的语义桥。新导出使用 `wps/2`，会收集顶层工具 replay 和 `run_action_batch` 子动作 replay；FlowScript 导入只发生在 `wpsToFlowScript.ts`，不代表 WinPilot 主 agent 直接理解或执行流程图。
+- `.wps.json` 是 WinPilot trace 到离线重放的语义桥。新导出使用 `wps/2`，会收集顶层工具 replay 和 `run_action_batch` 子动作 replay；Replayer 负责文本 selector 重新定位、坐标回退和控制流执行。FlowScript 导入只发生在 `wpsToFlowScript.ts`，不代表 WinPilot 主 agent 直接理解或执行流程图。
 - `ToolSession.dispatch()` 会给普通可见动作附加廉价 `screen_delta` 和 `action_target` 元信息。它用于定位“画面是否变化、变化时 foreground 是否仍是目标窗口”，不是语义完成证明；done 仍要看截图、目标窗口感知或外部证据。
 - `launch` 的目标窗口会在发现后置前；`interaction_tools.py` 的输入动作优先使用 session target，而不是无条件使用当前 foreground；`action/verify.py` 在目标已知时会忽略无关 foreground，避免 Codex/日志/其他窗口 OCR 造成假成功。
 - `agent/perception_tools.py` 在 UIA-off 绘图/画布任务上有 `canvas_fast_observe`：无 `query/full` 的 `observe` 跳过全窗口 OCR，直接提供 Win32/CV 和 `likely_canvas` 摘要；需要文字 grounding 时用 `observe(query=...)` 或 `observe(full=true)` 回到完整感知。
@@ -112,6 +112,7 @@ stateDiagram-v2
 - `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
 - `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
 - `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。
+- 回放/DSL 节点改动要同时检查 `.wps.json` schema、`wpsToFlowScript.ts`、前端 `store/executor.ts`、`python/engine/dsl_flow_converter.py` 和 `python/engine/executor.py`；WinPilot-only `.wps.json` 步骤在 FlowScript 中必须显式占位或 fail-fast，不能静默成功。
 
 ## 2026-07-03 低延迟 GUI 链路
 

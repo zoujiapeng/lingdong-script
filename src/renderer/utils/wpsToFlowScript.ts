@@ -75,6 +75,13 @@ function toolCall(featureName: string, step: WpsStep, extra: Record<string, unkn
   };
 }
 
+function wpsOnlyToolCall(featureName: string, step: WpsStep): { type: NodeType; params: NodeParams } {
+  return toolCall(featureName, step, {
+    _wps_tool: step.tool,
+    _requires_wps_replay: true,
+  });
+}
+
 function keyboardParams(keysValue: unknown): NodeParams {
   const raw = Array.isArray(keysValue) ? keysValue.map(normalizeKey).filter(Boolean) : [];
   const modifiers = raw.filter((k) => KEY_MODIFIERS.has(k));
@@ -203,9 +210,9 @@ function leafNode(step: WpsStep): { type: NodeType; params: NodeParams } {
       };
     }
     case 'draw_strokes':
-      return toolCall('draw_strokes', step, { _wps_tool: 'draw_strokes' });
+      return wpsOnlyToolCall('draw_strokes', step);
     case 'tray_click':
-      return toolCall('tray_click', step);
+      return wpsOnlyToolCall('tray_click', step);
     case 'wait':
       return { type: 'wait', params: waitParams(step) };
     case 'run_shell':
@@ -222,7 +229,7 @@ function leafNode(step: WpsStep): { type: NodeType; params: NodeParams } {
         } as NodeParams,
       };
     case 'run_detached':
-      return toolCall('run_detached', step, { _wps_tool: 'run_detached' });
+      return wpsOnlyToolCall('run_detached', step);
     case 'ext.delay':
       return {
         type: 'wait',

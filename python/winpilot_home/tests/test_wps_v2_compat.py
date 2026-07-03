@@ -6,6 +6,7 @@ ext.delay run their REAL implementations to prove variable interpolation works
 end-to-end. The key invariant: a v1 flat script behaves exactly as before.
 """
 import json
+from types import SimpleNamespace
 
 from winpilot.recorder import trace as trace_mod
 
@@ -165,3 +166,29 @@ def test_replayer_runs_detached_leaf(tmp_path, monkeypatch):
 
     assert out["ok"] is True
     assert calls == [("Start-Sleep 1", "demo")]
+
+
+def test_relocate_text_uses_window_anchor_even_without_preset_hwnd(monkeypatch):
+    monkeypatch.setattr(trace_mod.win32, "list_windows", lambda: [{"hwnd": 123}])
+    monkeypatch.setattr(
+        trace_mod.fusion,
+        "observe",
+        lambda hwnd, include_icons=False: SimpleNamespace(
+            elements=[SimpleNamespace(text="OK", cx=99, cy=88)]
+        ),
+    )
+
+    r = trace_mod.Replayer()
+    point = r._relocate({"tool": "click", "text": "OK", "coords": [1, 2]})
+
+    assert point == (99, 88)
+    assert r.hwnd == 123
+
+
+def test_relocate_text_falls_back_to_recorded_coords_when_no_window(monkeypatch):
+    monkeypatch.setattr(trace_mod.win32, "list_windows", lambda: [])
+
+    r = trace_mod.Replayer()
+    point = r._relocate({"tool": "click", "text": "OK", "coords": [1, 2]})
+
+    assert point == (1, 2)
