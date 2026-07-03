@@ -51,7 +51,9 @@ def test_v1_flat_script_runs_each_leaf_in_order(tmp_path):
 
 def test_v1_leaf_failure_stops_and_reports(tmp_path):
     script = {"format": "wps/1", "steps": [
-        {"tool": "click"}, {"tool": "type_text"}, {"tool": "hotkey"},
+        {"tool": "click", "coords": [1, 2]},
+        {"tool": "type_text", "text_input": "hi"},
+        {"tool": "hotkey", "keys": ["enter"]},
     ]}
     r = SpyReplayer()
     r._leaf_ok = {"type_text": False}
@@ -125,3 +127,41 @@ def test_v2_unknown_ext_step_fails_gracefully(tmp_path):
     r = SpyReplayer()
     out = r.run(_write(tmp_path, script))
     assert out["ok"] is False
+
+
+def test_replayer_runs_draw_strokes_leaf(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "draw_strokes",
+        lambda strokes, duration_s, hwnd: calls.append((strokes, duration_s, hwnd)) or {"ok": True},
+    )
+    script = {"format": "wps/2", "steps": [
+        {"tool": "draw_strokes", "strokes": [[[1, 2], [3, 4]]], "duration": 0.1},
+    ]}
+    r = trace_mod.Replayer()
+    r.step_delay = 0
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is True
+    assert calls == [([[[1, 2], [3, 4]]], 0.1, None)]
+
+
+def test_replayer_runs_detached_leaf(tmp_path, monkeypatch):
+    from winpilot.action import shell
+
+    calls = []
+    monkeypatch.setattr(
+        shell,
+        "run_detached",
+        lambda script, name="task": calls.append((script, name)) or {"ok": True, "pid": 123},
+    )
+    script = {"format": "wps/2", "steps": [
+        {"tool": "run_detached", "script": "Start-Sleep 1", "name": "demo"},
+    ]}
+    r = trace_mod.Replayer()
+    r.step_delay = 0
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is True
+    assert calls == [("Start-Sleep 1", "demo")]
