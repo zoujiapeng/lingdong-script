@@ -994,6 +994,69 @@ def test_done_gate_rejects_recent_missing_visual_color():
     assert "still missing: blue" in runner._last_done_reject_reason
 
 
+def test_drawing_done_requires_matched_visual_color_even_when_steps_are_low():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = ['execute_subgoal({"draw": {"shape": "triangle", "color": "blue"}})']
+    runner._recent_results = [
+        ("execute_subgoal", json.dumps({
+            "actions_executed": [{"action": "draw_strokes"}],
+            "evidence_packet": {
+                "matched_visual_colors": [],
+                "missing_visual_colors": [],
+            },
+            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
+        })),
+    ]
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("missing visual color evidence should reject before LLM judge")
+
+    assert runner._verify_done(_Client(), steps_left=0) is False
+    assert "has not matched them yet: blue" in runner._last_done_reject_reason
+
+
+def test_drawing_done_accepts_controller_visual_color_before_step_budget_force_accept():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = ['execute_subgoal({"draw": {"shape": "triangle", "color": "blue"}})']
+    runner._recent_results = [
+        ("execute_subgoal", json.dumps({
+            "actions_executed": [{"action": "draw_strokes"}],
+            "evidence_packet": {
+                "matched_visual_colors": ["blue"],
+                "missing_visual_colors": [],
+            },
+            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
+        })),
+    ]
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("controller visual color evidence should skip LLM judge")
+
+    assert runner._verify_done(_Client(), steps_left=0) is True
+    assert runner._done_verified is True
+    assert runner._done_unverified is False
+
+
 def test_top_level_click_uses_fast_controller_without_explicit_batch():
     import json
 

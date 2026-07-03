@@ -78,7 +78,7 @@
    如果 `execute_subgoal.click.expected_region` 存在且当前没有 snapshot，它会先做 targeted initial OCR/CV。排查时看 `evidence_packet.prelude` 是否有 `targeted_observe`，以及 `dim_stats.*.scope=targeted_initial_roi`。如果 ROI 没识别到目标 label，会回退普通 observe。
    对带语义锚点的动作，controller 会把 `click(label=...)` 升级为 `click_element`，把 `type_text(label=..., text=...)` 升级为 `type_into_element`。看 `results[].upgraded_from`、`anchor_locator`、`resolved_element`、`subresults`，可以判断卡在锚点定位、聚焦、清空还是输入。
    普通可见动作也会在工具结果和 `agent_tool.result_meta` 里暴露 `screen_delta` 与 `action_target`。排查假成功时先看 `action_target.after.foreground_matches_target`：如果为 false，说明动作/验证可能落在 Codex、日志窗口或其他无关窗口上，必须重新 focus/observe 目标窗口。`screen_delta.changed` 只是像素变化证据，不等于任务成功。
-   严格 GUI-only、`GUI only` 或 `只用GUI` 时，`run_shell/run_detached` 不应出现在 `NNN_llm_request.json` 的 tools 列表里；如果仍出现，先查 `task_rules._gui_only_forbids_shell()` 和 `tool_schemas(..., allow_shell=False)` 的路径。
+   严格 GUI-only、`GUI only` 或 `只用GUI` 时，`run_shell/run_detached`、`search_files`、`list_dir/read_file/write_file/search_text` 不应出现在 `NNN_llm_request.json` 的 tools 列表里；如果仍出现，先查 `task_rules._gui_only_forbids_shell()` 和 `tool_schemas(..., allow_shell=False, allow_files=False)` 的路径。
    done gate 会要求显著字面量 token 出现在最终证据中，例如 `FAST_WRAP_OK_073`、`75765`。OCR/verify 会容忍 `_`、空格、连字符、冒号差异，所以 `FAST WRAP OK 073` 可以证明 `FAST_WRAP_OK_073`，但完全缺失该 token 不能用“功能等价”替代。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
    注意：`execute_subgoal`、`run_action_batch`、`zoom/screenshot`、`draw_strokes/drag` 写回 LLM history 时会经过 `_compact_tool_evidence()`，只保留 ok/verified、controller_state、视觉颜色、关键 metrics 和 fast_path_advice，避免后续每轮重复携带完整 strokes/截图摘要。完整原始工具结果仍在 `NNN_tool_result.json`、`.jsonl` 的 `agent_tool.result_meta` 和截图文件里；排查细节以 trace 原始文件为准。
@@ -114,7 +114,7 @@
 
 默认 desktop/GUI 工具包括：
 
-`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`execute_subgoal`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`search_files`、`run_action_batch`、`screen_watch`、`done`、`fail`。
+`list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`execute_subgoal`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`run_action_batch`、`screen_watch`、`done`、`fail`。普通 desktop 任务仍可暴露 `search_files`；严格 GUI-only 且明确禁 shell 时会隐藏 `search_files`。
 
 按配置动态加入：
 
@@ -125,7 +125,7 @@
 
 额外桌面/文件工具：
 
-`clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。Coding Runtime 激活时还会加入 `apply_patch`、`github_search`，并把 `run_shell`、文件工具限定到 coding workspace。
+`clipboard_read`、`clipboard_write`、`clipboard_paste`、`cursor_position`、`mouse_down`、`mouse_up`、`move_mouse`、`screenshot`、`hold_key`、`list_displays`、`zoom`、`list_installed_apps`、`list_dir`、`read_file`、`write_file`、`search_text`。严格 GUI-only 且明确禁 shell 时会隐藏 `list_dir/read_file/write_file/search_text`；Coding Runtime 激活时还会加入 `apply_patch`、`github_search`，并把 `run_shell`、文件工具限定到 coding workspace。
 
 `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、计划/终止、文件、记忆、桌面杂项工具；现在主要保留会话状态、dispatch 和目标窗口解析。
 
@@ -260,3 +260,5 @@ Paint 多图形验证：`20260704-045155-a9dc21`。在 `mimo-v2.5` 下要求只�
 schema/计划成本回归：`20260704-055208-e16c54`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成；真实截图 `python/winpilot_home/traces/manual_screen_20260704_055249.jpg` 显示两个图形。`execute_subgoal` schema 文案已压缩但字段不变，GUI-only tools JSON 从约 23516 字符降到约 21471；planning 提示改为“如果当前 todo 已显示，就不要只为改写措辞调用 `revise_plan`”。该 run 无多余 `revise_plan`，`cache_miss_tokens=5516`。`complete_subgoal` 在全部子目标完成时会返回 `terminal="done"` 作为兜底节省最后一轮，但 `AgentRunner` 仍会对 terminal done 走原有 done gate。
 
 绘图 guidance 压缩回归：`20260704-055941-d4c164`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_060024.jpg` 显示两个图形。绘图任务额外 guidance 从旧 trace 约 2814 字符压到约 873 字符；该 run 通过 `complete_subgoal(4)` 的 `terminal="done"` 收尾，少一轮显式 `done`，`prompt_tokens=87619`、`cache_miss_tokens=5059`。
+
+严格 GUI-only schema/终止核验回归：`20260704-062419-8f48dc`。同一任务在 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_062508.jpg` 显示两个图形。8 次 LLM request 的 tools schema 都是 39 个工具、约 19709 字符，且没有 `run_shell/run_detached/search_files/list_dir/read_file/write_file/search_text`；`done_checks` 记录 `Drawing task accepted from controller visual color evidence: red, blue.`，证明 `complete_subgoal` terminal done 没有跳过 done gate，`cache_miss_tokens=4401`。

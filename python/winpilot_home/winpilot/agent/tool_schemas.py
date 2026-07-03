@@ -76,6 +76,7 @@ def tool_schemas(
     planning: bool = False,
     coding_runtime: bool = False,
     allow_shell: bool = True,
+    allow_files: bool = True,
 ) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
@@ -83,6 +84,7 @@ def tool_schemas(
     AgentRunner tool set instead of routing to a separate coding sub-agent.
     """
     tools = []
+    include_file_tools = allow_files or coding_runtime
 
     if allow_shell and shell.shell_enabled():
         tools.extend([
@@ -367,7 +369,13 @@ def tool_schemas(
         _tool("color_probe", "Read color information at a screen point.",
               {"x": _prop("integer"), "y": _prop("integer")}, ["x", "y"]),
         _tool("undo_last", "Undo or clean up the most recent reversible action from this run."),
-        _tool(
+        _tool("done", "Finish only after verified evidence shows the task is complete.",
+              {"summary": _prop("string", "Completion summary.")}, ["summary"]),
+        _tool("fail", "Finish with an honest failure reason when the task cannot be completed.",
+              {"reason": _prop("string", "Failure reason.")}, ["reason"]),
+    ])
+    if allow_files:
+        tools.append(_tool(
             "search_files",
             "Search user files by name. Do not use this to launch installed apps.",
             {
@@ -376,12 +384,7 @@ def tool_schemas(
                 "path": _prop("string", "Optional directory scope."),
             },
             ["query"],
-        ),
-        _tool("done", "Finish only after verified evidence shows the task is complete.",
-              {"summary": _prop("string", "Completion summary.")}, ["summary"]),
-        _tool("fail", "Finish with an honest failure reason when the task cannot be completed.",
-              {"reason": _prop("string", "Failure reason.")}, ["reason"]),
-    ])
+        ))
     _promote_tools(tools, ["execute_subgoal"], before="click")
 
     if planning:
@@ -475,14 +478,17 @@ def tool_schemas(
                "quality": _prop("integer", "JPEG quality 1-100.")},
               ["x", "y", "width", "height"]),
         _tool("list_installed_apps", "List installed applications from the Windows registry."),
-        _tool("list_dir", "List files and subdirectories. In Coding Runtime, paths are relative to the configured coding workspace.",
-              {"path": _prop("string", "Directory path. Omit for current directory/workspace root.")}),
-        _tool("read_file", "Read a text file with line numbers. In Coding Runtime, paths are workspace-confined.",
-              {"path": _prop("string"), "start": _prop("integer"), "count": _prop("integer")}, ["path"]),
-        _tool("write_file", "Write or overwrite a file. In Coding Runtime, sensitive config/secret writes are guarded.",
-              {"path": _prop("string"), "content": _prop("string")}, ["path", "content"]),
-        _tool("search_text", "Search for text across files. In Coding Runtime, searches the workspace by default.",
-              {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
-               "regex": _prop("boolean")}, ["query"]),
     ])
+    if include_file_tools:
+        tools.extend([
+            _tool("list_dir", "List files and subdirectories. In Coding Runtime, paths are relative to the configured coding workspace.",
+                  {"path": _prop("string", "Directory path. Omit for current directory/workspace root.")}),
+            _tool("read_file", "Read a text file with line numbers. In Coding Runtime, paths are workspace-confined.",
+                  {"path": _prop("string"), "start": _prop("integer"), "count": _prop("integer")}, ["path"]),
+            _tool("write_file", "Write or overwrite a file. In Coding Runtime, sensitive config/secret writes are guarded.",
+                  {"path": _prop("string"), "content": _prop("string")}, ["path", "content"]),
+            _tool("search_text", "Search for text across files. In Coding Runtime, searches the workspace by default.",
+                  {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
+                   "regex": _prop("boolean")}, ["query"]),
+        ])
     return tools

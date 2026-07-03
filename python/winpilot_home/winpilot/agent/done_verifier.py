@@ -96,6 +96,19 @@ class DoneVerifierMixin:
                     status[color] = "missing"
         return [color for color, value in status.items() if value == "missing"]
 
+    def _recent_matched_visual_colors(self, colors: list[str]) -> set[str]:
+        if not colors:
+            return set()
+        matched: set[str] = set()
+        for _tool, text in getattr(self, "_recent_results", []):
+            normalized = str(text or "").casefold()
+            normalized = normalized.replace("\\\\\"", '"').replace('\\"', '"')
+            for color in colors:
+                color_key = color.casefold()
+                if re.search(rf'"matched_visual_colors"\s*:\s*\[[^\]]*"{re.escape(color_key)}"', normalized):
+                    matched.add(color_key)
+        return matched
+
     def _reject_done(self, reason: str, content: str) -> bool:
         """Record a failed done-gate check and nudge the model to continue."""
         self._last_done_reject_reason = reason
@@ -270,6 +283,23 @@ class DoneVerifierMixin:
                 f"[done check failed] {reason}. Select the requested visible color, "
                 "draw again on the canvas, and verify matched_visual_colors before done.",
             )
+        if required_colors and not image_paths:
+            matched_recent_colors = self._recent_matched_visual_colors(required_colors)
+            unmatched_colors = [
+                color for color in required_colors
+                if color.casefold() not in matched_recent_colors
+            ]
+            if unmatched_colors:
+                reason = (
+                    "Drawing/canvas task requested specific colors, but recent controller "
+                    "evidence has not matched them yet: "
+                    + ", ".join(unmatched_colors)
+                )
+                return self._reject_done(
+                    reason,
+                    f"[done check failed] {reason}. Select the requested visible color, "
+                    "draw again on the canvas, and verify matched_visual_colors before done.",
+                )
         if not saw_drag:
             reason = (
                 "Drawing/canvas task has no recorded drag stroke. Tool selection or clicks "
@@ -529,14 +559,30 @@ class DoneVerifierMixin:
         if not cfg.get("agent", "verify_done", default=True):
             return True
         max_rejects = int(cfg.get("agent", "done_max_rejects", default=2))
-        if self._done_rejects >= max_rejects or steps_left <= 2:
+        if self._done_rejects >= max_rejects:
+            reason = (
+                "Done force-accepted after done_max_rejects; result is marked "
+                f"unverified (done_rejects={self._done_rejects})."
+            )
+            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason, unverified=True)
             self._done_unverified = True
             return True
+        force_unverified = steps_left <= 2
 
         recent, evidence = self._done_evidence()
         if _is_drawing_task(self.task):
             if not self._verify_drawing_done(evidence):
                 return False
+            required_colors = _required_drawing_colors(self.task)
+            if required_colors and not _required_image_paths(self.task):
+                reason = (
+                    "Drawing task accepted from controller visual color evidence: "
+                    + ", ".join(required_colors[:4])
+                    + "."
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+                self._done_verified = True
+                return True
             if self._drawing_has_deterministic_done_evidence(evidence):
                 reason = (
                     "Drawing task accepted from deterministic evidence: recorded "
@@ -565,4 +611,12 @@ class DoneVerifierMixin:
             return False
         if not self._verify_communication_done(screen):
             return False
+        if force_unverified:
+            reason = (
+                "Done accepted without LLM judge after deterministic guards passed "
+                f"(steps_left={steps_left}, done_rejects={self._done_rejects})."
+            )
+            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason, unverified=True)
+            self._done_unverified = True
+            return True
         return self._call_done_judge(client, screen, recent, evidence)
