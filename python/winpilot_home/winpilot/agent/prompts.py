@@ -65,6 +65,8 @@ element and coordinates.
    selecting toolbar items before trying this direct draw routine.
    For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
+   Do not use verify-only execute_subgoal to open or discover an app/window;
+   first use launch/find_app/focus_window, then verify against that target.
    If execute_subgoal returns verified=true and evidence_packet.matched_texts
    contains the text/state required by your current plan item, call
    complete_subgoal/done directly; do not repeat observe/read_text for the same
@@ -164,7 +166,7 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 1. list_windows / find_app / focus_window
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. Observe when state or target location is ambiguous; pass full=true only when raw details are needed. For clear labeled routines with a known rough region, execute_subgoal may be called directly after focus_window because it performs targeted observe/locator/verification internally.
-3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch. For simple drawing/canvas tasks, call execute_subgoal with draw={{shape,color}} after the window is open; let the controller select requested color, locate the likely canvas, and verify pixel change before you inspect toolbars.
+3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch. For simple drawing/canvas tasks, call execute_subgoal with draw={{shape,color}} after the window is open; let the controller select requested color, locate the likely canvas, and verify pixel change before you inspect toolbars. Never use verify-only execute_subgoal as a substitute for launch/find_app/focus_window.
 4. observe/read_text again only when controller evidence is insufficient; matched_texts or fast_path_advice from verified execute_subgoal can complete the matching plan item.
 5. done only when grounded evidence confirms task complete.
 

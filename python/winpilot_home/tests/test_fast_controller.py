@@ -1553,7 +1553,45 @@ def test_execute_subgoal_draw_without_target_hwnd_fails_fast(monkeypatch):
 
     assert payload["ok"] is False
     assert payload["needs_llm_reason"] is True
+    assert payload["needs_target_window"] is True
+    assert payload["controller_state"]["needs_target_window"] is True
     assert "ready canvas" in payload["error"]
+    assert "launch/find_app/focus_window" in payload["fast_path_advice"]
+
+
+def test_execute_subgoal_verify_only_without_target_hwnd_fails_fast():
+    from winpilot.fast.subgoal import SubgoalExecutor
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("verify-only routine without target hwnd should not read foreground")
+
+    class Session:
+        task = "open Paint and verify it"
+        hwnd = None
+        run_id = "run-verify-no-target"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            raise AssertionError(f"unexpected dispatch {name} {args}")
+
+    result = SubgoalExecutor(Session(), Controller()).execute({
+        "subgoal": "Open Windows Paint and verify a blank canvas is ready",
+        "verify_texts": ["Paint"],
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["needs_target_window"] is True
+    assert "verify-only" in payload["error"]
+    assert "launch/find_app/focus_window" in payload["fast_path_advice"]
 
 
 def test_execute_subgoal_builds_multi_draws_with_canvas_regions(monkeypatch):

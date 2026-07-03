@@ -768,6 +768,40 @@ class SubgoalExecutor:
 
     def execute(self, args: dict[str, Any]) -> ToolResult:
         request = parse_subgoal_request(args, task=getattr(self.session, "task", ""))
+        draw_specs = _draw_specs(request)
+        pure_verify = bool(
+            request.verify_texts
+            and not request.input
+            and not request.click
+            and not request.clicks
+            and not draw_specs
+        )
+        if pure_verify and not self._target_hwnd(request, allow_foreground=False):
+            payload = {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "needs_target_window": True,
+                "subgoal": request.subgoal,
+                "subgoal_route": "controller_first",
+                "controller_state": {
+                    "phase": "blocked",
+                    "needs_llm_reason": True,
+                    "needs_target_window": True,
+                },
+                "evidence_packet": {
+                    "matched_texts": [],
+                    "missing_texts": request.verify_texts,
+                },
+                "error": "execute_subgoal verify-only routine requires an existing target window/session hwnd.",
+                "needs_llm_reason": True,
+                "fast_path_advice": (
+                    "Do not use verify-only execute_subgoal to open or discover an app. "
+                    "First use launch/find_app/focus_window or perform the GUI action that "
+                    "creates the target state; then verify against that target window."
+                ),
+            }
+            return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
         snapshot, prelude, skip_click_auto_observe = self._ensure_observed(request)
         recent_changes = {}
         try:
@@ -786,14 +820,19 @@ class SubgoalExecutor:
                 if action.get("action") == "click_element":
                     action["skip_auto_observe"] = True
         if not actions:
-            draw_specs = _draw_specs(request)
+            needs_target_window = bool(draw_specs)
             payload = {
                 "ok": False,
                 "verified": False,
                 "blocked": True,
+                "needs_target_window": needs_target_window,
                 "subgoal": request.subgoal,
                 "subgoal_route": "controller_first",
-                "controller_state": {"phase": "blocked", "needs_llm_reason": True},
+                "controller_state": {
+                    "phase": "blocked",
+                    "needs_llm_reason": True,
+                    "needs_target_window": needs_target_window,
+                },
                 "evidence_packet": {
                     "matched_texts": [],
                     "missing_texts": request.verify_texts,
@@ -806,6 +845,13 @@ class SubgoalExecutor:
                 ),
                 "needs_llm_reason": True,
             }
+            if draw_specs:
+                payload["fast_path_advice"] = (
+                    "A draw routine requires a focused target app/window with a ready canvas. "
+                    "Do not retry execute_subgoal(draw) yet; first use launch/find_app/focus_window "
+                    "for the requested app, then call execute_subgoal(draw or draws) after the window "
+                    "is foreground and ready."
+                )
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
         batch = self.controller.execute(
             actions,

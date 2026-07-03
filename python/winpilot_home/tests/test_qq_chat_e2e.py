@@ -56,6 +56,8 @@ class TestVisionPrompt:
         prompt = system_prompt(main_model_has_vision=False)
 
         assert "draw={shape,color}" in prompt
+        assert "verify-only execute_subgoal" in prompt
+        assert "launch/find_app/focus_window" in prompt
 
     def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision
