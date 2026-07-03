@@ -120,3 +120,16 @@ def test_complete_subgoal_accepts_current_visual_color_evidence(monkeypatch):
 
     assert session.plan.steps[0]["done"] is True
 
+
+def test_complete_subgoal_all_done_returns_terminal_done():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="complete the visible GUI task")
+    session.plan = planner.Plan(["finish the only step"])
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.all_done()
+    assert result.terminal == "done"
+

@@ -189,7 +189,9 @@ class PlanToolMixin:
         if self.plan.all_done():
             return ToolResult(
                 f"已完成子目标 {index}（已核验）。所有子目标均完成——若任务确已达成请调用 done。\n"
-                f"{self.plan.render()}")
+                f"{self.plan.render()}",
+                terminal="done",
+            )
         return ToolResult(f"已完成子目标 {index}{'（已核验）' if check_expect else ''}。\n"
                           f"{self.plan.render()}")
 
