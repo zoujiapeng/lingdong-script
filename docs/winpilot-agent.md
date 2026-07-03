@@ -79,6 +79,7 @@
    严格 GUI-only、`GUI only` 或 `只用GUI` 时，`run_shell/run_detached` 不应出现在 `NNN_llm_request.json` 的 tools 列表里；如果仍出现，先查 `task_rules._gui_only_forbids_shell()` 和 `tool_schemas(..., allow_shell=False)` 的路径。
    done gate 会要求显著字面量 token 出现在最终证据中，例如 `FAST_WRAP_OK_073`、`75765`。OCR/verify 会容忍 `_`、空格、连字符、冒号差异，所以 `FAST WRAP OK 073` 可以证明 `FAST_WRAP_OK_073`，但完全缺失该 token 不能用“功能等价”替代。
 5. 打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 和 `NNN_llm_response.json`。这里能看到模型每一步真实收到的 system/user/tool messages、折叠后的感知内容、用户插话、图片注入，以及模型实际返回的 tool calls。
+   注意：`execute_subgoal`、`run_action_batch`、`zoom/screenshot`、`draw_strokes/drag` 写回 LLM history 时会经过 `_compact_tool_evidence()`，只保留 ok/verified、controller_state、视觉颜色、关键 metrics 和 fast_path_advice，避免后续每轮重复携带完整 strokes/截图摘要。完整原始工具结果仍在 `NNN_tool_result.json`、`.jsonl` 的 `agent_tool.result_meta` 和截图文件里；排查细节以 trace 原始文件为准。
    `/api/status.runtime` 和前端顶部 `runtime` badge 用来确认当前服务来自哪个 worktree/commit/端口/PID。先确认 runtime，再解释 trace；否则很容易把旧服务的行为误当成新分支结果。
 6. 如果工具结果和屏幕不一致，按工具名定位 mixin：
    - 窗口/应用发现：`window_tools.py`

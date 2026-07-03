@@ -1514,6 +1514,48 @@ def test_execute_subgoal_draw_waits_for_ready_canvas(monkeypatch):
     assert action["canvas_ready_attempts"][0]["looks_unready"] is True
 
 
+def test_execute_subgoal_draw_without_target_hwnd_fails_fast(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor
+
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: (_ for _ in ()).throw(AssertionError("no hwnd expected")))
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+
+        @staticmethod
+        def capture_fn(_region):
+            raise AssertionError("should not capture foreground window without target hwnd")
+
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("no actions should execute")
+
+    class Session:
+        task = "open Paint and draw a blue triangle"
+        hwnd = None
+        run_id = "run-draw-no-target"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            raise AssertionError(f"unexpected dispatch {name} {args}")
+
+    result = SubgoalExecutor(Session(), Controller()).execute({
+        "subgoal": "draw a blue triangle before the app is open",
+        "draw": {"shape": "triangle", "color": "blue"},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["needs_llm_reason"] is True
+    assert "ready canvas" in payload["error"]
+
+
 def test_execute_subgoal_builds_multi_draws_with_canvas_regions(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import subgoal as subgoal_mod
@@ -1572,6 +1614,41 @@ def test_execute_subgoal_builds_multi_draws_with_canvas_regions(monkeypatch):
     blue_xs = [point[0] for stroke in blue_draw["strokes"] for point in stroke]
     red_xs = [point[0] for stroke in red_draw["strokes"] for point in stroke]
     assert max(blue_xs) < max(red_xs)
+
+
+def test_agent_tool_message_compacts_execute_subgoal_result():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle")
+    raw = json.dumps({
+        "ok": True,
+        "verified": True,
+        "subgoal": "draw",
+        "subgoal_route": "controller_first",
+        "controller_state": {"phase": "verified"},
+        "actions_executed": [
+            {
+                "action": "draw_strokes",
+                "requested_color": "blue",
+                "shape": "triangle",
+                "strokes": [[[1, 2], [3, 4], [5, 6], [1, 2]]] * 80,
+                "canvas_region": {"x": 10, "y": 20, "width": 300, "height": 200},
+            }
+        ],
+        "evidence_packet": {
+            "matched_visual_colors": ["blue"],
+            "missing_visual_colors": [],
+            "visible_colors": {"blue": {"pixels": 123, "ratio": 0.02}},
+        },
+    }, ensure_ascii=False)
+
+    runner._append_tool_result("call-1", raw, tool_name="execute_subgoal")
+    content = runner.messages[-1]["content"]
+
+    assert len(content) < 2000
+    assert '"matched_visual_colors": ["blue"]' in content
+    assert '"stroke_count": 80' in content
+    assert "[[1, 2], [3, 4]" not in content
 
 
 def test_fast_controller_select_color_clicks_visible_palette_swatch():
