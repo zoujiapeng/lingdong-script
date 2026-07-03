@@ -90,4 +90,134 @@ describe('createFlowExecutor replay/DSL bridges', () => {
       'WinPilot-only replay step "draw_strokes" must run through the original .wps.json Replayer',
     ]);
   });
+
+  it('executes process_action through feature bridge instead of simulating success', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'proc',
+      type: 'process_action',
+      x: 0,
+      y: 0,
+      params: { action: 'wait_exit', name: 'demo.exe', timeout: 9 },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['wait_process_exit', { name: 'demo.exe', timeout: 9 }],
+    ]);
+  });
+
+  it('treats clipboard_action feature failure as node failure', async () => {
+    const script = flowWith({
+      id: 'clip',
+      type: 'clipboard_action',
+      x: 0,
+      y: 0,
+      params: { action: 'set', text: 'hello' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: false, error: 'clipboard denied' }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual(['clip', 'error', 'clipboard denied']);
+  });
+
+  it('treats default feature-map failure as node failure', async () => {
+    const script = flowWith({
+      id: 'launch',
+      type: 'launch_program',
+      x: 0,
+      y: 0,
+      params: { target: 'missing.exe' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: false, error: 'not found' }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual(['launch', 'error', 'not found']);
+  });
+
+  it('executes system_power through feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'power',
+      type: 'system_power',
+      x: 0,
+      y: 0,
+      params: { action: 'hibernate', confirm: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['hibernate', { confirm: true }],
+    ]);
+  });
+
+  it('does not pass unsupported delay params to direct hibernate nodes', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'hibernate',
+      type: 'hibernate',
+      x: 0,
+      y: 0,
+      params: { delay_seconds: 30, confirm: false },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['hibernate', { confirm: false }],
+    ]);
+  });
+
+  it('treats web_browser feature failure as node failure', async () => {
+    const script = flowWith({
+      id: 'web',
+      type: 'web_browser',
+      x: 0,
+      y: 0,
+      params: { action: 'navigate', url: 'https://example.invalid' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: false, error: 'browser unavailable' }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual(['web', 'error', 'browser unavailable']);
+  });
+
+  it('treats window_control feature failure as node failure', async () => {
+    const script = flowWith({
+      id: 'win',
+      type: 'window_control',
+      x: 0,
+      y: 0,
+      params: { operation: 'close', title: 'Missing' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: false, error: 'window missing' }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual(['win', 'error', 'window missing']);
+  });
 });
