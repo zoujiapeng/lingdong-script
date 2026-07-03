@@ -33,6 +33,109 @@ def _valid_check(check) -> dict | None:
     logger.warning("规划 check 含未知条件 %s，已忽略该子目标的核验", list(check))
     return None
 
+
+_VISIBLE_CHECK_KEYS = {"text_appears", "text_contains"}
+_RESULT_CONTEXT_MARKERS = (
+    "appear", "appears", "appeared", "visible", "shown", "show", "shows",
+    "verify", "verified", "confirm", "confirmed", "result", "state",
+    "出现", "显示", "可见", "确认", "核验", "验证", "结果", "状态", "生效",
+)
+_BUTTON_NOUN_PATTERN = r"(?:button|btn|menu|link|按钮|按键|菜单|链接)"
+_CLICK_VERB_PATTERN = r"(?:click|press|tap|select|点击|按下|按|选择)"
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"[\s_\-:/\\|()（）\[\]【】\"'“”‘’<>]+", "", text or "").casefold()
+
+
+def _looks_like_state_token(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return False
+    if "_" in value or any(ch.isdigit() for ch in value):
+        return True
+    ascii_letters = [ch for ch in value if ch.isascii() and ch.isalpha()]
+    return len(ascii_letters) >= 5 and all(ch.upper() == ch for ch in ascii_letters)
+
+
+def _occurrence_looks_like_button_label(goal: str, pos: int, value_len: int) -> bool:
+    before = goal[max(0, pos - 18):pos]
+    after = goal[pos + value_len:pos + value_len + 18]
+    if re.search(rf"^\s*{_BUTTON_NOUN_PATTERN}", after, re.IGNORECASE):
+        return True
+    return bool(
+        re.search(
+            rf"{_CLICK_VERB_PATTERN}\s*(?:the\s+)?[\"'“”‘’]?\s*$",
+            before,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _value_has_result_context(goal: str, value: str) -> bool:
+    haystack = (goal or "").casefold()
+    needle = (value or "").strip().casefold()
+    if not haystack or not needle:
+        return False
+    start = 0
+    while True:
+        pos = haystack.find(needle, start)
+        if pos < 0:
+            return False
+        context = haystack[max(0, pos - 18): pos + len(needle) + 18]
+        if (
+            any(marker in context for marker in _RESULT_CONTEXT_MARKERS)
+            and not _occurrence_looks_like_button_label(goal, pos, len(needle))
+        ):
+            return True
+        start = pos + max(1, len(needle))
+
+
+def _check_echoes_button_label(goal: str, key: str, value: str) -> bool:
+    """Return True when a text check is just the clicked control label.
+
+    A common planning failure is:
+      {"goal":"click Apply/Input button", "check":{"text_appears":"Apply/Input"}}
+    The label is already visible before the action, so complete_subgoal can
+    become a permanent blocker. Keep distinctive state tokens and values with
+    explicit result/verification context.
+    """
+    if key not in _VISIBLE_CHECK_KEYS:
+        return False
+    label = (value or "").strip()
+    if not label or not goal:
+        return False
+    if _looks_like_state_token(label) or _value_has_result_context(goal, label):
+        return False
+    if _compact_text(label) not in _compact_text(goal):
+        return False
+    escaped = re.escape(label)
+    patterns = (
+        rf"{escaped}\s*{_BUTTON_NOUN_PATTERN}",
+        rf"{_CLICK_VERB_PATTERN}\s*(?:the\s+)?[\"'“”‘’]?\s*{escaped}",
+    )
+    return any(re.search(pattern, goal, re.IGNORECASE) for pattern in patterns)
+
+
+def _sanitize_check_for_goal(goal: str, check) -> dict | None:
+    valid = _valid_check(check)
+    if not valid:
+        return None
+    sanitized = dict(valid)
+    dropped: list[str] = []
+    for key, value in list(sanitized.items()):
+        if isinstance(value, str) and _check_echoes_button_label(goal, key, value):
+            dropped.append(f"{key}={value!r}")
+            sanitized.pop(key, None)
+    if dropped:
+        logger.warning(
+            "规划 check 把按钮/菜单标签当成结果，已忽略: goal=%r dropped=%s",
+            goal,
+            dropped,
+        )
+    return sanitized or None
+
+
 _MAX_STEPS = 6
 _MAX_GOAL_CHARS = 60
 # Sequence markers that hint at a multi-step task.
@@ -45,6 +148,7 @@ _PLAN_SYSTEM = (
     "尽量带上 check(用于客观核验是否真完成)，可用键: "
     '{"file_exists":"路径"} {"file_contains":{"path":"..","text":".."}} '
     '{"process_running":"exe名"} {"window_appears":"标题"} {"text_appears":"界面文字"}。'
+    "不要把点击前就存在的按钮/菜单/链接自身文字当成 text_appears check；点击类子目标只有在有点击后的新文字、状态、文件、进程或窗口时才带 check。"
     "无确定性信号的子目标用纯字符串即可，不要编造 check。不要编号、不要解释。"
     '例: ["打开记事本", {"goal":"另存为到桌面a.txt", "check":{"file_exists":"C:\\\\Users\\\\me\\\\Desktop\\\\a.txt"}}]'
 )
@@ -87,7 +191,7 @@ def _parse_steps(raw: str) -> list[dict]:
     for item in data:
         if isinstance(item, dict):
             goal = str(item.get("goal", "")).strip()[:_MAX_GOAL_CHARS]
-            check = _valid_check(item.get("check"))
+            check = _sanitize_check_for_goal(goal, item.get("check"))
         else:
             goal, check = str(item).strip()[:_MAX_GOAL_CHARS], None
         if goal:
@@ -126,7 +230,10 @@ class Plan:
                 self.steps.append({
                     "goal": str(s.get("goal", "")).strip()[:_MAX_GOAL_CHARS],
                     "done": False,
-                    "check": _valid_check(s.get("check")),
+                    "check": _sanitize_check_for_goal(
+                        str(s.get("goal", "")).strip()[:_MAX_GOAL_CHARS],
+                        s.get("check"),
+                    ),
                 })
             else:
                 self.steps.append({"goal": str(s).strip()[:_MAX_GOAL_CHARS],

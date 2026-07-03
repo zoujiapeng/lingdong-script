@@ -212,7 +212,7 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click an Apply/Search/Send button, wait briefly, and verify visible text/state. This keeps low-level click/type/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason.",
+            "Controller-first GUI routine executor. Use for clear subgoals such as locate an input by label/nearby OCR, type literal text, click one or more Apply/Search/Send-style buttons, wait briefly, and verify visible text/state. Also use for labeled click-only routines when the target label and expected visible result/state are known. This keeps low-level click/type/observe loops inside the local controller; call normal tools when the target is ambiguous or the routine fails with needs_llm_reason.",
             {
                 "subgoal": _prop("string", "One short high-level GUI subgoal for this routine."),
                 "target_window": {
@@ -246,6 +246,21 @@ def tool_schemas(
                         "fallback_text": {"type": "array", "items": {"type": "string"}},
                         "button": _prop("string", "Mouse button.", enum=["left", "right", "middle"]),
                         "double": _prop("boolean", "Double click."),
+                    },
+                },
+                "clicks": {
+                    "type": "array",
+                    "description": "Optional ordered button/action click routines after the input routine, for one controller-first subgoal with multiple obvious buttons.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": _prop("string", "Button/menu/link visible label, e.g. Apply, Search, Send."),
+                            "role": _prop("string", "Default button."),
+                            "expected_region": _prop("string", "Optional rough region."),
+                            "fallback_text": {"type": "array", "items": {"type": "string"}},
+                            "button": _prop("string", "Mouse button.", enum=["left", "right", "middle"]),
+                            "double": _prop("boolean", "Double click."),
+                        },
                     },
                 },
                 "verify_texts": {

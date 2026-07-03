@@ -1018,3 +1018,62 @@ def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
         "subgoal": "verify LOCAL_COUNTER is visible",
     }, task=task)
     assert verify_request.verify_texts == ["LOCAL_COUNTER"]
+
+
+def test_subgoal_executor_runs_ordered_clicks_in_one_routine():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Type MULTI_CLICK_OK and verify FINAL_STATE"
+        hwnd = 1
+        run_id = "run-subgoal-clicks"
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Target",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=1, source="uia", role="edit", text="Target Input", cx=250, cy=100, left=100, top=80, width=300, height=36),
+                UIElement(elem_id=2, source="uia", role="button", text="Apply", cx=470, cy=100, left=420, top=80, width=100, height=36),
+                UIElement(elem_id=3, source="uia", role="button", text="Refresh", cx=590, cy=100, left=540, top=80, width=100, height=36),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "read_text":
+                return ToolResult("MULTI_CLICK_OK\nFINAL_STATE")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    result = SubgoalExecutor(Session(), FastGuiController(Session())).execute({
+        "subgoal": "fill input and run two buttons",
+        "input": {"label": "Target Input", "text": "MULTI_CLICK_OK", "clear": False},
+        "clicks": [{"label": "Apply"}, {"label": "Refresh"}],
+        "verify_texts": ["MULTI_CLICK_OK", "FINAL_STATE"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert [action["action"] for action in payload["actions_executed"]] == [
+        "type_into_element",
+        "click_element",
+        "click_element",
+        "read_text",
+    ]
+    assert [name for name, _args in calls] == [
+        "focus_window",
+        "click",
+        "type_text",
+        "click",
+        "click",
+        "read_text",
+    ]

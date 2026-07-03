@@ -33,7 +33,7 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 2,
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost_cny": 0.1},
             "slow_tools": [{"tool": "observe", "elapsed_ms": 50}],
-            "fast_gui": {"batch_calls": 1, "batch_actions": 3, "round_trips_saved": 2},
+            "fast_gui": {"batch_calls": 1, "batch_actions": 3, "subgoal_calls": 1, "subgoal_actions": 4, "round_trips_saved": 2},
         },
         {
             "run_id": "r2",
@@ -55,6 +55,8 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
     assert out["slow_tools"][0]["tool"] == "click"
     assert out["fast_gui"]["batch_calls"] == 3
     assert out["fast_gui"]["batch_actions"] == 7
+    assert out["fast_gui"]["subgoal_calls"] == 1
+    assert out["fast_gui"]["subgoal_actions"] == 4
     assert out["fast_gui"]["round_trips_saved"] == 4
 
 
@@ -126,6 +128,49 @@ def test_summarize_events_extracts_fast_gui_metrics():
     assert out["low_latency"]["screen_capture_latency"]["avg_ms"] == 4
 
 
+def test_summarize_events_extracts_execute_subgoal_metrics():
+    events = [
+        {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
+        {
+            "type": "agent_tool",
+            "tool": "execute_subgoal",
+            "elapsed_ms": 90,
+            "result_meta": {
+                "verified": True,
+                "needs_llm_reason": False,
+                "actions_executed": [
+                    {"action": "type_into_element"},
+                    {"action": "click_element"},
+                    {"action": "read_text"},
+                ],
+                "controller_state": {"phase": "verified"},
+                "metrics": {
+                    "controller_round_trips_saved": 4,
+                    "screen_wait_count": 1,
+                },
+                "evidence_packet": {
+                    "matched_texts": ["OK"],
+                    "missing_texts": [],
+                },
+            },
+            "ts": 1.2,
+        },
+        {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 2.0},
+    ]
+
+    out = summary.summarize_events(events)
+
+    assert out["fast_gui"]["subgoal_calls"] == 1
+    assert out["fast_gui"]["subgoal_actions"] == 3
+    assert out["fast_gui"]["verified_subgoals"] == 1
+    assert out["fast_gui"]["subgoals_needing_llm"] == 0
+    assert out["fast_gui"]["subgoal_missing_evidence"] == 0
+    assert out["fast_gui"]["round_trips_saved"] == 4
+    assert out["fast_gui"]["screen_waits"] == 1
+    assert out["fast_gui"]["controller_phases"] == {"verified": 1}
+    assert out["low_latency"]["action_execution_latency"]["avg_ms"] == 90
+
+
 def test_summarize_events_includes_batch_action_screenshots():
     events = [
         {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
@@ -189,6 +234,26 @@ def test_summarize_events_reports_low_latency_metrics():
     assert metrics["skill_reuse_rate"] == 1.0
     assert metrics["screen_watch_auto_starts"] == 1
     assert metrics["screen_watch_running_tool_events"] == 1
+
+
+def test_summarize_events_ignores_empty_vlm_placeholder():
+    events = [
+        {"type": "agent_start", "run_id": "r1", "task": "demo", "ts": 1.0},
+        {
+            "type": "perception",
+            "dims": {
+                "ocr": {"count": 2, "ms": 80},
+                "vlm": {"count": 0, "ms": 0},
+            },
+            "ts": 1.1,
+        },
+        {"type": "agent_done", "run_id": "r1", "status": "done", "ts": 1.2},
+    ]
+
+    out = summary.summarize_events(events)
+
+    assert out["low_latency"]["vlm_call_count"] == 0
+    assert "vlm" not in out["perception"]
 
 
 def test_aggregate_reports_treats_policy_failure_as_not_passed():

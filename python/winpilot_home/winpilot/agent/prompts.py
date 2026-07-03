@@ -48,7 +48,7 @@ element and coordinates.
    For any window where UIA/OCR returns few or no elements (custom-rendered apps,
    games, chat apps, canvas), native vision/VLM or compact visual summaries are
    your primary navigation tools.
-   For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
+   For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Also use execute_subgoal for click-only routines when the target has a visible label and the expected result is a visible text/state. If one routine needs several obvious buttons, put them in execute_subgoal.clicks in order. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
    For lower-level obvious mini-sequences, use run_action_batch so the fast GUI
    controller can click/type/wait/verify without an LLM round-trip per action.
    For a clear input target inside a batch, use type_into_element to locate,
@@ -143,7 +143,7 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 1. list_windows / find_app / focus_window
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. observe → read the perception reducer; pass full=true only when raw details are needed
-3. For clear labeled input/button routines, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch
+3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch
 4. observe/read_text again only when the controller evidence is insufficient
 5. done only when grounded evidence confirms task complete.
 
