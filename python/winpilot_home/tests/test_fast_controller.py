@@ -1522,3 +1522,49 @@ def test_palette_swatch_detection_ignores_titlebar_colorful_icon():
         image[y:y + 10, x:x + 10] = color
 
     assert FastGuiController._palette_swatch_point(image, Region(100, 200, 300, 220), "blue") is None
+
+
+def test_select_color_prefers_target_hwnd_region_over_stale_snapshot(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.utils.screenshot import Region
+
+    target_region = Region(100, 200, 300, 220)
+    monkeypatch.setattr(controller_mod, "window_region", lambda hwnd: target_region)
+    image = np.full((220, 300, 3), 96, dtype=np.uint8)
+    for x, color in [
+        (20, (0, 0, 255)),
+        (50, (0, 128, 255)),
+        (80, (0, 255, 255)),
+        (110, (0, 180, 0)),
+        (140, (255, 0, 0)),
+        (170, (180, 0, 180)),
+        (200, (0, 0, 255)),
+        (230, (0, 255, 255)),
+    ]:
+        image[110:128, x:x + 18] = color
+    clicks = []
+    captured_regions = []
+
+    class Session:
+        task = "draw a blue triangle"
+        hwnd = 7
+        run_id = "run-select-color-hwnd"
+        snapshot = Snapshot(hwnd=99, title="Stale", region=Region(0, 0, 1920, 1080), elements=[])
+
+        def dispatch(self, name, args):
+            clicks.append(args)
+            return ToolResult('{"ok": true}')
+
+    def capture_fn(region):
+        captured_regions.append(region)
+        return image
+
+    controller = FastGuiController(Session(), capture_fn=capture_fn)
+    out = controller.execute([{"action": "select_color", "color": "blue"}], sync=False)
+
+    assert out["ok"] is True
+    assert captured_regions == [target_region]
+    assert clicks
