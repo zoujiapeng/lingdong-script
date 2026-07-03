@@ -748,19 +748,36 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
         Hints in the prompt are weak references; a successful run may have
         ignored them entirely. Positive feedback is therefore reserved for
-        recipes replayed through reuse_skill. Failed/error runs with no replay
-        still penalize injected auto-recipes, preserving the old poison-control
-        behavior for bad hints.
+        recipes whose reuse_skill replay succeeded and whose run also ended
+        done. Failed replay attempts are negative even if live fallback later
+        finishes the task. Failed/error runs with no replay still penalize
+        injected auto-recipes, preserving the old poison-control behavior for
+        bad hints.
         """
         if self.status not in ("done", "fail", "error"):
             return
-        used_ids = list(dict.fromkeys(
-            str(rid) for rid in getattr(self.session, "used_memory_recipe_ids", [])
-            if str(rid)
+        attempts = [
+            attempt for attempt in getattr(self.session, "memory_recipe_attempts", [])
+            if isinstance(attempt, dict) and str(attempt.get("id") or "")
+        ]
+        replay_ok_ids = list(dict.fromkeys(
+            str(attempt["id"]) for attempt in attempts if attempt.get("replay_ok")
         ))
-        if used_ids:
-            experience.feedback(used_ids, success=(self.status == "done"))
-        elif self.status in ("fail", "error"):
+        replay_failed_ids = list(dict.fromkeys(
+            str(attempt["id"]) for attempt in attempts
+            if not attempt.get("replay_ok") and str(attempt["id"]) not in replay_ok_ids
+        ))
+        attempted_ids = list(dict.fromkeys(
+            str(attempt["id"]) for attempt in attempts
+        ))
+        if self.status == "done":
+            if replay_ok_ids:
+                experience.feedback(replay_ok_ids, success=True)
+            if replay_failed_ids:
+                experience.feedback(replay_failed_ids, success=False)
+        elif attempted_ids:
+            experience.feedback(attempted_ids, success=False)
+        else:
             experience.feedback(self._hint_ids, success=False)
 
     def _handle_tool_calls(self, tool_calls) -> str | None:
