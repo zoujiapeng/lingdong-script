@@ -16,6 +16,18 @@ _CODING_STRONG = (
     "这个项目", "项目里", "写代码", "写个程序", "写一个程序", "实现一个", "api 接口", "接口",
     "数据库", "前端", "后端", "部署",
 )
+_CODING_EXPLICIT = (
+    "编程任务", "项目编程", "coding task", "programming task",
+    "python 项目", "python项目", "node 项目", "node项目", "前端项目", "后端项目",
+    "run_shell", "stdout", "stderr", "exit code", "退出码",
+    "main.py", "package.json", "pyproject.toml", "requirements.txt", "vite.config",
+)
+_CODING_ARTIFACT_ACTION = re.compile(
+    r"(创建|新建|修改|编辑|写入|生成|运行|执行|测试|验证|create|write|edit|modify|run|test|verify)"
+    r"[^。,，;；\n]{0,80}"
+    r"\b[\w.-]+\.(?:py|js|ts|tsx|jsx|html|css|rs|go|java|cs|cpp|c|sh|ps1)\b",
+    re.IGNORECASE,
+)
 _CODING_BUILD = re.compile(
     r"(做|写|开发|实现|生成|创建|编写|搭建|搭|建|帮我做|帮我写)"
     r"[^。,，;；\n]{0,12}"
@@ -231,8 +243,14 @@ def _gui_only_launch_uses_shell(command: str) -> bool:
 def _is_coding_task(task: str) -> bool:
     text = (task or "").strip()
     low = text.lower()
-    if _OPEN_INTENT.match(text):
+    explicit_coding = (
+        any(k in low for k in _CODING_EXPLICIT)
+        or bool(_CODING_ARTIFACT_ACTION.search(text))
+    )
+    if _OPEN_INTENT.match(text) and not explicit_coding:
         return False
+    if explicit_coding:
+        return True
     if any(k in low for k in _CODING_STRONG):
         return True
     return bool(_CODING_BUILD.search(text))

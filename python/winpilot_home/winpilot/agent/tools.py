@@ -476,13 +476,27 @@ class ToolSession(
         if foreground_target:
             self._remember_target(foreground_target)
             return foreground_target
+        try:
+            fg = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            fg = 0
+        if (
+            fg
+            and self._window_alive(fg)
+            and self._window_alive(self.hwnd)
+            and int(fg) != int(self.hwnd)
+            and self._window_related_to_target(fg, self.hwnd)
+        ):
+            self._remember_target(fg)
+            return fg
         if self._window_alive(self.hwnd):
             return self.hwnd
         target = self._find_target_window()
         if target:
             self._remember_target(target)
             return target
-        fg = win32gui.GetForegroundWindow()
+        if not fg:
+            fg = win32gui.GetForegroundWindow()
         return fg if fg else None
 
     def _resolve_element(self, elem_id: int):

@@ -16,3 +16,10 @@ def test_coding_task_uses_unified_agent_with_coding_runtime():
 
     assert isinstance(runner, AgentRunner)
     assert runner.runtime_profile.coding
+
+
+def test_explicit_project_artifact_task_uses_coding_runtime():
+    runner = build_runner("这是一个 Python 项目编程任务：创建 main.py 并确认 stdout 是 7")
+
+    assert isinstance(runner, AgentRunner)
+    assert runner.runtime_profile.coding
