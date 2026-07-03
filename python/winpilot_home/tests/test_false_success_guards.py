@@ -342,6 +342,114 @@ def test_save_task_refuses_cancel_button_click():
     assert "Refused to click" in result.text
 
 
+def test_non_power_task_refuses_power_button_click():
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(task="把桌面上的文件夹拖到右上角")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="DesktopWindowXamlSource",
+        region=Region(0, 0, 1920, 1080),
+        elements=[
+            UIElement(
+                elem_id=18,
+                role="button",
+                text="电源 电池状态: 95% 可用(电源已接通)",
+                cx=1768,
+                cy=1050,
+                left=1751,
+                top=1020,
+                width=35,
+                height=60,
+                source="uia",
+            )
+        ],
+    )
+
+    result = session._t_click({"element_id": 18})
+
+    assert "Refused to click a system power" in result.text
+
+
+def test_coordinate_click_refuses_power_element_under_point():
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(task="打开浏览器访问网页")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="DesktopWindowXamlSource",
+        region=Region(0, 0, 1920, 1080),
+        elements=[
+            UIElement(
+                elem_id=9,
+                role="button",
+                text="关机",
+                cx=100,
+                cy=100,
+                left=80,
+                top=80,
+                width=50,
+                height=40,
+                source="uia",
+            )
+        ],
+    )
+
+    result = session._t_click({"x": 100, "y": 100})
+
+    assert "Refused to click a system power" in result.text
+
+
+def test_power_task_allows_power_labeled_click(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: False,
+        click=lambda *args, **kwargs: {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda name, action, **kwargs: action(),
+        post_state_summary=lambda: {},
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+
+    session = ToolSession(task="打开电源设置查看电池状态")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="DesktopWindowXamlSource",
+        region=Region(0, 0, 1920, 1080),
+        elements=[
+            UIElement(
+                elem_id=18,
+                role="button",
+                text="电源 电池状态: 95% 可用(电源已接通)",
+                cx=1768,
+                cy=1050,
+                left=1751,
+                top=1020,
+                width=35,
+                height=60,
+                source="uia",
+            )
+        ],
+    )
+
+    result = session._t_click({"element_id": 18})
+
+    assert "Refused to click" not in result.text
+
+
 def test_type_text_reuses_last_clicked_input(monkeypatch):
     import winpilot.agent.tools as tools_mod
     from winpilot.agent.tools import ToolSession

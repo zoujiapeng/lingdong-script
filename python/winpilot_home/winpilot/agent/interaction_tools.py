@@ -17,6 +17,17 @@ from .tool_result import ToolResult
 
 _CANCEL_TEXTS = {"cancel", "\u53d6\u6d88"}
 _INPUT_ROLES = {"edit", "combobox", "\u7f16\u8f91", "\u7ec4\u5408\u6846"}
+_DANGEROUS_POWER_TERMS = (
+    "shutdown", "shut down", "restart", "sign out", "log off", "sleep", "hibernate",
+    "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
+    "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90",
+)
+_POWER_TASK_ALLOW_TERMS = (
+    "shutdown", "shut down", "restart", "sign out", "log off", "sleep", "hibernate",
+    "power setting", "power settings", "battery",
+    "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
+    "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90", "\u7535\u6c60",
+)
 
 
 def _looks_like_save_task(task: str) -> bool:
@@ -36,6 +47,26 @@ def _looks_like_cancel_element(text: str, role: str) -> bool:
 def _looks_like_input_element(role: str) -> bool:
     role_text = (role or "").strip().casefold()
     return role_text in _INPUT_ROLES or "edit" in role_text or "combo" in role_text
+
+
+def _task_allows_power_action(task: str) -> bool:
+    text = (task or "").casefold()
+    return any(term in text for term in _POWER_TASK_ALLOW_TERMS)
+
+
+def _looks_like_dangerous_power_element(text: str, role: str) -> bool:
+    label = (text or "").strip().casefold()
+    if not label:
+        return False
+    role_text = (role or "").casefold()
+    clickable = (
+        "button" in role_text
+        or "\u6309\u94ae" in role_text
+        or "menu" in role_text
+        or "\u83dc\u5355" in role_text
+        or not role_text
+    )
+    return clickable and any(term in label for term in _DANGEROUS_POWER_TERMS)
 
 
 def _tools_attr(name: str, default):
@@ -72,6 +103,52 @@ def _printable_text_sequence(keys: list[str]) -> str:
 
 
 class InteractionToolMixin:
+    def _element_at_point(self, x: int, y: int):
+        snapshot = getattr(self, "snapshot", None)
+        elements = getattr(snapshot, "elements", None) or []
+        hits = []
+        for element in elements:
+            try:
+                left = int(getattr(element, "left", 0))
+                top = int(getattr(element, "top", 0))
+                width = int(getattr(element, "width", 0))
+                height = int(getattr(element, "height", 0))
+            except (TypeError, ValueError):
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            if left <= x <= left + width and top <= y <= top + height:
+                hits.append((width * height, element))
+        if not hits:
+            return None
+        hits.sort(key=lambda item: item[0])
+        return hits[0][1]
+
+    def _blocked_power_click_result(self, element) -> ToolResult | None:
+        if _task_allows_power_action(getattr(self, "task", "")):
+            return None
+        text = str(getattr(element, "text", "") or "")
+        role = str(getattr(element, "role", "") or "")
+        if not _looks_like_dangerous_power_element(text, role):
+            return None
+        result = {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "error": (
+                "Refused to click a system power/session control outside an explicit "
+                "power-management task. Re-observe the intended app/window and choose a "
+                "non-destructive target."
+            ),
+            "blocked_element": {
+                "text": text,
+                "role": role,
+                "source": str(getattr(element, "source", "") or ""),
+                "coords": [int(getattr(element, "cx", 0) or 0), int(getattr(element, "cy", 0) or 0)],
+            },
+        }
+        return ToolResult(self._fmt(result))
+
     def _action_hwnd(self) -> int | None:
         try:
             target = self._resolve_hwnd({})
@@ -127,6 +204,9 @@ class InteractionToolMixin:
                     "post_state": verify_mod.post_state_summary(),
                 }
                 return ToolResult(self._fmt(result), replay=replay)
+            blocked = self._blocked_power_click_result(element)
+            if blocked is not None:
+                return blocked
 
             def action() -> dict:
                 if button == "left" and not double and executor_mod.uia_invoke(element):
@@ -137,6 +217,11 @@ class InteractionToolMixin:
         elif "x" in args and "y" in args:
             x, y = int(args["x"]), int(args["y"])
             replay["coords"] = [x, y]
+            hit = self._element_at_point(x, y)
+            if hit is not None:
+                blocked = self._blocked_power_click_result(hit)
+                if blocked is not None:
+                    return blocked
 
             def action() -> dict:
                 return executor_mod.click(x, y, button=button, double=double, hwnd=self._action_hwnd())
