@@ -63,8 +63,15 @@ def _first_int(*values: Any) -> int | None:
     return None
 
 
-def infer_provider(api: dict[str, Any]) -> str:
+def _api_dict(api: Any) -> dict[str, Any]:
+    if isinstance(api, dict):
+        return api
+    return {"model": api} if api else {}
+
+
+def infer_provider(api: dict[str, Any] | Any) -> str:
     """Infer provider family from explicit config, base URL, or model name."""
+    api = _api_dict(api)
     explicit = _lower(api.get("provider") or "auto")
     if explicit and explicit != "auto":
         return explicit
@@ -102,7 +109,8 @@ class ModelProfile:
         return self.provider in _THINKING_DISABLED_BY_DEFAULT
 
 
-def model_profile_from_config(api: dict[str, Any]) -> ModelProfile:
+def model_profile_from_config(api: dict[str, Any] | Any) -> ModelProfile:
+    api = _api_dict(api)
     provider = infer_provider(api)
     model = str(api.get("model") or "")
     return ModelProfile(

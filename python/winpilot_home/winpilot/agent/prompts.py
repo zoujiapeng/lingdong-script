@@ -9,6 +9,7 @@ from ..utils.screenshot import screen_size
 _SYSTEM_TEMPLATE = """You are WinPilot, an agent controlling a real Windows desktop.
 {vision_line}
 Current physical screen size: {screen_w}x{screen_h}.
+{runtime_section}
 
 # Observation protocol
 After each observe call you receive:
@@ -117,6 +118,7 @@ Downloads={downloads}
 _COMPACT_SYSTEM_TEMPLATE = """You are WinPilot, an agent controlling a real Windows desktop.
 {vision_line}
 Screen: {screen_w}x{screen_h}. Desktop={desktop}
+{runtime_section}
 
 Native-vision models receive a screenshot after observe. Text-only models cannot
 inspect screenshot bytes directly; use OCR/UIA/CV, nonvisual_summary,
@@ -180,6 +182,7 @@ def system_prompt(
     playbook_text: str = "",
     style: str = "full",
     main_model_has_vision: bool = False,
+    runtime_section: str = "",
 ) -> str:
     screen_w, screen_h = screen_size()
     home = Path.home()
@@ -192,6 +195,7 @@ def system_prompt(
         screen_w=screen_w,
         screen_h=screen_h,
         vision_line=vision_line,
+        runtime_section=("\n" + runtime_section.strip()) if runtime_section else "",
         vlm_section=_VLM_SECTION if vlm_enabled else "",
         planning_section=_PLANNING_SECTION if planning_enabled else "",
         playbook_text=playbook_text,

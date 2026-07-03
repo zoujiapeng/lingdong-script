@@ -1,7 +1,8 @@
-"""OpenAI function-calling schemas for WinPilot GUI tools.
+"""OpenAI function-calling schemas for the unified WinPilot Agent.
 
 Keep this file compact: every description is sent to the LLM. Runtime dispatch
-belongs in ``tools.py``.
+belongs in ``tools.py``; Coding Runtime only changes the available tool set,
+not the runner.
 """
 from __future__ import annotations
 
@@ -57,8 +58,12 @@ def _expectable(props: dict | None = None) -> dict:
     return out
 
 
-def tool_schemas(planning: bool = False) -> list[dict]:
-    """Return the OpenAI tools array for the GUI agent."""
+def tool_schemas(planning: bool = False, coding_runtime: bool = False) -> list[dict]:
+    """Return the OpenAI tools array for the unified Agent.
+
+    When coding_runtime=True, repository-specific tools are added to the same
+    AgentRunner tool set instead of routing to a separate coding sub-agent.
+    """
     tools = []
 
     if shell.shell_enabled():
@@ -70,6 +75,7 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                     "command": _prop("string", "Command to run."),
                     "shell": _prop("string", "Default powershell.", enum=["powershell", "cmd"]),
                     "timeout_s": _prop("number", "Default 30 seconds."),
+                    "cwd": _prop("string", "Optional working directory. In Coding Runtime this is relative to the coding workspace."),
                 },
                 ["command"],
             ),
@@ -304,6 +310,30 @@ def tool_schemas(planning: bool = False) -> list[dict]:
             ["question"],
         ))
 
+
+    if coding_runtime:
+        tools.extend([
+            _tool(
+                "apply_patch",
+                "Coding Runtime: precise single-file replacement. The find text must occur exactly once; re-read the file after patching.",
+                {
+                    "path": _prop("string", "Path relative to the coding workspace."),
+                    "find": _prop("string", "Original text fragment; must be unique."),
+                    "replace": _prop("string", "Replacement text."),
+                },
+                ["path", "find", "replace"],
+            ),
+            _tool(
+                "github_search",
+                "Coding Runtime: search GitHub repositories and return clone_url candidates when the user names an open-source project without a URL.",
+                {
+                    "query": _prop("string", "Repository/project name or keywords."),
+                    "max_results": _prop("integer", "Default 5, maximum 10."),
+                },
+                ["query"],
+            ),
+        ])
+
     tools.extend([
         _tool("clipboard_read", "Read the current system clipboard text content."),
         _tool("clipboard_write", "Write text to the system clipboard.",
@@ -328,13 +358,13 @@ def tool_schemas(planning: bool = False) -> list[dict]:
                "quality": _prop("integer", "JPEG quality 1-100.")},
               ["x", "y", "width", "height"]),
         _tool("list_installed_apps", "List installed applications from the Windows registry."),
-        _tool("list_dir", "List files and subdirectories in a directory.",
-              {"path": _prop("string", "Directory path. Omit for current directory.")}),
-        _tool("read_file", "Read a text file with line numbers.",
+        _tool("list_dir", "List files and subdirectories. In Coding Runtime, paths are relative to the configured coding workspace.",
+              {"path": _prop("string", "Directory path. Omit for current directory/workspace root.")}),
+        _tool("read_file", "Read a text file with line numbers. In Coding Runtime, paths are workspace-confined.",
               {"path": _prop("string"), "start": _prop("integer"), "count": _prop("integer")}, ["path"]),
-        _tool("write_file", "Write or overwrite a file.",
+        _tool("write_file", "Write or overwrite a file. In Coding Runtime, sensitive config/secret writes are guarded.",
               {"path": _prop("string"), "content": _prop("string")}, ["path", "content"]),
-        _tool("search_text", "Search for text across files in a directory.",
+        _tool("search_text", "Search for text across files. In Coding Runtime, searches the workspace by default.",
               {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
                "regex": _prop("boolean")}, ["query"]),
     ])

@@ -14,8 +14,8 @@ Windows 桌面自动化项目。当前项目由两条主线组成：
 - WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
 - WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`；provider/cache/usage/cost 真实机制见 `docs/model-providers.md`。
 - 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
-- 用户始终面对一个 WinPilot Agent；路由只是在内部选择 capability/runner。GUI/桌面任务主要走 `AgentRunner`，编程/仓库任务使用 `CodingRunner` 这类 Coding capability。
-- GUI runner 的任务规则在 `agent/task_rules.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 仍负责主循环和 LLM 编排。
+- 用户始终面对一个 WinPilot Agent；`agent/router.py` 不再切换子 runner，所有任务都进入 `AgentRunner`。编程/仓库任务由 `RuntimeProfile` 在同一主循环内启用 Coding Runtime。
+- Agent 任务规则在 `agent/task_rules.py`，runtime 开关在 `agent/runtime_profile.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 负责唯一主循环和 LLM 编排。
 - 记忆系统分层很轻：`memory/experience.py` 管长期 recipe/note 和 `experience_memory.json`，`agent/session.py` 管本服务生命周期内的指代型 session memory，`context_guidance.py` 管 world/playbook 提示，`loop.py` 管超过阈值后的上下文折叠 checkpoint。`reuse_skill` 只能复用强匹配的已验证 replay，完成 replay 不等于任务 done；只有 replay 成功且最终 run 完成的 recipe 才会获得正反馈，失败 replay 后兜底完成不算成功复用。
 - 低延迟 GUI 路径已有 `run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI 与 query miss fallback、`click_element` 目标 observe 重试、batch 内部 `type_into_element` 组合输入、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
 - `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
@@ -94,7 +94,7 @@ python -m pytest tests/test_vision.py tests/test_interfaces.py -q
 ## 维护原则
 
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
-- 用户始终面对一个 Agent；Coding、Computer Use、Terminal、Browser 等是按任务自动组合的 Capability/Skill。不要为了新专长默认拆独立子 agent，只有存在明确隔离、安全或生命周期边界时才引入独立 runner。
+- 用户始终面对一个 Agent；Coding、Computer Use、Terminal、Browser 等是按任务自动组合的 Runtime/Capability。不要为了新专长默认拆独立子 agent，只有存在明确隔离、安全或生命周期边界时才引入独立 runner。
 - 不只看日志判定成功；GUI 任务必须用屏幕、文件、进程、窗口或 trace 证据验证。
 - 不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。legacy executor 共享类型在 `python/engine/executor_types.py`。
 - `release/`、`dist/`、`python-runtime/`、缓存和 pycache 是可再生成/本机产物，不当源码阅读。

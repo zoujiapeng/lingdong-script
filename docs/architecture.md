@@ -1,12 +1,12 @@
 # 当前架构
 
-项目对用户呈现为一个 WinPilot Agent，内部由多个 capability/runner 和流程图系统协作。
+项目对用户呈现为一个 WinPilot Agent，内部由一个主 runner、多个 Runtime/Capability 和流程图系统协作。
 
 ## 两条主线
 
 | 系统 | 路径 | 职责 | 边界 |
 | --- | --- | --- | --- |
-| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆，以及 Coding capability | 不直接使用 `@feature`，不直接编辑流程图 |
+| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆；编程/仓库能力作为 Coding Runtime 挂在统一 Agent 内 | 不直接使用 `@feature`，不直接编辑流程图 |
 | 流程图/DSL 系统 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编排、DSL 执行、`@feature`、MCP/HTTP/CLI | 不等同于用户面对的 WinPilot Agent |
 
 ## 进程和端口
@@ -40,14 +40,16 @@ flowchart TB
 ```mermaid
 flowchart LR
     server["server.py"] --> router["agent/router.py"]
-    router -->|"GUI task"| loop["AgentRunner<br/>agent/loop.py"]
-    router -->|"coding/repo task"| coding["CodingRunner<br/>agent/coding.py"]
+    router -->|"all tasks"| loop["AgentRunner<br/>agent/loop.py"]
+    loop --> profile["RuntimeProfile<br/>agent/runtime_profile.py"]
+    profile -->|"coding task enables"| codingrt["Coding Runtime<br/>agent/coding_tools.py"]
     loop --> rules["Task guards<br/>agent/task_rules.py"]
     loop --> donev["Done verifier<br/>agent/done_verifier.py"]
     loop --> context["Context guidance<br/>agent/context_guidance.py"]
     loop --> reflect["Reflection<br/>agent/reflection.py"]
     loop --> schemas["Tool schemas<br/>agent/tool_schemas.py"]
     loop --> tools["ToolSession<br/>agent/tools.py"]
+    tools --> codingrt
     tools --> windowtools["WindowToolMixin<br/>agent/window_tools.py"]
     tools --> perceptiontools["PerceptionToolMixin<br/>agent/perception_tools.py"]
     tools --> interactiontools["InteractionToolMixin<br/>agent/interaction_tools.py"]
@@ -84,8 +86,8 @@ stateDiagram-v2
 ```
 
 - `server.py` 的 `_RunState` 是服务级锁：同一时间只允许一个 agent、replay 或人工录制任务运行。
-- `AgentRunner.run()` 是 GUI agent 主循环：注入任务/上下文/记忆 -> 调 LLM -> 处理 tool calls -> `ToolSession.dispatch()` -> 工具 mixin -> done gate/world/playbook/reflect。
-- `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；具体工具按窗口、感知、交互、系统、低延迟 batch、计划/终止、文件、记忆、桌面杂项拆到 mixin。
+- `AgentRunner.run()` 是唯一主循环：注入任务/上下文/记忆/runtime prompt -> 调 LLM -> 处理 tool calls -> `ToolSession.dispatch()` -> Runtime/工具 mixin -> done gate/world/playbook/reflect。
+- `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；当 `RuntimeProfile.coding=true` 时挂载 workspace-confined `CodingSession`，并把同名文件/shell/repo 工具委托过去；其他工具按窗口、感知、交互、系统、低延迟 batch、计划/终止、文件、记忆、桌面杂项拆到 mixin。
 - `run_action_batch` 和 `screen_watch` 在 `agent/fast_tools.py`，内部进入 `fast/controller.py`。controller 会给 `draw_strokes/drag` 追加本地 `auto_visual_verify`；顶层 `draw_strokes/drag` 也会被 `AgentRunner` 自动包装成单动作 batch。验证充分时结果会带 `fast_path_advice`，减少额外 LLM round-trip。
 - `.wps.json` 是 WinPilot trace 到离线重放的语义桥。新导出使用 `wps/2`，会收集顶层工具 replay 和 `run_action_batch` 子动作 replay；Replayer 负责文本 selector 重新定位、坐标回退和控制流执行。FlowScript 导入只发生在 `wpsToFlowScript.ts`，不代表 WinPilot 主 agent 直接理解或执行流程图。
 - `ToolSession.dispatch()` 会给普通可见动作附加廉价 `screen_delta` 和 `action_target` 元信息。它用于定位“画面是否变化、变化时 foreground 是否仍是目标窗口”，不是语义完成证明；done 仍要看截图、目标窗口感知或外部证据。
@@ -100,8 +102,8 @@ stateDiagram-v2
 ## 最近结构调整
 
 - `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
-- `agent/tool_schemas.py` 承担 GUI agent function schema，并使用短描述减少 LLM 上下文；`agent/tools.py` 保留运行态状态和 dispatch；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/fast_tools.py`、`agent/plan_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆复用、桌面杂项工具。
-- `agent/task_rules.py` 承担 GUI task 分类、GUI-only 限制和 done gate guard 的纯规则；`agent/done_verifier.py` 承担 done 二次核验；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
+- `agent/tool_schemas.py` 承担统一 Agent function schema，并在 Coding Runtime 激活时动态加入 repo 工具；`agent/runtime_profile.py` 决定每次 run 的 runtime 开关；`agent/tools.py` 保留运行态状态和 dispatch；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/fast_tools.py`、`agent/plan_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆复用、桌面杂项工具。
+- `agent/task_rules.py` 承担任务分类、GUI-only 限制、coding runtime 触发和 done gate guard 的纯规则；`agent/done_verifier.py` 承担 done 二次核验；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 承担 legacy Flow/DSL executor 的共享状态、上下文和控制流异常，`executor.py` 继续作为 legacy 执行器维护。
 - `python/core/screenshot.py` 保留 `capture_screen()`，兼容旧 Robot Framework keywords。

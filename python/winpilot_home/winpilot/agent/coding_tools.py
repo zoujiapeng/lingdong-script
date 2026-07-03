@@ -1,9 +1,8 @@
-"""Coding sub-agent tools: deterministic filesystem / repo operations.
+"""Coding Runtime tools: deterministic filesystem / repo operations.
 
-Separate from the GUI agent's tools.py (which stays lean) — the coding agent
-gets real file-editing primitives instead of driving an editor through the
-screen. All path tools are confined to a workspace root; run_shell reuses the
-existing shell safety guard.
+These tools are now used by the single WinPilot AgentRunner as an optional
+capability, not by a separately planned coding sub-agent. All path tools are
+confined to a workspace root; run_shell reuses the existing shell safety guard.
 """
 from __future__ import annotations
 
@@ -38,7 +37,12 @@ def _tool(name: str, description: str, properties: dict, required: list[str] | N
 
 
 def coding_tool_schemas() -> list[dict]:
-    """OpenAI tools for the coding sub-agent."""
+    """Legacy full schema set for Coding Runtime tools.
+
+    The unified AgentRunner uses agent.tool_schemas with coding_runtime=True so
+    tool names are not duplicated. This function remains for compatibility with
+    older tests and external imports.
+    """
     return [
         _tool("list_dir", "列出目录下的文件/子目录（自动跳过 node_modules/.git/dist 等）。不传=工作区根",
               {"path": {"type": "string", "description": "相对工作区的目录，省略=根目录"}}),
@@ -73,8 +77,23 @@ class CodingResult:
         self.summary = summary       # one-line fold
 
 
+def coding_runtime_tool_names(include_terminal: bool = False) -> set[str]:
+    names = {
+        "list_dir",
+        "read_file",
+        "search_text",
+        "github_search",
+        "write_file",
+        "apply_patch",
+        "run_shell",
+    }
+    if include_terminal:
+        names.update({"done", "fail"})
+    return names
+
+
 class CodingSession:
-    """Dispatches coding tools against a confined workspace root."""
+    """Dispatches Coding Runtime tools against a confined workspace root."""
 
     def __init__(self, workspace: Path, stop_event=None, task: str = "") -> None:
         self.workspace = Path(workspace).resolve()
@@ -90,6 +109,11 @@ class CodingSession:
         except ValueError:
             raise ValueError(f"路径超出工作区: {path}（工作区根 {self.workspace}）") from None
         return p
+
+    def _rel_display(self, path: Path) -> str:
+        """Stable workspace-relative path text for model-facing tool output."""
+        rel = path.relative_to(self.workspace)
+        return "." if str(rel) == "." else rel.as_posix()
 
     @staticmethod
     def _fmt(data: dict) -> str:
@@ -223,8 +247,7 @@ class CodingSession:
                 entries.append(f"{child.name}/")
             else:
                 entries.append(child.name)
-        rel = base.relative_to(self.workspace)
-        body = f"{rel or '.'}:\n" + "\n".join(entries[:300])
+        body = f"{self._rel_display(base)}:\n" + "\n".join(entries[:300])
         return CodingResult(body, summary=f"[已折叠] list_dir {len(entries)}项")
 
     def _t_read_file(self, args: dict) -> CodingResult:
@@ -258,7 +281,7 @@ class CodingSession:
         content = str(args.get("content", ""))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        BUS.publish("action", action="write_file", path=str(p.relative_to(self.workspace)),
+        BUS.publish("action", action="write_file", path=self._rel_display(p),
                     bytes=len(content.encode("utf-8")))
         return CodingResult(self._fmt({"ok": True, "bytes": len(content.encode("utf-8"))}))
 
@@ -283,23 +306,30 @@ class CodingSession:
         if n > 1:
             return CodingResult(f"find 在文件中出现 {n} 次（不唯一）——请带上更多上下文使其唯一")
         p.write_text(text.replace(find, replace, 1), encoding="utf-8")
-        BUS.publish("action", action="apply_patch", path=str(p.relative_to(self.workspace)))
+        BUS.publish("action", action="apply_patch", path=self._rel_display(p))
         return CodingResult(self._fmt({"ok": True, "replaced": 1}))
 
     def _t_search_text(self, args: dict) -> CodingResult:
         query = str(args["query"])
         use_regex = bool(args.get("regex", False))
         glob = str(args.get("glob") or "")
+        base = self._resolve(str(args.get("path") or "."))
+        if not base.is_dir():
+            return CodingResult(f"搜索目录不存在: {args.get('path') or '.'}")
         try:
             pat = re.compile(query) if use_regex else None
         except re.error as exc:
             return CodingResult(f"正则错误: {exc}")
         hits: list[str] = []
-        for path in self.workspace.rglob("*"):
+        for path in base.rglob("*"):
             if len(hits) >= 200:
                 hits.append("…(结果过多，已截断)")
                 break
-            if not path.is_file() or any(part in _SKIP_DIRS for part in path.parts):
+            try:
+                rel_parts = path.relative_to(self.workspace).parts
+            except ValueError:
+                continue
+            if not path.is_file() or any(part in _SKIP_DIRS for part in rel_parts):
                 continue
             if path.suffix.lower() not in _TEXT_EXT:
                 continue
@@ -309,8 +339,7 @@ class CodingSession:
                 for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                     found = pat.search(line) if pat else (query in line)
                     if found:
-                        rel = path.relative_to(self.workspace)
-                        hits.append(f"{rel}:{i}: {line.strip()[:200]}")
+                        hits.append(f"{self._rel_display(path)}:{i}: {line.strip()[:200]}")
                         if len(hits) >= 200:
                             break
             except (UnicodeDecodeError, OSError):
@@ -337,7 +366,7 @@ class CodingSession:
                 url,
                 headers={
                     "Accept": "application/vnd.github+json",
-                    "User-Agent": "WinPilot-CodingAgent",
+                    "User-Agent": "WinPilot-CodingRuntime",
                 },
             )
             try:
