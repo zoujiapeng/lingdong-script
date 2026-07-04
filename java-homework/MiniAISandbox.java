@@ -10,34 +10,42 @@ public class MiniAISandbox extends JFrame {
 
     public static void main(String[] args) {
         try { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()); } catch (Exception ignored) {}
-        EventQueue.invokeLater(() -> new MiniAISandbox().setVisible(true));
+        EventQueue.invokeLater(() -> {
+            MiniAISandbox app = new MiniAISandbox();
+            app.setVisible(true);
+            if (args.length > 0 && "--smoke".equals(args[0])) app.smoke();
+        });
     }
 
     MiniAISandbox() {
         super("Mini Win11 - AI Sandbox");
         setSize(900, 560);
+        setMinimumSize(new Dimension(760, 460));
         setLocationRelativeTo(null);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
+
         desk.setLayout(null);
         desk.setBackground(new Color(226, 240, 255));
         add(desk, BorderLayout.CENTER);
         add(bar(), BorderLayout.SOUTH);
-        icon("📝\n记事本", "desk.note", 30, this::note);
-        icon("🧮\n计算器", "desk.calc", 95, this::calc);
-        icon("📁\n文件", "desk.files", 160, this::files);
-        icon("🎯\n小游戏", "desk.game", 225, this::game);
-        icon("🤖\n任务板", "desk.tasks", 290, this::tasks);
+
+        icon("N<br>记事本", "desk.note", 30, this::note);
+        icon("C<br>计算器", "desk.calc", 95, this::calc);
+        icon("F<br>文件", "desk.files", 160, this::files);
+        icon("G<br>小游戏", "desk.game", 225, this::game);
+        icon("AI<br>任务板", "desk.tasks", 290, this::tasks);
     }
 
     JPanel bar() {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 4));
         p.setBackground(new Color(238, 244, 252));
-        JButton start = button("sys.start", "开始", () -> menu());
+        JButton start = button("sys.start", "开始", this::menu);
         p.add(start);
         p.add(button("task.note", "记事本", this::note));
         p.add(button("task.calc", "计算器", this::calc));
         p.add(button("task.files", "文件", this::files));
         p.add(button("task.game", "游戏", this::game));
+
         JPanel all = new JPanel(new BorderLayout());
         all.add(p, BorderLayout.CENTER);
         all.add(tip, BorderLayout.EAST);
@@ -60,6 +68,7 @@ public class MiniAISandbox extends JFrame {
         JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT));
         top.add(button("note.save", "保存", () -> state.setText("已保存，字数=" + text.getText().length())));
         top.add(button("note.clear", "清空", () -> text.setText("")));
+
         JPanel p = new JPanel(new BorderLayout(5, 5));
         p.add(top, BorderLayout.NORTH);
         p.add(new JScrollPane(text), BorderLayout.CENTER);
@@ -72,6 +81,7 @@ public class MiniAISandbox extends JFrame {
         JComboBox<String> op = tag(new JComboBox<>(new String[]{"+", "-", "*", "/"}), "calc.op");
         JLabel ans = tag(new JLabel("结果："), "calc.answer");
         JPanel p = new JPanel(new GridLayout(5, 2, 6, 6));
+
         p.add(new JLabel("数字A")); p.add(a);
         p.add(new JLabel("运算")); p.add(op);
         p.add(new JLabel("数字B")); p.add(b);
@@ -91,11 +101,14 @@ public class MiniAISandbox extends JFrame {
         DefaultListModel<String> model = new DefaultListModel<>();
         for (String s : new String[]{"homework.docx", "photo.png", "todo.txt", "score.csv"}) model.addElement(s);
         JList<String> list = tag(new JList<>(model), "file.list");
-        JLabel state = tag(new JLabel("请选择一个文件"), "file.state");
+        list.setSelectedIndex(2);
+        JLabel state = tag(new JLabel("当前选择：todo.txt"), "file.state");
         JPanel bottom = new JPanel();
+
         bottom.add(button("file.open", "打开", () -> state.setText(list.getSelectedValue() == null ? "未选择" : "打开：" + list.getSelectedValue())));
         bottom.add(button("file.delete", "删除", () -> { int i = list.getSelectedIndex(); if (i >= 0) state.setText("删除：" + model.remove(i)); }));
         bottom.add(button("file.new", "新建", () -> model.addElement("new_file_" + model.size() + ".txt")));
+
         JPanel p = new JPanel(new BorderLayout(5, 5));
         p.add(state, BorderLayout.NORTH);
         p.add(new JScrollPane(list), BorderLayout.CENTER);
@@ -105,26 +118,26 @@ public class MiniAISandbox extends JFrame {
 
     void tasks() {
         JTextArea t = tag(new JTextArea(
-            "AI 自动化测试任务：\n\n" +
-            "1. note.text 输入 hello，点击 note.save。\n" +
-            "2. calc.a=21，calc.b=2，点击 calc.run。\n" +
-            "3. file.list 选择 todo.txt，点击 file.open。\n" +
-            "4. 连续点击 game.target 五次。\n\n" +
-            "所有按钮/输入框都有固定 name 和 tooltip。"), "tasks.text");
+            "AI 自动化测试任务：1.note.text 输入 hello，点击 note.save；2.calc.a=21，calc.b=2，点击 calc.run；" +
+            "3.file.list 选择 todo.txt，点击 file.open；4.连续点击 game.target 五次。" +
+            "所有按钮/输入框都有固定 name、tooltip、accessibleName。"), "tasks.text");
         t.setEditable(false);
-        win("tasks", "AI任务板", new JScrollPane(t), 420, 300);
+        t.setLineWrap(true);
+        win("tasks", "AI任务板", new JScrollPane(t), 430, 300);
     }
 
     void game() {
         JPanel p = new JPanel(null);
         JLabel score = tag(new JLabel("得分：0/5"), "game.score");
-        JButton target = tag(new JButton("🎯"), "game.target");
+        JButton target = tag(new JButton("点我"), "game.target");
         final int[] hit = {0};
+
         target.addActionListener(e -> {
             score.setText(++hit[0] >= 5 ? "胜利！" : "得分：" + hit[0] + "/5");
             target.setBounds(30 + rnd.nextInt(220), 45 + rnd.nextInt(120), 65, 45);
             say("点击 game.target，得分 " + hit[0]);
         });
+
         score.setBounds(10, 10, 120, 25);
         target.setBounds(120, 85, 65, 45);
         p.add(score); p.add(target);
@@ -132,7 +145,7 @@ public class MiniAISandbox extends JFrame {
     }
 
     void icon(String text, String id, int y, Runnable r) {
-        JButton b = button(id, "<html><center>" + text.replace("\n", "<br>") + "</center></html>", r);
+        JButton b = button(id, "<html><center>" + text + "</center></html>", r);
         b.setBounds(25, y, 95, 55);
         desk.add(b);
     }
@@ -161,9 +174,20 @@ public class MiniAISandbox extends JFrame {
         try { f.setSelected(true); } catch (Exception ignored) {}
     }
 
+    void smoke() {
+        note(); calc(); files(); game(); tasks();
+        Timer t = new Timer(300, e -> {
+            System.out.println("SMOKE_OK windows=" + desk.getAllFrames().length);
+            dispose();
+        });
+        t.setRepeats(false);
+        t.start();
+    }
+
     static <T extends JComponent> T tag(T c, String id) {
         c.setName(id);
         c.setToolTipText(id);
+        c.getAccessibleContext().setAccessibleName(id);
         return c;
     }
 
