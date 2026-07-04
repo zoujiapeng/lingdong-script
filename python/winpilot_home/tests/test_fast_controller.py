@@ -1397,6 +1397,71 @@ def test_execute_subgoal_draw_generates_strokes_inside_likely_canvas(monkeypatch
     assert "controller already executed and verified" in payload["fast_path_advice"].casefold()
 
 
+def test_execute_subgoal_draw_discards_stale_snapshot_for_different_target(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.utils.screenshot import Region
+
+    window = Region(10, 20, 500, 400)
+    image = np.zeros((400, 500, 3), dtype=np.uint8)
+    image[120:360, 80:460] = 255
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+        capture_fn = staticmethod(lambda region: image)
+
+        def execute(self, actions, **kwargs):
+            return {
+                "ok": True,
+                "verified": True,
+                "controller_state": {"phase": "verified"},
+                "metrics": {"action_count": len(actions)},
+                "results": [
+                    {"action": "select_color", "verified": True, "data": {"ok": True, "verified": True}},
+                    {"action": "draw_strokes", "verified": True, "data": {"ok": True, "verified": True}},
+                    {
+                        "action": "auto_visual_verify",
+                        "verified": True,
+                        "data": {
+                            "ok": True,
+                            "verified": True,
+                            "nonvisual_summary": {"visible_colors": {"blue": {"pixels": 100}}},
+                        },
+                    },
+                ],
+            }
+
+    class Session:
+        task = "draw a blue triangle on the canvas"
+        hwnd = 7
+        run_id = "run-draw-stale-snapshot"
+        snapshot = Snapshot(hwnd=99, title="Codex", region=Region(0, 0, 800, 600), elements=[])
+
+        def dispatch(self, name, args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, Controller()).execute({
+        "subgoal": "draw a blue triangle on the visible canvas",
+        "draw": {"shape": "triangle", "color": "blue"},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert session.snapshot is None
+    assert any(item["action"] == "discard_stale_snapshot" for item in payload["evidence_packet"]["prelude"])
+    assert payload["evidence_packet"]["perception_reducer"] == {}
+
+
 def test_execute_subgoal_draw_rejects_missing_requested_color(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import subgoal as subgoal_mod
