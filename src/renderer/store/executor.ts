@@ -677,6 +677,9 @@ export function createFlowExecutor(
             set_wallpaper: 'set_wallpaper',
           };
           const featureName = FEATURE_MAP[node.type];
+          if (!featureName) {
+            throw new Error(`Unsupported FlowScript node type: ${node.type}`);
+          }
           if (featureName) {
             log('info', `调用系统工具: ${featureName}`, nodeId);
             const res = await callFeatureOrThrow(featureName, params, nodeId, `模拟系统工具: ${featureName}`);
