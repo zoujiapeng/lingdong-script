@@ -166,6 +166,25 @@ def _drawing_visual_confirmation_goal(goal: str) -> bool:
     )
 
 
+_OPEN_PLAN_TERMS = (
+    "open", "launch", "start", "focus", "bring up",
+    "打开", "启动", "运行", "聚焦", "置前",
+)
+_OPEN_PLAN_MIXED_ACTION_TERMS = (
+    "draw", "type", "input", "write", "search", "send", "click",
+    "verify", "confirm", "screenshot", "save", "upload", "publish",
+    "绘制", "画一个", "画一", "输入", "搜索", "发送", "点击", "确认", "核验", "验证",
+    "截图", "保存", "上传", "发布",
+)
+
+
+def _looks_like_pure_open_plan_goal(goal: str) -> bool:
+    text = (goal or "").casefold()
+    if not any(term.casefold() in text for term in _OPEN_PLAN_TERMS):
+        return False
+    return not any(term.casefold() in text for term in _OPEN_PLAN_MIXED_ACTION_TERMS)
+
+
 def _drawing_plan_check_allows_visual_completion(
     check: Any,
     task: str,
@@ -1617,6 +1636,69 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             image_b64=result.image_b64,
         )
 
+    def _maybe_auto_complete_open_plan_item(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+    ) -> ToolResult:
+        if tool_name not in {"launch", "focus_window"}:
+            return result
+        plan = getattr(self.session, "plan", None)
+        steps = getattr(plan, "steps", None) or []
+        if not steps:
+            return result
+        try:
+            payload = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            return result
+        if not (payload.get("verified") or payload.get("target_hwnd")):
+            return result
+        completed: list[dict[str, Any]] = []
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict) or step.get("done"):
+                continue
+            goal = str(step.get("goal") or "")
+            if not _looks_like_pure_open_plan_goal(goal):
+                break
+            if plan.complete(index):
+                item = {"index": index, "goal": goal[:160], "source": tool_name}
+                completed.append(item)
+                BUS.publish(
+                    "agent_plan",
+                    run_id=self.run_id,
+                    action="auto_complete",
+                    index=index,
+                    source=f"{tool_name}.verified_target",
+                    plan=plan.snapshot(),
+                )
+            break
+        if not completed:
+            return result
+        payload["auto_completed_plan_items"] = completed
+        payload["plan_after_auto_complete"] = plan.render()
+        payload["fast_path_advice"] = (
+            str(payload.get("fast_path_advice") or "").strip()
+            + " Verified launch/focus already completed the matching open-window "
+              "plan item; continue with the next unfinished item."
+        ).strip()
+        self._trace_debug("open_plan_auto_completed", {
+            "run_id": self.run_id,
+            "tool": tool_name,
+            "args": args,
+            "completed": completed,
+        })
+        return ToolResult(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            is_observe=result.is_observe,
+            terminal=result.terminal,
+            summary=result.summary,
+            replay=result.replay,
+            image_b64=result.image_b64,
+        )
+
     def _score_experience_feedback(self) -> None:
         """Score memory only when it was actually tried, not merely injected.
 
@@ -1812,6 +1894,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
                 if result is None:
                     result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
+            result = self._maybe_auto_complete_open_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal

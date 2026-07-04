@@ -1071,6 +1071,57 @@ def test_execute_subgoal_draw_expands_from_task_without_plan():
     ]
 
 
+def test_verified_launch_auto_completes_pure_open_plan_item():
+    import json
+
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("open Paint, then draw a blue triangle")
+    runner.session.plan = planner.Plan([
+        "open Windows Paint app",
+        "draw a blue triangle",
+    ])
+    result = ToolResult(json.dumps({
+        "ok": True,
+        "verified": True,
+        "target_hwnd": 123,
+    }))
+
+    updated = runner._maybe_auto_complete_open_plan_item("launch", {"command": "mspaint"}, result)
+    payload = json.loads(updated.text)
+
+    assert runner.session.plan.steps[0]["done"] is True
+    assert runner.session.plan.steps[1]["done"] is False
+    assert payload["auto_completed_plan_items"][0]["index"] == 1
+    assert "next unfinished item" in payload["fast_path_advice"]
+
+
+def test_verified_launch_does_not_auto_complete_mixed_open_draw_goal():
+    import json
+
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("open Paint and draw a blue triangle")
+    runner.session.plan = planner.Plan([
+        "open Paint and verify blue triangle",
+        "draw a red rectangle",
+    ])
+    result = ToolResult(json.dumps({
+        "ok": True,
+        "verified": True,
+        "target_hwnd": 123,
+    }))
+
+    updated = runner._maybe_auto_complete_open_plan_item("launch", {"command": "mspaint"}, result)
+
+    assert updated is result
+    assert runner.session.plan.steps[0]["done"] is False
+
+
 def test_execute_subgoal_draw_does_not_expand_custom_strokes():
     from winpilot.agent import planner
     from winpilot.agent.loop import AgentRunner
