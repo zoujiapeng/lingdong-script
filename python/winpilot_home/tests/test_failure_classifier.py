@@ -259,6 +259,63 @@ def test_recovery_focus_enumerates_windows_focuses_and_observes():
     ]
 
 
+def test_recovery_layer_does_not_attach_failure_to_verified_root_result():
+    from winpilot.agent.failure_recovery import FailureRecoveryLayer
+
+    layer = FailureRecoveryLayer()
+    recovery = layer.handle_tool_result(
+        tool_name="execute_subgoal",
+        args={},
+        result_text=json.dumps({
+            "ok": True,
+            "verified": True,
+            "evidence_packet": {
+                "matched_texts": ["VISIBLE_DONE"],
+                "missing_texts": [],
+            },
+            "failure_classification": {
+                "failure_type": "CONTROL_NOT_FOUND",
+            },
+        }),
+        task="click target and verify VISIBLE_DONE",
+    )
+
+    assert recovery is None
+
+
+def test_recovery_layer_ignores_read_only_verify_miss():
+    from winpilot.agent.failure_recovery import FailureRecoveryLayer
+
+    layer = FailureRecoveryLayer()
+    recovery = layer.handle_tool_result(
+        tool_name="execute_subgoal",
+        args={"verify_texts": ["Hidden target action"]},
+        result_text=json.dumps({
+            "ok": False,
+            "verified": False,
+            "actions_executed": [{"action": "read_text"}],
+            "evidence_packet": {
+                "matched_texts": [],
+                "missing_texts": ["Hidden target action"],
+                "candidate_click_labels": ["Reveal hidden menu"],
+            },
+        }),
+        task="check whether Hidden target action is visible",
+    )
+
+    assert recovery is None
+
+
+def test_read_only_tool_missing_task_literal_is_not_constraint_lost():
+    cls = _classify(
+        "coordinate_diagnostics",
+        {"ok": True, "screen_size": {"width": 1920, "height": 1080}},
+        task="verify CALIBRATION_OK appears",
+    )
+
+    assert cls is None
+
+
 def test_recovery_escalates_window_focus_after_consecutive_failures():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer, FailureRecoveryStatus
 
