@@ -116,6 +116,8 @@
 
 `list_windows`、`observe`、`scan_windows`、`focus_window`、`find_app`、`find_program`、`tray_click`、`launch`、`execute_subgoal`、`click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait`、`read_text`、`find_image`、`capture_template`、`color_probe`、`undo_last`、`run_action_batch`、`screen_watch`、`done`、`fail`。普通 desktop 任务仍可暴露 `search_files`；严格 GUI-only 且明确禁 shell 时会隐藏 `search_files`。
 
+服务启动后会后台预热 OCR；排查第一次 OCR/`select_color` 特别慢时，先看 `/api/status.ocr_provider` 是否仍是 `uninitialized`。如果已经是 `DmlExecutionProvider` 或 `CPUExecutionProvider`，瓶颈通常在实际 OCR 区域、面板打开或色块扫描，而不是引擎冷启动。
+
 按配置动态加入：
 
 - `agent.shell_enabled=true`：`run_shell`、`run_detached`

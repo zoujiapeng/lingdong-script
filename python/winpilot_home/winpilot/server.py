@@ -16,6 +16,7 @@ import queue
 import re
 import sys
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +58,20 @@ if _started_by_direct_uvicorn() and not os.environ.get("WINPILOT_LAUNCHED_VIA_SE
     )
     sys.exit(1)
 
-app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None)
+def _warm_perception_dimensions() -> None:
+    if "ocr" in CONFIG.enabled_dimensions():
+        started = ocr.warm_async()
+        if started:
+            logger.info("OCR 后台预热已启动")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _warm_perception_dimensions()
+    yield
+
+
+app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
 # The server binds 127.0.0.1 only. Allow any origin so the Electron renderer
 # (file:// in prod, http://localhost:5200 in dev) can call the REST API

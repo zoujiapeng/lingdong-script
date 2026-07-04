@@ -93,6 +93,7 @@ stateDiagram-v2
 - `ToolSession.dispatch()` 会给普通可见动作附加廉价 `screen_delta` 和 `action_target` 元信息。它用于定位“画面是否变化、变化时 foreground 是否仍是目标窗口”，不是语义完成证明；done 仍要看截图、目标窗口感知或外部证据。
 - `launch` 的目标窗口会在发现后置前；`interaction_tools.py` 的输入动作优先使用 session target，而不是无条件使用当前 foreground；`action/verify.py` 在目标已知时会忽略无关 foreground，避免 Codex/日志/其他窗口 OCR 造成假成功。
 - `agent/perception_tools.py` 默认给 LLM compact perception reducer：screen stage、target window、top candidates、uncertainties、recent changes 和建议 controller action；完整 raw snapshot 仍写 trace，需要时用 `observe(full=true)`。UIA-off 绘图/画布任务上有 `canvas_fast_observe`：无 `query/full` 的 `observe` 跳过全窗口 OCR，直接提供 Win32/CV 和 `likely_canvas` 摘要；需要文字 grounding 时用 `observe(query=...)` 或 `observe(full=true)` 回到完整感知。
+- `perception/ocr.py` 的 RapidOCR 仍是懒加载引擎，但 `server.py` 在 FastAPI lifespan 中调用 `ocr.warm_async()` 后台预热，避免第一个真实 GUI 动作承担 OCR/DML 冷启动。`/api/status.ocr_provider` 可用于确认预热是否已经完成。
 - BUS/WebSocket 给前端显示进度；`recorder/trace.py` 写可回放事件和截图；`agent/loop.py` 的 LLM trace 写每步真实 prompt/response，失败复盘必须优先看这些证据。
 - 长期经验记忆在 `memory/experience.py`，落盘到本机 `experience_memory.json`，通过 `agent/memory_tools.py` 的 `remember/forget/reuse_skill` 暴露给 GUI agent。recipe 现在显式带 `conditions` 和 `evidence`，隐式 `reuse_skill` 只允许强任务匹配；普通匹配只进入 prompt 提示，不会自动 replay，也不会因为 run 成功而被记作成功复用。失败 replay 会被记录为该 recipe 的负反馈，即使后续实时操作兜底完成。
 - session memory 在 `agent/session.py`，只保存当前服务生命周期内最近任务，并且只对“再来/继续/刚才那个/previous/same/it”等指代型任务注入 prompt。普通新任务不带 session history。
