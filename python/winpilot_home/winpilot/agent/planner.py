@@ -296,7 +296,7 @@ def _parse_steps(raw: str) -> list[dict]:
     try:
         data = json.loads(blob)
     except json.JSONDecodeError:
-        return []
+        data = _parse_loose_step_list(blob)
     if not isinstance(data, list):
         return []
     out: list[dict] = []
@@ -309,6 +309,37 @@ def _parse_steps(raw: str) -> list[dict]:
         if goal:
             out.append({"goal": goal, "check": check})
     return _merge_adjacent_visible_verification_steps(out)[:_MAX_STEPS]
+
+
+def _parse_loose_step_list(raw: str) -> list[str]:
+    """Best-effort recovery for model-emitted list strings with bad quoting."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    if not text:
+        return []
+    if "\n" in text:
+        parts = [
+            re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", line).strip()
+            for line in text.splitlines()
+        ]
+    else:
+        body = text.strip()
+        if (body.startswith('"') and body.endswith('"')) or (body.startswith("'") and body.endswith("'")):
+            body = body[1:-1]
+        parts = re.split(r'"\s*,\s*"|\'\s*,\s*\'|[;；]\s*', body)
+        if len(parts) <= 1 and '", "' in body:
+            parts = body.split('", "')
+        if len(parts) <= 1 and "," in body and body.count(",") <= 8:
+            parts = re.split(r"\s*,\s*(?=[\"'A-Za-z0-9\u4e00-\u9fff])", body)
+    out: list[str] = []
+    for part in parts:
+        item = str(part or "").strip().strip("[] \t\r\n\"'")
+        if item:
+            out.append(item[:_MAX_GOAL_CHARS])
+    return out
 
 
 def make_plan(client, model: str, task: str, temperature: float = 0.2) -> list[dict]:
