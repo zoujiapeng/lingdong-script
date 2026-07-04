@@ -14,7 +14,7 @@
 | [flow-editor.md](flow-editor.md) | 流程图、DSL、`@feature` 体系 |
 | [replay-runtime-skill-convergence.md](replay-runtime-skill-convergence.md) | Replay/ARP/FlowScript 收敛方向 |
 | [现状评估与改进路线-2026-06.md](现状评估与改进路线-2026-06.md) | 工程债和改进路线，偏战略 |
-| [项目导览-面试版.md](项目导览-面试版.md) | 自用长文档，通俗解释和面试复盘 |
+| [项目导览-面试版.md](项目导览-面试版.md) | 以当前代码为准的面试导览、架构讲法、高频问答和过时说法清单 |
 
 ## 可信边界
 
