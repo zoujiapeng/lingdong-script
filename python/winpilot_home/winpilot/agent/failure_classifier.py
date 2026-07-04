@@ -673,6 +673,19 @@ class FailureClassifier:
         if not missing:
             return None
         failed = _has_failed_signal(data, text)
+        read_only_tools = {
+            "observe",
+            "read_text",
+            "coordinate_diagnostics",
+            "screenshot",
+            "zoom",
+            "list_windows",
+            "scan_windows",
+            "find_app",
+            "find_program",
+        }
+        if tool_name in read_only_tools and not failed:
+            return None
         claimed_ok = any(_truthy_bool(item.get("ok")) is True for item in _child_payloads(data))
         claimed_verified = any(_truthy_bool(item.get("verified")) is True for item in _child_payloads(data))
         evidence_tools = {

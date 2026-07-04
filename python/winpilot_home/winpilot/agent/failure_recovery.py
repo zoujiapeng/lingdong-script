@@ -42,6 +42,45 @@ class FailureRecoveryResult:
         }
 
 
+def _root_result_is_proven_success(data: dict[str, Any]) -> bool:
+    """A verified root tool result should not carry stale inner failure advice."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("ok") is True and data.get("verified") is True:
+        return True
+    auto_done = data.get("auto_done")
+    if isinstance(auto_done, dict) and auto_done.get("ok") is True and auto_done.get("auto_done") is True:
+        return True
+    return False
+
+
+def _root_result_is_nonmutating_negative_observation(data: dict[str, Any]) -> bool:
+    """A read-only verify miss is evidence, not a recovery failure."""
+    if not isinstance(data, dict):
+        return False
+    actions = data.get("actions_executed")
+    if not isinstance(actions, list) or not actions:
+        return False
+    mutating = {
+        "click",
+        "click_element",
+        "type_text",
+        "type_into_element",
+        "hotkey",
+        "drag",
+        "draw_strokes",
+        "run_action_batch",
+    }
+    if any(isinstance(item, dict) and item.get("action") in mutating for item in actions):
+        return False
+    packet = data.get("evidence_packet")
+    return bool(
+        isinstance(packet, dict)
+        and packet.get("missing_texts")
+        and not packet.get("matched_texts")
+    )
+
+
 class FailureRecoveryLayer:
     """Turns classifications into local recovery attempts and LLM hints."""
 
@@ -68,6 +107,15 @@ class FailureRecoveryLayer:
         visible_evidence_ledger: list[dict[str, Any]] | None = None,
         tool_history: list[tuple[str, dict[str, Any], str]] | None = None,
     ) -> FailureRecoveryResult | None:
+        data = parse_tool_json(result_text)
+        if _root_result_is_proven_success(data):
+            self._last_signature = ""
+            self._consecutive_count = 0
+            return None
+        if _root_result_is_nonmutating_negative_observation(data):
+            self._last_signature = ""
+            self._consecutive_count = 0
+            return None
         classification = self.classifier.classify_tool_result(
             tool_name,
             args or {},
