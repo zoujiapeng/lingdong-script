@@ -18,6 +18,7 @@ def test_valid_v2_nested_script():
         "vars": {"a": "1"},
         "steps": [
             {"tool": "ctrl.if",
+             "cond": {"always": True},
              "then": [{"tool": "click", "coords": [1, 2]}],
              "else": [{"tool": "ext.delay", "seconds": 1}]},
             {"tool": "ctrl.loop",
@@ -55,10 +56,21 @@ def test_reject_unknown_tool():
 
 def test_reject_unknown_tool_nested_in_branch():
     script = {"format": "wps/2", "steps": [
-        {"tool": "ctrl.if", "then": [{"tool": "nope"}]},
+        {"tool": "ctrl.if", "cond": {"always": True}, "then": [{"tool": "nope"}]},
     ]}
     err = trace_mod.validate_script(script)
     assert "nope" in err and "then" in err
+
+
+def test_reject_if_without_cond():
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.if", "then": [{"tool": "click", "coords": [1, 2]}]}]})
+    assert "ctrl.if requires cond" in err
+
+
+def test_allow_if_with_explicit_always_cond():
+    assert trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.if", "cond": {"always": True}, "then": []}]}) is None
 
 
 def test_reject_missing_required_leaf_fields():
@@ -176,3 +188,34 @@ def test_path_traversal_blocked(client):
     # ..%2f style traversal must not escape SCRIPTS_DIR
     resp = client.get("/api/script/..%2f..%2fconfig.wps.json")
     assert resp.status_code in (400, 404)
+
+
+def test_replayer_leaf_without_explicit_ok_fails_and_records_detail(monkeypatch):
+    replayer = trace_mod.Replayer()
+    replayer.step_delay = 0
+    monkeypatch.setattr(
+        replayer,
+        "_run_step",
+        lambda _idx, _step: {"error": "missing ok", "attempts": 2},
+    )
+
+    assert replayer._exec_steps([{"tool": "click", "coords": [1, 2]}]) is False
+    assert replayer._results == [{
+        "index": "1",
+        "tool": "click",
+        "ok": False,
+        "error": "missing ok",
+        "attempts": 2,
+    }]
+
+
+def test_replayer_does_not_guess_first_window_for_semantic_relocation(monkeypatch):
+    replayer = trace_mod.Replayer()
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "list_windows",
+        lambda: [{"hwnd": 123, "title": "Wrong"}],
+    )
+
+    assert replayer._observe_hwnd() is None
+    assert replayer.hwnd is None

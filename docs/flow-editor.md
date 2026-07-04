@@ -52,7 +52,7 @@
 - `FlowScript` 是前端画布 JSON；`DSL` 是旧文本编排入口；`python/engine/` 负责 legacy DSL/Flow 执行，不是 WinPilot 主 agent 的低延迟 controller。
 - `@feature` 是流程图/MCP/HTTP/CLI 的工具注册表。`FeatureSpec.flow_type` 只声明“这个 DSL 关键字应导入成哪个 FlowScript 节点”，必须和 `types/index.ts`、`nodeDefinitions.ts`、`dsl_flow_converter.py` 里的参数 shape 对齐。
 - 旧注册表里已知例子：`CLICK -> click`，`DRAG -> swipe`。不要把拖拽类动作声明成 `click` 节点，否则编辑器属性面板和 executor 会拿到错误参数。
-- `tool_call` 只表示“交给 feature 桥”。如果 payload 带 `_requires_wps_replay`，它是 WinPilot-only `.wps.json` 占位，前端 executor 会报错而不是假装成功。
+- `tool_call` 只表示“交给 feature 桥”。如果 payload 带 `_requires_wps_replay`，它是 WinPilot-only `.wps.json` 占位，前端 executor 会报错而不是假装成功；未知 WPS step 和 `while` / `until` replay 控制流也走这个保守路径。
 
 ## 修改节点时必须同步
 
@@ -71,4 +71,4 @@
 
 WinPilot 成功 trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 转成 FlowScript。Agent 不需要直接理解 FlowScript 内部结构。
 
-这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click` 等 WinPilot-only 步骤导入 FlowScript 时会保留为带 `_requires_wps_replay` 的 `tool_call` payload，占位不等于旧 `@feature` executor 已经能直接运行。
+这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。

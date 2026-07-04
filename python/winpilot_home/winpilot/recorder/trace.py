@@ -396,6 +396,11 @@ def _validate_steps(steps: Any, where: str) -> str | None:
         if tool not in KNOWN_TOOLS:
             return f"{loc} 未知步骤类型: {tool!r}"
         if tool == "ctrl.if":
+            cond = step.get("cond")
+            if not isinstance(cond, dict):
+                return f"{loc} ctrl.if requires cond object"
+            if not cond:
+                return f"{loc} ctrl.if cond must be non-empty or {{'always': true}}"
             for branch in ("then", "else"):
                 if step.get(branch) is not None:
                     err = _validate_steps(step[branch], f"{loc}.{branch}")
@@ -481,13 +486,9 @@ class Replayer:
         """Return a window anchor for semantic replay relocation."""
         if self.hwnd:
             return self.hwnd
-        try:
-            windows = win32.list_windows()
-            if windows:
-                self.hwnd = int(windows[0]["hwnd"])
-                return self.hwnd
-        except Exception as exc:
-            logger.debug("replay anchor window lookup failed: %s", exc)
+        # Never guess a replay target from the first visible window. Text-based
+        # relocation needs a focused/recorded target; otherwise a replay can
+        # silently click the wrong app. Coordinate-only steps can still run.
         return None
 
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
@@ -553,7 +554,8 @@ class Replayer:
             from ..action import shell
             return shell.run(step.get("command", ""),
                              shell=step.get("shell", "powershell"),
-                             timeout_s=float(step.get("timeout_s", 30)))
+                             timeout_s=float(step.get("timeout_s", 30)),
+                             stop_event=self.stop_event)
         if tool == "run_detached":
             from ..action import shell
             return shell.run_detached(str(step.get("script", "")),
@@ -620,10 +622,10 @@ class Replayer:
 
             if tool.startswith("ext."):
                 result = self._run_ext_step(step)
-                ok = bool(result.get("ok", True))
+                ok = bool(result.get("ok", False))
             else:
                 result = self._run_step(idx, step)
-                ok = (bool(result.get("ok", True))
+                ok = (bool(result.get("ok", False))
                       and result.get("verified", True) is not False)
             self._emit_step(idx, tool, ok, result)
             if not ok:
@@ -635,8 +637,12 @@ class Replayer:
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
-                            if k in ("error", "verify_detail", "attempts")})
-        self._results.append({"index": idx, "tool": tool, "ok": ok})
+                            if k in ("error", "verify_detail", "attempts", "timeout", "stopped")})
+        record = {"index": idx, "tool": tool, "ok": ok}
+        for key in ("error", "verify_detail", "attempts", "timeout", "stopped"):
+            if key in result:
+                record[key] = result[key]
+        self._results.append(record)
 
     def _emit_ctrl(self, idx: str, tool: str, ok: bool, detail: dict) -> None:
         BUS.publish("replay", state="ctrl", index=idx, tool=tool, ok=ok,
@@ -678,7 +684,8 @@ class Replayer:
             from ..action import shell
             result = shell.run(str(step.get("command", "")),
                                shell=str(step.get("shell", "powershell")),
-                               timeout_s=float(step.get("timeout_s", 30)))
+                               timeout_s=float(step.get("timeout_s", 30)),
+                               stop_event=self.stop_event)
             into = str(step.get("into", "")).strip()
             if into:
                 self.vars[into] = result.get("stdout", "") or ""

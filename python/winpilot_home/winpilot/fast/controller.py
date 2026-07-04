@@ -53,7 +53,6 @@ BATCH_MUTATING_ACTIONS = {
 BATCH_OBSERVE_ACTIONS = {
     "observe",
     "read_text",
-    "vlm_describe",
     "zoom",
     "auto_visual_verify",
 }

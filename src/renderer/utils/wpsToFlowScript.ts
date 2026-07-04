@@ -243,11 +243,11 @@ function leafNode(step: WpsStep): { type: NodeType; params: NodeParams } {
     case 'ext.clipboard_set':
       return { type: 'clipboard_set', params: { text: str(step.text) } as NodeParams };
     case 'ext.clipboard_get':
-      return { type: 'clipboard_get', params: {} as NodeParams };
+      return { type: 'clipboard_get', params: { into: str(step.into) || undefined } as NodeParams };
     case 'ext.screenshot':
       return { type: 'screenshot', params: screenshotParams(step) };
     default:
-      return toolCall(t || 'unknown_wps_step', step, { _wps_tool: t });
+      return wpsOnlyToolCall(t || 'unknown_wps_step', step);
   }
 }
 
@@ -273,11 +273,15 @@ function condParams(cond: Record<string, unknown> | undefined): NodeParams {
 
 function loopParams(step: WpsStep): NodeParams {
   const loopType = str(step.loop_type) || 'count';
+  const needsWpsReplay = loopType === 'while' || loopType === 'until';
   return {
     loop_type: loopType === 'infinite' ? 'infinite' : loopType === 'count' ? 'count' : 'condition',
     count: num(step.count, 1),
     condition: step.cond ? condParams(step.cond as Record<string, unknown>) : undefined,
     description: loopType === 'while' || loopType === 'until' ? `wps ${loopType}` : undefined,
+    _wps_loop_type: needsWpsReplay ? loopType : undefined,
+    _wps_tool: needsWpsReplay ? 'ctrl.loop' : undefined,
+    _requires_wps_replay: needsWpsReplay || undefined,
   } as NodeParams;
 }
 

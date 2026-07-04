@@ -281,6 +281,11 @@ export function createFlowExecutor(
         }
 
         case 'loop': {
+          if (params._requires_wps_replay) {
+            throw new Error(
+              `WinPilot control-flow step "${params._wps_tool || 'ctrl.loop'}:${params._wps_loop_type || 'loop'}" must run through the original .wps.json Replayer`
+            );
+          }
           const loopType = params.loop_type || 'count';
           const count = params.count || 10;
 

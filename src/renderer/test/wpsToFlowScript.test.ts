@@ -117,6 +117,7 @@ describe('wpsToFlowScript -> native FlowScript', () => {
     expect(calls[2].params._requires_wps_replay).toBe(true);
     expect(calls[3].feature_name).toBe('custom.future');
     expect(calls[3].params.answer).toBe(42);
+    expect(calls[3].params._requires_wps_replay).toBe(true);
   });
 
   it('maps clipboard and screenshot ext steps to native nodes', () => {
@@ -128,9 +129,24 @@ describe('wpsToFlowScript -> native FlowScript', () => {
       ],
     });
     expect(P(nodeOf(s, 'clipboard_set')).text).toBe('hello');
-    expect(nodeOf(s, 'clipboard_get')).toBeTruthy();
+    expect(P(nodeOf(s, 'clipboard_get')).into).toBe('clip');
     expect(P(nodeOf(s, 'screenshot')).save_path).toBe('shots/a.jpg');
     expect(P(nodeOf(s, 'screenshot')).format).toBe('jpg');
+  });
+
+  it('marks WPS while/until loops as requiring original replayer', () => {
+    const s = wpsToFlowScript({
+      steps: [{
+        tool: 'ctrl.loop',
+        loop_type: 'until',
+        cond: { text_appears: 'Done' },
+        body: [{ tool: 'click', coords: [1, 1] }],
+      }],
+    });
+    const params = P(nodeOf(s, 'loop'));
+    expect(params.loop_type).toBe('condition');
+    expect(params._wps_loop_type).toBe('until');
+    expect(params._requires_wps_replay).toBe(true);
   });
 
   it('produces a valid FlowScript envelope', () => {

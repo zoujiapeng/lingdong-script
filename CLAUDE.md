@@ -109,7 +109,7 @@ Frontend Agent page or scripts/gui_eval_run.py
    - `screen_delta.changed`
    - `action_target.after.foreground_matches_target`
    - `auto_visual_verify`
-8. 如果 strict GUI-only 任务里出现 `run_shell/run_detached/list_dir/read_file/write_file/search_text`，先查 `task_rules.py` 和 `tool_schemas.py` 的 allow flags。
+8. 如果 GUI-only 任务的 LLM request 里出现 `search_files/list_dir/read_file/write_file/search_text`，先查 `agent/loop.py` 传给 `tool_schemas.py` 的 `allow_files`；GUI-only 可以有受限只读 shell 核验，但不应暴露文件工具绕路。
 
 ## 文档和代码维护
 

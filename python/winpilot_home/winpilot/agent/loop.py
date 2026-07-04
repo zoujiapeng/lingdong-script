@@ -1624,7 +1624,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if (
                     tc.function.name in {
                         "run_shell", "run_detached", "write_file", "read_file", "list_dir",
-                        "apply_patch", "search_files",
+                        "apply_patch", "search_files", "search_text",
                     }
                     and not (
                         tc.function.name == "run_shell"
@@ -1926,15 +1926,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
             except Exception as exc:
                 logger.debug("复用建议注入失败: %s", exc)
+        is_gui_only_task = _is_gui_only_task(self.task)
         allow_shell_tools = not (
-            _is_gui_only_task(self.task)
+            is_gui_only_task
             and _gui_only_forbids_shell(self.task)
         )
+        # GUI-only runs may keep a tightly checked read-only shell verifier, but
+        # file/search tools invite non-GUI shortcuts and hide fake success.
+        allow_file_tools = (not is_gui_only_task) and allow_shell_tools
         tools = tool_schemas(
             planning=plan_on,
             coding_runtime=self._is_coding,
             allow_shell=allow_shell_tools,
-            allow_files=allow_shell_tools,
+            allow_files=allow_file_tools,
             profile=_schema_profile_for_task(self.task, is_coding=self._is_coding),
         )
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,

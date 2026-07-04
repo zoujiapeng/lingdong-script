@@ -4,6 +4,13 @@ from types import SimpleNamespace
 import numpy as np
 
 
+def test_batch_observe_actions_are_allowed_or_internal():
+    from winpilot.fast.controller import ALLOWED_BATCH_ACTIONS, BATCH_OBSERVE_ACTIONS
+
+    assert BATCH_OBSERVE_ACTIONS <= (ALLOWED_BATCH_ACTIONS | {"auto_visual_verify"})
+    assert "vlm_describe" not in BATCH_OBSERVE_ACTIONS
+
+
 def test_changed_regions_are_screen_space():
     from winpilot.fast.vision import changed_regions, roi_point_to_screen, screen_point_to_roi
     from winpilot.utils.screenshot import Region
