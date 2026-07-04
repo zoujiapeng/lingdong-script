@@ -103,6 +103,7 @@ stateDiagram-v2
 
 - `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
 - `agent/tool_schemas.py` 承担统一 Agent function schema，并在 Coding Runtime 激活时动态加入 repo 工具；GUI schema 会把 `execute_subgoal` 排在低级 `click/type_text` 之前，让 routine path 成为默认选项。`agent/runtime_profile.py` 决定每次 run 的 runtime 开关；`agent/tools.py` 保留运行态状态和 dispatch，并在 GUI mutation 前执行 `scope_guard`，避免焦点偏离目标窗口后继续乱点；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/fast_tools.py`、`agent/plan_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆复用、桌面杂项工具。
+- `agent/fast_tools.py` 会在进入 `SubgoalExecutor` 前拒绝空 `execute_subgoal`：只有自然语言 `subgoal` 而没有 `input/click/draw/verify_texts` 时直接返回 blocked，不启动 controller/perception。这样模型偶尔把 `execute_subgoal` 误当 launch/discovery 工具时，不会额外截图、OCR 或污染当前前台窗口感知。
 - `agent/task_rules.py` 承担任务分类、GUI-only 限制、coding runtime 触发和 done gate guard 的纯规则；严格 GUI-only 且明确禁 shell 时，`tool_schemas.py` 不暴露 `run_shell/run_detached`、`search_files` 和通用文件读写/搜索工具；`agent/done_verifier.py` 承担 done 二次核验，并要求任务里的显著字面量 token（如 `FAST_WRAP_OK_073`、`75765`）在最终屏幕/工具证据中出现；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
 - `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
 - `python/engine/executor_types.py` 承担 legacy Flow/DSL executor 的共享状态、上下文和控制流异常，`executor.py` 继续作为 legacy 执行器维护。
