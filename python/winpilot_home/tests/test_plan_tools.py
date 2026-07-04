@@ -133,3 +133,50 @@ def test_complete_subgoal_all_done_returns_terminal_done():
     assert session.plan.all_done()
     assert result.terminal == "done"
 
+
+def test_complete_subgoal_ignores_invented_drawing_file_check_without_requested_path(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(tools_mod, "verify", _false_verify())
+    session = ToolSession(
+        task="draw a blue triangle and a red rectangle, then confirm them on screen"
+    )
+    session.hwnd = 123
+    session.plan = planner.Plan([
+        {
+            "goal": "screenshot or save the canvas to confirm the shapes",
+            "check": {"file_exists": r"C:\Users\Public\Pictures\paint_confirm.png"},
+        }
+    ])
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is True
+    assert result.terminal == "done"
+
+
+def test_complete_subgoal_keeps_requested_drawing_file_check(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(tools_mod, "verify", _false_verify())
+    requested_path = r"C:\Users\Public\Pictures\paint_confirm.png"
+    session = ToolSession(
+        task=f"draw a blue triangle and save the final image as {requested_path}"
+    )
+    session.hwnd = 123
+    session.plan = planner.Plan([
+        {
+            "goal": "save the final drawing file",
+            "check": {"file_exists": requested_path},
+        }
+    ])
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is False
+    assert result.terminal is None
+

@@ -1163,6 +1163,61 @@ def test_execute_subgoal_draw_reuse_is_conservative():
     ) is None
 
 
+def test_execute_subgoal_color_verify_reuses_recent_visual_evidence():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle")
+    runner._recent_results = [(
+        "execute_subgoal",
+        json.dumps({
+            "verified": True,
+            "evidence_packet": {
+                "matched_visual_colors": ["blue", "red"],
+                "missing_visual_colors": [],
+            },
+        }),
+    )]
+
+    result = runner._maybe_reuse_recent_visual_color_verify(
+        "execute_subgoal",
+        {"subgoal": "verify the blue and red shapes", "verify_texts": ["blue", "red"]},
+    )
+
+    assert result is not None
+    payload = json.loads(result.text)
+    assert payload["subgoal_route"] == "controller_visual_evidence_reuse"
+    assert payload["evidence_packet"]["matched_visual_colors"] == ["blue", "red"]
+
+
+def test_execute_subgoal_color_verify_reuse_requires_all_colors_and_drawing_task():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a blue triangle and a red rectangle")
+    runner._recent_results = [(
+        "execute_subgoal",
+        json.dumps({
+            "verified": True,
+            "evidence_packet": {"matched_visual_colors": ["blue"]},
+        }),
+    )]
+
+    assert runner._maybe_reuse_recent_visual_color_verify(
+        "execute_subgoal",
+        {"verify_texts": ["blue", "red"]},
+    ) is None
+
+    non_drawing = AgentRunner("type blue and red into a text field")
+    non_drawing._recent_results = runner._recent_results
+    assert non_drawing._maybe_reuse_recent_visual_color_verify(
+        "execute_subgoal",
+        {"verify_texts": ["blue"]},
+    ) is None
+
+
 def test_execute_subgoal_draws_auto_complete_matching_plan_items():
     import json
 

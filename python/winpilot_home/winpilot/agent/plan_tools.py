@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import re
 import sys
+from pathlib import Path
 
 from ..action import verify
 from ..utils.log import BUS
 from . import planner
+from .task_rules import _is_drawing_task, _required_image_paths
 from .tool_result import ToolResult
 
 
@@ -30,6 +32,62 @@ _CURRENT_CONTROLLER_VISIBLE_SOURCES = {
     "execute_subgoal:evidence_packet",
     "execute_subgoal:visual_color",
 }
+_FILE_CHECK_KEYS = {"file_exists"}
+
+
+def _file_check_paths(check: dict | None) -> list[str]:
+    if not isinstance(check, dict):
+        return []
+    paths: list[str] = []
+    for key in _FILE_CHECK_KEYS:
+        value = check.get(key)
+        if isinstance(value, str) and value.strip():
+            paths.append(value.strip())
+    file_contains = check.get("file_contains")
+    if isinstance(file_contains, dict):
+        path = file_contains.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+    return paths
+
+
+def _task_mentions_path(task: str, path: str) -> bool:
+    task_text = (task or "").casefold()
+    value = (path or "").strip()
+    if not task_text or not value:
+        return False
+    if value.casefold() in task_text:
+        return True
+    name = Path(value).name.casefold()
+    return bool(name and name in task_text)
+
+
+def _spurious_drawing_file_check(
+    task: str,
+    check: dict | None,
+) -> tuple[bool, str]:
+    """Ignore planner-invented output files for visual-only drawing tasks.
+
+    A drawing task can ask for visual confirmation without asking to save a
+    file. The planner sometimes invents a ``file_exists`` check for that
+    confirmation, which turns a visibly successful canvas task into a fake
+    failure. Keep real file checks whenever the user named an output path.
+    """
+    if not _is_drawing_task(task):
+        return False, ""
+    paths = _file_check_paths(check)
+    if not paths:
+        return False, ""
+    if _required_image_paths(task):
+        return False, ""
+    explicit = [path for path in paths if _task_mentions_path(task, path)]
+    if explicit:
+        return False, ""
+    return (
+        True,
+        "ignored planner-invented file check for drawing task without "
+        f"requested output path: {', '.join(paths)}",
+    )
 
 _COLOR_ALIASES = {
     "blue": {"blue", "蓝", "蓝色"},
@@ -153,8 +211,17 @@ class PlanToolMixin:
         if not (1 <= index <= len(self.plan.steps)):
             return ToolResult(f"子目标序号 {index} 无效。\n{self.plan.render()}")
         check_expect = self.plan.check_for(index)
+        goal = str(self.plan.steps[index - 1].get("goal") or "")
+        ignored_file_check, ignored_detail = _spurious_drawing_file_check(
+            getattr(self, "task", ""),
+            check_expect,
+        )
+        if ignored_file_check:
+            BUS.publish("agent_plan", action="subgoal_check", index=index,
+                        verified=True, detail=ignored_detail,
+                        source="ignored_spurious_file_check")
+            check_expect = None
         if check_expect:
-            goal = str(self.plan.steps[index - 1].get("goal") or "")
             current_ok, current_detail = self._current_controller_visible_subgoal_ok(check_expect)
             if current_ok:
                 BUS.publish("agent_plan", action="subgoal_check", index=index,
