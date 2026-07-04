@@ -86,6 +86,7 @@
 - `execute_subgoal` 在没有 snapshot 且 click 带 `expected_region` 时，会先对该粗区域做 targeted initial OCR/CV；只有裁剪区真的识别到目标 label 才使用该 snapshot，否则回退全窗口 observe。snapshot 的 region 仍保持完整目标窗口，避免 watcher 被裁剪区带偏。
 - `execute_subgoal` 会在聚焦目标 hwnd 后丢弃 hwnd 不一致的旧 snapshot，避免前一轮 Codex/日志窗口感知被写进当前目标窗口的 `perception_reducer`。纯绘图 routine 丢弃 stale snapshot 后可继续走 `draw_direct_canvas_capture`，不必为了 reducer 再补一次 observe。
 - `observe(changed_only=true, query="...")` 先查 recent/action ROI；如果 ROI 里没有 query 命中，会明确标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部变化不含目标时误导模型。
+- 服务启动时通过 FastAPI lifespan 触发 `ocr.warm_async()` 后台预热 RapidOCR；如果 `/api/status.ocr_provider` 已从 `uninitialized` 变成 DML/CPU provider，第一次真实 GUI OCR/选色不应再承担冷启动。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据；`draw_strokes/drag` 仍用 `sync=false` 并可带 `auto_visual_verify`、`visual_change_detected`，验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
 - 严格 GUI-only 且用户明确禁 shell、写 `GUI only` 或写 `只用GUI` 时，`tool_schemas.py` 不会向模型暴露 `run_shell/run_detached`、`search_files` 和通用文件读写/搜索工具；执行层的 GUI-only guard 仍会兜底拦截 shell/文件/脚本工具。排查“它为什么还想走命令行或读文件”时先看该 run 的 `NNN_llm_request.json` tools 列表。

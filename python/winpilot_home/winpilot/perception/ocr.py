@@ -22,6 +22,8 @@ from .model import UIElement
 
 _engine = None
 _engine_lock = threading.Lock()
+_warm_thread: threading.Thread | None = None
+_warm_thread_lock = threading.Lock()
 _active_provider = "uninitialized"
 
 
@@ -95,6 +97,26 @@ def get_engine():
 
 def active_provider() -> str:
     return _active_provider
+
+
+def warm_async() -> bool:
+    """Warm OCR in the background so the first GUI action avoids cold start."""
+    global _warm_thread
+    with _warm_thread_lock:
+        if _engine is not None:
+            return False
+        if _warm_thread is not None and _warm_thread.is_alive():
+            return False
+
+        def worker() -> None:
+            try:
+                get_engine()
+            except Exception as exc:
+                logger.warning("OCR 后台预热失败: %s", exc)
+
+        _warm_thread = threading.Thread(target=worker, daemon=True, name="ocr-warmup")
+        _warm_thread.start()
+        return True
 
 
 def recognize(image: np.ndarray, origin: tuple[int, int] = (0, 0),
