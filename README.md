@@ -100,3 +100,7 @@ python -m pytest tests/test_vision.py tests/test_interfaces.py -q
 - `release/`、`dist/`、`python-runtime/`、缓存和 pycache 是可再生成/本机产物，不当源码阅读。
 
 MIT
+
+### Memory Graph Note
+
+WinPilot long-term memory now uses `python/winpilot_home/memory.db` as a SQLite Memory Graph. `experience_memory.json` is still kept for migration/compatibility, and old recipe-like APIs remain available. Dynamic long-term memory is injected as a bounded Memory Pack user message, not in the stable system prompt. Replay success is not done evidence.

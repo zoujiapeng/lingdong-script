@@ -219,3 +219,11 @@ python -m http.server 8877 --bind 127.0.0.1
 已验证 run：`20260703-025138-dcf2c6`。截图 `python/winpilot_home/traces/20260703-025138-dcf2c6/batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，整条路径走 `/api/chat`，UIA 关闭，只用 Win32/OCR/CV/VLM 维度。这个 run 的 `observe(changed_only=true)` 在 ROI 内直接识别到 `LOCAL COUNTER`，没有再补一次全量 `query=LOCAL_COUNTER`。
 
 `/api/trace/<run_id>/summary` 会返回 `low_latency` 和 `fast_gui` 字段，用来定位瓶颈：截图耗时、感知耗时、LLM 决策耗时、动作执行耗时、动作后验证耗时、重规划频率、VLM 调用频率、skill 复用率、watcher 覆盖情况、batch subgoal、controller phase、anchor click/cache/failure。以后做速度优化先看这里，再决定该减少 VLM、减少 LLM round-trip，还是改 controller 内环。
+
+## Memory Graph Update
+
+Long-term experience memory is now backed by `python/winpilot_home/memory.db` through the Memory Graph modules under `winpilot/memory/`. The old `experience_memory.json` path is retained for idempotent migration and compatibility. `/api/memory` still returns recipe-like dicts, but graph-native search/lineage/related/retire/verify APIs are available for inspection and maintenance.
+
+Agent prompt flow changed: the system prompt stays stable, and `runtime.prepare_run_memory()` appends a bounded Memory Pack as a user message after the task. The pack includes only a small number of skill/procedure, warning, and factual/manual notes; raw artifacts/chunks require `memory_open`. Coding tasks receive only factual/manual notes, never GUI replay skills. Session memory remains separate and is injected only for referential follow-ups.
+
+Feedback is evidence based: packed/retrieved memories do not gain success; only actually used replay skills whose replay succeeded and whose run finished with verified done get positive feedback. Failed replay remains negative even if live fallback later succeeds. See `docs/memory-graph.md`.

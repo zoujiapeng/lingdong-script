@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
-from ..memory import experience
+from ..memory import compiler, experience
 from ..perception import fusion, intent, vlm
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
@@ -943,17 +943,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.status = "running"
         max_steps = int(self.max_steps_override or CONFIG.get("agent", "max_steps", default=40))
         plan_on = planning_enabled()
-        # Coding tasks are excluded from action-replay reuse, but relevant
-        # factual project notes (manual 'remember' entries) still help — inject
-        # them read-only (empty hint_ids → never scored/evicted by this run).
+        # Coding tasks are excluded from GUI action replay, but relevant
+        # factual/manual memories still help. Dynamic long-term memory is a
+        # user Memory Pack, keeping the system prompt stable.
         if self._is_coding:
-            hints, self._hint_ids = experience.note_hints(self.task), []
+            hints, self._hint_ids = experience.hints_with_ids(
+                self.task, notes_only=True, run_id=self.run_id
+            )[0], []
         else:
-            hints, self._hint_ids = experience.hints_with_ids(self.task)
+            hints, self._hint_ids = experience.hints_with_ids(self.task, run_id=self.run_id)
         matched_books = playbooks.for_task(self.task)
         self._injected_playbooks = {b.name for b in matched_books}
         system = prompts.system_prompt(
-            experience_hints=hints, vlm_enabled=vlm.is_configured(),
+            experience_hints="", vlm_enabled=vlm.is_configured(),
             planning_enabled=plan_on,
             playbook_text=playbooks.render_section(matched_books),
             style=str(CONFIG.get("agent", "prompt_style", default="full")),
@@ -962,6 +964,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},
         ]
+        if hints:
+            self.messages.append({"role": "user", "content": hints})
         if _is_communication_task(self.task):
             payloads = _quoted_payloads(self.task)
             wants_decor = any(k in (self.task or "").lower() for k in (
@@ -1054,10 +1058,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
                 self.messages.append({"role": "user", "content": ctx})
-        # Proactive reuse: when this task strongly matches a past run that left a
-        # verified replay script, direct the agent to reuse it first (it's the
-        # whole point of skills; replay failure auto-falls-back to live actions).
-        # Skipped for coding tasks — they are never in the reusable scope.
         if not self._is_coding:
             try:
                 script, recipe = experience.reusable_script_for(self.task)
@@ -1065,13 +1065,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     self.messages.append({
                         "role": "user",
                         "content": (
-                            f"⚡ 本任务与上次成功完成的「{recipe['task']}」高度一致，已有可复用流程脚本。"
-                            f"**第一步请直接调用 reuse_skill 复用**（0-token 重放上次步骤）；"
-                            "若重放中途某步失败，它会告诉你卡在哪，你再从那步起实时操作。"),
+                            f"[Proactive memory reuse] This task strongly matches memory {recipe['id']} "
+                            f'("{recipe["task"]}"). If the current observed screen satisfies its '
+                            f'conditions, call reuse_skill(memory_id="{recipe["id"]}") first. '
+                            "Replay completion is not done evidence; verify final state before done."
+                        ),
                     })
                     BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
             except Exception as exc:
-                logger.debug("复用建议注入失败: %s", exc)
+                logger.debug("memory reuse suggestion injection failed: %s", exc)
         tools = tool_schemas(planning=plan_on)
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints))
@@ -1145,32 +1147,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.result_text = str(exc)
             BUS.publish("agent_error", run_id=self.run_id, error=str(exc))
 
-        # Record a reusable recipe (+ export a replayable .wps.json) ONLY for
-        # non-coding successes. Coding tasks are excluded from the reusable
-        # scope entirely — solved fresh next time, guided by the playbook.
-        if self.status == "done" and not self._is_coding:
-            app_hint = self.session.snapshot.title if self.session.snapshot else ""
-            # Trusted (→ reusable skill + linked script) when EITHER the done-gate
-            # judge independently confirmed success, OR an action passed external
-            # verify; and never when done was force-accepted after max rejects.
-            verified_run = (
-                (self._done_verified
-                 or (self._had_verified_action and self._last_verify_ok is not False))
-                and not self._done_unverified)
-            # Reuse-like-scripts: a trusted success becomes a replayable .wps.json
-            # linked to the recipe, so a future identical task can reuse_skill it.
-            script_name = ""
-            if verified_run:
-                try:
-                    from ..recorder import trace as _trace
-                    script_path = _trace.export_script(self.run_id)
-                    script_name = script_path.name
-                except (FileNotFoundError, ValueError) as exc:
-                    logger.debug("成功流程无可重放步骤，跳过导出: %s", exc)
-                except OSError as exc:
-                    logger.warning("成功流程导出脚本失败(IO): %s", exc)
-            experience.record(self.task, app_hint, self._steps_log,
-                              verified=verified_run, script=script_name)
+        try:
+            compiler.ingest_run(self)
+        except Exception as exc:
+            logger.debug("memory graph ingest failed: %s", exc)
         self._score_experience_feedback()
 
         try:
