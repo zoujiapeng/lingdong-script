@@ -24,6 +24,7 @@
 | `python/winpilot_home/winpilot/config.py` | 真实默认配置和本机 `config.json` 读写 |
 | `python/winpilot_home/winpilot/agent/router.py` | 只构建统一 `AgentRunner` |
 | `python/winpilot_home/winpilot/agent/runtime_profile.py` | 每次 run 的 Runtime/Capability 开关 |
+| `python/winpilot_home/winpilot/agent/gui_plan_helpers.py` | GUI schema profile、绘图计划解析、打开窗口计划自动完成等纯 helper |
 | `python/winpilot_home/winpilot/agent/loop.py` | LLM 主循环、上下文折叠、工具调用、done gate 编排 |
 | `python/winpilot_home/winpilot/agent/tool_schemas.py` | OpenAI function schema 和 schema profile |
 | `python/winpilot_home/winpilot/agent/tools.py` | `ToolSession` 状态、dispatch、目标窗口解析 |

@@ -81,6 +81,7 @@ flowchart TD
 | `agent/loop.py` | LLM 主循环、上下文折叠、工具调用、usage、done gate 编排 |
 | `agent/runtime_profile.py` | 判断本次 run 是否启用 Coding Runtime、workspace、max steps |
 | `agent/task_rules.py` | GUI-only、coding task、可见 literal、done gate 辅助规则 |
+| `agent/gui_plan_helpers.py` | GUI schema profile、绘图计划解析、纯打开窗口计划判断等无状态 helper |
 | `agent/tool_schemas.py` | function-calling schema、allow flags、`standard/lean_gui/drawing_gui` profile |
 | `agent/tools.py` | `ToolSession` 状态、dispatch、目标 hwnd、world、undo stack |
 | `agent/*_tools.py` | 具体工具 mixin |
