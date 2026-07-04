@@ -1,6 +1,7 @@
 """Visual anchor cache and locator for fast repeated GUI actions."""
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Iterable
@@ -75,9 +76,58 @@ def _terms(anchor: VisualAnchor) -> list[str]:
     return [term.casefold() for term in out if term]
 
 
+_URL_OR_ADDRESS_RE = re.compile(
+    r"^(?:https?://|file://|localhost\b|127\.0\.0\.1\b|\[::1\])|"
+    r"(?:\.html?|:\d{2,5}/|\?.*=)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_browser_address_text(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return False
+    if len(value) > 120:
+        return True
+    return bool(_URL_OR_ADDRESS_RE.search(value))
+
+
+def _role_family(role: str) -> str:
+    value = (role or "").strip().casefold()
+    if not value:
+        return ""
+    if any(term in value for term in ("button", "btn", "pushbutton", "splitbutton")):
+        return "button"
+    if any(term in value for term in ("edit", "textbox", "input", "combobox", "searchbox")):
+        return "input"
+    if any(term in value for term in ("menuitem", "menu item", "link", "hyperlink", "tab")):
+        return "command"
+    if "text" in value or "document" in value or "pane" in value:
+        return "text"
+    return value
+
+
+def _role_penalty(element: UIElement, anchor: VisualAnchor) -> float:
+    requested = _role_family(anchor.role)
+    if not requested:
+        return 0.0
+    current = _role_family(element.role)
+    if requested == current:
+        return 0.12
+    # OCR-only custom controls often surface as text even when they are really
+    # buttons. Keep them viable, but do not let native browser chrome or normal
+    # text fields win just because a fallback term matched.
+    if requested == "button" and _looks_like_browser_address_text(element.text):
+        return -1.2
+    if requested == "button" and current == "text" and (element.source or "").casefold() == "ocr":
+        return -0.05
+    if requested in {"button", "input"} and current:
+        return -0.42
+    return 0.0
+
+
 def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
     text = (element.text or "").casefold()
-    role = (element.role or "").casefold()
     terms = _terms(anchor)
     score = 0.0
     if terms:
@@ -88,8 +138,8 @@ def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
                 score = max(score, 0.82)
             elif text and text in term:
                 score = max(score, 0.55)
-    if anchor.role and anchor.role.casefold() in role:
-        score += 0.12
+    if anchor.role:
+        score += _role_penalty(element, anchor)
     if anchor.expected_region and _region_match(element, window, anchor.expected_region):
         score += 0.08
     elif anchor.expected_region:

@@ -62,6 +62,55 @@ def test_element_cache_locates_visual_anchor_in_region():
     assert cache.stats()["hits"] == 1
 
 
+def test_element_cache_rejects_browser_url_when_button_role_requested():
+    from winpilot.fast.element_cache import ElementCache
+    from winpilot.fast.types import VisualAnchor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Target - Browser",
+        region=Region(0, 0, 1200, 800),
+        elements=[
+            UIElement(
+                elem_id=4,
+                source="uia",
+                role="text",
+                text="http://127.0.0.1:8877/gui_agent_target.html?v=coord1",
+                cx=430,
+                cy=56,
+                left=160,
+                top=40,
+                width=700,
+                height=28,
+            ),
+            UIElement(
+                elem_id=9,
+                source="ocr",
+                role="text",
+                text="校准点",
+                cx=620,
+                cy=620,
+                left=580,
+                top=600,
+                width=80,
+                height=36,
+            ),
+        ],
+    )
+    cache = ElementCache()
+
+    located = cache.locate_with_trace(
+        snapshot,
+        VisualAnchor(label="校准点", fallback_text=("Calibration",), role="button"),
+    )
+
+    assert located.element is not None
+    assert located.element.elem_id == 9
+
+
 def test_element_cache_revalidates_cached_anchor_without_reusing_old_element_id():
     from winpilot.fast.element_cache import ElementCache
     from winpilot.fast.types import VisualAnchor
@@ -229,18 +278,199 @@ def test_fast_controller_type_into_element_clicks_clears_and_types():
     assert calls == [
         ("click", {"element_id": 4, "button": "left", "double": False}),
         ("hotkey", {"keys": ["ctrl", "a"]}),
+        ("hotkey", {"keys": ["backspace"]}),
         ("type_text", {"text": "hello", "expect": expected_expect}),
     ]
     data = out["results"][0]["data"]
     assert data["via"] == "type_into_element"
-    assert data["controller_internal_action_count"] == 3
+    assert data["controller_internal_action_count"] == 4
     assert data["resolved_element"]["elem_id"] == 4
     assert data["subresults"][0]["action"] == "click_element"
-    assert data["subresults"][2]["action"] == "type_text"
-    assert out["metrics"]["internal_action_count"] == 3
-    assert out["metrics"]["compound_round_trips_saved"] == 2
-    assert out["metrics"]["controller_round_trips_saved"] == 2
+    assert data["subresults"][3]["action"] == "type_text"
+    assert out["metrics"]["internal_action_count"] == 4
+    assert out["metrics"]["compound_round_trips_saved"] == 3
+    assert out["metrics"]["controller_round_trips_saved"] == 3
     assert out["controller_state"]["phase"] == "verified"
+
+
+def test_fast_controller_type_into_element_rejects_wildcard_prefix_after_clear():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Save As",
+            region=Region(0, 0, 1000, 600),
+            elements=[
+                UIElement(elem_id=3, source="ocr", role="text", text="文件名(N):", cx=120, cy=520, left=70, top=510, width=100, height=22),
+                UIElement(elem_id=4, role="edit", text="*.txt", cx=300, cy=520),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "read_text":
+                return ToolResult("文件名(N): *.txtWinPilotE2E_note.txt\n保存(S)")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {
+            "type_into_element": {
+                "label": "文件名",
+                "role": "edit",
+                "text": "WinPilotE2E_note.txt",
+                "clear": True,
+                "expect": {"text_appears": "WinPilotE2E_note.txt"},
+            }
+        }
+    ])
+
+    assert out["ok"] is False
+    data = out["results"][0]["data"]
+    assert data["stage"] == "replace_guard"
+    assert "wildcard" in data["error"] or "glob" in data["error"]
+    assert [name for name, _args in calls] == [
+        "click",
+        "hotkey",
+        "hotkey",
+        "type_text",
+        "read_text",
+    ]
+
+
+def test_type_into_element_prefers_real_input_near_concrete_label():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Save As",
+            region=Region(0, 0, 1000, 600),
+            elements=[
+                UIElement(elem_id=3, source="ocr", role="text", text="文件名(N):", cx=90, cy=520, left=40, top=508, width=100, height=24),
+                UIElement(elem_id=4, source="win32", role="edit", text="*.txt", cx=540, cy=520, left=150, top=508, width=780, height=24),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "read_text":
+                return ToolResult("文件名(N): WinPilotE2E_note.txt")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {
+            "type_into_element": {
+                "label": "文件名",
+                "role": "edit",
+                "text": "C:\\Users\\zou\\Desktop\\WinPilotE2E_note.txt",
+                "clear": True,
+            }
+        }
+    ])
+
+    assert out["ok"]
+    assert calls[0] == ("click", {"element_id": 4, "button": "left", "double": False})
+    data = out["results"][0]["data"]
+    assert data["resolved_element"]["elem_id"] == 4
+    assert "near concrete label" in data["input_locator"]["reason"]
+
+
+def test_type_into_element_rejects_missing_high_risk_text_after_typing():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Save As",
+            region=Region(0, 0, 1000, 600),
+            elements=[
+                UIElement(elem_id=3, source="ocr", role="text", text="文件名(N):", cx=90, cy=520, left=40, top=508, width=100, height=24),
+                UIElement(elem_id=4, source="win32", role="edit", text="*.txt", cx=540, cy=520, left=150, top=508, width=780, height=24),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            if name == "read_text":
+                return ToolResult("文件名(N): *.txt\n保存(S)")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {
+            "type_into_element": {
+                "label": "文件名",
+                "role": "edit",
+                "text": "C:\\Users\\zou\\Desktop\\WinPilotE2E_note.txt",
+                "clear": True,
+            }
+        }
+    ])
+
+    assert out["ok"] is False
+    data = out["results"][0]["data"]
+    assert data["stage"] == "replace_guard"
+    assert data["error"] == "typed text was not visible after input"
+
+
+def test_type_into_element_does_not_use_generic_edit_for_missing_filename_label():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Untitled - Notepad",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=4, role="edit", text="", cx=500, cy=300)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {
+            "type_into_element": {
+                "label": "文件名(N):",
+                "role": "edit",
+                "text": "C:\\Users\\zou\\Desktop\\WinPilotE2E_note.txt",
+                "clear": True,
+            }
+        }
+    ])
+
+    assert out["ok"] is False
+    data = out["results"][0]["data"]
+    assert data["stage"] == "focus"
+    assert data["input_locator"]["reason"] == "concrete_label_not_found"
+    assert calls == []
 
 
 def test_fast_controller_upgrades_semantic_click_to_anchor_click():
@@ -305,12 +535,13 @@ def test_fast_controller_upgrades_semantic_type_text_to_type_into_element():
     assert calls == [
         ("click", {"element_id": 11, "button": "left", "double": False}),
         ("hotkey", {"keys": ["ctrl", "a"]}),
+        ("hotkey", {"keys": ["backspace"]}),
         ("type_text", {"text": "hello"}),
     ]
     assert out["results"][0]["action"] == "type_into_element"
     assert out["results"][0]["upgraded_from"] == "type_text"
     assert out["results"][0]["data"]["via"] == "type_into_element"
-    assert out["metrics"]["compound_round_trips_saved"] == 2
+    assert out["metrics"]["compound_round_trips_saved"] == 3
 
 
 def test_fast_controller_accepts_single_key_shorthand():
@@ -1073,6 +1304,88 @@ def test_subgoal_executor_runs_input_click_verify_routine():
     assert payload["subgoal_route"] == "controller_first"
     assert payload["evidence_packet"]["matched_texts"] == ["FAST_WRAP_OK_099", "LOCAL_COUNTER"]
     assert [name for name, _args in calls] == ["focus_window", "click", "type_text", "click", "read_text"]
+
+
+def test_subgoal_file_dialog_submission_uses_enter_after_filename_input():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Save file to desktop"
+        hwnd = 1
+        run_id = "run-file-dialog-enter"
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Save As",
+            region=Region(0, 0, 900, 500),
+            elements=[
+                UIElement(elem_id=1, source="ocr", role="text", text="文件名(N):", cx=90, cy=420, left=40, top=410, width=90, height=22),
+                UIElement(elem_id=2, source="uia", role="edit", text="*.txt", cx=330, cy=420, left=150, top=405, width=360, height=32),
+                UIElement(elem_id=3, source="uia", role="button", text="保存", cx=760, cy=460, left=720, top=445, width=80, height=32),
+            ],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "read_text":
+                return ToolResult("WinPilotE2E_note.txt")
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            if name == "hotkey":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "Save As to desktop",
+        "target_window": {"title": "Save As"},
+        "input": {"label": "文件名", "text": "C:\\Users\\zou\\Desktop\\WinPilotE2E_note.txt", "clear": True},
+        "click": {"label": "保存"},
+        "verify_texts": ["WinPilotE2E_note"],
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert [action["action"] for action in payload["actions_executed"]] == [
+        "type_into_element",
+        "hotkey",
+        "wait_stable",
+        "read_text",
+    ]
+    assert ("hotkey", {"keys": ["enter"], "expect": {"window_gone": "Save As", "timeout_s": 5.0}}) in calls
+
+
+def test_subgoal_target_hwnd_prefers_matching_foreground_over_stale_session(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast import subgoal as subgoal_mod
+
+    class Session:
+        hwnd = 100
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true}')
+
+    monkeypatch.setattr(subgoal_mod.win32gui, "GetForegroundWindow", lambda: 200)
+    monkeypatch.setattr(
+        subgoal_mod.win32,
+        "_window_text",
+        lambda hwnd: "另存为" if int(hwnd) == 200 else "*无标题 - 记事本",
+    )
+
+    session = Session()
+    executor = subgoal_mod.SubgoalExecutor(session, FastGuiController(session))
+
+    assert executor._target_hwnd(
+        subgoal_mod.parse_subgoal_request({"target_window": {"title": "另存为"}})
+    ) == 200
+    assert session.hwnd == 200
 
 
 def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():

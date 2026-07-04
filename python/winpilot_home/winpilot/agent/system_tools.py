@@ -1,9 +1,11 @@
 """System, launch, tray, shell, and undo tool handlers for ToolSession."""
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import win32gui
 
@@ -21,6 +23,103 @@ def _tools_attr(name: str, default):
 
 
 class SystemToolMixin:
+    @staticmethod
+    def _url_launch_terms(command: str, launch_result: dict) -> list[str]:
+        target = str(launch_result.get("target") or command or "").strip()
+        if "://" not in target:
+            return []
+        parsed = urlparse(target)
+        parts: list[str] = []
+        for chunk in (parsed.netloc, parsed.path):
+            parts.extend(re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", chunk))
+        terms: list[str] = []
+        for part in parts:
+            value = part.strip().casefold()
+            if len(value) >= 3 and value not in {"http", "https", "html", "htm", "www", "com", "localhost"}:
+                terms.append(value)
+        return list(dict.fromkeys(terms))
+
+    @staticmethod
+    def _browser_window_score(window: dict, terms: list[str], prior_hwnd: int | None) -> float:
+        hwnd = int(window.get("hwnd") or 0)
+        title = str(window.get("title") or "")
+        class_name = str(window.get("class_name") or "")
+        title_key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", title.casefold())
+        score = 0.0
+        if hwnd and prior_hwnd and hwnd == int(prior_hwnd):
+            score -= 6.0
+        if class_name in {"Chrome_WidgetWin_1", "MozillaWindowClass", "ApplicationFrameWindow"}:
+            score += 1.5
+        if any(browser in title.casefold() for browser in ("chrome", "edge", "firefox", "browser")):
+            score += 0.8
+        if title.strip().casefold() == "codex":
+            score -= 5.0
+        matched_terms = 0
+        for term in terms:
+            if term and term in title_key:
+                matched_terms += 1
+        score += matched_terms * 1.2
+        if matched_terms >= 2:
+            score += 2.0
+        return score
+
+    def _url_launch_visible_window(
+        self,
+        command: str,
+        launch_result: dict,
+        win32_mod,
+        prior_hwnd: int | None,
+    ) -> dict | None:
+        terms = self._url_launch_terms(command, launch_result)
+        if not terms:
+            return None
+        list_windows = getattr(win32_mod, "list_windows", None)
+        if not callable(list_windows):
+            return None
+        try:
+            windows = list_windows()
+        except Exception:
+            return None
+        scored: list[tuple[float, dict]] = []
+        for window in windows or []:
+            hwnd = int(window.get("hwnd") or 0)
+            if not hwnd or not self._window_alive(hwnd):
+                continue
+            score = self._browser_window_score(window, terms, prior_hwnd)
+            if score > 0.5:
+                scored.append((score, window))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if not scored:
+            return None
+        score, window = scored[0]
+        return {
+            "hwnd": int(window.get("hwnd") or 0),
+            "title": str(window.get("title") or ""),
+            "pid": window.get("pid"),
+            "query": "url",
+            "score": round(float(score), 3),
+            "terms": terms,
+        }
+
+    def _wait_url_launch_visible_window(
+        self,
+        command: str,
+        launch_result: dict,
+        win32_mod,
+        prior_hwnd: int | None,
+        timeout_s: float = 7.0,
+    ) -> dict | None:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            found = self._url_launch_visible_window(command, launch_result, win32_mod, prior_hwnd)
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return None
+            if getattr(self, "stop_event", None) is not None and self.stop_event.is_set():
+                return None
+            time.sleep(0.35)
+
     @staticmethod
     def _launch_process_query(command: str, launch_result: dict) -> str:
         """Best-effort process basename for a shell launch command.
@@ -231,12 +330,18 @@ class SystemToolMixin:
         launch_window = None
         if result.get("ok") and result.get("verified") is not True:
             launch_window = self._wait_launch_visible_window(command, result, win32_mod)
+            if launch_window is None:
+                launch_window = self._wait_url_launch_visible_window(command, result, win32_mod, prior_hwnd)
             if launch_window:
                 hwnd = int(launch_window["hwnd"])
                 focus_result = executor_mod.focus_window(hwnd)
                 if focus_result.get("ok"):
                     result["verified"] = True
-                    result["verify_method"] = "win32-process"
+                    result["verify_method"] = (
+                        "win32-url-window"
+                        if launch_window.get("query") == "url"
+                        else "win32-process"
+                    )
                     result["verify_detail"] = (
                         "visible launched app window detected: "
                         f"{launch_window.get('title') or launch_window.get('query')} "

@@ -126,6 +126,43 @@ def test_visible_evidence_ledger_ignores_negative_query_hits():
     assert runner._visible_evidence_ledger[-1]["target"] == "APPLIED_TEXT"
 
 
+def test_subgoal_evidence_ignores_observe_query_and_browser_url():
+    from winpilot.fast.subgoal import _pick_text
+
+    fake = {
+        "results": [
+            {
+                "action": "observe",
+                "full_text": (
+                    'Changed-only observe query fallback: no changed text matched query "CALIBRATION_OK"; '
+                    "returned a full observe snapshot instead.\n"
+                    '[4] text "http://127.0.0.1:8877/gui_agent_target.html?calibration=1" '
+                    "center=(412,80) bbox=(120,64,680,28) src=uia\n"
+                    "Perception reducer:\n"
+                    '- text="http://127.0.0.1:8877/gui_agent_target.html?calibration=1" '
+                    'why="query CALIBRATION_OK came from the request"\n'
+                    "No elements matched query CALIBRATION_OK among 80 elements."
+                ),
+            }
+        ]
+    }
+
+    visible = _pick_text(fake)
+
+    assert "CALIBRATION_OK" not in visible
+    assert "calibration=1" not in visible
+
+    true_visible = _pick_text({
+        "results": [
+            {
+                "action": "read_text",
+                "preview": "CALIBRATION_OK screen=618,642 client=216,318 button_offset=42,18",
+            }
+        ]
+    })
+    assert "CALIBRATION_OK screen=" in true_visible
+
+
 def test_visible_state_done_accepts_historical_evidence_for_appeared_task(monkeypatch):
     import queue
 
@@ -716,6 +753,31 @@ def test_hotkey_printable_sequence_is_typed_as_text(monkeypatch):
     assert calls[0][0] == "type_text"
     assert calls[0][1] == "6+7="
     assert "coerced_from_hotkey" in result.text
+
+
+def test_hotkey_json_string_keys_are_pressed_not_typed(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+
+    fake_executor = SimpleNamespace(
+        type_text=lambda text, hwnd=None: calls.append(("type_text", text, hwnd)) or {"ok": True, "typed": len(text)},
+        press_keys=lambda keys: calls.append(("press_keys", keys)) or {"ok": True, "keys": keys},
+        focus_window=lambda hwnd: {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+
+    session = ToolSession(task="save the file")
+    result = session._t_hotkey({"keys": '["ctrl", "s"]}'})
+
+    assert calls == [("press_keys", ["ctrl", "s"])]
+    assert '"keys": ["ctrl", "s"]' in result.text
+    assert "coerced_from_hotkey" not in result.text
 
 
 def test_assistant_history_truncates_verbose_content():
@@ -1845,6 +1907,54 @@ def test_desktop_icon_drag_done_accepts_batch_drag(monkeypatch):
 
     assert runner._verify_done(_Client()) is True
     assert runner._done_verified is True
+
+
+def test_desktop_drag_verified_batch_auto_completes_plan_item():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.planner import Plan
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner(
+        "把桌面上的 WinPilotDragTest_123 文件夹图标通过鼠标拖动到桌面右上角附近。"
+    )
+    runner.session.plan = Plan([
+        {"goal": "显示桌面"},
+        {"goal": "将 WinPilotDragTest_123 文件夹图标拖动到桌面右上角附近"},
+    ])
+    runner.session.plan.complete(1)
+    payload = {
+        "ok": True,
+        "verified": True,
+        "controller_state": {
+            "phase": "verified",
+            "verified": True,
+            "last_action": "drag",
+        },
+        "results": [
+            {
+                "action": "drag",
+                "data": {
+                    "ok": True,
+                    "verified": True,
+                    "visual_change_detected": True,
+                },
+            }
+        ],
+    }
+
+    result = runner._maybe_auto_complete_desktop_drag_plan_item(
+        "run_action_batch",
+        {"actions": [{"action": "drag", "x1": 100, "y1": 500, "x2": 1850, "y2": 80}]},
+        ToolResult(json.dumps(payload)),
+    )
+    data = json.loads(result.text)
+
+    assert result.terminal == "done"
+    assert runner.session.plan.all_done()
+    assert data["plan_all_done"] is True
+    assert data["auto_completed_plan_items"][0]["index"] == 2
 
 
 def test_desktop_icon_drag_done_rejects_wrong_area(monkeypatch):

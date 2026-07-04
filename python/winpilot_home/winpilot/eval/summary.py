@@ -352,6 +352,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             done_checks.append({
                 "passed": event.get("passed"),
                 "reason": str(event.get("reason", ""))[:500],
+                "unverified": bool(event.get("unverified")),
             })
         elif etype == "agent_usage":
             total = event.get("total")
@@ -491,6 +492,7 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "total": 0,
             "passed_or_done": 0,
+            "unverified_done_count": 0,
             "total_duration_s": 0,
             "total_cost_cny": 0,
             "total_prompt_tokens": 0,
@@ -513,10 +515,25 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         or {}
         for r in reports
     ]
+    def unverified_done(report: dict[str, Any]) -> bool:
+        checks = report.get("done_checks") or report.get("summary", {}).get("done_checks") or []
+        if isinstance(checks, list):
+            for check in checks:
+                if not isinstance(check, dict):
+                    continue
+                reason = str(check.get("reason") or "").casefold()
+                if check.get("unverified") is True:
+                    return True
+                if "force-accepted" in reason or "unverified" in reason:
+                    return True
+        return False
+
     def passed(report: dict[str, Any]) -> bool:
         if report.get("timed_out"):
             return False
         if report.get("policy_passed") is False:
+            return False
+        if unverified_done(report):
             return False
         if "ground_truth_passed" in report:
             return bool(report.get("ground_truth_passed"))
@@ -525,6 +542,7 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "total": len(reports),
         "passed_or_done": sum(1 for r in reports if passed(r)),
+        "unverified_done_count": sum(1 for r in reports if unverified_done(r)),
         "total_duration_s": round(sum(float(r.get("duration_s") or 0) for r in reports), 2),
         "total_cost_cny": round(sum(float(u.get("cost_cny") or 0) for u in usage_items), 4),
         "total_prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in usage_items),

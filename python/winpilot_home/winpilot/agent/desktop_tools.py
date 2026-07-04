@@ -9,6 +9,7 @@ from ..action import executor
 from ..action.verify import _match_visible_text
 from ..perception import vision_cv
 from ..utils.screenshot import Region, capture, screen_size, window_region
+from .interaction_tools import normalize_key_sequence
 from .tool_result import ToolResult
 
 
@@ -53,11 +54,8 @@ class DesktopToolMixin:
         return ToolResult(self._fmt(result))
 
     def _t_hold_key(self, args: dict) -> ToolResult:
-        keys = args.get("keys") or []
-        if isinstance(keys, str):
-            keys = [keys]
-        result = executor.hold_keys([str(k) for k in keys],
-                                    int(args.get("duration_ms", 0)))
+        keys = normalize_key_sequence(args.get("keys") or [])
+        result = executor.hold_keys(keys, int(args.get("duration_ms", 0)))
         return ToolResult(self._fmt(result))
 
     def _t_list_displays(self, _args: dict) -> ToolResult:
@@ -175,7 +173,9 @@ class DesktopToolMixin:
             "real_mouse_path": True,
             "note": (
                 "This tool calls executor.click with physical screen coordinates. "
-                "Compare requested.x/y with the target app's own click echo."
+                "Compare requested.x/y with the target app's own click echo. "
+                "Browser event.screenX/screenY may be CSS screen coordinates under DPI scaling, "
+                "not physical pixels."
             ),
         }
         try:
@@ -201,6 +201,12 @@ class DesktopToolMixin:
                         "inside": region.left <= x < region.right and region.top <= y < region.bottom,
                     },
                 }
+                try:
+                    dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+                    payload["target_window"]["dpi"] = int(dpi)
+                    payload["target_window"]["scale_from_96dpi"] = round(float(dpi) / 96.0, 4)
+                except Exception as exc:
+                    payload["target_window"]["dpi_error"] = str(exc)
             except Exception as exc:
                 payload["target_window_error"] = str(exc)
         try:
