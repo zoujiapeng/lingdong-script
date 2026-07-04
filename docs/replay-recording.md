@@ -82,6 +82,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `ext.clipboard_get` 的 `into` 会保留到 `clipboard_get` 节点；前端 executor 通过真实 feature bridge 读取后会写入 FlowScript runtime variables，后续 `variable_*` 条件可以继续使用。
 - `draw_strokes`、`run_detached`、`tray_click`、未知 WPS step，以及 `while` / `until` 控制流会导入为带 `_requires_wps_replay` 的占位，并保留原始 payload。前端 FlowScript executor 会 fail-fast，提示必须走原始 `.wps.json` Replayer；不要把无法等价执行的节点模拟成成功。
 - 普通 `tool_call` 也必须通过 `window.electronAPI.callFeature` 真实桥接执行；没有桥接时要 fail-fast，不能在浏览器预览里模拟系统/桌面动作成功。
+- WPS 导入器会给转换后的节点加 `_source_wps_replay`。前端 executor 对这些节点采取保守策略：基础点击、文字点击、输入、快捷键、滚动、拖拽、截图、启动/聚焦/剪贴板等会优先走真实 feature bridge；没有 bridge 或 bridge 返回失败时节点失败。手工新建的普通 FlowScript 节点仍可用于浏览器预览模拟，但这不代表它能等价重放真实桌面动作。
 
 测试重点：
 

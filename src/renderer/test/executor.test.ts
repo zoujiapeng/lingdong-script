@@ -128,6 +128,29 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('treats bridge type:error responses as node failures', async () => {
+    const script = flowWith({
+      id: 'call',
+      type: 'tool_call',
+      x: 0,
+      y: 0,
+      params: {
+        feature_name: 'launch_program',
+        params: { target: 'missing.exe' },
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ type: 'error', error: 'feature child crashed' }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'call',
+      'error',
+      'feature child crashed',
+    ]);
+  });
+
   it('fails WPS-only loop placeholders instead of browser-simulating control flow', async () => {
     const calls: Array<[string, any]> = [];
     const script = flowWith({
@@ -155,6 +178,105 @@ describe('createFlowExecutor replay/DSL bridges', () => {
       'loop',
       'error',
       'WinPilot control-flow step "ctrl.loop:until" must run through the original .wps.json Replayer',
+    ]);
+  });
+
+  it('requires a real bridge for WPS-imported coordinate clicks', async () => {
+    const script = flowWith({
+      id: 'click',
+      type: 'click',
+      x: 0,
+      y: 0,
+      params: { x: 10, y: 20, method: 'single', _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'click',
+      'error',
+      'click_target requires electronAPI.callFeature',
+    ]);
+  });
+
+  it('executes WPS-imported coordinate clicks through feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'click',
+      type: 'click',
+      x: 0,
+      y: 0,
+      params: { x: 10, y: 20, method: 'single', _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { type: 'result', result: { success: true, result: true } };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['click_target', {
+        target: '10,20',
+        region: '',
+        timeout: 5,
+        human_like: true,
+        double: false,
+        allow_uia: false,
+        physical: true,
+      }],
+    ]);
+  });
+
+  it('uses clipboard typing for WPS-imported non-ASCII text without unsupported params', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'type',
+      type: 'input_text',
+      x: 0,
+      y: 0,
+      params: { text: '健康科技', click_before: false, clear_before: false, _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { type: 'result', result: { success: true, result: true } };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['type_clipboard', { text: '健康科技' }],
+    ]);
+  });
+
+  it('treats wrapped feature false results as node failures and strips internal params', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'launch',
+      type: 'launch_program',
+      x: 0,
+      y: 0,
+      params: { target: 'missing.exe', _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { type: 'result', result: { success: true, result: false } };
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual([
+      ['launch_program', { target: 'missing.exe' }],
+    ]);
+    expect(result.statuses).toContainEqual([
+      'launch',
+      'error',
+      'launch_program returned false',
     ]);
   });
 

@@ -22,6 +22,24 @@ describe('ReplayEditorView jsonOrThrow', () => {
     await expect(jsonOrThrow(response, 'replay script')).rejects.toThrow('replay busy');
   });
 
+  it('throws nested provider error messages', async () => {
+    const response = new Response(JSON.stringify({ error: { message: 'invalid token' } }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await expect(jsonOrThrow(response, 'start agent')).rejects.toThrow('invalid token');
+  });
+
+  it('serializes structured backend details', async () => {
+    const response = new Response(JSON.stringify({ detail: [{ msg: 'script missing', loc: ['file'] }] }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await expect(jsonOrThrow(response, 'read script')).rejects.toThrow('script missing');
+  });
+
   it('throws plain-text bodies for failed non-JSON responses', async () => {
     const response = new Response('service offline', { status: 503 });
 
