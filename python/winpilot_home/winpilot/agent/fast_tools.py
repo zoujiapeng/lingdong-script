@@ -2,10 +2,37 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
 from ..fast.subgoal import SubgoalExecutor
 from .tool_result import ToolResult
+
+
+def _has_execute_subgoal_routine(args: dict[str, Any]) -> bool:
+    if not isinstance(args, dict):
+        return False
+    input_spec = args.get("input") or args.get("type") or args.get("text_input")
+    click_spec = args.get("click") or args.get("button") or args.get("press")
+    clicks = args.get("clicks") or args.get("buttons")
+    draw_spec = args.get("draw") or args.get("drawing")
+    draws = args.get("draws") or args.get("drawings")
+    verify = args.get("verify_texts") or args.get("verify")
+    if isinstance(input_spec, dict) and input_spec:
+        return True
+    if isinstance(click_spec, dict) and click_spec:
+        return True
+    if isinstance(clicks, list) and any(isinstance(item, dict) and item for item in clicks):
+        return True
+    if isinstance(draw_spec, dict) and draw_spec:
+        return True
+    if isinstance(draws, list) and any(isinstance(item, dict) and item for item in draws):
+        return True
+    if isinstance(verify, str) and verify.strip():
+        return True
+    if isinstance(verify, list) and any(str(item or "").strip() for item in verify):
+        return True
+    return bool(args.get("text") or args.get("button_label") or args.get("shape"))
 
 
 class FastToolMixin:
@@ -38,6 +65,36 @@ class FastToolMixin:
         return False
 
     def _t_execute_subgoal(self, args: dict) -> ToolResult:
+        if not isinstance(args, dict):
+            args = {}
+        if not _has_execute_subgoal_routine(args):
+            payload = {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "needs_target_window": False,
+                "subgoal": str(args.get("subgoal") or args.get("goal") or ""),
+                "subgoal_route": "controller_first",
+                "controller_state": {
+                    "phase": "blocked",
+                    "needs_llm_reason": True,
+                    "needs_target_window": False,
+                },
+                "evidence_packet": {"matched_texts": [], "missing_texts": []},
+                "error": (
+                    "execute_subgoal requires an executable routine: input.text, "
+                    "click.label/clicks, draw/draws, or verify_texts. The subgoal "
+                    "string is only a label and cannot launch/discover an app."
+                ),
+                "needs_llm_reason": True,
+                "fast_path_advice": (
+                    "Do not use execute_subgoal with only a natural-language subgoal. "
+                    "First use launch/find_app/focus_window/list_windows to establish "
+                    "the target app/window, or provide input/click/draw/verify_texts "
+                    "for a concrete controller routine."
+                ),
+            }
+            return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
         return SubgoalExecutor(self, self._fast_controller()).execute(args)
 
     def _t_run_action_batch(self, args: dict) -> ToolResult:

@@ -839,6 +839,25 @@ def test_run_action_batch_tool_rejects_empty_actions():
     assert "requires" in result.text
 
 
+def test_execute_subgoal_tool_rejects_empty_routine_without_controller():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    class Session(FastToolMixin):
+        def _fast_controller(self):
+            raise AssertionError("empty execute_subgoal should not initialize controller/perception")
+
+    result = Session()._t_execute_subgoal({
+        "subgoal": "Open Windows Paint app and verify the canvas is ready",
+        "constraints": {"wait": True},
+    })
+    data = json.loads(result.text)
+
+    assert data["ok"] is False
+    assert data["blocked"] is True
+    assert "subgoal string is only a label" in data["error"]
+    assert "launch/find_app/focus_window" in data["fast_path_advice"]
+
+
 def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
     from winpilot.agent.fast_tools import FastToolMixin
 
