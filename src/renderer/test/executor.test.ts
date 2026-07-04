@@ -19,10 +19,10 @@ function flowWith(node: FlowScript['nodes'][number]): FlowScript {
   };
 }
 
-async function runFlow(script: FlowScript, callFeature: (name: string, params: any) => Promise<any> | any) {
+async function runFlow(script: FlowScript, callFeature?: (name: string, params: any) => Promise<any> | any) {
   const logs: Array<Omit<LogEntry, 'timestamp'>> = [];
   const statuses: Array<[string, string, string | undefined]> = [];
-  (globalThis as any).window = { electronAPI: { callFeature } };
+  (globalThis as any).window = callFeature ? { electronAPI: { callFeature } } : {};
 
   const done = new Promise<'completed' | 'stopped' | 'error'>((resolve) => {
     createFlowExecutor(script, {
@@ -88,6 +88,29 @@ describe('createFlowExecutor replay/DSL bridges', () => {
       'draw',
       'error',
       'WinPilot-only replay step "draw_strokes" must run through the original .wps.json Replayer',
+    ]);
+  });
+
+  it('requires a real feature bridge for tool_call nodes', async () => {
+    const script = flowWith({
+      id: 'call',
+      type: 'tool_call',
+      x: 0,
+      y: 0,
+      params: {
+        feature_name: 'launch_program',
+        params: { target: 'notepad.exe' },
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'call',
+      'error',
+      'launch_program requires electronAPI.callFeature',
     ]);
   });
 

@@ -456,6 +456,9 @@ export function createFlowExecutor(
         case 'tool_call': {
           const featureName = params.feature_name || 'unknown';
           const featureParams = params.params || {};
+          if (!(window as any).electronAPI?.callFeature) {
+            throw new Error(`${featureName} requires electronAPI.callFeature`);
+          }
           if (featureParams._requires_wps_replay) {
             throw new Error(
               `WinPilot-only replay step "${featureParams._wps_tool || featureName}" must run through the original .wps.json Replayer`

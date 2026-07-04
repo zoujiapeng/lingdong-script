@@ -80,6 +80,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - 能被现有 FlowScript 节点准确表达的步骤会落到原生节点，例如 `click` / `click_text`、`input_text`、`keyboard`、`swipe`、`wait`、`clipboard_set/get`、`screenshot`。
 - `run_shell` 会导入为旧 `@feature` 注册表里的 `run_command`；shell 类型保留在 `_wps_shell` 中，供人工调整。
 - `draw_strokes`、`run_detached`、`tray_click`、未知 WPS step，以及 `while` / `until` 控制流会导入为带 `_requires_wps_replay` 的占位，并保留原始 payload。前端 FlowScript executor 会 fail-fast，提示必须走原始 `.wps.json` Replayer；不要把无法等价执行的节点模拟成成功。
+- 普通 `tool_call` 也必须通过 `window.electronAPI.callFeature` 真实桥接执行；没有桥接时要 fail-fast，不能在浏览器预览里模拟系统/桌面动作成功。
 
 测试重点：
 
