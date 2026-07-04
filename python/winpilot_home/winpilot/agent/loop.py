@@ -1900,6 +1900,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "find_program",
                 "run_action_batch",
                 "execute_subgoal",
+                "schedule_task",
+                "list_scheduled_tasks",
+                "cancel_scheduled_task",
                 "zoom",
                 "screenshot",
             }
@@ -1911,7 +1914,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if tc.function.name in {"run_action_batch", "execute_subgoal", "zoom", "screenshot", "draw_strokes", "drag"}:
                     evidence_text = self._compact_tool_evidence(tc.function.name, result.text)
                 else:
-                    limit = 1200 if tc.function.name in {"list_windows", "scan_windows", "read_text"} else 600
+                    limit = 1200 if tc.function.name in {
+                        "list_windows",
+                        "scan_windows",
+                        "read_text",
+                        "schedule_task",
+                        "cancel_scheduled_task",
+                    } else 600
+                    if tc.function.name == "list_scheduled_tasks":
+                        limit = 2400
                     evidence_text = (result.text or "")[:limit]
                 self._recent_results.append((tc.function.name, evidence_text))
                 self._recent_results = self._recent_results[-6:]

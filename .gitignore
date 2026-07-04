@@ -96,6 +96,7 @@ python/winpilot_home/templates_img/
 python/winpilot_home/experience_memory.json
 python/winpilot_home/memory.db
 python/winpilot_home/memory.db-*
+python/winpilot_home/agent_schedules.json
 python/winpilot_home/winpilot/bin/
 
 # Pytest cache

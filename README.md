@@ -90,6 +90,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - GUI 成功不能只看 agent 总结，必须用截图、文件、进程、窗口、trace 或工具证据验证。
 - 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
+- WinPilot Agent 自带内部计划任务：`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 写入 `python/winpilot_home/agent_schedules.json`，到期后仍走同一个 `AgentRunner`；这不是 Windows Task Scheduler。
 
 MIT
 

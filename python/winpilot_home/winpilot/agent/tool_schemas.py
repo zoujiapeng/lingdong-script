@@ -249,6 +249,31 @@ def tool_schemas(
         ])
 
     tools.extend([
+        _tool(
+            "schedule_task",
+            "Create a persistent WinPilot Agent scheduled task. The future run enters the same AgentRunner path as /api/chat; use for user-requested reminders or delayed/recurring agent work, not for immediate steps.",
+            {
+                "task": _prop("string", "Natural-language task to run later."),
+                "name": _prop("string", "Optional schedule name."),
+                "run_at": _prop("string", "Optional ISO datetime. If omitted, delay_seconds is used."),
+                "delay_seconds": _prop("number", "Optional delay from now."),
+                "interval_seconds": _prop("number", "Optional recurrence interval."),
+                "enabled": _prop("boolean", "Default true."),
+                "max_steps": _prop("integer", "Optional max AgentRunner steps."),
+            },
+            ["task"],
+        ),
+        _tool(
+            "list_scheduled_tasks",
+            "List persistent WinPilot Agent scheduled tasks.",
+            {"enabled_only": _prop("boolean", "Only return enabled schedules.")},
+        ),
+        _tool(
+            "cancel_scheduled_task",
+            "Disable a persistent WinPilot Agent scheduled task by id.",
+            {"id": _prop("string", "Schedule id.")},
+            ["id"],
+        ),
         _tool("list_windows", "List visible top-level windows with title, hwnd, class, and geometry."),
         _tool(
             "observe",

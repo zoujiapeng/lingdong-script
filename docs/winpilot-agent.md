@@ -64,6 +64,7 @@ server.py _RunState
 | `memory_tools.py` | `remember`銆乣forget`銆乣reuse_skill` |
 | `desktop_tools.py` | clipboard銆乵ouse low-level銆乻creenshot銆乨isplays銆乮nstalled apps |
 | `coding_tools.py` | workspace-confined repo file/shell/patch/GitHub tools |
+| `scheduler.py` | persistent internal AgentRunner schedules (`schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task`) |
 
 ## Tool Schema
 
