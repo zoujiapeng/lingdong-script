@@ -1884,3 +1884,4 @@ def test_select_color_reuses_cached_palette_button(monkeypatch):
     assert ocr_calls["count"] == 1
     assert len(clicks) == 4
     assert clicks[0] == clicks[2]  # cached palette opener reused for red
+    assert all(click.get("skip_screen_delta") is True for click in clicks)

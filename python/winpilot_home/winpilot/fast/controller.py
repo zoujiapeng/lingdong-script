@@ -404,7 +404,7 @@ class FastGuiController:
             cached = self._color_palette_button_cache.get(cache_key)
             if cached is not None:
                 x, y = cached
-                click = self._dispatch("click", {"x": x, "y": y})
+                click = self._dispatch("click", {"x": x, "y": y, "skip_screen_delta": True})
                 if not _failed(click):
                     return ToolResult(json.dumps({
                         "ok": True,
@@ -447,7 +447,7 @@ class FastGuiController:
         click_y = max(region.top + 8, y - offset)
         if cache_key is not None:
             self._color_palette_button_cache[cache_key] = (x, click_y)
-        click = self._dispatch("click", {"x": x, "y": click_y})
+        click = self._dispatch("click", {"x": x, "y": click_y, "skip_screen_delta": True})
         return ToolResult(json.dumps({
             "ok": not _failed(click),
             "cached": False,
@@ -487,8 +487,12 @@ class FastGuiController:
         def scan_after_open(action: str) -> None:
             nonlocal point, summary
             deadline = time.monotonic() + 1.6
+            first_scan = True
             while time.monotonic() < deadline and point is None:
-                time.sleep(0.18)
+                if first_scan:
+                    first_scan = False
+                else:
+                    time.sleep(0.12)
                 try:
                     point, summary = capture_palette_point()
                     attempts.append({"action": action, "ok": point is not None, "summary": summary})
@@ -539,7 +543,7 @@ class FastGuiController:
                 "attempts": attempts,
                 "error": f"no compact {color} swatch found in visible palette",
             }, ensure_ascii=False, default=str))
-        click = self._dispatch("click", {"x": point[0], "y": point[1]})
+        click = self._dispatch("click", {"x": point[0], "y": point[1], "skip_screen_delta": True})
         attempts.append({
             "action": "click_color_swatch",
             "ok": not _failed(click),
