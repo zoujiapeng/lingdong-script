@@ -1,0 +1,30 @@
+flowchart TD
+  start([首次启动]) --> intent{用户意图}
+  intent -->|实时让电脑做事| cockpit[Agent Cockpit]
+  intent -->|编辑可复用流程| studio[Automation Studio]
+  intent -->|录制演示或复用| replay[Replay Lab]
+
+  cockpit --> preflight[运行前体检]
+  preflight --> observe[观察窗口和屏幕]
+  observe --> act[执行动作]
+  act --> verify{证据验证}
+  verify -->|成功| crystallize[结晶为模板或 WPS]
+  verify -->|失败| classify[失败分类与恢复]
+  classify --> recover[窗口聚焦 / OCR替代 / 动态等待 / 重新定位]
+  recover --> verify
+
+  studio --> search[自然语言搜索指令库]
+  search --> compose[生成节点组合]
+  compose --> layout[主路径垂直排版]
+  layout --> gates[插入验证门]
+  gates --> run[运行或调试]
+  run --> evidence[查看证据面板]
+
+  replay --> trace[选择 trace 或 WPS]
+  trace --> map[映射到 FlowScript]
+  map --> editable{是否可等价编辑}
+  editable -->|是| importFlow[导入流程图]
+  editable -->|否| wpsOnly[保留 WPS 占位并原样重放]
+  importFlow --> studio
+  crystallize --> template[模板与知识库]
+  template --> search

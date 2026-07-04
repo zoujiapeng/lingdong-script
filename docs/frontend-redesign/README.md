@@ -6,11 +6,11 @@
 
 - `lingdong_redesign_spec.md`：产品定位、信息架构、交互规则、组件拆分建议。
 - `CODEX_IMPLEMENTATION_PROMPT.md`：交给 Codex 的实现提示词。
-- `lingdong_redesign_prototype.html`：本地 HTML 原型。
-- `lingdong_redesign_workflow.mmd`：Mermaid 用户流程图。
-- `*.svg`：可直接拖入 Figma 的四张设计画布。
-- `*.png`：四张设计预览图。
-- `lingdong_frontend_redesign_pack.zip`：完整离线设计包。
+- `lingdong_redesign_workflow.mmd`：用户流程图 Mermaid 源码。
+- `prototype/lingdong_redesign_prototype.html`：本地 HTML 原型。
+- `figma/*.svg`：可直接拖入 Figma 的设计参考画布。
+
+说明：本次仓库提交保留的是可编辑源资料。PNG 预览和 ZIP 打包件属于聊天侧二进制交付物；当前 GitHub Connector 不支持直接从本地路径上传大二进制文件，所以没有把 PNG/ZIP 伪装成文本提交。Figma 开工请直接导入 `figma/*.svg`。
 
 ## 建议工作流
 
