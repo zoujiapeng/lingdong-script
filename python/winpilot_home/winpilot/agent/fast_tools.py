@@ -35,6 +35,49 @@ def _has_execute_subgoal_routine(args: dict[str, Any]) -> bool:
     return bool(args.get("text") or args.get("button_label") or args.get("shape"))
 
 
+def _needs_resolved_target_window(session: Any, args: dict[str, Any]) -> bool:
+    target = args.get("target_window")
+    if not isinstance(target, dict):
+        return False
+    if target.get("hwnd"):
+        return False
+    if not (str(target.get("process") or "").strip() or str(target.get("title") or "").strip()):
+        return False
+    try:
+        if int(getattr(session, "hwnd", 0) or 0):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _blocked_unresolved_target_payload(args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "needs_target_window": True,
+        "subgoal": str(args.get("subgoal") or args.get("goal") or ""),
+        "subgoal_route": "controller_first",
+        "controller_state": {
+            "phase": "blocked",
+            "needs_llm_reason": True,
+            "needs_target_window": True,
+        },
+        "evidence_packet": {"matched_texts": [], "missing_texts": []},
+        "error": (
+            "execute_subgoal target_window has only a process/title hint. "
+            "Resolve it to a real hwnd before running a controller routine."
+        ),
+        "needs_llm_reason": True,
+        "fast_path_advice": (
+            "Use launch/find_app/list_windows/scan_windows/focus_window to establish "
+            "the target app/window first. Do not click the current foreground window "
+            "as a substitute for an unresolved target_window."
+        ),
+    }
+
+
 class FastToolMixin:
     def _fast_controller(self) -> FastGuiController:
         controller = getattr(self, "_fast_gui_controller", None)
@@ -95,6 +138,8 @@ class FastToolMixin:
                 ),
             }
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+        if _needs_resolved_target_window(self, args):
+            return ToolResult(json.dumps(_blocked_unresolved_target_payload(args), ensure_ascii=False, default=str))
         return SubgoalExecutor(self, self._fast_controller()).execute(args)
 
     def _t_run_action_batch(self, args: dict) -> ToolResult:

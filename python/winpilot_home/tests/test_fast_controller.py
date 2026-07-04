@@ -858,6 +858,29 @@ def test_execute_subgoal_tool_rejects_empty_routine_without_controller():
     assert "launch/find_app/focus_window" in data["fast_path_advice"]
 
 
+def test_execute_subgoal_rejects_unresolved_target_window_without_controller():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    class Session(FastToolMixin):
+        hwnd = None
+
+        def _fast_controller(self):
+            raise AssertionError("unresolved target_window should not initialize controller/perception")
+
+    result = Session()._t_execute_subgoal({
+        "subgoal": "Open Windows Paint and click the blank canvas",
+        "target_window": {"process": "mspaint.exe"},
+        "click": {"label": "blank canvas"},
+    })
+    data = json.loads(result.text)
+
+    assert data["ok"] is False
+    assert data["blocked"] is True
+    assert data["needs_target_window"] is True
+    assert "Resolve it to a real hwnd" in data["error"]
+    assert "launch/find_app/list_windows/scan_windows/focus_window" in data["fast_path_advice"]
+
+
 def test_run_action_batch_tool_defaults_to_stable_sync_for_mutation():
     from winpilot.agent.fast_tools import FastToolMixin
 
