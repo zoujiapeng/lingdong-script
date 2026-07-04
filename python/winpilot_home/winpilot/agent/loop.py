@@ -29,6 +29,7 @@ from ..utils.log import BUS, logger
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import DoneVerifierMixin
+from .failure_recovery import FailureRecoveryLayer, attach_recovery_metadata
 from .gui_plan_helpers import (
     _DRAW_COLOR_TERMS,
     _draw_spec_key,
@@ -160,6 +161,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._is_coding = self.runtime_profile.coding
         self._tool_history: list[tuple[str, dict[str, Any], str]] = []
         self._completion_rejects = 0
+        self._failure_recovery_layer = FailureRecoveryLayer()
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -790,6 +792,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "plan_after_auto_complete": str(data.get("plan_after_auto_complete") or "")[:500],
                 "metrics": data.get("metrics"),
             }
+            if data.get("failure_classification"):
+                compact["failure_classification"] = data.get("failure_classification")
+            if data.get("failure_recovery"):
+                compact["failure_recovery"] = data.get("failure_recovery")
             return json.dumps(compact, ensure_ascii=False, default=str)[:1800]
         if tool_name == "run_action_batch":
             compact_results: list[dict[str, Any]] = []
@@ -840,6 +846,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "metrics": data.get("metrics"),
                 "results": compact_results,
             }
+            if data.get("failure_classification"):
+                compact["failure_classification"] = data.get("failure_classification")
+            if data.get("failure_recovery"):
+                compact["failure_recovery"] = data.get("failure_recovery")
             return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
         if tool_name in {"draw_strokes", "drag"} and data.get("wrapped_by_fast_controller"):
             compact: dict[str, Any] = {
@@ -854,6 +864,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
             }
+            if data.get("failure_classification"):
+                compact["failure_classification"] = data.get("failure_classification")
+            if data.get("failure_recovery"):
+                compact["failure_recovery"] = data.get("failure_recovery")
             auto = data.get("auto_visual_verify")
             if isinstance(auto, dict):
                 compact["auto_visual_verify"] = {
@@ -1675,6 +1689,36 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             result = self._maybe_auto_complete_open_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
+            failure_recovery = None
+            raw_result_text = result.text
+            try:
+                failure_recovery = self._failure_recovery_layer.handle_tool_result(
+                    tool_name=tc.function.name,
+                    args=args,
+                    result_text=result.text or "",
+                    task=self.task,
+                    session=self.session,
+                    recent_results=self._recent_results,
+                    visible_evidence_ledger=self._visible_evidence_ledger,
+                    tool_history=self._tool_history,
+                )
+                if failure_recovery is not None:
+                    result.text = attach_recovery_metadata(result.text or "", failure_recovery)
+                    post_tool_hints.extend(failure_recovery.post_tool_hints)
+                    BUS.publish(
+                        "agent_recovery",
+                        run_id=self.run_id,
+                        tool=tc.function.name,
+                        failure_recovery=failure_recovery.to_dict(),
+                    )
+            except Exception as exc:
+                self._trace_debug("failure_recovery_error", {
+                    "run_id": self.run_id,
+                    "tool_call_id": tc.id,
+                    "tool": tc.function.name,
+                    "args": args,
+                    "error": str(exc),
+                })
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
             self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
@@ -1685,10 +1729,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "tool": tc.function.name,
                 "args": args,
                 "result_text": result.text,
+                "raw_result_text": raw_result_text if raw_result_text != result.text else None,
                 "summary": result.summary,
                 "terminal": result.terminal,
                 "replay": result.replay,
                 "elapsed_ms": elapsed_ms,
+                "failure_recovery": failure_recovery.to_dict() if failure_recovery else None,
             })
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
@@ -1773,9 +1819,27 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "plan_after_auto_complete",
                     "needs_llm_reason",
                     "element_cache",
+                    "failure_classification",
+                    "failure_recovery",
                 ):
                     if key in parsed_result:
                         result_meta[key] = parsed_result[key]
+            if failure_recovery is not None:
+                result_meta.setdefault(
+                    "failure_classification",
+                    failure_recovery.classification.to_dict(),
+                )
+                result_meta.setdefault(
+                    "failure_recovery",
+                    {
+                        "status": failure_recovery.status.value,
+                        "llm_required": failure_recovery.llm_required,
+                        "retryable": failure_recovery.retryable,
+                        "local_actions": failure_recovery.local_actions,
+                        "post_tool_hint_count": len(failure_recovery.post_tool_hints),
+                        "result_meta": failure_recovery.result_meta,
+                    },
+                )
             BUS.publish(
                 "agent_tool",
                 run_id=self.run_id,
