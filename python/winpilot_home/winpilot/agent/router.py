@@ -33,4 +33,5 @@ def build_runner(
         stop_event=stop_event,
         session_context=session_context,
         max_steps_override=max_steps_override,
+        runtime_profile=profile,
     )

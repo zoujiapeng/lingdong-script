@@ -40,7 +40,7 @@ from .plan_tools import PlanToolMixin
 from .system_tools import SystemToolMixin
 from .tool_schemas import tool_schemas
 from .tool_result import ToolResult
-from .runtime_profile import build_runtime_profile
+from .runtime_profile import RuntimeProfile, build_runtime_profile
 from .window_tools import WindowToolMixin
 
 _MUTATING_TOOLS = {
@@ -79,14 +79,14 @@ class ToolSession(
 ):
     """Per-run state: latest snapshot + current target window."""
 
-    def __init__(self, stop_event=None, task: str = "") -> None:
+    def __init__(self, stop_event=None, task: str = "", runtime_profile: RuntimeProfile | None = None) -> None:
         self.snapshot: fusion.Snapshot | None = None
         self.hwnd: int | None = None
         self.task = task or ""
         # Shared with the runner so long ops (reuse_skill replay) honor Stop.
         import threading
         self.stop_event = stop_event or threading.Event()
-        self.runtime_profile = build_runtime_profile(self.task)
+        self.runtime_profile = runtime_profile or build_runtime_profile(self.task)
         self.coding_runtime = (
             CodingSession(
                 self.runtime_profile.coding_workspace,
