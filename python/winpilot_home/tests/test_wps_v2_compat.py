@@ -192,3 +192,45 @@ def test_relocate_text_falls_back_to_recorded_coords_when_no_window(monkeypatch)
     point = r._relocate({"tool": "click", "text": "OK", "coords": [1, 2]})
 
     assert point == (1, 2)
+
+
+def test_replayer_preflight_binds_declared_target_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "find_window",
+        lambda title: {"hwnd": 456, "title": "Target App", "pid": 12} if title == "Target App" else None,
+    )
+    script = {
+        "format": "wps/2",
+        "target_window": {"title": "Target App"},
+        "steps": [{"tool": "click", "coords": [1, 2]}],
+    }
+
+    r = SpyReplayer()
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is True
+    assert out["preflight"]["required"] is True
+    assert out["preflight"]["hwnd"] == 456
+    assert r.hwnd == 456
+    assert [c["tool"] for c in r.leaf_calls] == ["click"]
+
+
+def test_replayer_preflight_fails_before_actions_when_target_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod.win32, "find_window", lambda title: None)
+    script = {
+        "format": "wps/2",
+        "target_window": "Missing App",
+        "steps": [{"tool": "click", "coords": [1, 2]}],
+    }
+
+    r = SpyReplayer()
+    out = r.run(_write(tmp_path, script))
+
+    assert out["ok"] is False
+    assert out["preflight"]["required"] is True
+    assert r.leaf_calls == []
+    assert out["results"][0]["index"] == "preflight"
+    assert out["results"][0]["tool"] == "preflight.target_window"
+    assert out["results"][0]["ok"] is False
+    assert 'title="Missing App"' in out["results"][0]["error"]

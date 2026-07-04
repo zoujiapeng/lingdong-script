@@ -328,6 +328,62 @@ def _is_point(value: Any) -> bool:
     )
 
 
+def _target_window_hint_from(value: Any, source: str) -> dict[str, Any] | None:
+    """Normalize optional replay target-window metadata."""
+    if isinstance(value, str):
+        title = value.strip()
+        return {"source": source, "title": title} if title else None
+    if not isinstance(value, dict):
+        return None
+
+    hint: dict[str, Any] = {"source": source}
+    title = (
+        str(value.get("title") or value.get("window_title") or value.get("name") or "")
+        .strip()
+    )
+    process = (
+        str(value.get("process") or value.get("process_name") or value.get("app") or "")
+        .strip()
+    )
+    hwnd = value.get("hwnd")
+    try:
+        hwnd_int = int(hwnd) if hwnd not in (None, "") else None
+    except (TypeError, ValueError):
+        hwnd_int = None
+
+    if hwnd_int:
+        hint["hwnd"] = hwnd_int
+    if title:
+        hint["title"] = title
+    if process:
+        hint["process"] = process
+    return hint if len(hint) > 1 else None
+
+
+def _target_window_hint(script: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("target_window", "target"):
+        hint = _target_window_hint_from(script.get(key), key)
+        if hint:
+            return hint
+
+    conditions = script.get("conditions")
+    if isinstance(conditions, dict):
+        for key in ("target_window", "window_title", "window_appears", "target"):
+            hint = _target_window_hint_from(conditions.get(key), f"conditions.{key}")
+            if hint:
+                return hint
+    return None
+
+
+def _target_window_spec_present(script: dict[str, Any]) -> bool:
+    if "target_window" in script:
+        return True
+    conditions = script.get("conditions")
+    return isinstance(conditions, dict) and any(
+        key in conditions for key in ("target_window", "window_title", "window_appears")
+    )
+
+
 def _has_click_target(step: dict) -> bool:
     return (
         _nonempty_str(step.get("text"))
@@ -438,6 +494,8 @@ def validate_script(data: Any) -> str | None:
         return f"未知 format: {fmt!r}（应为 wps/1 或 wps/2）"
     if data.get("vars") is not None and not isinstance(data.get("vars"), dict):
         return "vars 必须是对象"
+    if _target_window_spec_present(data) and not _target_window_hint(data):
+        return "target_window requires title/window_title/name, hwnd, or process"
     return _validate_steps(data.get("steps"), "steps")
 
 
@@ -490,6 +548,84 @@ class Replayer:
         # relocation needs a focused/recorded target; otherwise a replay can
         # silently click the wrong app. Coordinate-only steps can still run.
         return None
+
+    def _target_hint_label(self, hint: dict[str, Any]) -> str:
+        parts = []
+        if hint.get("title"):
+            parts.append(f'title="{hint["title"]}"')
+        if hint.get("process"):
+            parts.append(f'process="{hint["process"]}"')
+        if hint.get("hwnd"):
+            parts.append(f"hwnd={hint['hwnd']}")
+        return ", ".join(parts) or "empty target_window"
+
+    def _window_process_name(self, win: dict) -> str:
+        pid = win.get("pid")
+        proc_fn = getattr(win32, "_process_name", None)
+        if not callable(proc_fn) or not pid:
+            return ""
+        try:
+            return str(proc_fn(int(pid)) or "")
+        except Exception:
+            return ""
+
+    def _window_matches_target_hint(self, win: dict, hint: dict[str, Any]) -> bool:
+        title = str(hint.get("title") or "").strip()
+        if title and not win32.title_contains(str(win.get("title") or ""), title):
+            return False
+
+        process = str(hint.get("process") or "").strip().casefold()
+        if process:
+            actual = self._window_process_name(win).casefold()
+            if not actual:
+                return False
+            process_key = process.removesuffix(".exe")
+            actual_key = actual.removesuffix(".exe")
+            if process not in actual and process_key not in actual_key:
+                return False
+        return True
+
+    def _find_target_window(self, hint: dict[str, Any]) -> dict | None:
+        try:
+            hwnd = hint.get("hwnd")
+            if hwnd:
+                for win in win32.list_windows():
+                    if int(win.get("hwnd") or 0) == int(hwnd) and self._window_matches_target_hint(win, hint):
+                        return win
+                return None
+
+            title = str(hint.get("title") or "").strip()
+            process = str(hint.get("process") or "").strip()
+            if title and not process:
+                return win32.find_window(title)
+
+            for win in win32.list_windows():
+                if self._window_matches_target_hint(win, hint):
+                    return win
+        except Exception as exc:
+            logger.warning("replay target-window preflight failed: %s", exc)
+        return None
+
+    def _preflight_target_window(self, script: dict[str, Any]) -> dict[str, Any]:
+        hint = _target_window_hint(script)
+        if not hint:
+            return {"ok": True, "required": False}
+
+        found = self._find_target_window(hint)
+        if not found:
+            error = f"target window not found: {self._target_hint_label(hint)}"
+            result = {"ok": False, "error": error, "hint": hint}
+            self._emit_step("preflight", "preflight.target_window", False, result)
+            return {"ok": False, "required": True, "error": error, "hint": hint}
+
+        self.hwnd = int(found["hwnd"])
+        return {
+            "ok": True,
+            "required": True,
+            "hwnd": self.hwnd,
+            "title": found.get("title"),
+            "hint": hint,
+        }
 
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
         tool = step.get("tool", "")
@@ -584,9 +720,13 @@ class Replayer:
         self._results = []
         total = replay_control.count_leaves(steps)
         BUS.publish("replay", state="start", script=path.name, total=total)
+        preflight = self._preflight_target_window(script)
+        if not preflight.get("ok", False):
+            BUS.publish("replay", state="done", ok=False)
+            return {"ok": False, "results": self._results, "preflight": preflight}
         ok_all = self._exec_steps(steps)
         BUS.publish("replay", state="done", ok=ok_all)
-        return {"ok": ok_all, "results": self._results}
+        return {"ok": ok_all, "results": self._results, "preflight": preflight}
 
     # --------------------------------------------------------- step engine
     def _should_stop(self) -> bool:
@@ -637,9 +777,9 @@ class Replayer:
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
-                            if k in ("error", "verify_detail", "attempts", "timeout", "stopped")})
+                            if k in ("error", "verify_detail", "attempts", "timeout", "stopped", "hint")})
         record = {"index": idx, "tool": tool, "ok": ok}
-        for key in ("error", "verify_detail", "attempts", "timeout", "stopped"):
+        for key in ("error", "verify_detail", "attempts", "timeout", "stopped", "hint"):
             if key in result:
                 record[key] = result[key]
         self._results.append(record)
