@@ -13,7 +13,7 @@ import { wpsToFlowScript, WpsScript } from '../utils/wpsToFlowScript';
 interface TraceItem { run_id: string; task: string; status: string; steps: number }
 interface ScriptItem { file: string; name: string; task: string; steps: number }
 
-async function jsonOrThrow<T = any>(response: Response, label: string): Promise<T> {
+export async function jsonOrThrow<T = any>(response: Response, label: string): Promise<T> {
   const text = await response.text();
   let data: any = {};
   if (text) {
@@ -48,14 +48,14 @@ export function ReplayEditorView() {
     if (!b) return;
     try {
       const [tr, sc] = await Promise.all([
-        fetch(`${b}api/traces`).then((r) => r.json()),
-        fetch(`${b}api/scripts`).then((r) => r.json()),
+        fetch(`${b}api/traces`).then((r) => jsonOrThrow<TraceItem[]>(r, 'load traces')),
+        fetch(`${b}api/scripts`).then((r) => jsonOrThrow<ScriptItem[]>(r, 'load scripts')),
       ]);
       setTraces(Array.isArray(tr) ? tr : []);
       setScripts(Array.isArray(sc) ? sc : []);
       setError('');
       try {
-        const st = await fetch(`${b}api/human/status`).then((r) => r.json());
+        const st = await fetch(`${b}api/human/status`).then((r) => jsonOrThrow(r, 'human recorder status'));
         setRecording(!!st?.recording);
       } catch { /* ignore */ }
     } catch (e) {
