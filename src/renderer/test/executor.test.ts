@@ -250,4 +250,24 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.status).toBe('error');
     expect(result.statuses).toContainEqual(['win', 'error', 'window missing']);
   });
+
+  it('fails unsupported node types instead of reporting success', async () => {
+    const script = flowWith({
+      id: 'mystery',
+      type: 'not_a_real_node' as any,
+      x: 0,
+      y: 0,
+      params: {},
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: true }));
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'mystery',
+      'error',
+      'Unsupported FlowScript node type: not_a_real_node',
+    ]);
+  });
 });
