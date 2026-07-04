@@ -115,6 +115,15 @@ def _find_term(text: str, term_map: dict[str, tuple[str, ...]]) -> str:
     return ""
 
 
+def _find_terms(text: str, term_map: dict[str, tuple[str, ...]]) -> list[str]:
+    haystack = (text or "").casefold()
+    return [
+        value
+        for value, terms in term_map.items()
+        if any(term.casefold() in haystack for term in terms)
+    ]
+
+
 def _parse_plan_draw_spec(text: str) -> dict[str, str]:
     lowered = (text or "").casefold()
     if any(term.casefold() in lowered for term in _DRAW_NON_ACTION_TERMS):
@@ -1229,6 +1238,73 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             )
         return None
 
+    def _maybe_reuse_recent_visual_color_verify(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        if tool_name != "execute_subgoal" or not _is_drawing_task(self.task):
+            return None
+        if any(args.get(key) for key in ("input", "click", "clicks", "draw", "draws")):
+            return None
+        raw_verify = args.get("verify_texts") or args.get("verify") or []
+        if isinstance(raw_verify, str):
+            verify_texts = [raw_verify]
+        elif isinstance(raw_verify, list):
+            verify_texts = [str(item or "") for item in raw_verify]
+        else:
+            verify_texts = []
+        colors: list[str] = []
+        for text in verify_texts:
+            for color in _find_terms(text, _DRAW_COLOR_TERMS):
+                if color not in colors:
+                    colors.append(color)
+        if not colors:
+            return None
+        matched = self._recent_matched_visual_colors(colors)
+        missing = [color for color in colors if color.casefold() not in matched]
+        if missing:
+            return None
+        payload = {
+            "ok": True,
+            "verified": True,
+            "subgoal": str(args.get("subgoal") or "Verify visual colors"),
+            "subgoal_route": "controller_visual_evidence_reuse",
+            "reused_recent_evidence": True,
+            "controller_state": {
+                "phase": "verified",
+                "verified": True,
+                "needs_observe": False,
+                "needs_llm_reason": False,
+            },
+            "actions_executed": [],
+            "evidence_packet": {
+                "matched_texts": [],
+                "missing_texts": [],
+                "matched_visual_colors": colors,
+                "missing_visual_colors": [],
+                "reused_from": "recent execute_subgoal visual color evidence",
+            },
+            "needs_llm_reason": False,
+            "fast_path_advice": (
+                "Recent controller visual evidence already matched these colors. "
+                "Complete the matching visual verification plan item instead of OCR-reading color words."
+            ),
+        }
+        self._trace_debug("execute_subgoal_visual_color_verify_reused", {
+            "run_id": self.run_id,
+            "args": args,
+            "colors": colors,
+        })
+        return ToolResult(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            replay={
+                "tool": "execute_subgoal",
+                "subgoal": payload["subgoal"],
+                "reused_recent_visual_colors": colors,
+            },
+        )
+
     @staticmethod
     def _draw_specs_from_args(args: dict[str, Any]) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
@@ -1534,7 +1610,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             elif blocked_gui_only_action:
                 result = ToolResult(blocked_gui_only_action)
             else:
-                result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
+                result = self._maybe_reuse_recent_visual_color_verify(tc.function.name, args)
+                if result is None:
+                    result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
                 if result is None:
                     result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
