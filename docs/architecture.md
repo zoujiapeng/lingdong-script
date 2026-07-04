@@ -1,171 +1,162 @@
 # 当前架构
 
-项目对用户呈现为一个 WinPilot Agent，内部由一个主 runner、多个 Runtime/Capability 和流程图系统协作。
+本项目对用户呈现为一个 WinPilot Agent。内部由一个主 runner、多种 Runtime/Capability、低延迟 GUI controller、记忆/replay 系统和 legacy 流程图系统组成。
+
+## 总览
+
+```mermaid
+flowchart LR
+  User["用户 / 前端 Agent 页面"] --> Electron["Electron 主进程"]
+  Electron --> WinPilot["WinPilot FastAPI\npython/winpilot_home/serve.py"]
+  WinPilot --> Runner["AgentRunner\nagent/loop.py"]
+  Runner --> Runtime["RuntimeProfile\nDesktop / Coding"]
+  Runner --> Tools["ToolSession.dispatch\nagent/tools.py"]
+  Tools --> GUI["GUI tools\nwindow/perception/interaction/system"]
+  Tools --> Fast["Fast GUI Controller\nfast/controller.py + fast/subgoal.py"]
+  Tools --> Coding["Coding Runtime\nagent/coding_tools.py"]
+  Tools --> Memory["Memory / Replay\nmemory + recorder"]
+  Electron --> Flow["Flow editor / DSL\nsrc/renderer + python/engine"]
+```
 
 ## 两条主线
 
-| 系统 | 路径 | 职责 | 边界 |
-| --- | --- | --- | --- |
-| WinPilot desktop agent | `python/winpilot_home/winpilot/` | LLM 实时操控 Windows、感知、动作、验证、录制、记忆；编程/仓库能力作为 Coding Runtime 挂在统一 Agent 内 | 不直接使用 `@feature`，不直接编辑流程图 |
-| 流程图/DSL 系统 | `src/renderer/`、`python/engine/`、`python/features/` | 可视化编排、DSL 执行、`@feature`、MCP/HTTP/CLI | 不等同于用户面对的 WinPilot Agent |
+### WinPilot desktop agent
+
+路径：`python/winpilot_home/winpilot/`
+
+负责真实 Windows 桌面操作。核心约束：
+
+- 只有一个用户可见 Agent。
+- 所有任务进入 `agent/router.py -> AgentRunner`。
+- GUI/Computer Use 是默认能力；Coding、Shell、File、Browser、Replay 是按任务和配置启用的 capability。
+- done 前必须经过真实证据核验，不能只信模型总结。
+
+### 流程图 / DSL 自动化
+
+路径：`src/renderer/`、`python/engine/`、`python/features/`
+
+负责可视化编排和 legacy 自动化。它和 WinPilot 的关系是桥接，不是共享工具池：
+
+- FlowScript 是前端画布 JSON。
+- `python/engine/` 是 legacy DSL/Flow 执行引擎。
+- `python/features/` 是 `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用。
+- WinPilot 成功 trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 保守导入 FlowScript。
 
 ## 进程和端口
 
-```mermaid
-flowchart TB
-    user["User"]
-    renderer["React renderer<br/>src/renderer"]
-    main["Electron main<br/>src/main"]
-    api["Electron HTTP API<br/>127.0.0.1:7880<br/>src/main/api.ts"]
-    wpboot["WinPilot launcher<br/>src/main/winpilotServer.ts"]
-    serve["python/winpilot_home/serve.py<br/>dynamic local port"]
-    wp["WinPilot FastAPI<br/>winpilot/server.py"]
-    ipc["IPC adapter<br/>python/agent/__main__.py"]
-    engine["Flow/DSL engine<br/>python/engine"]
-    features["@feature registry<br/>python/features"]
+| 进程/服务 | 入口 | 说明 |
+| --- | --- | --- |
+| Electron HTTP API | `src/main/api.ts` | 默认 `127.0.0.1:7880`，供外部控制前端和查询状态 |
+| WinPilot FastAPI | `python/winpilot_home/serve.py` | 由 Electron 托管或手动启动；不要直接跑 uvicorn |
+| WinPilot Web UI | `python/winpilot_home/winpilot/webui/` | 前端 Agent 页面通过 iframe 使用 |
+| Legacy IPC agent | `python/agent/__main__.py` | Electron stdin/stdout JSON-line 到 WinPilot BUS 的适配器 |
+| GUI eval script | `scripts/gui_eval_run.py` | 走同一个 `/api/chat` 路径，写 compact eval 报告 |
 
-    user --> renderer
-    renderer --> main
-    main --> api
-    main --> wpboot --> serve --> wp
-    main --> ipc --> wp
-    renderer -->|"Agent iframe / REST"| wp
-    renderer --> engine --> features
-```
+`/api/status.runtime` 会返回 repo root、branch、commit、dirty、PID、port。排查多 worktree 或旧服务时先看它。
 
-`serve.py` 会设置 `WINPILOT_LAUNCHED_VIA_SERVE=1`。`server.py` 只阻止真正的 `uvicorn winpilot.server:app` 直接启动，不阻止测试导入。
-
-## WinPilot 内部
+## Agent 内部
 
 ```mermaid
-flowchart LR
-    server["server.py"] --> router["agent/router.py"]
-    router -->|"all tasks"| loop["AgentRunner<br/>agent/loop.py"]
-    loop --> profile["RuntimeProfile<br/>agent/runtime_profile.py"]
-    profile -->|"coding task enables"| codingrt["Coding Runtime<br/>agent/coding_tools.py"]
-    loop --> rules["Task guards<br/>agent/task_rules.py"]
-    loop --> donev["Done verifier<br/>agent/done_verifier.py"]
-    loop --> context["Context guidance<br/>agent/context_guidance.py"]
-    loop --> reflect["Reflection<br/>agent/reflection.py"]
-    loop --> schemas["Tool schemas<br/>agent/tool_schemas.py"]
-    loop --> tools["ToolSession<br/>agent/tools.py"]
-    tools --> codingrt
-    tools --> windowtools["WindowToolMixin<br/>agent/window_tools.py"]
-    tools --> perceptiontools["PerceptionToolMixin<br/>agent/perception_tools.py"]
-    tools --> interactiontools["InteractionToolMixin<br/>agent/interaction_tools.py"]
-    tools --> systemtools["SystemToolMixin<br/>agent/system_tools.py"]
-    tools --> fasttools["FastToolMixin<br/>agent/fast_tools.py"]
-    tools --> plantools["PlanToolMixin<br/>agent/plan_tools.py"]
-    tools --> filetools["FileToolMixin<br/>agent/file_tools.py"]
-    tools --> memorytools["MemoryToolMixin<br/>agent/memory_tools.py"]
-    tools --> desktoptools["DesktopToolMixin<br/>agent/desktop_tools.py"]
-    tools --> fusion["fusion.observe<br/>UIA/Win32/OCR/CV/VLM"]
-    tools --> action["action/executor.py<br/>SendInput/UIA/clipboard/screenshot"]
-    tools --> verify["action/verify.py<br/>expect verification"]
-    loop --> recorder["recorder/trace.py"]
-    recorder --> wps[".wps.json"]
+flowchart TD
+  Chat["/api/chat"] --> Router["agent/router.py"]
+  Router --> Runner["AgentRunner"]
+  Runner --> Profile["RuntimeProfile"]
+  Runner --> Schema["tool_schemas(profile, allow flags)"]
+  Runner --> LLM["OpenAI-compatible LLM"]
+  LLM --> Calls["tool calls"]
+  Calls --> Dispatch["ToolSession.dispatch"]
+  Dispatch --> Mixins["window/perception/interaction/system/plan/file/memory tools"]
+  Dispatch --> Fast["FastToolMixin -> FastGuiController/SubgoalExecutor"]
+  Dispatch --> Coding["CodingSession when RuntimeProfile.coding=true"]
+  Mixins --> Trace["BUS + trace + screenshots"]
+  Fast --> Trace
+  Coding --> Trace
+  Trace --> Done["done_verifier.py"]
 ```
 
-## 运行时状态机
+关键文件：
 
-```mermaid
-stateDiagram-v2
-    [*] --> idle
-    idle --> pending: POST /api/chat
-    pending --> running: background thread starts
-    running --> done: done tool/plain reply passes done verifier
-    running --> reply: plain assistant reply without tool evidence
-    running --> fail: fail tool or max_steps
-    running --> stopped: POST /api/stop
-    running --> error: unhandled exception
-    done --> idle
-    reply --> idle
-    fail --> idle
-    stopped --> idle
-    error --> idle
+| 文件 | 职责 |
+| --- | --- |
+| `agent/loop.py` | LLM 主循环、上下文折叠、工具调用、usage、done gate 编排 |
+| `agent/runtime_profile.py` | 判断本次 run 是否启用 Coding Runtime、workspace、max steps |
+| `agent/task_rules.py` | GUI-only、coding task、可见 literal、done gate 辅助规则 |
+| `agent/tool_schemas.py` | function-calling schema、allow flags、`standard/lean_gui/drawing_gui` profile |
+| `agent/tools.py` | `ToolSession` 状态、dispatch、目标 hwnd、world、undo stack |
+| `agent/*_tools.py` | 具体工具 mixin |
+| `agent/done_verifier.py` | 防假成功核验 |
+| `fast/subgoal.py` | controller-first routine：输入、点击、绘图、等待、验证 |
+| `fast/controller.py` | 本地低延迟动作执行和 fast metrics |
+| `perception/fusion.py` | UIA/Win32/OCR/CV/VLM snapshot 融合 |
+| `perception/reducer.py` | 给 LLM 的 compact 感知摘要 |
+| `recorder/trace.py` | trace、`.wps.json`、replay |
+| `model_adapter.py` | provider、thinking 默认、usage/cache/cost 归一化 |
+
+## 运行状态机
+
+一次任务的状态流：
+
+```text
+queued
+  -> running
+  -> LLM step
+  -> tool dispatch
+  -> evidence written to BUS/trace
+  -> done verifier if terminal
+  -> done / fail / reply / stopped / error
 ```
 
-- `server.py` 的 `_RunState` 是服务级锁：同一时间只允许一个 agent、replay 或人工录制任务运行。
-- `AgentRunner.run()` 是唯一主循环：注入任务/上下文/记忆/runtime prompt -> 调 LLM -> 处理 tool calls -> `ToolSession.dispatch()` -> Runtime/工具 mixin -> done gate/world/playbook/reflect。
-- `ToolSession` 是每次运行的状态容器，保存最近 `Snapshot`、目标窗口 `hwnd`、world model、plan、undo stack；当 `RuntimeProfile.coding=true` 时挂载 workspace-confined `CodingSession`，并把同名文件/shell/repo 工具委托过去；其他工具按窗口、感知、交互、系统、低延迟 batch、计划/终止、文件、记忆、桌面杂项拆到 mixin。
-- `execute_subgoal`、`run_action_batch` 和 `screen_watch` 在 `agent/fast_tools.py`，内部进入 `fast/controller.py`。`execute_subgoal` 不是第二个 agent，而是同一 `ToolSession` 下的 controller-first routine：LLM 给输入/点击/绘图/验证子目标，本地 controller 完成定位、输入、点击、选色、绘制、等待和 `evidence_packet`。绘图 routine 支持 `draws[]`，`AgentRunner` 会把相邻的简单 shape/color/region plan 项保守合并到一次 controller 调用，并能复用最近 controller 视觉证据避免重复绘制；纯颜色 verify 也可复用最近视觉颜色证据，避免为了确认颜色再 OCR 或重画。无额外 check 的简单绘图 plan 项和“确认画布/图形/颜色可见”项可被 verified `draws[]` 自动标记完成；若 plan 全部完成，当前 `execute_subgoal` 可返回 terminal done，但仍交给 done gate 看真实可见证据。若用户没要求保存图片，`complete_subgoal` 会忽略 plan 幻觉出的文件存在检查。controller 还会给 `draw_strokes/drag` 追加本地 `auto_visual_verify`；顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 也会被 `AgentRunner` 自动包装成单动作 batch，让普通 GUI 动作获得 screen sync、`needs_observe`、batch metrics 和 fast-controller trace。验证充分时结果会带 `fast_path_advice`，减少额外 LLM round-trip。
-- `.wps.json` 是 WinPilot trace 到离线重放的语义桥。新导出使用 `wps/2`，会收集顶层工具 replay 和 `run_action_batch` 子动作 replay；Replayer 负责文本 selector 重新定位、坐标回退和控制流执行。FlowScript 导入只发生在 `wpsToFlowScript.ts`，不代表 WinPilot 主 agent 直接理解或执行流程图。
-- `ToolSession.dispatch()` 会给普通可见动作附加廉价 `screen_delta` 和 `action_target` 元信息。它用于定位“画面是否变化、变化时 foreground 是否仍是目标窗口”，不是语义完成证明；done 仍要看截图、目标窗口感知或外部证据。
-- `launch` 的目标窗口会在发现后置前；`interaction_tools.py` 的输入动作优先使用 session target，而不是无条件使用当前 foreground；`action/verify.py` 在目标已知时会忽略无关 foreground，避免 Codex/日志/其他窗口 OCR 造成假成功。
-- `agent/perception_tools.py` 默认给 LLM compact perception reducer：screen stage、target window、top candidates、uncertainties、recent changes 和建议 controller action；完整 raw snapshot 仍写 trace，需要时用 `observe(full=true)`。UIA-off 绘图/画布任务上有 `canvas_fast_observe`：无 `query/full` 的 `observe` 跳过全窗口 OCR，直接提供 Win32/CV 和 `likely_canvas` 摘要；需要文字 grounding 时用 `observe(query=...)` 或 `observe(full=true)` 回到完整感知。
-- `perception/ocr.py` 的 RapidOCR 仍是懒加载引擎，但 `server.py` 在 FastAPI lifespan 中调用 `ocr.warm_async()` 后台预热，避免第一个真实 GUI 动作承担 OCR/DML 冷启动。`/api/status.ocr_provider` 可用于确认预热是否已经完成。
-- BUS/WebSocket 给前端显示进度；`recorder/trace.py` 写可回放事件和截图；`agent/loop.py` 的 LLM trace 写每步真实 prompt/response，失败复盘必须优先看这些证据。
-- 长期经验记忆在 `memory/experience.py`，落盘到本机 `experience_memory.json`，通过 `agent/memory_tools.py` 的 `remember/forget/reuse_skill` 暴露给 GUI agent。recipe 现在显式带 `conditions` 和 `evidence`，隐式 `reuse_skill` 只允许强任务匹配；普通匹配只进入 prompt 提示，不会自动 replay，也不会因为 run 成功而被记作成功复用。失败 replay 会被记录为该 recipe 的负反馈，即使后续实时操作兜底完成。
-- session memory 在 `agent/session.py`，只保存当前服务生命周期内最近任务，并且只对“再来/继续/刚才那个/previous/same/it”等指代型任务注入 prompt。普通新任务不带 session history。
-- world advisory 是 `perception/world.py`、`agent/run_state.py`、`agent/context_guidance.py` 的运行态提示层：它只报告重复动作、动作后无变化、screen watcher 变化、need_observe/recovering 等信号，不主动截图，不替代 done 证据。
-- 上下文折叠仍在 `agent/loop.py`：超过阈值后折叠旧大型工具结果，保留最近全量观察，并用 checkpoint 保存任务目标、关键屏幕状态、失败/恢复原因和最近工具证据。
+注意：
 
-## 最近结构调整
+- `agent_done` 只是运行结束事件，不等于真实任务成功。
+- GUI 成功要看 `done_check`、截图、文件/进程/窗口状态和工具 evidence。
+- replay 成功只代表脚本步骤执行完，仍需要当前证据通过 done gate。
+- `screen_delta.changed=true` 只说明像素变化，不单独证明业务目标完成。
 
-- `src/renderer/store/index.ts` 不再复制 defaults/templates/localStorage helper；这些真实来源在 `store/defaults.ts` 和 `store/persistence.ts`。
-- `agent/tool_schemas.py` 承担统一 Agent function schema，并在 Coding Runtime 激活时动态加入 repo 工具；GUI schema 会把 `execute_subgoal` 排在低级 `click/type_text` 之前，让 routine path 成为默认选项。`agent/runtime_profile.py` 决定每次 run 的 runtime 开关；`agent/tools.py` 保留运行态状态和 dispatch，并在 GUI mutation 前执行 `scope_guard`，避免焦点偏离目标窗口后继续乱点；`agent/window_tools.py`、`agent/perception_tools.py`、`agent/interaction_tools.py`、`agent/system_tools.py`、`agent/fast_tools.py`、`agent/plan_tools.py`、`agent/file_tools.py`、`agent/memory_tools.py`、`agent/desktop_tools.py` 分别承担窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆复用、桌面杂项工具。
-- `agent/fast_tools.py` 会在进入 `SubgoalExecutor` 前拒绝空 `execute_subgoal`：只有自然语言 `subgoal` 而没有 `input/click/draw/verify_texts` 时直接返回 blocked，不启动 controller/perception。这样模型偶尔把 `execute_subgoal` 误当 launch/discovery 工具时，不会额外截图、OCR 或污染当前前台窗口感知。
-- `agent/task_rules.py` 承担任务分类、GUI-only 限制、coding runtime 触发和 done gate guard 的纯规则；严格 GUI-only 且明确禁 shell 时，`tool_schemas.py` 不暴露 `run_shell/run_detached`、`search_files` 和通用文件读写/搜索工具；`agent/done_verifier.py` 承担 done 二次核验，并要求任务里的显著字面量 token（如 `FAST_WRAP_OK_073`、`75765`）在最终屏幕/工具证据中出现；`agent/context_guidance.py` 承担 planning/world/playbook 上下文提示；`agent/reflection.py` 承担反思检查点。
-- `winpilot/utils/image_capture.py` 统一窗口截图转 JPEG base64。
-- `python/engine/executor_types.py` 承担 legacy Flow/DSL executor 的共享状态、上下文和控制流异常，`executor.py` 继续作为 legacy 执行器维护。
-- `python/core/screenshot.py` 保留 `capture_screen()`，兼容旧 Robot Framework keywords。
-- 打包配置过滤 Python/runtime 的 pycache、测试、dist-info、运行数据；Electron 语言包限制为 `zh-CN` 和 `en-US`。
+## 低延迟 GUI
+
+当前已落地的方向：
+
+- **LLM 下子目标，controller 执行 routine**：`execute_subgoal` 在本地完成定位、输入、点击、等待、验证。
+- **批量动作**：`run_action_batch` 和自动 fast-wrap 减少 click/type 的 LLM round-trip。
+- **变化触发感知**：`screen_watch`、action ROI、`observe(changed_only=true)`、query fallback。
+- **只给 LLM 摘要**：`perception/reducer.py` 排序候选、疑点和建议动作；原始 snapshot 留 trace。
+- **通用输入定位**：`input_locator` 组合 UIA、OCR/CV 和 synthetic candidate，避免写单软件规则。
+- **窗口范围保护**：`scope_guard` 阻止 GUI mutation 跑到错误前台窗口。
+- **绘图/画布优化**：`draw/draws`、通用颜色面板 opener、颜色 evidence、绘图计划自动合并。
+- **schema 降噪**：strict GUI-only 绘图任务使用 `drawing_gui`，只减少模型可见 schema，不减少本地 controller 能力。
+
+仍然没有完成：
+
+- 常驻轻量视觉模型/YOLO 主循环。
+- 真正视觉伺服控制。
+- LLM 完全退出常规动作内环。
+- 完整低延迟 dashboard 和稳定 skill reuse 率。
+
+## 记忆、Replay 和 Skill
+
+| 层 | 文件 | 事实 |
+| --- | --- | --- |
+| 长期经验 | `memory/experience.py` | 本机 `experience_memory.json`，recipe/note 有 conditions/evidence |
+| Session memory | `agent/session.py` | 只处理“继续/刚才那个/再来一次”等指代 |
+| Skill reuse | `agent/memory_tools.py` | 强匹配成功 replay 才能 0-token 复用 |
+| Trace/replay | `recorder/trace.py` | `.wps.json` 是 WinPilot replay 源格式 |
+| Flow 导入 | `wpsToFlowScript.ts` | 保守导入，WinPilot-only 步骤保留为 payload |
+
+复用不是 done 证据。replay 成功后仍要观察当前屏幕/文件/进程/文本。
+
+## 模型与成本
+
+- 模型请求走 OpenAI-compatible chat completions。
+- `model_adapter.py` 负责 provider 推断、MiMo/Reasonix thinking 默认关闭、usage/cache/cost 归一化。
+- 只有 provider 有可信价格表时 UI 才显示真实成本；未知 provider 不显示假的 `¥0`。
+- 强 VLM 是兜底，不应进入每步主循环。默认 VLM 关闭。
+- 排查 token/cost 时看 `traces/<run_id>/NNN_llm_request.json` 的 `tools` 和 `messages` 大小。
 
 ## 维护重点
 
-- `agent/loop.py` 已拆出任务规则、done 核验、上下文提示和反思检查点，但仍承担 LLM 调用、工具循环和上下文折叠。
-- `agent/tools.py` 已拆出 schema、窗口、感知、输入动作、系统/启动、低延迟 batch、计划/终止、文件、记忆、桌面杂项工具；后续新增工具优先放入对应 mixin。
-- `python/engine/executor.py` 是旧 DSLExecutor，类型已拆到 `executor_types.py`；应冻结为 legacy 引擎，不继续扩张。
-- 回放/DSL 节点改动要同时检查 `.wps.json` schema、`wpsToFlowScript.ts`、前端 `store/executor.ts`、`python/engine/dsl_flow_converter.py` 和 `python/engine/executor.py`；WinPilot-only `.wps.json` 步骤在 FlowScript 中必须显式占位或 fail-fast，feature 桥接返回 `success: false` / `false` 也必须让节点失败，不能静默成功。
-
-## 2026-07-03 低延迟 GUI 链路
-
-```mermaid
-flowchart LR
-    llm["Main LLM<br/>任务理解/异常推理"] --> tools["ToolSession.dispatch"]
-    tools --> launch["launch/focus_window<br/>目标窗口保护"]
-    tools --> watcher["auto screen_watch<br/>cheap frame diff"]
-    watcher --> roi["recent/action changed ROI<br/>30s cache"]
-    roi --> observe["observe(changed_only=true)<br/>Win32/OCR/CV on ROI"]
-    tools --> batch["run_action_batch<br/>subgoal + fast controller"]
-    observe --> world["WorldModel bulletin"]
-    observe --> done["done_verifier<br/>fresh visible evidence"]
-```
-
-- `screen_watch` 是低成本变化检测层，不做语义理解；它保留 `recent_changed_regions` 和动作归因的 `action_changed_regions`，让 LLM 慢一拍调用 `observe(changed_only=true)` 时仍能只看局部。
-- `fusion.screen_watch_autostart=true` 时，ToolSession 在获得目标窗口或执行可见动作前自动启动 watcher，AgentRunner 结束时停止 watcher，避免每个任务都要求 LLM 手动启动。
-- 普通可见动作的 `screen_delta` 使用动作前/动作后独立截图 diff，不直接复用后台 watcher 的 `_prev`；这是为了避免连续采样线程在动作前后抢帧。动作 ROI 新鲜时，`observe(changed_only=true)` 优先 action ROI，再退回普通 recent ROI。
-- `observe(changed_only=true)` 只在最近/action ROI 上跑本地 Win32/OCR/CV；无 ROI 时明确 fallback 到普通 observe，方便 trace 排错。若同时传入 `query` 且 ROI snapshot 没有命中，会标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部 ROI 把模型带进假盲区。
-- `execute_subgoal` 接受 `input`、单个 `click`、有序 `clicks`、`draw` 和 `verify_texts`，结果会暴露 `actions_executed`、`controller_state`、`evidence_packet.matched_texts/missing_texts/candidate_click_labels`。绘图 routine 会用 `likely_canvas_bbox` 生成简单 shape strokes；若有 `draw.color`，会先用通用 `select_color` 打开颜色面板并点击目标色块，随后用 `matched_visual_colors/missing_visual_colors/visible_colors` 证明颜色是否真的出现在动作区域。`select_color` 只缓存同一 hwnd/window region 下打开颜色面板的按钮，不缓存色块；每次选色仍重新扫描 HSV 小色块，缓存 opener 失效时回退 OCR opener。它可用于输入+按钮 routine，也可用于“可见按钮 + 可验证状态”的 click-only routine；click-only 单状态验证优先走动作后的 `observe(changed_only=true, query=...)`，只理解变化 ROI，避免无条件全窗口 `read_text`。子目标只验证与该 subgoal/args 相关的 literal；全局完成条件仍交给 done gate，避免输入 routine 因后续状态还没出现而误报失败。锚点 label 失败时会把粗区域可见短文本作为 `candidate_click_labels` 返回给 LLM，要求改用语义相关的本地化/同义可见控件重试，而不是去 shell/源码里找 GUI 标签。`complete_subgoal` 可直接接受当前 `execute_subgoal:evidence_packet` 中匹配到的可见文本，避免 controller 已验证后又跑 full verify。`run_action_batch` 接受 `subgoal`，结果会暴露 `controller_state`、`metrics`、`element_cache`；`click_element` 结果会暴露 `anchor_locator` 和 `resolved_element`。element cache 复用时会用当前 snapshot 重新验证文本/角色/相对位置，不跨 observe 盲信旧 `elem_id`；如果当前 snapshot 漏掉文本锚点，controller 会做一次目标 `observe(query=label)` 并重试，证据写入 `controller_auto_observe`。
-- 普通顶层 GUI 动作现在也会走 fast-controller 单动作 batch：`click/type_text/hotkey/scroll/focus_window` 默认等待稳定，`draw_strokes/drag` 保持 `sync=false` 并做局部视觉摘要。`click(label=...)` 或 `type_text(label=..., text=...)` 这类语义动作会在 controller 内自动升级为 `click_element` / `type_into_element`，避免把语义锚点参数误交给原始坐标点击。
-- `/api/status` 返回 `runtime` 指纹，前端顶部显示 `runtime: branch@commit`，用于确认当前测试服务到底来自哪个 worktree、端口和 PID。严格 GUI-only、`GUI only` 或 `只用GUI` 的任务不会向模型暴露 shell schema，也不会暴露通用文件/搜索 schema；执行层仍保留 GUI-only guard 作为兜底。
-- `action/verify.py`、`perception/ocr.py`、plan subgoal 和 done gate 都会容忍 OCR 把 `_`、空格、连字符、冒号混淆，例如 `FAST_WRAP_OK_073` 可匹配 `FAST WRAP OK 073`。done gate 仍要求显著字面量 token 出现在最终证据中，不能把“功能等价”当完成。
-- batch 内部 `type_into_element` 会把定位、点击、可选清空和输入合成一个 controller 动作；结果用 `subresults` 展开内部 click/hotkey/type 阶段，避免把输入框任务拆回多轮 LLM。
-- 当 `execute_subgoal` 没有可用 snapshot 且点击锚点带 `expected_region` 时，会先在目标窗口的粗区域做 targeted initial OCR/CV。只有该 ROI 里真的识别到目标 label 才使用裁剪感知；否则回退全窗口 observe。targeted snapshot 的 `region` 仍是完整目标窗口，避免 screen watcher 和后续 ROI 换算被裁剪坐标污染。
-- `execute_subgoal` 聚焦目标 hwnd 后会丢弃 hwnd 不一致的旧 snapshot。这个保护主要防止上一轮前台窗口（例如 Codex 或日志窗口）的 reducer 摘要混入当前目标应用；纯绘图路径丢弃 stale snapshot 后仍可跳过初始 observe，直接由 controller 等待 ready canvas。
-- `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、`execute_subgoal` 调用/动作/验证数、controller phase、anchor click/cache/failure，batch `metrics.auto_observe_count` 记录 controller 内部为了定位元素主动做的目标 observe，`metrics.compound_round_trips_saved` 记录组合动作节省的低层 round-trip，`subgoal_elapsed_ms/subgoal_controller_elapsed_ms/subgoal_overhead_ms` 用于区分慢在 controller 内环还是前置 observe/包装开销，后续性能优化应优先看这些字段。VLM 只有 `count>0` 或 `ms>0` 才计入强视觉调用；未配置时的 0ms 占位不会算进 `vlm_call_count`。
-- URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
-- `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
-- 最新验证 run：`20260704-005515-7f70a7`。它通过 `/api/chat` 跑严格 GUI-only 网页靶场，工具序列为 `launch -> observe -> execute_subgoal(input+apply) -> execute_subgoal(counter) -> execute_subgoal(verify) -> done`，仅 11 个工具、1 次 observe、done 一次通过；截图 `batch_after_003.jpg` 显示输入框 `SUBGOAL_OK_078` 和状态卡 `LOCAL_COUNTER_2`。对照 run `20260704-002852-1e75a4` 暴露过子目标证据作用域错误：输入 routine 把后续 `LOCAL_COUNTER` 也当作当前 missing evidence，导致绕圈；现在子目标证据只绑定当前 routine。
-- 最新 click-only 验证 run：`20260704-014433-99e853`。它通过 `/api/chat` 跑“点击可见按钮直到 LOCAL_COUNTER 可见”，工具序列为 `launch -> complete_subgoal -> execute_subgoal(click+verify) -> complete_subgoal -> done`；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`，证明 click-only routine 也能进入 controller-first 内环。
-- changed-only click-only 验证 run：`20260704-020133-18f863`。`execute_subgoal` 内部动作为 `click_element -> wait_stable -> observe(changed_only=true, query=LOCAL_COUNTER)`，工具耗时约 5.9s，截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`。`20260704-020623-8f8903` 验证 `complete_subgoal` 已能用当前 controller evidence，计划核验耗时降到 1ms。
-- targeted initial ROI 验证 run：`20260704-022217-2eeead`。模型传入 `expected_region=left`，`execute_subgoal` 的 `subgoal_overhead_ms=327`，说明没有内部全窗口 prelude；截图 `batch_after_002.jpg` 显示 `LOCAL_COUNTER_1`。该 run 仍有一次模型主动 `observe(full=true)`，后续优化应继续压缩 LLM 的习惯性全量观察。
-- 本地化标签恢复验证 run：`20260704-031451-4d2852`。任务说英文 `Local Counter`，真实按钮是中文“只改局部状态”；第一次 `execute_subgoal` 在无 session hwnd 时用 foreground hwnd 做 targeted ROI，失败后返回候选标签和 controller recovery hint，第二次用中文可见标签点击并验证 `LOCAL_COUNTER_1`。该 run 的 tools schema 没有 `run_shell`，证明 `只用GUI` 已进入 strict GUI-only schema。
-- Paint 绘图/选色验证 run：`20260704-041425-bbbe11`。同一 `/api/chat` GUI-only 路径打开 Windows Paint，通过 1 次 `execute_subgoal.draw(shape=triangle,color=blue)` 完成蓝色三角形；截图 `batch_after_002.jpg` 显示真实蓝色三角形，`evidence_packet.matched_visual_colors=["blue"]`，动作区域 `visible_colors.blue.pixels=2937`。对照失败 run `20260704-035617-1d7d9c` 暴露过两个问题：标题栏彩色图标被误当色块、done gate 不识别 `execute_subgoal` 内嵌 draw；后续 `20260704-040400-df4388` 验证了修复可成功，`20260704-041425-bbbe11` 进一步验证 `select_color` 优先使用目标 hwnd 区域后可避免 stale snapshot 干扰并减少轮次。
-- Paint 多图形验证 run：`20260704-045155-a9dc21`。同一 GUI-only 路径、便宜模型 `mimo-v2.5`，从空白 Paint 画布完成左侧蓝色三角形和右侧红色矩形并 `done`。关键改动是绘图前等待 ready canvas，避免 `launch` 只看到 Paint 黑壳就开始选色；`draw.expected_region` 会把 shape 放到画布左/右子区域；`execute_subgoal` 会把 `matched_visual_colors` 写入 evidence ledger，`complete_subgoal` 能用视觉颜色证据完成计划项，planner 也会丢弃绘图目标里把“蓝色/红色”当文字 OCR 的错误 check。
-- 后续成本/步数回归 run：`20260704-053455-7b33d3`。同一任务在 `mimo-v2.5`、`max_steps=9` 下 8 个工具完成并截图核验，`prompt_tokens=92863`。架构上新增两条通用保护：verify-only `execute_subgoal` 必须已有目标 hwnd，否则返回 `needs_target_window=true` 并要求先 `launch/find_app/focus_window`；planner 会清理绘图/视觉确认项里的弱文本 app-title check，让这类任务使用 controller 颜色证据和 screenshot/nonvisual summary，而不是把 “Paint/画图” 文字当完成证据。
-- schema/计划成本回归 run：`20260704-055208-e16c54`。`execute_subgoal` schema 只压缩描述、不改字段，GUI-only tools JSON 从约 23516 字符降到约 21471；已有 todo 时模型不应仅为重述而 `revise_plan`；全部子目标完成时 `complete_subgoal` 可返回 `terminal="done"`，仍由 `AgentRunner` 的 done gate 最终确认。这轮同一 GUI-only Paint 任务在 `max_steps=8` 下完成，`cache_miss_tokens=5516`。
-- 绘图 guidance 压缩 run：`20260704-055941-d4c164`。绘图任务额外 guidance 从约 2814 字符压到约 873 字符，同一 GUI-only Paint 任务仍在 `mimo-v2.5`、`max_steps=8` 下完成；该 run 通过 `complete_subgoal(4)` 的 terminal done 收尾，`prompt_tokens=87619`、`cache_miss_tokens=5059`。
-- 严格 GUI-only schema/终止核验 run：`20260704-062419-8f48dc`。同一 Paint 多图形任务仍用 `mimo-v2.5`、`max_steps=8` 完成；strict tools schema 为 39 个工具、约 19709 字符，隐藏 `run_shell/run_detached/search_files/list_dir/read_file/write_file/search_text`。最终 `complete_subgoal(4)` terminal done 进入 done gate，`done_checks` 记录 controller 视觉颜色证据 `red, blue`，真实截图 `python/winpilot_home/traces/manual_screen_20260704_062508.jpg` 显示两个图形，`cache_miss_tokens=4401`。
-- plan tool history 压缩 run：`20260704-063415-fcd39d`。`complete_subgoal` 的原始工具结果继续完整写 trace，但 `_append_tool_result()` 写回 LLM history 时调用 `_compact_tool_evidence()`，只保留 completed_index、remaining_steps、next_unfinished 和简短 guidance；同一 Paint 任务仍完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_063504.jpg` 显示两个图形，`cache_miss_tokens=4233`。
-- 相邻绘图子目标合并/压缩证据 run：`20260704-073655-e7b108`。同一 Paint 多图形任务仍用 `mimo-v2.5`、`max_steps=8`；第一次 `execute_subgoal` 参数被扩展为 `draws=[blue triangle left, red rectangle right]`，整轮只有 1 次 `execute_subgoal`。压缩后的 tool evidence 仍保留 `draw_strokes`，done gate 通过 controller 视觉颜色证据 `red, blue`，真实截图 `python/winpilot_home/traces/manual_screen_20260704_073736.jpg` 显示左侧蓝色三角形和右侧红色矩形，`prompt_tokens=70113`、`cache_miss_tokens=3937`。
-- 绘图计划假文件检查 run：`20260704-075519-703ae4`。同一 Paint 多图形任务仍用 `mimo-v2.5`、`max_steps=8`，整轮 7 个工具、1 次 `execute_subgoal`，没有 shell、没有 File/Save As。真实截图 `python/winpilot_home/traces/manual_screen_20260704_075555.jpg` 显示左侧蓝色三角形和右侧红色矩形；done gate 通过 controller 颜色证据 `red, blue`，`prompt_tokens=59172`、`cache_miss_tokens=3428`。这轮验证了“视觉确认”不会被 plan 中凭空出现的 `file_exists` 检查劫持成保存文件流程。
-- 绘图视觉确认自动完成 run：`20260704-081006-61ccb2`。同一 Paint 多图形任务仍用 `mimo-v2.5`、`max_steps=8`，工具数降到 3，只有 `launch`、`complete_subgoal(1)`、`execute_subgoal(draws blue/red)`；`execute_subgoal` 自动完成绘图项和视觉确认项后返回 terminal done，done gate 仍通过 controller 颜色证据 `red, blue`。真实截图 `python/winpilot_home/traces/manual_screen_20260704_081043.jpg` 显示两个图形，`prompt_tokens=27253`、`cache_miss_tokens=1269`。
-- 颜色面板 opener 缓存 run：`20260704-082538-6ac6bd`。同一任务仍用 `mimo-v2.5`，真实截图 `python/winpilot_home/traces/manual_screen_20260704_082615.jpg` 显示两个图形；第二次 `select_color` 复用面板 opener 后内部耗时约 1604ms。该优化只减少 opener 定位成本，目标色块仍逐次扫描，避免跨面板状态盲点坐标。
-- 端到端清洁回归 run：`20260704-085111-80e560`。同一任务仍用 `mimo-v2.5`，真实截图 `python/winpilot_home/traces/manual_screen_20260704_085209.jpg` 显示两个图形；工具序列为 `launch -> complete_subgoal(1) -> execute_subgoal(draws blue/red, terminal done)`，没有空 routine、shell 或文件读写。`perception_reducer={}` 说明纯绘图路径没有继承旧 Codex snapshot，done gate 仍用 controller 颜色证据 `red, blue`。
-## 2026-07-04 low-cost GUI schema profile
-
-- Runtime architecture remains one `AgentRunner` with capabilities, not multiple user-facing agents. `agent.tool_profile=auto` is a per-run function-schema profile, not a dispatch/runtime split.
-- Auto profile currently switches strict GUI-only drawing/canvas tasks to `drawing_gui`; coding and normal desktop tasks keep the standard schema. This preserves broad capability while reducing fixed prompt cost on controller-first drawing runs.
-- `drawing_gui` filters the model-facing tool list to the GUI/controller core, compacts descriptions, and prunes `execute_subgoal` down to draw/draws/verify fields so it is not used as an app opener. Local `ToolSession` and fast controller implementations remain available behind the selected tools. Current local measurement: standard strict GUI schema about 39 tools / 19.9k JSON chars, drawing profile about 24 tools / 7.4-8.2k JSON chars depending on VLM/schema options.
-- Verified `launch` / `focus_window` results now participate in plan state: a pure open-window todo can be marked complete by the loop without an extra LLM `complete_subgoal` call. The guard refuses mixed open+draw/verify goals, keeping completion evidence honest.
+- 新能力优先拆模块，不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`。
+- 文档记录当前事实，不堆历史 run id；历史证据留在 trace/eval。
+- GUI-only 的真实验收必须走 `/api/chat`，并人工核对截图。
+- 不为特定软件硬编码规则。QQ、计算器、Paint 等只能作为测试场景。
+- 更新 Flow/DSL/replay 时同步测试 `recorder/trace.py`、`wpsToFlowScript.ts`、`python/engine/dsl_flow_converter.py`。

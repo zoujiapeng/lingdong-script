@@ -1,24 +1,22 @@
 # 灵动脚本 / Lingdong Script
 
-Windows 桌面自动化项目。当前项目由两条主线组成：
+Windows 桌面自动化项目。当前代码由两条主线组成：
 
 - **WinPilot desktop agent**：`python/winpilot_home/winpilot/`，负责用 LLM 操控真实 Windows 桌面。
-- **流程图/DSL 自动化系统**：`src/renderer/` + `python/engine/` + `python/features/`，负责可视化编排、传统自动化执行和外部集成。
+- **流程图 / DSL 自动化系统**：`src/renderer/`、`python/engine/`、`python/features/`，负责可视化编排、传统自动化执行和外部集成。
 
 两条主线刻意解耦。WinPilot 不直接使用 `python/features/` 的 `@feature` 注册表，也不直接理解流程图节点；成功的 agent trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 转成 FlowScript。
 
 ## 当前事实
 
-- 主线分支是 `master`；较大的实验/改造先在 `codex/*` 分支完成，验证后再合并回 `master`。不要把某个开发分支名当成架构事实。
-- Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。
-- WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
-- WinPilot 默认模型配置在 `python/winpilot_home/winpilot/config.py`，默认文本模型为 `deepseek-v4-flash`；provider/cache/usage/cost 真实机制见 `docs/model-providers.md`。
-- 感知默认启用 UIA、Win32、OCR、CV；VLM 默认关闭，但视觉模式可在 VLM 配置有效时参与辅助感知。
-- 用户始终面对一个 WinPilot Agent；`agent/router.py` 不再切换子 runner，所有任务都进入 `AgentRunner`。编程/仓库任务由 `RuntimeProfile` 在同一主循环内启用 Coding Runtime。
-- Agent 任务规则在 `agent/task_rules.py`，runtime 开关在 `agent/runtime_profile.py`，done 二次核验在 `agent/done_verifier.py`，planning/world/playbook 提示在 `agent/context_guidance.py`，反思检查点在 `agent/reflection.py`；`agent/loop.py` 负责唯一主循环和 LLM 编排。
-- 记忆系统分层很轻：`memory/experience.py` 管长期 recipe/note 和 `experience_memory.json`，`agent/session.py` 管本服务生命周期内的指代型 session memory，`context_guidance.py` 管 world/playbook 提示，`loop.py` 管超过阈值后的上下文折叠 checkpoint。`reuse_skill` 只能复用强匹配的已验证 replay，完成 replay 不等于任务 done；只有 replay 成功且最终 run 完成的 recipe 才会获得正反馈，失败 replay 后兜底完成不算成功复用。
-- 低延迟 GUI 路径已有 `execute_subgoal` controller-first routine（输入、单击、有序多击、click-only 验证、简单画布 `draw/draws` 绘图和通用色块选色）、`run_action_batch(subgoal=...)`、自动 `screen_watch`、动作 `screen_delta/action_target`、`observe(changed_only=true)` 的 recent/action ROI 与 query miss fallback、perception reducer、scope guard、`click_element` 目标 observe 重试、batch 内部 `type_into_element` 组合输入、UIA-off `input_locator`、锚点缓存复验和 `low_latency` / `fast_gui` trace summary 指标；顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 现在也会自动进入 fast controller 单动作 batch。严格 GUI-only/只用 GUI 的任务不会向模型暴露 shell 工具；`execute_subgoal` 锚点失败时会返回粗区域可见候选标签，帮助模型用本地化/同义控件重试。planner 会过滤“按钮标签本身当完成证据”的危险 check，并把“点击控件 + 验证状态文本”合并成一个 controller routine；绘图任务会把相邻的简单 shape/color 计划合并为一次 `draws[]` routine，`select_color` 会缓存颜色面板 opener 但每次重扫目标色块，无额外 check 的简单绘图项和纯视觉确认项可由 controller 证据自动标记完成，必要时让该轮 `execute_subgoal` 直接进入 terminal done（仍走 done gate）。若用户没有要求保存图片，`complete_subgoal` 会忽略绘图计划里凭空出现的 `file_exists` 检查，最终仍由可见颜色/截图证据进入 done gate。它还不是完整视觉伺服或“LLM 只处理异常”的成熟内环。
-- `config.json`、`traces/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
+- 主线分支是 `master`。大改造先在 `codex/*` 分支验证，再合并回 `master`。
+- 用户始终面对一个 WinPilot Agent。`agent/router.py` 只构建 `AgentRunner`；Coding、Computer Use、Terminal、Browser 等是同一 runner 下按任务启用的 Runtime/Capability。
+- 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
+- Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
+- 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
+- 感知默认组合 UIA、Win32、OCR、CV；VLM 默认关闭，只有在 `vlm` 配置有效时才作为辅助感知。
+- 低延迟 GUI 目前已落地 controller-first routine、批量动作、变化区域观察、perception reducer、scope guard、UIA-off input locator、绘图 `draw/draws`、视觉颜色证据、工具 schema profile 和 trace 指标。它仍不是完整视觉伺服，也不是“LLM 只处理异常”的最终形态。
+- `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 快速启动
 
@@ -27,7 +25,7 @@ npm install
 npm run dev
 ```
 
-WinPilot Agent 需要在前端 Agent 页面或 `python/winpilot_home/config.json` 中配置 OpenAI 兼容 API key。
+前端 Agent 页面会嵌入 WinPilot 原生 Web UI。API key 可在前端设置页或 `python/winpilot_home/config.json` 中配置。
 
 ## 常用验证
 
@@ -43,62 +41,54 @@ npm run build
 npm run clean
 ```
 
-`npm run clean:runtime` 会额外删除忽略的 `python-runtime/`。只有在不需要打包内置 Python 版本、且能重新准备 runtime 时使用。
+`npm run clean:runtime` 会额外删除忽略的 `python-runtime/`。只有确认可重新准备运行时环境时再使用。
 
-真实 GUI 评测走和前端相同的 `/api/chat` 路径：
+真实 GUI 评测应走和前端一致的 `/api/chat` 路径：
 
 ```bash
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
 ```
 
-报告输出到忽略目录 `python/winpilot_home/evals/`，trace 和截图仍在本机运行目录。
+报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。
 
-网页靶场可用于复现低延迟 GUI 局部变化链路：
+网页靶场用于复现输入、按钮、局部变化、弹窗、拖拽和画布任务：
 
 ```bash
 cd python/winpilot_home/eval_targets
 python -m http.server 8877 --bind 127.0.0.1
 ```
 
-然后让前端 Agent 或 `/api/chat` 打开 `http://127.0.0.1:8877/gui_agent_target.html`，测试 `execute_subgoal`、`run_action_batch`、`screen_watch`、`observe(changed_only=true)` 和 done gate 是否对得上真实截图。
-
-排查端口/工作区混淆时先看 `/api/status.runtime` 或前端顶部 `runtime` badge：它会显示当前服务的 repo root、branch、commit、dirty 状态、PID 和端口。严格 GUI-only 测试可写 `do not use shell`、`GUI only` 或 `只用GUI`，此时 schema 会隐藏 `run_shell/run_detached` 和通用文件/搜索工具，避免模型先绕去命令行或读文件。
-
-旧根目录测试需要额外路径：
-
-```powershell
-$env:PYTHONPATH='python'
-python -m pytest tests/test_vision.py tests/test_interfaces.py -q
-```
+然后让前端 Agent 或 `/api/chat` 打开 `http://127.0.0.1:8877/gui_agent_target.html`，用截图和 trace 核对真实行为。
 
 ## 目录边界
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/main/` | Electron 主进程、HTTP API、Python 子进程、WinPilot 服务启动 |
+| `src/main/` | Electron 主进程、HTTP API、Python 子进程、WinPilot 服务生命周期 |
 | `src/renderer/` | React 流程图编辑器、Agent iframe、录制导入 UI |
 | `python/winpilot_home/winpilot/` | 当前 WinPilot agent、感知、动作、录制、记忆、REST |
 | `python/agent/__main__.py` | Electron IPC 到 WinPilot 的适配器 |
-| `python/engine/` | 旧 FlowScript/DSL 执行引擎 |
-| `python/features/` | 旧 `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用 |
-| `python/core/` | 旧公共接口层，仍被部分 legacy 测试/工具引用 |
+| `python/engine/` | legacy FlowScript/DSL 执行引擎 |
+| `python/features/` | legacy `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用 |
+| `python/core/` | legacy 公共接口层，仍被部分测试/工具引用 |
+| `scripts/` | 开发、评测、清理脚本；运行输出写入忽略目录 |
 
 ## 文档
 
 - [CLAUDE.md](CLAUDE.md)：给 AI/开发者的最短接手说明。
 - [docs/README.md](docs/README.md)：文档索引。
-- [docs/architecture.md](docs/architecture.md)：当前架构和边界。
-- [docs/winpilot-agent.md](docs/winpilot-agent.md)：WinPilot agent 细节。
-- [docs/apis.md](docs/apis.md)：Electron HTTP API、WinPilot REST、IPC、MCP。
+- [docs/architecture.md](docs/architecture.md)：当前架构、状态机和边界。
+- [docs/winpilot-agent.md](docs/winpilot-agent.md)：WinPilot agent 运行机制和 trace 复盘方法。
+- [docs/model-providers.md](docs/model-providers.md)：模型 provider、cache、usage/cost。
 - [docs/replay-recording.md](docs/replay-recording.md)：trace、`.wps.json`、replay、导入流程图。
 - [docs/flow-editor.md](docs/flow-editor.md)：流程图/DSL/`@feature` 体系。
 
 ## 维护原则
 
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
-- 用户始终面对一个 Agent；Coding、Computer Use、Terminal、Browser 等是按任务自动组合的 Runtime/Capability。不要为了新专长默认拆独立子 agent，只有存在明确隔离、安全或生命周期边界时才引入独立 runner。
-- 不只看日志判定成功；GUI 任务必须用屏幕、文件、进程、窗口或 trace 证据验证。
-- 不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。legacy executor 共享类型在 `python/engine/executor_types.py`。
-- `release/`、`dist/`、`python-runtime/`、缓存和 pycache 是可再生成/本机产物，不当源码阅读。
+- 用户始终面对一个 Agent。新能力优先作为 Runtime/Capability/Skill 接入同一 runner；只有明确隔离、安全或生命周期边界时才引入独立 runner。
+- GUI 成功不能只看 agent 总结，必须用截图、文件、进程、窗口、trace 或工具证据验证。
+- 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
+- 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
 
 MIT
