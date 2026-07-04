@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import scheduler as agent_scheduler
 from .agent.loop import AgentRunner
 from .agent.router import build_runner
 from .agent.session import SESSION
@@ -68,7 +69,11 @@ def _warm_perception_dimensions() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     _warm_perception_dimensions()
-    yield
+    _start_scheduler_thread()
+    try:
+        yield
+    finally:
+        _stop_scheduler_thread()
 
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
@@ -119,11 +124,113 @@ class _RunState:
 
 
 STATE = _RunState()
+_SCHEDULER_STOP = threading.Event()
+_SCHEDULER_THREAD: threading.Thread | None = None
+
+
+def _scheduled_worker(runner: AgentRunner, schedule_id: str) -> None:
+    try:
+        result = runner.run()
+        SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
+        BUS.publish("session", action="append", count=len(SESSION.all()))
+        agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
+        BUS.publish(
+            "schedule",
+            action="finished",
+            schedule_id=schedule_id,
+            run_id=runner.run_id,
+            status=runner.status,
+            result=result,
+        )
+    except Exception as exc:
+        logger.exception("scheduled agent worker crashed")
+        runner.status = "error"
+        runner.result_text = f"Scheduled agent worker crashed: {exc}"
+        SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
+        agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
+        BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
+        BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
+        BUS.publish("session", action="append", count=len(SESSION.all()))
+    finally:
+        trace_mod.RECORDER.stop()
+
+
+def _try_start_scheduled(entry: dict[str, Any]) -> bool:
+    task = str(entry.get("task") or "").strip()
+    schedule_id = str(entry.get("id") or "")
+    if not task or not schedule_id:
+        return False
+    with STATE.lock:
+        if STATE.busy():
+            agent_scheduler.mark_skipped(schedule_id, "busy", defer_seconds=30.0)
+            BUS.publish("schedule", action="deferred", schedule_id=schedule_id, reason="busy")
+            return False
+        STATE.stop_event = threading.Event()
+        max_steps = entry.get("max_steps")
+        try:
+            max_steps_override = int(max_steps) if max_steps else None
+        except (TypeError, ValueError):
+            max_steps_override = None
+        runner = build_runner(
+            task,
+            stop_event=STATE.stop_event,
+            session_context=SESSION.recent(),
+            max_steps_override=max_steps_override,
+        )
+        STATE.runner = runner
+        trace_mod.RECORDER.start(runner.run_id)
+        agent_scheduler.mark_started(schedule_id, runner.run_id)
+        BUS.publish(
+            "schedule",
+            action="start",
+            schedule_id=schedule_id,
+            run_id=runner.run_id,
+            name=entry.get("name", ""),
+        )
+        BUS.publish("chat", run_id=runner.run_id, role="user", content=task)
+        STATE.thread = threading.Thread(
+            target=_scheduled_worker,
+            args=(runner, schedule_id),
+            daemon=True,
+            name="agent-schedule",
+        )
+        STATE.thread.start()
+    return True
+
+
+def _scheduler_loop() -> None:
+    agent_scheduler.reset_running_flags()
+    while not _SCHEDULER_STOP.wait(1.0):
+        for entry in agent_scheduler.due_tasks(limit=1):
+            _try_start_scheduled(entry)
+
+
+def _start_scheduler_thread() -> None:
+    global _SCHEDULER_THREAD
+    if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+        return
+    _SCHEDULER_STOP.clear()
+    _SCHEDULER_THREAD = threading.Thread(target=_scheduler_loop, daemon=True, name="agent-scheduler")
+    _SCHEDULER_THREAD.start()
+
+
+def _stop_scheduler_thread() -> None:
+    _SCHEDULER_STOP.set()
 
 
 # -------------------------------------------------------------------- models
 class ChatRequest(BaseModel):
     task: str
+    max_steps: int | None = None
+
+
+class AgentScheduleRequest(BaseModel):
+    task: str
+    name: str = ""
+    run_at: str = ""
+    delay_seconds: float | None = None
+    interval_seconds: float | None = None
+    enabled: bool = True
     max_steps: int | None = None
 
 
@@ -245,6 +352,39 @@ def status() -> dict[str, Any]:
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
     }
+
+
+@app.get("/api/agent-schedules")
+def agent_schedules(enabled_only: bool = False) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schedules": agent_scheduler.list_tasks(enabled_only=enabled_only),
+    }
+
+
+@app.post("/api/agent-schedules")
+def create_agent_schedule(req: AgentScheduleRequest) -> dict[str, Any]:
+    try:
+        entry = agent_scheduler.create_task(
+            req.task,
+            name=req.name,
+            run_at=req.run_at,
+            delay_seconds=req.delay_seconds,
+            interval_seconds=req.interval_seconds,
+            enabled=req.enabled,
+            max_steps=req.max_steps,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "schedule": entry}
+
+
+@app.delete("/api/agent-schedules/{schedule_id}")
+def cancel_agent_schedule(schedule_id: str) -> dict[str, Any]:
+    ok = agent_scheduler.cancel_task(schedule_id)
+    if not ok:
+        raise HTTPException(404, "schedule not found")
+    return {"ok": True, "id": schedule_id}
 
 
 @app.post("/api/elevate")

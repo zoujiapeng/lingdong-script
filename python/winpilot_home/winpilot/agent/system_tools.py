@@ -8,6 +8,7 @@ from pathlib import Path
 import win32gui
 
 from ..action import executor, shell, verify
+from .. import scheduler as agent_scheduler
 from ..perception import apps, search, tray, win32
 from ..utils.log import BUS
 from .tool_result import ToolResult
@@ -132,6 +133,30 @@ class SystemToolMixin:
             self._fmt(result),
             replay={"tool": "run_detached", "script": script, "name": name},
         )
+
+    def _t_schedule_task(self, args: dict) -> ToolResult:
+        try:
+            entry = agent_scheduler.create_task(
+                str(args.get("task") or ""),
+                name=str(args.get("name") or ""),
+                run_at=str(args.get("run_at") or ""),
+                delay_seconds=args.get("delay_seconds"),
+                interval_seconds=args.get("interval_seconds"),
+                enabled=bool(args.get("enabled", True)),
+                max_steps=int(args.get("max_steps")) if args.get("max_steps") else None,
+            )
+        except Exception as exc:
+            return ToolResult(f"schedule_task failed: {exc}")
+        return ToolResult(self._fmt({"ok": True, "schedule": entry}))
+
+    def _t_list_scheduled_tasks(self, args: dict) -> ToolResult:
+        items = agent_scheduler.list_tasks(enabled_only=bool(args.get("enabled_only", False)))
+        return ToolResult(self._fmt({"ok": True, "schedules": items, "count": len(items)}))
+
+    def _t_cancel_scheduled_task(self, args: dict) -> ToolResult:
+        schedule_id = str(args.get("id") or "")
+        ok = agent_scheduler.cancel_task(schedule_id)
+        return ToolResult(self._fmt({"ok": ok, "id": schedule_id}))
 
     def _t_undo_last(self, _args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)

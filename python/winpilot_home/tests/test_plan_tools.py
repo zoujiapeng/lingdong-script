@@ -180,3 +180,34 @@ def test_complete_subgoal_keeps_requested_drawing_file_check(monkeypatch):
     assert session.plan.steps[0]["done"] is False
     assert result.terminal is None
 
+
+def test_complete_subgoal_ignores_winpilot_schedule_windows_task_file_check(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(tools_mod, "verify", _false_verify())
+    session = ToolSession(
+        task=(
+            "Create a WinPilot scheduled task named Agent Scheduler E2E Smoke "
+            "to run one hour later"
+        )
+    )
+    session.hwnd = None
+    session.plan = planner.Plan([
+        {
+            "goal": "create WinPilot scheduled task Agent Scheduler E2E Smoke",
+            "check": {
+                "file_contains": {
+                    "path": r"C:\Windows\System32\Tasks\Agent Scheduler E2E Smoke",
+                    "text": "Agent Scheduler E2E Smoke",
+                }
+            },
+        }
+    ])
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is True
+    assert result.terminal == "done"
+

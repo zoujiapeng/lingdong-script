@@ -89,6 +89,39 @@ def _spurious_drawing_file_check(
         f"requested output path: {', '.join(paths)}",
     )
 
+
+def _spurious_agent_schedule_file_check(
+    task: str,
+    goal: str,
+    check: dict | None,
+) -> tuple[bool, str]:
+    """Ignore Windows Task Scheduler file checks for WinPilot schedules."""
+    paths = _file_check_paths(check)
+    if not paths:
+        return False, ""
+    text = f"{task}\n{goal}".casefold()
+    mentions_winpilot_schedule = (
+        ("winpilot" in text and ("schedule" in text or "计划任务" in text or "定时" in text))
+        or "schedule_task" in text
+        or "list_scheduled_tasks" in text
+        or "cancel_scheduled_task" in text
+        or "agent scheduled task" in text
+        or "scheduled agent" in text
+    )
+    if not mentions_winpilot_schedule:
+        return False, ""
+    invented_windows_paths = [
+        path for path in paths
+        if path.replace("/", "\\").casefold().startswith(r"c:\windows\system32\tasks")
+    ]
+    if not invented_windows_paths:
+        return False, ""
+    return (
+        True,
+        "ignored planner-invented Windows Task Scheduler file check for "
+        "a WinPilot internal scheduled task: " + ", ".join(invented_windows_paths),
+    )
+
 _COLOR_ALIASES = {
     "blue": {"blue", "蓝", "蓝色"},
     "red": {"red", "红", "红色"},
@@ -216,6 +249,12 @@ class PlanToolMixin:
             getattr(self, "task", ""),
             check_expect,
         )
+        if not ignored_file_check:
+            ignored_file_check, ignored_detail = _spurious_agent_schedule_file_check(
+                getattr(self, "task", ""),
+                goal,
+                check_expect,
+            )
         if ignored_file_check:
             BUS.publish("agent_plan", action="subgoal_check", index=index,
                         verified=True, detail=ignored_detail,

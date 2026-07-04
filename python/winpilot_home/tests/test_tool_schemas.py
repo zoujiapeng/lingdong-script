@@ -32,6 +32,18 @@ def test_execute_subgoal_schema_requires_concrete_routine_guidance():
     assert "input, click/clicks, draw/draws, or verify_texts" in description
 
 
+def test_schema_exposes_agent_schedules_without_shell():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    names = set(_names(tool_schemas(planning=True, coding_runtime=False, allow_shell=False)))
+
+    assert {
+        "schedule_task",
+        "list_scheduled_tasks",
+        "cancel_scheduled_task",
+    } <= names
+
+
 def test_strict_gui_schema_hides_file_tools_without_hiding_gui_tools():
     from winpilot.agent.tool_schemas import tool_schemas
 
