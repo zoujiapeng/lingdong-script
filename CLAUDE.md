@@ -128,3 +128,7 @@ npm run build
 - 已落地或有骨架：`run_action_batch`、batch `subgoal`、自动 `screen_watch`、动作独立 `screen_delta/action_target`、changed/action ROI observe、部分 world model、element cache 锚点复验、部分 skill replay、canvas fast observe、可见证据 done gate、低延迟 trace 指标。
 - 部分落地但仍不成熟：LLM 下子目标而非逐步点击、视觉锚点点击、状态机、预测式感知、指标体系。现在还没有真正做到“常规动作完全由 controller 内环处理，LLM 只管异常”；`click_element` 仍主要依赖 OCR/UIA/CV 元素和锚点文本/区域，不是真正轻量视觉模型。
 - 尚未真正完成：轻量 UI 视觉模型/YOLO 主循环、视觉伺服控制、跨任务稳定 skill 复用率、全量延迟 dashboard、强 VLM 只作兜底的成熟调度策略。
+
+### Memory Graph Note
+
+Long-term memory is now SQLite-backed (`memory.db`) through `winpilot/memory/store.py` plus retriever/packer/feedback/compiler modules. `experience.py` is a compatibility layer. Do not put dynamic memory back into the system prompt; use Memory Pack user messages. Current GUI/file/tool evidence always beats long-term memory.

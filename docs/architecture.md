@@ -135,3 +135,9 @@ flowchart LR
 - URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
 - `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。
 - 最新验证 run：`20260703-025138-dcf2c6`。它通过 `/api/chat` 跑 UIA-off 网页靶场，真实截图显示 `LOCAL_COUNTER_1`，changed-only observe 使用左侧状态卡 ROI 直接识别 `LOCAL COUNTER`，done gate 以 fresh screen evidence 通过。
+
+## Memory Graph Update
+
+WinPilot long-term memory now uses a SQLite Memory Graph / Memory Capsule layer. `memory/experience.py` remains the compatibility facade for old recipe-like APIs, while graph storage, migration, retrieval, packing, feedback, and run compilation live in `memory/store.py`, `migration.py`, `retriever.py`, `packer.py`, `feedback.py`, `compiler.py`, and `runtime.py`.
+
+Dynamic long-term memory is no longer embedded in the system prompt. `runtime.prepare_run_memory()` creates a short Memory Pack appended after the user task. Current GUI/file/tool evidence always wins over long-term memory. Replay success is only action evidence, not done evidence. See `docs/memory-graph.md` for schema, migration, feedback, and debugging details.
