@@ -38,6 +38,8 @@ server.py _RunState
 - tool result 压缩写回 LLM history，同时保留完整 trace。
 - done 二次核验和假成功防护。
 
+`agent/gui_plan_helpers.py` 放置与主循环无关的纯 helper：schema profile 选择、绘图计划解析、绘图视觉确认判断、纯打开窗口计划项判断。测试仍可从 `agent.loop` 导入这些旧 helper 名称，但新代码应优先从 helper 模块引用。
+
 ## ToolSession
 
 `agent/tools.py` 持有一次 run 的工具状态：
