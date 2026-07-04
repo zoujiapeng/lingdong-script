@@ -115,11 +115,20 @@ def test_if_false_without_else_is_ok_noop():
     assert r.executed == []
 
 
-def test_if_no_cond_takes_then():
+def test_if_no_cond_fails_instead_of_taking_then():
     r = FakeReplayer()
     step = {"tool": "ctrl.if", "then": [leaf("A")]}
+    assert rc.exec_if(r, step, "1") is False
+    assert r.executed == []
+    assert r.emitted_ctrl[0][3] is None
+
+
+def test_if_explicit_always_true_takes_then():
+    r = FakeReplayer()
+    step = {"tool": "ctrl.if", "cond": {"always": True}, "then": [leaf("A")]}
     assert rc.exec_if(r, step, "1") is True
     assert r.executed == ["A"]
+    assert r.cond_calls == []
 
 
 def test_if_propagates_branch_failure():

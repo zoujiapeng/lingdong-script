@@ -77,6 +77,8 @@ server.py _RunState
 - `coding_runtime`
 - `profile`
 
+GUI-only 任务默认不暴露 `search_files` / file tools；即使某些任务允许最终只读 `run_shell` 核验，也不能让模型用文件搜索/读写来准备或替代可见 GUI 操作。
+
 Profile：
 
 - `standard`：普通 desktop/coding 默认。

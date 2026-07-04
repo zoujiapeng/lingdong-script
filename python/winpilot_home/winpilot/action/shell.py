@@ -122,7 +122,8 @@ def _run_legacy_subprocess(command: str, shell: str = "powershell",
 
 
 def run(command: str, shell: str = "powershell",
-        timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None) -> dict:
+        timeout_s: float = _DEFAULT_TIMEOUT_S, cwd: str | None = None,
+        stop_event=None) -> dict:
     """Run a command, capture output, and kill the whole process tree on timeout."""
     if not shell_enabled():
         return {"ok": False, "error": "shell is disabled"}
@@ -153,7 +154,31 @@ def run(command: str, shell: str = "powershell",
             cwd=cwd,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        stdout_b, stderr_b = proc.communicate(timeout=timeout_s)
+        if stop_event is None:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout_s)
+        else:
+            deadline = time.monotonic() + float(timeout_s)
+            while True:
+                if stop_event.is_set():
+                    _kill_process_tree(proc.pid)
+                    try:
+                        stdout_b, stderr_b = proc.communicate(timeout=2)
+                    except Exception:
+                        stdout_b, stderr_b = b"", b""
+                    BUS.publish("action", action="shell_result", exit_code=None,
+                                ok=False, output_preview="stopped")
+                    return {"ok": False, "error": "command stopped",
+                            "stopped": True,
+                            "stdout": _truncate(_decode(stdout_b or b"", prefer)),
+                            "stderr": _truncate(_decode(stderr_b or b"", prefer))}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout_s)
+                try:
+                    stdout_b, stderr_b = proc.communicate(timeout=min(0.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except subprocess.TimeoutExpired:
         if proc is not None:
             _kill_process_tree(proc.pid)

@@ -168,8 +168,7 @@ def test_replayer_runs_detached_leaf(tmp_path, monkeypatch):
     assert calls == [("Start-Sleep 1", "demo")]
 
 
-def test_relocate_text_uses_window_anchor_even_without_preset_hwnd(monkeypatch):
-    monkeypatch.setattr(trace_mod.win32, "list_windows", lambda: [{"hwnd": 123}])
+def test_relocate_text_uses_existing_window_anchor(monkeypatch):
     monkeypatch.setattr(
         trace_mod.fusion,
         "observe",
@@ -179,6 +178,7 @@ def test_relocate_text_uses_window_anchor_even_without_preset_hwnd(monkeypatch):
     )
 
     r = trace_mod.Replayer()
+    r.hwnd = 123
     point = r._relocate({"tool": "click", "text": "OK", "coords": [1, 2]})
 
     assert point == (99, 88)

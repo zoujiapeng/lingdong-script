@@ -78,9 +78,13 @@ def _max_iters(step: dict) -> int:
 
 def exec_if(replayer: Any, step: dict, idx: str) -> bool:
     """``ctrl.if``: evaluate cond, run the ``then`` (or ``else``) sub-block."""
-    cond = step.get("cond") or {}
+    cond = step.get("cond")
+    if not isinstance(cond, dict) or not cond:
+        replayer._emit_ctrl(idx, "ctrl.if", False,
+                            detail={"error": "ctrl.if requires cond object"})
+        return False
     timeout_s = float(step.get("timeout_s", 6.0))
-    branch_taken = replayer._check_condition(cond, timeout_s) if cond else True
+    branch_taken = True if cond.get("always") is True else replayer._check_condition(cond, timeout_s)
     replayer._emit_ctrl(idx, "ctrl.if", branch_taken,
                         detail={"branch": "then" if branch_taken else "else"})
     block = step.get("then") if branch_taken else step.get("else")

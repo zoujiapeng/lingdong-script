@@ -13,6 +13,18 @@ import { wpsToFlowScript, WpsScript } from '../utils/wpsToFlowScript';
 interface TraceItem { run_id: string; task: string; status: string; steps: number }
 interface ScriptItem { file: string; name: string; task: string; steps: number }
 
+async function jsonOrThrow<T = any>(response: Response, label: string): Promise<T> {
+  const text = await response.text();
+  let data: any = {};
+  if (text) {
+    try { data = JSON.parse(text); } catch { data = { detail: text }; }
+  }
+  if (!response.ok) {
+    throw new Error(data?.detail || data?.error || `${label} failed (${response.status})`);
+  }
+  return data as T;
+}
+
 export function ReplayEditorView() {
   const loadScript = useStore((s) => s.loadScript);
   const setViewMode = useStore((s) => s.setViewMode);
@@ -85,7 +97,8 @@ export function ReplayEditorView() {
     if (!b) return;
     setBusy(true);
     try {
-      const res = await fetch(`${b}api/export/${encodeURIComponent(runId)}`, { method: 'POST' }).then((r) => r.json());
+      const res = await fetch(`${b}api/export/${encodeURIComponent(runId)}`, { method: 'POST' })
+        .then((r) => jsonOrThrow(r, 'export trace'));
       if (res?.script) {
         await refreshLists();
         await importScript(res.script);
@@ -102,12 +115,15 @@ export function ReplayEditorView() {
   const replayOriginal = useCallback(async (file: string) => {
     const b = await apiBase();
     if (!b) return;
+    setBusy(true);
     try {
       await fetch(`${b}api/replay`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ script: file }),
-      });
+      }).then((r) => jsonOrThrow(r, 'replay script'));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   }, [apiBase]);
 
@@ -116,7 +132,8 @@ export function ReplayEditorView() {
     if (!b) return;
     try {
       if (recording) {
-        const res = await fetch(`${b}api/human/stop`, { method: 'POST' }).then((r) => r.json());
+        const res = await fetch(`${b}api/human/stop`, { method: 'POST' })
+          .then((r) => jsonOrThrow(r, 'stop recording'));
         setRecording(false);
         await refreshLists();
         if (res?.file) await importScript(res.file);
@@ -124,7 +141,7 @@ export function ReplayEditorView() {
         const res = await fetch(`${b}api/human/start`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
         });
-        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || '无法开始录制'); }
+        await jsonOrThrow(res, 'start recording');
         setRecording(true);
       }
     } catch (e) {

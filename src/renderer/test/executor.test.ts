@@ -91,6 +91,36 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('fails WPS-only loop placeholders instead of browser-simulating control flow', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'loop',
+      type: 'loop',
+      x: 0,
+      y: 0,
+      params: {
+        loop_type: 'condition',
+        _requires_wps_replay: true,
+        _wps_tool: 'ctrl.loop',
+        _wps_loop_type: 'until',
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true };
+    });
+
+    expect(result.status).toBe('error');
+    expect(calls).toEqual([]);
+    expect(result.statuses).toContainEqual([
+      'loop',
+      'error',
+      'WinPilot control-flow step "ctrl.loop:until" must run through the original .wps.json Replayer',
+    ]);
+  });
+
   it('executes process_action through feature bridge instead of simulating success', async () => {
     const calls: Array<[string, any]> = [];
     const script = flowWith({
