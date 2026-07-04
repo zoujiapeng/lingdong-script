@@ -39,14 +39,17 @@ describe('wpsToFlowScript -> native FlowScript', () => {
 
     expect(P(nodeOf(s, 'click_text')).text).toBe('OK');
     expect(P(nodeOf(s, 'click_text')).offset_x).toBe(0);
+    expect(P(nodeOf(s, 'click_text'))._source_wps_replay).toBe(true);
     expect(P(nodeOf(s, 'input_text')).text).toBe('hi');
     expect(P(nodeOf(s, 'input_text')).x).toBe(12);
     expect(P(nodeOf(s, 'keyboard')).modifiers).toEqual(['ctrl']);
     expect(P(nodeOf(s, 'keyboard')).keys).toEqual(['s']);
     expect(P(nodeOf(s, 'launch_program')).target).toBe('notepad');
+    expect(P(nodeOf(s, 'launch_program'))._source_wps_replay).toBe(true);
     expect(P(nodeOf(s, 'wait')).duration).toBe(2);
     expect(P(nodeOf(s, 'tool_call')).feature_name).toBe('run_command');
     expect(P(nodeOf(s, 'tool_call')).params.command).toBe('echo hi');
+    expect(P(nodeOf(s, 'tool_call'))._source_wps_replay).toBe(true);
 
     expect(hasEdge(s, 'start', 'output', 'click_text')).toBe(true);
     expect(s.edges.every((e) => e.to_port === 'input')).toBe(true);
