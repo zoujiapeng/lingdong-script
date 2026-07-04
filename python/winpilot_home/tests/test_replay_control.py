@@ -164,6 +164,13 @@ def test_loop_while_runs_until_cond_false():
     assert r.executed == ["P", "P"]  # ran while true twice, stopped on false
 
 
+def test_loop_while_without_cond_aborts_instead_of_successful_noop():
+    r = FakeReplayer()
+    step = {"tool": "ctrl.loop", "loop_type": "while", "body": [leaf("P")]}
+    assert rc.exec_loop(r, step, "1") is False
+    assert r.executed == []
+
+
 def test_loop_until_runs_at_least_once_then_until_true():
     r = FakeReplayer(cond_results=[False, True])
     step = {"tool": "ctrl.loop", "loop_type": "until",
