@@ -1423,7 +1423,7 @@ def test_subgoal_uses_targeted_initial_roi_when_region_hint_matches(monkeypatch)
     assert [name for name, _args in calls] == ["focus_window", "click"]
 
 
-def test_subgoal_targeted_roi_no_label_match_returns_candidates_without_full_observe(monkeypatch):
+def test_subgoal_targeted_roi_no_label_match_retries_with_query_observe(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast import subgoal as subgoal_mod
     from winpilot.fast.controller import FastGuiController
@@ -1432,6 +1432,7 @@ def test_subgoal_targeted_roi_no_label_match_returns_candidates_without_full_obs
     from winpilot.utils.screenshot import Region
 
     calls = []
+    full_snapshot = None
 
     monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: Region(0, 0, 1000, 800))
     monkeypatch.setattr(subgoal_mod.win32, "_window_text", lambda hwnd: "Target")
@@ -1453,9 +1454,25 @@ def test_subgoal_targeted_roi_no_label_match_returns_candidates_without_full_obs
         snapshot = None
 
         def dispatch(self, name, args):
+            nonlocal full_snapshot
             calls.append((name, args))
             if name == "observe":
-                raise AssertionError("label-miss targeted ROI should not fall back to full observe")
+                if full_snapshot is None:
+                    from winpilot.perception.fusion import Snapshot
+
+                    full_snapshot = Snapshot(
+                        hwnd=1,
+                        title="Target",
+                        region=Region(0, 0, 1000, 800),
+                        elements=[
+                            UIElement(elem_id=1, source="ocr", role="button", text="Local Counter", cx=210, cy=200, left=155, top=188, width=110, height=24),
+                        ],
+                    )
+                self.snapshot = full_snapshot
+                return ToolResult("LOCAL_COUNTER")
+            if name == "click":
+                assert args["element_id"] == 1
+                return ToolResult('{"ok": true, "verified": false}')
             return ToolResult('{"ok": true}')
 
     session = Session()
@@ -1467,12 +1484,13 @@ def test_subgoal_targeted_roi_no_label_match_returns_candidates_without_full_obs
     })
     payload = json.loads(result.text)
 
-    assert payload["ok"] is False
-    assert payload["actions_executed"][0]["skip_auto_observe"] is True
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert "skip_auto_observe" not in payload["actions_executed"][0]
     assert payload["evidence_packet"]["prelude"][1]["action"] == "targeted_observe"
     assert payload["evidence_packet"]["prelude"][1]["label_matched"] is False
-    assert "只改局部状态" in payload["evidence_packet"]["candidate_click_labels"]
-    assert calls == [("focus_window", {"hwnd": 1})]
+    assert payload["evidence_packet"]["matched_texts"] == ["LOCAL_COUNTER"]
+    assert [name for name, _args in calls] == ["focus_window", "observe", "click", "observe"]
 
 
 def test_subgoal_anchor_failure_returns_visible_region_candidates():

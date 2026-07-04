@@ -625,7 +625,6 @@ class SubgoalExecutor:
             if targeted is not None:
                 self.session.snapshot = targeted
                 targeted_meta = targeted.dim_stats.get("targeted_initial", {})
-                skip_click_auto_observe = targeted_meta.get("label_matched") is False
                 prelude.append({
                     "action": "targeted_observe",
                     "ok": True,
