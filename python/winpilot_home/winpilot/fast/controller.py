@@ -404,11 +404,13 @@ class FastGuiController:
             cached = self._color_palette_button_cache.get(cache_key)
             if cached is not None:
                 x, y = cached
+                started = _now_ms()
                 click = self._dispatch("click", {"x": x, "y": y, "skip_screen_delta": True})
                 if not _failed(click):
                     return ToolResult(json.dumps({
                         "ok": True,
                         "cached": True,
+                        "elapsed_ms": max(0, _now_ms() - started),
                         "point": {"x": x, "y": y},
                         "click": _json_dict(click.text),
                         "preview": click.text[:240],
@@ -419,12 +421,16 @@ class FastGuiController:
             region.width,
             max(96, min(region.height, int(region.height * 0.36))),
         ).clamp_to_screen()
+        started = _now_ms()
         try:
+            ocr_started = _now_ms()
             elements = ocr.collect(toolbar)
+            ocr_ms = max(0, _now_ms() - ocr_started)
         except Exception as exc:
             return ToolResult(json.dumps({
                 "ok": False,
                 "error": f"color palette OCR failed: {exc}",
+                "elapsed_ms": max(0, _now_ms() - started),
             }, ensure_ascii=False))
         label_terms = {"colors", "colour", "color", "颜色", "色彩", "顏色"}
         candidates = []
@@ -438,6 +444,8 @@ class FastGuiController:
             return ToolResult(json.dumps({
                 "ok": False,
                 "error": "no visible Colors/颜色 toolbar label found",
+                "elapsed_ms": max(0, _now_ms() - started),
+                "ocr_ms": ocr_ms,
             }, ensure_ascii=False))
         candidates.sort(key=lambda element: int(getattr(element, "cy", 0) or 0))
         label = candidates[0]
@@ -451,6 +459,8 @@ class FastGuiController:
         return ToolResult(json.dumps({
             "ok": not _failed(click),
             "cached": False,
+            "elapsed_ms": max(0, _now_ms() - started),
+            "ocr_ms": ocr_ms,
             "point": {"x": x, "y": click_y},
             "click": _json_dict(click.text),
             "preview": click.text[:240],
@@ -480,9 +490,12 @@ class FastGuiController:
         cache_key = self._palette_cache_key(region)
         attempts: list[dict[str, Any]] = []
 
-        def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any]]:
+        def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any], int]:
+            started = _now_ms()
             image = self.capture_fn(region)
-            return self._palette_swatch_point(image, region, color), self._palette_component_summary(image)
+            point = self._palette_swatch_point(image, region, color)
+            summary = self._palette_component_summary(image)
+            return point, summary, max(0, _now_ms() - started)
 
         def scan_after_open(action: str) -> None:
             nonlocal point, summary
@@ -494,15 +507,25 @@ class FastGuiController:
                 else:
                     time.sleep(0.12)
                 try:
-                    point, summary = capture_palette_point()
-                    attempts.append({"action": action, "ok": point is not None, "summary": summary})
+                    point, summary, elapsed_ms = capture_palette_point()
+                    attempts.append({
+                        "action": action,
+                        "ok": point is not None,
+                        "summary": summary,
+                        "elapsed_ms": elapsed_ms,
+                    })
                 except Exception as exc:
                     attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
                     point = None
 
         try:
-            point, summary = capture_palette_point()
-            attempts.append({"action": "scan_color_palette", "ok": point is not None, "summary": summary})
+            point, summary, elapsed_ms = capture_palette_point()
+            attempts.append({
+                "action": "scan_color_palette",
+                "ok": point is not None,
+                "summary": summary,
+                "elapsed_ms": elapsed_ms,
+            })
         except Exception as exc:
             attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
             point = None
