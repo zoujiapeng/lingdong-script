@@ -48,6 +48,7 @@ _MUTATING_TOOLS = {
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
     "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
+    "coordinate_click_test",
 }
 _ACTION_SCREEN_DELTA_TOOLS = {
     "click",
@@ -61,6 +62,7 @@ _ACTION_SCREEN_DELTA_TOOLS = {
     "mouse_up",
     "move_mouse",
     "hold_key",
+    "coordinate_click_test",
 }
 
 

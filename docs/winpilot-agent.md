@@ -62,7 +62,7 @@ server.py _RunState
 | `plan_tools.py` | `revise_plan`銆乣complete_subgoal`銆乣done`銆乣fail` |
 | `file_tools.py` | `list_dir`銆乣read_file`銆乣write_file`銆乣search_text` |
 | `memory_tools.py` | `remember`銆乣forget`銆乣reuse_skill` |
-| `desktop_tools.py` | clipboard銆乵ouse low-level銆乻creenshot銆乨isplays銆乮nstalled apps |
+| `desktop_tools.py` | clipboard銆乵ouse low-level銆乻creenshot銆乨isplays銆乮nstalled apps銆乧oordinate diagnostics/click test |
 | `coding_tools.py` | workspace-confined repo file/shell/patch/GitHub tools |
 | `scheduler.py` | persistent internal AgentRunner schedules (`schedule_task`, `list_scheduled_tasks`, `cancel_scheduled_task`) |
 

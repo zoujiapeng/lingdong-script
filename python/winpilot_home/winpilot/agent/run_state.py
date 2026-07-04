@@ -29,6 +29,7 @@ ACTION_TOOLS = {
     "apply_patch",
     "run_action_batch",
     "execute_subgoal",
+    "coordinate_click_test",
 }
 OBSERVE_TOOLS = {
     "observe",
@@ -47,6 +48,7 @@ OBSERVE_TOOLS = {
     "github_search",
     "screenshot",
     "zoom",
+    "coordinate_diagnostics",
 }
 
 

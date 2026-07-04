@@ -44,6 +44,14 @@ def test_schema_exposes_agent_schedules_without_shell():
     } <= names
 
 
+def test_schema_exposes_coordinate_calibration_tools_without_shell():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    names = set(_names(tool_schemas(planning=True, coding_runtime=False, allow_shell=False)))
+
+    assert {"coordinate_diagnostics", "coordinate_click_test"} <= names
+
+
 def test_strict_gui_schema_hides_file_tools_without_hiding_gui_tools():
     from winpilot.agent.tool_schemas import tool_schemas
 
@@ -86,6 +94,8 @@ def test_lean_gui_profile_keeps_controller_tools_and_hides_unrelated_tools():
         "type_text",
         "draw_strokes",
         "screenshot",
+        "coordinate_diagnostics",
+        "coordinate_click_test",
         "done",
         "fail",
         "revise_plan",
