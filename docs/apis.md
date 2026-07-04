@@ -69,3 +69,20 @@
 | HTTP MCP | `src/main/api.ts` 的 `/mcp` | 通过 Electron HTTP API 暴露 |
 
 MCP 当前服务流程图/`@feature`/外部集成，不是 WinPilot GUI agent 的工具表。
+
+## Memory Graph APIs
+
+Legacy memory endpoints remain compatible:
+
+- `GET /api/memory` returns recipe-like `id/task/app/steps/uses/successes/provisional/manual/script/conditions/evidence` items.
+- `POST /api/memory`, `PUT /api/memory/{id}`, `DELETE /api/memory/{id}`, and `DELETE /api/memory` keep the old UI contract.
+
+Graph-native endpoints:
+
+- `POST /api/memory/search` returns compact graph search results with scores and reasons.
+- `GET /api/memory/{id}/lineage` returns the node and related graph edges.
+- `GET /api/memory/{id}/related` returns neighboring nodes/edges.
+- `POST /api/memory/{id}/retire` marks a memory retired.
+- `POST /api/memory/{id}/verify` records manual verification evidence and promotes confidence.
+
+Secrets such as API keys, config values, and environment variables should never be written into memory nodes.

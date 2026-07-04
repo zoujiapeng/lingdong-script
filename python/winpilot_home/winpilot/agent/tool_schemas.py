@@ -538,7 +538,14 @@ def tool_schemas(
             _tool("remember", "Store a user-requested long-term memory note with applicability/evidence.",
                   {
                       "note": _prop("string"),
+                      "kind": _prop("string", "fact, preference, rule, or summary."),
+                      "title": _prop("string", "Optional short title."),
                       "app": _prop("string", "Optional app name."),
+                      "anchors": {
+                          "type": "array",
+                          "items": {"type": "string"},
+                          "description": "Optional recall anchors.",
+                      },
                       "conditions": {
                           "type": "array",
                           "items": {"type": "string"},
@@ -550,10 +557,36 @@ def tool_schemas(
                           "description": "Optional evidence required before relying on this note.",
                       },
                   }, ["note"]),
-            _tool("forget", "Delete matching long-term memory notes by query.",
+            _tool("forget", "Retire matching long-term memory notes by query.",
                   {"query": _prop("string")}, ["query"]),
             _tool("reuse_skill", "Replay a matching previously successful workflow when appropriate.",
-                  {"task": _prop("string"), "recipe_id": _prop("string", "Optional recipe id.")}),
+                  {
+                      "task": _prop("string"),
+                      "memory_id": _prop("string", "Preferred memory id."),
+                      "recipe_id": _prop("string", "Legacy recipe id."),
+                  }),
+            _tool("memory_search", "Search long-term memory; returns compact matches.",
+                  {"query": _prop("string"), "limit": _prop("integer", "Default 8.")}, ["query"]),
+            _tool("memory_open", "Open one memory in summary/full/source/lineage mode.",
+                  {
+                      "memory_id": _prop("string"),
+                      "mode": _prop("string", "Default summary.", enum=["summary", "full", "source", "lineage"]),
+                  }, ["memory_id"]),
+            _tool("memory_update", "Edit one long-term memory.",
+                  {
+                      "memory_id": _prop("string"),
+                      "title": _prop("string"),
+                      "summary": _prop("string"),
+                      "body": _prop("string"),
+                      "status": _prop("string"),
+                      "confidence": _prop("number"),
+                      "conditions": {"type": "array", "items": {"type": "string"}},
+                      "evidence": {"type": "array", "items": {"type": "string"}},
+                      "anchors": {"type": "array", "items": {"type": "string"}},
+                      "supersedes": _prop("string", "Optional old memory id."),
+                  }, ["memory_id"]),
+            _tool("memory_retire", "Retire one long-term memory by id.",
+                  {"memory_id": _prop("string")}, ["memory_id"]),
         ])
 
     if vlm.is_configured():

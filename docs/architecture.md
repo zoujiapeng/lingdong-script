@@ -1,12 +1,12 @@
-# 当前架构
+# 褰撳墠鏋舵瀯
 
-本项目对用户呈现为一个 WinPilot Agent。内部由一个主 runner、多种 Runtime/Capability、低延迟 GUI controller、记忆/replay 系统和 legacy 流程图系统组成。
+鏈」鐩鐢ㄦ埛鍛堢幇涓轰竴涓?WinPilot Agent銆傚唴閮ㄧ敱涓€涓富 runner銆佸绉?Runtime/Capability銆佷綆寤惰繜 GUI controller銆佽蹇?replay 绯荤粺鍜?legacy 娴佺▼鍥剧郴缁熺粍鎴愩€?
 
-## 总览
+## 鎬昏
 
 ```mermaid
 flowchart LR
-  User["用户 / 前端 Agent 页面"] --> Electron["Electron 主进程"]
+  User["鐢ㄦ埛 / 鍓嶇 Agent 椤甸潰"] --> Electron["Electron 涓昏繘绋?]
   Electron --> WinPilot["WinPilot FastAPI\npython/winpilot_home/serve.py"]
   WinPilot --> Runner["AgentRunner\nagent/loop.py"]
   Runner --> Runtime["RuntimeProfile\nDesktop / Coding"]
@@ -18,43 +18,50 @@ flowchart LR
   Electron --> Flow["Flow editor / DSL\nsrc/renderer + python/engine"]
 ```
 
-## 两条主线
+Memory Graph note: long-term memory now uses the SQLite Memory Graph (`memory.db`).
+`memory/store.py`, `memory/runtime.py`, `memory/retriever.py`, `memory/packer.py`,
+`memory/feedback.py`, and `memory/compiler.py` hold the graph runtime; `memory/experience.py`
+is the compatibility facade for old recipe APIs. `experience_memory.json` is migration/compat
+data only, not the primary runtime store. See `docs/memory-graph.md`.
+
+
+## 涓ゆ潯涓荤嚎
 
 ### WinPilot desktop agent
 
-路径：`python/winpilot_home/winpilot/`
+璺緞锛歚python/winpilot_home/winpilot/`
 
-负责真实 Windows 桌面操作。核心约束：
+璐熻矗鐪熷疄 Windows 妗岄潰鎿嶄綔銆傛牳蹇冪害鏉燂細
 
-- 只有一个用户可见 Agent。
-- 所有任务进入 `agent/router.py -> AgentRunner`。
-- GUI/Computer Use 是默认能力；Coding、Shell、File、Browser、Replay 是按任务和配置启用的 capability。
-- done 前必须经过真实证据核验，不能只信模型总结。
+- 鍙湁涓€涓敤鎴峰彲瑙?Agent銆?
+- 鎵€鏈変换鍔¤繘鍏?`agent/router.py -> AgentRunner`銆?
+- GUI/Computer Use 鏄粯璁よ兘鍔涳紱Coding銆丼hell銆丗ile銆丅rowser銆丷eplay 鏄寜浠诲姟鍜岄厤缃惎鐢ㄧ殑 capability銆?
+- done 鍓嶅繀椤荤粡杩囩湡瀹炶瘉鎹牳楠岋紝涓嶈兘鍙俊妯″瀷鎬荤粨銆?
 
-### 流程图 / DSL 自动化
+### 娴佺▼鍥?/ DSL 鑷姩鍖?
 
-路径：`src/renderer/`、`python/engine/`、`python/features/`
+璺緞锛歚src/renderer/`銆乣python/engine/`銆乣python/features/`
 
-负责可视化编排和 legacy 自动化。它和 WinPilot 的关系是桥接，不是共享工具池：
+璐熻矗鍙鍖栫紪鎺掑拰 legacy 鑷姩鍖栥€傚畠鍜?WinPilot 鐨勫叧绯绘槸妗ユ帴锛屼笉鏄叡浜伐鍏锋睜锛?
 
-- FlowScript 是前端画布 JSON。
-- `python/engine/` 是 legacy DSL/Flow 执行引擎。
-- `python/features/` 是 `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用。
-- WinPilot 成功 trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 保守导入 FlowScript。
+- FlowScript 鏄墠绔敾甯?JSON銆?
+- `python/engine/` 鏄?legacy DSL/Flow 鎵ц寮曟搸銆?
+- `python/features/` 鏄?`@feature` 娉ㄥ唽琛紝渚涙祦绋嬪浘/MCP/HTTP/CLI 浣跨敤銆?
+- WinPilot 鎴愬姛 trace 鍙互瀵煎嚭 `.wps.json`锛屽啀鐢?`src/renderer/utils/wpsToFlowScript.ts` 淇濆畧瀵煎叆 FlowScript銆?
 
-## 进程和端口
+## 杩涚▼鍜岀鍙?
 
-| 进程/服务 | 入口 | 说明 |
+| 杩涚▼/鏈嶅姟 | 鍏ュ彛 | 璇存槑 |
 | --- | --- | --- |
-| Electron HTTP API | `src/main/api.ts` | 默认 `127.0.0.1:7880`，供外部控制前端和查询状态 |
-| WinPilot FastAPI | `python/winpilot_home/serve.py` | 由 Electron 托管或手动启动；不要直接跑 uvicorn |
-| WinPilot Web UI | `python/winpilot_home/winpilot/webui/` | 前端 Agent 页面通过 iframe 使用 |
-| Legacy IPC agent | `python/agent/__main__.py` | Electron stdin/stdout JSON-line 到 WinPilot BUS 的适配器 |
-| GUI eval script | `scripts/gui_eval_run.py` | 走同一个 `/api/chat` 路径，写 compact eval 报告 |
+| Electron HTTP API | `src/main/api.ts` | 榛樿 `127.0.0.1:7880`锛屼緵澶栭儴鎺у埗鍓嶇鍜屾煡璇㈢姸鎬?|
+| WinPilot FastAPI | `python/winpilot_home/serve.py` | 鐢?Electron 鎵樼鎴栨墜鍔ㄥ惎鍔紱涓嶈鐩存帴璺?uvicorn |
+| WinPilot Web UI | `python/winpilot_home/winpilot/webui/` | 鍓嶇 Agent 椤甸潰閫氳繃 iframe 浣跨敤 |
+| Legacy IPC agent | `python/agent/__main__.py` | Electron stdin/stdout JSON-line 鍒?WinPilot BUS 鐨勯€傞厤鍣?|
+| GUI eval script | `scripts/gui_eval_run.py` | 璧板悓涓€涓?`/api/chat` 璺緞锛屽啓 compact eval 鎶ュ憡 |
 
-`/api/status.runtime` 会返回 repo root、branch、commit、dirty、PID、port。排查多 worktree 或旧服务时先看它。
+`/api/status.runtime` 浼氳繑鍥?repo root銆乥ranch銆乧ommit銆乨irty銆丳ID銆乸ort銆傛帓鏌ュ worktree 鎴栨棫鏈嶅姟鏃跺厛鐪嬪畠銆?
 
-## Agent 内部
+## Agent 鍐呴儴
 
 ```mermaid
 flowchart TD
@@ -74,28 +81,28 @@ flowchart TD
   Trace --> Done["done_verifier.py"]
 ```
 
-关键文件：
+鍏抽敭鏂囦欢锛?
 
-| 文件 | 职责 |
+| 鏂囦欢 | 鑱岃矗 |
 | --- | --- |
-| `agent/loop.py` | LLM 主循环、上下文折叠、工具调用、usage、done gate 编排 |
-| `agent/runtime_profile.py` | 判断本次 run 是否启用 Coding Runtime、workspace、max steps |
-| `agent/task_rules.py` | GUI-only、coding task、可见 literal、done gate 辅助规则 |
-| `agent/gui_plan_helpers.py` | GUI schema profile、绘图计划解析、纯打开窗口计划判断等无状态 helper |
-| `agent/tool_schemas.py` | function-calling schema、allow flags、`standard/lean_gui/drawing_gui` profile |
-| `agent/tools.py` | `ToolSession` 状态、dispatch、目标 hwnd、world、undo stack |
-| `agent/*_tools.py` | 具体工具 mixin |
-| `agent/done_verifier.py` | 防假成功核验 |
-| `fast/subgoal.py` | controller-first routine：输入、点击、绘图、等待、验证 |
-| `fast/controller.py` | 本地低延迟动作执行和 fast metrics |
-| `perception/fusion.py` | UIA/Win32/OCR/CV/VLM snapshot 融合 |
-| `perception/reducer.py` | 给 LLM 的 compact 感知摘要 |
-| `recorder/trace.py` | trace、`.wps.json`、replay |
-| `model_adapter.py` | provider、thinking 默认、usage/cache/cost 归一化 |
+| `agent/loop.py` | LLM 涓诲惊鐜€佷笂涓嬫枃鎶樺彔銆佸伐鍏疯皟鐢ㄣ€乽sage銆乨one gate 缂栨帓 |
+| `agent/runtime_profile.py` | 鍒ゆ柇鏈 run 鏄惁鍚敤 Coding Runtime銆亀orkspace銆乵ax steps |
+| `agent/task_rules.py` | GUI-only銆乧oding task銆佸彲瑙?literal銆乨one gate 杈呭姪瑙勫垯 |
+| `agent/gui_plan_helpers.py` | GUI schema profile銆佺粯鍥捐鍒掕В鏋愩€佺函鎵撳紑绐楀彛璁″垝鍒ゆ柇绛夋棤鐘舵€?helper |
+| `agent/tool_schemas.py` | function-calling schema銆乤llow flags銆乣standard/lean_gui/drawing_gui` profile |
+| `agent/tools.py` | `ToolSession` 鐘舵€併€乨ispatch銆佺洰鏍?hwnd銆亀orld銆乽ndo stack |
+| `agent/*_tools.py` | 鍏蜂綋宸ュ叿 mixin |
+| `agent/done_verifier.py` | 闃插亣鎴愬姛鏍搁獙 |
+| `fast/subgoal.py` | controller-first routine锛氳緭鍏ャ€佺偣鍑汇€佺粯鍥俱€佺瓑寰呫€侀獙璇?|
+| `fast/controller.py` | 鏈湴浣庡欢杩熷姩浣滄墽琛屽拰 fast metrics |
+| `perception/fusion.py` | UIA/Win32/OCR/CV/VLM snapshot 铻嶅悎 |
+| `perception/reducer.py` | 缁?LLM 鐨?compact 鎰熺煡鎽樿 |
+| `recorder/trace.py` | trace銆乣.wps.json`銆乺eplay |
+| `model_adapter.py` | provider銆乼hinking 榛樿銆乽sage/cache/cost 褰掍竴鍖?|
 
-## 运行状态机
+## 杩愯鐘舵€佹満
 
-一次任务的状态流：
+涓€娆′换鍔＄殑鐘舵€佹祦锛?
 
 ```text
 queued
@@ -107,57 +114,57 @@ queued
   -> done / fail / reply / stopped / error
 ```
 
-注意：
+娉ㄦ剰锛?
 
-- `agent_done` 只是运行结束事件，不等于真实任务成功。
-- GUI 成功要看 `done_check`、截图、文件/进程/窗口状态和工具 evidence。
-- replay 成功只代表脚本步骤执行完，仍需要当前证据通过 done gate。
-- `screen_delta.changed=true` 只说明像素变化，不单独证明业务目标完成。
+- `agent_done` 鍙槸杩愯缁撴潫浜嬩欢锛屼笉绛変簬鐪熷疄浠诲姟鎴愬姛銆?
+- GUI 鎴愬姛瑕佺湅 `done_check`銆佹埅鍥俱€佹枃浠?杩涚▼/绐楀彛鐘舵€佸拰宸ュ叿 evidence銆?
+- replay 鎴愬姛鍙唬琛ㄨ剼鏈楠ゆ墽琛屽畬锛屼粛闇€瑕佸綋鍓嶈瘉鎹€氳繃 done gate銆?
+- `screen_delta.changed=true` 鍙鏄庡儚绱犲彉鍖栵紝涓嶅崟鐙瘉鏄庝笟鍔＄洰鏍囧畬鎴愩€?
 
-## 低延迟 GUI
+## 浣庡欢杩?GUI
 
-当前已落地的方向：
+褰撳墠宸茶惤鍦扮殑鏂瑰悜锛?
 
-- **LLM 下子目标，controller 执行 routine**：`execute_subgoal` 在本地完成定位、输入、点击、等待、验证。
-- **批量动作**：`run_action_batch` 和自动 fast-wrap 减少 click/type 的 LLM round-trip。
-- **变化触发感知**：`screen_watch`、action ROI、`observe(changed_only=true)`、query fallback。
-- **只给 LLM 摘要**：`perception/reducer.py` 排序候选、疑点和建议动作；原始 snapshot 留 trace。
-- **通用输入定位**：`input_locator` 组合 UIA、OCR/CV 和 synthetic candidate，避免写单软件规则。
-- **窗口范围保护**：`scope_guard` 阻止 GUI mutation 跑到错误前台窗口。
-- **绘图/画布优化**：`draw/draws`、通用颜色面板 opener、颜色 evidence、绘图计划自动合并。
-- **schema 降噪**：strict GUI-only 绘图任务使用 `drawing_gui`，只减少模型可见 schema，不减少本地 controller 能力。
+- **LLM 涓嬪瓙鐩爣锛宑ontroller 鎵ц routine**锛歚execute_subgoal` 鍦ㄦ湰鍦板畬鎴愬畾浣嶃€佽緭鍏ャ€佺偣鍑汇€佺瓑寰呫€侀獙璇併€?
+- **鎵归噺鍔ㄤ綔**锛歚run_action_batch` 鍜岃嚜鍔?fast-wrap 鍑忓皯 click/type 鐨?LLM round-trip銆?
+- **鍙樺寲瑙﹀彂鎰熺煡**锛歚screen_watch`銆乤ction ROI銆乣observe(changed_only=true)`銆乹uery fallback銆?
+- **鍙粰 LLM 鎽樿**锛歚perception/reducer.py` 鎺掑簭鍊欓€夈€佺枒鐐瑰拰寤鸿鍔ㄤ綔锛涘師濮?snapshot 鐣?trace銆?
+- **閫氱敤杈撳叆瀹氫綅**锛歚input_locator` 缁勫悎 UIA銆丱CR/CV 鍜?synthetic candidate锛岄伩鍏嶅啓鍗曡蒋浠惰鍒欍€?
+- **绐楀彛鑼冨洿淇濇姢**锛歚scope_guard` 闃绘 GUI mutation 璺戝埌閿欒鍓嶅彴绐楀彛銆?
+- **缁樺浘/鐢诲竷浼樺寲**锛歚draw/draws`銆侀€氱敤棰滆壊闈㈡澘 opener銆侀鑹?evidence銆佺粯鍥捐鍒掕嚜鍔ㄥ悎骞躲€?
+- **schema 闄嶅櫔**锛歴trict GUI-only 缁樺浘浠诲姟浣跨敤 `drawing_gui`锛屽彧鍑忓皯妯″瀷鍙 schema锛屼笉鍑忓皯鏈湴 controller 鑳藉姏銆?
 
-仍然没有完成：
+浠嶇劧娌℃湁瀹屾垚锛?
 
-- 常驻轻量视觉模型/YOLO 主循环。
-- 真正视觉伺服控制。
-- LLM 完全退出常规动作内环。
-- 完整低延迟 dashboard 和稳定 skill reuse 率。
+- 甯搁┗杞婚噺瑙嗚妯″瀷/YOLO 涓诲惊鐜€?
+- 鐪熸瑙嗚浼烘湇鎺у埗銆?
+- LLM 瀹屽叏閫€鍑哄父瑙勫姩浣滃唴鐜€?
+- 瀹屾暣浣庡欢杩?dashboard 鍜岀ǔ瀹?skill reuse 鐜囥€?
 
-## 记忆、Replay 和 Skill
+## 璁板繂銆丷eplay 鍜?Skill
 
-| 层 | 文件 | 事实 |
+| 灞?| 鏂囦欢 | 浜嬪疄 |
 | --- | --- | --- |
-| 长期经验 | `memory/experience.py` | 本机 `experience_memory.json`，recipe/note 有 conditions/evidence |
-| Session memory | `agent/session.py` | 只处理“继续/刚才那个/再来一次”等指代 |
-| Skill reuse | `agent/memory_tools.py` | 强匹配成功 replay 才能 0-token 复用 |
-| Trace/replay | `recorder/trace.py` | `.wps.json` 是 WinPilot replay 源格式 |
-| Flow 导入 | `wpsToFlowScript.ts` | 保守导入，WinPilot-only 步骤保留为 payload |
+| 闀挎湡缁忛獙 | `memory/experience.py` | 鏈満 `experience_memory.json`锛宺ecipe/note 鏈?conditions/evidence |
+| Session memory | `agent/session.py` | 鍙鐞嗏€滅户缁?鍒氭墠閭ｄ釜/鍐嶆潵涓€娆♀€濈瓑鎸囦唬 |
+| Skill reuse | `agent/memory_tools.py` | 寮哄尮閰嶆垚鍔?replay 鎵嶈兘 0-token 澶嶇敤 |
+| Trace/replay | `recorder/trace.py` | `.wps.json` 鏄?WinPilot replay 婧愭牸寮?|
+| Flow 瀵煎叆 | `wpsToFlowScript.ts` | 淇濆畧瀵煎叆锛學inPilot-only 姝ラ淇濈暀涓?payload |
 
-复用不是 done 证据。replay 成功后仍要观察当前屏幕/文件/进程/文本。
+澶嶇敤涓嶆槸 done 璇佹嵁銆俽eplay 鎴愬姛鍚庝粛瑕佽瀵熷綋鍓嶅睆骞?鏂囦欢/杩涚▼/鏂囨湰銆?
 
-## 模型与成本
+## 妯″瀷涓庢垚鏈?
 
-- 模型请求走 OpenAI-compatible chat completions。
-- `model_adapter.py` 负责 provider 推断、MiMo/Reasonix thinking 默认关闭、usage/cache/cost 归一化。
-- 只有 provider 有可信价格表时 UI 才显示真实成本；未知 provider 不显示假的 `¥0`。
-- 强 VLM 是兜底，不应进入每步主循环。默认 VLM 关闭。
-- 排查 token/cost 时看 `traces/<run_id>/NNN_llm_request.json` 的 `tools` 和 `messages` 大小。
+- 妯″瀷璇锋眰璧?OpenAI-compatible chat completions銆?
+- `model_adapter.py` 璐熻矗 provider 鎺ㄦ柇銆丮iMo/Reasonix thinking 榛樿鍏抽棴銆乽sage/cache/cost 褰掍竴鍖栥€?
+- 鍙湁 provider 鏈夊彲淇′环鏍艰〃鏃?UI 鎵嶆樉绀虹湡瀹炴垚鏈紱鏈煡 provider 涓嶆樉绀哄亣鐨?`楼0`銆?
+- 寮?VLM 鏄厹搴曪紝涓嶅簲杩涘叆姣忔涓诲惊鐜€傞粯璁?VLM 鍏抽棴銆?
+- 鎺掓煡 token/cost 鏃剁湅 `traces/<run_id>/NNN_llm_request.json` 鐨?`tools` 鍜?`messages` 澶у皬銆?
 
-## 维护重点
+## 缁存姢閲嶇偣
 
-- 新能力优先拆模块，不继续扩大 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`。
-- 文档记录当前事实，不堆历史 run id；历史证据留在 trace/eval。
-- GUI-only 的真实验收必须走 `/api/chat`，并人工核对截图。
-- 不为特定软件硬编码规则。QQ、计算器、Paint 等只能作为测试场景。
-- 更新 Flow/DSL/replay 时同步测试 `recorder/trace.py`、`wpsToFlowScript.ts`、`python/engine/dsl_flow_converter.py`。
+- 鏂拌兘鍔涗紭鍏堟媶妯″潡锛屼笉缁х画鎵╁ぇ `agent/loop.py`銆乣agent/tools.py`銆乣python/engine/executor.py`銆?
+- 鏂囨。璁板綍褰撳墠浜嬪疄锛屼笉鍫嗗巻鍙?run id锛涘巻鍙茶瘉鎹暀鍦?trace/eval銆?
+- GUI-only 鐨勭湡瀹為獙鏀跺繀椤昏蛋 `/api/chat`锛屽苟浜哄伐鏍稿鎴浘銆?
+- 涓嶄负鐗瑰畾杞欢纭紪鐮佽鍒欍€俀Q銆佽绠楀櫒銆丳aint 绛夊彧鑳戒綔涓烘祴璇曞満鏅€?
+- 鏇存柊 Flow/DSL/replay 鏃跺悓姝ユ祴璇?`recorder/trace.py`銆乣wpsToFlowScript.ts`銆乣python/engine/dsl_flow_converter.py`銆?

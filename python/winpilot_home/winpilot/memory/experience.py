@@ -1,45 +1,61 @@
-"""Experience memory: task recipes with ids, scoring, and CRUD.
+"""Compatibility layer over the SQLite Memory Graph.
 
-Hardening (Phase 2-E/F):
-- every recipe has a stable ``id`` → single-item CRUD via API/UI/agent tools
-- ``provisional`` flag: a recipe recorded from a run whose actions were never
-  externally verified is marked unverified and rendered with a warning
-- score tracking: when injected recipes lead to success/failure the counters
-  update; recipes that keep failing are evicted (bad experience must not
-  poison future runs)
-- steps are intent-level strings (built in loop._record_step from replay
-  metadata) instead of raw coordinate-bound tool calls
-
-Stored as a small JSON file — human-editable, easy to clear.
+The old public API returned recipe-like dicts backed by
+experience_memory.json. Those function names remain stable while storage,
+retrieval, migration, and feedback are delegated to memory/* modules.
 """
 from __future__ import annotations
 
-import json
-import os
 import re
-import threading
 import time
-import uuid
+from pathlib import Path
+from typing import Any
 
-from ..config import CONFIG, MEMORY_PATH
-from ..utils.log import logger
+from .. import config
+from . import feedback as feedback_mod
+from .migration import migrate_json_if_needed
+from .retriever import is_volatile_state_task, strong_match, top_reusable_skill
+from .runtime import prepare_run_memory
+from .store import MemoryStore
+from .types import ACTION_KINDS, FACTUAL_KINDS
 
+CONFIG = config.CONFIG
+MEMORY_PATH = config.MEMORY_PATH
+MEMORY_DB_PATH = config.MEMORY_DB_PATH
+
+_DEFAULT_MEMORY_PATH = config.ROOT_DIR / "experience_memory.json"
+_DEFAULT_MEMORY_DB_PATH = config.ROOT_DIR / "memory.db"
 _MAX_RECIPES = 50
-_MAX_HINTS = 3
-_MAX_RENDERED_STEPS = 8
 _MAX_CONDITIONS = 5
 _MAX_EVIDENCE = 5
-_MAX_META_CHARS = 220
-# Evict a recipe once it has been tried this many times without ever helping.
-_EVICT_MIN_USES = 3
-_lock = threading.Lock()
+_COMPAT_KINDS = ACTION_KINDS | FACTUAL_KINDS | {"summary"}
+_store_cache: tuple[Path, MemoryStore] | None = None
+
+_JUNK_STEP = re.compile(r"\b(element_id|hwnd)\b")
+_OLD_FORMAT = re.compile(r"^\w+\(\{.*\}\)$")
 
 
-def _new_id() -> str:
-    return uuid.uuid4().hex[:10]
+def _effective_db_path() -> Path:
+    db_path = Path(MEMORY_DB_PATH)
+    mem_path = Path(MEMORY_PATH)
+    if db_path != _DEFAULT_MEMORY_DB_PATH:
+        return db_path
+    if mem_path != _DEFAULT_MEMORY_PATH:
+        return mem_path.with_suffix(".db")
+    return db_path
 
 
-def _string_list(values, max_items: int, max_chars: int = _MAX_META_CHARS) -> list[str]:
+def _store() -> MemoryStore:
+    global _store_cache
+    path = _effective_db_path()
+    if _store_cache is None or _store_cache[0] != path:
+        _store_cache = (path, MemoryStore(path))
+    store = _store_cache[1]
+    migrate_json_if_needed(store, MEMORY_PATH)
+    return store
+
+
+def _string_list(values: Any, max_items: int, max_chars: int = 220) -> list[str]:
     if values is None:
         return []
     if isinstance(values, str):
@@ -56,151 +72,97 @@ def _string_list(values, max_items: int, max_chars: int = _MAX_META_CHARS) -> li
     return out
 
 
-def _default_conditions(recipe: dict) -> list[str]:
+def _default_conditions(recipe: dict[str, Any]) -> list[str]:
     app = str(recipe.get("app") or "").strip()
     if recipe.get("manual"):
-        conditions = [
+        return [
             "Use only when this user-provided note is relevant to the current task.",
+            "Current GUI/file/tool evidence has priority over this memory.",
         ]
-    else:
-        conditions = [
-            "Use only for the same workflow goal, not just a shared keyword.",
-        ]
-        if app:
-            conditions.append(
-                f'Current target app/window should match "{app}" or be intentionally equivalent.'
-            )
-        if recipe.get("script"):
-            conditions.append(
-                "Replay only after the target screen has been observed in the current run."
-            )
-    conditions.append(
-        "Do not apply to live-state questions about current foreground, login, status, or visibility."
-    )
-    return conditions[:_MAX_CONDITIONS]
+    out = ["Use only for the same workflow goal, not just a shared keyword."]
+    if app:
+        out.append(f'Current target app/window should match "{app}" or be intentionally equivalent.')
+    if recipe.get("script"):
+        out.append("Replay only after the target screen has been observed in the current run.")
+    out.append("Do not apply to live-state questions about current foreground, login, status, or visibility.")
+    return out[:_MAX_CONDITIONS]
 
 
-def _default_evidence(recipe: dict) -> list[str]:
+def _default_evidence(recipe: dict[str, Any]) -> list[str]:
     if recipe.get("manual"):
         return [
             "Treat as a hint; verify against current files, UI, or deterministic output before relying on it.",
         ]
-    evidence = [
+    out = [
         "Before reuse, observe/list_windows or equivalent evidence must confirm the current target.",
         "After replay/actions, verify final state with observe/read_text/VLM/nonvisual summary or deterministic checks before done.",
     ]
     if recipe.get("provisional"):
-        evidence.append("This recipe is provisional until a later verified run proves it useful.")
-    return evidence[:_MAX_EVIDENCE]
+        out.append("This recipe is provisional until a later verified run proves it useful.")
+    return out[:_MAX_EVIDENCE]
 
 
-def _normalize(recipe: dict) -> dict:
-    """Backfill fields for recipes written by older versions."""
-    recipe.setdefault("id", _new_id())
-    recipe.setdefault("uses", 0)
-    recipe.setdefault("successes", 0)
-    recipe.setdefault("provisional", False)
-    recipe.setdefault("manual", False)
-    recipe.setdefault("script", "")  # linked .wps.json for 0-token reuse
-    recipe["conditions"] = _string_list(
-        recipe.get("conditions") or recipe.get("applicability"),
-        _MAX_CONDITIONS,
-    )
-    if not recipe["conditions"]:
-        recipe["conditions"] = _default_conditions(recipe)
-    recipe["evidence"] = _string_list(
-        recipe.get("evidence") or recipe.get("evidence_requirements"),
-        _MAX_EVIDENCE,
-    )
-    if not recipe["evidence"]:
-        recipe["evidence"] = _default_evidence(recipe)
+def _clean_steps(steps: list[Any]) -> list[str]:
+    clean = []
+    for raw in steps or []:
+        step = str(raw).strip()
+        if _OLD_FORMAT.match(step) and _JUNK_STEP.search(step):
+            continue
+        if step:
+            clean.append(step[:300])
+    return clean[:30]
+
+
+def _script(node: dict[str, Any]) -> str:
+    payload = node.get("payload") or {}
+    script = str(payload.get("script") or "")
+    if script:
+        return script
+    for artifact in node.get("artifacts") or []:
+        if artifact.get("kind") == "wps_script":
+            return str(artifact.get("uri") or "")
+    return ""
+
+
+def _recipe_from_node(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not node or node.get("status") in {"retired", "superseded"}:
+        return None
+    payload = dict(node.get("payload") or {})
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        body = str(node.get("body") or "")
+        steps = [line.strip() for line in body.splitlines() if line.strip()]
+    manual = bool(node.get("manual") or payload.get("manual") or node.get("kind") in FACTUAL_KINDS)
+    provisional = bool(payload.get("provisional") or node.get("status") == "provisional")
+    recipe = {
+        "id": node.get("id", ""),
+        "task": payload.get("task") or node.get("title") or node.get("summary") or "",
+        "app": payload.get("app") or node.get("app") or "",
+        "steps": _clean_steps(steps),
+        "uses": int(payload.get("uses") or 0),
+        "successes": int(payload.get("successes") or 0),
+        "provisional": provisional,
+        "manual": manual,
+        "script": payload.get("script") or _script(node),
+        "conditions": _string_list(node.get("conditions"), _MAX_CONDITIONS)
+        or _default_conditions(payload),
+        "evidence": _string_list(node.get("evidence"), _MAX_EVIDENCE)
+        or _default_evidence(payload),
+        "kind": node.get("kind"),
+        "status": node.get("status"),
+        "confidence": node.get("confidence"),
+    }
     return recipe
 
 
-# Old-format step strings like `click({"element_id": 39})` / `focus_window({"hwnd": 263756})`
-# encode per-run handles that are meaningless next session — they can't be reused.
-_JUNK_STEP = re.compile(r'\b(element_id|hwnd)\b')
-_OLD_FORMAT = re.compile(r'^\w+\(\{.*\}\)$')
-_VOLATILE_CN = ("当前", "现在", "此刻", "已打开", "已经打开", "前台", "窗口")
-_STATE_CN = ("检查", "扫描", "找出", "哪个", "状态", "登录", "登录页", "在线")
-_VOLATILE_EN = (
-    "current",
-    "currently",
-    "now",
-    "open window",
-    "visible window",
-    "foreground",
-    "which window",
-    "logged in",
-    "login page",
-    "status",
-)
-
-
-def is_volatile_state_task(task: str) -> bool:
-    """Return True for tasks whose answer depends on live, changing UI state.
-
-    Action recipes are useful for stable workflows, but dangerous for questions
-    like "which already-open window is logged in": old hwnds and old screen
-    conclusions can become false minutes later.
-    """
-    text = _norm(task)
-    if not text:
-        return False
-    if any(k in text for k in _VOLATILE_EN):
-        return True
-    has_live_anchor = any(k in text for k in _VOLATILE_CN)
-    has_state_question = any(k in text for k in _STATE_CN)
-    return has_live_anchor and has_state_question
-
-
-def _clean_steps(steps: list) -> list[str]:
-    """Drop legacy steps that bind to per-run element_id/hwnd (un-reusable)."""
-    cleaned = []
-    for s in steps:
-        s = str(s)
-        if _OLD_FORMAT.match(s.strip()) and _JUNK_STEP.search(s):
-            continue
-        cleaned.append(s)
-    return cleaned
-
-
-def _load() -> list[dict]:
-    if not MEMORY_PATH.exists():
-        return []
-    try:
-        data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            return []
-        recipes, seen = [], set()
-        for r in data:
-            r = _normalize(r)
-            if r["id"] in seen:  # enforce id uniqueness (race-written dupes)
-                continue
-            r["steps"] = _clean_steps(r.get("steps", []))
-            if not r["steps"] and not r.get("manual"):
-                continue  # legacy recipe with nothing reusable left → drop
-            seen.add(r["id"])
-            recipes.append(r)
-        return recipes
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("经验记忆读取失败: %s", exc)
-        return []
-
-
-def _save(recipes: list[dict]) -> None:
-    """Atomic write: a crash mid-save must not corrupt the memory file."""
-    tmp = MEMORY_PATH.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps(recipes, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, MEMORY_PATH)
+def _node_from_recipe_id(recipe_id: str) -> dict[str, Any] | None:
+    return _store().get_node(recipe_id)
 
 
 def enabled() -> bool:
     return bool(CONFIG.get("agent", "experience_memory", default=True))
 
 
-# ------------------------------------------------------------------ recording
 def record(
     task: str,
     app_hint: str,
@@ -210,223 +172,117 @@ def record(
     conditions: list[str] | None = None,
     evidence: list[str] | None = None,
 ) -> None:
-    """Persist a recipe from a finished run (newest first, capped).
-
-    ``verified=False`` marks the recipe provisional. ``script`` links a
-    replayable .wps.json for 0-token reuse.
-    """
     if not enabled() or not steps:
         return
     if is_volatile_state_task(task):
-        logger.info("跳过易变状态任务的经验记录: %s", task[:60])
         return
-    recipe = _normalize({
+    clean_steps = _clean_steps(steps)
+    if not clean_steps:
+        return
+    store = _store()
+    # Preserve old replacement semantics for identical task recipes.
+    for node in store.list_nodes(kinds=ACTION_KINDS, include_inactive=True, limit=500):
+        if str(node.get("title") or "") == task:
+            store.delete_node(node["id"])
+    provisional = not (verified and script)
+    kind = "skill" if verified and script else "procedure"
+    payload = {
         "task": task[:200],
         "app": app_hint[:80],
-        "steps": steps[:30],
+        "steps": clean_steps,
         "ts": int(time.time()),
-        "provisional": not verified,
+        "provisional": provisional,
+        "manual": False,
         "script": script,
-        "conditions": conditions or [],
-        "evidence": evidence or [],
-    })
-    with _lock:
-        recipes = [r for r in _load() if r.get("task") != recipe["task"]]
-        recipes.insert(0, recipe)
-        _save(recipes[:_MAX_RECIPES])
-    logger.info("经验记忆已保存: %s (%d步%s%s)", task[:40], len(steps),
-                "，未验证" if not verified else "",
-                "，含可复用脚本" if script else "")
+        "uses": 0,
+        "successes": 0,
+    }
+    conds = _string_list(conditions, _MAX_CONDITIONS) or _default_conditions(payload)
+    evid = _string_list(evidence, _MAX_EVIDENCE) or _default_evidence(payload)
+    node = store.add_node(
+        kind,
+        task[:500],
+        summary=task[:500],
+        body="\n".join(clean_steps),
+        app=app_hint[:200],
+        status="provisional" if provisional else "active",
+        confidence=0.45 if provisional else 0.7,
+        payload=payload,
+        manual=False,
+        conditions=conds,
+        evidence=evid,
+        anchors=[task, app_hint] + clean_steps[:3],
+    )
+    if node and script:
+        store.add_artifact(node["id"], "wps_script", script)
 
 
 def feedback(recipe_ids: list[str], success: bool) -> None:
-    """Update scores for recipes that were injected into a finished run.
-
-    A success also promotes provisional recipes (they proved useful); recipes
-    that keep failing are evicted so bad experience cannot keep poisoning runs.
-    """
-    if not recipe_ids:
+    if not enabled() or not recipe_ids:
         return
-    ids = set(recipe_ids)
-    with _lock:
-        recipes = _load()
-        kept: list[dict] = []
-        for r in recipes:
-            if r["id"] in ids:
-                r["uses"] += 1
-                if success:
-                    r["successes"] += 1
-                    r["provisional"] = False
-                if (r["uses"] >= _EVICT_MIN_USES and r["successes"] == 0
-                        and not r.get("manual")):
-                    logger.info("经验配方屡试无效，已淘汰: %s", r.get("task", "")[:40])
-                    continue
-            kept.append(r)
-        _save(kept)
+    feedback_mod.apply_feedback_to_ids(_store(), recipe_ids, success)
 
 
-# ------------------------------------------------------------------ matching
-def hints_with_ids(task: str, notes_only: bool = False) -> tuple[str, list[str]]:
-    """Render up to N relevant recipes + their ids (for score feedback).
-
-    ``notes_only=True`` restricts matching to manual factual notes (added via
-    the ``remember`` tool / UI), excluding auto-recorded action recipes. Used
-    for coding tasks: project facts ("用 pnpm", "测试命令 pytest -q") still
-    transfer, but non-portable action replays do not.
-    """
+def hints_with_ids(task: str, notes_only: bool = False, run_id: str = "") -> tuple[str, list[str]]:
     if not enabled():
         return "", []
-    task_lower = task.lower()
-    words = [w for w in task_lower.replace("，", " ").replace(",", " ").split() if len(w) >= 2]
-    scored: list[tuple[float, dict]] = []
-    for recipe in _load():
-        if notes_only and not recipe.get("manual"):
-            continue
-        if (not recipe.get("manual")
-                and (is_volatile_state_task(task)
-                     or is_volatile_state_task(recipe.get("task", "")))):
-            continue
-        haystack = (recipe.get("task", "") + recipe.get("app", "")).lower()
-        score: float = sum(1 for w in words if w in haystack)
-        # Chinese tasks rarely have spaces — substring overlap fallback.
-        # >=2 bigram hits count (a single 2-char hit is too weak a signal).
-        if not score and len(task_lower) >= 4:
-            matches = sum(
-                1 for i in range(len(task_lower) - 1)
-                if task_lower[i : i + 2] in haystack
-            )
-            score = matches / 3.0 if matches >= 2 else 0.0
-        if score > 0:
-            # Proven recipes outrank unproven; never-successful ones sink.
-            uses, wins = recipe["uses"], recipe["successes"]
-            if wins > 0:
-                score += min(wins, 3) * 0.5
-            elif uses > 0:
-                score -= uses * 0.5
-            if recipe.get("provisional"):
-                score -= 0.5
-            if score > 0:
-                scored.append((score, recipe))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    blocks, ids = [], []
-    for rank, (score, recipe) in enumerate(scored[:_MAX_HINTS]):
-        title = recipe.get("task", "")
-        app = recipe.get("app", "")
-        steps = _render_steps(recipe.get("steps", []))
-        conditions = _render_bullets("Conditions", recipe.get("conditions", []))
-        evidence = _render_bullets("Evidence required", recipe.get("evidence", []))
-        meta = "\n".join(part for part in (conditions, evidence) if part)
-        # Strong match + linked replay script -> promote to "reusable procedure".
-        strong = rank == 0 and recipe.get("script") and _strong_match(task, title)
-        if strong:
-            blocks.append(
-                f'[reusable skill candidate] Past verified workflow "{title}" '
-                f'(app:{app}, score:{score:.1f}).\n'
-                f'{meta}\n'
-                f'Steps preview:\n{steps}\n'
-                'If the current observed screen satisfies the conditions, call '
-                f'reuse_skill(task="{title}") first. Replay completion is not task '
-                'completion; verify final state before done.'
-            )
-        else:
-            tag = " provisional/unverified" if recipe.get("provisional") else ""
-            blocks.append(
-                f'[memory{tag}] "{title}" (app:{app}, score:{score:.1f}).\n'
-                f'{meta}\n'
-                f'Steps/notes:\n{steps}'
-            )
-        ids.append(recipe["id"])
-    return "\n".join(blocks), ids
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", "", (s or "").lower())
-
-
-def _strong_match(query: str, recipe_task: str) -> bool:
-    """High-confidence 'same task': normalized containment or high bigram overlap."""
-    a, b = _norm(query), _norm(recipe_task)
-    if len(a) < 3 or len(b) < 3:
-        return False  # too short → containment would false-positive
-    if a == b or a in b or b in a:
-        return True
-    ba = {a[i:i+2] for i in range(len(a) - 1)}
-    bb = {b[i:i+2] for i in range(len(b) - 1)}
-    if not ba or not bb:
-        return False
-    overlap = len(ba & bb) / min(len(ba), len(bb))
-    return overlap >= 0.7
-
-
-def _render_steps(steps: list) -> str:
-    clean = [str(s).strip()[:300] for s in steps if str(s).strip()]
-    shown = clean[:_MAX_RENDERED_STEPS]
-    lines = [f"  {i + 1}. {s}" for i, s in enumerate(shown)]
-    if len(clean) > len(shown):
-        lines.append(f"  ... {len(clean) - len(shown)} more step(s) kept in memory")
-    return "\n".join(lines) if lines else "  (no reusable action steps)"
-
-
-def _render_bullets(label: str, items: list[str]) -> str:
-    clean = _string_list(items, _MAX_CONDITIONS if "Condition" in label else _MAX_EVIDENCE)
-    if not clean:
-        return ""
-    lines = [f"{label}:"]
-    lines.extend(f"  - {item}" for item in clean)
-    return "\n".join(lines)
-
-
-def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | None]:
-    """Resolve a task (or explicit recipe id) to its linked .wps.json script.
-
-    Returns (script_filename, recipe) or ("", None). Used by the reuse_skill tool.
-    """
-    if is_volatile_state_task(task):
-        return "", None
-    if recipe_id:
-        recipe = get(recipe_id)
-        if (
-            recipe
-            and recipe.get("script")
-            and not recipe.get("provisional")
-            and not is_volatile_state_task(recipe.get("task", ""))
-        ):
-            return recipe["script"], recipe
-        return "", recipe
-    _text, ids = hints_with_ids(task)
-    for rid in ids:  # best match first
-        recipe = get(rid)
-        if (
-            recipe
-            and recipe.get("script")
-            and not recipe.get("provisional")
-            and _strong_match(task, recipe.get("task", ""))
-        ):
-            return recipe["script"], recipe
-    return "", None
+    pack = prepare_run_memory(
+        task,
+        {"notes_only": notes_only, "coding": notes_only},
+        run_id=run_id,
+        store=_store(),
+    )
+    ids = [
+        rid for rid in pack.selected_ids
+        if (get(rid) is not None or (_store().get_node(rid) or {}).get("kind") == "warning")
+    ]
+    return pack.text, ids
 
 
 def hints_for(task: str) -> str:
-    """Back-compat wrapper used by older callers/tests."""
     return hints_with_ids(task)[0]
 
 
 def note_hints(task: str) -> str:
-    """Relevant manual factual notes only (no ids → never scored/evicted by the
-    calling run). For coding tasks, which keep facts but not action replays."""
     return hints_with_ids(task, notes_only=True)[0]
 
 
-# ---------------------------------------------------------------------- CRUD
+def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | None]:
+    if not enabled() or is_volatile_state_task(task):
+        return "", None
+    store = _store()
+    if recipe_id:
+        node = store.get_node(recipe_id)
+        recipe = _recipe_from_node(node)
+        if (
+            recipe
+            and recipe.get("script")
+            and not recipe.get("provisional")
+            and node
+            and node.get("kind") == "skill"
+        ):
+            return str(recipe["script"]), recipe
+        return "", recipe
+    node, _score = top_reusable_skill(task, store)
+    recipe = _recipe_from_node(node)
+    if recipe and recipe.get("script") and strong_match(task, str(recipe.get("task") or "")):
+        return str(recipe["script"]), recipe
+    return "", None
+
+
 def all_recipes() -> list[dict]:
-    return _load()
+    if not enabled():
+        return []
+    recipes = []
+    for node in _store().list_nodes(kinds=_COMPAT_KINDS, limit=_MAX_RECIPES):
+        recipe = _recipe_from_node(node)
+        if recipe:
+            recipes.append(recipe)
+    return recipes
 
 
 def get(recipe_id: str) -> dict | None:
-    for r in _load():
-        if r["id"] == recipe_id:
-            return r
-    return None
+    return _recipe_from_node(_node_from_recipe_id(recipe_id))
 
 
 def add(
@@ -436,76 +292,110 @@ def add(
     manual: bool = True,
     conditions: list[str] | None = None,
     evidence: list[str] | None = None,
+    *,
+    kind: str = "",
+    title: str = "",
+    body: str = "",
+    summary: str = "",
+    anchors: list[str] | None = None,
 ) -> dict:
-    """Manually add a recipe/note (UI form or agent ``remember`` tool)."""
-    recipe = _normalize({
-        "task": (task or "")[:200],
+    chosen_kind = kind or ("fact" if manual else "procedure")
+    clean_steps = _clean_steps(steps or ([task] if manual else []))
+    payload = {
+        "task": (title or task or "")[:200],
         "app": (app or "")[:80],
-        "steps": [str(s)[:300] for s in (steps or [])][:30],
+        "steps": clean_steps,
         "ts": int(time.time()),
         "manual": manual,
-        "conditions": conditions or [],
-        "evidence": evidence or [],
-    })
-    with _lock:
-        recipes = _load()
-        recipes.insert(0, recipe)
-        _save(recipes[:_MAX_RECIPES])
-    return recipe
+        "provisional": chosen_kind in ACTION_KINDS and not manual,
+        "uses": 0,
+        "successes": 0,
+    }
+    conds = _string_list(conditions, _MAX_CONDITIONS) or _default_conditions(payload)
+    evid = _string_list(evidence, _MAX_EVIDENCE) or _default_evidence(payload)
+    node = _store().add_node(
+        chosen_kind,
+        (title or task or "")[:500],
+        summary=summary or (task or "")[:500],
+        body=body or "\n".join(clean_steps),
+        app=app[:200],
+        status="active",
+        confidence=0.65 if manual else 0.45,
+        payload=payload,
+        manual=manual,
+        conditions=conds,
+        evidence=evid,
+        anchors=anchors or [task, app],
+    )
+    return _recipe_from_node(node) or {}
 
 
 def update(recipe_id: str, patch: dict) -> dict | None:
-    """Edit a single recipe; only whitelisted fields are touched."""
-    allowed = {"task", "app", "steps", "provisional", "conditions", "evidence"}
-    with _lock:
-        recipes = _load()
-        for r in recipes:
-            if r["id"] == recipe_id:
-                for key, value in patch.items():
-                    if key not in allowed:
-                        continue
-                    if key == "steps":
-                        r["steps"] = [str(s)[:300] for s in (value or [])][:30]
-                    elif key == "conditions":
-                        r["conditions"] = _string_list(value, _MAX_CONDITIONS)
-                    elif key == "evidence":
-                        r["evidence"] = _string_list(value, _MAX_EVIDENCE)
-                    elif key == "provisional":
-                        r["provisional"] = bool(value)
-                    else:
-                        r[key] = str(value)[:200]
-                _save(recipes)
-                return r
-    return None
+    node = _store().get_node(recipe_id)
+    if not node:
+        return None
+    payload = dict(node.get("payload") or {})
+    node_patch: dict[str, Any] = {}
+    if "task" in patch or "title" in patch:
+        value = str(patch.get("title") if "title" in patch else patch.get("task"))
+        node_patch["title"] = value[:500]
+        node_patch["summary"] = value[:1000]
+        payload["task"] = value[:200]
+    if "summary" in patch:
+        node_patch["summary"] = str(patch["summary"])[:1000]
+    if "body" in patch:
+        node_patch["body"] = str(patch["body"])[:20000]
+    if "app" in patch:
+        value = str(patch["app"])[:200]
+        node_patch["app"] = value
+        payload["app"] = value[:80]
+    if "steps" in patch:
+        payload["steps"] = _clean_steps(patch.get("steps") or [])
+        node_patch["body"] = "\n".join(payload["steps"])
+    if "provisional" in patch:
+        payload["provisional"] = bool(patch["provisional"])
+        node_patch["status"] = "provisional" if patch["provisional"] else "active"
+    for key in ("status", "confidence", "kind"):
+        if key in patch:
+            node_patch[key] = patch[key]
+    if "conditions" in patch:
+        node_patch["conditions"] = _string_list(patch["conditions"], _MAX_CONDITIONS)
+    if "evidence" in patch:
+        node_patch["evidence"] = _string_list(patch["evidence"], _MAX_EVIDENCE)
+    if "anchors" in patch:
+        node_patch["anchors"] = _string_list(patch["anchors"], 12)
+    if "supersedes" in patch and patch["supersedes"]:
+        old_id = str(patch["supersedes"])
+        _store().add_edge(recipe_id, old_id, "supersedes")
+        _store().retire_node(old_id, "superseded")
+    node_patch["payload"] = payload
+    updated = _store().update_node(recipe_id, node_patch)
+    return _recipe_from_node(updated)
 
 
 def delete(recipe_id: str) -> bool:
-    with _lock:
-        recipes = _load()
-        kept = [r for r in recipes if r["id"] != recipe_id]
-        if len(kept) == len(recipes):
-            return False
-        _save(kept)
-    return True
+    return _store().delete_node(recipe_id)
 
 
 def delete_matching(query: str) -> list[dict]:
-    """Delete recipes whose task/app/steps contain the query (agent ``forget``)."""
     q = (query or "").strip().lower()
     if not q:
         return []
-    with _lock:
-        recipes = _load()
-        removed = [
-            r for r in recipes
-            if q in (r.get("task", "") + r.get("app", "")
-                     + " ".join(r.get("steps", []))).lower()
-        ]
-        if removed:
-            _save([r for r in recipes if r not in removed])
+    removed = []
+    for node in _store().list_nodes(kinds=_COMPAT_KINDS, limit=500):
+        recipe = _recipe_from_node(node)
+        if not recipe:
+            continue
+        haystack = (
+            recipe.get("task", "")
+            + recipe.get("app", "")
+            + " ".join(recipe.get("steps", []))
+        ).lower()
+        if q in haystack:
+            _store().retire_node(recipe["id"])
+            removed.append(recipe)
     return removed
 
 
 def clear() -> None:
-    with _lock:
-        _save([])
+    _store().clear()

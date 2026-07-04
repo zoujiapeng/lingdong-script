@@ -19,6 +19,7 @@ SCRIPTS_DIR = ROOT_DIR / "scripts"
 TEMPLATES_IMG_DIR = ROOT_DIR / "templates_img"
 BIN_DIR = ROOT_DIR / "winpilot" / "bin"
 MEMORY_PATH = ROOT_DIR / "experience_memory.json"
+MEMORY_DB_PATH = ROOT_DIR / "memory.db"
 
 _DEFAULTS: dict[str, Any] = {
     "api": {

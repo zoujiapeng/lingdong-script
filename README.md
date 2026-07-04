@@ -92,3 +92,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
 
 MIT
+
+### Memory Graph Note
+
+WinPilot long-term memory now uses `python/winpilot_home/memory.db` as a SQLite Memory Graph. `experience_memory.json` is still kept for migration/compatibility, and old recipe-like APIs remain available. Dynamic long-term memory is injected as a bounded Memory Pack user message, not in the stable system prompt. Replay success is not done evidence.
