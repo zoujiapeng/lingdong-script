@@ -1253,9 +1253,54 @@ def test_execute_subgoal_draws_auto_complete_matching_plan_items():
     updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
     payload = json.loads(updated.text)
 
-    assert [step["done"] for step in runner.session.plan.steps] == [True, True, False]
-    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2]
+    assert [step["done"] for step in runner.session.plan.steps] == [True, True, True]
+    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2, 3]
+    assert payload["plan_all_done"] is True
+    assert updated.terminal == "done"
     assert "plan_after_auto_complete" in payload
+
+
+def test_execute_subgoal_draws_does_not_auto_complete_file_output_task():
+    import json
+
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    output_path = r"C:\Users\Public\Pictures\paint_confirm.png"
+    runner = AgentRunner(f"draw a blue triangle and red rectangle, then save as {output_path}")
+    runner.session.plan = planner.Plan([
+        "draw a blue triangle",
+        "draw a red rectangle on the right",
+        "verify both shapes are visible",
+        {"goal": "save the final drawing file", "check": {"file_exists": output_path}},
+    ])
+    args = {
+        "draws": [
+            {"shape": "triangle", "color": "blue", "expected_region": "left"},
+            {"shape": "rectangle", "color": "red", "expected_region": "right"},
+        ],
+    }
+    result = ToolResult(json.dumps({
+        "ok": True,
+        "verified": True,
+        "actions_executed": [
+            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
+            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
+        ],
+        "evidence_packet": {
+            "matched_visual_colors": ["blue", "red"],
+            "missing_visual_colors": [],
+        },
+    }))
+
+    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
+    payload = json.loads(updated.text)
+
+    assert [step["done"] for step in runner.session.plan.steps] == [True, True, False, False]
+    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2]
+    assert "plan_all_done" not in payload
+    assert updated.terminal is None
 
 
 def test_execute_subgoal_draws_auto_complete_requires_matched_color():
