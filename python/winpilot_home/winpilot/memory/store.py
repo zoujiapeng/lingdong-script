@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from .. import config
 from ..utils.log import logger
+from .safety import sanitize_memory_text, sanitize_payload
 from .types import NODE_KINDS
 
 
@@ -305,8 +306,8 @@ class MemoryStore:
             return {}
         node_id = node_id or new_id()
         kind = kind if kind in NODE_KINDS else "fact"
-        conds = _clean_list(conditions, 8)
-        evid = _clean_list(evidence, 8)
+        conds = [sanitize_memory_text(item) for item in _clean_list(conditions, 8)]
+        evid = [sanitize_memory_text(item) for item in _clean_list(evidence, 8)]
         if kind == "observation":
             status = "provisional"
             expires_at = expires_at or (_now() + 3600)
@@ -329,24 +330,24 @@ class MemoryStore:
                     (
                         node_id,
                         kind,
-                        (title or "")[:500],
-                        (summary or "")[:1000],
-                        (body or "")[:20000],
+                        sanitize_memory_text(title)[:500],
+                        sanitize_memory_text(summary)[:1000],
+                        sanitize_memory_text(body)[:20000],
                         status,
                         float(confidence),
-                        (app or "")[:200],
+                        sanitize_memory_text(app)[:200],
                         node_id,
                         ts,
                         ts,
                         expires_at,
-                        (source or "")[:500],
+                        sanitize_memory_text(source)[:500],
                         1 if manual else 0,
-                        _json_dumps(payload or {}),
+                        _json_dumps(sanitize_payload(payload or {})),
                     ),
                 )
                 self._replace_child_rows("memory_conditions", node_id, conds)
                 self._replace_child_rows("memory_evidence", node_id, evid)
-                self._replace_anchors(node_id, _clean_list(anchors, 12, 200))
+                self._replace_anchors(node_id, [sanitize_memory_text(item) for item in _clean_list(anchors, 12, 200)])
                 self._refresh_fts(node_id)
             return self.get_node(node_id) or {}
         except sqlite3.DatabaseError as exc:
@@ -438,9 +439,11 @@ class MemoryStore:
                 continue
             col = "payload_json" if key == "payload" else key
             if key == "payload":
-                value = _json_dumps(value)
+                value = _json_dumps(sanitize_payload(value))
             elif key == "manual":
                 value = 1 if value else 0
+            elif isinstance(value, str):
+                value = sanitize_memory_text(value)
             set_parts.append(f"{col}=?")
             params.append(value)
         try:
@@ -455,14 +458,21 @@ class MemoryStore:
                     )
                 if "conditions" in patch:
                     self._replace_child_rows(
-                        "memory_conditions", node_id, _clean_list(patch.get("conditions"), 8)
+                        "memory_conditions",
+                        node_id,
+                        [sanitize_memory_text(item) for item in _clean_list(patch.get("conditions"), 8)],
                     )
                 if "evidence" in patch:
                     self._replace_child_rows(
-                        "memory_evidence", node_id, _clean_list(patch.get("evidence"), 8)
+                        "memory_evidence",
+                        node_id,
+                        [sanitize_memory_text(item) for item in _clean_list(patch.get("evidence"), 8)],
                     )
                 if "anchors" in patch:
-                    self._replace_anchors(node_id, patch.get("anchors") or [])
+                    self._replace_anchors(
+                        node_id,
+                        [sanitize_memory_text(item) for item in _clean_list(patch.get("anchors"), 12, 200)],
+                    )
                 self._refresh_fts(node_id)
             return self.get_node(node_id)
         except sqlite3.DatabaseError as exc:
@@ -583,7 +593,7 @@ class MemoryStore:
             with self._lock, self.conn:
                 self.conn.execute(
                     "INSERT INTO memory_anchors(node_id, kind, value, weight) VALUES (?, ?, ?, ?)",
-                    (node_id, kind, value[:200], float(weight)),
+                    (node_id, kind, sanitize_memory_text(value)[:200], float(weight)),
                 )
                 self._refresh_fts(node_id)
         except sqlite3.DatabaseError as exc:
@@ -596,7 +606,7 @@ class MemoryStore:
             with self._lock, self.conn:
                 self.conn.execute(
                     "INSERT INTO memory_conditions(node_id, text, required) VALUES (?, ?, ?)",
-                    (node_id, text[:300], 1 if required else 0),
+                    (node_id, sanitize_memory_text(text)[:300], 1 if required else 0),
                 )
         except sqlite3.DatabaseError as exc:
             self._mark_disabled(exc)
@@ -608,7 +618,7 @@ class MemoryStore:
             with self._lock, self.conn:
                 self.conn.execute(
                     "INSERT INTO memory_evidence(node_id, text, required) VALUES (?, ?, ?)",
-                    (node_id, text[:300], 1 if required else 0),
+                    (node_id, sanitize_memory_text(text)[:300], 1 if required else 0),
                 )
         except sqlite3.DatabaseError as exc:
             self._mark_disabled(exc)
@@ -651,7 +661,13 @@ class MemoryStore:
                     INSERT INTO memory_artifacts(node_id, kind, uri, payload_json, created_at)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (node_id, kind, uri, _json_dumps(payload or {}), _now()),
+                    (
+                        node_id,
+                        kind,
+                        sanitize_memory_text(uri),
+                        _json_dumps(sanitize_payload(payload or {})),
+                        _now(),
+                    ),
                 )
         except sqlite3.DatabaseError as exc:
             self._mark_disabled(exc)
@@ -700,7 +716,7 @@ class MemoryStore:
                         event,
                         status,
                         None if success is None else (1 if success else 0),
-                        _json_dumps(detail or {}),
+                        _json_dumps(sanitize_payload(detail or {})),
                         _now(),
                     ),
                 )
@@ -761,9 +777,9 @@ class MemoryStore:
                     (
                         run_id or "",
                         task[:500],
-                        pack_text[:10000],
+                        sanitize_memory_text(pack_text)[:10000],
                         _json_dumps(selected_ids),
-                        _json_dumps(scores),
+                        _json_dumps(sanitize_payload(scores)),
                         _now(),
                     ),
                 )

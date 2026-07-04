@@ -58,3 +58,31 @@ def test_memory_store_schema_crud_edges_and_fallback(tmp_path):
     assert store.get_node(node["id"])["status"] == "retired"
     assert store.delete_node(node["id"])
     assert store.get_node(node["id"]) is None
+
+
+def test_memory_store_redacts_secret_like_values(tmp_path):
+    from winpilot.memory.store import MemoryStore
+
+    store = MemoryStore(tmp_path / "memory.db")
+    node = store.add_node(
+        "fact",
+        "api_key=sk-secretsecretsecret should not persist",
+        body="Bearer abcdefghijklmnopqrstuvwxyz",
+        payload={"api_key": "sk-secretsecretsecret", "nested": {"token": "abc123456789"}},
+        conditions=["password=hunter2 should be redacted"],
+        evidence=["authorization: Bearer abcdefghijklmnopqrstuvwxyz"],
+    )
+    store.record_attempt(
+        node["id"],
+        "used",
+        detail={"secret": "abc123456789", "note": "token=abc123456789"},
+    )
+
+    loaded = store.get_node(node["id"])
+    attempts = store.attempts_for_node(node["id"])
+    combined = str(loaded) + str(attempts)
+
+    assert "sk-secretsecretsecret" not in combined
+    assert "abcdefghijklmnopqrstuvwxyz" not in combined
+    assert "abc123456789" not in combined
+    assert "[REDACTED" in combined
