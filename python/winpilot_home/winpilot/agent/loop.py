@@ -89,6 +89,20 @@ _DRAW_NON_ACTION_TERMS = (
     "screenshot", "screen shot", "capture", "save",
     "确认", "核验", "验证", "检查", "可见", "存在", "截图", "截屏", "保存",
 )
+_DRAW_VISUAL_CONFIRM_TERMS = (
+    "confirm", "verify", "verification", "check", "visible", "exist", "exists",
+    "show", "shown", "on screen", "canvas",
+    "确认", "核验", "验证", "检查", "可见", "存在", "显示", "画布", "画面",
+)
+_DRAW_VISUAL_OBJECT_TERMS = (
+    "shape", "shapes", "drawing", "canvas", "color", "colors",
+    "triangle", "rectangle", "square", "circle", "line",
+    "图形", "画布", "画面", "颜色", "三角形", "矩形", "方形", "圆形", "线",
+)
+_DRAW_FILE_OUTPUT_TERMS = (
+    "save", "save as", "export", "write file",
+    "保存", "另存", "另存为", "导出", "写入文件",
+)
 _DRAW_ACTION_RE = re.compile(r"(draw|paint|sketch|绘制|画)")
 
 
@@ -122,6 +136,54 @@ def _find_terms(text: str, term_map: dict[str, tuple[str, ...]]) -> list[str]:
         for value, terms in term_map.items()
         if any(term.casefold() in haystack for term in terms)
     ]
+
+
+def _has_any_term(text: str, terms: tuple[str, ...]) -> bool:
+    haystack = (text or "").casefold()
+    return any(term.casefold() in haystack for term in terms)
+
+
+def _drawing_task_requests_file_output(task: str) -> bool:
+    return bool(_required_image_paths(task)) or _has_any_term(task, _DRAW_FILE_OUTPUT_TERMS)
+
+
+def _drawing_visual_confirmation_goal(goal: str) -> bool:
+    return (
+        _has_any_term(goal, _DRAW_VISUAL_CONFIRM_TERMS)
+        and _has_any_term(goal, _DRAW_VISUAL_OBJECT_TERMS)
+    )
+
+
+def _drawing_plan_check_allows_visual_completion(
+    check: Any,
+    task: str,
+) -> bool:
+    if not isinstance(check, dict) or not check:
+        return True
+    keys = {str(key) for key in check if str(key) != "timeout_s"}
+    if not keys:
+        return True
+    visual_keys = {"text_appears", "text_contains", "window_title", "window_appears"}
+    file_keys = {"file_exists", "file_contains"}
+    if keys <= visual_keys:
+        return True
+    if keys <= (visual_keys | file_keys) and not _drawing_task_requests_file_output(task):
+        return True
+    return False
+
+
+def _drawing_visual_confirmation_colors(goal: str, check: Any, task: str) -> list[str]:
+    text = goal or ""
+    if isinstance(check, dict):
+        for value in check.values():
+            if isinstance(value, str):
+                text += " " + value
+            elif isinstance(value, dict):
+                text += " " + " ".join(str(v) for v in value.values())
+    colors = _find_terms(text, _DRAW_COLOR_TERMS)
+    if not colors:
+        colors = _find_terms(task, _DRAW_COLOR_TERMS)
+    return colors
 
 
 def _parse_plan_draw_spec(text: str) -> dict[str, str]:
@@ -1395,15 +1457,51 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     source="execute_subgoal.draws",
                     plan=plan.snapshot(),
                 )
+        packet = payload.get("evidence_packet") if isinstance(payload.get("evidence_packet"), dict) else {}
+        matched_visual_colors = {
+            str(color).casefold()
+            for color in (packet.get("matched_visual_colors") or [])
+        }
+        if matched_visual_colors and not _drawing_task_requests_file_output(self.task):
+            for index, step in enumerate(steps, start=1):
+                if not isinstance(step, dict) or step.get("done"):
+                    continue
+                goal = str(step.get("goal") or "")
+                if not _drawing_visual_confirmation_goal(goal):
+                    continue
+                if not _drawing_plan_check_allows_visual_completion(step.get("check"), self.task):
+                    continue
+                needed_colors = _drawing_visual_confirmation_colors(goal, step.get("check"), self.task)
+                if not needed_colors:
+                    continue
+                if any(color.casefold() not in matched_visual_colors for color in needed_colors):
+                    continue
+                if plan.complete(index):
+                    item = {
+                        "index": index,
+                        "goal": goal[:160],
+                        "source": "visual_color_confirmation",
+                    }
+                    completed.append(item)
+                    BUS.publish(
+                        "agent_plan",
+                        action="auto_complete",
+                        index=index,
+                        source="execute_subgoal.visual_color_confirmation",
+                        plan=plan.snapshot(),
+                    )
         if not completed:
             return result
         payload["auto_completed_plan_items"] = completed
         payload["plan_after_auto_complete"] = plan.render()
+        if plan.all_done() and payload.get("verified") is True:
+            payload["plan_all_done"] = True
         existing_advice = str(payload.get("fast_path_advice") or "").strip()
         auto_advice = (
             "Auto-completed drawing plan items "
             + ", ".join(str(item["index"]) for item in completed)
-            + " from verified controller draw evidence; continue with next unfinished item."
+            + " from verified controller draw evidence; "
+            + ("plan is complete." if plan.all_done() else "continue with next unfinished item.")
         )
         payload["fast_path_advice"] = (existing_advice + " " + auto_advice).strip()
         self._trace_debug("execute_subgoal_draw_plan_auto_completed", {
@@ -1414,7 +1512,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         return ToolResult(
             json.dumps(payload, ensure_ascii=False, default=str),
             is_observe=result.is_observe,
-            terminal=result.terminal,
+            terminal="done" if payload.get("plan_all_done") else result.terminal,
             summary=result.summary,
             replay=result.replay,
             image_b64=result.image_b64,
