@@ -154,6 +154,7 @@ npm run build
 - 绘图视觉确认自动完成回归：`20260704-081006-61ccb2`，同一 Paint GUI-only 任务、便宜模型 `mimo-v2.5`、`max_steps=8`，最终 `done`。工具数从上一轮 7 降到 3：`launch -> complete_subgoal(1) -> execute_subgoal(draws blue/red, terminal done)`；没有额外截图/保存/文件检查。真实截图 `python/winpilot_home/traces/manual_screen_20260704_081043.jpg` 显示左侧蓝色三角形和右侧红色矩形，done gate 仍以 controller 颜色证据 `red, blue` 通过；`prompt_tokens=27253`、`cache_miss_tokens=1269`。
 - 颜色面板 opener 缓存回归：`20260704-082538-6ac6bd`，同一 Paint GUI-only 任务、便宜模型 `mimo-v2.5`，最终 `done`。这轮模型先误用一次 verify-only `execute_subgoal` 并被 scope/target guard 阻止，随后仍通过 `launch -> complete_subgoal -> execute_subgoal(draws blue/red, terminal done)` 完成；真实截图 `python/winpilot_home/traces/manual_screen_20260704_082615.jpg` 显示两个图形。第二次 `select_color` 使用缓存的面板 opener，内部耗时约 1604ms；色块仍重新扫描，避免盲点 stale swatch。
 - 空 `execute_subgoal` 快速拒绝已补测试：只有 `subgoal`/`constraints`、没有具体 routine 时不会初始化 fast controller，也不会观察当前前台窗口；这用于压低模型误把 `execute_subgoal` 当 launch/discovery 工具时的成本。
+- 端到端清洁回归：`20260704-085111-80e560`，同一 Paint GUI-only 任务、便宜模型 `mimo-v2.5`，真实截图 `python/winpilot_home/traces/manual_screen_20260704_085209.jpg` 显示左侧蓝色三角形和右侧红色矩形。工具序列稳定为 `launch -> complete_subgoal(1) -> execute_subgoal(draws blue/red, terminal done)`，`tool_count=3`，没有空 `execute_subgoal`、没有 shell、没有文件读写；`evidence_packet.perception_reducer={}`，不再带 Codex stale reducer；done gate 仍由 controller 视觉颜色证据 `red, blue` 通过。用量：`prompt_tokens=27323`、`cache_miss_tokens=6459`。
 
 ## 15 项低延迟改造进度
 
