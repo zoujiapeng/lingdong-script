@@ -35,6 +35,18 @@ def test_parse_steps_sanitizes_chinese_button_label_echo():
     assert steps == [{"goal": "点击应用输入按钮使文字生效", "check": None}]
 
 
+def test_parse_steps_recovers_badly_quoted_string_list():
+    steps = planner._parse_steps(
+        '["打开浏览器并访问目标页面", "点击页面上的"校准点"按钮", "确认页面出现 CALIBRATION_OK"]'
+    )
+
+    assert [step["goal"] for step in steps] == [
+        "打开浏览器并访问目标页面",
+        '点击页面上的"校准点"按钮 and verify CALIBRATION_OK',
+    ]
+    assert steps[1]["check"] == {"text_appears": "CALIBRATION_OK"}
+
+
 def test_plan_merges_click_then_visible_state_verify():
     plan = planner.Plan(
         [
