@@ -24,6 +24,7 @@ from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import planner, scope_guard
+from .task_rules import _gui_only_blocked_hotkey
 
 # Several imports above are retained as stable monkeypatch targets for older
 # tests and scripts that patch winpilot.agent.tools.<module>. The mixins read
@@ -124,6 +125,10 @@ class ToolSession(
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
             return ToolResult(f"未知工具: {name}")
+        if name == "hotkey":
+            blocked_hotkey = _gui_only_blocked_hotkey(self.task, args.get("keys") or [])
+            if blocked_hotkey:
+                return ToolResult(blocked_hotkey)
         guard_result = scope_guard.ensure_scope(self, name, args)
         if guard_result is not None:
             return guard_result

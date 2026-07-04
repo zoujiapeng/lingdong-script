@@ -397,7 +397,8 @@
     const dropZone = document.getElementById('dropZone');
     const dropTarget = document.getElementById('dropTarget');
 
-    let counter = 0;
+    let applyCounter = 0;
+    let localCounter = 0;
     let drawing = false;
     let strokePoints = 0;
 
@@ -422,17 +423,17 @@
 
     applyBtn.addEventListener('click', () => {
       const value = input.value.trim() || 'EMPTY_INPUT';
-      counter += 1;
+      applyCounter += 1;
       setStatus(
         'ok',
-        `APPLIED_TEXT_${counter}: ${value}`,
+        `APPLIED_TEXT_${applyCounter}: ${value}`,
         `输入已应用。changed_only observe 应只需要关注这个状态卡和输入行附近的变化。`
       );
     });
 
     smallChangeBtn.addEventListener('click', () => {
-      counter += 1;
-      setStatus('warn', `LOCAL_COUNTER_${counter}`, '只有这个状态卡发生变化，用来测试局部 ROI。');
+      localCounter += 1;
+      setStatus('warn', `LOCAL_COUNTER_${localCounter}`, '只有这个状态卡发生变化，用来测试局部 ROI。');
     });
 
     openModalBtn.addEventListener('click', () => {
@@ -447,14 +448,15 @@
 
     resetBtn.addEventListener('click', () => {
       input.value = '';
-      counter = 0;
+      applyCounter = 0;
+      localCounter = 0;
       strokePoints = 0;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       canvasStatus.textContent = '画布状态：空白';
       dropZone.classList.remove('done');
       dragToken.style.left = '18px';
       dragToken.style.top = '54px';
-      setStatus('idle', '等待操作', '靶场已重置。');
+      setStatus('idle', 'LOCAL_COUNTER_0', '靶场已重置到可见的归零状态。');
     });
 
     function canvasPoint(event) {

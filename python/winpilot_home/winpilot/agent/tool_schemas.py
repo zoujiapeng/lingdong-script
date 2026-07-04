@@ -311,7 +311,7 @@ def tool_schemas(
         ),
         _tool(
             "hotkey",
-            "Press a keyboard shortcut, e.g. ['ctrl','s'], ['enter'], ['alt','f4']. Use type_text for printable text like 6+7=.",
+            "Press a keyboard shortcut, e.g. ['ctrl','s'], ['enter'], ['alt','f4']. Use type_text for printable text like 6+7=. In GUI-only tasks, do not use browser refresh or DevTools shortcuts unless the user explicitly asks.",
             _expectable({"keys": {"type": "array", "items": {"type": "string"}}}),
             ["keys"],
         ),

@@ -239,6 +239,76 @@ def test_visible_evidence_ignores_negative_query_result():
     assert runner._visible_evidence_ledger == []
 
 
+def test_visible_evidence_tracks_nested_batch_read_text():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4")
+    runner._track_visible_evidence(
+        "run_action_batch",
+        {},
+        json.dumps({
+            "ok": True,
+            "results": [
+                {
+                    "action": "read_text",
+                    "preview": "APPLIED_TEXT_1: DEMO\nLOCAL_COUNTER_4",
+                    "ok": True,
+                }
+            ],
+        }),
+    )
+
+    targets = {item["target"] for item in runner._visible_evidence_ledger}
+    assert {"APPLIED_TEXT_1", "LOCAL_COUNTER_4"} <= targets
+
+
+def test_auto_done_accepts_strong_targets_from_visible_tool_evidence():
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner(
+        "confirm APPLIED_TEXT_1, E2E_TARGET_AUTO_101 and LOCAL_COUNTER_4 are visible"
+    )
+    result = ToolResult(
+        "Window: Target\nAPPLIED_TEXT_1: E2E_TARGET_AUTO_101\nLOCAL_COUNTER_4"
+    )
+    before = len(runner._visible_evidence_ledger)
+
+    runner._track_visible_evidence("read_text", {}, result.text)
+    out = runner._maybe_auto_done_from_visible_evidence("read_text", result, before)
+
+    assert out.terminal == "done"
+    assert '"auto_done": true' in out.text
+
+
+def test_auto_done_ignores_verified_expect_without_visible_tool_evidence():
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+
+    runner = AgentRunner("confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4 are visible")
+    before = len(runner._visible_evidence_ledger)
+    runner._append_visible_evidence(
+        "launch:verified_expect",
+        "APPLIED_TEXT_1",
+        "verified expect text appeared: APPLIED_TEXT_1",
+    )
+    runner._append_visible_evidence(
+        "launch:verified_expect",
+        "LOCAL_COUNTER_4",
+        "verified expect text appeared: LOCAL_COUNTER_4",
+    )
+
+    out = runner._maybe_auto_done_from_visible_evidence(
+        "launch",
+        ToolResult("{}"),
+        before,
+    )
+
+    assert out.terminal is None
+
+
 def test_text_appears_scoped_to_target_window(monkeypatch):
     from winpilot.action import verify
 
@@ -283,6 +353,15 @@ def test_text_appears_tolerates_ocr_separator_errors(monkeypatch):
     out = verify._eval_once({"text_appears": "FAST_WRAP_OK_072"}, hwnd=123, level=0)
 
     assert out.verified
+
+
+def test_text_match_rejects_ambiguous_short_digits():
+    from winpilot.action.verify import _match_visible_text
+
+    assert not _match_visible_text("4", "http://127.0.0.1:8878\nLOCAL_COUNTER_14")
+    assert not _match_visible_text("0", "LOCAL_COUNTER_20")
+    assert _match_visible_text("75765", "Calculator display: 75765")
+    assert _match_visible_text("LOCAL_COUNTER_4", "LOCAL COUNTER 4")
 
 
 def test_verify_ignores_unrelated_foreground_when_target_scoped(monkeypatch):
@@ -370,6 +449,7 @@ def test_gui_only_shell_policy():
         _gui_only_shell_allowed,
         _is_gui_only_task,
     )
+    from winpilot.agent.task_rules import _gui_only_blocked_hotkey
 
     assert _is_gui_only_task("GUI-only test. Use Notepad.")
     assert _is_gui_only_task("Use GUI only; do not use shell.")
@@ -396,6 +476,35 @@ def test_gui_only_shell_policy():
     assert _gui_only_forbids_shell("GUI only, complete it visibly.")
     assert _gui_only_launch_uses_shell("powershell -NoExit -Command python -m http.server 8878")
     assert not _gui_only_launch_uses_shell("calc")
+    assert _gui_only_blocked_hotkey("GUI only, complete it visibly.", ["ctrl", "shift", "j"])
+    assert _gui_only_blocked_hotkey("GUI only, complete it visibly.", ["ctrl", "r"])
+    assert not _gui_only_blocked_hotkey("GUI only, refresh the page visibly.", ["ctrl", "r"])
+    assert not _gui_only_blocked_hotkey("GUI only, open developer tools.", ["ctrl", "shift", "j"])
+
+
+def test_gui_only_dispatch_blocks_browser_reset_and_devtools_hotkeys(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        press_keys=lambda keys: calls.append(keys) or {"ok": True},
+        focus_window=lambda hwnd: {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda _name, action, **_kwargs: action(),
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+
+    session = ToolSession(task="Use GUI only to operate the visible web app.")
+
+    devtools = session.dispatch("hotkey", {"keys": ["ctrl", "shift", "j"]})
+    refresh = session.dispatch("hotkey", {"keys": ["ctrl", "r"]})
+
+    assert "developer-tools hotkey" in devtools.text
+    assert "refresh/reload hotkey" in refresh.text
+    assert calls == []
 
 
 def test_tool_schemas_can_hide_shell_for_strict_gui_only():
@@ -1947,3 +2056,12 @@ def test_upload_publish_task_does_not_inject_media_playbook(monkeypatch):
     matched = playbooks.for_task("upload C:\\Users\\zou\\Desktop\\demo.mp4 to Douyin")
 
     assert [book.name for book in matched] == ["file-dialog"]
+
+
+def test_gui_only_detects_bare_chinese_gui_operation_marker():
+    from winpilot.agent.task_rules import _gui_only_blocked_hotkey, _is_gui_only_task
+
+    task = "\u5fc5\u987b\u901a\u8fc7GUI\u64cd\u4f5c"
+
+    assert _is_gui_only_task(task)
+    assert _gui_only_blocked_hotkey(task, ["ctrl", "r"])

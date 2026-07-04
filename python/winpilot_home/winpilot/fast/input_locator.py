@@ -21,6 +21,8 @@ _INPUT_ROLE_TERMS = (
 _BUTTON_ROLE_TERMS = ("button", "link", "menu", "按钮", "链接", "菜单")
 _PLACEHOLDER_TERMS = (
     "search", "find", "input", "type", "enter", "message", "comment", "query",
+    "\u641c\u7d22", "\u67e5\u627e", "\u8f93\u5165", "\u8bf7\u8f93\u5165",
+    "\u6d88\u606f", "\u8bc4\u8bba",
     "搜索", "查找", "输入", "请输入", "消息", "评论", "搜索框",
 )
 _CARET_TEXTS = {"i", "l", "|", "丨", "︱"}
@@ -91,6 +93,23 @@ def _is_caret_like(element: UIElement) -> bool:
         and text in _CARET_TEXTS
         and int(element.height or 0) >= max(12, int(element.width or 1) * 2)
     )
+
+
+def _looks_like_field_label(text: object) -> bool:
+    normalized = _norm(text)
+    if not normalized:
+        return False
+    label_terms = {
+        "inputbox",
+        "textbox",
+        "searchbox",
+        "editbox",
+        "\u8f93\u5165\u6846",
+        "\u641c\u7d22\u6846",
+        "\u6587\u672c\u6846",
+        "\u76ee\u6807\u8f93\u5165\u6846",
+    }
+    return any(term in normalized for term in label_terms)
 
 
 def _terms(label: str = "", fallback_text: Iterable[str] = ()) -> list[str]:
@@ -200,10 +219,18 @@ def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> 
         h = max(26, min(54, int(element.height * 1.8) if element.height else 32))
         w = max(140, min(420, int(window.width * 0.36)))
         gap = max(8, min(20, int(element.width * 0.18) if element.width else 10))
-        # Prefer a box to the right of the label/icon, clipped inside window.
-        left = min(max(window.left, int(element.left + element.width + gap)), window.right - 40)
-        top = min(max(window.top, int(element.cy - h / 2)), window.bottom - h)
-        width = min(w, max(40, window.right - left - 8))
+        if _looks_like_field_label(text):
+            # Field labels such as "input box" usually sit above the real
+            # editable rectangle; clicking to the right often hits empty chrome.
+            left = min(max(window.left + 8, int(element.left)), window.right - 80)
+            top = min(max(window.top, int(element.top + element.height + 8)), window.bottom - h)
+            width = min(w, max(80, window.right - left - 8))
+            reason += "; field-label below"
+        else:
+            # Prefer a box to the right of the label/icon, clipped inside window.
+            left = min(max(window.left, int(element.left + element.width + gap)), window.right - 40)
+            top = min(max(window.top, int(element.cy - h / 2)), window.bottom - h)
+            width = min(w, max(40, window.right - left - 8))
         if width < 80:
             # Fallback below the label for mobile/web stacked forms.
             left = min(max(window.left + 8, int(element.left)), window.right - 80)
@@ -240,8 +267,12 @@ def locate_input(
             score += 0.70
             reason.append("input-like role")
         elif str(element.text or "").strip() and any(_norm(p) in _norm(element.text) for p in _PLACEHOLDER_TERMS):
-            score += 0.48
-            reason.append("placeholder/search-like text")
+            if _looks_like_field_label(element.text):
+                score += 0.04
+                reason.append("field-label text; prefer nearby input box")
+            else:
+                score += 0.48
+                reason.append("placeholder/search-like text")
         elif "focused" in {_norm(s) for s in element.states} and not _is_button_role(element):
             score += 0.42
             reason.append("focused non-button element")
