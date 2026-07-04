@@ -92,6 +92,9 @@ def test_reject_unbounded_conditional_loop_without_cond():
     err = trace_mod.validate_script(
         {"format": "wps/2", "steps": [{"tool": "ctrl.loop", "loop_type": "until", "body": []}]})
     assert "requires cond" in err
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "steps": [{"tool": "ctrl.loop", "loop_type": "while", "cond": {}, "body": []}]})
+    assert "cond must be non-empty" in err
 
 
 def test_reject_bad_loop_count_and_max_iters():

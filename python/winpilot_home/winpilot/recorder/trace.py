@@ -468,8 +468,12 @@ def _validate_steps(steps: Any, where: str) -> str | None:
                 return f"{loc} invalid loop_type: {loop_type!r}"
             if loop_type == "count" and step.get("count") is not None and not _is_number(step.get("count")):
                 return f"{loc} ctrl.loop count requires numeric count"
-            if loop_type in ("while", "until") and not isinstance(step.get("cond"), dict):
-                return f"{loc} ctrl.loop {loop_type} requires cond object"
+            if loop_type in ("while", "until"):
+                cond = step.get("cond")
+                if not isinstance(cond, dict):
+                    return f"{loc} ctrl.loop {loop_type} requires cond object"
+                if not cond:
+                    return f"{loc} ctrl.loop {loop_type} cond must be non-empty"
             if step.get("max_iters") is not None and not _is_number(step.get("max_iters")):
                 return f"{loc} ctrl.loop max_iters must be numeric"
             err = _validate_steps(step.get("body") or [], f"{loc}.body")

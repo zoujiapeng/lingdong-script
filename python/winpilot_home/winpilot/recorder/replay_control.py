@@ -118,10 +118,13 @@ def exec_loop(replayer: Any, step: dict, idx: str) -> bool:
         return True
 
     if loop_type == "while":
+        if not cond:
+            logger.warning("while loop requires cond; aborting instead of treating it as a successful no-op")
+            return False
         while iters < cap:
             if replayer._should_stop():
                 return False
-            if not cond or not replayer._check_condition(cond, timeout_s):
+            if not replayer._check_condition(cond, timeout_s):
                 break
             if not run_body():
                 return False
