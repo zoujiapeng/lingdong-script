@@ -105,6 +105,29 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('reports WPS-only tool_call reason even without a feature bridge', async () => {
+    const script = flowWith({
+      id: 'draw',
+      type: 'tool_call',
+      x: 0,
+      y: 0,
+      params: {
+        feature_name: 'draw_strokes',
+        params: { _requires_wps_replay: true, _wps_tool: 'draw_strokes' },
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'draw',
+      'error',
+      'WinPilot-only replay step "draw_strokes" must run through the original .wps.json Replayer',
+    ]);
+  });
+
   it('requires a real feature bridge for tool_call nodes', async () => {
     const script = flowWith({
       id: 'call',
