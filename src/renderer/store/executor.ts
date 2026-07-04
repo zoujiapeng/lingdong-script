@@ -37,6 +37,8 @@ export function createFlowExecutor(
 
   let nodeMap = new Map<string, FlowNode>();
   script.nodes.forEach((n) => nodeMap.set(n.id, n));
+  const runtimeVariables: Record<string, string> = { ...(script.variables || {}) };
+  script.variables = runtimeVariables;
 
   let edgesByFrom = new Map<string, FlowEdge[]>();
   script.edges.forEach((e) => {
@@ -53,6 +55,26 @@ export function createFlowExecutor(
 
   function log(level: string, message: string, nodeId?: string) {
     callbacks.onLog({ level: level as any, message, node_id: nodeId });
+  }
+
+  function setVariable(name: any, value: any, nodeId: string) {
+    const key = String(name || '').trim();
+    if (!key) throw new Error('variable name is required');
+    runtimeVariables[key] = String(value ?? '');
+    script.variables[key] = runtimeVariables[key];
+    log('info', `变量 ${key} = "${runtimeVariables[key]}"`, nodeId);
+  }
+
+  function featureText(value: any): string {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value !== 'object') return String(value);
+    for (const key of ['text', 'value', 'stdout', 'output']) {
+      if (value[key] != null) return featureText(value[key]);
+    }
+    if (value.result != null) return featureText(value.result);
+    if (value.data != null) return featureText(value.data);
+    return '';
   }
 
   async function delay(ms: number) {
@@ -272,6 +294,22 @@ export function createFlowExecutor(
             log('info', `检查窗口是否存在（模拟: 否）`, nodeId);
             await delay(300);
             result = 'no';
+          } else if (cond === 'variable_equals' || cond === 'variable_greater' || cond === 'variable_less') {
+            const name = String(params.variable_name || '').trim();
+            const actual = runtimeVariables[name] ?? '';
+            const expected = String(params.variable_value ?? '');
+            let matched = false;
+            if (cond === 'variable_equals') {
+              matched = actual === expected;
+            } else {
+              const a = Number(actual);
+              const b = Number(expected);
+              matched = Number.isFinite(a) && Number.isFinite(b)
+                ? (cond === 'variable_greater' ? a > b : a < b)
+                : false;
+            }
+            log('info', `变量判断: ${name}=${actual} ${cond} ${expected} -> ${matched ? 'yes' : 'no'}`, nodeId);
+            result = matched ? 'yes' : 'no';
           } else {
             log('info', `变量判断（模拟: 假）`, nodeId);
             await delay(200);
@@ -402,12 +440,13 @@ export function createFlowExecutor(
 
         case 'variable_set':
           log('info', `设置变量: ${params.name} = "${params.value}"`, nodeId);
+          setVariable(params.name, params.value, nodeId);
           await delay(100);
           result = 'output';
           break;
 
         case 'variable_get':
-          log('info', `读取变量: ${params.name}`, nodeId);
+          log('info', `读取变量: ${params.name} = "${runtimeVariables[String(params.name || '').trim()] ?? ''}"`, nodeId);
           await delay(100);
           result = 'output';
           break;
@@ -519,6 +558,9 @@ export function createFlowExecutor(
           if (sub === 'get_image') { cp.format_ = params.format_ || 'base64'; cp.save_path = params.save_path || ''; }
           const res = await callFeatureOrThrow(clipFn[sub] || 'clipboard_get_text', cp, nodeId, `剪贴板操作模拟: ${clipLogs[sub]}`);
           if (res !== undefined) log('info', `剪贴板结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          if (sub === 'get' && params.into && res !== undefined) {
+            setVariable(params.into, featureText(res), nodeId);
+          }
           result = 'output';
           break;
         }
@@ -687,6 +729,9 @@ export function createFlowExecutor(
             log('info', `调用系统工具: ${featureName}`, nodeId);
             const res = await callFeatureOrThrow(featureName, params, nodeId, `模拟系统工具: ${featureName}`);
             if (res !== undefined) log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            if (node.type === 'clipboard_get' && params.into && res !== undefined) {
+              setVariable(params.into, featureText(res), nodeId);
+            }
           } else {
             log('warn', `未知节点类型: ${node.type}`, nodeId);
           }

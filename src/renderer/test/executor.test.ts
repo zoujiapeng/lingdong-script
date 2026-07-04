@@ -19,6 +19,20 @@ function flowWith(node: FlowScript['nodes'][number]): FlowScript {
   };
 }
 
+function flowSequence(
+  nodes: FlowScript['nodes'],
+  edges: FlowScript['edges'],
+  variables: Record<string, string> = {},
+): FlowScript {
+  return {
+    meta: { name: 'executor-test', version: '1.0.0', created_at: '', updated_at: '' },
+    nodes,
+    edges,
+    variables,
+    settings: { error_handling: 'stop' },
+  };
+}
+
 async function runFlow(script: FlowScript, callFeature?: (name: string, params: any) => Promise<any> | any) {
   const logs: Array<Omit<LogEntry, 'timestamp'>> = [];
   const statuses: Array<[string, string, string | undefined]> = [];
@@ -180,6 +194,49 @@ describe('createFlowExecutor replay/DSL bridges', () => {
 
     expect(result.status).toBe('error');
     expect(result.statuses).toContainEqual(['clip', 'error', 'clipboard denied']);
+  });
+
+  it('stores clipboard_get output into FlowScript variables', async () => {
+    const script = flowWith({
+      id: 'clip',
+      type: 'clipboard_get',
+      x: 0,
+      y: 0,
+      params: { into: 'clip_text' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, () => ({ success: true, result: { text: 'CLIP_VALUE' } }));
+
+    expect(result.status).toBe('completed');
+    expect(script.variables.clip_text).toBe('CLIP_VALUE');
+  });
+
+  it('routes variable conditions using runtime variables', async () => {
+    const script = flowSequence(
+      [
+        { id: 'start', type: 'start', x: 0, y: 0, params: {}, status: 'idle' },
+        { id: 'set', type: 'variable_set', x: 0, y: 0, params: { name: 'score', value: '5' }, status: 'idle' },
+        { id: 'cond', type: 'condition', x: 0, y: 0, params: { condition_type: 'variable_greater', variable_name: 'score', variable_value: '3' }, status: 'idle' },
+        { id: 'yes', type: 'variable_set', x: 0, y: 0, params: { name: 'branch', value: 'yes' }, status: 'idle' },
+        { id: 'no', type: 'variable_set', x: 0, y: 0, params: { name: 'branch', value: 'no' }, status: 'idle' },
+        { id: 'end', type: 'end', x: 0, y: 0, params: {}, status: 'idle' },
+      ],
+      [
+        { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'set', to_port: 'input' },
+        { id: 'e2', from_node: 'set', from_port: 'output', to_node: 'cond', to_port: 'input' },
+        { id: 'e3', from_node: 'cond', from_port: 'yes', to_node: 'yes', to_port: 'input' },
+        { id: 'e4', from_node: 'cond', from_port: 'no', to_node: 'no', to_port: 'input' },
+        { id: 'e5', from_node: 'yes', from_port: 'output', to_node: 'end', to_port: 'input' },
+        { id: 'e6', from_node: 'no', from_port: 'output', to_node: 'end', to_port: 'input' },
+      ],
+    );
+
+    const result = await runFlow(script, () => ({ success: true }));
+
+    expect(result.status).toBe('completed');
+    expect(script.variables.score).toBe('5');
+    expect(script.variables.branch).toBe('yes');
   });
 
   it('treats default feature-map failure as node failure', async () => {
