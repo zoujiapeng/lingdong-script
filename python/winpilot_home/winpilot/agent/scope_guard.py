@@ -30,6 +30,7 @@ GUI_SCOPE_MUTATIONS = {
     "mouse_up",
     "move_mouse",
     "hold_key",
+    "coordinate_click_test",
     "run_action_batch",
     "execute_subgoal",
 }

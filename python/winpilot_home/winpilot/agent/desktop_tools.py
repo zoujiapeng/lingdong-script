@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 from pathlib import Path
 
 from ..action import executor
+from ..action.verify import _match_visible_text
 from ..perception import vision_cv
+from ..utils.screenshot import Region, capture, screen_size, window_region
 from .tool_result import ToolResult
 
 
@@ -60,6 +63,174 @@ class DesktopToolMixin:
     def _t_list_displays(self, _args: dict) -> ToolResult:
         result = executor.list_displays()
         return ToolResult(self._fmt(result))
+
+    def _t_coordinate_diagnostics(self, args: dict) -> ToolResult:
+        """Report coordinate/capture geometry for DPI/ROI mismatch debugging."""
+        payload: dict = {"ok": True}
+        try:
+            sw, sh = screen_size()
+            payload["screen_size"] = {"width": int(sw), "height": int(sh), "source": "GetSystemMetrics"}
+        except Exception as exc:
+            payload["screen_size_error"] = str(exc)
+        try:
+            full = capture()
+            payload["full_capture"] = {
+                "width": int(full.shape[1]),
+                "height": int(full.shape[0]),
+                "source": "mss",
+            }
+        except Exception as exc:
+            payload["full_capture_error"] = str(exc)
+        try:
+            payload["displays"] = executor.list_displays()
+        except Exception as exc:
+            payload["displays_error"] = str(exc)
+
+        hwnd = args.get("hwnd") or getattr(self, "hwnd", None)
+        region = None
+        if hwnd:
+            try:
+                hwnd = int(hwnd)
+                region = window_region(hwnd)
+                payload["target_window"] = {
+                    "hwnd": hwnd,
+                    "region": {
+                        "left": region.left,
+                        "top": region.top,
+                        "width": region.width,
+                        "height": region.height,
+                        "right": region.right,
+                        "bottom": region.bottom,
+                    },
+                }
+                try:
+                    dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+                    payload["target_window"]["dpi"] = int(dpi)
+                    payload["target_window"]["scale_from_96dpi"] = round(float(dpi) / 96.0, 4)
+                except Exception as exc:
+                    payload["target_window"]["dpi_error"] = str(exc)
+                try:
+                    cropped = capture(region)
+                    payload["target_window"]["capture"] = {
+                        "width": int(cropped.shape[1]),
+                        "height": int(cropped.shape[0]),
+                        "matches_region": (
+                            int(cropped.shape[1]) == int(region.width)
+                            and int(cropped.shape[0]) == int(region.height)
+                        ),
+                    }
+                except Exception as exc:
+                    payload["target_window"]["capture_error"] = str(exc)
+            except Exception as exc:
+                payload["target_window_error"] = str(exc)
+
+        if args.get("x") is not None and args.get("y") is not None:
+            x, y = int(args["x"]), int(args["y"])
+            point = {"x": x, "y": y}
+            if region is not None:
+                point["relative_to_target"] = {
+                    "x": x - region.left,
+                    "y": y - region.top,
+                    "inside": region.left <= x < region.right and region.top <= y < region.bottom,
+                }
+            try:
+                probe = capture(Region(x - 2, y - 2, 5, 5))
+                if getattr(probe, "size", 0):
+                    center = probe[min(2, probe.shape[0] - 1), min(2, probe.shape[1] - 1)].tolist()
+                    point["bgr_at_point"] = [int(v) for v in center[:3]]
+            except Exception as exc:
+                point["probe_error"] = str(exc)
+            payload["point"] = point
+
+        warnings: list[str] = []
+        screen = payload.get("screen_size") or {}
+        full_capture = payload.get("full_capture") or {}
+        if screen and full_capture and (
+            int(screen.get("width") or -1) != int(full_capture.get("width") or -2)
+            or int(screen.get("height") or -1) != int(full_capture.get("height") or -2)
+        ):
+            warnings.append("screen_size differs from full_capture; check DPI awareness or virtual monitor origin.")
+        target = payload.get("target_window") or {}
+        target_capture = target.get("capture") if isinstance(target, dict) else {}
+        if isinstance(target_capture, dict) and target_capture.get("matches_region") is False:
+            warnings.append("target window capture size does not match window_region; ROI coordinate mapping is suspect.")
+        payload["warnings"] = warnings
+        return ToolResult(self._fmt(payload))
+
+    def _t_coordinate_click_test(self, args: dict) -> ToolResult:
+        """Perform one real mouse click and return coordinate evidence."""
+        x, y = int(args["x"]), int(args["y"])
+        hwnd = args.get("hwnd") or getattr(self, "hwnd", None)
+        try:
+            hwnd = int(hwnd) if hwnd else None
+        except (TypeError, ValueError):
+            hwnd = None
+        button = str(args.get("button") or "left")
+        double = bool(args.get("double", False))
+        payload: dict = {
+            "ok": False,
+            "requested": {"x": x, "y": y},
+            "button": button,
+            "double": double,
+            "real_mouse_path": True,
+            "note": (
+                "This tool calls executor.click with physical screen coordinates. "
+                "Compare requested.x/y with the target app's own click echo."
+            ),
+        }
+        try:
+            payload["cursor_before"] = executor.cursor_position()
+        except Exception as exc:
+            payload["cursor_before_error"] = str(exc)
+        if hwnd:
+            try:
+                region = window_region(hwnd)
+                payload["target_window"] = {
+                    "hwnd": hwnd,
+                    "region": {
+                        "left": region.left,
+                        "top": region.top,
+                        "width": region.width,
+                        "height": region.height,
+                        "right": region.right,
+                        "bottom": region.bottom,
+                    },
+                    "requested_relative": {
+                        "x": x - region.left,
+                        "y": y - region.top,
+                        "inside": region.left <= x < region.right and region.top <= y < region.bottom,
+                    },
+                }
+            except Exception as exc:
+                payload["target_window_error"] = str(exc)
+        try:
+            click_result = executor.click(x, y, button=button, double=double, hwnd=hwnd)
+            payload["click_result"] = click_result
+            payload["ok"] = bool(click_result.get("ok"))
+        except Exception as exc:
+            payload["error"] = str(exc)
+            return ToolResult(self._fmt(payload))
+        try:
+            payload["cursor_after"] = executor.cursor_position()
+        except Exception as exc:
+            payload["cursor_after_error"] = str(exc)
+        wait_ms = args.get("wait_ms", 250)
+        try:
+            import time
+            time.sleep(max(0.0, min(float(wait_ms), 3000.0)) / 1000.0)
+        except Exception:
+            pass
+        expected = str(args.get("expect_text") or "").strip()
+        if expected:
+            try:
+                read = self._t_read_text({"hwnd": hwnd} if hwnd else {})
+                payload["read_text_preview"] = read.text[:1200]
+                payload["verified"] = bool(_match_visible_text(expected, read.text))
+                payload["expect_text"] = expected
+            except Exception as exc:
+                payload["verify_error"] = str(exc)
+                payload["verified"] = False
+        return ToolResult(self._fmt(payload))
 
     def _t_zoom(self, args: dict) -> ToolResult:
         result = executor.zoom_region(

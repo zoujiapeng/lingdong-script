@@ -1903,6 +1903,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "schedule_task",
                 "list_scheduled_tasks",
                 "cancel_scheduled_task",
+                "coordinate_diagnostics",
+                "coordinate_click_test",
                 "zoom",
                 "screenshot",
             }
@@ -1920,6 +1922,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         "read_text",
                         "schedule_task",
                         "cancel_scheduled_task",
+                        "coordinate_diagnostics",
+                        "coordinate_click_test",
                     } else 600
                     if tc.function.name == "list_scheduled_tasks":
                         limit = 2400
