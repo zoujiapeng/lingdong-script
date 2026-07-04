@@ -48,7 +48,7 @@ from .gui_plan_helpers import (
 from .planner import planning_enabled
 from .reflection import ReflectionMixin
 from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
-from .runtime_profile import build_runtime_profile
+from .runtime_profile import RuntimeProfile, build_runtime_profile
 from .task_rules import (
     _blocks_store_search_action,
     _blocks_upload_media_analysis,
@@ -122,11 +122,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
     def __init__(self, task: str, stop_event: threading.Event | None = None,
                  session_context: list | None = None,
-                 max_steps_override: int | None = None) -> None:
+                 max_steps_override: int | None = None,
+                 runtime_profile: RuntimeProfile | None = None) -> None:
         self.task = task
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
-        self.session = ToolSession(stop_event=self.stop_event, task=task)
+        self.runtime_profile = runtime_profile or build_runtime_profile(task)
+        self.session = ToolSession(
+            stop_event=self.stop_event,
+            task=task,
+            runtime_profile=self.runtime_profile,
+        )
         self.session.run_id = self.run_id
         # Prior finished tasks this session (list[SessionEntry]) for continuity.
         self.session_context = session_context or []
@@ -156,7 +162,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._llm_trace_index = 0                    # local forensic trace files
         self.max_steps_override = max_steps_override
         self.run_state = RunStateMachine()
-        self.runtime_profile = build_runtime_profile(task)
         # Coding is now an in-process runtime capability of this AgentRunner,
         # not a separate sub-agent / runner loop.
         self._is_coding = self.runtime_profile.coding

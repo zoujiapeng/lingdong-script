@@ -18,6 +18,12 @@ def test_coding_task_uses_unified_agent_with_coding_runtime():
     assert runner.runtime_profile.coding
 
 
+def test_runner_and_tool_session_share_runtime_profile():
+    runner = build_runner("Debug this Python project and run tests")
+
+    assert runner.session.runtime_profile is runner.runtime_profile
+
+
 def test_explicit_project_artifact_task_uses_coding_runtime():
     runner = build_runner("这是一个 Python 项目编程任务：创建 main.py 并确认 stdout 是 7")
 
