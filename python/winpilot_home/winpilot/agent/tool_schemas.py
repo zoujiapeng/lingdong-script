@@ -6,6 +6,8 @@ not the runner.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+
 from ..action import shell
 from ..memory import experience
 from ..perception import vlm
@@ -72,11 +74,147 @@ def _promote_tools(tools: list[dict], names: list[str], before: str) -> None:
     tools[:] = [*rest[:insert_at], *promoted, *rest[insert_at:]]
 
 
+_LEAN_GUI_TOOLS = {
+    "list_windows",
+    "scan_windows",
+    "focus_window",
+    "find_app",
+    "find_program",
+    "launch",
+    "observe",
+    "screen_watch",
+    "read_text",
+    "execute_subgoal",
+    "run_action_batch",
+    "click",
+    "type_text",
+    "hotkey",
+    "scroll",
+    "drag",
+    "draw_strokes",
+    "wait",
+    "screenshot",
+    "zoom",
+    "revise_plan",
+    "complete_subgoal",
+    "vlm_describe",
+    "done",
+    "fail",
+}
+
+
+_DRAWING_EXECUTE_SUBGOAL_PROPS = {
+    "subgoal",
+    "target_window",
+    "draw",
+    "draws",
+    "verify_texts",
+    "constraints",
+}
+
+
+_LEAN_TOOL_DESCRIPTIONS = {
+    "list_windows": "List visible windows.",
+    "scan_windows": "Focus/observe matching windows.",
+    "focus_window": "Bring hwnd to foreground.",
+    "find_app": "Find a running app/process.",
+    "find_program": "Find an installed program.",
+    "launch": "Launch an app/program/URL.",
+    "observe": "Observe target/foreground window; use query/full/changed_only when needed.",
+    "screen_watch": "Cheap screen change watcher.",
+    "read_text": "Read visible text from target/window.",
+    "execute_subgoal": (
+        "Controller GUI routine. Include concrete input, click/clicks, draw/draws, "
+        "or verify_texts; subgoal alone is invalid."
+    ),
+    "run_action_batch": "Execute a short grounded GUI batch in the local controller.",
+    "click": "Click element_id or x/y.",
+    "type_text": "Type literal text into the focused control.",
+    "hotkey": "Press shortcut keys.",
+    "scroll": "Scroll at x/y.",
+    "drag": "Drag from x1/y1 to x2/y2.",
+    "draw_strokes": "Draw screen-coordinate strokes.",
+    "wait": "Wait for a condition.",
+    "screenshot": "Capture screen with compact nonvisual summary.",
+    "zoom": "Capture a screen rectangle with compact nonvisual summary.",
+    "revise_plan": "Create/replace todo plan.",
+    "complete_subgoal": "Mark a todo item complete.",
+    "vlm_describe": "Ask VLM about a screen/window region.",
+    "done": "Finish only after verified evidence.",
+    "fail": "Finish with an honest failure reason.",
+}
+
+_DRAWING_TOOL_DESCRIPTIONS = {
+    **_LEAN_TOOL_DESCRIPTIONS,
+    "execute_subgoal": (
+        "Controller drawing routine. Use launch/focus first; then include draw/draws "
+        "or verify_texts. Do not use it to open/discover an app."
+    ),
+}
+
+
+def _strip_nested_descriptions(node: object) -> None:
+    if isinstance(node, dict):
+        node.pop("description", None)
+        for value in node.values():
+            _strip_nested_descriptions(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_nested_descriptions(item)
+
+
+def _compact_tool_descriptions(tool: dict, descriptions: dict[str, str] | None = None) -> dict:
+    compact = deepcopy(tool)
+    fn = compact.get("function") or {}
+    name = str(fn.get("name") or "")
+    description_map = descriptions or _LEAN_TOOL_DESCRIPTIONS
+    if name in description_map:
+        fn["description"] = description_map[name]
+    parameters = fn.get("parameters")
+    if isinstance(parameters, dict):
+        _strip_nested_descriptions(parameters)
+    return compact
+
+
+def _prune_execute_subgoal_properties(tool: dict, allowed: set[str]) -> dict:
+    if _tool_name(tool) != "execute_subgoal":
+        return tool
+    fn = tool.get("function") or {}
+    params = fn.get("parameters") or {}
+    props = params.get("properties")
+    if isinstance(props, dict):
+        params["properties"] = {key: value for key, value in props.items() if key in allowed}
+    return tool
+
+
+def _apply_tool_profile(tools: list[dict], profile: str) -> list[dict]:
+    """Return a task-profiled schema list without changing dispatch capability."""
+    if profile in {"", "standard", "full"}:
+        return tools
+    if profile == "lean_gui":
+        return [
+            _compact_tool_descriptions(tool)
+            for tool in tools
+            if _tool_name(tool) in _LEAN_GUI_TOOLS
+        ]
+    if profile == "drawing_gui":
+        return [
+            _prune_execute_subgoal_properties(
+                _compact_tool_descriptions(tool, _DRAWING_TOOL_DESCRIPTIONS),
+                _DRAWING_EXECUTE_SUBGOAL_PROPS,
+            )
+            for tool in tools
+            if _tool_name(tool) in _LEAN_GUI_TOOLS
+        ]
+    return tools
+
+
 def tool_schemas(
     planning: bool = False,
     coding_runtime: bool = False,
     allow_shell: bool = True,
     allow_files: bool = True,
+    profile: str = "standard",
 ) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
@@ -491,4 +629,4 @@ def tool_schemas(
                   {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
                    "regex": _prop("boolean")}, ["query"]),
         ])
-    return tools
+    return _apply_tool_profile(tools, profile)

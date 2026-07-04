@@ -1025,6 +1025,52 @@ def test_execute_subgoal_draw_expands_adjacent_plan_draws():
     assert "combined adjacent drawing plan items" in expanded["subgoal"]
 
 
+def test_execute_subgoal_draw_expands_from_task_when_plan_has_verify_noise():
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "open Paint, draw a blue triangle on the left and a red rectangle on the right"
+    )
+    runner.session.plan = planner.Plan([
+        "open Paint and verify blue triangle",
+        "draw red rectangle on the right",
+        "confirm both shapes are visible",
+    ])
+    args = {
+        "subgoal": "Draw a blue triangle",
+        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
+    }
+
+    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
+
+    assert expanded is not args
+    assert expanded["draws"] == [
+        {"shape": "triangle", "color": "blue", "expected_region": "left"},
+        {"shape": "rectangle", "color": "red", "expected_region": "right"},
+    ]
+
+
+def test_execute_subgoal_draw_expands_from_task_without_plan():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "draw a blue triangle on the left and a red rectangle on the right"
+    )
+    args = {
+        "subgoal": "Draw a blue triangle",
+        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
+    }
+
+    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
+
+    assert expanded is not args
+    assert expanded["draws"] == [
+        {"shape": "triangle", "color": "blue", "expected_region": "left"},
+        {"shape": "rectangle", "color": "red", "expected_region": "right"},
+    ]
+
+
 def test_execute_subgoal_draw_does_not_expand_custom_strokes():
     from winpilot.agent import planner
     from winpilot.agent.loop import AgentRunner

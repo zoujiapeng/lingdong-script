@@ -47,3 +47,76 @@ def test_coding_runtime_keeps_file_tools_even_when_gui_files_are_hidden():
     names = set(_names(tool_schemas(planning=True, coding_runtime=True, allow_shell=False, allow_files=False)))
 
     assert {"list_dir", "read_file", "write_file", "search_text", "apply_patch", "github_search"} <= names
+
+
+def test_lean_gui_profile_keeps_controller_tools_and_hides_unrelated_tools():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    standard = tool_schemas(planning=True, coding_runtime=False, allow_shell=False, allow_files=False)
+    lean = tool_schemas(
+        planning=True,
+        coding_runtime=False,
+        allow_shell=False,
+        allow_files=False,
+        profile="lean_gui",
+    )
+    names = set(_names(lean))
+
+    assert len(lean) < len(standard)
+    assert {
+        "list_windows",
+        "launch",
+        "focus_window",
+        "observe",
+        "execute_subgoal",
+        "run_action_batch",
+        "click",
+        "type_text",
+        "draw_strokes",
+        "screenshot",
+        "done",
+        "fail",
+        "revise_plan",
+        "complete_subgoal",
+    } <= names
+    assert {
+        "capture_template",
+        "find_image",
+        "color_probe",
+        "clipboard_read",
+        "mouse_down",
+        "mouse_up",
+        "move_mouse",
+        "list_installed_apps",
+    }.isdisjoint(names)
+
+
+def test_schema_profile_auto_uses_lean_only_for_gui_drawing_tasks(monkeypatch):
+    from winpilot.agent.loop import _schema_profile_for_task
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.CONFIG.get",
+        lambda *path, default=None: "auto" if path == ("agent", "tool_profile") else default,
+    )
+
+    assert _schema_profile_for_task("请只用GUI打开画图画一个蓝色三角形", is_coding=False) == "drawing_gui"
+    assert _schema_profile_for_task("打开QQ给我的手机发消息", is_coding=False) == "standard"
+    assert _schema_profile_for_task("重构这个 Python 项目", is_coding=True) == "standard"
+
+
+def test_drawing_gui_profile_keeps_draw_subgoal_without_click_input():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(
+        planning=True,
+        coding_runtime=False,
+        allow_shell=False,
+        allow_files=False,
+        profile="drawing_gui",
+    )
+    execute = next(tool for tool in tools if tool["function"]["name"] == "execute_subgoal")
+    props = set(execute["function"]["parameters"]["properties"])
+
+    assert {"subgoal", "target_window", "draw", "draws", "verify_texts", "constraints"} <= props
+    assert {"input", "click", "clicks"}.isdisjoint(props)
+    assert "Do not use it to open/discover an app" in execute["function"]["description"]

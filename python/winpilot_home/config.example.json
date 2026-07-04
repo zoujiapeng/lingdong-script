@@ -47,6 +47,7 @@
     "planning_enabled": true,
     "playbooks_enabled": true,
     "prompt_style": "full",
+    "tool_profile": "auto",
     "session_memory": true,
     "verify_done": true,
     "done_max_rejects": 2,

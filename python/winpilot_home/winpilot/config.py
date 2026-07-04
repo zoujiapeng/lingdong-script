@@ -61,6 +61,7 @@ _DEFAULTS: dict[str, Any] = {
         "planning_enabled": True,
         "playbooks_enabled": True,
         "prompt_style": "full",
+        "tool_profile": "auto",
         "session_memory": True,
         "verify_done": True,
         "done_max_rejects": 2,
