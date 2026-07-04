@@ -77,6 +77,39 @@ export function createFlowExecutor(
     return '';
   }
 
+  function publicFeatureParams(params: Record<string, any>): Record<string, any> {
+    return Object.fromEntries(
+      Object.entries(params || {}).filter(([key]) => !key.startsWith('_'))
+    );
+  }
+
+  function featureFailureMessage(res: any, featureName: string): string | undefined {
+    if (res === false) return `${featureName} returned false`;
+    if (res?.type === 'error') return res.error || `${featureName} failed`;
+    if (res?.success === false) return res.error || `${featureName} failed`;
+    if (res?.ok === false) return res.error || `${featureName} failed`;
+    const inner = res?.type === 'result' ? res.result : res?.result;
+    if (inner === false) return `${featureName} returned false`;
+    if (inner?.success === false) return inner.error || `${featureName} failed`;
+    if (inner?.ok === false) return inner.error || `${featureName} failed`;
+    if (res?.type === 'result' && inner?.success === true && inner?.result === false) {
+      return inner.error || `${featureName} returned false`;
+    }
+    return undefined;
+  }
+
+  function isWpsReplayNode(params: Record<string, any>): boolean {
+    return params?._source_wps_replay === true;
+  }
+
+  function hasNonAscii(text: string): boolean {
+    return /[^\x00-\x7F]/.test(text);
+  }
+
+  function coordsTarget(x: any, y: any): string {
+    return `${Number(x) || 0},${Number(y) || 0}`;
+  }
+
   async function delay(ms: number) {
     if (ms <= 0) return;
     const start = Date.now();
@@ -113,10 +146,9 @@ export function createFlowExecutor(
       await delay(300);
       return undefined;
     }
-    const res = await win.electronAPI.callFeature(featureName, featureParams);
-    if (res === false || res?.success === false) {
-      throw new Error(res?.error || `${featureName} failed`);
-    }
+    const res = await win.electronAPI.callFeature(featureName, publicFeatureParams(featureParams));
+    const failure = featureFailureMessage(res, featureName);
+    if (failure) throw new Error(failure);
     return res;
   }
 
@@ -169,6 +201,28 @@ export function createFlowExecutor(
 
         case 'click': {
           log('info', `点击: (${params.x}, ${params.y}) [${params.method}]`, nodeId);
+          if (isWpsReplayNode(params)) {
+            const method = params.method || 'single';
+            const featureName = method === 'right' ? 'right_click'
+              : method === 'middle' ? 'middle_click'
+                : 'click_target';
+            const target = coordsTarget(params.x, params.y);
+            const featureParams: Record<string, any> = featureName === 'middle_click'
+              ? { target }
+              : { target, region: '' };
+            if (featureName === 'click_target') {
+              featureParams.timeout = 5;
+              featureParams.human_like = true;
+              featureParams.double = method === 'double';
+              featureParams.allow_uia = false;
+              featureParams.physical = true;
+            }
+            const res = await callFeatureOrThrow(featureName, featureParams, nodeId, undefined, true);
+            log('info', `WPS真实点击结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            await delay((params.delay_after || 0.5) * 1000);
+            result = 'output';
+            break;
+          }
           await delay(200);
           await delay((params.delay_after || 0.5) * 1000);
           result = 'output';
@@ -177,6 +231,27 @@ export function createFlowExecutor(
 
         case 'click_text': {
           log('info', `OCR点击文本: "${(params.text || '').substring(0, 30)}"`, nodeId);
+          if (isWpsReplayNode(params)) {
+            const method = params.method || 'single';
+            const featureName = method === 'right' ? 'right_click'
+              : method === 'middle' ? 'middle_click'
+                : 'click_target';
+            const target = params.text || '';
+            const featureParams: Record<string, any> = featureName === 'middle_click'
+              ? { target }
+              : { target, region: '' };
+            if (featureName === 'click_target') {
+              featureParams.timeout = params.timeout ?? 5;
+              featureParams.human_like = true;
+              featureParams.double = method === 'double';
+              featureParams.allow_uia = true;
+            }
+            const res = await callFeatureOrThrow(featureName, featureParams, nodeId, undefined, true);
+            log('info', `WPS真实文字点击结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            await delay((params.delay_after || 0.5) * 1000);
+            result = 'output';
+            break;
+          }
           await delay(300);
           await delay((params.delay_after || 0.5) * 1000);
           result = 'output';
@@ -260,6 +335,32 @@ export function createFlowExecutor(
 
         case 'input_text': {
           log('info', `输入文本: "${(params.text || '').substring(0, 30)}"`, nodeId);
+          if (isWpsReplayNode(params)) {
+            if (params.click_before && Number.isFinite(Number(params.x)) && Number.isFinite(Number(params.y))) {
+              await callFeatureOrThrow('click_target', {
+                target: coordsTarget(params.x, params.y),
+                region: '',
+                timeout: 5,
+                human_like: true,
+                double: false,
+                allow_uia: false,
+                physical: true,
+              }, nodeId, undefined, true);
+            }
+            if (params.clear_before) {
+              await callFeatureOrThrow('hotkey', { keys: 'ctrl+a' }, nodeId, undefined, true);
+            }
+            const text = String(params.text || '');
+            const featureName = hasNonAscii(text) ? 'type_clipboard' : 'type_text';
+            const featureParams = featureName === 'type_clipboard'
+              ? { text }
+              : { text, clear_first: false, interval: 0 };
+            const res = await callFeatureOrThrow(featureName, featureParams, nodeId, undefined, true);
+            log('info', `WPS真实输入结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            await delay((params.delay_after || 0.3) * 1000);
+            result = 'output';
+            break;
+          }
           await delay(400);
           await delay((params.delay_after || 0.3) * 1000);
           result = 'output';
@@ -268,6 +369,14 @@ export function createFlowExecutor(
 
         case 'keyboard': {
           log('info', `按键: ${[...(params.modifiers || []), ...(params.keys || [])].join('+')}`, nodeId);
+          if (isWpsReplayNode(params)) {
+            const keys = [...(params.modifiers || []), ...(params.keys || [])].join('+');
+            const res = await callFeatureOrThrow('hotkey', { keys }, nodeId, undefined, true);
+            log('info', `WPS真实快捷键结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            await delay((params.delay_after || 0.2) * 1000);
+            result = 'output';
+            break;
+          }
           await delay(200);
           await delay((params.delay_after || 0.2) * 1000);
           result = 'output';
@@ -276,6 +385,19 @@ export function createFlowExecutor(
 
         case 'swipe': {
           log('info', `滑动: (${params.start_x},${params.start_y}) → (${params.end_x},${params.end_y})`, nodeId);
+          if (isWpsReplayNode(params)) {
+            const res = await callFeatureOrThrow('swipe_action', {
+              start_x: params.start_x ?? 0,
+              start_y: params.start_y ?? 0,
+              end_x: params.end_x ?? 0,
+              end_y: params.end_y ?? 0,
+              duration: params.duration ?? 0.5,
+            }, nodeId, undefined, true);
+            log('info', `WPS真实拖拽结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            await delay((params.delay_after || 0.3) * 1000);
+            result = 'output';
+            break;
+          }
           await delay(500);
           await delay((params.delay_after || 0.3) * 1000);
           result = 'output';
@@ -424,6 +546,21 @@ export function createFlowExecutor(
 
         case 'screenshot':
           log('info', '截图（模拟: 已保存）', nodeId);
+          if (isWpsReplayNode(params)) {
+            const region = typeof params.region === 'string'
+              ? params.region
+              : Array.isArray(params.region)
+                ? params.region.join(',')
+                : '';
+            const res = await callFeatureOrThrow('screenshot', {
+              region,
+              format: params.format === 'jpg' ? 'jpeg' : (params.format || 'png'),
+              quality: params.quality ?? 70,
+            }, nodeId, undefined, true);
+            log('info', `WPS真实截图结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            result = 'output';
+            break;
+          }
           await delay(200);
           result = 'output';
           break;
@@ -636,6 +773,19 @@ export function createFlowExecutor(
           const sub = params.sub_operation || 'click';
           if (sub === 'scroll') {
             log('info', `滚轮: ${params.scroll_direction || 'down'} ${params.scroll_amount || 3}格`, nodeId);
+            if (isWpsReplayNode(params)) {
+              const res = await callFeatureOrThrow('scroll', {
+                direction: params.scroll_direction || 'down',
+                amount: params.scroll_amount || 3,
+                x: params.x ?? -1,
+                y: params.y ?? -1,
+                target: '',
+              }, nodeId, undefined, true);
+              log('info', `WPS真实滚动结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+              await delay((params.delay_after || 0.5) * 1000);
+              result = 'output';
+              break;
+            }
           } else if (sub === 'hover') {
             log('info', `悬停 (${params.hover_x},${params.hover_y}) ${params.hover_duration || 0.5}s`, nodeId);
           } else if (sub === 'move') {
@@ -727,7 +877,13 @@ export function createFlowExecutor(
           }
           if (featureName) {
             log('info', `调用系统工具: ${featureName}`, nodeId);
-            const res = await callFeatureOrThrow(featureName, params, nodeId, `模拟系统工具: ${featureName}`);
+            const res = await callFeatureOrThrow(
+              featureName,
+              params,
+              nodeId,
+              `模拟系统工具: ${featureName}`,
+              isWpsReplayNode(params)
+            );
             if (res !== undefined) log('info', `工具结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
             if (node.type === 'clipboard_get' && params.into && res !== undefined) {
               setVariable(params.into, featureText(res), nodeId);

@@ -13,6 +13,15 @@ import { wpsToFlowScript, WpsScript } from '../utils/wpsToFlowScript';
 interface TraceItem { run_id: string; task: string; status: string; steps: number }
 interface ScriptItem { file: string; name: string; task: string; steps: number }
 
+function responseErrorMessage(data: any, label: string, status: number): string {
+  const value = data?.detail ?? data?.error?.message ?? data?.error ?? data?.message;
+  if (typeof value === 'string' && value.trim()) return value;
+  if (Array.isArray(value) || (value && typeof value === 'object')) {
+    try { return JSON.stringify(value); } catch { /* fall through */ }
+  }
+  return `${label} failed (${status})`;
+}
+
 export async function jsonOrThrow<T = any>(response: Response, label: string): Promise<T> {
   const text = await response.text();
   let data: any = {};
@@ -20,7 +29,7 @@ export async function jsonOrThrow<T = any>(response: Response, label: string): P
     try { data = JSON.parse(text); } catch { data = { detail: text }; }
   }
   if (!response.ok) {
-    throw new Error(data?.detail || data?.error || `${label} failed (${response.status})`);
+    throw new Error(responseErrorMessage(data, label, response.status));
   }
   return data as T;
 }
@@ -79,10 +88,8 @@ export function ReplayEditorView() {
     if (!b) return;
     setBusy(true);
     try {
-      const wps = (await fetch(`${b}api/script/${encodeURIComponent(file)}`).then((r) => {
-        if (!r.ok) throw new Error(`读取脚本失败 (${r.status})`);
-        return r.json();
-      })) as WpsScript;
+      const wps = await fetch(`${b}api/script/${encodeURIComponent(file)}`)
+        .then((r) => jsonOrThrow<WpsScript>(r, 'read script'));
       loadScript(wpsToFlowScript(wps));
       setViewMode('canvas');           // drop into the real flow editor
     } catch (e) {
