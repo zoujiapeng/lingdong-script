@@ -167,7 +167,18 @@ def count_leaves(steps: list[dict]) -> int:
             total += count_leaves(step.get("then") or [])
             total += count_leaves(step.get("else") or [])
         elif tool == "ctrl.loop":
-            total += count_leaves(step.get("body") or [])
+            body_count = count_leaves(step.get("body") or [])
+            loop_type = step.get("loop_type", "count")
+            if loop_type == "count":
+                try:
+                    count = int(step.get("count", 1))
+                except (TypeError, ValueError):
+                    count = 1
+                total += body_count * min(max(0, count), _max_iters(step))
+            elif step.get("max_iters") is not None:
+                total += body_count * _max_iters(step)
+            else:
+                total += body_count
         else:
             total += 1
     return total

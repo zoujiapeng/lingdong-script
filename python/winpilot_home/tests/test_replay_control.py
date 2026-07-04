@@ -216,6 +216,17 @@ def test_count_leaves_recurses_branches_and_loops():
     steps = [
         leaf("a"),
         {"tool": "ctrl.if", "then": [leaf("b"), leaf("c")], "else": [leaf("d")]},
-        {"tool": "ctrl.loop", "body": [leaf("e")]},
+        {"tool": "ctrl.loop", "loop_type": "count", "count": 3, "body": [leaf("e")]},
     ]
-    assert rc.count_leaves(steps) == 5
+    assert rc.count_leaves(steps) == 7
+
+
+def test_count_leaves_caps_count_loops_by_max_iters():
+    steps = [
+        {"tool": "ctrl.loop", "loop_type": "count", "count": 10, "max_iters": 2,
+         "body": [leaf("a"), leaf("b")]},
+        {"tool": "ctrl.loop", "loop_type": "while", "max_iters": 3,
+         "body": [leaf("c")]},
+        {"tool": "ctrl.loop", "loop_type": "until", "body": [leaf("d")]},
+    ]
+    assert rc.count_leaves(steps) == 8
