@@ -1801,3 +1801,67 @@ def test_select_color_prefers_target_hwnd_region_over_stale_snapshot(monkeypatch
     assert out["ok"] is True
     assert captured_regions == [target_region]
     assert clicks
+
+
+def test_select_color_reuses_cached_palette_button(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.screenshot import Region
+
+    target_region = Region(100, 200, 300, 220)
+    monkeypatch.setattr(controller_mod, "window_region", lambda hwnd: target_region)
+    closed_image = np.full((220, 300, 3), 96, dtype=np.uint8)
+    open_image = closed_image.copy()
+    for x, color in [
+        (20, (0, 0, 255)),
+        (50, (0, 128, 255)),
+        (80, (0, 255, 255)),
+        (110, (0, 180, 0)),
+        (140, (255, 0, 0)),
+        (170, (180, 0, 180)),
+        (200, (0, 0, 255)),
+        (230, (0, 255, 255)),
+        (20, (0, 180, 0)),
+        (50, (255, 0, 0)),
+    ]:
+        open_image[110:128, x:x + 18] = color
+
+    ocr_calls = {"count": 0}
+
+    def collect(_region):
+        ocr_calls["count"] += 1
+        return [SimpleNamespace(text="Colors", cx=250, cy=280)]
+
+    monkeypatch.setattr(controller_mod.ocr, "collect", collect)
+    palette_open = {"value": False}
+    clicks = []
+
+    class Session:
+        task = "draw a blue triangle and a red rectangle"
+        hwnd = 7
+        run_id = "run-select-color-cache"
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "click"
+            clicks.append(args)
+            if int(args["y"]) < 280:
+                palette_open["value"] = True
+            else:
+                palette_open["value"] = False
+            return ToolResult('{"ok": true}')
+
+    def capture_fn(_region):
+        return open_image if palette_open["value"] else closed_image
+
+    controller = FastGuiController(Session(), capture_fn=capture_fn)
+    out = controller.execute([
+        {"action": "select_color", "color": "blue"},
+        {"action": "select_color", "color": "red"},
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert ocr_calls["count"] == 1
+    assert len(clicks) == 4
+    assert clicks[0] == clicks[2]  # cached palette opener reused for red

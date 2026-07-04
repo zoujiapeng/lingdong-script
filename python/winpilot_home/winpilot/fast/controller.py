@@ -306,6 +306,7 @@ class FastGuiController:
         self.cache = cache or ElementCache()
         self.watcher = watcher or ScreenWatcher(region_provider=self._target_region)
         self.capture_fn = capture_fn
+        self._color_palette_button_cache: dict[tuple[int, int, int, int, int], tuple[int, int]] = {}
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -388,7 +389,30 @@ class FastGuiController:
             "color_counts": counts,
         }
 
-    def _open_color_palette(self, region: Region) -> ToolResult:
+    def _palette_cache_key(self, region: Region) -> tuple[int, int, int, int, int]:
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        return (hwnd, int(region.left), int(region.top), int(region.width), int(region.height))
+
+    def _open_color_palette(
+        self,
+        region: Region,
+        *,
+        cache_key: tuple[int, int, int, int, int] | None = None,
+        prefer_cache: bool = True,
+    ) -> ToolResult:
+        if prefer_cache and cache_key is not None:
+            cached = self._color_palette_button_cache.get(cache_key)
+            if cached is not None:
+                x, y = cached
+                click = self._dispatch("click", {"x": x, "y": y})
+                if not _failed(click):
+                    return ToolResult(json.dumps({
+                        "ok": True,
+                        "cached": True,
+                        "point": {"x": x, "y": y},
+                        "click": _json_dict(click.text),
+                        "preview": click.text[:240],
+                    }, ensure_ascii=False, default=str))
         toolbar = Region(
             region.left,
             region.top,
@@ -421,7 +445,16 @@ class FastGuiController:
         y = int(getattr(label, "cy", 0) or 0)
         offset = max(34, min(82, int(region.height * 0.10)))
         click_y = max(region.top + 8, y - offset)
-        return self._dispatch("click", {"x": x, "y": click_y})
+        if cache_key is not None:
+            self._color_palette_button_cache[cache_key] = (x, click_y)
+        click = self._dispatch("click", {"x": x, "y": click_y})
+        return ToolResult(json.dumps({
+            "ok": not _failed(click),
+            "cached": False,
+            "point": {"x": x, "y": click_y},
+            "click": _json_dict(click.text),
+            "preview": click.text[:240],
+        }, ensure_ascii=False, default=str))
 
     def _select_color(self, action: dict[str, Any]) -> ToolResult:
         color = str(action.get("color") or action.get("name") or "").strip().casefold()
@@ -444,11 +477,24 @@ class FastGuiController:
                 "ok": False,
                 "error": "select_color has no target window/region",
             }, ensure_ascii=False))
+        cache_key = self._palette_cache_key(region)
         attempts: list[dict[str, Any]] = []
 
         def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any]]:
             image = self.capture_fn(region)
             return self._palette_swatch_point(image, region, color), self._palette_component_summary(image)
+
+        def scan_after_open(action: str) -> None:
+            nonlocal point, summary
+            deadline = time.monotonic() + 1.6
+            while time.monotonic() < deadline and point is None:
+                time.sleep(0.18)
+                try:
+                    point, summary = capture_palette_point()
+                    attempts.append({"action": action, "ok": point is not None, "summary": summary})
+                except Exception as exc:
+                    attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
+                    point = None
 
         try:
             point, summary = capture_palette_point()
@@ -457,7 +503,7 @@ class FastGuiController:
             attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
             point = None
         if point is None:
-            opened = self._open_color_palette(region)
+            opened = self._open_color_palette(region, cache_key=cache_key)
             opened_data = _json_dict(opened.text)
             attempts.append({
                 "action": "open_color_palette",
@@ -473,15 +519,18 @@ class FastGuiController:
                     "attempts": attempts,
                     "error": "could not open a visible color palette",
                 }, ensure_ascii=False, default=str))
-            deadline = time.monotonic() + 1.6
-            while time.monotonic() < deadline and point is None:
-                time.sleep(0.18)
-                try:
-                    point, summary = capture_palette_point()
-                    attempts.append({"action": "scan_after_open", "ok": point is not None, "summary": summary})
-                except Exception as exc:
-                    attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
-                    point = None
+            scan_after_open("scan_after_open")
+            if point is None and opened_data.get("cached"):
+                opened = self._open_color_palette(region, cache_key=cache_key, prefer_cache=False)
+                opened_data = _json_dict(opened.text)
+                attempts.append({
+                    "action": "open_color_palette_uncached",
+                    "ok": not _failed(opened),
+                    "data": opened_data,
+                    "preview": opened.text[:240],
+                })
+                if not _failed(opened):
+                    scan_after_open("scan_after_uncached_open")
         if point is None:
             return ToolResult(json.dumps({
                 "ok": False,
