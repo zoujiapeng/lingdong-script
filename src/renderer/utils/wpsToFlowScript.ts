@@ -338,7 +338,7 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
       }
 
       const { type, params } = leafNode(step);
-      const node = add(type, params, depth);
+      const node = add(type, { ...params, _source_wps_replay: true } as NodeParams, depth);
       attach(node.id);
       exits = [{ node: node.id, port: 'output' }];
     }
