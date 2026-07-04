@@ -102,6 +102,51 @@ def _printable_text_sequence(keys: list[str]) -> str:
     return "".join(chars)
 
 
+def normalize_key_sequence(raw: Any) -> list[str]:
+    """Normalize model-produced hotkey args without treating JSON as text.
+
+    Some providers occasionally return an array-looking string for a JSON
+    schema array, and in rare cases append an extra brace. Shortcut tools are
+    too risky to interpret such strings as printable text.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        parsed: Any = None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            if "[" in text and "]" in text:
+                bracketed = text[text.find("["):text.rfind("]") + 1]
+                try:
+                    parsed = json.loads(bracketed)
+                except json.JSONDecodeError:
+                    parsed = None
+        if isinstance(parsed, (list, tuple)):
+            return [str(key) for key in parsed]
+        if isinstance(parsed, str):
+            text = parsed.strip()
+        if "+" in text:
+            parts = [part.strip() for part in text.split("+")]
+            return [part for part in parts if part]
+        if "," in text:
+            parts = [part.strip(" \t\r\n'\"") for part in text.split(",")]
+            return [part for part in parts if part]
+        return [text] if text else []
+    if isinstance(raw, (list, tuple)):
+        out: list[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip().startswith("["):
+                parsed = normalize_key_sequence(item)
+                if len(parsed) > 1:
+                    out.extend(parsed)
+                    continue
+            out.append(str(item))
+        return out
+    return [str(raw)]
+
+
 class InteractionToolMixin:
     def _element_at_point(self, x: int, y: int):
         snapshot = getattr(self, "snapshot", None)
@@ -286,7 +331,9 @@ class InteractionToolMixin:
         executor_mod = _tools_attr("executor", executor)
         verify_mod = _tools_attr("verify", verify)
         win32gui_mod = _tools_attr("win32gui", win32gui)
-        keys = [str(k) for k in args["keys"]]
+        keys = normalize_key_sequence(args.get("keys"))
+        if not keys:
+            return ToolResult("hotkey requires keys[]")
         printable_text = _printable_text_sequence(keys)
         if printable_text:
             result = self._t_type_text({

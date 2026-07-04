@@ -72,6 +72,37 @@ def _compact_key(value: Any) -> str:
     return re.sub(r"[\s_\-:\uff1a]+", "", str(value or "").casefold())
 
 
+def _looks_like_file_path(text: Any) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if "\\" in value or "/" in value:
+        return True
+    return bool("." in value and len(value) <= 260 and not any(ch.isspace() for ch in value))
+
+
+def _file_dialog_enter_submit(request: SubgoalRequest, input_spec: dict[str, Any],
+                              click_specs: list[dict[str, Any]]) -> bool:
+    text = input_spec.get("text", input_spec.get("value", input_spec.get("text_input", "")))
+    if not _looks_like_file_path(text):
+        return False
+    parts: list[Any] = [
+        request.subgoal,
+        request.target_window.get("title") if isinstance(request.target_window, dict) else "",
+        input_spec.get("label"),
+        input_spec.get("fallback_text"),
+    ]
+    for click in click_specs:
+        parts.extend([click.get("label"), click.get("text"), click.get("name")])
+    haystack = _compact_key(" ".join(str(part or "") for part in parts))
+    markers = [
+        "filename", "file name", "filepath", "file path", "path",
+        "save", "open", "saveas", "文件名", "文件路径", "路径",
+        "保存", "打开", "另存为", "另存",
+    ]
+    return any(_compact_key(marker) in haystack for marker in markers)
+
+
 def _task_visible_targets(task: str) -> list[str]:
     return _unique([*_required_visible_payloads(task), *_required_literal_tokens(task), *_visible_state_targets(task)])
 
@@ -205,17 +236,71 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
 
 
 def _pick_text(data: dict[str, Any]) -> str:
+    def _looks_like_browser_chrome_text(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        return bool(re.search(
+            r"^(?:https?://|file://|localhost\b|127\.0\.0\.1\b|\[::1\])|"
+            r"(?:\.html?|:\d{2,5}/|\?.*=)",
+            value,
+            re.IGNORECASE,
+        ))
+
+    def _diagnostic_line(line: str) -> bool:
+        value = str(line or "").strip()
+        lower = value.casefold()
+        if not value:
+            return False
+        diagnostic_markers = (
+            "changed-only observe query fallback",
+            "no elements matched query",
+            "no changed-region text matched query",
+            "query fallback",
+        )
+        if any(marker in lower for marker in diagnostic_markers):
+            return True
+        if lower.startswith((
+            "perception reducer",
+            "screen_stage=",
+            "target_window=",
+            "stats=",
+            "top_candidates:",
+            "uncertainties:",
+            "recent_changes:",
+            "recommended_next_controller_actions:",
+        )):
+            return True
+        return False
+
+    def _visible_from_observe_line(line: str) -> str:
+        raw = str(line or "")
+        stripped = raw.strip()
+        if not stripped or _diagnostic_line(stripped):
+            return ""
+        if stripped.startswith("["):
+            match = re.search(r'"([^"]{1,240})"', stripped)
+            visible = match.group(1).strip() if match else stripped
+            return "" if _looks_like_browser_chrome_text(visible) else visible
+        # Reducer candidate rows can contain both visible text and explanation
+        # that echoes the query. Keep only the visible text field.
+        match = re.search(r'\btext="([^"]{1,240})"', stripped)
+        if match:
+            visible = match.group(1).strip()
+            return "" if _looks_like_browser_chrome_text(visible) else visible
+        if re.search(r"\bquery\s*[:=]", stripped, re.IGNORECASE):
+            return ""
+        if _looks_like_browser_chrome_text(stripped):
+            return ""
+        return raw
+
     def _strip_observe_diagnostics(text: str) -> str:
         lines: list[str] = []
         for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if line.startswith("Changed-only observe query fallback:"):
+            visible = _visible_from_observe_line(raw_line)
+            if not visible:
                 continue
-            if line.startswith("No elements matched query"):
-                continue
-            if line.startswith("No changed-region text matched query"):
-                continue
-            lines.append(raw_line)
+            lines.append(visible)
         return "\n".join(lines)
 
     chunks: list[str] = []
@@ -223,10 +308,12 @@ def _pick_text(data: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         if item.get("action") in {"read_text", "observe"}:
+            action = str(item.get("action") or "")
             full_text = item.get("full_text")
             if isinstance(full_text, str):
-                chunks.append(_strip_observe_diagnostics(full_text))
-            chunks.append(_strip_observe_diagnostics(str(item.get("preview") or "")))
+                chunks.append(_strip_observe_diagnostics(full_text) if action == "observe" else full_text)
+            preview = str(item.get("preview") or "")
+            chunks.append(_strip_observe_diagnostics(preview) if action == "observe" else preview)
         child_data = item.get("data")
         if isinstance(child_data, dict):
             for key in ("text", "body", "visible_text", "preview"):
@@ -564,6 +651,7 @@ class SubgoalExecutor:
 
     def _target_hwnd(self, request: SubgoalRequest, allow_foreground: bool = True) -> int | None:
         target = request.target_window or {}
+        title = str(target.get("title") or "").strip()
         hwnd = target.get("hwnd")
         try:
             if hwnd:
@@ -571,9 +659,43 @@ class SubgoalExecutor:
         except (TypeError, ValueError):
             pass
         session_hwnd = getattr(self.session, "hwnd", None)
+        if title and allow_foreground:
+            try:
+                foreground = int(win32gui.GetForegroundWindow())
+                if foreground:
+                    fg_title = win32._window_text(foreground)
+                    if win32.title_contains(fg_title, title):
+                        try:
+                            setattr(self.session, "hwnd", foreground)
+                        except Exception:
+                            pass
+                        return foreground
+            except Exception:
+                pass
+        if title:
+            try:
+                found = win32.find_window(title)
+                if found and found.get("hwnd"):
+                    hwnd = int(found["hwnd"])
+                    try:
+                        setattr(self.session, "hwnd", hwnd)
+                    except Exception:
+                        pass
+                    return hwnd
+            except Exception:
+                pass
         if session_hwnd:
+            if title:
+                try:
+                    session_title = win32._window_text(int(session_hwnd))
+                    if session_title and not win32.title_contains(session_title, title):
+                        return None
+                except Exception:
+                    pass
             return session_hwnd
         if not allow_foreground:
+            return None
+        if title:
             return None
         try:
             foreground = int(win32gui.GetForegroundWindow())
@@ -731,6 +853,18 @@ class SubgoalExecutor:
                     last_color = str(color)
                 actions.append(draw_action)
         click_specs = request.clicks or ([request.click] if request.click else [])
+        submit_file_dialog_with_enter = bool(
+            input_spec and click_specs and _file_dialog_enter_submit(request, input_spec, click_specs)
+        )
+        if submit_file_dialog_with_enter:
+            title = ""
+            if isinstance(request.target_window, dict):
+                title = str(request.target_window.get("title") or "").strip()
+            action = {"action": "hotkey", "keys": ["enter"]}
+            if title:
+                action["expect"] = {"window_gone": title, "timeout_s": 5.0}
+            actions.append(action)
+            click_specs = []
         changed_query_text = ""
         if not input_spec and click_specs and len(request.verify_texts) == 1:
             changed_query_text = request.verify_texts[0]

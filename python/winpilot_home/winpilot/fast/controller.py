@@ -95,6 +95,75 @@ def _norm_text(value: Any) -> str:
     return "".join(ch for ch in str(value or "").casefold() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
+def _needs_replace_guard(text: str, action: dict[str, Any]) -> bool:
+    """Return true for inputs where append-vs-replace mistakes are costly."""
+    raw_parts = [
+        text,
+        action.get("label"),
+        action.get("text_query"),
+        action.get("role"),
+        action.get("expected_region"),
+    ]
+    for item in action.get("fallback_text") or []:
+        raw_parts.append(item)
+    haystack = " ".join(str(part or "") for part in raw_parts).casefold()
+    if any(token in haystack for token in (
+        "filename", "file name", "文件名", "path", "路径", "save as", "另存", "打开",
+    )):
+        return True
+    stripped = text.strip()
+    if "\\" in stripped or "/" in stripped:
+        return True
+    if "." in stripped and len(stripped) <= 260 and not any(ch.isspace() for ch in stripped):
+        return True
+    return False
+
+
+def _detect_prefixed_glob_text(visible_text: str, target_text: str) -> str:
+    """Detect common file-dialog failures like '*.txtReport.txt' after clear."""
+    target = str(target_text or "").strip()
+    if not target:
+        return ""
+    compact_visible = "".join(str(visible_text or "").split()).casefold()
+    compact_target = "".join(target.split()).casefold()
+    if not compact_target or compact_target not in compact_visible:
+        return ""
+    prefixes = ("*.", "*")
+    for prefix in prefixes:
+        needle = f"{prefix}{compact_target}"
+        if needle in compact_visible:
+            return f"input was appended to existing wildcard prefix ({prefix})"
+    # Windows file dialogs often start with a filter-like default such as
+    # *.txt; if it remains immediately before the intended filename, the save
+    # target is invalid even though the requested literal appears on screen.
+    for idx in range(len(compact_visible)):
+        if not compact_visible.startswith(compact_target, idx):
+            continue
+        before = compact_visible[max(0, idx - 12):idx]
+        if "*." in before and before.endswith((".txt", ".log", ".csv", ".json", ".md", ".png", ".jpg", ".jpeg")):
+            return "input was appended after an existing file-glob filter"
+    return ""
+
+
+def _input_presence_error(visible_text: str, target_text: str) -> str:
+    """Return an error when a high-risk input is not visible after typing."""
+    target = str(target_text or "").strip()
+    if not target:
+        return ""
+    visible_norm = _norm_text(visible_text)
+    if not visible_norm:
+        return "typed text was not visible after input"
+    candidates = [_norm_text(target)]
+    if "\\" in target or "/" in target:
+        basename = target.replace("/", "\\").rsplit("\\", 1)[-1]
+        if basename and basename != target:
+            candidates.append(_norm_text(basename))
+    for candidate in candidates:
+        if candidate and candidate in visible_norm:
+            return ""
+    return "typed text was not visible after input"
+
+
 def _color_mask(image: np.ndarray, color: str) -> np.ndarray | None:
     if image is None or getattr(image, "size", 0) == 0:
         return None
@@ -769,6 +838,20 @@ class FastGuiController:
             )
             input_locator_data = located_input.to_dict()
             candidate = located_input.candidate if located_input.found else None
+            if (
+                not located_input.found
+                and str(input_locator_data.get("reason") or "") == "concrete_label_not_found"
+            ):
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "focus",
+                    "error": "type_into_element concrete input label was not visible",
+                    "via": "type_into_element",
+                    "input_locator": input_locator_data,
+                    "subresults": internal,
+                    "controller_internal_action_count": len(internal),
+                }, ensure_ascii=False, default=str))
             if candidate is not None:
                 if candidate.element is not None and candidate.element.elem_id is not None and candidate.element.elem_id >= 0:
                     click_payload = {
@@ -839,7 +922,8 @@ class FastGuiController:
                     payload[key] = click_data[key]
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
-        if _truthy(action.get("clear") or action.get("replace") or action.get("clear_existing")):
+        clear_requested = _truthy(action.get("clear") or action.get("replace") or action.get("clear_existing"))
+        if clear_requested:
             clear_result = self._dispatch("hotkey", {"keys": ["ctrl", "a"]})
             clear_data = _json_dict(clear_result.text)
             internal.append({
@@ -853,6 +937,24 @@ class FastGuiController:
                     "blocked": True,
                     "stage": "clear",
                     "error": "type_into_element could not select existing text",
+                    "via": "type_into_element",
+                    "subresults": internal,
+                    "controller_internal_action_count": len(internal),
+                }
+                return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+            delete_result = self._dispatch("hotkey", {"keys": ["backspace"]})
+            delete_data = _json_dict(delete_result.text)
+            internal.append({
+                "action": "hotkey",
+                "ok": not _failed(delete_result),
+                "data": delete_data if delete_data else {"preview": delete_result.text[:240]},
+            })
+            if _failed(delete_result):
+                payload = {
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "clear",
+                    "error": "type_into_element could not delete selected text",
                     "via": "type_into_element",
                     "subresults": internal,
                     "controller_internal_action_count": len(internal),
@@ -873,6 +975,25 @@ class FastGuiController:
             "ok": not type_failed,
             "data": type_data if type_data else {"preview": type_result.text[:240]},
         })
+        replace_guard_error = ""
+        if not type_failed and clear_requested and _needs_replace_guard(text, action):
+            read_result = self._dispatch("read_text", {})
+            read_data = _json_dict(read_result.text)
+            read_preview = read_result.text[:240]
+            internal.append({
+                "action": "read_text",
+                "ok": not _failed(read_result),
+                "data": read_data if read_data else {"preview": read_preview},
+            })
+            if _failed(read_result):
+                type_failed = True
+                replace_guard_error = "type_into_element could not verify replaced input text"
+            else:
+                replace_guard_error = _input_presence_error(read_result.text, text)
+                if not replace_guard_error:
+                    replace_guard_error = _detect_prefixed_glob_text(read_result.text, text)
+                if replace_guard_error:
+                    type_failed = True
         payload = {
             "ok": not type_failed,
             "via": "type_into_element",
@@ -887,8 +1008,8 @@ class FastGuiController:
             payload["verified"] = bool(type_data.get("verified"))
         if type_failed:
             payload["blocked"] = True
-            payload["stage"] = "type_text"
-            payload["error"] = "type_into_element text entry did not verify"
+            payload["stage"] = "replace_guard" if replace_guard_error else "type_text"
+            payload["error"] = replace_guard_error or "type_into_element text entry did not verify"
         if input_locator_data:
             payload["input_locator"] = input_locator_data
         for key in (

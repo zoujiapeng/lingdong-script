@@ -274,6 +274,22 @@
       background: #effaf5;
     }
 
+    .calibration-pad {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      align-items: center;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .calibration-point {
+      height: 64px;
+      border: 2px solid var(--red);
+      background: #fff7f6;
+      color: var(--red);
+      font-weight: 700;
+    }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -332,6 +348,13 @@
           <button id="resetBtn">重置</button>
         </div>
 
+        <div class="calibration-pad">
+          <button id="calibrationPoint" class="calibration-point">校准点</button>
+          <p class="status-detail" id="coordinateEcho">
+            点击校准点后显示真实 screen/client 坐标。
+          </p>
+        </div>
+
         <div class="status-card" id="statusCard" data-state="idle">
           <span class="badge" id="statusBadge">IDLE</span>
           <p class="status-line" id="statusLine">等待操作</p>
@@ -361,6 +384,7 @@
             <h2>判定输出</h2>
             <p class="status-detail" id="auditLog">暂无事件。</p>
           </section>
+
         </div>
       </div>
     </main>
@@ -396,6 +420,8 @@
     const dragToken = document.getElementById('dragToken');
     const dropZone = document.getElementById('dropZone');
     const dropTarget = document.getElementById('dropTarget');
+    const calibrationPoint = document.getElementById('calibrationPoint');
+    const coordinateEcho = document.getElementById('coordinateEcho');
 
     let applyCounter = 0;
     let localCounter = 0;
@@ -512,6 +538,15 @@
       dragToken.style.left = 'calc(100% - 164px)';
       dragToken.style.top = '54px';
       log('DRAG_TOKEN_DROPPED');
+    });
+
+    calibrationPoint.addEventListener('click', (event) => {
+      const rect = calibrationPoint.getBoundingClientRect();
+      const relX = Math.round(event.clientX - rect.left);
+      const relY = Math.round(event.clientY - rect.top);
+      const text = `CALIBRATION_OK screen=${event.screenX},${event.screenY} client=${event.clientX},${event.clientY} button_offset=${relX},${relY}`;
+      coordinateEcho.textContent = text;
+      log(text);
     });
   </script>
 </body>

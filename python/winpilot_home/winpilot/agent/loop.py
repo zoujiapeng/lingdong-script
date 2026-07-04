@@ -57,6 +57,7 @@ from .task_rules import (
     _gui_only_shell_allowed,
     _is_coding_task,
     _is_communication_task,
+    _is_desktop_icon_drag_task,
     _is_drawing_task,
     _is_gui_only_task,
     _is_upload_publish_task,
@@ -1567,6 +1568,107 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             image_b64=result.image_b64,
         )
 
+    @staticmethod
+    def _payload_has_verified_drag(payload: dict[str, Any]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("verified") is not True:
+            return False
+        state = payload.get("controller_state")
+        if isinstance(state, dict) and state.get("last_action") == "drag":
+            return True
+        if payload.get("source_action") == "drag" and payload.get("visual_change_detected") is True:
+            return True
+        for item in payload.get("results") or []:
+            if not isinstance(item, dict) or item.get("action") != "drag":
+                continue
+            data = item.get("data")
+            if isinstance(data, dict) and (
+                data.get("verified") is True or data.get("visual_change_detected") is True
+            ):
+                return True
+            preview = str(item.get("preview") or "")
+            if '"visual_change_detected": true' in preview.casefold() or '"verified": true' in preview.casefold():
+                return True
+        return False
+
+    @staticmethod
+    def _looks_like_desktop_drag_plan_goal(goal: str) -> bool:
+        text = str(goal or "")
+        low = text.casefold()
+        has_drag = any(term in low for term in ("drag", "move", "icon", "folder"))
+        has_drag = has_drag or any(term in text for term in ("拖动", "移动", "图标", "文件夹", "整理", "排列"))
+        return has_drag
+
+    def _maybe_auto_complete_desktop_drag_plan_item(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+    ) -> ToolResult:
+        if tool_name not in {"run_action_batch", "drag"} or not _is_desktop_icon_drag_task(self.task):
+            return result
+        try:
+            payload = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if not self._payload_has_verified_drag(payload):
+            return result
+
+        plan = getattr(self.session, "plan", None)
+        steps = getattr(plan, "steps", None) or []
+        completed: list[dict[str, Any]] = []
+        if steps:
+            for index, step in enumerate(steps, start=1):
+                if not isinstance(step, dict) or step.get("done"):
+                    continue
+                goal = str(step.get("goal") or "")
+                if not self._looks_like_desktop_drag_plan_goal(goal):
+                    continue
+                if plan.complete(index):
+                    item = {"index": index, "goal": goal[:160], "source": tool_name}
+                    completed.append(item)
+                    BUS.publish(
+                        "agent_plan",
+                        run_id=self.run_id,
+                        action="auto_complete",
+                        index=index,
+                        source=f"{tool_name}.verified_drag",
+                        plan=plan.snapshot(),
+                    )
+                break
+            if not completed:
+                return result
+            payload["auto_completed_plan_items"] = completed
+            payload["plan_after_auto_complete"] = plan.render()
+            if plan.all_done():
+                payload["plan_all_done"] = True
+        else:
+            payload["plan_all_done"] = True
+
+        existing_advice = str(payload.get("fast_path_advice") or "").strip()
+        auto_advice = (
+            "Auto-completed desktop drag plan item from verified controller drag "
+            "evidence; "
+            + ("plan is complete." if payload.get("plan_all_done") else "continue with next unfinished item.")
+        )
+        payload["fast_path_advice"] = (existing_advice + " " + auto_advice).strip()
+        self._trace_debug("desktop_drag_plan_auto_completed", {
+            "run_id": self.run_id,
+            "tool": tool_name,
+            "args": args,
+            "completed": completed,
+            "plan_all_done": payload.get("plan_all_done"),
+        })
+        return ToolResult(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            is_observe=result.is_observe,
+            terminal="done" if payload.get("plan_all_done") else result.terminal,
+            summary=result.summary,
+            replay=result.replay,
+            image_b64=result.image_b64,
+        )
+
     def _maybe_auto_complete_open_plan_item(
         self,
         tool_name: str,
@@ -1827,6 +1929,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     result = self._dispatch_with_fast_visual_wrap(tc.function.name, args)
             result = self._maybe_auto_complete_open_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
+            result = self._maybe_auto_complete_desktop_drag_plan_item(tc.function.name, args, result)
             failure_recovery = None
             raw_result_text = result.text
             try:

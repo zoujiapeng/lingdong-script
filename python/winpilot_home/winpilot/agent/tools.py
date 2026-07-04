@@ -33,7 +33,7 @@ from .coding_tools import CodingSession
 from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
-from .interaction_tools import InteractionToolMixin
+from .interaction_tools import InteractionToolMixin, normalize_key_sequence
 from .memory_tools import MemoryToolMixin
 from .perception_tools import PerceptionToolMixin
 from .plan_tools import PlanToolMixin
@@ -127,6 +127,9 @@ class ToolSession(
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
             return ToolResult(f"未知工具: {name}")
+        if name == "hotkey":
+            args = dict(args)
+            args["keys"] = normalize_key_sequence(args.get("keys"))
         if name == "hotkey":
             blocked_hotkey = _gui_only_blocked_hotkey(self.task, args.get("keys") or [])
             if blocked_hotkey:

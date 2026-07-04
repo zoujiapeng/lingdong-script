@@ -128,6 +128,22 @@ def _terms(label: str = "", fallback_text: Iterable[str] = ()) -> list[str]:
     return unique
 
 
+def _requires_concrete_label_match(terms: list[str]) -> bool:
+    """Some labels are concrete field identities, not soft semantic hints."""
+    if not terms:
+        return False
+    concrete = {
+        "filename", "file name", "filepath", "file path", "path",
+        "文件名", "文件名称", "文件路径", "路径",
+        "保存位置", "另存为", "saveas", "save as",
+    }
+    for term in terms:
+        key = _norm(term)
+        if any(_norm(item) in key or key in _norm(item) for item in concrete):
+            return True
+    return False
+
+
 def _text_score(text: str, terms: list[str]) -> tuple[float, str]:
     text_norm = _norm(text)
     if not text_norm or not terms:
@@ -186,6 +202,72 @@ def _candidate_from_element(element: UIElement, score: float, reason: list[str])
     )
 
 
+def _rect(element: UIElement | InputCandidate) -> tuple[int, int, int, int]:
+    if isinstance(element, InputCandidate):
+        left, top, width, height = element.bbox
+        return int(left), int(top), int(left + width), int(top + height)
+    return int(element.left), int(element.top), int(element.left + element.width), int(element.top + element.height)
+
+
+def _vertical_overlap(a: UIElement, b: UIElement) -> float:
+    _ax1, ay1, _ax2, ay2 = _rect(a)
+    _bx1, by1, _bx2, by2 = _rect(b)
+    overlap = max(0, min(ay2, by2) - max(ay1, by1))
+    return overlap / max(1, min(int(a.height or 0), int(b.height or 0)))
+
+
+def _label_elements(snapshot: Snapshot, label_terms: list[str]) -> list[UIElement]:
+    if not label_terms:
+        return []
+    labels: list[UIElement] = []
+    for element in snapshot.elements:
+        text = str(element.text or "").strip()
+        text_norm = _norm(text)
+        if not text_norm or _is_caret_like(element):
+            continue
+        for term in label_terms:
+            term_norm = _norm(term)
+            if term_norm and (term_norm in text_norm or text_norm in term_norm):
+                labels.append(element)
+                break
+    return labels
+
+
+def _input_candidates_near_labels(snapshot: Snapshot, label_terms: list[str]) -> list[InputCandidate]:
+    """Promote real input controls that sit on the same row as a matched label."""
+    labels = _label_elements(snapshot, label_terms)
+    if not labels:
+        return []
+    candidates: list[InputCandidate] = []
+    for label in labels:
+        label_right = int(label.left + label.width)
+        label_cy = int(label.cy)
+        for element in snapshot.elements:
+            if element is label or _is_caret_like(element) or not _is_input_role(element):
+                continue
+            if int(element.width or 0) <= 0 or int(element.height or 0) <= 0:
+                continue
+            same_row = _vertical_overlap(label, element) >= 0.35 or abs(int(element.cy) - label_cy) <= max(18, int(label.height or 0), int(element.height or 0))
+            to_right = int(element.left) >= label_right - 12
+            spans_label_row = int(element.left) <= label_right + 80 and int(element.left + element.width) > label_right + 80
+            if not same_row or not (to_right or spans_label_row):
+                continue
+            gap = max(0, int(element.left) - label_right)
+            score = 0.96
+            if element.source in {"win32", "uia"}:
+                score += 0.10
+            if gap <= 80:
+                score += 0.08
+            if int(element.width or 0) >= max(120, int(label.width or 0)):
+                score += 0.04
+            candidates.append(_candidate_from_element(
+                element,
+                score,
+                [f'input-like control near concrete label "{label.text}"'],
+            ))
+    return candidates
+
+
 def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> list[InputCandidate]:
     if not label_terms:
         return []
@@ -217,7 +299,7 @@ def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> 
         if not matched:
             continue
         h = max(26, min(54, int(element.height * 1.8) if element.height else 32))
-        w = max(140, min(420, int(window.width * 0.36)))
+        w = max(140, min(760, int(window.width * 0.52)))
         gap = max(8, min(20, int(element.width * 0.18) if element.width else 10))
         if _looks_like_field_label(text):
             # Field labels such as "input box" usually sit above the real
@@ -257,6 +339,7 @@ def locate_input(
     min_score: float = 0.45,
 ) -> InputLocateResult:
     terms = _terms(label, fallback_text)
+    strict_label = _requires_concrete_label_match(terms)
     scored: list[InputCandidate] = []
     for element in snapshot.elements:
         if _is_caret_like(element):
@@ -290,7 +373,24 @@ def locate_input(
             score += 0.05
             reason.append("uia")
         scored.append(_candidate_from_element(element, score, reason))
+    scored.extend(_input_candidates_near_labels(snapshot, terms))
     scored.extend(_nearby_synthetic_candidates(snapshot, terms))
+    if strict_label:
+        label_linked = [
+            cand for cand in scored
+            if "label" in cand.reason.casefold()
+            or any(_norm(term) and _norm(term) in _norm(cand.element.text if cand.element else "") for term in terms)
+        ]
+        if not label_linked:
+            best = max(scored, key=lambda cand: cand.score, default=None)
+            return InputLocateResult(
+                False,
+                candidate=None,
+                score=best.score if best else 0.0,
+                reason="concrete_label_not_found",
+                candidates=tuple(scored[:5]),
+            )
+        scored = label_linked
     if expected_region:
         adjusted: list[InputCandidate] = []
         for cand in scored:

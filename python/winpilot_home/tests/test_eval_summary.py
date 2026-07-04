@@ -21,6 +21,7 @@ def test_summarize_events_counts_tools_usage_and_slowest():
     assert out["tool_counts"] == {"observe": 1, "click": 1}
     assert out["slow_tools"][0]["tool"] == "observe"
     assert out["rejected_done_count"] == 1
+    assert out["done_checks"][0]["unverified"] is False
     assert out["usage"]["cost_cny"] == 0.01
     assert out["perception"]["uia"]["avg_ms"] == 1000
 
@@ -291,3 +292,29 @@ def test_aggregate_reports_treats_policy_failure_as_not_passed():
     out = summary.aggregate_reports(reports)
 
     assert out["passed_or_done"] == 1
+
+
+def test_aggregate_reports_treats_unverified_done_as_not_passed():
+    reports = [
+        {
+            "run_id": "r1",
+            "status": "done",
+            "done_checks": [
+                {
+                    "passed": True,
+                    "unverified": True,
+                    "reason": "Done force-accepted after done_max_rejects",
+                }
+            ],
+        },
+        {
+            "run_id": "r2",
+            "status": "done",
+            "done_checks": [{"passed": True, "reason": "fresh visible evidence"}],
+        },
+    ]
+
+    out = summary.aggregate_reports(reports)
+
+    assert out["passed_or_done"] == 1
+    assert out["unverified_done_count"] == 1

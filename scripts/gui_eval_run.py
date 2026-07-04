@@ -42,7 +42,13 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             ),
             "timeout_s": 360,
             "cleanup": [
-                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotE2E_note.txt\" -Force -ErrorAction SilentlyContinue"
+                "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotE2E_note.txt\" -Force -ErrorAction SilentlyContinue; taskkill /f /im notepad.exe 2>$null"
+            ],
+            "checks": [
+                {
+                    "name": "notepad_file_contains_payload",
+                    "command": "if ((Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotE2E_note.txt\") -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotE2E_note.txt\" -Raw -Encoding UTF8) -match 'WinPilot E2E 记录') -and ((Get-Content -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotE2E_note.txt\" -Raw -Encoding UTF8) -match '时间测试通过')) { 'OK'; exit 0 } else { exit 1 }",
+                }
             ],
         },
     ],
@@ -63,11 +69,38 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             "cleanup": [
                 "Remove-Item -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotPerfDrag_Eval\" -Recurse -Force -ErrorAction SilentlyContinue"
             ],
+            "checks": [
+                {
+                    "name": "drag_folder_still_exists",
+                    "command": "if (Test-Path -LiteralPath \"$env:USERPROFILE\\Desktop\\WinPilotPerfDrag_Eval\") { 'OK'; exit 0 } else { exit 1 }",
+                }
+            ],
         },
         {
             "id": "paint_triangle",
             "task": "在当前画图画布空白处画一个小三角形，不用保存。必须通过GUI操作。如果画图没打开就先打开画图。",
             "timeout_s": 240,
+        },
+    ],
+    "gui-target": [
+        {
+            "id": "target_coordinate_click",
+            "task": (
+                "打开 http://127.0.0.1:8877/gui_agent_target.html?v=coord2，"
+                "点击页面上的“校准点”按钮，最后确认页面出现 CALIBRATION_OK。"
+                "必须通过GUI真实鼠标点击，不要用脚本注入点击。"
+            ),
+            "timeout_s": 240,
+            "setup": [
+                "$port = 8877; "
+                "$ok = $false; "
+                "try { $ok = (Test-NetConnection 127.0.0.1 -Port $port -InformationLevel Quiet) } catch { $ok = $false }; "
+                "if (-not $ok) { "
+                "Start-Process -FilePath python -ArgumentList @('-m','http.server','8877','--bind','127.0.0.1') "
+                "-WorkingDirectory 'C:\\Users\\zou\\Desktop\\claude\\python\\winpilot_home\\eval_targets' "
+                "-WindowStyle Hidden; Start-Sleep -Seconds 2 }"
+            ],
+            "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
         },
     ],
     "gui-deep-10": [
@@ -363,6 +396,7 @@ def _summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         {
             "passed": event.get("passed"),
             "reason": event.get("reason", ""),
+            "unverified": bool(event.get("unverified")),
         }
         for event in events
         if event.get("type") == "done_check"
