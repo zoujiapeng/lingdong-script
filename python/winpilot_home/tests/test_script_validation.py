@@ -108,6 +108,12 @@ def test_reject_bad_vars():
         {"format": "wps/2", "steps": [], "vars": "nope"})
 
 
+def test_reject_empty_declared_target_window():
+    err = trace_mod.validate_script(
+        {"format": "wps/2", "target_window": {}, "steps": []})
+    assert "target_window requires" in err
+
+
 # ------------------------------------------------------------- export_script
 def _write_trace(path, events):
     with open(path, "w", encoding="utf-8") as fh:
