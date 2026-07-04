@@ -141,6 +141,7 @@ flowchart LR
 - `action/verify.py`、`perception/ocr.py`、plan subgoal 和 done gate 都会容忍 OCR 把 `_`、空格、连字符、冒号混淆，例如 `FAST_WRAP_OK_073` 可匹配 `FAST WRAP OK 073`。done gate 仍要求显著字面量 token 出现在最终证据中，不能把“功能等价”当完成。
 - batch 内部 `type_into_element` 会把定位、点击、可选清空和输入合成一个 controller 动作；结果用 `subresults` 展开内部 click/hotkey/type 阶段，避免把输入框任务拆回多轮 LLM。
 - 当 `execute_subgoal` 没有可用 snapshot 且点击锚点带 `expected_region` 时，会先在目标窗口的粗区域做 targeted initial OCR/CV。只有该 ROI 里真的识别到目标 label 才使用裁剪感知；否则回退全窗口 observe。targeted snapshot 的 `region` 仍是完整目标窗口，避免 screen watcher 和后续 ROI 换算被裁剪坐标污染。
+- `execute_subgoal` 聚焦目标 hwnd 后会丢弃 hwnd 不一致的旧 snapshot。这个保护主要防止上一轮前台窗口（例如 Codex 或日志窗口）的 reducer 摘要混入当前目标应用；纯绘图路径丢弃 stale snapshot 后仍可跳过初始 observe，直接由 controller 等待 ready canvas。
 - `eval/summary.py` 的 `low_latency` 字段记录 screen capture、perception、LLM decision、action execution、post-action verify、replan/VLM/skill reuse/watch coverage；`fast_gui` 字段记录 batch subgoal、`execute_subgoal` 调用/动作/验证数、controller phase、anchor click/cache/failure，batch `metrics.auto_observe_count` 记录 controller 内部为了定位元素主动做的目标 observe，`metrics.compound_round_trips_saved` 记录组合动作节省的低层 round-trip，`subgoal_elapsed_ms/subgoal_controller_elapsed_ms/subgoal_overhead_ms` 用于区分慢在 controller 内环还是前置 observe/包装开销，后续性能优化应优先看这些字段。VLM 只有 `count>0` 或 `ms>0` 才计入强视觉调用；未配置时的 0ms 占位不会算进 `vlm_call_count`。
 - URL `launch` 会直接打开 URL，并用归一化窗口标题匹配后聚焦目标窗口，避免 Codex、日志窗口或其他前景窗口遮挡造成假感知。
 - `done_verifier.py` 对“确认出现某个状态/标签”的任务有确定性收束：fresh screen OCR 看见目标文本才通过，可减少完成后的额外 LLM judge。

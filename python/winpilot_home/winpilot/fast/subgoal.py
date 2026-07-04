@@ -497,6 +497,21 @@ class SubgoalExecutor:
                 prelude.append({"action": "focus_window", "ok": not bool(focus.terminal), "preview": focus.text[:240]})
             except Exception:
                 pass
+            snapshot = getattr(self.session, "snapshot", None)
+            try:
+                snapshot_hwnd = int(getattr(snapshot, "hwnd", 0) or 0) if snapshot is not None else 0
+            except Exception:
+                snapshot_hwnd = 0
+            if snapshot is not None and snapshot_hwnd and snapshot_hwnd != int(hwnd):
+                try:
+                    self.session.snapshot = None
+                except Exception:
+                    pass
+                prelude.append({
+                    "action": "discard_stale_snapshot",
+                    "ok": True,
+                    "preview": f"discarded snapshot hwnd={snapshot_hwnd}; target hwnd={int(hwnd)}",
+                })
         if getattr(self.session, "snapshot", None) is None:
             if _draw_specs(request) and not request.input and not request.clicks and not request.verify_texts:
                 prelude.append({

@@ -84,6 +84,7 @@
 - `type_into_element` 是 `run_action_batch` 内部组合动作：定位锚点、点击聚焦、可选 `Ctrl+A` 清空、再 `type_text`。结果里看 `subresults`、`controller_internal_action_count`、`metrics.compound_round_trips_saved`，用于判断卡在定位、聚焦、清空还是输入验证。
 - `type_into_element` 和 `execute_subgoal` 会使用 UIA/OCR/CV 组合的通用 `input_locator`；UIA 关闭时会用 label、placeholder/search-like OCR、附近矩形、focused non-button 和 synthetic candidate，不写 QQ/计算器/靶场专属规则。
 - `execute_subgoal` 在没有 snapshot 且 click 带 `expected_region` 时，会先对该粗区域做 targeted initial OCR/CV；只有裁剪区真的识别到目标 label 才使用该 snapshot，否则回退全窗口 observe。snapshot 的 region 仍保持完整目标窗口，避免 watcher 被裁剪区带偏。
+- `execute_subgoal` 会在聚焦目标 hwnd 后丢弃 hwnd 不一致的旧 snapshot，避免前一轮 Codex/日志窗口感知被写进当前目标窗口的 `perception_reducer`。纯绘图 routine 丢弃 stale snapshot 后可继续走 `draw_direct_canvas_capture`，不必为了 reducer 再补一次 observe。
 - `observe(changed_only=true, query="...")` 先查 recent/action ROI；如果 ROI 里没有 query 命中，会明确标记 `Changed-only observe query fallback` 并退回全窗口 observe，避免局部变化不含目标时误导模型。
 - `run_action_batch` 可能追加内部 `auto_visual_verify` 结果；这是 controller 对 `draw_strokes/drag` 动作区域做的本地截图摘要，不是 LLM 额外发起的一轮工具调用。
 - 顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 调用也会在 `AgentRunner` 内自动包装成单动作 `run_action_batch`，所以即使模型没有主动写 batch，也应在工具结果里看到 `wrapped_by_fast_controller`、`metrics`、`needs_observe` 等证据；`draw_strokes/drag` 仍用 `sync=false` 并可带 `auto_visual_verify`、`visual_change_detected`，验证充分时还会返回 `fast_path_advice`，提示模型不要再额外 zoom/observe。
