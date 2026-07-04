@@ -276,3 +276,5 @@ plan tool history 压缩回归：`20260704-063415-fcd39d`。同一任务在 `mim
 绘图视觉确认自动完成回归：`20260704-081006-61ccb2`。同一任务在便宜模型 `mimo-v2.5`、`max_steps=8` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_081043.jpg` 显示左侧蓝色三角形和右侧红色矩形。工具序列缩短为 `launch -> complete_subgoal(1) -> execute_subgoal(draws blue/red, terminal done)`；`tool_count=3`、`decision_count=3`，没有额外截图/保存/文件检查，done gate 仍由 controller 视觉颜色证据 `red, blue` 通过，`prompt_tokens=27253`、`cache_miss_tokens=1269`。
 
 颜色面板 opener 缓存回归：`20260704-082538-6ac6bd`。同一任务在便宜模型 `mimo-v2.5` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_082615.jpg` 显示两个图形。第二次 `select_color` 复用 opener 后内部耗时约 1604ms；由于色块仍重新扫描，这个缓存不会把旧色块坐标当成新证据。
+
+端到端清洁回归：`20260704-085111-80e560`。同一任务在便宜模型 `mimo-v2.5` 下完成，真实截图 `python/winpilot_home/traces/manual_screen_20260704_085209.jpg` 显示两个图形。工具序列为 `launch -> complete_subgoal(1) -> execute_subgoal(draws blue/red, terminal done)`；没有空 `execute_subgoal`、没有 shell、没有文件读写，`evidence_packet.perception_reducer={}`，done gate 仍由 controller 视觉颜色证据 `red, blue` 通过。
