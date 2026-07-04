@@ -68,18 +68,88 @@ def _unique(values: list[str]) -> list[str]:
     return out
 
 
+def _compact_key(value: Any) -> str:
+    return re.sub(r"[\s_\-:\uff1a]+", "", str(value or "").casefold())
+
+
+def _task_visible_targets(task: str) -> list[str]:
+    return _unique([*_required_visible_payloads(task), *_required_literal_tokens(task), *_visible_state_targets(task)])
+
+
+def _looks_like_distinctive_state_token(text: str) -> bool:
+    value = str(text or "")
+    return bool(
+        "_" in value
+        or re.search(r"[A-Z]{2,}", value)
+        or re.search(r"[A-Za-z]+\d|\d+[A-Za-z]", value)
+    )
+
+
+def _expand_verify_texts(verify_texts: list[str], task: str) -> list[str]:
+    targets = _task_visible_targets(task)
+    out: list[str] = []
+    for text in verify_texts:
+        key = _compact_key(text)
+        if key.isdigit() and len(key) <= 2:
+            expanded = [
+                target for target in targets
+                if _compact_key(target).endswith(key)
+                and any(ch.isalpha() or "\u4e00" <= ch <= "\u9fff" for ch in str(target))
+            ]
+            out.extend(expanded)
+            continue
+        out.append(text)
+    out = _unique(out)
+    if any(_looks_like_distinctive_state_token(text) for text in out):
+        distinctive = [text for text in out if _looks_like_distinctive_state_token(text)]
+        if distinctive:
+            return _unique(distinctive)
+    return out
+
+
 def _scope_mentions(target: str, *parts: Any) -> bool:
-    key = re.sub(r"[\s_\-:\uff1a]+", "", str(target or "")).casefold()
+    key = _compact_key(target)
     if not key:
         return False
     haystack = "\n".join(str(part or "") for part in parts)
-    haystack_key = re.sub(r"[\s_\-:\uff1a]+", "", haystack).casefold()
+    haystack_key = _compact_key(haystack)
     return key in haystack_key
+
+
+_CN_CLICK_LABEL_RE = re.compile(
+    r"(?:点击|点按|按下|按|选择|打开)\s*[\"“'‘]?([^，。；;,.!！?？\n\"”'’]{1,24}?)[\"”'’]?\s*(?:按钮|按键|菜单|链接)"
+)
+_EN_CLICK_LABEL_RE = re.compile(
+    r"\b(?:click|press|tap|select|open)\s+(?:the\s+)?[\"']?(.{1,32}?)[\"']?\s+"
+    r"(?:button|btn|menu|link)\b",
+    re.IGNORECASE,
+)
+
+
+def _infer_click_spec_from_subgoal(subgoal: str) -> dict[str, Any]:
+    text = str(subgoal or "").strip()
+    if not text:
+        return {}
+    for pattern in (_CN_CLICK_LABEL_RE, _EN_CLICK_LABEL_RE):
+        match = pattern.search(text)
+        if not match:
+            continue
+        label = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n:：-—")
+        if label:
+            return {"label": label, "role": "button"}
+    return {}
 
 
 def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalRequest:
     input_spec = _as_dict(args.get("input") or args.get("type") or args.get("text_input"))
+    subgoal_text = str(args.get("subgoal") or args.get("goal") or "").strip()
+    raw_clicks = args.get("clicks") or args.get("buttons") or []
+    click_items: list[dict[str, Any]] = []
+    if isinstance(raw_clicks, list):
+        click_items = [item for item in raw_clicks if isinstance(item, dict)]
     click_spec = _as_dict(args.get("click") or args.get("button") or args.get("press"))
+    if not click_spec and not click_items:
+        click_spec = _infer_click_spec_from_subgoal(subgoal_text)
     draw_spec = _as_dict(args.get("draw") or args.get("drawing") or {})
     if not draw_spec and args.get("shape"):
         draw_spec = {"shape": args.get("shape")}
@@ -94,17 +164,17 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
     clicks: list[dict[str, Any]] = []
     if click_spec:
         clicks.append(click_spec)
-    raw_clicks = args.get("clicks") or args.get("buttons") or []
-    if isinstance(raw_clicks, list):
-        clicks.extend(item for item in raw_clicks if isinstance(item, dict))
-    verify_texts = _as_text_list(args.get("verify_texts") or args.get("verify") or [])
+    clicks.extend(click_items)
+    verify_texts = _expand_verify_texts(
+        _as_text_list(args.get("verify_texts") or args.get("verify") or []),
+        task,
+    )
     if not verify_texts and input_spec.get("text"):
         verify_texts.append(str(input_spec.get("text") or ""))
     # Task-level evidence still belongs to the final done gate. A routine should
     # only inherit task literals that are actually part of this subgoal; otherwise
     # an input-only routine can be marked failed because a later button/state
     # requirement has not happened yet.
-    subgoal_text = str(args.get("subgoal") or args.get("goal") or "").strip()
     scope_text = json.dumps(
         {
             "subgoal": subgoal_text,
@@ -118,7 +188,7 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         ensure_ascii=False,
         default=str,
     )
-    for target in [*_required_visible_payloads(task), *_required_literal_tokens(task), *_visible_state_targets(task)]:
+    for target in _task_visible_targets(task):
         if _scope_mentions(target, scope_text):
             verify_texts.append(target)
     return SubgoalRequest(
@@ -135,19 +205,50 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
 
 
 def _pick_text(data: dict[str, Any]) -> str:
+    def _strip_observe_diagnostics(text: str) -> str:
+        lines: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if line.startswith("Changed-only observe query fallback:"):
+                continue
+            if line.startswith("No elements matched query"):
+                continue
+            if line.startswith("No changed-region text matched query"):
+                continue
+            lines.append(raw_line)
+        return "\n".join(lines)
+
     chunks: list[str] = []
     for item in data.get("results") or []:
         if not isinstance(item, dict):
             continue
         if item.get("action") in {"read_text", "observe"}:
-            chunks.append(str(item.get("preview") or ""))
+            full_text = item.get("full_text")
+            if isinstance(full_text, str):
+                chunks.append(_strip_observe_diagnostics(full_text))
+            chunks.append(_strip_observe_diagnostics(str(item.get("preview") or "")))
         child_data = item.get("data")
         if isinstance(child_data, dict):
             for key in ("text", "body", "visible_text", "preview"):
                 value = child_data.get(key)
                 if isinstance(value, str):
-                    chunks.append(value)
+                    chunks.append(_strip_observe_diagnostics(value))
     return "\n".join(chunks)
+
+
+def _public_batch_results(results: Any) -> list[dict[str, Any]]:
+    if not isinstance(results, list):
+        return []
+    public: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        public.append({
+            key: value
+            for key, value in item.items()
+            if key != "full_text"
+        })
+    return public
 
 
 def _verified_expect_texts(actions: list[dict[str, Any]], data: dict[str, Any]) -> list[str]:
@@ -634,6 +735,10 @@ class SubgoalExecutor:
         changed_query_text = ""
         if not input_spec and click_specs and len(request.verify_texts) == 1:
             changed_query_text = request.verify_texts[0]
+        allow_click_interval_wait = not (
+            isinstance(request.constraints, dict)
+            and request.constraints.get("wait") is False
+        )
         for index, click_spec in enumerate(click_specs):
             label = click_spec.get("label") or click_spec.get("text") or click_spec.get("name")
             if label or click_spec.get("anchor"):
@@ -645,7 +750,35 @@ class SubgoalExecutor:
                     "button": click_spec.get("button", "left"),
                     "double": bool(click_spec.get("double", False)),
                 })
-                actions.append(action)
+                count_source = (
+                    click_spec.get("click_count")
+                    or click_spec.get("count")
+                    or click_spec.get("times")
+                    or (
+                        request.constraints.get("click_count")
+                        if len(click_specs) == 1 and isinstance(request.constraints, dict)
+                        else None
+                    )
+                )
+                try:
+                    click_count = int(count_source or 1)
+                except (TypeError, ValueError):
+                    click_count = 1
+                click_count = max(1, min(click_count, 12))
+                try:
+                    click_interval_ms = int(request.constraints.get("click_interval_ms") or 140)
+                except (TypeError, ValueError, AttributeError):
+                    click_interval_ms = 140
+                click_interval_ms = max(40, min(click_interval_ms, 600))
+                for repeat_index in range(click_count):
+                    repeated = dict(action)
+                    if click_count > 1:
+                        repeated["repeat_index"] = repeat_index + 1
+                        repeated["repeat_count"] = click_count
+                    actions.append(repeated)
+                    last_click = index == len(click_specs) - 1 and repeat_index == click_count - 1
+                    if allow_click_interval_wait and not last_click and (click_count > 1 or len(click_specs) > 1):
+                        actions.append({"action": "wait", "duration_ms": click_interval_ms})
         wait_spec = request.constraints.get("wait") if isinstance(request.constraints, dict) else None
         if wait_spec is not False and actions:
             actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
@@ -917,7 +1050,7 @@ class SubgoalExecutor:
                 "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
             },
             "actions_executed": actions,
-            "results": batch.get("results") or [],
+            "results": _public_batch_results(batch.get("results") or []),
             "metrics": batch.get("metrics") or {},
             "evidence_packet": evidence_packet,
             "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),

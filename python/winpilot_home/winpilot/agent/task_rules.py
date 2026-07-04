@@ -89,9 +89,12 @@ def _has_explicit_gui_only_marker(task: str) -> bool:
         or "no command line" in text
         or "\u5fc5\u987b\u8d70gui" in compact
         or "\u5fc5\u987b\u901agui" in compact
+        or "\u5fc5\u987b\u901a\u8fc7gui\u64cd\u4f5c" in compact
         or "\u901agui\u64cd\u4f5c" in compact
         or "\u901a\u8fc7gui\u64cd\u4f5c" in compact
         or bool(re.search(r"\u901a\u8fc7.{0,6}gui\u64cd\u4f5c", compact))
+        or "蹇呴』閫氳繃gui鎿嶄綔" in compact
+        or "閫氳繃gui鎿嶄綔" in compact
         or "\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
         or "\u5168\u7a0b\u4e3b\u8981\u64cd\u4f5c\u5fc5\u987b\u8d70gui" in compact
         or "\u4e0d\u8981\u7528\u547d\u4ee4\u884c" in compact
@@ -251,6 +254,58 @@ def _gui_only_launch_uses_shell(command: str) -> bool:
         or ".ps1" in low
         or "python -m http.server" in low
     )
+
+
+def _gui_only_blocked_hotkey(task: str, keys: list[str] | tuple[str, ...]) -> str:
+    """Return a GUI-only block reason for shortcuts that reset or inspect apps.
+
+    This is intentionally generic. A visible GUI task may use normal shortcuts
+    such as Enter/Esc/Ctrl+S, but browser refresh and developer-tool shortcuts
+    are not task work; they usually reset state or open an implementation/debug
+    surface that a real end user did not ask to use.
+    """
+    if not _is_gui_only_task(task):
+        return ""
+    normalized = {
+        ("ctrl" if str(key).casefold() in {"control", "ctl"} else str(key).casefold())
+        for key in (keys or [])
+    }
+    text = (task or "").casefold()
+    compact = re.sub(r"\s+", "", text)
+    refresh_requested = (
+        "refresh" in text
+        or "reload" in text
+        or "\u5237\u65b0" in compact
+        or "\u91cd\u65b0\u52a0\u8f7d" in compact
+    )
+    devtools_requested = (
+        "devtools" in text
+        or "developer tools" in text
+        or "console" in text
+        or "\u5f00\u53d1\u8005\u5de5\u5177" in compact
+        or "\u63a7\u5236\u53f0" in compact
+    )
+    if (
+        "f12" in normalized
+        or (
+            {"ctrl", "shift"} <= normalized
+            and normalized & {"i", "j", "c"}
+        )
+    ) and not devtools_requested:
+        return (
+            "GUI-only mode blocked browser developer-tools hotkey. "
+            "Use the visible application UI instead of DevTools/console."
+        )
+    if (
+        "f5" in normalized
+        or ({"ctrl", "r"} <= normalized)
+    ) and not refresh_requested:
+        return (
+            "GUI-only mode blocked refresh/reload hotkey because it can reset "
+            "visible task state. Continue from the current GUI state or use a "
+            "visible reset control only if the task asks for it."
+        )
+    return ""
 
 
 def _is_coding_task(task: str) -> bool:

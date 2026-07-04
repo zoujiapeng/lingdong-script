@@ -62,6 +62,7 @@ from .task_rules import (
     _is_upload_publish_task,
     _quoted_payloads,
     _required_image_paths,
+    _required_literal_tokens,
     _required_visible_payloads,
     _visible_state_targets,
 )
@@ -536,7 +537,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 self._had_verified_action = True
 
     def _visible_evidence_targets(self) -> list[str]:
-        targets = [*_visible_state_targets(self.task), *_required_visible_payloads(self.task)]
+        targets = [
+            *_visible_state_targets(self.task),
+            *_required_visible_payloads(self.task),
+            *_required_literal_tokens(self.task),
+        ]
         seen: set[str] = set()
         out: list[str] = []
         for target in targets:
@@ -663,6 +668,34 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                                 f"subgoal matched visual color: {color}",
                             )
         if not (isinstance(data, dict) and data.get("verified") is True):
+            if not (isinstance(data, dict) and tool_name == "run_action_batch"):
+                return
+        if isinstance(data, dict) and tool_name == "run_action_batch":
+            for item in data.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("action") not in {"observe", "read_text"}:
+                    continue
+                preview = str(item.get("preview") or "")
+                child_data = item.get("data") if isinstance(item.get("data"), dict) else {}
+                if isinstance(child_data, dict):
+                    preview = "\n".join(
+                        part for part in [
+                            preview,
+                            str(child_data.get("text") or ""),
+                            str(child_data.get("body") or ""),
+                            str(child_data.get("visible_text") or ""),
+                        ]
+                        if part
+                    )
+                haystack = self._normalize_visible_text(preview)
+                for target in targets:
+                    if self._normalize_visible_text(target) in haystack:
+                        self._append_visible_evidence(
+                            f"run_action_batch:{item.get('action')}",
+                            target,
+                            self._visible_snippet(preview, target),
+                        )
             return
         for value in self._expect_visible_values(args):
             self._append_visible_evidence(
@@ -670,6 +703,103 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 value,
                 f"verified expect text appeared: {value}",
             )
+
+    @staticmethod
+    def _strong_auto_done_target(target: str) -> bool:
+        value = str(target or "").strip()
+        if len(value) < 4:
+            return False
+        return (
+            "_" in value
+            or any(ch.isdigit() for ch in value)
+            or (len(value) >= 6 and value.upper() == value and any(ch.isalpha() for ch in value))
+        )
+
+    def _auto_done_visible_targets(self) -> list[str]:
+        return [
+            target
+            for target in self._visible_evidence_targets()
+            if self._strong_auto_done_target(target)
+        ]
+
+    @staticmethod
+    def _auto_done_evidence_source(source: str) -> bool:
+        return source in {"observe", "read_text", "execute_subgoal:evidence_packet"} or source in {
+            "run_action_batch:observe",
+            "run_action_batch:read_text",
+        }
+
+    def _visible_targets_proven_by_controller_evidence(self, targets: list[str]) -> tuple[bool, list[str]]:
+        seen = {
+            self._normalize_visible_text(str(item.get("target") or ""))
+            for item in self._visible_evidence_ledger
+            if self._auto_done_evidence_source(str(item.get("source") or ""))
+        }
+        missing = [
+            target
+            for target in targets
+            if self._normalize_visible_text(target) not in seen
+        ]
+        return not missing, missing
+
+    def _maybe_auto_done_from_visible_evidence(
+        self,
+        tool_name: str,
+        result: ToolResult,
+        ledger_len_before: int,
+    ) -> ToolResult:
+        if self._is_coding or result.terminal:
+            return result
+        if tool_name not in {"observe", "read_text", "execute_subgoal", "run_action_batch"}:
+            return result
+        new_entries = self._visible_evidence_ledger[ledger_len_before:]
+        if not any(
+            self._auto_done_evidence_source(str(item.get("source") or ""))
+            for item in new_entries
+        ):
+            return result
+        targets = self._auto_done_visible_targets()
+        if not targets:
+            return result
+        proven, missing = self._visible_targets_proven_by_controller_evidence(targets)
+        if not proven:
+            self._trace_debug("auto_done_visible_evidence_wait", {
+                "run_id": self.run_id,
+                "tool": tool_name,
+                "targets": targets,
+                "missing": missing,
+            })
+            return result
+        payload = {
+            "ok": True,
+            "auto_done": True,
+            "reason": "all strong task-visible targets were proven by real observe/read_text/controller evidence",
+            "targets": targets,
+        }
+        try:
+            original = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            original = {}
+        if isinstance(original, dict):
+            original["auto_done"] = payload
+            text = json.dumps(original, ensure_ascii=False, default=str)
+        else:
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        BUS.publish(
+            "agent_auto_done",
+            run_id=self.run_id,
+            tool=tool_name,
+            targets=targets,
+            reason=payload["reason"],
+        )
+        return ToolResult(
+            text,
+            is_observe=result.is_observe,
+            terminal="done",
+            summary=result.summary,
+            replay=result.replay,
+            image_b64=result.image_b64,
+        )
 
     @staticmethod
     def _compact_visual_summary(summary: Any) -> Any:
@@ -832,6 +962,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 ):
                     if key in child_data:
                         child[key] = child_data[key]
+                preview = item.get("preview")
+                if item.get("action") in {"observe", "read_text"} and isinstance(preview, str) and preview.strip():
+                    child["preview"] = preview[:500]
                 if "nonvisual_summary" in child_data:
                     child["nonvisual_summary"] = AgentRunner._compact_visual_summary(
                         child_data.get("nonvisual_summary")
@@ -1738,7 +1871,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             })
             self._record_step(tc.function.name, args, result.replay)
             self._track_verification(tc.function.name, result.text)
+            ledger_len_before = len(self._visible_evidence_ledger)
             self._track_visible_evidence(tc.function.name, args, result.text)
+            result = self._maybe_auto_done_from_visible_evidence(
+                tc.function.name,
+                result,
+                ledger_len_before,
+            )
             self._tool_history.append((tc.function.name, args, result.text or ""))
             self._tool_history = self._tool_history[-40:]
             # Keep recent tool outputs as evidence for the done-gate judge
@@ -1819,6 +1958,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "plan_after_auto_complete",
                     "needs_llm_reason",
                     "element_cache",
+                    "auto_done",
                     "failure_classification",
                     "failure_recovery",
                 ):

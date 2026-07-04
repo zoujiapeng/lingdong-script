@@ -1126,6 +1126,8 @@ class FastGuiController:
                 "terminal": result.terminal,
                 "preview": result.text[:800],
             }
+            if name in BATCH_OBSERVE_ACTIONS and len(result.text or "") > 800:
+                item["full_text"] = result.text
             if upgraded_from:
                 item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)

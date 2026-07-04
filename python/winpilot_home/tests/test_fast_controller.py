@@ -1002,6 +1002,30 @@ def test_type_into_element_uses_synthetic_nearby_input_locator():
     assert data["input_locator"]["candidate"]["source"] == "synthetic_near_label"
 
 
+def test_input_locator_prefers_placeholder_over_field_label_text():
+    from winpilot.fast.input_locator import locate_input
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Custom Target",
+        region=Region(0, 0, 900, 500),
+        elements=[
+            UIElement(elem_id=1, source="ocr", role="text", text="目标输入框", cx=90, cy=300, left=45, top=290, width=90, height=22),
+            UIElement(elem_id=2, source="ocr", role="text", text="在这里输入测试文字", cx=152, cy=346, left=61, top=336, width=182, height=23),
+        ],
+    )
+
+    result = locate_input(snapshot, label="目标输入框", expected_region="left")
+
+    assert result.found
+    assert result.candidate is not None
+    assert result.candidate.source == "synthetic_near_label"
+    assert result.candidate.center[1] > 320
+
+
 def test_subgoal_executor_runs_input_click_verify_routine():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -1067,6 +1091,168 @@ def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
         "subgoal": "verify LOCAL_COUNTER is visible",
     }, task=task)
     assert verify_request.verify_texts == ["LOCAL_COUNTER"]
+
+
+def test_subgoal_parser_infers_click_label_from_button_subgoal():
+    from winpilot.fast.subgoal import parse_subgoal_request
+
+    request = parse_subgoal_request({
+        "subgoal": "检查局部计数是否为0，若不为0则点击重置按钮",
+        "verify_texts": ["LOCAL_COUNTER_0"],
+    })
+
+    assert request.click["label"] == "重置"
+    assert request.clicks[0]["label"] == "重置"
+    assert request.clicks[0]["role"] == "button"
+
+
+def test_subgoal_parser_expands_short_numeric_verify_to_task_literal():
+    from winpilot.fast.subgoal import parse_subgoal_request
+
+    request = parse_subgoal_request({
+        "subgoal": "点击局部计数按钮四次",
+        "click": {"label": "只改局部状态"},
+        "verify_texts": ["4"],
+    }, task="最后确认页面能看到 APPLIED_TEXT_1: DEMO、LOCAL_COUNTER_4。")
+
+    assert request.verify_texts == ["LOCAL_COUNTER_4"]
+
+
+def test_subgoal_parser_prefers_distinctive_verify_tokens_over_aliases():
+    from winpilot.fast.subgoal import parse_subgoal_request
+
+    request = parse_subgoal_request({
+        "subgoal": "关闭弹窗",
+        "click": {"label": "关闭"},
+        "verify_texts": ["MODAL_CLOSED", "弹窗已关闭"],
+    })
+    assert request.verify_texts == ["MODAL_CLOSED"]
+
+    final_request = parse_subgoal_request({
+        "subgoal": "最终确认",
+        "verify_texts": ["APPLIED_TEXT_1: DEMO", "LOCAL_COUNTER_4"],
+    })
+    assert final_request.verify_texts == ["APPLIED_TEXT_1: DEMO", "LOCAL_COUNTER_4"]
+
+
+def test_subgoal_visible_text_ignores_observe_query_diagnostics():
+    from winpilot.action.verify import _match_visible_text
+    from winpilot.fast.subgoal import _pick_text
+
+    visible_text = _pick_text({
+        "results": [{
+            "action": "observe",
+            "preview": (
+                'Changed-only observe query fallback: recent ROI did not contain '
+                'query "local_counter_0"; returned a full observe snapshot.\n'
+                "Perception reducer:\n"
+                '- id=7 role=text text="LOCAL_COUNTER_20" center=(100,100)'
+            ),
+        }]
+    })
+
+    assert "local_counter_0" not in visible_text.casefold()
+    assert _match_visible_text("LOCAL_COUNTER_20", visible_text)
+    assert not _match_visible_text("LOCAL_COUNTER_0", visible_text)
+
+
+def test_subgoal_visible_text_uses_internal_full_observe_text():
+    from winpilot.action.verify import _match_visible_text
+    from winpilot.fast.subgoal import _pick_text
+
+    visible_text = _pick_text({
+        "results": [{
+            "action": "observe",
+            "preview": "Perception reducer:\n- id=1 text=\"only early candidates\"",
+            "full_text": "Window: Target\n[9] text \"LOCAL COUNTER 4\"",
+        }]
+    })
+
+    assert _match_visible_text("LOCAL_COUNTER_4", visible_text)
+
+
+def test_subgoal_build_actions_honors_click_count_constraint():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "最后确认 LOCAL_COUNTER_4"
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    request = parse_subgoal_request({
+        "subgoal": "点击局部计数按钮四次",
+        "click": {"label": "只改局部状态", "expected_region": "left"},
+        "verify_texts": ["4"],
+        "constraints": {"click_count": 4},
+    }, task=Session.task)
+
+    actions = executor._build_actions(request)
+
+    clicks = [action for action in actions if action.get("action") == "click_element"]
+    waits = [action for action in actions if action.get("action") == "wait"]
+    assert len(clicks) == 4
+    assert [action["duration_ms"] for action in waits] == [140, 140, 140]
+    assert {action["repeat_count"] for action in clicks} == {4}
+    assert actions[-1]["query"] == "LOCAL_COUNTER_4"
+
+
+def test_execute_subgoal_verifies_with_full_text_but_returns_public_results():
+    import json
+
+    from winpilot.fast.subgoal import SubgoalExecutor
+
+    class Session:
+        task = "confirm LOCAL_COUNTER_4"
+        hwnd = None
+        snapshot = None
+
+    class Controller:
+        def execute(self, actions, **kwargs):
+            return {
+                "ok": True,
+                "verified": False,
+                "controller_state": {"phase": "executed"},
+                "results": [{
+                    "index": 1,
+                    "action": "observe",
+                    "ok": True,
+                    "preview": "Perception reducer:\n- id=1 text=\"early candidate\"",
+                    "full_text": "Window: Target\n[4] text \"LOCAL COUNTER 4\"",
+                }],
+                "metrics": {},
+            }
+
+    executor = SubgoalExecutor(Session(), Controller())
+    executor._ensure_observed = lambda request: (None, [], False)
+
+    result = executor.execute({
+        "subgoal": "verify local counter",
+        "click": {"label": "只改局部状态"},
+        "verify_texts": ["LOCAL_COUNTER_4"],
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert payload["evidence_packet"]["matched_texts"] == ["LOCAL_COUNTER_4"]
+    assert "full_text" not in payload["results"][0]
+
+
+def test_subgoal_parser_does_not_infer_extra_click_when_clicks_provided():
+    from winpilot.fast.subgoal import parse_subgoal_request
+
+    request = parse_subgoal_request({
+        "subgoal": "点击只改局部状态按钮四次",
+        "clicks": [
+            {"label": "只改局部状态"},
+            {"label": "只改局部状态"},
+            {"label": "只改局部状态"},
+            {"label": "只改局部状态"},
+        ],
+        "verify_texts": ["LOCAL_COUNTER_4"],
+    })
+
+    assert len(request.clicks) == 4
 
 
 def test_subgoal_executor_runs_ordered_clicks_in_one_routine():

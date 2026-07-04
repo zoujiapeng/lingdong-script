@@ -39,7 +39,36 @@ SUPPORTED_CONDITIONS = (
 ) + groundtruth.GROUNDTRUTH_KEYS
 
 
+def _norm_visible_text(value: str) -> str:
+    return re.sub(r"[\s_\-:\uff1a]+", "", (value or "").casefold())
+
+
+def _match_visible_text_precise(needle: str, text: str) -> bool:
+    needle_lower = (needle or "").casefold()
+    text_lower = (text or "").casefold()
+    norm_needle = _norm_visible_text(needle_lower)
+    if not norm_needle:
+        return False
+    # Short numeric checks are too weak for GUI verification: they can match URL
+    # ports, clocks, list indexes, or diagnostic text. Accept one/two digit
+    # values only when they are the whole visible line. Longer numeric literals
+    # still work for calculator/file-result tasks as bounded numeric tokens.
+    if norm_needle.isdigit():
+        for line in text_lower.splitlines():
+            norm_line = _norm_visible_text(line)
+            if norm_line == norm_needle:
+                return True
+            if len(norm_needle) >= 3 and re.search(rf"(?<!\d){re.escape(norm_needle)}(?!\d)", norm_line):
+                return True
+        return False
+    if needle_lower in text_lower:
+        return True
+    norm_text = _norm_visible_text(text_lower)
+    return bool(norm_needle and norm_needle in norm_text)
+
+
 def _match_visible_text(needle: str, text: str) -> bool:
+    return _match_visible_text_precise(needle, text)
     needle_lower = (needle or "").casefold()
     text_lower = (text or "").casefold()
     if needle_lower in text_lower:
