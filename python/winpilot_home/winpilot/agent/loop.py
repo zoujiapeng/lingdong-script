@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import CONFIG, TRACES_DIR
-from ..memory import experience
+from ..memory import compiler, experience
 from ..model_adapter import (
     accumulate_usage,
     build_model_adapter,
@@ -2252,6 +2252,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     logger.warning("成功流程导出脚本失败(IO): %s", exc)
             experience.record(self.task, app_hint, self._steps_log,
                               verified=verified_run, script=script_name)
+        try:
+            compiler.ingest_run(self)
+        except Exception as exc:
+            logger.debug("memory graph ingest failed: %s", exc)
         self._score_experience_feedback()
 
         try:

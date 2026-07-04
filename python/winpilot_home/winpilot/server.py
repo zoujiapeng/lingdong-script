@@ -144,6 +144,16 @@ class MemoryPatchRequest(BaseModel):
     provisional: bool | None = None
 
 
+class MemorySearchRequest(BaseModel):
+    query: str
+    limit: int = 12
+
+
+class MemoryVerifyRequest(BaseModel):
+    evidence: str = ""
+    status: str = "verified"
+
+
 class ReplayRequest(BaseModel):
     script: str
 
@@ -433,6 +443,35 @@ def memory_add(req: MemoryAddRequest) -> dict[str, Any]:
     )
 
 
+@app.post("/api/memory/search")
+def memory_graph_search(req: MemorySearchRequest) -> dict[str, Any]:
+    from .memory import experience, retriever
+
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(400, "query cannot be empty")
+    store = experience._store()
+    _frame, candidates = retriever.recall(query, store, limit=max(1, min(req.limit, 50)))
+    return {
+        "ok": True,
+        "query": query,
+        "results": [
+            {
+                "id": c.node.get("id"),
+                "kind": c.node.get("kind"),
+                "title": c.node.get("title"),
+                "summary": c.node.get("summary"),
+                "status": c.node.get("status"),
+                "confidence": c.node.get("confidence"),
+                "app": c.node.get("app"),
+                "score": round(c.score, 3),
+                "reasons": c.reasons,
+            }
+            for c in candidates[: req.limit]
+        ],
+    }
+
+
 @app.put("/api/memory/{recipe_id}")
 def memory_update(recipe_id: str, req: MemoryPatchRequest) -> dict[str, Any]:
     from .memory import experience
@@ -446,6 +485,62 @@ def memory_update(recipe_id: str, req: MemoryPatchRequest) -> dict[str, Any]:
     if updated is None:
         raise HTTPException(404, "记忆条目不存在")
     return updated
+
+
+@app.get("/api/memory/{recipe_id}/lineage")
+def memory_lineage(recipe_id: str) -> dict[str, Any]:
+    from .memory import experience
+
+    store = experience._store()
+    node = store.get_node(recipe_id)
+    if not node:
+        raise HTTPException(404, "memory not found")
+    return {"ok": True, "node": node, "related": store.related(recipe_id, direction="both", limit=100)}
+
+
+@app.get("/api/memory/{recipe_id}/related")
+def memory_related(recipe_id: str) -> dict[str, Any]:
+    from .memory import experience
+
+    store = experience._store()
+    if not store.get_node(recipe_id):
+        raise HTTPException(404, "memory not found")
+    return {"ok": True, "id": recipe_id, "related": store.related(recipe_id, direction="both", limit=100)}
+
+
+@app.post("/api/memory/{recipe_id}/retire")
+def memory_retire(recipe_id: str) -> dict[str, Any]:
+    from .memory import experience
+
+    store = experience._store()
+    if not store.retire_node(recipe_id):
+        raise HTTPException(404, "memory not found")
+    return {"ok": True, "id": recipe_id}
+
+
+@app.post("/api/memory/{recipe_id}/verify")
+def memory_verify(recipe_id: str, req: MemoryVerifyRequest) -> dict[str, Any]:
+    from .memory import experience
+
+    store = experience._store()
+    node = store.get_node(recipe_id)
+    if not node:
+        raise HTTPException(404, "memory not found")
+    if req.evidence.strip():
+        store.add_evidence(recipe_id, req.evidence.strip(), required=True)
+    store.record_attempt(recipe_id, "manual_verify", status=req.status, success=True)
+    payload = dict(node.get("payload") or {})
+    payload["successes"] = int(payload.get("successes") or 0) + 1
+    payload["uses"] = int(payload.get("uses") or 0) + 1
+    updated = store.update_node(
+        recipe_id,
+        {
+            "status": "active",
+            "confidence": min(0.98, float(node.get("confidence") or 0.5) + 0.1),
+            "payload": payload,
+        },
+    )
+    return {"ok": True, "memory": updated}
 
 
 @app.delete("/api/memory/{recipe_id}")
