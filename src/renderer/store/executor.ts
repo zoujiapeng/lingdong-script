@@ -379,6 +379,7 @@ export function createFlowExecutor(
               `WinPilot wait step "${params.wait_type || 'condition'}" must run through the original .wps.json Replayer`
             );
           } else {
+            rejectBrowserSimulation('wait');
             log('info', `等待条件（模拟跳过）`, nodeId);
             await delay(200);
           }
@@ -491,6 +492,7 @@ export function createFlowExecutor(
             log('info', `变量判断: ${name}=${actual} ${cond} ${expected} -> ${matched ? 'yes' : 'no'}`, nodeId);
             result = matched ? 'yes' : 'no';
           } else {
+            rejectBrowserSimulation('condition');
             log('info', `变量判断（模拟: 假）`, nodeId);
             await delay(200);
             result = 'no';
