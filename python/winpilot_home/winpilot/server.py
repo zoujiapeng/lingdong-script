@@ -130,9 +130,18 @@ class _RunState:
         )
         return legacy_running or job_running
 
+    def agent_busy(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def busy_breakdown(self) -> dict[str, bool]:
+        return {
+            "agent": self.agent_busy(),
+            "replay": self.replay_busy(),
+            "human_recording": human_mod.RECORDER.is_recording(),
+        }
+
     def busy(self) -> bool:
-        running_agent = self.thread is not None and self.thread.is_alive()
-        return running_agent or self.replay_busy() or human_mod.RECORDER.is_recording()
+        return any(self.busy_breakdown().values())
 
 
 STATE = _RunState()
@@ -374,8 +383,13 @@ def interject(req: ChatRequest) -> dict[str, Any]:
 @app.get("/api/status")
 def status() -> dict[str, Any]:
     runner = STATE.runner
+    busy = STATE.busy_breakdown()
     return {
-        "running": STATE.busy(),
+        "running": any(busy.values()),
+        "busy": busy,
+        "agent_running": busy["agent"],
+        "replay_running": busy["replay"],
+        "human_recording": busy["human_recording"],
         "run_id": runner.run_id if runner else None,
         "run_status": runner.status if runner else None,
         "usage": dict(runner.usage_total) if runner else None,
