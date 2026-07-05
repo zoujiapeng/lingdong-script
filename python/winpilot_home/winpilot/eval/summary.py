@@ -197,6 +197,24 @@ def _low_latency_metrics(
         for event in desktop_queue_done
         if event.get("elapsed_ms") is not None
     ]
+    desktop_job_events = [
+        event for event in events
+        if event.get("type") == "desktop_action_queue_job"
+    ]
+    desktop_job_terminal = [
+        event for event in desktop_job_events
+        if event.get("state") in {"done", "error", "canceled"}
+    ]
+    desktop_job_wait_ms = [
+        int(event.get("wait_ms") or 0)
+        for event in desktop_job_terminal
+        if event.get("wait_ms") is not None
+    ]
+    desktop_job_elapsed_ms = [
+        int(event.get("elapsed_ms") or 0)
+        for event in desktop_job_terminal
+        if event.get("elapsed_ms") is not None
+    ]
 
     steps = max(step_count, 1)
     minutes = max(duration_s / 60.0, 1 / 60.0)
@@ -223,6 +241,14 @@ def _low_latency_metrics(
             "reentrant": sum(1 for event in desktop_queue_starts if event.get("reentrant") is True),
             "wait_latency": _latency_summary(desktop_queue_wait_ms),
             "execution_latency": _latency_summary(desktop_queue_elapsed_ms),
+            "async_jobs": {
+                "submitted": sum(1 for event in desktop_job_events if event.get("state") == "queued"),
+                "completed": sum(1 for event in desktop_job_terminal if event.get("state") == "done"),
+                "errors": sum(1 for event in desktop_job_terminal if event.get("state") == "error"),
+                "canceled": sum(1 for event in desktop_job_terminal if event.get("state") == "canceled"),
+                "wait_latency": _latency_summary(desktop_job_wait_ms),
+                "execution_latency": _latency_summary(desktop_job_elapsed_ms),
+            },
         },
     }
 
