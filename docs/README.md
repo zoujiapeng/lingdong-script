@@ -22,6 +22,7 @@
 - 流程图/DSL 体系以 `src/renderer/`、`python/engine/`、`python/features/` 为准。
 - Runtime、低延迟 GUI、记忆、上下文折叠以 `CLAUDE.md`、`architecture.md`、`winpilot-agent.md` 为准。
 - 本机运行数据以 `config.json`、`traces/`、`evals/`、`experience_memory.json` 为主，不作为架构事实提交。
+- 低延迟 GUI、Replay/IR、前端成熟度和真实软件能力以 README 的“成熟度快照”和 `architecture.md` 的边界描述为准；不要把路线图目标当成已完成事实。
 
 ## 维护规则
 

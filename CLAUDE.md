@@ -76,13 +76,24 @@ Frontend Agent page or scripts/gui_eval_run.py
 - `agent/scope_guard.py`：GUI mutation 前检查目标窗口/前台，避免点到 Codex、日志窗口或错误窗口。
 - `drawing_gui` schema profile：绘图/画布任务只暴露必要 GUI/controller 工具，降低 prompt 成本。
 - 物理坐标排查工具：`coordinate_diagnostics` / `coordinate_click_test`。
+- `action/desktop_queue.py`：真实桌面写入动作进入全局 single-writer 队列，支持同步执行和后台 job。
+- `action/executor.py`：已有 raw click/move/focus/key helper，但还不是完整独立 Raw Device Executor。
 
 仍未完成：
 
 - 没有成熟视觉伺服控制。
 - 没有常驻轻量 UI 视觉模型/YOLO 主循环。
+- 没有跨任务常驻的 OCR/UIA/CV/VLM 语义 perception daemon；当前常驻部分主要是 screen delta watcher。
+- 没有按 hwnd 的细粒度 action queue；`target_hwnd` 目前主要用于记录和后续策略，不提供多窗口并行动作。
 - 还没做到所有常规动作都不经过 LLM、LLM 只处理异常。
 - Skill 复用率、VLM 兜底调度和低延迟 dashboard 仍需继续打磨。
+
+## 当前实力边界
+
+- 计算器、记事本、网页靶场、简单绘图/拖拽可以作为基础回归，但不能证明通用 computer use 能力。
+- QQ、微信、Steam、抖音、网易云等真实复杂软件需要非破坏性 E2E：打开、聚焦正确窗口、定位输入框/搜索框、输入草稿或搜索词、观察结果、清理草稿；未经用户明确允许不要真实发送消息或发布内容。
+- 通信任务的 `click/type_text/hotkey ok` 不是成功证据。必须看到目标会话、目标联系人、消息文本出现在输入框或聊天记录中；真实发送还要看到发送后的聊天记录证据。
+- 前端目前是可用的工程工作台，不是最终产品形态。改前端时要保留真实 FlowCanvas、Agent iframe、Replay/trace 调试入口，不要用纯视觉 redesign 覆盖真实功能。
 
 ## Replay / FlowScript 边界
 
