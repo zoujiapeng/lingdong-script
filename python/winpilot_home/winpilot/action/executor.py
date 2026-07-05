@@ -449,7 +449,7 @@ def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> 
     for i, char in enumerate(text):
         _refocus_if_needed(i)
         if char == "\n":
-            press_keys(["enter"])
+            _raw_press_keys(["enter"])
             continue
         code = ord(char)
         if code > 0xFFFF:  # surrogate pair for emoji etc.
@@ -467,11 +467,7 @@ def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> 
     return {"ok": True, "typed": len(text)}
 
 
-@queued_desktop_action("press_keys")
-def press_keys(keys: list[str]) -> dict:
-    """Press a chord, e.g. ["ctrl","s"] or single ["enter"]."""
-    if _dry_run():
-        return {"ok": True, "dry_run": True}
+def _raw_press_keys(keys: list[str]) -> dict:
     vks = [_vk_of(k) for k in keys]
     downs, ups = [], []
     for vk in vks:
@@ -481,6 +477,15 @@ def press_keys(keys: list[str]) -> dict:
     _send_inputs(downs)
     time.sleep(0.03)
     _send_inputs(list(reversed(ups)))
+    return {"ok": True, "keys": keys}
+
+
+@queued_desktop_action("press_keys")
+def press_keys(keys: list[str]) -> dict:
+    """Press a chord, e.g. ["ctrl","s"] or single ["enter"]."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True}
+    _raw_press_keys(keys)
     BUS.publish("action", action="hotkey", keys=keys)
     return {"ok": True, "keys": keys}
 

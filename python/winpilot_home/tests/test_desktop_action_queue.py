@@ -104,6 +104,117 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
     ]
 
 
+def test_public_scroll_uses_one_outer_queue_event(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
+    monkeypatch.setattr(executor, "_raw_move_mouse", lambda x, y: calls.append(("move", x, y)))
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: calls.append(("send", len(inputs))))
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.scroll(10, 20, -2)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out["ok"] is True
+    assert calls == [("move", 10, 20), ("send", 1)]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "scroll"),
+        ("done", "scroll"),
+    ]
+
+
+def test_public_drag_uses_one_outer_queue_event(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
+    monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: calls.append(("focus", hwnd)))
+    monkeypatch.setattr(
+        executor,
+        "_stroke_path",
+        lambda waypoints, duration_s: calls.append(("stroke", waypoints, duration_s)),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.drag(1, 2, 5, 6, points=[[3, 4]], hwnd=123)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out["ok"] is True
+    assert calls == [
+        ("focus", 123),
+        ("stroke", [(1, 2), (3, 4), (5, 6)], 0.4),
+    ]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "drag"),
+        ("done", "drag"),
+    ]
+
+
+def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
+    monkeypatch.setattr(executor, "_raw_focus_window", lambda hwnd: calls.append(("focus", hwnd)))
+    monkeypatch.setattr(
+        executor,
+        "_stroke_path",
+        lambda waypoints, duration_s: calls.append(("stroke", waypoints, duration_s)),
+    )
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.draw_strokes([[[1, 2], [3, 4]], [[9, 9]]], hwnd=123)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out == {"ok": True, "strokes_drawn": 1}
+    assert calls == [
+        ("focus", 123),
+        ("stroke", [(1, 2), (3, 4)], 0.4),
+    ]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "draw_strokes"),
+        ("done", "draw_strokes"),
+    ]
+
+
+def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
+    sent_batches = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_should_type_via_vk", lambda _text: False)
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: sent_batches.append(len(inputs)))
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.type_text("a\nb", interval_s=0)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out == {"ok": True, "typed": 3}
+    assert sent_batches == [2, 1, 1, 2]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "type_text"),
+        ("done", "type_text"),
+    ]
+    action_events = [event for event in events if event.get("type") == "action"]
+    assert [event["action"] for event in action_events] == ["type_text"]
+
+
 def test_desktop_action_queue_async_worker_serializes_jobs():
     queue = DesktopActionQueue()
     active = 0
