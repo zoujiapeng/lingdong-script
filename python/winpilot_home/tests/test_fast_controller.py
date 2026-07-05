@@ -1361,6 +1361,180 @@ def test_subgoal_file_dialog_submission_uses_enter_after_filename_input():
     assert ("hotkey", {"keys": ["enter"], "expect": {"window_gone": "Save As", "timeout_s": 5.0}}) in calls
 
 
+def test_subgoal_printable_click_sequence_prefers_keyboard_text():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "Use keyboard to calculate result 408"
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    request = parse_subgoal_request({
+        "subgoal": "enter 12 multiply by 34 equals and read the result",
+        "clicks": [
+            {"label": "1"},
+            {"label": "2"},
+            {"label": "Multiply by"},
+            {"label": "3"},
+            {"label": "4"},
+            {"label": "Equals"},
+        ],
+        "verify_texts": ["408"],
+    }, task=Session.task)
+
+    actions = executor._build_actions(request)
+
+    assert actions[0] == {
+        "action": "type_text",
+        "text": "12*34=",
+        "keyboard_sequence_from_clicks": True,
+        "expect": {"text_appears": "408"},
+    }
+    assert [action["action"] for action in actions] == ["type_text", "wait_stable"]
+
+
+def test_subgoal_printable_click_sequence_normalizes_chinese_operators():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "计算 12 乘 34 等于 408"
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    request = parse_subgoal_request({
+        "subgoal": "计算 12 乘 34",
+        "clicks": [
+            {"label": "1"},
+            {"label": "2"},
+            {"label": "乘"},
+            {"label": "3"},
+            {"label": "4"},
+            {"label": "等于"},
+        ],
+        "verify_texts": ["408"],
+    }, task=Session.task)
+
+    actions = executor._build_actions(request)
+
+    assert actions[0]["action"] == "type_text"
+    assert actions[0]["text"] == "12*34="
+    assert actions[0]["keyboard_sequence_from_clicks"] is True
+
+
+def test_subgoal_printable_click_sequence_maps_x_only_in_arithmetic_context():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "calculate 12 x 34"
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    math_request = parse_subgoal_request({
+        "subgoal": "calculate 12 x 34",
+        "clicks": [
+            {"label": "1"}, {"label": "2"}, {"label": "x"},
+            {"label": "3"}, {"label": "4"}, {"label": "="},
+        ],
+        "verify_texts": ["408"],
+    }, task=Session.task)
+    assert executor._build_actions(math_request)[0]["text"] == "12*34="
+
+    plain_request = parse_subgoal_request({
+        "subgoal": "enter code xabc",
+        "clicks": [
+            {"label": "x"}, {"label": "a"}, {"label": "b"}, {"label": "c"},
+        ],
+        "verify_texts": ["xabc"],
+    }, task="enter code xabc")
+    assert executor._build_actions(plain_request)[0]["text"] == "xabc"
+
+
+def test_subgoal_executable_keyboard_input_reads_output_not_raw_echo():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "Open a keyboard-first surface and compute 12 times 34."
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    request = parse_subgoal_request({
+        "subgoal": "compute 12 times 34",
+        "input": {"label": "display", "text": "12*34=", "clear": False},
+    }, task=Session.task)
+
+    actions = executor._build_actions(request)
+
+    assert request.verify_texts == []
+    assert actions[0]["action"] == "type_into_element"
+    assert "expect" not in actions[0]
+    assert [action["action"] for action in actions] == [
+        "type_into_element",
+        "wait_stable",
+        "read_text",
+    ]
+
+
+def test_subgoal_plain_button_sequence_stays_as_clicks():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+
+    class Session:
+        task = "Click visible choices A and B"
+
+    executor = SubgoalExecutor(Session(), FastGuiController(Session()))
+    request = parse_subgoal_request({
+        "subgoal": "click A then B",
+        "clicks": [{"label": "A"}, {"label": "B"}],
+    }, task=Session.task)
+
+    actions = executor._build_actions(request)
+
+    assert [action["action"] for action in actions[:3]] == ["click_element", "wait", "click_element"]
+    assert not any(action.get("keyboard_sequence_from_clicks") for action in actions)
+
+
+def test_subgoal_input_locator_failure_falls_back_to_keyboard_text():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Enter 12*34= and verify 408"
+        hwnd = 1
+        run_id = "run-keyboard-fallback"
+        snapshot = Snapshot(hwnd=1, title="Keyboard Target", region=Region(0, 0, 500, 400), elements=[])
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": false, "blocked": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "calculate with keyboard input",
+        "input": {"label": "main input", "text": "12*34="},
+        "verify_texts": ["408"],
+        "constraints": {"wait": False},
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert payload["metrics"]["fallback_from_type_into_element"] is True
+    assert payload["actions_executed"][-1]["action"] == "type_text"
+    assert payload["actions_executed"][-1]["keyboard_fallback_from_type_into_element"] is True
+    assert calls[-1] == (
+        "type_text",
+        {"text": "12*34=", "keyboard_fallback_from_type_into_element": True,
+         "expect": {"text_appears": "408", "timeout_s": 2.0}},
+    )
+
+
 def test_subgoal_target_hwnd_prefers_matching_foreground_over_stale_session(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

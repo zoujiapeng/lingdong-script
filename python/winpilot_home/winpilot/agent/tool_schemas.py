@@ -381,7 +381,7 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine: locate/type/click/draw/wait/verify inside local controller. Must include a concrete routine field: input, click/clicks, draw/draws, or verify_texts; subgoal alone is only a label and is invalid. Use for clear input+button, labeled click, or simple canvas drawing routines. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd; use launch/find_app/focus_window first when opening or discovering an app.",
+            "Controller-first GUI routine: locate/type/click/draw/wait/verify inside local controller. Must include a concrete routine field: input, click/clicks, draw/draws, or verify_texts; subgoal alone is only a label and is invalid. Use for clear input+button, labeled click, ordered visible button clicks, or simple canvas drawing routines. For printable keyboard sequences such as 12*34=, prefer input.text or type_text; if short printable labels are supplied in clicks, the controller may normalize them into keyboard typing. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd; use launch/find_app/focus_window first when opening or discovering an app.",
             {
                 "subgoal": _prop("string", "Short label for the routine; this is not executable by itself."),
                 "target_window": {

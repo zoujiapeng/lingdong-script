@@ -10,6 +10,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -101,6 +102,166 @@ def _file_dialog_enter_submit(request: SubgoalRequest, input_spec: dict[str, Any
         "保存", "打开", "另存为", "另存",
     ]
     return any(_compact_key(marker) in haystack for marker in markers)
+
+
+_PRINTABLE_SEQUENCE_TRIGGERS = (
+    "input", "type", "enter", "key", "keyboard", "calculate", "compute", "result",
+    "输入", "键入", "录入", "按键", "键盘", "计算", "算出", "结果",
+)
+
+_PRINTABLE_LABEL_ALIASES = {
+    "add": "+",
+    "plus": "+",
+    "加": "+",
+    "subtract": "-",
+    "minus": "-",
+    "减": "-",
+    "multiply": "*",
+    "multiplyby": "*",
+    "times": "*",
+    "乘": "*",
+    "乘以": "*",
+    "divide": "/",
+    "divideby": "/",
+    "dividedby": "/",
+    "除": "/",
+    "除以": "/",
+    "equals": "=",
+    "equal": "=",
+    "等于": "=",
+    "decimal": ".",
+    "decimalpoint": ".",
+    "point": ".",
+    "dot": ".",
+    "小数点": ".",
+    "space": " ",
+    "空格": " ",
+}
+
+
+def _click_label_to_printable_key(label: Any) -> str | None:
+    text = unicodedata.normalize("NFKC", str(label or "")).strip()
+    if not text:
+        return None
+    compact = _compact_key(text)
+    if compact in _PRINTABLE_LABEL_ALIASES:
+        return _PRINTABLE_LABEL_ALIASES[compact]
+    if len(text) == 1:
+        if text in {"×", "✕"}:
+            return "*"
+        if text == "÷":
+            return "/"
+        if text.isprintable() and not text.isspace():
+            return text
+    return None
+
+
+def _click_sequence_as_keyboard_text(request: SubgoalRequest,
+                                     click_specs: list[dict[str, Any]]) -> str:
+    if request.input or len(click_specs) < 2:
+        return ""
+    scope_text = _compact_key(
+        " ".join([
+            request.subgoal,
+            " ".join(request.verify_texts),
+            json.dumps(request.constraints, ensure_ascii=False, default=str),
+        ])
+    )
+    if not any(_compact_key(token) in scope_text for token in _PRINTABLE_SEQUENCE_TRIGGERS):
+        return ""
+    arithmetic_scope = any(
+        _compact_key(token) in scope_text
+        for token in ("calculate", "compute", "result", "计算", "算出", "结果")
+    )
+    has_digit_label = any(
+        any(ch.isdigit() for ch in str(spec.get("label") or spec.get("text") or spec.get("name") or ""))
+        for spec in click_specs
+    )
+    out: list[str] = []
+    for spec in click_specs:
+        if any(key in spec for key in ("x", "y", "element_id", "anchor", "double", "drag")):
+            return ""
+        count_source = spec.get("click_count") or spec.get("count") or spec.get("times")
+        try:
+            count = int(count_source or 1)
+        except (TypeError, ValueError):
+            return ""
+        if count != 1:
+            return ""
+        label = spec.get("label") or spec.get("text") or spec.get("name")
+        key = _click_label_to_printable_key(label)
+        if key is None:
+            return ""
+        if key in {"x", "X"} and arithmetic_scope and has_digit_label:
+            key = "*"
+        out.append(key)
+    text = "".join(out)
+    # Avoid converting generic two-button UI choices such as A/B unless the
+    # sequence contains an obvious text/calculation shape.
+    if not any(ch.isdigit() or ch in "+-*/=." for ch in text) and len(text) < 4:
+        return ""
+    return text
+
+
+def _direct_keyboard_text(text: Any) -> str:
+    value = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if not value or "\n" in value or "\r" in value or len(value) > 180:
+        return ""
+    if not value.isprintable():
+        return ""
+    return value
+
+
+def _looks_like_executable_keyboard_sequence(text: Any) -> bool:
+    value = _direct_keyboard_text(text)
+    if not value:
+        return False
+    return (
+        value.endswith("=")
+        and any(ch.isdigit() for ch in value)
+        and any(op in value for op in "+-*/×÷")
+    )
+
+
+def _type_into_element_failed_to_focus(batch: dict[str, Any]) -> bool:
+    results = batch.get("results") or []
+    if not isinstance(results, list) or not results:
+        return False
+    first = results[0]
+    if not isinstance(first, dict) or first.get("action") != "type_into_element":
+        return False
+    data = first.get("data") if isinstance(first.get("data"), dict) else {}
+    if data.get("ok") is True:
+        return False
+    reason = " ".join(str(data.get(key) or "") for key in ("stage", "error", "via")).casefold()
+    return (
+        "focus" in reason
+        or "could not focus" in reason
+        or "could not locate" in reason
+        or "locator" in reason
+    )
+
+
+def _merge_fallback_batch(primary: dict[str, Any], fallback: dict[str, Any],
+                          fallback_actions: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = dict(fallback)
+    merged["fallback_from"] = "type_into_element"
+    merged["fallback_actions"] = fallback_actions
+    merged["primary_failed_results"] = primary.get("results") or []
+    merged["results"] = list(primary.get("results") or []) + list(fallback.get("results") or [])
+    metrics = dict(fallback.get("metrics") or {})
+    primary_metrics = primary.get("metrics") if isinstance(primary.get("metrics"), dict) else {}
+    try:
+        metrics["elapsed_ms"] = int(primary_metrics.get("elapsed_ms") or 0) + int(metrics.get("elapsed_ms") or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        metrics["action_count"] = int(primary_metrics.get("action_count") or 0) + int(metrics.get("action_count") or 0)
+    except (TypeError, ValueError):
+        pass
+    metrics["fallback_from_type_into_element"] = True
+    merged["metrics"] = metrics
+    return merged
 
 
 def _task_visible_targets(task: str) -> list[str]:
@@ -200,7 +361,11 @@ def parse_subgoal_request(args: dict[str, Any], task: str = "") -> SubgoalReques
         _as_text_list(args.get("verify_texts") or args.get("verify") or []),
         task,
     )
-    if not verify_texts and input_spec.get("text"):
+    if (
+        not verify_texts
+        and input_spec.get("text")
+        and not _looks_like_executable_keyboard_sequence(input_spec.get("text"))
+    ):
         verify_texts.append(str(input_spec.get("text") or ""))
     # Task-level evidence still belongs to the final done gate. A routine should
     # only inherit task literals that are actually part of this subgoal; otherwise
@@ -827,6 +992,7 @@ class SubgoalExecutor:
 
     def _build_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
+        read_after_input_sequence = False
         input_spec = request.input
         if input_spec:
             text = input_spec.get("text", input_spec.get("value", input_spec.get("text_input", "")))
@@ -843,6 +1009,8 @@ class SubgoalExecutor:
                 elif isinstance(expect_text, str) and expect_text.strip():
                     action["expect"] = {"text_appears": expect_text.strip()}
                 actions.append(action)
+                if not request.verify_texts and _looks_like_executable_keyboard_sequence(text):
+                    read_after_input_sequence = True
         last_color = ""
         for draw_spec in _draw_specs(request):
             draw_action = self._build_draw_action(request, draw_spec)
@@ -865,6 +1033,22 @@ class SubgoalExecutor:
                 action["expect"] = {"window_gone": title, "timeout_s": 5.0}
             actions.append(action)
             click_specs = []
+        keyboard_text = _click_sequence_as_keyboard_text(request, click_specs)
+        if keyboard_text:
+            action = {
+                "action": "type_text",
+                "text": keyboard_text,
+                "keyboard_sequence_from_clicks": True,
+            }
+            if len(request.verify_texts) == 1:
+                action["expect"] = {"text_appears": request.verify_texts[0]}
+            actions.append(action)
+            wait_spec = request.constraints.get("wait") if isinstance(request.constraints, dict) else None
+            if wait_spec is not False:
+                actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
+            if request.verify_texts and len(request.verify_texts) != 1:
+                actions.append({"action": "read_text"})
+            return actions
         changed_query_text = ""
         if not input_spec and click_specs and len(request.verify_texts) == 1:
             changed_query_text = request.verify_texts[0]
@@ -925,6 +1109,35 @@ class SubgoalExecutor:
                 })
             else:
                 actions.append({"action": "read_text"})
+        elif read_after_input_sequence:
+            actions.append({"action": "read_text"})
+        return actions
+
+    def _keyboard_fallback_actions(self, request: SubgoalRequest) -> list[dict[str, Any]]:
+        if not request.input or request.click or request.clicks or _draw_specs(request):
+            return []
+        if not self._target_hwnd(request, allow_foreground=False):
+            return []
+        text = _direct_keyboard_text(
+            request.input.get("text", request.input.get("value", request.input.get("text_input", "")))
+        )
+        if not text:
+            return []
+        action = {
+            "action": "type_text",
+            "text": text,
+            "keyboard_fallback_from_type_into_element": True,
+        }
+        if len(request.verify_texts) == 1:
+            action["expect"] = {"text_appears": request.verify_texts[0]}
+        actions = [action]
+        wait_spec = request.constraints.get("wait") if isinstance(request.constraints, dict) else None
+        if wait_spec is not False:
+            actions.append({"action": "wait_stable", "stable_ms": 250, "timeout_s": 2.0})
+        if request.verify_texts and len(request.verify_texts) != 1:
+            actions.append({"action": "read_text"})
+        elif not request.verify_texts and _looks_like_executable_keyboard_sequence(text):
+            actions.append({"action": "read_text"})
         return actions
 
     def _ready_canvas_region(self, window: Region, timeout_s: float = 3.5) -> tuple[Region | None, list[dict[str, Any]]]:
@@ -1140,6 +1353,19 @@ class SubgoalExecutor:
             sync=False,
             subgoal=request.subgoal,
         )
+        fallback_actions: list[dict[str, Any]] = []
+        if not batch.get("ok") and _type_into_element_failed_to_focus(batch):
+            fallback_actions = self._keyboard_fallback_actions(request)
+            if fallback_actions:
+                primary_action_count = len(batch.get("results") or [])
+                fallback_batch = self.controller.execute(
+                    fallback_actions,
+                    stop_on_error=True,
+                    sync=False,
+                    subgoal=f"{request.subgoal} (keyboard fallback)",
+                )
+                batch = _merge_fallback_batch(batch, fallback_batch, fallback_actions)
+                actions = actions[:primary_action_count] + fallback_actions
         visible_text = _pick_text(batch)
         expect_matched = _verified_expect_texts(actions, batch)
         visible_colors = _visual_colors_from_batch(batch)
