@@ -167,15 +167,30 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
   if (ir.format !== 'automation-ir/1') throw new Error('Unsupported Automation IR format');
   const source = ir.source || {};
   if (source.kind !== 'wps') throw new Error('Only WPS-sourced Automation IR can be converted to WPS');
-  return {
+  const conditions = clone(ir.conditions || {}) as Record<string, unknown>;
+  const evidence = ir.evidence;
+  const script: WpsScript = {
     format: 'wps/2',
     name: str(ir.name) || 'Automation',
     task: str(source.task),
     source: 'automation-ir',
-    source_run: str(source.source_run),
+    source_ir: str(ir.id),
+    created: created(ir.created),
     vars: clone(ir.variables || {}),
     steps: clone(ir.steps || []) as WpsStep[],
   };
+  if (conditions.target_window !== undefined && conditions.target_window !== null && conditions.target_window !== '') {
+    script.target_window = clone(conditions.target_window);
+  }
+  if (Object.keys(conditions).length > 0) {
+    script.conditions = conditions;
+  }
+  if (Array.isArray((evidence as Record<string, unknown> | undefined)?.required)) {
+    script.evidence = clone((evidence as Record<string, unknown>).required as unknown[]);
+  } else if (Array.isArray(evidence)) {
+    script.evidence = clone(evidence);
+  }
+  return script;
 }
 
 export function validateAutomationIR(value: unknown): string | undefined {

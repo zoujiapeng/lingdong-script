@@ -21,7 +21,12 @@ export interface WpsScript {
   name?: string;
   task?: string;
   source?: string;
+  source_ir?: string;
   source_run?: string;
+  created?: number;
+  target_window?: unknown;
+  conditions?: Record<string, unknown>;
+  evidence?: unknown[] | Record<string, unknown>;
   vars?: Record<string, string>;
   steps: WpsStep[];
 }
