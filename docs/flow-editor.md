@@ -10,6 +10,7 @@
 
 - `types/index.ts`：FlowScript 类型和 `NodeType`。
 - `utils/nodeDefinitions.ts`：节点定义。
+- `components/workbench/WorkbenchPanels.tsx`：统一工作台外壳；Agent cockpit 为第一屏，Flow/Replay/Settings 作为上下文层承载真实组件。
 - `components/PropertyPanel/`：参数编辑。
 - `store/defaults.ts`：默认设置和预置模板。
 - `store/persistence.ts`：localStorage 持久化 helper。
