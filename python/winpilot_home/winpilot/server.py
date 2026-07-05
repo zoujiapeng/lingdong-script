@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from .automation_ir import automation_ir_from_wps, validate_automation_ir
 from . import scheduler as agent_scheduler
+from .action.desktop_queue import DESKTOP_ACTION_QUEUE
 from .agent.loop import AgentRunner
 from .agent.router import build_runner
 from .agent.session import SESSION
@@ -385,6 +386,7 @@ def status() -> dict[str, Any]:
         "is_admin": _is_admin(),
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
+        "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
     }
 
 
