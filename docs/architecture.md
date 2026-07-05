@@ -122,6 +122,7 @@ queued
 - 仓库/代码任务：desktop + Coding Runtime。
 - GUI-only 任务：禁用 Coding Runtime，并限制 shell/file 绕路。
 - `ToolSession` 使用由 `router.build_runner()` 传入的同一个 profile，避免 runner 和 tools 二次推断不一致。
+- `runtime.to_dict().capabilities` 会列出本轮可用能力，例如 `desktop`、`coding`、`replay`、`scheduler`、`automation_ir`、`desktop_action_queue`；这些是 capability，不是用户可见子 agent。
 
 用户表达仍是一个 Agent：
 
