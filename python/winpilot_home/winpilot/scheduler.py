@@ -83,12 +83,15 @@ def create_task(
     task = str(task or "").strip()
     if not task:
         raise ValueError("task is required")
-    due = _parse_time(run_at)
+    run_at_text = str(run_at or "").strip()
+    due = _parse_time(run_at_text)
+    if run_at_text and due is None:
+        raise ValueError("run_at must be an ISO-8601 datetime")
     if due is None:
         try:
             delay = float(delay_seconds) if delay_seconds is not None else 0.0
         except (TypeError, ValueError):
-            delay = 0.0
+            raise ValueError("delay_seconds must be a number") from None
         due = _now() + timedelta(seconds=max(0.0, delay))
     interval = None
     if interval_seconds is not None:

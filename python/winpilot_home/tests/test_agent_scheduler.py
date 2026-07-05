@@ -44,6 +44,32 @@ def test_agent_scheduler_accepts_iso_run_at(tmp_path, monkeypatch):
     assert scheduler.due_tasks() == []
 
 
+def test_agent_scheduler_rejects_invalid_run_at(tmp_path, monkeypatch):
+    import pytest
+
+    from winpilot import scheduler
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+
+    with pytest.raises(ValueError, match="run_at must be an ISO-8601 datetime"):
+        scheduler.create_task("bad future task", run_at="tomorrow morning maybe")
+
+    assert scheduler.list_tasks() == []
+
+
+def test_agent_scheduler_rejects_invalid_delay_seconds(tmp_path, monkeypatch):
+    import pytest
+
+    from winpilot import scheduler
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+
+    with pytest.raises(ValueError, match="delay_seconds must be a number"):
+        scheduler.create_task("bad delay task", delay_seconds="soon")
+
+    assert scheduler.list_tasks() == []
+
+
 def test_agent_schedule_rest_create_list_cancel(tmp_path, monkeypatch):
     import pytest
 
@@ -68,3 +94,22 @@ def test_agent_schedule_rest_create_list_cancel(tmp_path, monkeypatch):
         cancelled = client.delete(f"/api/agent-schedules/{schedule_id}")
         assert cancelled.status_code == 200
         assert scheduler.list_tasks()[0]["enabled"] is False
+
+
+def test_agent_schedule_rest_rejects_invalid_run_at(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from winpilot import scheduler, server
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+
+    with TestClient(server.app) as client:
+        created = client.post(
+            "/api/agent-schedules",
+            json={"task": "say hello later", "run_at": "not a datetime"},
+        )
+        assert created.status_code == 400
+        assert "run_at must be an ISO-8601 datetime" in created.text
+        assert scheduler.list_tasks() == []
