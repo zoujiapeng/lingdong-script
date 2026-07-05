@@ -263,6 +263,53 @@ def test_summarize_events_reports_low_latency_metrics():
             "elapsed_ms": 7,
             "ts": 1.63,
         },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "queued",
+            "job_id": "job-1",
+            "action": "click",
+            "ts": 1.64,
+        },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "done",
+            "job_id": "job-1",
+            "action": "click",
+            "wait_ms": 4,
+            "elapsed_ms": 11,
+            "ts": 1.65,
+        },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "queued",
+            "job_id": "job-2",
+            "action": "drag",
+            "ts": 1.66,
+        },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "canceled",
+            "job_id": "job-2",
+            "action": "drag",
+            "wait_ms": 6,
+            "ts": 1.67,
+        },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "queued",
+            "job_id": "job-3",
+            "action": "type_text",
+            "ts": 1.68,
+        },
+        {
+            "type": "desktop_action_queue_job",
+            "state": "error",
+            "job_id": "job-3",
+            "action": "type_text",
+            "wait_ms": 3,
+            "elapsed_ms": 5,
+            "ts": 1.69,
+        },
         {"type": "agent_recovery", "kind": "structured_replan", "ts": 1.7},
         {"type": "memory", "action": "reuse_suggested", "ts": 1.8},
         {"type": "agent_step", "step": 2, "ts": 2.0},
@@ -293,6 +340,12 @@ def test_summarize_events_reports_low_latency_metrics():
     assert metrics["desktop_action_queue"]["wait_latency"]["max_ms"] == 5
     assert metrics["desktop_action_queue"]["execution_latency"]["p50_ms"] == 13.5
     assert metrics["desktop_action_queue"]["execution_latency"]["max_ms"] == 20
+    assert metrics["desktop_action_queue"]["async_jobs"]["submitted"] == 3
+    assert metrics["desktop_action_queue"]["async_jobs"]["completed"] == 1
+    assert metrics["desktop_action_queue"]["async_jobs"]["errors"] == 1
+    assert metrics["desktop_action_queue"]["async_jobs"]["canceled"] == 1
+    assert metrics["desktop_action_queue"]["async_jobs"]["wait_latency"]["max_ms"] == 6
+    assert metrics["desktop_action_queue"]["async_jobs"]["execution_latency"]["p50_ms"] == 8
 
 
 def test_summarize_events_ignores_empty_vlm_placeholder():

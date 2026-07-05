@@ -141,13 +141,13 @@ queued
 - `scope_guard` 在 GUI mutation 前检查前台/目标窗口。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - 坐标排查工具 `coordinate_diagnostics` / `coordinate_click_test` 使用物理屏幕坐标和真实鼠标点击路径。
-- `action/desktop_queue.py` 已提供同步 single-writer Desktop Action Queue；`action/executor.py` 的真实鼠标、键盘、窗口、剪贴板写入和启动动作会通过这个队列串行化，并在 trace 中发布 `desktop_action_queue` 事件。
+- `action/desktop_queue.py` 已提供 single-writer Desktop Action Queue：同步 `run()` 已接入真实鼠标、键盘、窗口、剪贴板写入和启动动作；内部后台 `submit/wait/cancel/get_job` job worker 已可用于后续 replay/recovery/Flow real executor 接入。trace 中分别发布 `desktop_action_queue` 和 `desktop_action_queue_job` 事件。
 
 仍未完成：
 
 - 常驻轻量视觉模型/YOLO 主循环。
 - 成熟视觉伺服控制。
-- Desktop Action Queue 的后台异步 job worker、按 target hwnd 的细粒度锁，以及 Raw Device Executor 的完整内环。
+- 按 target hwnd 的细粒度锁，以及 Raw Device Executor 的完整内环。
 - LLM 只处理异常、常规动作完全本地化。
 - 稳定 dashboard：p50/p95 GUI latency、LLM round trips、VLM count、skill reuse rate 等。
 
