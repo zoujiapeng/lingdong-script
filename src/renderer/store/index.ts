@@ -125,7 +125,7 @@ interface AppStore {
 
   // Actions - UI
   setUI: (updates: Partial<UIState>) => void;
-  setViewMode: (mode: 'canvas' | 'pseudocode' | 'settings' | 'agent' | 'replay') => void;
+  setViewMode: (mode: UIState['viewMode']) => void;
   startConnecting: (nodeId: string, portId: string) => void;
   stopConnecting: () => void;
   setHoveredNode: (id?: string) => void;
@@ -659,13 +659,23 @@ export const useStore = create<AppStore>()(
       if (nodes.length === 0) return;
       const minX = Math.min(...nodes.map((n) => n.x));
       const minY = Math.min(...nodes.map((n) => n.y));
-      const maxX = Math.max(...nodes.map((n) => n.x + 200));
-      const maxY = Math.max(...nodes.map((n) => n.y + 80));
-      const W = window.innerWidth - 120;
-      const H = window.innerHeight - 120;
+      const maxX = Math.max(...nodes.map((n) => {
+        const dims = getNodeDimensions(n.type);
+        return n.x + dims.w;
+      }));
+      const maxY = Math.max(...nodes.map((n) => {
+        const dims = getNodeDimensions(n.type);
+        return n.y + dims.h;
+      }));
+      const canvasEl = typeof document !== 'undefined'
+        ? document.querySelector<HTMLElement>('.wb-compose-canvas .flow-canvas-wrapper, .flow-canvas-wrapper')
+        : null;
+      const rect = canvasEl?.getBoundingClientRect();
+      const W = Math.max(320, rect?.width || window.innerWidth - 120);
+      const H = Math.max(260, rect?.height || window.innerHeight - 120);
       const scaleX = W / (maxX - minX + 100);
       const scaleY = H / (maxY - minY + 100);
-      const scale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.3), 1.5);
+      const scale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.15), 1.5);
       const x = (W - (maxX - minX) * scale) / 2 - minX * scale;
       const y = (H - (maxY - minY) * scale) / 2 - minY * scale;
       set((state) => { state.ui.canvas_transform = { x, y, scale }; });

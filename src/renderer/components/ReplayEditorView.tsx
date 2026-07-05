@@ -35,6 +35,8 @@ export function ReplayEditorView() {
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [traceFoldOpen, setTraceFoldOpen] = useState(false);
+  const [scriptFoldOpen, setScriptFoldOpen] = useState(false);
 
   const apiBase = useCallback(async (): Promise<string | null> => {
     if (base) return base;
@@ -149,51 +151,97 @@ export function ReplayEditorView() {
     }
   }, [apiBase, recording, refreshLists, importScript]);
 
-  if (!base) {
-    return <div style={centered}><span style={muted}>等待 WinPilot 服务就绪…（Agent 面板需先启动一次）</span></div>;
-  }
+  const traceCount = traces.length;
+  const scriptCount = scripts.length;
+
+  useEffect(() => {
+    if (traceCount > 0) setTraceFoldOpen(true);
+  }, [traceCount]);
+
+  useEffect(() => {
+    if (scriptCount > 0) setScriptFoldOpen(true);
+  }, [scriptCount]);
 
   return (
-    <div style={{ height: '100%', width: '100%', overflowY: 'auto', padding: 16, maxWidth: 720, margin: '0 auto' }}>
-      <button
-        className={recording ? 'agent-btn agent-btn-primary' : 'agent-btn'}
-        style={{ width: '100%', marginBottom: 14, padding: '8px 0' }}
-        onClick={toggleRecord}
-        title="录制你的真实操作（自动抓取元素文字选择器），生成可编辑的流程图脚本"
-      >
-        {recording ? '⏹ 停止录制（演示）→ 导入到流程图' : '🔴 录制演示 → 生成流程图'}
-      </button>
-      <p style={muted}>导入后会转换成原版流程图节点、加载到画布，可像普通流程图一样自由编辑、与指令库节点混用、按 F5 运行。</p>
-
-      <div style={head}>Agent 录制 (trace)</div>
-      {traces.length === 0 && <div style={muted}>（暂无 trace）</div>}
-      {traces.map((t) => (
-        <div key={t.run_id} style={row}>
-          <span style={ellipsis} title={t.task}>{t.task || t.run_id}
-            <span style={muted}> · {t.status} {t.steps}步</span></span>
-          <button className="agent-btn agent-btn-primary" onClick={() => importTrace(t.run_id)} disabled={busy}>导入到流程图</button>
+    <div className={`replay-orb${recording ? ' is-recording' : ''}${busy ? ' is-busy' : ''}`}>
+      <section className="replay-orb-prime">
+        <div className="replay-orb-status" aria-hidden="true">
+          <span />
+          <span />
+          <span />
         </div>
-      ))}
-
-      <div style={{ ...head, marginTop: 16 }}>已保存脚本 (.wps.json)</div>
-      {scripts.length === 0 && <div style={muted}>（暂无脚本）</div>}
-      {scripts.map((sc) => (
-        <div key={sc.file} style={row}>
-          <span style={ellipsis} title={sc.task || sc.file}>{sc.name || sc.file}
-            <span style={muted}> · {sc.steps}步</span></span>
-          <button className="agent-btn agent-btn-primary" onClick={() => importScript(sc.file)} disabled={busy}>导入到流程图</button>
-          <button className="agent-btn" onClick={() => replayOriginal(sc.file)} title="不编辑，直接用 WinPilot 离线重放原始脚本（0 token）">原样重放</button>
+        <div className="replay-orb-copy">
+          <span>{base ? 'Replay ready' : 'Waiting for WinPilot'}</span>
+          <strong>{recording ? '正在录制真实操作' : '演示与 trace 复用'}</strong>
+          <em>{base ? `${traceCount} trace · ${scriptCount} script` : 'connection pending'}</em>
         </div>
-      ))}
+        <button
+          className="replay-record-btn"
+          onClick={toggleRecord}
+          disabled={!base || busy}
+          title="录制你的真实操作（自动抓取元素文字选择器），生成可编辑的流程图脚本"
+        >
+          <span />
+          {recording ? '停止并导入' : '录制'}
+        </button>
+      </section>
 
-      <button className="agent-btn" style={{ marginTop: 14 }} onClick={refreshLists}>刷新</button>
-      {error && <div style={{ color: 'var(--err, #d33)', fontSize: 12, marginTop: 8 }}>{error}</div>}
+      <div className="replay-orb-strip">
+        <button type="button" onClick={refreshLists} disabled={!base || busy}>刷新</button>
+        <span>FlowScript import</span>
+      </div>
+
+      {!base ? (
+        <div className="replay-empty">
+          <strong>等待 WinPilot</strong>
+          <span>trace / scripts pending</span>
+        </div>
+      ) : (
+        <div className="replay-folds">
+          <details
+            className="replay-fold"
+            open={traceFoldOpen}
+            onToggle={event => setTraceFoldOpen(event.currentTarget.open)}
+          >
+            <summary>
+              <span>Trace</span>
+              <strong>{traceCount}</strong>
+            </summary>
+            {traces.length === 0 ? (
+              <div className="replay-empty compact">暂无 trace</div>
+            ) : traces.map((t) => (
+              <div key={t.run_id} className="replay-row">
+                <span className="replay-row-main" title={t.task}>{t.task || t.run_id}</span>
+                <span className="replay-row-meta">{t.status} · {t.steps}步</span>
+                <button onClick={() => importTrace(t.run_id)} disabled={busy}>导入</button>
+              </div>
+            ))}
+          </details>
+
+          <details
+            className="replay-fold"
+            open={scriptFoldOpen}
+            onToggle={event => setScriptFoldOpen(event.currentTarget.open)}
+          >
+            <summary>
+              <span>WPS scripts</span>
+              <strong>{scriptCount}</strong>
+            </summary>
+            {scripts.length === 0 ? (
+              <div className="replay-empty compact">暂无脚本</div>
+            ) : scripts.map((sc) => (
+              <div key={sc.file} className="replay-row">
+                <span className="replay-row-main" title={sc.task || sc.file}>{sc.name || sc.file}</span>
+                <span className="replay-row-meta">{sc.steps}步</span>
+                <button onClick={() => importScript(sc.file)} disabled={busy}>导入</button>
+                <button onClick={() => replayOriginal(sc.file)} disabled={busy} title="不编辑，直接用 WinPilot 离线重放原始脚本（0 token）">重放</button>
+              </div>
+            ))}
+          </details>
+        </div>
+      )}
+
+      {error && <div className="replay-error">{error}</div>}
     </div>
   );
 }
-
-const centered: React.CSSProperties = { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' };
-const muted: React.CSSProperties = { color: 'var(--text-muted, #888)', fontSize: 12, margin: '4px 0' };
-const head: React.CSSProperties = { fontSize: 13, fontWeight: 600, color: 'var(--accent, #6366f1)', margin: '6px 0 8px' };
-const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '5px 4px', fontSize: 12, borderBottom: '1px solid var(--border, #eee)' };
-const ellipsis: React.CSSProperties = { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };

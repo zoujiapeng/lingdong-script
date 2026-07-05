@@ -1,18 +1,13 @@
 import React, { useEffect, useCallback } from 'react';
-import { NodeLibrary } from './components/NodeLibrary/NodeLibrary';
-import { FlowCanvas } from './components/Canvas/FlowCanvas';
-import { PropertyPanel } from './components/PropertyPanel/PropertyPanel';
-import { TopBar } from './components/common/TopBar';
-
 import { TriggerBar } from './components/common/TriggerBar';
 import { TriggerConfigPanel } from './components/common/TriggerConfigPanel';
-import { LogPanel } from './components/common/LogPanel';
 import { ToolCallPanel } from './components/common/ToolCallPanel';
 import { ParamPromptDialog } from './components/common/ParamPromptDialog';
-import { PseudoPanel } from './components/PseudoPanel';
-import { AgentView } from './components/AgentView';
-import { ReplayEditorView } from './components/ReplayEditorView';
-import { SettingsPanel } from './components/SettingsPanel';
+import {
+  CommandDock,
+  NebulaBackdrop,
+  UnifiedWorkbenchView,
+} from './components/workbench/WorkbenchPanels';
 import { useStore } from './store';
 import { htnRegistry } from './utils/htnRegistry';
 import { ALL_HTN_DEFS } from './utils/htnTemplateDefs';
@@ -205,7 +200,6 @@ export default function App() {
         }
         return;
       }
-
       // Template shortcuts
       const shortcuts = loadTemplateShortcuts();
       const parts: string[] = [];
@@ -234,6 +228,28 @@ export default function App() {
         }
       }
 
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const lensShortcuts: Record<string, 'overview' | 'canvas' | 'replay' | 'settings'> = {
+          '1': 'overview',
+          '2': 'canvas',
+          '3': 'replay',
+          '4': 'settings',
+        };
+        const nextMode = lensShortcuts[e.key];
+        if (nextMode) {
+          e.preventDefault();
+          store.setViewMode(nextMode);
+          if (nextMode === 'overview') {
+            store.setUI({ panels_visible: false, show_node_library: false, show_property_panel: false });
+          }
+          if (nextMode === 'canvas') {
+            store.setUI({ panels_visible: true, show_node_library: false, show_property_panel: false });
+            requestAnimationFrame(() => useStore.getState().fitToScreen());
+          }
+          return;
+        }
+      }
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const { nodes, edges } = store.ui.selection;
         if (nodes.length > 0) store.deleteNodes(nodes.filter(id => {
@@ -242,7 +258,17 @@ export default function App() {
         }));
         if (edges.length > 0) store.deleteEdges(edges);
       }
-      if (e.key === 'Escape') store.clearSelection();
+      if (e.key === 'Escape') {
+        if (store.ui.show_tool_call_panel) {
+          store.setUI({ show_tool_call_panel: false });
+          return;
+        }
+        if (['canvas', 'pseudocode', 'replay', 'settings'].includes(store.ui.viewMode)) {
+          store.setViewMode('overview');
+          store.setUI({ panels_visible: false, show_node_library: false, show_property_panel: false });
+        }
+        store.clearSelection();
+      }
     },
     []
   );
@@ -253,106 +279,20 @@ export default function App() {
   }, [handleKeyDown]);
 
   return (
-    <div className={`app-root${viewMode === 'canvas' ? ' canvas-view' : ''}${panelsVisible ? ' panels-visible' : ''}`}>
-      <div className="top-wrapper">
-        <TopBar />
-        <div className="view-tabs">
-        <button
-          className={`view-tab ${viewMode === 'canvas' ? 'active' : ''}`}
-          onClick={() => setViewMode('canvas')}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <rect x="3" y="3" width="7" height="7" rx="1" />
-            <rect x="14" y="3" width="7" height="7" rx="1" />
-            <rect x="3" y="14" width="7" height="7" rx="1" />
-            <rect x="14" y="14" width="7" height="7" rx="1" />
-          </svg>
-          流程图
-        </button>
-        <button
-          className={`view-tab ${viewMode === 'pseudocode' ? 'active' : ''}`}
-          onClick={() => setViewMode('pseudocode')}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <polyline points="16 18 22 12 16 6" />
-            <polyline points="8 6 2 12 8 18" />
-          </svg>
-          伪代码
-        </button>
-        <button
-          className={`view-tab ${viewMode === 'agent' ? 'active' : ''}`}
-          onClick={() => setViewMode('agent')}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <path d="M12 2a4 4 0 014 4c0 2-2 4-4 6-2-2-4-4-4-6a4 4 0 014-4z" />
-            <path d="M12 14c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z" />
-          </svg>
-          Agent
-        </button>
-        <button
-          className={`view-tab ${viewMode === 'replay' ? 'active' : ''}`}
-          onClick={() => setViewMode('replay')}
-          title="导入 Agent 录制/脚本到流程图，或录制演示"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-          导入/录制
-        </button>
-        <div className="view-tabs-spacer" />
-        <button
-          className={`view-tab ${viewMode === 'settings' ? 'active' : ''} view-tab-settings`}
-          onClick={() => setViewMode(viewMode === 'settings' ? 'canvas' : 'settings')}
-          title="设置"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6 }}>
-            <circle cx="12" cy="12" r="3" />
-            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-          </svg>
-          设置
-        </button>
-      </div>
-      </div>
+    <div className={`app-root wb-root wb-root-unified${viewMode === 'canvas' ? ' canvas-view' : ''}${panelsVisible ? ' panels-visible' : ''}`}>
+      <NebulaBackdrop />
+      <div className="wb-main">
+        <CommandDock />
+        <TriggerBar />
+        <TriggerConfigPanel />
 
-      <TriggerBar />
-      <TriggerConfigPanel />
-
-      <div className={`app-body${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
-        {/* AgentView stays mounted across tab switches so the embedded WinPilot
-            iframe (chat history + live WebSocket) survives. Unmounting it would
-            reload the webui and lose the conversation, and re-show "正在启动". */}
-        <div
-          className="agent-view-host"
-          style={{
-            display: viewMode === 'agent' ? 'flex' : 'none',
-            flex: 1,
-            minWidth: 0,
-            width: '100%',
-            height: '100%',
-          }}
-        >
-          <AgentView />
+        <div className={`app-body wb-content wb-unified-content${viewMode === 'canvas' ? ' canvas-view-layout' : ''}`}>
+          <UnifiedWorkbenchView />
         </div>
-        {viewMode === 'settings' ? (
-          <SettingsPanel />
-        ) : viewMode === 'agent' ? null : viewMode === 'replay' ? (
-          <ReplayEditorView />
-        ) : viewMode === 'pseudocode' ? (
-          <div className="canvas-area">
-            <PseudoPanel />
-          </div>
-        ) : (
-          <>
-            <NodeLibrary />
-            <div className="canvas-area">
-              <FlowCanvas />
-            </div>
-            <PropertyPanel />
-          </>
-        )}
-      </div>
-      <div className="bottom-wrapper">
-        {showToolCallPanel && <ToolCallPanel />}
+
+        <div className="bottom-wrapper wb-bottom">
+          {showToolCallPanel && <ToolCallPanel />}
+        </div>
       </div>
       <ParamPromptDialog />
     </div>

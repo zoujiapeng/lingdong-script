@@ -1,17 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useStore } from '../store';
 
 /**
- * AgentView — embeds WinPilot's native web UI in an iframe. The iframe src
- * includes `?theme=dark|light` for initial paint; subsequent theme changes are
- * pushed via postMessage so the iframe reacts instantly without reloading.
+ * AgentView — embeds WinPilot's native web UI in an iframe. The redesigned
+ * workbench uses a dark cockpit, so the embedded Agent UI is kept dark too.
  *
  * This component is kept mounted across tab switches (see App.tsx) so the iframe
  * — and the chat history + WebSocket it holds — survives. It pre-warms the
  * server in the background even when not visible.
  */
 export function AgentView() {
-  const darkMode = useStore(s => s.ui.dark_mode);
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string>('');
@@ -51,10 +48,10 @@ export function AgentView() {
   // Push theme changes to the iframe in real-time (no reload needed).
   useEffect(() => {
     iframeRef.current?.contentWindow?.postMessage(
-      { type: 'wp-theme', value: darkMode ? 'dark' : 'light' },
+      { type: 'wp-theme', value: 'dark' },
       '*',
     );
-  }, [darkMode, url]);
+  }, [url]);
 
   const retry = () => { setUrl(null); setFailed(false); setErrorDetail(''); setReloadKey(k => k + 1); };
 
@@ -87,17 +84,16 @@ export function AgentView() {
     );
   }
 
-  const theme = darkMode ? 'dark' : 'light';
-  const src = `${url}?theme=${theme}`;
+  const src = `${url}?theme=dark`;
 
   return (
     <div className="agent-view-panel" style={{ padding: 0, height: '100%', width: '100%', maxWidth: 'none', margin: 0, overflow: 'hidden' }}>
       <iframe
         key={reloadKey}
         ref={iframeRef}
+        className="winpilot-frame"
         src={src}
         title="WinPilot"
-        style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
         allow="clipboard-read; clipboard-write"
       />
     </div>

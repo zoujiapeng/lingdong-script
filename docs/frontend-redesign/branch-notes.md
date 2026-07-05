@@ -1,0 +1,182 @@
+# Frontend Redesign Branch Notes
+
+Branch: `codex/frontend-redesign-assets`
+
+## Current Decisions
+
+- Keep the app as a single workbench instead of switching between full pages.
+- Agent is the primary stage and should not appear again as a right-side lens.
+- Evidence is available through the compact `EV` drawer inside the Agent stage. Do not duplicate it as a separate right-side lens or mission-bar action.
+- Library/templates are hover-only for now. The old full template page is not part of the main workbench surface.
+- Flow must keep the original orchestration editor capabilities:
+  - `NodeLibrary` remains available for search, click-to-add, and drag-to-add.
+  - `FlowCanvas` remains the real editable canvas for drag, zoom, selection, right-click menu, and edge connection.
+  - `PropertyPanel` remains available for selected-node parameter editing.
+- Compact flow previews are allowed only as secondary peeks. They must not replace the full Flow composer.
+
+## Cleanup Made In This Pass
+
+- Removed duplicate Agent and Evidence entries from the right-side lens rail.
+- Removed duplicated mission-bar actions for latest run/evidence/flow context.
+- Reduced Flow header actions to the text/graph switch. Fit/layout controls remain available through the composer or existing command surfaces.
+- Kept the right-side rail focused on: Flow, Replay, Library hover bubble, System.
+
+## Dynamic Layout Pass
+
+- The Agent stage now defaults to a quieter layout:
+  - The left task contract folds into a narrow `TASK` handle and expands on hover/focus.
+  - The right evidence/guardrail drawer remains folded as `EV` and expands on hover/focus.
+  - The central Agent screen keeps maximum space by default.
+- The right lens rail dynamically grows from icon-only to icon+label on hover/focus.
+- Context surfaces enter as floating clipped panels instead of replacing the page.
+- Flow composition keeps the original editor stack but changes size around intent:
+  - `NodeLibrary` expands from the left handle.
+  - `PropertyPanel` expands from the right handle or selected-node state.
+  - The canvas remains the real editable `FlowCanvas`.
+- The compact flow map is now an edge-floating peek:
+  - Hover/focus opens it temporarily.
+  - Clicking its graph icon pins/unpins it.
+  - Mini flow nodes flip in 3D on hover/focus to reveal status and key params.
+- The embedded WinPilot Agent UI is forced to dark theme inside the redesigned cockpit. This avoids the real Electron client showing a large light iframe inside an otherwise dark workbench.
+- The mission strip is compressed by default and reveals the duplicate mission title only on hover/focus. The top command title already carries the primary script name.
+- Lightweight keyboard lens navigation is available after existing template shortcuts get priority:
+  - `1` returns to the main Agent surface.
+  - `2` opens Flow.
+  - `3` opens Replay.
+  - `4` opens System.
+  - `Escape` closes the active floating surface before clearing selection.
+- Motion and light effects are gated:
+  - Heavy nebula/prism/scan animations stay quiet by default.
+  - Pointer movement, hover, or focus briefly wakes local highlights.
+  - The Agent iframe glass overlay is intentionally very light so it does not dim real WinPilot content.
+- Replay is a compact content-sized floating tool instead of a full-height page:
+  - The record action is the primary capsule.
+  - Trace and WPS script lists stay folded until they have content or the user opens them.
+  - Empty Replay state should not reserve a tall blank panel.
+- `fitToScreen()` now measures the actual visible `FlowCanvas` wrapper before falling back to the browser window. This keeps the redesigned Flow lens centered inside its floating canvas instead of fitting against the full Electron window.
+
+## Verified In This Pass
+
+- Production build and Electron TypeScript compile pass with `npm run build`.
+- Real Electron iframe target changed from `?theme=light` to `?theme=dark`.
+- Real DOM checks confirmed keyboard navigation opens/closes Flow, Replay, and System correctly.
+- Real DOM checks confirmed Flow still mounts the original `FlowCanvas`, `NodeLibrary`, and `PropertyPanel`.
+- Real DOM checks confirmed the compact flow map expands from 30x30 to a pinned large peek without horizontal page overflow.
+- Real Electron Replay check after the compact pass:
+  - Floating layer measured 640x312 with no page overflow.
+  - WinPilot iframe remained `?theme=dark`.
+- Real Electron Flow check after canvas-fit fix:
+  - Original Flow stack remained mounted.
+  - 32 nodes fit inside the visible canvas at scale `0.171337`.
+  - Selecting a node expanded the real `PropertyPanel` from the folded handle to 318px with no horizontal overflow.
+  - Folded `NodeLibrary` and `PropertyPanel` content now truly hides at opacity `0` with pointer events disabled. Hover/selection brings the original panels back to opacity `1`.
+  - Compact map pin measured 560x360 with 32 mini nodes; hovered mini node flipped in 3D and showed tooltip opacity `1`.
+- Real Electron Replay fold check:
+  - Empty folds stay closed by default.
+  - Opening an empty fold grew the floating layer only from 312px to 366px.
+  - Closing it returned to 312px without horizontal overflow.
+- Real Electron Library check:
+  - Hover shows a compact 250x161 template bubble.
+  - Clicking Library keeps the workbench on the main focus surface and does not open a template page.
+- Real Electron command dock check:
+  - Search hints now float instead of resizing the command dock.
+  - Command dock stayed 58px and Agent frame stayed 643px before and after search focus.
+- Real Electron hidden-control check:
+  - Collapsed search suggestions no longer keep tabbable buttons in the keyboard path.
+  - Collapsed task drawer no longer keeps textarea/copy/template buttons tabbable; focusing the `TASK` handle expands it and restores tab stops.
+  - The top utility cluster now folds into one 34px tool handle and expands to 202px on focus/intent.
+  - Tool buttons restore `tabIndex=0`, opacity `1`, and pointer events only while expanded; collapsed state returns them to `tabIndex=-1`, opacity `0`, and hidden visibility.
+  - Opening and closing the tool handle did not move the workbench or shrink the Agent iframe: frame stayed 1360x643 and workbench y stayed 58 with no overflow.
+  - Trigger bar behavior was changed to a floating strip so it cannot reserve height under the command dock and compress the Agent stage.
+- Real Electron Flow/Replay context-layer check after state hardening:
+  - Keyboard `2` opened Flow with context layer `data-open=true`, opacity `1`, pointer events enabled, and no overflow.
+  - Flow still mounted the real `FlowCanvas`, `NodeLibrary`, and `PropertyPanel`.
+  - Keyboard `3` opened Replay with a compact 640x312 floating layer and visible replay orb.
+  - Keyboard `1` returned to Agent with context layer `data-open=false`, opacity `0`, pointer events disabled, and no overflow.
+- Real Electron Flow intent check after explicit state pass:
+  - Opening Flow and returning with `1` or `Escape` now clears `panels_visible`; Agent frame returned to y=102 and h=643 instead of keeping a 28px legacy trigger gap.
+  - The old `.wb-root.panels-visible .trigger-bar` rule is overridden in the unified root so trigger chrome floats and cannot reserve layout height.
+  - Default Flow lens: library 42px, canvas 1030px, map handle 30px, hidden library/map content visibility hidden, no overflow.
+  - Library hover: explicit `library-open` state expanded the real `NodeLibrary` to 260px and kept no overflow.
+  - Moving from Library to map restored the library to 42px and hid `NodeLibrary` again.
+  - Map hover: explicit `map-open` state revealed the mini flow without expanding page overflow; leaving the map hid it again.
+  - Default workbench had `wb-motion-live=false` and no computed CSS animations running.
+- Real Electron hidden-rail and compact map update:
+  - Right rail stays 40px wide; Flow hover shows only its label and Library hover shows only the 250x161 template bubble.
+  - Leaving the rail returns all labels/bubbles to opacity `0` and hidden visibility.
+  - Flow structure peek now keeps a 34px trigger and floats a 430x284 mini-flow radar only on intent.
+  - For a 32-node script, mini-flow switches to grid layout so 26px node dots do not overlap.
+  - Node hover/focus is explicit React state (`preview`) and shows a mounted 210px parameter popup; the node dot itself stays 26px so the radar does not reflow.
+  - Mini-flow parameter popups now choose above/below and left/center/right alignment from node position; a bottom-row node stayed fully inside the context layer.
+  - Comprehensive Electron pass confirmed Agent iframe `?theme=dark`, no page overflow, Flow library hover, mini-flow popup, Escape return, and Replay 640x312 compact layer.
+  - Clicking a mini-flow node still calls the real selection path: the node gets `selected`, `PropertyPanel` opens to 318px, `NodeLibrary` remains hidden, and there is no page overflow.
+- Copy and motion cleanup:
+  - Library bubble copy no longer says `hover only`; it now reads as playbook state.
+  - Agent iframe status chip no longer exposes the implementation detail `iframe`; it now reads `Live`.
+  - Static root edge glow was reduced from opacity `0.36` to `0.08`.
+  - Pointer aura was tightened to smaller 42px/96px radii with lower opacity; global nebula/ribbon/particle layers remain disabled under the motion gate.
+- Top dock density cleanup:
+  - Script title editing is now a 34px file capsule by default.
+  - Hover/focus opens a 240px floating input below the dock; it does not resize the dock, does not shrink the Agent iframe, and keeps page overflow at `0`.
+  - The script title capsule is now keyboard-focusable (`tabIndex=0`); focusing it opens the floating input without page overflow.
+  - System status summary is now a 34px icon trigger; detailed status remains in the popover.
+- Agent drawer float cleanup:
+  - Task and evidence drawers now use `data-open` for explicit visible/hidden states.
+  - Drawer contents float over the Agent screen instead of changing the cockpit grid; the WinPilot iframe stayed 1360x643 during left/right drawer hover.
+  - Moving from one drawer to the other now forces the previous drawer back to opacity `0`, hidden visibility, and disabled pointer events.
+- Hidden-state audit:
+  - Default hidden states were checked for context layer, Library bubble, script title input, command tools, and both Agent drawers.
+  - Closed context layer now uses `visibility:hidden` in addition to opacity `0` and disabled pointer events; opening Replay restores `visibility:visible`.
+  - Search hints now use visibility rather than opacity as the primary hidden/open switch; hover shows the hint strip without resizing the dock or Agent iframe.
+  - Default animation audit found `0` DOM elements with active CSS animations in the resting Agent view.
+- Floating utility cleanup:
+  - The top tool handle now keeps a fixed 34px footprint; tools float vertically below it instead of widening the command dock.
+  - Real Electron check confirmed the Run button stayed at x=1446.7 with width 73.3 while the tool tray opened, and page overflow stayed empty.
+  - System status details now explicitly hide when the native `details` element is closed; closed state measured opacity `0`, hidden visibility, and disabled pointer events.
+  - Tool call results now open as a right-bottom floating glass log (`520x320`) instead of a bottom flex panel, so the Agent frame stayed `1360.4x643.6` before and after opening it.
+  - `Escape` closes the floating tool-call log without changing the current Agent surface.
+  - The frame scan layer no longer sits geometrically outside the Agent frame while hidden, which removes false overflow during DOM audits.
+- Renderer regression tests:
+  - After the hidden-control and floating-trigger pass, `npm run build` passed with renderer Vite build and Electron TypeScript compile.
+  - After the hidden-control and floating-trigger pass, full `npx vitest run` passed: 19 test files, 230 tests.
+  - After the Flow/Replay context-layer visibility fix, `npm run build` passed again.
+  - After the explicit Flow intent pass, `npm run build` passed again.
+  - After the explicit Flow intent pass, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the hidden-rail and compact map update, `npm run build` passed again.
+  - After the hidden-rail and compact map update, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the copy and motion cleanup, `npm run build` passed again.
+  - After the copy and motion cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the top dock density cleanup, `npm run build` passed again.
+  - After the top dock density cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the Agent drawer float cleanup, `npm run build` passed again.
+  - After the Agent drawer float cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the hidden-state audit cleanup, `npm run build` passed again.
+  - After the hidden-state audit cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the search hint visibility cleanup, `npm run build` passed again.
+  - After the search hint visibility cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the script title keyboard focus cleanup, `npm run build` passed again.
+  - After the script title keyboard focus cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the System status trigger compression, `npm run build` passed again.
+  - After the System status trigger compression, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the mini-flow popup boundary cleanup, `npm run build` passed again.
+  - After the mini-flow popup boundary cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - `npx vitest run src/renderer/test/store.test.ts src/renderer/test/wpsToFlowScript.test.ts src/renderer/test/electronAPI.test.ts` passed.
+  - Full `npx vitest run` passed: 19 test files, 230 tests.
+  - After the floating utility cleanup, `npm run build` passed again.
+  - After the floating utility cleanup, full `npx vitest run` passed again: 19 test files, 230 tests.
+  - After the floating utility cleanup, `git diff --check` passed with only existing CRLF normalization warnings.
+  - Store default `themeMode` remains `system`; the redesigned workbench uses its own dark cockpit treatment without changing that default.
+- Real Electron Agent default check after top compression:
+  - Mission strip measured 28px high.
+  - Agent iframe frame increased from 592px to 643px on the current desktop viewport after the Agent title row became a hover-only overlay.
+  - Inside the WinPilot iframe, task textarea measured y=530-590 and the execute/stop buttons measured y=598-632 within a 642px iframe viewport.
+  - External iframe scaling was tried and reverted because the measured transformed iframe height became less reliable than the unscaled embed.
+
+## Merge Watch Points
+
+- If another branch expects `viewMode='templates'`, the unified workbench currently redirects it back to `overview`; the hover library is the intended main-surface behavior.
+- If a future change moves evidence out of the Agent stage, add only one visible evidence entry back.
+- Do not remove the real Flow editor components from the Flow lens again unless the old editor is replaced feature-for-feature.
+- Theme mode can still come from older localStorage values while the redesigned workbench uses a mostly dark cockpit treatment. Default store behavior remains `system`; decide later whether to make the workbench fully theme-following or explicitly dark-only.
+- If the embedded WinPilot UI still needs to fit shorter windows, prefer a responsive pass inside the WinPilot frontend itself instead of scaling the outer iframe.
+- The Windows native Electron menu bar is still visible in the real client. Hiding it requires a small `src/main` shell decision, so this renderer-focused pass leaves it untouched.
