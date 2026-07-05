@@ -36,6 +36,9 @@ describe('Automation IR adapters', () => {
       format: 'wps/2',
       name: 'demo',
       task: 'demo task',
+      created: 123,
+      conditions: { target_window: { title: 'Demo App' }, login_state: 'ready' },
+      evidence: ['final text visible'],
       vars: { a: '1' },
       steps: [{ tool: 'click', coords: [10, 20] }],
     }, 'air-roundtrip');
@@ -44,7 +47,11 @@ describe('Automation IR adapters', () => {
 
     expect(wps.format).toBe('wps/2');
     expect(wps.source).toBe('automation-ir');
-    expect(wps.source_run).toBe('');
+    expect(wps.source_ir).toBe('air-roundtrip');
+    expect(wps.created).toBe(123);
+    expect(wps.target_window).toEqual({ title: 'Demo App' });
+    expect(wps.conditions).toEqual({ target_window: { title: 'Demo App' }, login_state: 'ready' });
+    expect(wps.evidence).toEqual(['final text visible']);
     expect(wps.vars).toEqual({ a: '1' });
     expect(wps.steps).toEqual([{ tool: 'click', coords: [10, 20] }]);
   });
