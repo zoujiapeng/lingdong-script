@@ -259,6 +259,66 @@ def test_recovery_focus_enumerates_windows_focuses_and_observes():
     ]
 
 
+def test_recovery_focus_prefers_session_dispatch_over_private_handlers():
+    from types import SimpleNamespace
+
+    from winpilot.agent.failure_recovery import FailureRecoveryLayer
+
+    calls = []
+
+    class _Session:
+        def _action_target_context(self):
+            return {
+                "target_hwnd": 7,
+                "foreground_hwnd": 99,
+                "foreground_matches_target": False,
+            }
+
+        def dispatch(self, name, args):
+            calls.append((name, dict(args)))
+            if name == "list_windows":
+                return SimpleNamespace(text='hwnd=7 "Target" class=AppWindow')
+            if name == "focus_window":
+                return SimpleNamespace(text='{"ok": true}')
+            if name == "observe":
+                return SimpleNamespace(text="Target window content")
+            raise AssertionError(name)
+
+        def _t_list_windows(self, _args):
+            raise AssertionError("recovery should use dispatch for list_windows")
+
+        def _t_focus_window(self, _args):
+            raise AssertionError("recovery should use dispatch for focus_window")
+
+        def _t_observe(self, _args):
+            raise AssertionError("recovery should use dispatch for observe")
+
+    layer = FailureRecoveryLayer()
+    recovery = layer.handle_tool_result(
+        tool_name="click",
+        args={"x": 10, "y": 20},
+        result_text=json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "scope_guard": {"before": {}, "after": {}},
+        }),
+        session=_Session(),
+    )
+
+    assert recovery is not None
+    assert calls == [
+        ("list_windows", {}),
+        ("focus_window", {"hwnd": 7}),
+        ("observe", {"hwnd": 7, "include_icons": False, "max_elements": 80}),
+    ]
+    assert [item.get("via") for item in recovery.local_actions[1:]] == [
+        "dispatch",
+        "dispatch",
+        "dispatch",
+    ]
+
+
 def test_recovery_layer_does_not_attach_failure_to_verified_root_result():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer
 
