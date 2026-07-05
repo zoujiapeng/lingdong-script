@@ -293,6 +293,7 @@ export function createFlowExecutor(
         }
 
         case 'popup_close': {
+          rejectBrowserSimulation('popup_close');
           log('info', `关闭弹窗 (策略: ${params.strategies?.[0] || 'auto'})`, nodeId);
           await delay(500);
           await delay((params.delay_after || 0.3) * 1000);
@@ -597,6 +598,7 @@ export function createFlowExecutor(
             }
             log('info', `子脚本执行完毕: ${subName}`, nodeId);
           } else {
+            rejectBrowserSimulation('sub_script');
             log('warn', `子脚本未找到: ${subName} (${subId || '无ID'})`, nodeId);
             await delay(200);
           }
@@ -626,11 +628,13 @@ export function createFlowExecutor(
           result = 'output';
           break;
         case 'camera_capture':
+          rejectBrowserSimulation('camera_capture');
           log('info', `摄像头抓拍 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
           await delay(500);
           result = 'output';
           break;
         case 'camera_record':
+          rejectBrowserSimulation('camera_record');
           log('info', `摄像头录像 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
           await delay(300);
           result = 'output';
