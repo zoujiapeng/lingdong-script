@@ -184,6 +184,66 @@ def test_export_script_skips_non_executable_replay_records(tmp_path, monkeypatch
     assert trace_mod.validate_script(data) is None
 
 
+def test_export_script_adds_stable_target_window_from_launch_expect(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
+    _write_trace(tmp_path / "r4.jsonl", [
+        {"type": "agent_start", "task": "targeted"},
+        {
+            "type": "agent_tool",
+            "tool": "launch",
+            "args": {"expect": {"window_title": "Target App"}},
+            "replay": {"tool": "launch", "command": "target.exe"},
+        },
+        {
+            "type": "agent_tool",
+            "tool": "click",
+            "replay": {"tool": "click", "coords": [7, 8]},
+        },
+    ])
+
+    path = trace_mod.export_script("r4")
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    assert data["target_window"] == {"title": "Target App"}
+    assert trace_mod.validate_script(data) is None
+
+
+def test_export_script_uses_perception_target_window_without_persisting_hwnd(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
+    _write_trace(tmp_path / "r5.jsonl", [
+        {"type": "agent_start", "task": "targeted"},
+        {
+            "type": "agent_tool",
+            "tool": "execute_subgoal",
+            "args": {"target_window": {"hwnd": 123456}},
+            "result_meta": {
+                "evidence_packet": {
+                    "perception_reducer": {
+                        "target_window": {
+                            "title": "WinPilot Target - Chrome",
+                            "process": "chrome.exe",
+                            "hwnd": 123456,
+                        }
+                    }
+                }
+            },
+            "replay": {"tool": "click", "coords": [7, 8], "text": "OK"},
+        },
+    ])
+
+    path = trace_mod.export_script("r5")
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    assert data["target_window"] == {
+        "title": "WinPilot Target - Chrome",
+        "process": "chrome.exe",
+    }
+    assert "hwnd" not in data["target_window"]
+    assert trace_mod.validate_script(data) is None
+
+
 # ------------------------------------------------------------- HTTP endpoints
 @pytest.fixture
 def client(tmp_path, monkeypatch):

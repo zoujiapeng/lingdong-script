@@ -39,7 +39,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；只有 Replayer 已知的可执行工具会进入脚本，`auto_visual_verify`、`observe`、`execute_subgoal` 等观测/复合/校验事件不会变成重放动作。
 - 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。`ctrl.if` 必须带 `cond` 对象，确实无条件时显式写 `{"always": true}`；`ctrl.loop` 的 `count` / `max_iters` 必须是数字，`while` / `until` 必须带 `cond` 对象，避免空条件循环跑到上限才停。
 - Replayer 当前支持 `click`、`type_text`、`hotkey`、`launch`、`focus_window`、`scroll`、`drag`、`draw_strokes`、`wait`、`run_shell`、`run_detached`、`tray_click`，以及 `ctrl.if` / `ctrl.loop` 和 `ext.*` 便利步骤。
-- 脚本如果声明 `target_window`，或在 `conditions` 里声明 `target_window` / `window_title` / `window_appears`，Replayer 会在执行任何动作前做窗口 preflight：找到目标后绑定 `hwnd`，找不到则 fail-fast，并把 `preflight.target_window` 错误写入 replay results。
+- 脚本如果声明 `target_window`，或在 `conditions` 里声明 `target_window` / `window_title` / `window_appears`，Replayer 会在执行任何动作前做窗口 preflight：找到目标后绑定 `hwnd`，找不到则 fail-fast，并把 `preflight.target_window` 错误写入 replay results。新导出的 agent trace 会尽量从 `launch.expect`、`target_window` 参数或 perception reducer 中写入稳定的 `title/process`，但不会持久化上次运行的易变 `hwnd`。
 - 文本 selector 只会通过已聚焦/已锚定窗口 `fusion.observe()` 重新定位；Replayer 不会猜 `list_windows()[0]` 作为锚点。没有目标窗口时，文本重定位会失败，只有坐标型步骤能继续按录制坐标兜底。
 - `elapsed_ms` 等 trace 计时字段不是重放语义，导出时会剥离；selector 文本会去掉未读数、消息数等易变噪声。
 
