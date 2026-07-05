@@ -145,6 +145,13 @@ queued
 - `action/executor.py` 的 public `click/scroll/drag/draw_strokes/type_text/clipboard_paste` 外层仍进队列，但内部已使用 raw `move/focus/press` helper，避免一次真实动作产生多层 public queue wrapper；完整 Raw Device Executor 仍未完成。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
 
+成熟度判断：
+
+- Raw Device Executor 是“已有 raw helper + 部分内层去重”，不是完整分层。Fast controller 的某些 routine 仍通过 `ToolSession.dispatch()` 走外层工具生命周期。
+- Desktop Action Queue 是全局 single-writer 队列。它保护真实鼠标、键盘、窗口、剪贴板写入不会互相打架；`target_hwnd` 暂时不是多 hwnd 并发锁。
+- Perception daemon 目前等价于 Level 0 screen delta watcher + 按需 OCR/UIA/CV/VLM。它还没有跨任务维护语义元素缓存、登录态、页面阶段和 VLM 兜底策略。
+- 低延迟收益在计算器、记事本、网页靶场、简单绘图/拖拽上已经能看到；对 QQ/微信/Steam/抖音/网易云这类真实复杂软件还缺系统化 E2E 证据。
+
 仍未完成：
 
 - 常驻轻量视觉模型/YOLO 主循环。
@@ -173,6 +180,8 @@ Agent live run
 - WPS-only 节点带 `_requires_wps_replay`，前端 executor 必须 fail-fast。
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
 - `reuse_skill` 会强匹配历史成功脚本并 0-token replay；replay 成功后仍必须 observe/read_text/expect 证明最终状态再 done。
+
+不要把 Automation IR 写成已经统一了一切。当前真实状态是：IR 用来减少新入口继续发明并行 metadata，`.wps.json` 仍是 WinPilot Replayer 的直接输入，FlowScript 仍是前端画布格式，legacy DSL 仍由 `python/engine/` 处理。
 
 ## Memory
 

@@ -54,3 +54,11 @@ Trace / Human recording / Flow editor
 - FlowScript executor 和 WinPilot Replayer 仍是两套执行路径。
 - Replay API 已有 `replay_id`、状态查询和取消入口；底层真实鼠标/键盘/窗口/剪贴板写入动作已经进入 single-writer Desktop Action Queue，队列也提供后台 async job worker。Replay/recovery/Flow real executor 还没有全部迁到这个 async job worker，Raw Device Executor 也还未完成。
 - Skill 复用率、失败归因和 replay 后证据采集还需要继续工程化。
+
+## 真实落地顺序
+
+1. 先保持 `.wps.json` 作为 WinPilot Replayer 的稳定输入，不要为了“统一 IR”破坏已有 replay。
+2. 新增入口优先生成 `automation-ir/1`，再由 adapter 输出 `.wps.json` 或 FlowScript；旧格式继续兼容。
+3. FlowScript 从 WPS/IR 导入的节点必须区分 real desktop mode 和 browser simulation mode；真实桌面节点不能模拟成功。
+4. Apprentice/skill 生命周期必须包含 preflight、evidence、失败恢复和截图引用；不能只保存“任务文本相似”的历史步骤。
+5. 当 IR 的 adapter、preflight、result schema 和 Flow real bridge 都稳定后，再把 IR 升级为唯一中间层。

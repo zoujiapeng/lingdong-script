@@ -18,6 +18,19 @@ Windows 桌面自动化项目。当前代码由两条主线组成：
 - 低延迟 GUI 目前已落地 controller-first routine、批量动作、变化区域观察、perception reducer、scope guard、UIA-off input locator、绘图 `draw/draws`、视觉颜色证据、工具 schema profile 和 trace 指标。它仍不是完整视觉伺服，也不是“LLM 只处理异常”的最终形态。
 - `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
+## 成熟度快照
+
+这份快照按当前代码核对，不按目标路线图美化：
+
+| 方向 | 当前状态 |
+| --- | --- |
+| Raw Device Executor | `action/executor.py` 已有 raw mouse/key/focus helper，public action 进 `DesktopActionQueue`；但 Fast GUI controller 内层仍有路径回到 `ToolSession.dispatch()`，完整独立 raw executor 尚未完成。 |
+| Action Queue | `action/desktop_queue.py` 是全局 single-writer 队列，支持同步 `run()` 和后台 job；`target_hwnd` 目前是元数据，不是按 hwnd 并发锁。全局串行更安全，但还不是细粒度 runtime。 |
+| Perception daemon | `fast/watcher.py` 提供低成本 screen delta watcher 和 bulletin board；OCR/UIA/CV/VLM 语义理解仍按 observe/controller 触发，不是跨任务常驻语义感知 daemon。 |
+| Automation IR | `automation-ir/1` 是 WPS/Flow/skill 的最小共享 envelope；`.wps.json`、FlowScript、legacy DSL 仍并存，IR 还不是唯一中间层。 |
+| 前端 | Electron/React 工作台可用，Agent 页嵌入 WinPilot Web UI，FlowCanvas/Replay/设置齐全；但整体仍偏开发者工作台，概念密度高，不是消费级“一句话 Agent”界面。 |
+| 真实能力 | 计算器、记事本、网页靶场、简单绘图/拖拽已有回归；QQ/微信/Steam/抖音/网易云等真实复杂软件还缺系统化非破坏性 E2E，不能用靶场成绩替代。 |
+
 ## 快速启动
 
 ```bash
