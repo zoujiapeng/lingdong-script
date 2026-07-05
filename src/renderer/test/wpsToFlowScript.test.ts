@@ -159,6 +159,7 @@ describe('wpsToFlowScript -> native FlowScript', () => {
     expect(s.meta.tags).toContain('wps/2');
     expect(s.variables).toEqual({ u: 'a' });
     expect(s.settings.error_handling).toBe('stop');
+    expect(s.settings.require_real_features).toBe(true);
     expect(P(nodeOf(s, 'variable_set')).name).toBe('u');
   });
 });

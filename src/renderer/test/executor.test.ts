@@ -426,6 +426,42 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(script.variables.branch).toBe('yes');
   });
 
+  it('keeps browser-preview simulations available by default', async () => {
+    const script = flowWith({
+      id: 'color',
+      type: 'color_check',
+      x: 0,
+      y: 0,
+      params: { expected_color: '#ffffff' },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('completed');
+  });
+
+  it('fails simulated-only nodes when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'color',
+      type: 'color_check',
+      x: 0,
+      y: 0,
+      params: { expected_color: '#ffffff' },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'color',
+      'error',
+      'color_check requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
   it('treats default feature-map failure as node failure', async () => {
     const script = flowWith({
       id: 'launch',

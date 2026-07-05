@@ -72,4 +72,4 @@
 
 WinPilot 成功 trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 转成 FlowScript。Agent 不需要直接理解 FlowScript 内部结构。
 
-这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。能桥接的基础 GUI 节点和窗口等待会通过 `@feature` 尝试真实执行，不能桥接或桥接失败时应让流程失败，而不是继续报告完成。
+这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。WPS 导入的 FlowScript 会设置 `settings.require_real_features=true`；能桥接的基础 GUI 节点和窗口等待会通过 `@feature` 尝试真实执行，不能桥接或桥接失败时应让流程失败，而不是继续报告完成。
