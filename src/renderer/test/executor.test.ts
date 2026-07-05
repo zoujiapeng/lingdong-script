@@ -504,7 +504,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
-  it('fails popup simulation when require_real_features is enabled', async () => {
+  it('requires a real bridge for popup close when require_real_features is enabled', async () => {
     const script = flowWith({
       id: 'popup',
       type: 'popup_close',
@@ -521,7 +521,29 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'popup',
       'error',
-      'popup_close requires real feature execution; browser simulation is disabled',
+      'handle_dialog requires electronAPI.callFeature',
+    ]);
+  });
+
+  it('executes popup close through feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'popup',
+      type: 'popup_close',
+      x: 0,
+      y: 0,
+      params: { strategies: ['auto'], timeout: 7 },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true, result: 'handled' };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['handle_dialog', { timeout: 7 }],
     ]);
   });
 
@@ -546,7 +568,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
-  it('fails camera simulation when require_real_features is enabled', async () => {
+  it('requires a real bridge for camera capture when require_real_features is enabled', async () => {
     const script = flowWith({
       id: 'camera',
       type: 'camera_capture',
@@ -563,7 +585,79 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'camera',
       'error',
-      'camera_capture requires real feature execution; browser simulation is disabled',
+      'camera_capture requires electronAPI.callFeature',
+    ]);
+  });
+
+  it('executes camera capture through feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'camera',
+      type: 'camera_capture',
+      x: 0,
+      y: 0,
+      params: {
+        camera_id: 1,
+        output_path: 'C:\\Users\\zou\\Desktop\\snap.jpg',
+        width: 640,
+        height: 480,
+        format: 'jpg',
+        wait_stable: 0.1,
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true, result: { file: params.output_path } };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['camera_capture', {
+        camera_id: 1,
+        output_path: 'C:\\Users\\zou\\Desktop\\snap.jpg',
+        width: 640,
+        height: 480,
+        format: 'jpg',
+        wait_stable: 0.1,
+      }],
+    ]);
+  });
+
+  it('executes camera recording through feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'camera',
+      type: 'camera_record',
+      x: 0,
+      y: 0,
+      params: {
+        camera_id: 2,
+        output_path: 'C:\\Users\\zou\\Desktop\\clip.avi',
+        fps: 24,
+        duration: 3,
+        width: 1280,
+        height: 720,
+      },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true, result: { file: params.output_path } };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['camera_record_start', {
+        camera_id: 2,
+        output_path: 'C:\\Users\\zou\\Desktop\\clip.avi',
+        fps: 24,
+        duration: 3,
+        width: 1280,
+        height: 720,
+      }],
     ]);
   });
 
