@@ -203,6 +203,7 @@ WinPilot Agent 内部计划任务：
 - 数据：`python/winpilot_home/agent_schedules.json`。
 - 服务端线程：`server.py` 的 scheduler loop。
 - 到期后仍走 `router.build_runner() -> AgentRunner`。
+- `run_at` 必须是 ISO-8601 时间；自然语言时间要先由模型/上层解析成明确时间，底层不会把无效时间静默当成“立刻执行”。
 
 这套不是 Windows Task Scheduler，也不同于 legacy Electron 模板调度器。
 
