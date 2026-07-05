@@ -60,12 +60,19 @@ def _percentile(values: list[int], pct: float) -> int:
     return int(ordered[idx])
 
 
+def _median_ms(values: list[int]) -> int | float:
+    if not values:
+        return 0
+    return round(statistics.median(values), 1)
+
+
 def _latency_summary(values: list[int]) -> dict[str, Any]:
     values = [int(v) for v in values if int(v) >= 0]
     return {
         "count": len(values),
         "avg_ms": round(statistics.mean(values), 1) if values else 0,
         "max_ms": max(values) if values else 0,
+        "p50_ms": _median_ms(values),
         "p95_ms": _percentile(values, 0.95),
     }
 
@@ -409,6 +416,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "count": len(values),
             "avg_ms": round(statistics.mean(values), 1) if values else 0,
             "max_ms": max(values) if values else 0,
+            "p50_ms": _median_ms(values),
             "p95_ms": _percentile(values, 0.95),
         }
         for tool, values in sorted(by_tool.items())
@@ -447,6 +455,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             "total_elements": dim_counts.get(name, 0),
             "avg_ms": round(statistics.mean(values), 1) if values else 0,
             "max_ms": max(values) if values else 0,
+            "p50_ms": _median_ms(values),
         }
         for name, values in sorted(dim_latency.items())
     }
@@ -464,6 +473,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "tool_latency_overall": {
             "avg_ms": round(statistics.mean(elapsed_ms), 1) if elapsed_ms else 0,
             "max_ms": max(elapsed_ms) if elapsed_ms else 0,
+            "p50_ms": _median_ms(elapsed_ms),
             "p95_ms": _percentile(elapsed_ms, 0.95),
         },
         "slow_tools": slow_tools,
