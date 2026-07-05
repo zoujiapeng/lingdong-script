@@ -195,9 +195,13 @@ def _restore_cursor(pos: tuple[int, int]) -> None:
 
 
 # ---------------------------------------------------------------- mouse API
+def _raw_move_mouse(x: int, y: int) -> None:
+    user32.SetCursorPos(int(x), int(y))
+
+
 @queued_desktop_action("move_mouse")
 def move_mouse(x: int, y: int) -> None:
-    user32.SetCursorPos(int(x), int(y))
+    _raw_move_mouse(x, y)
 
 
 @queued_desktop_action("click")
@@ -231,8 +235,8 @@ def click(x: int, y: int, button: str = "left", double: bool = False, hwnd: int 
 
 def _raw_click(x: int, y: int, button: str, double: bool, hwnd: int | None) -> None:
     if hwnd:
-        focus_window(hwnd)
-    move_mouse(x, y)
+        _raw_focus_window(hwnd)
+    _raw_move_mouse(x, y)
     time.sleep(0.05)
     if button == "left":
         down, up = win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP
@@ -320,7 +324,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
     if _dry_run():
         return {"ok": True, "dry_run": True}
     if hwnd:
-        focus_window(hwnd)
+        _raw_focus_window(hwnd)
         time.sleep(0.05)
     # drag inherently needs a moving cursor; in no-steal mode we still snap the
     # user's cursor back afterwards (a true background drag isn't reliable).
@@ -357,7 +361,7 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     if _dry_run():
         return {"ok": True, "dry_run": True}
     if hwnd:
-        focus_window(hwnd)
+        _raw_focus_window(hwnd)
         time.sleep(0.05)
     saved = _cursor_pos() if _no_mouse_steal() else None
     drawn = 0
@@ -399,7 +403,7 @@ def scroll(x: int, y: int, amount: int) -> dict:
             logger.debug("post scroll 失败: %s", exc)
         saved = _cursor_pos()
         try:
-            move_mouse(x, y)
+            _raw_move_mouse(x, y)
             time.sleep(0.04)
             _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
         finally:
@@ -407,7 +411,7 @@ def scroll(x: int, y: int, amount: int) -> dict:
         BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
                     via="sendinput_restored")
         return {"ok": True, "via": "sendinput_restored"}
-    move_mouse(x, y)
+    _raw_move_mouse(x, y)
     time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
     BUS.publish("action", action="scroll", x=x, y=y, amount=amount)
@@ -428,7 +432,7 @@ def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> 
     def _refocus_if_needed(i: int) -> None:
         if hwnd and i > 0 and i % 8 == 0:
             if win32gui.GetForegroundWindow() != hwnd:
-                focus_window(hwnd)
+                _raw_focus_window(hwnd)
                 time.sleep(0.08)
 
     if _should_type_via_vk(text):
@@ -482,8 +486,7 @@ def press_keys(keys: list[str]) -> dict:
 
 
 # --------------------------------------------------------------- window API
-@queued_desktop_action("focus_window")
-def focus_window(hwnd: int) -> dict:
+def _raw_focus_window(hwnd: int) -> dict:
     """Robust foreground switch (works around SetForegroundWindow locks)."""
     try:
         if win32gui.IsIconic(hwnd):
@@ -506,6 +509,11 @@ def focus_window(hwnd: int) -> dict:
     except Exception as exc:
         logger.warning("focus_window 失败 hwnd=%s: %s", hwnd, exc)
         return {"ok": False, "error": str(exc)}
+
+
+@queued_desktop_action("focus_window")
+def focus_window(hwnd: int) -> dict:
+    return _raw_focus_window(hwnd)
 
 
 _URL_RE = re.compile(r"(?:https?://|file://|microsoft-edge:)[^\s\"']+", re.IGNORECASE)

@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from winpilot.action import executor
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.utils.log import BUS
 
@@ -75,6 +76,32 @@ def test_desktop_action_queue_emits_bus_events_and_errors():
     assert queue_events[3]["elapsed_ms"] >= 0
     assert queue_events[3]["reentrant"] is False
     assert queue.status()["failed"] == 1
+
+
+def test_public_click_uses_one_outer_queue_event(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: False)
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda x, y, button, double, hwnd: calls.append((x, y, button, double, hwnd)),
+    )
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.click(10, 20, button="left", hwnd=123)
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out["ok"] is True
+    assert calls == [(10, 20, "left", False, 123)]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "click"),
+        ("done", "click"),
+    ]
 
 
 def test_desktop_action_queue_async_worker_serializes_jobs():
