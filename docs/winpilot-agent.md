@@ -98,6 +98,12 @@ Profile：
 - `draws`
 - `verify_texts`
 
+For printable key sequences such as `12*34=`, prefer `input.text` or `type_text`.
+If a model still sends short printable labels in `clicks`, the controller may
+rewrite that routine into keyboard typing and mark the action with
+`keyboard_sequence_from_clicks`; this is a generic anti-coordinate-drift path,
+not an app-specific calculator rule.
+
 只有自然语言 `subgoal` 会快速 blocked，不初始化 controller/perception。
 
 典型用途：
