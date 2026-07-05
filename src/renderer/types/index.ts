@@ -545,6 +545,7 @@ export interface ScriptSettings {
   max_retries: number;
   retry_delay: number;
   log_level: 'debug' | 'info' | 'warn' | 'error';
+  require_real_features?: boolean;
 }
 
 // --- Execution Engine Types ---

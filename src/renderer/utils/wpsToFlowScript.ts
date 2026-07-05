@@ -374,6 +374,7 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
       max_retries: 2,
       retry_delay: 1,
       log_level: 'info',
+      require_real_features: true,
     },
   };
 }

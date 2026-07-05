@@ -141,7 +141,9 @@ export function createFlowExecutor(
   ): Promise<any | undefined> {
     const win = window as any;
     if (!win.electronAPI?.callFeature) {
-      if (requireBridge) throw new Error(`${featureName} requires electronAPI.callFeature`);
+      if (requireBridge || script.settings?.require_real_features === true) {
+        throw new Error(`${featureName} requires electronAPI.callFeature`);
+      }
       log('warn', simulateMessage || `模拟工具调用: ${featureName}`, nodeId);
       await delay(300);
       return undefined;
@@ -174,6 +176,12 @@ export function createFlowExecutor(
       await delay(300);
     }
     throw new Error(`${featureName} timed out after ${timeoutSeconds}s${lastFailure ? `: ${lastFailure}` : ''}`);
+  }
+
+  function rejectBrowserSimulation(nodeType: string): void {
+    if (script.settings?.require_real_features === true) {
+      throw new Error(`${nodeType} requires real feature execution; browser simulation is disabled`);
+    }
   }
 
   function buildPowerParams(featureName: string, nodeParams: Record<string, any>): Record<string, any> {
@@ -247,6 +255,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('click');
           await delay(200);
           await delay((params.delay_after || 0.5) * 1000);
           result = 'output';
@@ -276,6 +285,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('click_text');
           await delay(300);
           await delay((params.delay_after || 0.5) * 1000);
           result = 'output';
@@ -291,6 +301,7 @@ export function createFlowExecutor(
         }
 
         case 'color_check': {
+          rejectBrowserSimulation('color_check');
           log('info', `检测颜色: ${params.expected_color || '未设置'}`, nodeId);
           await delay(200);
           // Simulate: always matches for demo
@@ -299,6 +310,7 @@ export function createFlowExecutor(
         }
 
         case 'progress_wait': {
+          rejectBrowserSimulation('progress_wait');
           log('info', `等待进度条 (${params.wait_type || 'fill'})`, nodeId);
           await delay(500);
           result = 'output';
@@ -306,6 +318,7 @@ export function createFlowExecutor(
         }
 
         case 'region_wait': {
+          rejectBrowserSimulation('region_wait');
           log('info', `等待区域${params.region_type === 'stable' ? '稳定' : '变化'}`, nodeId);
           await delay(500);
           result = 'output';
@@ -313,6 +326,7 @@ export function createFlowExecutor(
         }
 
         case 'scene_condition': {
+          rejectBrowserSimulation('scene_condition');
           const sceneName = params.scene_name || '未知';
           log('info', `场景识别: "${sceneName}"（模拟: 不匹配）`, nodeId);
           await delay(300);
@@ -321,6 +335,7 @@ export function createFlowExecutor(
         }
 
         case 'image_click': {
+          rejectBrowserSimulation('image_click');
           const target = (params.targets || [])[0];
           const fname = target ? target.path.split(/[\\/]/).pop() : '未知';
           log('info', `检测图片: ${fname}`, nodeId);
@@ -399,6 +414,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('input_text');
           await delay(400);
           await delay((params.delay_after || 0.3) * 1000);
           result = 'output';
@@ -415,6 +431,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('keyboard');
           await delay(200);
           await delay((params.delay_after || 0.2) * 1000);
           result = 'output';
@@ -436,6 +453,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('swipe');
           await delay(500);
           await delay((params.delay_after || 0.3) * 1000);
           result = 'output';
@@ -447,10 +465,12 @@ export function createFlowExecutor(
           if (cond === 'always_true') {
             result = 'yes';
           } else if (cond === 'image_exists') {
+            rejectBrowserSimulation('condition.image_exists');
             log('info', `检查图片是否存在（模拟: 否）`, nodeId);
             await delay(300);
             result = 'no';
           } else if (cond === 'window_exists') {
+            rejectBrowserSimulation('condition.window_exists');
             log('info', `检查窗口是否存在（模拟: 否）`, nodeId);
             await delay(300);
             result = 'no';
@@ -599,6 +619,7 @@ export function createFlowExecutor(
             result = 'output';
             break;
           }
+          rejectBrowserSimulation('screenshot');
           await delay(200);
           result = 'output';
           break;
@@ -788,6 +809,7 @@ export function createFlowExecutor(
         }
 
         case 'click_action': {
+          rejectBrowserSimulation('click_action');
           const mode = params.mode || 'coordinate';
           if (mode === 'image') {
             const target = (params.targets || [])[0];
@@ -808,6 +830,7 @@ export function createFlowExecutor(
         }
 
         case 'mouse_operation': {
+          if (!isWpsReplayNode(params)) rejectBrowserSimulation('mouse_operation');
           const sub = params.sub_operation || 'click';
           if (sub === 'scroll') {
             log('info', `滚轮: ${params.scroll_direction || 'down'} ${params.scroll_amount || 3}格`, nodeId);
