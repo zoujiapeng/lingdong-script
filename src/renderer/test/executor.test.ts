@@ -254,6 +254,48 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('requires a real bridge for WPS-imported window waits', async () => {
+    const script = flowWith({
+      id: 'wait',
+      type: 'wait',
+      x: 0,
+      y: 0,
+      params: { wait_type: 'window', window_title: 'Save As', timeout: 1, _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'wait',
+      'error',
+      'focus_window requires electronAPI.callFeature',
+    ]);
+  });
+
+  it('executes WPS-imported window waits through focus_window feature bridge', async () => {
+    const calls: Array<[string, any]> = [];
+    const script = flowWith({
+      id: 'wait',
+      type: 'wait',
+      x: 0,
+      y: 0,
+      params: { wait_type: 'window', window_title: 'Save As', timeout: 1, _source_wps_replay: true },
+      status: 'idle',
+    });
+
+    const result = await runFlow(script, (name, params) => {
+      calls.push([name, params]);
+      return { success: true };
+    });
+
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([
+      ['focus_window', { title: 'Save As', exact: false }],
+    ]);
+  });
+
   it('uses clipboard typing for WPS-imported non-ASCII text without unsupported params', async () => {
     const calls: Array<[string, any]> = [];
     const script = flowWith({
