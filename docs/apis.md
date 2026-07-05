@@ -42,10 +42,15 @@
 | GET | `/api/trace/{run_id}` | 读取 trace |
 | GET | `/api/trace/{run_id}/shot/{name}` | 读取 trace 截图 |
 | POST | `/api/export/{run_id}` | 导出 `.wps.json` |
+| POST | `/api/export/{run_id}/ir` | 导出 `automation-ir/1` |
 | GET | `/api/scripts` | 列脚本 |
 | GET/PUT | `/api/script/{file}` | 读取/保存 `.wps.json` |
+| GET | `/api/script/{file}/ir` | 将已有 `.wps.json` 包装为 `automation-ir/1` |
+| GET | `/api/automation-ir/{file}` | 读取并校验 `.automation.json` |
 | POST/GET | `/api/human/start`、`/api/human/stop`、`/api/human/status` | 人类演示录制 |
-| POST | `/api/replay` | 重放 `.wps.json` |
+| POST | `/api/replay` | 启动 `.wps.json` replay job，返回 `replay_id` |
+| GET | `/api/replay/{replay_id}` | 查询 replay job 状态、结果、失败细节 |
+| POST | `/api/replay/{replay_id}/cancel` | 取消 replay job |
 | GET/POST/DELETE | `/api/memory` | 经验记忆 |
 | PUT/DELETE | `/api/memory/{recipe_id}` | 单条经验记忆 |
 | GET/DELETE | `/api/session` | 会话记忆 |

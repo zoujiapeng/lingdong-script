@@ -5,7 +5,7 @@ Windows 桌面自动化项目。当前代码由两条主线组成：
 - **WinPilot desktop agent**：`python/winpilot_home/winpilot/`，负责用 LLM 操控真实 Windows 桌面。
 - **流程图 / DSL 自动化系统**：`src/renderer/`、`python/engine/`、`python/features/`，负责可视化编排、传统自动化执行和外部集成。
 
-两条主线刻意解耦。WinPilot 不直接使用 `python/features/` 的 `@feature` 注册表，也不直接理解流程图节点；成功的 agent trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 转成 FlowScript。
+两条主线刻意解耦。WinPilot 不直接使用 `python/features/` 的 `@feature` 注册表，也不直接理解流程图节点；成功的 agent trace 可以导出 `.wps.json` 或 `automation-ir/1`，再由 `src/renderer/utils/wpsToFlowScript.ts` / `src/renderer/utils/automationIR.ts` 桥接到 FlowScript。
 
 ## 当前事实
 

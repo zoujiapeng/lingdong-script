@@ -154,7 +154,7 @@ queued
 ```text
 Agent live run
   -> trace JSONL + screenshots
-  -> export .wps.json
+  -> export .wps.json / automation-ir/1
   -> Replayer 0-token replay
   -> optional FlowScript import for editing
 ```
@@ -162,7 +162,9 @@ Agent live run
 当前事实：
 
 - `.wps.json` 是 WinPilot 语义重放格式。
+- `automation-ir/1` 是 WPS/Flow/skill 的最小共享 envelope，当前不是唯一事实源。
 - `recorder/trace.py` 是离线 replay 源。
+- `POST /api/replay` 返回 `replay_id`；`GET /api/replay/{replay_id}` 查询状态、结果和失败细节；`POST /api/replay/{replay_id}/cancel` 取消。
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。
 - WPS-only 节点带 `_requires_wps_replay`，前端 executor 必须 fail-fast。
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
