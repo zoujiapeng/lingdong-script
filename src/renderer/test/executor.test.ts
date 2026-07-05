@@ -462,6 +462,48 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('fails simulated waits when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'wait',
+      type: 'wait',
+      x: 0,
+      y: 0,
+      params: { wait_type: 'condition', timeout: 1 },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'wait',
+      'error',
+      'wait requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
+  it('fails simulated unknown conditions when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'cond',
+      type: 'condition',
+      x: 0,
+      y: 0,
+      params: { condition_type: 'text_exists', text: 'Done' },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'cond',
+      'error',
+      'condition requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
   it('treats default feature-map failure as node failure', async () => {
     const script = flowWith({
       id: 'launch',
