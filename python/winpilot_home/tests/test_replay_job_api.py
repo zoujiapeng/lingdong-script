@@ -96,6 +96,41 @@ def test_replay_cancel_sets_job_stop_event(client, tmp_path, monkeypatch):
     assert stopped["ok"] is False
 
 
+def test_status_breaks_down_replay_busy_state(client, tmp_path, monkeypatch):
+    from winpilot import server
+
+    _write_script(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_replay(path, stop_event=None):
+        started.set()
+        release.wait(timeout=1.0)
+        return {"ok": True, "results": [], "preflight": {"ok": True}}
+
+    monkeypatch.setattr(server.trace_mod, "replay", fake_replay)
+
+    created = client.post("/api/replay", json={"script": "demo.wps.json"})
+    assert created.status_code == 200
+    assert started.wait(1.0)
+
+    status = client.get("/api/status")
+    assert status.status_code == 200
+    data = status.json()
+    assert data["running"] is True
+    assert data["busy"] == {
+        "agent": False,
+        "replay": True,
+        "human_recording": False,
+    }
+    assert data["agent_running"] is False
+    assert data["replay_running"] is True
+    assert data["human_recording"] is False
+
+    release.set()
+    _wait_for(client, created.json()["replay_id"], {"done"})
+
+
 def test_get_script_as_automation_ir(client, tmp_path):
     _write_script(tmp_path)
 
