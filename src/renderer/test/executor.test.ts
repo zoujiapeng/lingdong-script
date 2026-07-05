@@ -504,6 +504,69 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     ]);
   });
 
+  it('fails popup simulation when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'popup',
+      type: 'popup_close',
+      x: 0,
+      y: 0,
+      params: { strategies: ['auto'] },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'popup',
+      'error',
+      'popup_close requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
+  it('fails missing sub-scripts when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'sub',
+      type: 'sub_script',
+      x: 0,
+      y: 0,
+      params: { script_id: 'missing', script_name: 'Missing Script' },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'sub',
+      'error',
+      'sub_script requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
+  it('fails camera simulation when require_real_features is enabled', async () => {
+    const script = flowWith({
+      id: 'camera',
+      type: 'camera_capture',
+      x: 0,
+      y: 0,
+      params: { camera_id: 0 },
+      status: 'idle',
+    });
+    script.settings.require_real_features = true;
+
+    const result = await runFlow(script);
+
+    expect(result.status).toBe('error');
+    expect(result.statuses).toContainEqual([
+      'camera',
+      'error',
+      'camera_capture requires real feature execution; browser simulation is disabled',
+    ]);
+  });
+
   it('treats default feature-map failure as node failure', async () => {
     const script = flowWith({
       id: 'launch',
