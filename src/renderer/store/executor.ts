@@ -293,9 +293,11 @@ export function createFlowExecutor(
         }
 
         case 'popup_close': {
-          rejectBrowserSimulation('popup_close');
           log('info', `关闭弹窗 (策略: ${params.strategies?.[0] || 'auto'})`, nodeId);
-          await delay(500);
+          const res = await callFeatureOrThrow('handle_dialog', {
+            timeout: params.timeout ?? 5,
+          }, nodeId, `关闭弹窗（模拟）`);
+          if (res !== undefined) log('info', `弹窗处理结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
           await delay((params.delay_after || 0.3) * 1000);
           result = 'output';
           break;
@@ -628,15 +630,33 @@ export function createFlowExecutor(
           result = 'output';
           break;
         case 'camera_capture':
-          rejectBrowserSimulation('camera_capture');
           log('info', `摄像头抓拍 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
-          await delay(500);
+          {
+            const res = await callFeatureOrThrow('camera_capture', {
+              camera_id: (params as any).camera_id ?? 0,
+              output_path: (params as any).output_path || (params as any).path || '',
+              width: (params as any).width ?? 0,
+              height: (params as any).height ?? 0,
+              format: (params as any).format || 'jpg',
+              wait_stable: (params as any).wait_stable ?? 0.5,
+            }, nodeId, '摄像头抓拍（模拟）');
+            if (res !== undefined) log('info', `摄像头抓拍结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          }
           result = 'output';
           break;
         case 'camera_record':
-          rejectBrowserSimulation('camera_record');
           log('info', `摄像头录像 (摄像头 ${(params as any).camera_id ?? 0})`, nodeId);
-          await delay(300);
+          {
+            const res = await callFeatureOrThrow('camera_record_start', {
+              camera_id: (params as any).camera_id ?? 0,
+              output_path: (params as any).output_path || (params as any).path || '',
+              fps: (params as any).fps ?? 15,
+              duration: (params as any).duration ?? 0,
+              width: (params as any).width ?? 0,
+              height: (params as any).height ?? 0,
+            }, nodeId, '摄像头录像（模拟）');
+            if (res !== undefined) log('info', `摄像头录像结果: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          }
           result = 'output';
           break;
 
