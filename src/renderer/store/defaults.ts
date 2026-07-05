@@ -24,7 +24,7 @@ export const DEFAULT_UI_STATE: UIState = {
   grid_size: 20,
   dark_mode: false,
   themeMode: (() => { try { const s = localStorage.getItem('lingdong-theme-mode'); if (s === 'light' || s === 'dark' || s === 'system') return s; } catch {} return 'system'; })(),
-  viewMode: 'canvas',
+  viewMode: 'overview',
   panels_visible: false,
   show_node_library: false,
   show_property_panel: false,
