@@ -26,6 +26,7 @@ import win32gui
 
 from ..config import CONFIG
 from ..utils.log import BUS, logger
+from .desktop_queue import queued_desktop_action
 
 user32 = ctypes.windll.user32
 
@@ -194,10 +195,12 @@ def _restore_cursor(pos: tuple[int, int]) -> None:
 
 
 # ---------------------------------------------------------------- mouse API
+@queued_desktop_action("move_mouse")
 def move_mouse(x: int, y: int) -> None:
     user32.SetCursorPos(int(x), int(y))
 
 
+@queued_desktop_action("click")
 def click(x: int, y: int, button: str = "left", double: bool = False, hwnd: int | None = None) -> dict:
     """Click at screen coords. Brings target window forward first if given.
 
@@ -304,6 +307,7 @@ def _stroke_path(waypoints: list[tuple[int, int]], duration_s: float) -> None:
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
 
 
+@queued_desktop_action("drag")
 def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
          points: list | None = None, hwnd: int | None = None) -> dict:
     """Press at the start, move through the path, release at the end.
@@ -340,6 +344,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
     return {"ok": True}
 
 
+@queued_desktop_action("draw_strokes")
 def draw_strokes(strokes: list, duration_s: float = 0.4,
                  hwnd: int | None = None) -> dict:
     """Draw multiple SEPARATE strokes in one call, lifting the pen between them.
@@ -374,6 +379,7 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     return {"ok": True, "strokes_drawn": drawn}
 
 
+@queued_desktop_action("scroll")
 def scroll(x: int, y: int, amount: int) -> dict:
     """amount: positive=up, negative=down; in notches."""
     if _dry_run():
@@ -409,6 +415,7 @@ def scroll(x: int, y: int, amount: int) -> dict:
 
 
 # ------------------------------------------------------------- keyboard API
+@queued_desktop_action("type_text")
 def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> dict:
     """Unicode injection — IME-independent, supports Chinese.
 
@@ -456,6 +463,7 @@ def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> 
     return {"ok": True, "typed": len(text)}
 
 
+@queued_desktop_action("press_keys")
 def press_keys(keys: list[str]) -> dict:
     """Press a chord, e.g. ["ctrl","s"] or single ["enter"]."""
     if _dry_run():
@@ -474,6 +482,7 @@ def press_keys(keys: list[str]) -> dict:
 
 
 # --------------------------------------------------------------- window API
+@queued_desktop_action("focus_window")
 def focus_window(hwnd: int) -> dict:
     """Robust foreground switch (works around SetForegroundWindow locks)."""
     try:
@@ -523,6 +532,7 @@ def _url_from_launch_command(command: str) -> str:
     return ""
 
 
+@queued_desktop_action("launch")
 def launch(command: str) -> dict:
     """Launch an app: exe name, full path, or shell command."""
     if _dry_run():
@@ -540,6 +550,7 @@ def launch(command: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+@queued_desktop_action("close_window")
 def close_window(hwnd: int) -> dict:
     if _dry_run():
         return {"ok": True, "dry_run": True}
@@ -606,6 +617,7 @@ def clipboard_read() -> str:
             return ""
 
 
+@queued_desktop_action("clipboard_write")
 def clipboard_write(text: str) -> dict:
     """Write text to the system clipboard."""
     if _dry_run():
@@ -629,6 +641,7 @@ def clipboard_write(text: str) -> dict:
             return {"ok": False, "error": str(exc2)}
 
 
+@queued_desktop_action("clipboard_paste")
 def clipboard_paste() -> dict:
     """Paste from clipboard via Ctrl+V."""
     if _dry_run():
@@ -650,6 +663,7 @@ def cursor_position() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+@queued_desktop_action("mouse_down")
 def mouse_down(button: str = "left") -> dict:
     """Press and hold a mouse button at the current cursor position."""
     if _dry_run():
@@ -666,6 +680,7 @@ def mouse_down(button: str = "left") -> dict:
     return {"ok": True, "button": button}
 
 
+@queued_desktop_action("mouse_up")
 def mouse_up(button: str = "left") -> dict:
     """Release a mouse button at the current cursor position."""
     if _dry_run():
@@ -743,6 +758,7 @@ def screenshot_base64(display_id: int | None = None,
 # ----------------------------------------------------------------- hold keys
 # Ported from cc-haha runtime/win_helper.py hold_keys()
 
+@queued_desktop_action("hold_keys")
 def hold_keys(keys: list[str], duration_ms: int) -> dict:
     """Press and hold a chord for ``duration_ms`` then release.
 

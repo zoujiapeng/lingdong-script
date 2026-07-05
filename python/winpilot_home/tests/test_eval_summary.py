@@ -228,6 +228,39 @@ def test_summarize_events_reports_low_latency_metrics():
             "ts": 1.6,
         },
         {"type": "screen_watch", "action": "auto_start", "ts": 1.61},
+        {
+            "type": "desktop_action_queue",
+            "state": "start",
+            "action": "click",
+            "reentrant": False,
+            "wait_ms": 1,
+            "ts": 1.615,
+        },
+        {
+            "type": "desktop_action_queue",
+            "state": "done",
+            "action": "click",
+            "wait_ms": 5,
+            "elapsed_ms": 20,
+            "ts": 1.62,
+        },
+        {
+            "type": "desktop_action_queue",
+            "state": "start",
+            "action": "type_text",
+            "reentrant": True,
+            "wait_ms": 2,
+            "ts": 1.625,
+        },
+        {
+            "type": "desktop_action_queue",
+            "state": "error",
+            "action": "type_text",
+            "reentrant": True,
+            "wait_ms": 2,
+            "elapsed_ms": 7,
+            "ts": 1.63,
+        },
         {"type": "agent_recovery", "kind": "structured_replan", "ts": 1.7},
         {"type": "memory", "action": "reuse_suggested", "ts": 1.8},
         {"type": "agent_step", "step": 2, "ts": 2.0},
@@ -251,6 +284,11 @@ def test_summarize_events_reports_low_latency_metrics():
     assert metrics["skill_reuse_rate"] == 1.0
     assert metrics["screen_watch_auto_starts"] == 1
     assert metrics["screen_watch_running_tool_events"] == 1
+    assert metrics["desktop_action_queue"]["actions"] == 2
+    assert metrics["desktop_action_queue"]["errors"] == 1
+    assert metrics["desktop_action_queue"]["reentrant"] == 1
+    assert metrics["desktop_action_queue"]["wait_latency"]["max_ms"] == 5
+    assert metrics["desktop_action_queue"]["execution_latency"]["max_ms"] == 20
 
 
 def test_summarize_events_ignores_empty_vlm_placeholder():

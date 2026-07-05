@@ -52,5 +52,5 @@ Trace / Human recording / Flow editor
 
 - Automation IR v1 已落地为最小共享 envelope，但尚未成为 Trace/Human/Flow/Skill 的唯一事实源。
 - FlowScript executor 和 WinPilot Replayer 仍是两套执行路径。
-- Replay API 已有 `replay_id`、状态查询和取消入口，但底层桌面动作仍是全局串行保护，还不是 Desktop Action Queue / Raw Device Executor。
+- Replay API 已有 `replay_id`、状态查询和取消入口；底层真实鼠标/键盘/窗口/剪贴板写入动作已经进入同步 single-writer Desktop Action Queue，但还不是后台异步 job worker / Raw Device Executor。
 - Skill 复用率、失败归因和 replay 后证据采集还需要继续工程化。
