@@ -215,6 +215,29 @@ def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):
     assert [event["action"] for event in action_events] == ["type_text"]
 
 
+def test_clipboard_paste_uses_raw_hotkey_without_nested_queue(monkeypatch):
+    calls = []
+    events = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_raw_press_keys", lambda keys: calls.append(tuple(keys)))
+
+    BUS.add_sink(events.append)
+    try:
+        out = executor.clipboard_paste()
+    finally:
+        BUS.remove_sink(events.append)
+
+    assert out == {"ok": True}
+    assert calls == [("ctrl", "v")]
+    queue_events = [event for event in events if event.get("type") == "desktop_action_queue"]
+    assert [(event["state"], event["action"]) for event in queue_events] == [
+        ("start", "clipboard_paste"),
+        ("done", "clipboard_paste"),
+    ]
+    action_events = [event for event in events if event.get("type") == "action"]
+    assert [event["action"] for event in action_events] == ["clipboard_paste"]
+
+
 def test_desktop_action_queue_async_worker_serializes_jobs():
     queue = DesktopActionQueue()
     active = 0

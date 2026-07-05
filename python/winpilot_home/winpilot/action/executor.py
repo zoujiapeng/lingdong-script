@@ -659,7 +659,7 @@ def clipboard_paste() -> dict:
     """Paste from clipboard via Ctrl+V."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    press_keys(["ctrl", "v"])
+    _raw_press_keys(["ctrl", "v"])
     BUS.publish("action", action="clipboard_paste")
     return {"ok": True}
 
