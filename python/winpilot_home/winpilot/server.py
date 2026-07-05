@@ -16,6 +16,8 @@ import queue
 import re
 import sys
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .automation_ir import automation_ir_from_wps, validate_automation_ir
 from . import scheduler as agent_scheduler
 from .agent.loop import AgentRunner
 from .agent.router import build_runner
@@ -115,17 +118,48 @@ class _RunState:
         self.runner: AgentRunner | None = None
         self.thread: threading.Thread | None = None
         self.replay_thread: threading.Thread | None = None
+        self.replay_jobs: dict[str, dict[str, Any]] = {}
         self.stop_event = threading.Event()
+
+    def replay_busy(self) -> bool:
+        legacy_running = self.replay_thread is not None and self.replay_thread.is_alive()
+        job_running = any(
+            job.get("status") in {"queued", "running", "canceling"}
+            for job in self.replay_jobs.values()
+        )
+        return legacy_running or job_running
 
     def busy(self) -> bool:
         running_agent = self.thread is not None and self.thread.is_alive()
-        running_replay = self.replay_thread is not None and self.replay_thread.is_alive()
-        return running_agent or running_replay or human_mod.RECORDER.is_recording()
+        return running_agent or self.replay_busy() or human_mod.RECORDER.is_recording()
 
 
 STATE = _RunState()
 _SCHEDULER_STOP = threading.Event()
 _SCHEDULER_THREAD: threading.Thread | None = None
+
+
+def _public_replay_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "replay_id": job["id"],
+        "script": job.get("script", ""),
+        "status": job.get("status", "unknown"),
+        "ok": job.get("ok"),
+        "error": job.get("error", ""),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "result": job.get("result"),
+    }
+
+
+def _update_replay_job(replay_id: str, **changes: Any) -> dict[str, Any] | None:
+    with STATE.lock:
+        job = STATE.replay_jobs.get(replay_id)
+        if not job:
+            return None
+        job.update(changes)
+        return _public_replay_job(job)
 
 
 def _scheduled_worker(runner: AgentRunner, schedule_id: str) -> None:
@@ -476,6 +510,15 @@ def export(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
     return {"ok": True, "script": path.name}
 
 
+@app.post("/api/export/{run_id}/ir")
+def export_ir(run_id: str, req: ExportRequest | None = None) -> dict[str, Any]:
+    try:
+        path = trace_mod.export_automation_ir(run_id, name=(req.name if req else None))
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "ir": path.name}
+
+
 @app.get("/api/scripts")
 def scripts() -> list[dict[str, Any]]:
     return trace_mod.list_scripts()
@@ -485,6 +528,12 @@ def _script_path(file: str) -> Path:
     if not file.endswith(".wps.json"):
         raise HTTPException(400, "文件名必须以 .wps.json 结尾")
     return _ensure_inside(SCRIPTS_DIR / file, SCRIPTS_DIR, "脚本")
+
+
+def _ir_path(file: str) -> Path:
+    if not file.endswith(".automation.json"):
+        raise HTTPException(400, "IR file name must end with .automation.json")
+    return _ensure_inside(SCRIPTS_DIR / file, SCRIPTS_DIR, "Automation IR")
 
 
 @app.get("/api/script/{file}")
@@ -497,6 +546,31 @@ def get_script(file: str) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         raise HTTPException(400, f"脚本解析失败: {exc}") from exc
+
+
+@app.get("/api/script/{file}/ir")
+def get_script_ir(file: str) -> dict[str, Any]:
+    script = get_script(file)
+    ir = automation_ir_from_wps(script)
+    err = validate_automation_ir(ir)
+    if err:
+        raise HTTPException(400, f"Automation IR validation failed: {err}")
+    return ir
+
+
+@app.get("/api/automation-ir/{file}")
+def get_automation_ir(file: str) -> dict[str, Any]:
+    path = _ir_path(file)
+    if not path.exists():
+        raise HTTPException(404, "Automation IR not found")
+    try:
+        ir = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(400, f"Automation IR parse failed: {exc}") from exc
+    err = validate_automation_ir(ir)
+    if err:
+        raise HTTPException(400, f"Automation IR validation failed: {err}")
+    return ir
 
 
 @app.put("/api/script/{file}")
@@ -548,19 +622,79 @@ def replay(req: ReplayRequest) -> dict[str, Any]:
     with STATE.lock:
         if STATE.busy():
             raise HTTPException(409, "已有任务在运行")
-        STATE.stop_event = threading.Event()
-        stop_event = STATE.stop_event
+        replay_id = f"replay-{uuid.uuid4().hex[:12]}"
+        stop_event = threading.Event()
+        STATE.stop_event = stop_event
+        job: dict[str, Any] = {
+            "id": replay_id,
+            "script": req.script,
+            "status": "queued",
+            "ok": None,
+            "error": "",
+            "result": None,
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "stop_event": stop_event,
+        }
+        STATE.replay_jobs[replay_id] = job
 
         def worker() -> None:
+            _update_replay_job(replay_id, status="running", started_at=time.time())
+            BUS.publish("replay", state="job_start", replay_id=replay_id, script=req.script)
             try:
-                trace_mod.replay(script_path, stop_event=stop_event)
+                result = trace_mod.replay(script_path, stop_event=stop_event)
+                status = "stopped" if stop_event.is_set() and not result.get("ok", False) else "done"
+                _update_replay_job(
+                    replay_id,
+                    status=status,
+                    ok=bool(result.get("ok", False)),
+                    result=result,
+                    finished_at=time.time(),
+                )
+                BUS.publish("replay", state="job_done", replay_id=replay_id,
+                            ok=bool(result.get("ok", False)), status=status)
             except Exception as exc:
                 logger.exception("重放失败")
-                BUS.publish("replay", state="error", error=str(exc))
+                _update_replay_job(
+                    replay_id,
+                    status="error",
+                    ok=False,
+                    error=str(exc),
+                    finished_at=time.time(),
+                )
+                BUS.publish("replay", state="error", replay_id=replay_id, error=str(exc))
 
         STATE.replay_thread = threading.Thread(target=worker, daemon=True, name="replay")
         STATE.replay_thread.start()
-    return {"ok": True}
+        public = _public_replay_job(job)
+    return {"ok": True, "replay_id": replay_id, "job": public}
+
+
+@app.get("/api/replay/{replay_id}")
+def replay_status(replay_id: str) -> dict[str, Any]:
+    with STATE.lock:
+        job = STATE.replay_jobs.get(replay_id)
+        if not job:
+            raise HTTPException(404, "replay job not found")
+        return _public_replay_job(job)
+
+
+@app.post("/api/replay/{replay_id}/cancel")
+def replay_cancel(replay_id: str) -> dict[str, Any]:
+    with STATE.lock:
+        job = STATE.replay_jobs.get(replay_id)
+        if not job:
+            raise HTTPException(404, "replay job not found")
+        if job.get("status") in {"done", "error", "stopped"}:
+            return {"ok": True, "job": _public_replay_job(job)}
+        stop_event = job.get("stop_event")
+        if isinstance(stop_event, threading.Event):
+            stop_event.set()
+        job["status"] = "canceling"
+        public = _public_replay_job(job)
+    BUS.publish("replay", state="job_cancel", replay_id=replay_id)
+    return {"ok": True, "job": public}
 
 
 @app.get("/api/memory")

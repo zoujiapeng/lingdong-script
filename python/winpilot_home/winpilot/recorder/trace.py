@@ -19,6 +19,7 @@ from typing import Any
 import cv2
 
 from ..action import executor, verify
+from ..automation_ir import automation_ir_from_wps, validate_automation_ir
 from ..config import SCRIPTS_DIR, TRACES_DIR
 from ..perception import fusion, win32
 from ..utils.log import BUS, logger
@@ -244,6 +245,9 @@ def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
         replay = event.get("replay")
         if not replay:
             continue
+        tool = replay.get("tool") if isinstance(replay, dict) else None
+        if tool not in KNOWN_TOOLS:
+            continue
         if event.get("type") == "agent_batch_action":
             steps.append(replay)
         elif event.get("type") == "agent_tool" and event.get("tool") != "run_action_batch":
@@ -251,8 +255,8 @@ def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
     return steps
 
 
-def export_script(run_id: str, name: str | None = None) -> Path:
-    """Distill a trace into a replayable .wps.json script."""
+def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
+    """Distill a trace into a replayable .wps.json document."""
     events = read_trace(run_id)
     if not events:
         raise FileNotFoundError(f"trace 不存在: {run_id}")
@@ -274,10 +278,30 @@ def export_script(run_id: str, name: str | None = None) -> Path:
     err = validate_script(script)
     if err:
         raise ValueError(f"exported .wps.json is not replayable: {err}")
+    return script
+
+
+def export_script(run_id: str, name: str | None = None) -> Path:
+    """Distill a trace into a replayable .wps.json script."""
+    script = build_script(run_id, name=name)
     SCRIPTS_DIR.mkdir(exist_ok=True)
     path = SCRIPTS_DIR / f"{name or run_id}.wps.json"
     path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
     BUS.publish("trace", state="exported", run_id=run_id, script=str(path))
+    return path
+
+
+def export_automation_ir(run_id: str, name: str | None = None) -> Path:
+    """Distill a trace into Automation IR v1 for skill/Flow/replay handoff."""
+    script = build_script(run_id, name=name)
+    ir = automation_ir_from_wps(script, name=name)
+    err = validate_automation_ir(ir)
+    if err:
+        raise ValueError(f"exported Automation IR is invalid: {err}")
+    SCRIPTS_DIR.mkdir(exist_ok=True)
+    path = SCRIPTS_DIR / f"{name or run_id}.automation.json"
+    path.write_text(json.dumps(ir, ensure_ascii=False, indent=1), encoding="utf-8")
+    BUS.publish("trace", state="exported_ir", run_id=run_id, ir=str(path))
     return path
 
 

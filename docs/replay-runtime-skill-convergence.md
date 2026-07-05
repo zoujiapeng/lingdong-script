@@ -6,6 +6,7 @@
 
 - 用户仍面对一个 WinPilot Agent。
 - `.wps.json` 是 WinPilot 语义 replay 格式，来源是真实 trace。
+- `automation-ir/1` 已有最小 envelope，当前用于 WPS/Flow/skill handoff；它还不是唯一事实源。
 - FlowScript 是前端流程图格式，来源是 `src/renderer/`。
 - `python/engine/` 是 legacy DSL/Flow 执行器，不是 WinPilot 低延迟 controller。
 - `reuse_skill` 只是强匹配 `.wps.json` 的 0-token replay；replay 成功后仍要用当前屏幕/文件/进程/文本证据通过 done gate。
@@ -49,6 +50,7 @@ Trace / Human recording / Flow editor
 
 ## 当前还没完成
 
-- 统一 Automation IR 尚未落地为唯一格式。
+- Automation IR v1 已落地为最小共享 envelope，但尚未成为 Trace/Human/Flow/Skill 的唯一事实源。
 - FlowScript executor 和 WinPilot Replayer 仍是两套执行路径。
+- Replay API 已有 `replay_id`、状态查询和取消入口，但底层桌面动作仍是全局串行保护，还不是 Desktop Action Queue / Raw Device Executor。
 - Skill 复用率、失败归因和 replay 后证据采集还需要继续工程化。

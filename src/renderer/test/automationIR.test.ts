@@ -1,0 +1,130 @@
+import { describe, expect, it } from 'vitest';
+import {
+  automationIrFromFlowScript,
+  automationIrFromWps,
+  automationIrToWps,
+  validateAutomationIR,
+} from '../utils/automationIR';
+import type { FlowScript } from '../types';
+
+describe('Automation IR adapters', () => {
+  it('wraps WPS scripts without losing replay metadata', () => {
+    const ir = automationIrFromWps({
+      format: 'wps/2',
+      name: 'send',
+      task: 'send message',
+      source: 'agent',
+      source_run: 'run-1',
+      vars: { msg: 'hello' },
+      steps: [
+        { tool: 'click', coords: [1, 2] },
+        { tool: 'type_text', text_input: '${msg}' },
+      ],
+    }, 'air-test');
+
+    expect(validateAutomationIR(ir)).toBeUndefined();
+    expect(ir.id).toBe('air-test');
+    expect(ir.source.kind).toBe('wps');
+    expect(ir.source.source_run).toBe('run-1');
+    expect(ir.variables).toEqual({ msg: 'hello' });
+    expect(ir.safety.mutates_desktop).toBe(true);
+    expect(ir.steps[0]).toEqual({ tool: 'click', coords: [1, 2] });
+  });
+
+  it('roundtrips Automation IR back to a WPS envelope when steps are WPS-shaped', () => {
+    const ir = automationIrFromWps({
+      format: 'wps/2',
+      name: 'demo',
+      task: 'demo task',
+      vars: { a: '1' },
+      steps: [{ tool: 'click', coords: [10, 20] }],
+    }, 'air-roundtrip');
+
+    const wps = automationIrToWps(ir);
+
+    expect(wps.format).toBe('wps/2');
+    expect(wps.source).toBe('automation-ir');
+    expect(wps.source_run).toBe('');
+    expect(wps.vars).toEqual({ a: '1' });
+    expect(wps.steps).toEqual([{ tool: 'click', coords: [10, 20] }]);
+  });
+
+  it('wraps FlowScript as IR without pretending it is executable WPS', () => {
+    const flow: FlowScript = {
+      meta: {
+        id: 'flow-1',
+        name: 'flow demo',
+        created_at: '',
+        updated_at: '',
+        version: '1.0.0',
+      },
+      nodes: [
+        { id: 'start', type: 'start', x: 0, y: 0, params: {} },
+        { id: 'click', type: 'click', x: 100, y: 0, params: { x: 1, y: 2, method: 'single', delay_after: 0 } },
+      ],
+      edges: [
+        { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'click', to_port: 'input' },
+      ],
+      variables: { token: 'x' },
+      settings: {
+        default_delay: 0,
+        error_handling: 'stop',
+        max_retries: 0,
+        retry_delay: 0,
+        log_level: 'info',
+      },
+    };
+
+    const ir = automationIrFromFlowScript(flow, 'air-flow');
+
+    expect(validateAutomationIR(ir)).toBeUndefined();
+    expect(ir.source.kind).toBe('flowscript');
+    expect(ir.steps[1]).toMatchObject({
+      tool: 'click',
+      node_id: 'click',
+      params: { x: 1, y: 2, method: 'single', delay_after: 0 },
+    });
+    expect(ir.safety.executor).toBe('flowscript');
+  });
+
+  it('does not convert FlowScript-sourced IR back to WPS', () => {
+    const flow: FlowScript = {
+      meta: {
+        id: 'flow-1',
+        name: 'flow demo',
+        created_at: '',
+        updated_at: '',
+        version: '1.0.0',
+      },
+      nodes: [{ id: 'start', type: 'start', x: 0, y: 0, params: {} }],
+      edges: [],
+      variables: {},
+      settings: {
+        default_delay: 0,
+        error_handling: 'stop',
+        max_retries: 0,
+        retry_delay: 0,
+        log_level: 'info',
+      },
+    };
+    const ir = automationIrFromFlowScript(flow, 'air-flow');
+
+    expect(() => automationIrToWps(ir)).toThrow('WPS-sourced');
+  });
+
+  it('rejects malformed IR', () => {
+    expect(validateAutomationIR({ format: 'wps/2' })).toContain('format');
+    expect(validateAutomationIR({
+      format: 'automation-ir/1',
+      id: 'x',
+      name: 'x',
+      source: {},
+      conditions: {},
+      evidence: {},
+      safety: {},
+      fallback: {},
+      variables: {},
+      steps: [{}],
+    })).toContain('requires tool');
+  });
+});

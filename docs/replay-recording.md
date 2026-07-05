@@ -3,7 +3,7 @@
 WinPilot 的复用链路是：
 
 ```text
-Agent 实时操作 -> trace -> .wps.json -> Replayer 或 FlowScript
+Agent 实时操作 -> trace -> .wps.json / automation-ir/1 -> Replayer 或 FlowScript
 ```
 
 ## Trace
@@ -36,7 +36,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 当前边界：
 
 - 新导出的 agent 脚本使用 `format: "wps/2"`；`wps/1` 只作为旧脚本兼容输入保留。
-- `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；`auto_visual_verify`、`observe` 等观测/校验事件不会变成重放动作。
+- `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；只有 Replayer 已知的可执行工具会进入脚本，`auto_visual_verify`、`observe`、`execute_subgoal` 等观测/复合/校验事件不会变成重放动作。
 - 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。`ctrl.if` 必须带 `cond` 对象，确实无条件时显式写 `{"always": true}`；`ctrl.loop` 的 `count` / `max_iters` 必须是数字，`while` / `until` 必须带 `cond` 对象，避免空条件循环跑到上限才停。
 - Replayer 当前支持 `click`、`type_text`、`hotkey`、`launch`、`focus_window`、`scroll`、`drag`、`draw_strokes`、`wait`、`run_shell`、`run_detached`、`tray_click`，以及 `ctrl.if` / `ctrl.loop` 和 `ext.*` 便利步骤。
 - 脚本如果声明 `target_window`，或在 `conditions` 里声明 `target_window` / `window_title` / `window_appears`，Replayer 会在执行任何动作前做窗口 preflight：找到目标后绑定 `hwnd`，找不到则 fail-fast，并把 `preflight.target_window` 错误写入 replay results。
@@ -59,7 +59,26 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `GET /api/script/{file}`
 - `PUT /api/script/{file}`
 - `POST /api/export/{run_id}`
+- `POST /api/export/{run_id}/ir`
+- `GET /api/script/{file}/ir`
+- `GET /api/automation-ir/{file}`
 - `POST /api/replay`
+- `GET /api/replay/{replay_id}`
+- `POST /api/replay/{replay_id}/cancel`
+
+`POST /api/replay` 当前会启动 replay job 并返回 `replay_id`。桌面动作仍由全局运行状态串行保护；查询接口返回 `status`、`ok`、`result.results`、`preflight`、`error` 和时间戳，前端不要再只依赖 websocket 事件或 `{ok: true}` 判断 replay 结果。
+
+## Automation IR v1
+
+`python/winpilot_home/winpilot/automation_ir.py` 和 `src/renderer/utils/automationIR.ts` 提供当前最小共享 envelope：
+
+- `format: "automation-ir/1"`
+- `id` / `name` / `source`
+- `conditions` / `evidence`
+- `steps` / `variables`
+- `safety` / `fallback`
+
+当前 IR 是 WPS/Flow/skill 的共同 handoff，不是唯一事实源。`.wps.json` 仍是 WinPilot Replayer 的直接输入，FlowScript 仍是前端流程图格式。只有 `source.kind == "wps"` 的 IR 允许回转成 `.wps.json`；FlowScript-sourced IR 不能静默转 WPS，避免不可等价执行的流程被假装成可离线 replay。
 
 ## 人类演示录制
 

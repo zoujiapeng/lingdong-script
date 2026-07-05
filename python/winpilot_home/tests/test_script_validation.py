@@ -159,6 +159,31 @@ def test_export_script_dedupes_fast_wrapper_child_and_parent(tmp_path, monkeypat
     assert data["steps"] == [replay]
 
 
+def test_export_script_skips_non_executable_replay_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path / "scripts")
+    _write_trace(tmp_path / "r3.jsonl", [
+        {"type": "agent_start", "task": "subgoal"},
+        {"type": "agent_tool", "tool": "launch",
+         "replay": {"tool": "launch", "command": "notepad"}},
+        {"type": "agent_batch_action", "tool": "click_element",
+         "replay": {"tool": "click", "coords": [7, 8], "text": "OK"}},
+        {"type": "agent_batch_action", "tool": "observe",
+         "replay": {"elapsed_ms": 123}},
+        {"type": "agent_tool", "tool": "execute_subgoal",
+         "replay": {"tool": "execute_subgoal", "actions": []}},
+    ])
+
+    path = trace_mod.export_script("r3")
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    assert data["steps"] == [
+        {"tool": "launch", "command": "notepad"},
+        {"tool": "click", "coords": [7, 8], "text": "OK"},
+    ]
+    assert trace_mod.validate_script(data) is None
+
+
 # ------------------------------------------------------------- HTTP endpoints
 @pytest.fixture
 def client(tmp_path, monkeypatch):
