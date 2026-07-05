@@ -24,6 +24,8 @@ def test_summarize_events_counts_tools_usage_and_slowest():
     assert out["done_checks"][0]["unverified"] is False
     assert out["usage"]["cost_cny"] == 0.01
     assert out["perception"]["uia"]["avg_ms"] == 1000
+    assert out["perception"]["uia"]["p50_ms"] == 1000
+    assert out["tool_latency_overall"]["p50_ms"] == 640
 
 
 def test_aggregate_reports_totals_usage_and_slow_tools():
@@ -273,6 +275,7 @@ def test_summarize_events_reports_low_latency_metrics():
     metrics = out["low_latency"]
 
     assert metrics["action_decision_latency"]["count"] == 2
+    assert metrics["action_decision_latency"]["p50_ms"] == 425
     assert metrics["action_decision_latency"]["max_ms"] == 450
     assert metrics["action_execution_latency"]["avg_ms"] == 120
     assert metrics["post_action_verify_latency"]["avg_ms"] == 18
@@ -288,6 +291,7 @@ def test_summarize_events_reports_low_latency_metrics():
     assert metrics["desktop_action_queue"]["errors"] == 1
     assert metrics["desktop_action_queue"]["reentrant"] == 1
     assert metrics["desktop_action_queue"]["wait_latency"]["max_ms"] == 5
+    assert metrics["desktop_action_queue"]["execution_latency"]["p50_ms"] == 13.5
     assert metrics["desktop_action_queue"]["execution_latency"]["max_ms"] == 20
 
 
