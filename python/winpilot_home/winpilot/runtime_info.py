@@ -42,6 +42,10 @@ def _git_dirty() -> bool | None:
     return None
 
 
+def _has_module(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
 def runtime_fingerprint() -> dict[str, Any]:
     """Return non-secret identity data for the currently running service."""
     commit = _git(["rev-parse", "--short=12", "HEAD"])
@@ -63,8 +67,10 @@ def runtime_fingerprint() -> dict[str, Any]:
             "dirty": _git_dirty(),
         },
         "capabilities": {
-            "runtime_profile": importlib.util.find_spec(
-                "winpilot.agent.runtime_profile"
-            ) is not None,
+            "runtime_profile": _has_module("winpilot.agent.runtime_profile"),
+            "automation_ir": _has_module("winpilot.automation_ir"),
+            "replay_jobs": True,
+            "scheduler": _has_module("winpilot.scheduler"),
+            "desktop_action_queue": _has_module("winpilot.action.desktop_queue"),
         },
     }

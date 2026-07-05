@@ -47,7 +47,7 @@ server.py _RunState
 - 当前 target hwnd/title/process。
 - 最近 `Snapshot`。
 - plan/world/undo stack。
-- RuntimeProfile。
+- RuntimeProfile；`runtime.to_dict().capabilities` 记录本轮 desktop/coding/replay/scheduler/automation_ir/desktop_action_queue 等能力。
 - `dispatch()` 到各个 mixin。
 
 工具实现分布：

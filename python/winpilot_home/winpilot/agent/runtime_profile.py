@@ -24,20 +24,48 @@ def coding_workspace_dir() -> Path:
 class RuntimeProfile:
     """Per-run capability switches for the unified AgentRunner."""
 
+    desktop: bool = True
     coding: bool = False
     coding_workspace: Path | None = None
     max_steps: int | None = None
+    replay: bool = True
+    scheduler: bool = True
+    automation_ir: bool = True
+    action_queue: bool = True
 
     @property
     def label(self) -> str:
         return "coding+desktop" if self.coding else "desktop"
 
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        active = []
+        if self.desktop:
+            active.append("desktop")
+        if self.coding:
+            active.append("coding")
+        if self.replay:
+            active.append("replay")
+        if self.scheduler:
+            active.append("scheduler")
+        if self.automation_ir:
+            active.append("automation_ir")
+        if self.action_queue:
+            active.append("desktop_action_queue")
+        return tuple(active)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "label": self.label,
+            "capabilities": list(self.capabilities),
+            "desktop": self.desktop,
             "coding": self.coding,
             "coding_workspace": str(self.coding_workspace or ""),
             "max_steps": self.max_steps,
+            "replay": self.replay,
+            "scheduler": self.scheduler,
+            "automation_ir": self.automation_ir,
+            "action_queue": self.action_queue,
         }
 
     def prompt_section(self) -> str:
@@ -75,9 +103,10 @@ def build_runtime_profile(task: str) -> RuntimeProfile:
     coding_enabled = bool(CONFIG.get("coding", "enabled", default=True))
     use_coding = coding_enabled and _is_coding_task(task) and not _is_gui_only_task(task)
     if not use_coding:
-        return RuntimeProfile(coding=False)
+        return RuntimeProfile(desktop=True, coding=False)
     max_steps = int(CONFIG.get("coding", "max_steps", default=30))
     return RuntimeProfile(
+        desktop=True,
         coding=True,
         coding_workspace=coding_workspace_dir(),
         max_steps=max_steps,

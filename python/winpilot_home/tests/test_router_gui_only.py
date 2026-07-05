@@ -9,6 +9,10 @@ def test_gui_only_task_stays_on_unified_desktop_agent():
 
     assert isinstance(runner, AgentRunner)
     assert not runner.runtime_profile.coding
+    assert runner.runtime_profile.desktop
+    assert "desktop" in runner.runtime_profile.capabilities
+    assert "coding" not in runner.runtime_profile.capabilities
+    assert "desktop_action_queue" in runner.runtime_profile.capabilities
 
 
 def test_coding_task_uses_unified_agent_with_coding_runtime():
@@ -16,6 +20,14 @@ def test_coding_task_uses_unified_agent_with_coding_runtime():
 
     assert isinstance(runner, AgentRunner)
     assert runner.runtime_profile.coding
+    assert runner.runtime_profile.to_dict()["capabilities"] == [
+        "desktop",
+        "coding",
+        "replay",
+        "scheduler",
+        "automation_ir",
+        "desktop_action_queue",
+    ]
 
 
 def test_runner_and_tool_session_share_runtime_profile():
