@@ -142,6 +142,7 @@ queued
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - 坐标排查工具 `coordinate_diagnostics` / `coordinate_click_test` 使用物理屏幕坐标和真实鼠标点击路径。
 - `action/desktop_queue.py` 已提供 single-writer Desktop Action Queue：同步 `run()` 已接入真实鼠标、键盘、窗口、剪贴板写入和启动动作；内部后台 `submit/wait/cancel/get_job` job worker 已可用于后续 replay/recovery/Flow real executor 接入。trace 中分别发布 `desktop_action_queue` 和 `desktop_action_queue_job` 事件。
+- `action/executor.py` 的 public `click()` 外层仍进队列，但内部已使用 raw `move/focus` helper，避免一次真实点击产生多层 public queue wrapper；完整 Raw Device Executor 仍未完成。
 
 仍未完成：
 
