@@ -93,7 +93,7 @@ Frontend Agent page or scripts/gui_eval_run.py
 - 计算器、记事本、网页靶场、简单绘图/拖拽可以作为基础回归，但不能证明通用 computer use 能力。
 - QQ、微信、Steam、抖音、网易云等真实复杂软件需要非破坏性 E2E：打开、聚焦正确窗口、定位输入框/搜索框、输入草稿或搜索词、观察结果、清理草稿；未经用户明确允许不要真实发送消息或发布内容。
 - 通信任务的 `click/type_text/hotkey ok` 不是成功证据。必须看到目标会话、目标联系人、消息文本出现在输入框或聊天记录中；真实发送还要看到发送后的聊天记录证据。
-- 前端目前是可用的工程工作台，不是最终产品形态。改前端时要保留真实 FlowCanvas、Agent iframe、Replay/trace 调试入口，不要用纯视觉 redesign 覆盖真实功能。
+- 前端目前采用统一工作台外壳：Agent cockpit 是第一屏，Flow/Replay/Settings 作为上下文层展开。改前端时必须保留真实 FlowCanvas、Agent iframe、Replay/trace 调试入口，不要把 executor、Automation IR 或 WPS 安全逻辑回退成视觉 demo。
 
 ## Replay / FlowScript 边界
 

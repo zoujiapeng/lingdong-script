@@ -28,7 +28,7 @@ Windows 桌面自动化项目。当前代码由两条主线组成：
 | Action Queue | `action/desktop_queue.py` 是全局 single-writer 队列，支持同步 `run()` 和后台 job；`target_hwnd` 目前是元数据，不是按 hwnd 并发锁。全局串行更安全，但还不是细粒度 runtime。 |
 | Perception daemon | `fast/watcher.py` 提供低成本 screen delta watcher 和 bulletin board；OCR/UIA/CV/VLM 语义理解仍按 observe/controller 触发，不是跨任务常驻语义感知 daemon。 |
 | Automation IR | `automation-ir/1` 是 WPS/Flow/skill 的最小共享 envelope；`.wps.json`、FlowScript、legacy DSL 仍并存，IR 还不是唯一中间层。 |
-| 前端 | Electron/React 工作台可用，Agent 页嵌入 WinPilot Web UI，FlowCanvas/Replay/设置齐全；但整体仍偏开发者工作台，概念密度高，不是消费级“一句话 Agent”界面。 |
+| 前端 | Electron/React 已采用统一工作台外壳，Agent cockpit 是第一屏，FlowCanvas/Replay/设置作为真实组件展开；但整体仍偏开发者工作台，概念密度高，不是消费级“一句话 Agent”界面。 |
 | 真实能力 | 计算器、记事本、网页靶场、简单绘图/拖拽已有回归；QQ/微信/Steam/抖音/网易云等真实复杂软件还缺系统化非破坏性 E2E，不能用靶场成绩替代。 |
 
 ## 快速启动
