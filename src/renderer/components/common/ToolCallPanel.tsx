@@ -1,10 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import { useStore } from '../../store';
-import { Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Trash2, ChevronDown, ChevronRight, X } from 'lucide-react';
 
 export const ToolCallPanel = React.memo(function ToolCallPanel() {
   const toolCallLog = useStore(s => s.toolCallLog);
   const clearToolCallLog = useStore(s => s.clearToolCallLog);
+  const setUI = useStore(s => s.setUI);
   const logEndRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
 
@@ -17,7 +18,7 @@ export const ToolCallPanel = React.memo(function ToolCallPanel() {
   };
 
   return (
-    <div className="log-panel" style={{ borderTop: '1px solid var(--border-primary)' }}>
+    <div className="log-panel tool-call-panel">
       <div className="log-panel-header">
         <span className="log-panel-title">工具调用记录</span>
         {toolCallLog.length > 0 && (
@@ -29,6 +30,13 @@ export const ToolCallPanel = React.memo(function ToolCallPanel() {
           </button>
         )}
         <span style={{ fontSize: 10, color: 'rgba(148,163,184,0.4)' }}>{toolCallLog.length} 条</span>
+        <button
+          onClick={() => setUI({ show_tool_call_panel: false })}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(148,163,184,0.65)', padding: 2, display: 'flex' }}
+          title="关闭工具记录"
+          aria-label="关闭工具记录">
+          <X size={12} />
+        </button>
       </div>
       <div className="log-entries">
         {toolCallLog.length === 0 && (
