@@ -152,6 +152,30 @@ export function createFlowExecutor(
     return res;
   }
 
+  async function waitFeatureSuccessOrThrow(
+    featureName: string,
+    featureParams: Record<string, any>,
+    nodeId: string,
+    timeoutSeconds: number,
+  ): Promise<any> {
+    const win = window as any;
+    if (!win.electronAPI?.callFeature) {
+      throw new Error(`${featureName} requires electronAPI.callFeature`);
+    }
+    const timeoutMs = Math.max(0.1, Number(timeoutSeconds) || 10) * 1000;
+    const deadline = Date.now() + timeoutMs;
+    let lastFailure = '';
+    while (Date.now() <= deadline) {
+      const res = await win.electronAPI.callFeature(featureName, publicFeatureParams(featureParams));
+      const failure = featureFailureMessage(res, featureName);
+      if (!failure) return res;
+      lastFailure = failure;
+      log('debug', `${featureName} wait probe failed: ${failure}`, nodeId);
+      await delay(300);
+    }
+    throw new Error(`${featureName} timed out after ${timeoutSeconds}s${lastFailure ? `: ${lastFailure}` : ''}`);
+  }
+
   function buildPowerParams(featureName: string, nodeParams: Record<string, any>): Record<string, any> {
     if (featureName === 'shutdown' || featureName === 'reboot') {
       return {
@@ -325,6 +349,20 @@ export function createFlowExecutor(
             const dur = params.duration || 1;
             log('info', `等待 ${dur} 秒`, nodeId);
             await delay(Math.min(dur, 10) * 1000); // cap at 10s for demo (no cap in Python engine)
+          } else if (isWpsReplayNode(params) && params.wait_type === 'window') {
+            const title = String(params.window_title || '').trim();
+            if (!title) throw new Error('WPS window wait requires window_title');
+            const res = await waitFeatureSuccessOrThrow(
+              'focus_window',
+              { title, exact: false },
+              nodeId,
+              params.timeout ?? 10,
+            );
+            log('info', `WPS window wait result: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          } else if (isWpsReplayNode(params)) {
+            throw new Error(
+              `WinPilot wait step "${params.wait_type || 'condition'}" must run through the original .wps.json Replayer`
+            );
           } else {
             log('info', `等待条件（模拟跳过）`, nodeId);
             await delay(200);
