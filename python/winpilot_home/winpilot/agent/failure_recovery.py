@@ -279,15 +279,15 @@ class FailureRecoveryLayer:
 
     def _list_windows_probe(self, session: Any, actions: list[dict[str, Any]]) -> None:
         try:
-            lister = getattr(session, "_t_list_windows", None)
-            if not callable(lister):
+            result, via = self._dispatch_probe(session, "list_windows", {})
+            if result is None:
                 actions.append({"action": "list_windows", "ok": False, "error": "list_windows unavailable"})
                 return
-            result = lister({})
             preview = str(getattr(result, "text", "") or "")[:600]
             actions.append({
                 "action": "list_windows",
                 "ok": bool(preview.strip()),
+                "via": via,
                 "preview": preview,
             })
         except Exception as exc:
@@ -314,16 +314,16 @@ class FailureRecoveryLayer:
 
     def _focus_target(self, session: Any, target: int, actions: list[dict[str, Any]]) -> None:
         try:
-            focus = getattr(session, "_t_focus_window", None)
-            if not callable(focus):
+            result, via = self._dispatch_probe(session, "focus_window", {"hwnd": int(target)})
+            if result is None:
                 actions.append({"action": "focus_window", "ok": False, "error": "focus_window unavailable"})
                 return
-            result = focus({"hwnd": int(target)})
             payload = parse_tool_json(getattr(result, "text", "") or "")
             actions.append({
                 "action": "focus_window",
                 "ok": bool(payload.get("ok")) if payload else True,
                 "target_hwnd": int(target),
+                "via": via,
                 "result": payload or {"preview": str(getattr(result, "text", ""))[:180]},
             })
         except Exception as exc:
@@ -338,20 +338,33 @@ class FailureRecoveryLayer:
         action_name: str,
     ) -> None:
         try:
-            observe = getattr(session, "_t_observe", None)
-            if not callable(observe):
+            result, via = self._dispatch_probe(
+                session,
+                "observe",
+                {"hwnd": int(target), "include_icons": False, "max_elements": 80},
+            )
+            if result is None:
                 actions.append({"action": action_name, "ok": False, "error": "observe unavailable"})
                 return
-            result = observe({"hwnd": int(target), "include_icons": False, "max_elements": 80})
             preview = str(getattr(result, "text", "") or "")[:300]
             actions.append({
                 "action": action_name,
                 "ok": bool(preview.strip()),
                 "target_hwnd": int(target),
+                "via": via,
                 "preview": preview,
             })
         except Exception as exc:
             actions.append({"action": action_name, "ok": False, "target_hwnd": int(target), "error": str(exc)[:160]})
+
+    def _dispatch_probe(self, session: Any, name: str, args: dict[str, Any]) -> tuple[Any | None, str]:
+        dispatcher = getattr(session, "dispatch", None)
+        if callable(dispatcher):
+            return dispatcher(name, args), "dispatch"
+        handler = getattr(session, f"_t_{name}", None)
+        if callable(handler):
+            return handler(args), "handler"
+        return None, "unavailable"
 
     @staticmethod
     def _last_action_ok(actions: list[dict[str, Any]], action_name: str) -> bool:
