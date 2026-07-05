@@ -255,6 +255,82 @@ def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
     return steps
 
 
+def _stable_target_window_hint(hint: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only replay-stable window identity; never persist old hwnd."""
+    if not hint:
+        return None
+    title = str(hint.get("title") or "").strip()
+    process = str(hint.get("process") or "").strip()
+    out: dict[str, Any] = {}
+    if title:
+        out["title"] = title
+    if process:
+        out["process"] = process
+    return out or None
+
+
+def _target_window_from_result_meta(meta: Any) -> dict[str, Any] | None:
+    if not isinstance(meta, dict):
+        return None
+    for key in ("target_window", "window"):
+        hint = _stable_target_window_hint(
+            _target_window_hint_from(meta.get(key), f"result_meta.{key}")
+        )
+        if hint:
+            return hint
+    reducer = meta.get("perception_reducer")
+    if isinstance(reducer, dict):
+        hint = _stable_target_window_hint(
+            _target_window_hint_from(reducer.get("target_window"), "result_meta.perception_reducer.target_window")
+        )
+        if hint:
+            return hint
+    evidence = meta.get("evidence_packet")
+    if isinstance(evidence, dict):
+        reducer = evidence.get("perception_reducer")
+        if isinstance(reducer, dict):
+            hint = _stable_target_window_hint(
+                _target_window_hint_from(
+                    reducer.get("target_window"),
+                    "result_meta.evidence_packet.perception_reducer.target_window",
+                )
+            )
+            if hint:
+                return hint
+    return None
+
+
+def _target_window_from_args(args: Any) -> dict[str, Any] | None:
+    if not isinstance(args, dict):
+        return None
+    for key in ("target_window", "target"):
+        hint = _stable_target_window_hint(
+            _target_window_hint_from(args.get(key), f"args.{key}")
+        )
+        if hint:
+            return hint
+    expect = args.get("expect")
+    if isinstance(expect, dict):
+        for key in ("window_title", "window_appears", "target_window"):
+            hint = _stable_target_window_hint(
+                _target_window_hint_from(expect.get(key), f"args.expect.{key}")
+            )
+            if hint:
+                return hint
+    return None
+
+
+def _extract_target_window(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in events:
+        hint = _target_window_from_args(event.get("args"))
+        if hint:
+            return hint
+        hint = _target_window_from_result_meta(event.get("result_meta"))
+        if hint:
+            return hint
+    return None
+
+
 def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
     """Distill a trace into a replayable .wps.json document."""
     events = read_trace(run_id)
@@ -275,6 +351,9 @@ def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
         "created": int(time.time()),
         "steps": steps,
     }
+    target_window = _extract_target_window(events)
+    if target_window:
+        script["target_window"] = target_window
     err = validate_script(script)
     if err:
         raise ValueError(f"exported .wps.json is not replayable: {err}")
