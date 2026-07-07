@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { BorderBeam } from 'border-beam';
 import { useStore } from '../store';
 
 /**
@@ -57,33 +58,38 @@ export function AgentView() {
   }, [darkMode, url]);
 
   const retry = () => { setUrl(null); setFailed(false); setErrorDetail(''); setReloadKey(k => k + 1); };
+  const beamTheme = darkMode ? 'dark' : 'light';
 
   if (failed) {
     return (
-      <div className="agent-view-panel" style={centered}>
-        <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', maxWidth: 460 }}>
-          WinPilot 服务启动失败或超时。<br />
-          请确认 Python 依赖已安装（fastapi / uvicorn / pywin32 / opencv-python / mss）。
-          {errorDetail && (
-            <pre style={{
-              marginTop: 10, padding: 8, textAlign: 'left', fontSize: 11,
-              whiteSpace: 'pre-wrap', background: 'var(--surface-2, rgba(0,0,0,.06))',
-              borderRadius: 6, maxHeight: 160, overflow: 'auto',
-            }}>{errorDetail}</pre>
-          )}
-          <div style={{ marginTop: 12 }}>
-            <button className="agent-btn agent-btn-primary" onClick={retry} style={{ padding: '6px 16px' }}>重试</button>
+      <AgentBeamShell theme={beamTheme} active>
+        <div className="agent-view-panel" style={centered}>
+          <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', maxWidth: 460 }}>
+            WinPilot 服务启动失败或超时。<br />
+            请确认 Python 依赖已安装（fastapi / uvicorn / pywin32 / opencv-python / mss）。
+            {errorDetail && (
+              <pre style={{
+                marginTop: 10, padding: 8, textAlign: 'left', fontSize: 11,
+                whiteSpace: 'pre-wrap', background: 'var(--surface-2, rgba(0,0,0,.06))',
+                borderRadius: 6, maxHeight: 160, overflow: 'auto',
+              }}>{errorDetail}</pre>
+            )}
+            <div style={{ marginTop: 12 }}>
+              <button className="agent-btn agent-btn-primary" onClick={retry} style={{ padding: '6px 16px' }}>重试</button>
+            </div>
           </div>
         </div>
-      </div>
+      </AgentBeamShell>
     );
   }
 
   if (!url) {
     return (
-      <div className="agent-view-panel" style={centered}>
-        <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>正在启动 WinPilot 服务…</div>
-      </div>
+      <AgentBeamShell theme={beamTheme} active>
+        <div className="agent-view-panel" style={centered}>
+          <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>正在启动 WinPilot 服务…</div>
+        </div>
+      </AgentBeamShell>
     );
   }
 
@@ -91,18 +97,48 @@ export function AgentView() {
   const src = `${url}?theme=${theme}`;
 
   return (
-    <div className="agent-view-panel" style={{ padding: 0, height: '100%', width: '100%', maxWidth: 'none', margin: 0, overflow: 'hidden' }}>
-      <iframe
-        key={reloadKey}
-        ref={iframeRef}
-        src={src}
-        title="WinPilot"
-        style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-        allow="clipboard-read; clipboard-write"
-      />
-    </div>
+    <AgentBeamShell theme={beamTheme} active>
+      <div className="agent-view-panel" style={{ padding: 0, height: '100%', width: '100%', maxWidth: 'none', margin: 0, overflow: 'hidden' }}>
+        <iframe
+          key={reloadKey}
+          ref={iframeRef}
+          src={src}
+          title="WinPilot"
+          style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+          allow="clipboard-read; clipboard-write"
+        />
+      </div>
+    </AgentBeamShell>
   );
 }
+
+function AgentBeamShell({ children, theme, active }: { children: React.ReactNode; theme: 'dark' | 'light'; active: boolean }) {
+  return (
+    <BorderBeam
+      size="pulse-outside"
+      colorVariant="ocean"
+      theme={theme}
+      strength={0.42}
+      duration={2.8}
+      borderRadius={18}
+      active={active}
+      style={{ height: '100%', width: '100%', display: 'block', overflow: 'visible' }}
+    >
+      <div style={beamChildSurface}>
+        {children}
+      </div>
+    </BorderBeam>
+  );
+}
+
+const beamChildSurface: React.CSSProperties = {
+  height: '100%',
+  width: '100%',
+  overflow: 'hidden',
+  borderRadius: 18,
+  border: '1px solid var(--border-primary)',
+  background: 'var(--bg-primary)',
+};
 
 const centered: React.CSSProperties = {
   height: '100%',
