@@ -48,7 +48,7 @@ def test_run_state_batch_with_final_observe_is_ready():
     assert state.guidance() == ""
 
 
-def test_run_state_batch_with_final_zoom_is_ready():
+def test_run_state_batch_with_final_zoom_still_needs_semantic_verify():
     from winpilot.agent.run_state import RunStateMachine
 
     state = RunStateMachine()
@@ -58,8 +58,8 @@ def test_run_state_batch_with_final_zoom_is_ready():
         json.dumps({"ok": True, "metrics": {"action_count": 2}}),
     )
 
-    assert state.phase == "ready"
-    assert state.unverified_actions == 0
+    assert state.phase == "need_observe"
+    assert state.unverified_actions == 1
 
 
 def test_run_state_batch_verified_result_is_ready():
@@ -76,7 +76,20 @@ def test_run_state_batch_verified_result_is_ready():
     assert state.unverified_actions == 0
 
 
-def test_run_state_observe_resets_pending_unverified_count():
+def test_run_state_semantic_observe_resets_pending_unverified_count():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool("click", {"x": 1, "y": 2}, json.dumps({"ok": True, "verified": False}))
+    assert state.unverified_actions == 1
+
+    state.after_tool("observe", {}, json.dumps({"ok": True, "text": "real semantic state"}))
+
+    assert state.phase == "ready"
+    assert state.unverified_actions == 0
+
+
+def test_run_state_zoom_does_not_clear_pending_unverified_count():
     from winpilot.agent.run_state import RunStateMachine
 
     state = RunStateMachine()
@@ -85,8 +98,8 @@ def test_run_state_observe_resets_pending_unverified_count():
 
     state.after_tool("zoom", {"x": 1, "y": 2, "width": 10, "height": 10}, json.dumps({"ok": True}))
 
-    assert state.phase == "ready"
-    assert state.unverified_actions == 0
+    assert state.phase == "need_observe"
+    assert state.unverified_actions == 1
 
 
 def test_run_state_done_rejection_is_not_terminal_done():

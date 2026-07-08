@@ -50,6 +50,10 @@ OBSERVE_TOOLS = {
     "zoom",
     "coordinate_diagnostics",
 }
+PASSIVE_PIXEL_OBSERVE_TOOLS = {
+    "screenshot",
+    "zoom",
+}
 
 
 def _now_ms() -> int:
@@ -81,7 +85,7 @@ def _batch_last_action(args: dict) -> str:
 
 def _batch_has_semantic_observe(args: dict) -> bool:
     last = _batch_last_action(args)
-    return last in {"observe", "read_text", "vlm_describe", "zoom", "screenshot"}
+    return last in {"observe", "read_text", "vlm_describe"}
 
 
 def _batch_has_expect(args: dict) -> bool:
@@ -97,6 +101,10 @@ def _batch_has_expect(args: dict) -> bool:
             if isinstance(payload.get("expect"), dict):
                 return True
     return False
+
+
+def _passive_observe_verifies_pending_actions(data: dict[str, Any]) -> bool:
+    return data.get("verified") is True or data.get("matches") is True
 
 
 @dataclass
@@ -158,6 +166,20 @@ class RunStateMachine:
             return
 
         if name in OBSERVE_TOOLS:
+            if (
+                self.unverified_actions > 0
+                and name in PASSIVE_PIXEL_OBSERVE_TOOLS
+                and not _passive_observe_verifies_pending_actions(data)
+            ):
+                self._transition(
+                    "need_observe",
+                    name,
+                    (
+                        f"{name} captured pixels but did not prove "
+                        f"{self.unverified_actions} pending action(s)"
+                    ),
+                )
+                return
             self.unverified_actions = 0
             self._transition("ready", name)
             return

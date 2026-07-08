@@ -134,6 +134,56 @@ def test_complete_subgoal_all_done_returns_terminal_done():
     assert result.terminal == "done"
 
 
+def test_complete_subgoal_rejects_unchecked_question_step():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="complete this quiz in the visible app")
+    session.plan = planner.Plan(["Answer question 2"])
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is False
+    assert result.terminal is None
+    assert "explicit current evidence" in result.text
+
+
+def test_complete_subgoal_rejects_unchecked_submit_when_completion_below_100():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="complete the visible form")
+    session.plan = planner.Plan(["Submit the form"])
+    session.visible_evidence_ledger = [
+        {
+            "source": "execute_subgoal:evidence_packet",
+            "target": "completion rate 60%",
+            "snippet": "completion rate 60%",
+        }
+    ]
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is False
+    assert result.terminal is None
+    assert "completion_rate=60%" in result.text
+
+
+def test_complete_subgoal_rejects_pending_unverified_action_without_check():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="complete the visible GUI task")
+    session.plan = planner.Plan(["finish the current UI state"])
+    session.run_state = SimpleNamespace(unverified_actions=2)
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is False
+    assert result.terminal is None
+    assert "2 GUI action" in result.text
+
+
 def test_complete_subgoal_ignores_invented_drawing_file_check_without_requested_path(monkeypatch):
     import winpilot.agent.tools as tools_mod
     from winpilot.agent import planner
