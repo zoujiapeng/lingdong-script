@@ -163,6 +163,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._llm_trace_index = 0                    # local forensic trace files
         self.max_steps_override = max_steps_override
         self.run_state = RunStateMachine()
+        self.session.run_state = self.run_state
         # Coding is now an in-process runtime capability of this AgentRunner,
         # not a separate sub-agent / runner loop.
         self._is_coding = self.runtime_profile.coding

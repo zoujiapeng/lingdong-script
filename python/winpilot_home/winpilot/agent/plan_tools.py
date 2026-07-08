@@ -33,6 +33,58 @@ _CURRENT_CONTROLLER_VISIBLE_SOURCES = {
     "execute_subgoal:visual_color",
 }
 _FILE_CHECK_KEYS = {"file_exists"}
+_FORM_OR_QUIZ_CONTEXT_RE = re.compile(
+    r"("
+    r"answer\s+(?:the\s+)?question|question\s*\d+|\bq\s*\d+\b|"
+    r"quiz|exam|survey|form|multiple\s+choice|single\s+choice|"
+    r"\u7b54\u9898|\u9898\u76ee|\u7b2c\s*\d+\s*\u9898|"
+    r"\u5355\u9009|\u591a\u9009|\u5224\u65ad|\u8003\u8bd5|"
+    r"\u95ee\u5377|\u8868\u5355|\u4f5c\u4e1a"
+    r")",
+    re.IGNORECASE,
+)
+_SUBMIT_OR_SAVE_RE = re.compile(
+    r"("
+    r"submit|turn\s+in|hand\s+in|save|"
+    r"\u63d0\u4ea4|\u4ea4\u5377|\u4fdd\u5b58"
+    r")",
+    re.IGNORECASE,
+)
+_COMPLETION_RATE_RE = re.compile(
+    r"(?:\u5b8c\u6210\u7387|completion\s*(?:rate)?)\s*[:\uff1a]?\s*(\d{1,3})\s*%",
+    re.IGNORECASE,
+)
+
+
+def _is_coding_runtime(session) -> bool:
+    profile = getattr(session, "runtime_profile", None)
+    return bool(getattr(profile, "coding", False))
+
+
+def _looks_like_form_or_quiz_context(task: str, goal: str) -> bool:
+    return bool(_FORM_OR_QUIZ_CONTEXT_RE.search(f"{task}\n{goal}"))
+
+
+def _looks_like_submit_or_save_goal(goal: str) -> bool:
+    return bool(_SUBMIT_OR_SAVE_RE.search(goal or ""))
+
+
+def _latest_completion_rate(ledger: list[dict] | None) -> int | None:
+    if not isinstance(ledger, list):
+        return None
+    for item in reversed(ledger):
+        if not isinstance(item, dict):
+            continue
+        text = f"{item.get('target') or ''}\n{item.get('snippet') or ''}"
+        match = _COMPLETION_RATE_RE.search(text)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            continue
+        return max(0, min(100, value))
+    return None
 
 
 def _file_check_paths(check: dict | None) -> list[str]:
@@ -227,6 +279,39 @@ class PlanToolMixin:
             return False, "historical visible evidence missing: " + ", ".join(missing)
         return True, "historical visible evidence: " + ", ".join(targets)
 
+    def _unchecked_subgoal_blocker(self, goal: str) -> str:
+        """Return a reason when a no-check subgoal is unsafe to mark done."""
+        pending = int(getattr(getattr(self, "run_state", None), "unverified_actions", 0) or 0)
+        if pending > 0:
+            return (
+                f"{pending} GUI action(s) are still unverified. Use observe/read_text "
+                "or an explicit check before marking this subgoal complete."
+            )
+        if _is_coding_runtime(self):
+            return ""
+        task = str(getattr(self, "task", "") or "")
+        completion_rate = _latest_completion_rate(getattr(self, "visible_evidence_ledger", []))
+        if _looks_like_submit_or_save_goal(goal) and completion_rate is not None and completion_rate < 100:
+            return (
+                f"recent page evidence says completion_rate={completion_rate}%, "
+                "so a save/submit/finish subgoal cannot be marked complete yet."
+            )
+        if _looks_like_form_or_quiz_context(task, goal):
+            detail = (
+                "form/question workflows need explicit current evidence. "
+                "Revise this plan step with a check, or verify current question/selection/"
+                "completion text with observe/read_text/execute_subgoal first."
+            )
+            if completion_rate is not None:
+                detail += f" Latest completion_rate evidence is {completion_rate}%."
+            return detail
+        if _looks_like_submit_or_save_goal(goal):
+            return (
+                "save/submit/finish subgoals need explicit current evidence "
+                "such as visible success text, final state, or a verified file/result."
+            )
+        return ""
+
     def _t_revise_plan(self, args: dict) -> ToolResult:
         steps = args.get("steps") or []
         if not isinstance(steps, list) or not steps:
@@ -289,6 +374,21 @@ class PlanToolMixin:
                 return ToolResult(
                     f"子目标 {index} 核验未通过（{outcome.detail}）——尚未真正完成，"
                     "请先达成该子目标再标完成，不要跳步。")
+        elif not ignored_file_check:
+            blocker = self._unchecked_subgoal_blocker(goal)
+            if blocker:
+                BUS.publish(
+                    "agent_plan",
+                    action="subgoal_check",
+                    index=index,
+                    verified=False,
+                    detail=blocker,
+                    source="unchecked_subgoal_guard",
+                )
+                return ToolResult(
+                    f"Subgoal {index} has no check and is not safe to mark complete: "
+                    f"{blocker}"
+                )
         self.plan.complete(index)
         BUS.publish("agent_plan", action="complete", index=index,
                     plan=self.plan.snapshot())
