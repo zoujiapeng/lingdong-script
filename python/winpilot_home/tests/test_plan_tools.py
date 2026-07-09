@@ -134,6 +134,28 @@ def test_complete_subgoal_all_done_returns_terminal_done():
     assert result.terminal == "done"
 
 
+def test_complete_subgoal_is_idempotent_after_controller_completion(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    monkeypatch.setattr(tools_mod, "verify", _false_verify())
+    session = ToolSession(task="drag a desktop folder icon to the top right")
+    session.hwnd = 123
+    session.plan = planner.Plan([
+        {
+            "goal": "drag the desktop folder icon to the top right",
+            "check": {"file_exists": r"C:\Users\Public\Desktop\WinPilotPerfDrag_Eval"},
+        }
+    ])
+    session.plan.complete(1)
+
+    result = session._t_complete_subgoal({"index": 1})
+
+    assert session.plan.steps[0]["done"] is True
+    assert result.terminal == "done"
+
+
 def test_complete_subgoal_rejects_unchecked_question_step():
     from winpilot.agent import planner
     from winpilot.agent.tools import ToolSession

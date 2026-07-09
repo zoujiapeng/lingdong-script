@@ -479,6 +479,20 @@ def test_input_done_requires_required_visible_text(monkeypatch):
     assert runner._done_rejects == 1
 
 
+def test_required_visible_payloads_extracts_spoken_line_format():
+    from winpilot.agent.task_rules import _required_visible_payloads
+
+    task = (
+        "打开记事本，输入两行文字：第一行 WinPilot E2E 记录，"
+        "第二行 时间测试通过。然后通过GUI另存为桌面上的 WinPilotE2E_note.txt。"
+    )
+
+    assert _required_visible_payloads(task) == [
+        "WinPilot E2E 记录",
+        "时间测试通过",
+    ]
+
+
 def test_gui_only_shell_policy():
     from winpilot.agent.loop import (
         _gui_only_forbids_shell,
@@ -2175,3 +2189,83 @@ def test_gui_only_detects_bare_chinese_gui_operation_marker():
 
     assert _is_gui_only_task(task)
     assert _gui_only_blocked_hotkey(task, ["ctrl", "r"])
+
+
+def test_desktop_drag_task_does_not_force_accept_after_rejects():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "\u628a\u684c\u9762\u4e0a\u7684 WinPilotPerfDrag_Eval "
+        "\u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1"
+    )
+    runner._done_rejects = 99
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("max-reject side-effect tasks should not call the judge")
+
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_unverified is False
+    assert "unverified force-accept is disabled" in runner._last_done_reject_reason
+
+
+def test_drawing_task_does_not_force_accept_after_rejects():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("\u5728\u753b\u56fe\u753b\u5e03\u7a7a\u767d\u5904\u753b\u4e00\u4e2a\u5c0f\u4e09\u89d2\u5f62")
+    runner._done_rejects = 99
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("drawing force-accept should be disabled")
+
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_unverified is False
+    assert "unverified force-accept is disabled" in runner._last_done_reject_reason
+
+
+def test_desktop_drag_done_accepts_controller_plan_evidence_without_full_ocr_name(monkeypatch):
+    from winpilot.agent import planner
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "\u628a\u684c\u9762\u4e0a\u7684 WinPilotPerfDrag_Eval "
+        "\u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1"
+    )
+    runner.session.plan = planner.Plan([
+        "\u663e\u793a\u684c\u9762",
+        "\u5c06 WinPilotPerfDrag_Eval \u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1",
+    ])
+    runner.session.plan.complete(1)
+    runner.session.plan.complete(2)
+    runner._steps_log = ["drag({\"x1\": 1757, \"y1\": 144, \"x2\": 1850, \"y2\": 92})"]
+    runner._recent_results = [
+        (
+            "drag",
+            (
+                '{"ok": true, "verified": true, "visual_change_detected": true, '
+                '"adjusted_drop_target": {"x": 1850, "y": 92, "adjusted": true}}'
+            ),
+        )
+    ]
+    monkeypatch.setattr(
+        runner,
+        "_fresh_done_screen",
+        lambda: 'Window: "Desktop"\n[1] listitem "WinPilot.." center=(1850,92) bbox=(1805,59,94,67)',
+    )
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("deterministic desktop drag evidence should skip judge")
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True

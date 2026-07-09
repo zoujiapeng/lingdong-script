@@ -345,7 +345,7 @@ def _required_visible_payloads(task: str) -> list[str]:
     low = text.lower()
     line_re = (
         r"\u7b2c[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\d]+"
-        r"\u884c\s*[=:\uff1a\uff1d]\s*([^\uff0c,\u3002\uff1b;\r\n]+)"
+        r"\u884c\s*(?:[=:\uff1a\uff1d]\s*)?([^\uff0c,\u3002\uff1b;\r\n]+)"
     )
     payloads = [match.strip() for match in re.findall(line_re, text) if match.strip()]
     if any(trigger in low for trigger in ("type", "input", "write", "fill")):
