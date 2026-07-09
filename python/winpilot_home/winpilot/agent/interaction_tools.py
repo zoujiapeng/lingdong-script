@@ -12,6 +12,7 @@ from ..action import executor, verify
 from ..perception import vision_cv
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture
+from .task_rules import _is_desktop_icon_drag_task
 from .tool_result import ToolResult
 
 
@@ -382,6 +383,17 @@ class InteractionToolMixin:
         capture_fn = _tools_attr("capture", capture)
         x1, y1 = int(args["x1"]), int(args["y1"])
         x2, y2 = int(args["x2"]), int(args["y2"])
+        adjusted_drop = self._desktop_icon_safe_drop_target(x1, y1, x2, y2)
+        if adjusted_drop and not adjusted_drop.get("adjusted", True):
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "stage": "drop_target",
+                "error": adjusted_drop.get("reason", "unsafe desktop icon drop target"),
+                "adjusted_drop_target": adjusted_drop,
+            }))
+        if adjusted_drop:
+            x2, y2 = adjusted_drop["x"], adjusted_drop["y"]
         points = args.get("points") if isinstance(args.get("points"), list) else None
         duration = float(args.get("duration", 0.4))
         region = self._drag_feedback_region(x1, y1, x2, y2, points)
@@ -392,6 +404,8 @@ class InteractionToolMixin:
             logger.debug("drag pre-capture failed: %s", exc)
         result = executor_mod.drag(x1, y1, x2, y2, duration_s=duration,
                                    points=points, hwnd=self.hwnd)
+        if adjusted_drop:
+            result["adjusted_drop_target"] = adjusted_drop
         if before is not None:
             try:
                 time.sleep(0.12)
@@ -447,6 +461,104 @@ class InteractionToolMixin:
         right = max(xs) + pad
         bottom = max(ys) + pad
         return Region(left, top, max(1, right - left), max(1, bottom - top)).clamp_to_screen()
+
+    def _desktop_icon_safe_drop_target(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+    ) -> dict[str, Any] | None:
+        if not _is_desktop_icon_drag_task(getattr(self, "task", "")):
+            return None
+        snapshot = getattr(self, "snapshot", None)
+        if snapshot is None:
+            return None
+        title = str(getattr(snapshot, "title", "") or "")
+        elements = list(getattr(snapshot, "elements", []) or [])
+        is_desktop = title == "Program Manager" or any(
+            "list" in str(getattr(elem, "role", "") or "").casefold()
+            and str(getattr(elem, "text", "") or "") in {"桌面", "Desktop"}
+            for elem in elements
+        )
+        if not is_desktop:
+            return None
+        icons = [
+            elem for elem in elements
+            if "listitem" in str(getattr(elem, "role", "") or "").casefold()
+            and int(getattr(elem, "width", 0) or 0) >= 32
+            and int(getattr(elem, "height", 0) or 0) >= 32
+        ]
+        if not icons:
+            return None
+
+        def hits_icon(px: int, py: int, pad: int = 12) -> bool:
+            for elem in icons:
+                left = int(getattr(elem, "left", 0) or 0) - pad
+                top = int(getattr(elem, "top", 0) or 0) - pad
+                right = left + int(getattr(elem, "width", 0) or 0) + pad * 2
+                bottom = top + int(getattr(elem, "height", 0) or 0) + pad * 2
+                if left <= px <= right and top <= py <= bottom:
+                    return True
+            return False
+
+        if not hits_icon(x2, y2):
+            return None
+
+        region = getattr(snapshot, "region", None)
+        left = int(getattr(region, "left", 0) or 0)
+        top = int(getattr(region, "top", 0) or 0)
+        width = int(getattr(region, "width", 1920) or 1920)
+        height = int(getattr(region, "height", 1080) or 1080)
+        right = left + width
+        bottom = top + height
+        task_text = str(getattr(self, "task", "") or "")
+        wants_top_right = (
+            "top-right" in task_text.casefold()
+            or "top right" in task_text.casefold()
+            or "右上" in task_text
+        )
+        x_start = min(right - 36, max(left + 36, x2))
+        y_start = min(bottom - 96, max(top + 36, y2))
+        candidates: list[tuple[int, int]] = []
+        if wants_top_right:
+            for y in range(top + 40, min(bottom - 96, top + int(height * 0.42)), 42):
+                for x in range(right - 40, max(left + int(width * 0.62), left + 40), -42):
+                    candidates.append((x, y))
+        for dy in (0, 42, -42, 84, -84, 126, 168, 210):
+            for dx in (0, -42, 42, -84, 84, -126, 126, -168, 168, -210, 210):
+                candidates.append((x_start + dx, y_start + dy))
+
+        seen: set[tuple[int, int]] = set()
+        safe: list[tuple[int, int]] = []
+        for px, py in candidates:
+            px = min(right - 24, max(left + 24, int(px)))
+            py = min(bottom - 96, max(top + 24, int(py)))
+            key = (px, py)
+            if key in seen:
+                continue
+            seen.add(key)
+            if hits_icon(px, py):
+                continue
+            if abs(px - x1) < 48 and abs(py - y1) < 48:
+                continue
+            safe.append(key)
+        if not safe:
+            return {
+                "x": x2,
+                "y": y2,
+                "adjusted": False,
+                "reason": "drop target overlaps another desktop icon and no nearby empty point was found",
+            }
+        safe.sort(key=lambda p: (abs(p[0] - x2) + abs(p[1] - y2), abs(p[0] - (right - 40)), p[1]))
+        nx, ny = safe[0]
+        return {
+            "x": nx,
+            "y": ny,
+            "adjusted": True,
+            "from": [x2, y2],
+            "reason": "desktop icon drop target overlapped another icon; adjusted to nearby empty desktop space",
+        }
 
     def _t_draw_strokes(self, args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)

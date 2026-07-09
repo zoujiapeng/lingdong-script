@@ -252,12 +252,8 @@ class TestDoneGate:
         assert result is True
         assert runner._done_verified is True
 
-    def test_done_force_accepted_after_max_rejects(self):
-        """After done_max_rejects bounces the done is accepted but flagged.
-
-        The max_rejects gate runs before the communication-task quick checks,
-        so we patch CONFIG to return a fixed max_rejects=2 and set _done_rejects=2.
-        """
+    def test_done_force_accept_disabled_after_max_rejects(self):
+        """Communication tasks must not turn repeated rejects into fake success."""
         runner = _make_runner()
         runner._recent_results = []
         runner._done_rejects = 2
@@ -278,8 +274,9 @@ class TestDoneGate:
             client = MagicMock()
             result = runner._verify_done(client, steps_left=10)
 
-        assert result is True
-        assert runner._done_unverified is True
+        assert result is False
+        assert runner._done_unverified is False
+        assert "unverified force-accept is disabled" in runner._last_done_reject_reason
 
 
 # ---------------------------------------------------------------------------

@@ -293,6 +293,51 @@ def test_fast_controller_type_into_element_clicks_clears_and_types():
     assert out["controller_state"]["phase"] == "verified"
 
 
+def test_type_into_element_append_newline_moves_caret_to_end_first():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Untitled - Notepad",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=4, role="edit", text="first line", cx=500, cy=300)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            if name == "type_text":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true, "verified": false}')
+
+    out = FastGuiController(Session()).execute([
+        {
+            "type_into_element": {
+                "label": "editor",
+                "role": "edit",
+                "text": "\nsecond line",
+                "clear": False,
+            }
+        }
+    ])
+
+    assert out["ok"]
+    assert calls == [
+        ("click", {"element_id": 4, "button": "left", "double": False}),
+        ("hotkey", {"keys": ["ctrl", "end"]}),
+        ("type_text", {"text": "\nsecond line"}),
+    ]
+    data = out["results"][0]["data"]
+    assert data["controller_internal_action_count"] == 3
+    assert data["subresults"][1]["purpose"] == "move_to_end_before_append"
+
+
 def test_fast_controller_type_into_element_rejects_wildcard_prefix_after_clear():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -2671,3 +2716,55 @@ def test_select_color_reuses_cached_palette_button(monkeypatch):
     assert len(clicks) == 4
     assert clicks[0] == clicks[2]  # cached palette opener reused for red
     assert all(click.get("skip_screen_delta") is True for click in clicks)
+
+
+def test_desktop_icon_drag_adjusts_drop_away_from_existing_icon():
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(
+        task=(
+            "\u628a\u684c\u9762\u4e0a\u7684 WinPilotPerfDrag_Eval "
+            "\u6587\u4ef6\u5939\u56fe\u6807\u62d6\u52a8\u5230\u684c\u9762\u53f3\u4e0a\u89d2\u9644\u8fd1"
+        )
+    )
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Program Manager",
+        region=Region(0, 0, 1920, 1080),
+        elements=[
+            UIElement(
+                elem_id=1,
+                source="uia",
+                role="listitem",
+                text="WinPilotPerfDrag_Eval",
+                cx=1757,
+                cy=144,
+                left=1710,
+                top=111,
+                width=94,
+                height=67,
+            ),
+            UIElement(
+                elem_id=2,
+                source="uia",
+                role="listitem",
+                text="\u671f\u672b\u590d\u4e60",
+                cx=1850,
+                cy=50,
+                left=1805,
+                top=5,
+                width=94,
+                height=67,
+            ),
+        ],
+    )
+
+    out = session._desktop_icon_safe_drop_target(1757, 144, 1850, 50)
+
+    assert out is not None
+    assert out["adjusted"] is True
+    assert (out["x"], out["y"]) != (1850, 50)
+    assert not (1793 <= out["x"] <= 1911 and -7 <= out["y"] <= 84)

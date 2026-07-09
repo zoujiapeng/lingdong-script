@@ -385,6 +385,14 @@ class DoneVerifierMixin:
         saw_visual_change = self._evidence_has_true_flag(normalized, "visual_change_detected")
         if not (saw_drag and saw_visual_change):
             return False
+        plan = getattr(getattr(self, "session", None), "plan", None)
+        plan_done = bool(plan is not None and plan.all_done())
+        controller_done = (
+            "auto-completed desktop drag plan item" in normalized
+            or "adjusted_drop_target" in normalized
+        )
+        if plan_done or controller_done:
+            return True
         wants_top_right = any(term in (self.task or "").casefold() for term in ("top-right", "top right")) \
             or "\u53f3\u4e0a" in (self.task or "")
         sw, sh = screen_size()
@@ -553,6 +561,21 @@ class DoneVerifierMixin:
         logger.info("done 被核验拦截(第%d次): %s", self._done_rejects, reason)
         return False
 
+    def _allows_unverified_done_force_accept(self) -> bool:
+        if _is_drawing_task(self.task):
+            return False
+        if _is_desktop_icon_drag_task(self.task):
+            return False
+        if _is_communication_task(self.task):
+            return False
+        if _is_gui_search_task(self.task):
+            return False
+        if _required_visible_payloads(self.task) or _required_literal_tokens(self.task):
+            return False
+        if _required_image_paths(self.task):
+            return False
+        return True
+
     def _verify_done(self, client, steps_left: int = 99) -> bool:
         """Independently verify a ``done`` claim before accepting it."""
         cfg = _config()
@@ -560,6 +583,20 @@ class DoneVerifierMixin:
             return True
         max_rejects = int(cfg.get("agent", "done_max_rejects", default=2))
         if self._done_rejects >= max_rejects:
+            if not self._allows_unverified_done_force_accept():
+                reason = (
+                    "Done was rejected repeatedly and this task has real GUI side effects; "
+                    "unverified force-accept is disabled. Continue repairing or fail with "
+                    "the exact missing evidence."
+                )
+                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
+                self._last_done_reject_reason = reason
+                self._done_rejects += 1
+                self.messages.append({
+                    "role": "user",
+                    "content": f"[done check failed] {reason}",
+                })
+                return False
             reason = (
                 "Done force-accepted after done_max_rejects; result is marked "
                 f"unverified (done_rejects={self._done_rejects})."
@@ -595,10 +632,6 @@ class DoneVerifierMixin:
         screen = self._fresh_done_screen()
         if not self._verify_visible_payloads(screen, evidence):
             return False
-        if not self._verify_required_literal_tokens(screen, evidence):
-            return False
-        if self._visible_state_has_deterministic_done_evidence(screen, evidence):
-            return True
         if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
             reason = (
                 "Desktop icon drag accepted from deterministic evidence: target "
@@ -606,6 +639,10 @@ class DoneVerifierMixin:
             )
             BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
             self._done_verified = True
+            return True
+        if not self._verify_required_literal_tokens(screen, evidence):
+            return False
+        if self._visible_state_has_deterministic_done_evidence(screen, evidence):
             return True
         if not self._verify_gui_search_done(screen):
             return False

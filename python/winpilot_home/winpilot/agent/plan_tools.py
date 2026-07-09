@@ -328,6 +328,18 @@ class PlanToolMixin:
         index = int(args.get("index", -1))
         if not (1 <= index <= len(self.plan.steps)):
             return ToolResult(f"子目标序号 {index} 无效。\n{self.plan.render()}")
+        if self.plan.steps[index - 1].get("done"):
+            BUS.publish("agent_plan", action="complete", index=index,
+                        plan=self.plan.snapshot(), already_done=True)
+            if self.plan.all_done():
+                return ToolResult(
+                    f"Subgoal {index} was already completed; all subgoals are complete.\n"
+                    f"{self.plan.render()}",
+                    terminal="done",
+                )
+            return ToolResult(
+                f"Subgoal {index} was already completed.\n{self.plan.render()}"
+            )
         check_expect = self.plan.check_for(index)
         goal = str(self.plan.steps[index - 1].get("goal") or "")
         ignored_file_check, ignored_detail = _spurious_drawing_file_check(

@@ -164,6 +164,19 @@ def _input_presence_error(visible_text: str, target_text: str) -> str:
     return "typed text was not visible after input"
 
 
+def _should_move_to_end_before_typing(text: str, action: dict[str, Any]) -> bool:
+    """For append-style entry, place the caret at the document/input end.
+
+    Clicking a text editor before typing can leave the caret in the middle or
+    preserve a selection. When the requested text starts with a newline, the
+    caller is almost certainly appending another line rather than replacing the
+    current contents.
+    """
+    if _truthy(action.get("append") or action.get("move_to_end")):
+        return True
+    return str(text or "").startswith(("\n", "\r"))
+
+
 def _color_mask(image: np.ndarray, color: str) -> np.ndarray | None:
     if image is None or getattr(image, "size", 0) == 0:
         return None
@@ -804,6 +817,7 @@ class FastGuiController:
             if k not in {
                 "text", "text_input", "value", "clear", "replace",
                 "clear_existing", "clear_method", "expect",
+                "append", "move_to_end",
             }
         }
         internal: list[dict[str, Any]] = []
@@ -955,6 +969,26 @@ class FastGuiController:
                     "blocked": True,
                     "stage": "clear",
                     "error": "type_into_element could not delete selected text",
+                    "via": "type_into_element",
+                    "subresults": internal,
+                    "controller_internal_action_count": len(internal),
+                }
+                return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+        elif _should_move_to_end_before_typing(text, action):
+            move_result = self._dispatch("hotkey", {"keys": ["ctrl", "end"]})
+            move_data = _json_dict(move_result.text)
+            internal.append({
+                "action": "hotkey",
+                "purpose": "move_to_end_before_append",
+                "ok": not _failed(move_result),
+                "data": move_data if move_data else {"preview": move_result.text[:240]},
+            })
+            if _failed(move_result):
+                payload = {
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "append_position",
+                    "error": "type_into_element could not move caret to end before append",
                     "via": "type_into_element",
                     "subresults": internal,
                     "controller_internal_action_count": len(internal),
