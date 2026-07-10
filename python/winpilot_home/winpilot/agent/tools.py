@@ -214,10 +214,34 @@ class ToolSession(
                 def capture_pressed_state() -> None:
                     probe_started = time.monotonic()
                     pressed_frame = capture_fn(region)
+                    probe_capture_ms = int((time.monotonic() - probe_started) * 1000)
                     context["_screen_delta_press_frames"].append(pressed_frame)
                     context["_screen_delta_press_capture_ms"].append(
-                        int((time.monotonic() - probe_started) * 1000)
+                        probe_capture_ms
                     )
+                    pressed_delta = changed_regions(
+                        frame,
+                        pressed_frame,
+                        root_region=region,
+                        pixel_thresh=getattr(controller.watcher, "pixel_thresh", 12),
+                    )
+                    if pressed_delta.changed and hasattr(controller.watcher, "record_action_delta"):
+                        try:
+                            controller.watcher.record_action_delta(
+                                pressed_delta,
+                                region,
+                                capture_ms=probe_capture_ms,
+                                diff_ms=pressed_delta.elapsed_ms,
+                                evidence_frame=pressed_frame,
+                                transient=True,
+                            )
+                        except TypeError:
+                            controller.watcher.record_action_delta(
+                                pressed_delta,
+                                region,
+                                capture_ms=probe_capture_ms,
+                                diff_ms=pressed_delta.elapsed_ms,
+                            )
 
                 context["_screen_delta_press_probe"] = capture_pressed_state
             else:

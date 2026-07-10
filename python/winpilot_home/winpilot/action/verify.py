@@ -18,18 +18,21 @@ Expect DSL (keys may be combined; all must pass):
 from __future__ import annotations
 
 import re
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import win32gui
 
 from ..config import CONFIG
-from ..perception import fusion, groundtruth, ocr, vision_cv, win32
+from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, screen_size, window_region
 
 _POLL_INTERVAL_S = 0.35
+_FAST_POLL_INTERVAL_S = 0.08
+_FAST_ESCALATION_S = 0.75
 _DEFAULT_TIMEOUT_S = 6.0
 _COLOR_DEFAULT_TOLERANCE = 40
 
@@ -83,6 +86,12 @@ def _match_visible_text_precise(needle: str, text: str) -> bool:
             corrected_line = norm_line.translate(table)
             if corrected_needle == corrected_line:
                 return True
+            if (
+                corrected_needle.endswith("1")
+                and norm_line.endswith("t")
+                and corrected_needle[:-1] == corrected_line[:-1]
+            ):
+                return True
     return False
 
 
@@ -98,6 +107,7 @@ class VerifyOutcome:
     detail: str
     method: str = ""           # which dimension confirmed/refuted (uia/ocr/win32/cv)
     elapsed_ms: int = 0
+    trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,7 +115,179 @@ class VerifyOutcome:
             "detail": self.detail,
             "method": self.method,
             "elapsed_ms": self.elapsed_ms,
+            "trace": dict(self.trace),
         }
+
+
+class _AsyncTextProbe:
+    """Run OCR on watcher-triggered ROIs while UIA verification continues."""
+
+    def __init__(
+        self,
+        watcher: Any,
+        after_change_ms: int = 0,
+        needles: list[str] | None = None,
+    ) -> None:
+        self.watcher = watcher
+        self.after_change_ms = max(0, int(after_change_ms))
+        self.needles = [str(item) for item in (needles or []) if str(item).strip()]
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._started = False
+        self._ready = False
+        self._texts: list[str] = []
+        self._elapsed_ms = 0
+        self._evidence_count = 0
+        self._processed_count = 0
+        self._generation = 0
+        self._source = ""
+        self._sample_texts: list[str] = []
+        self._error = ""
+
+    def maybe_start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+        generation = 0
+        change_generation = 0
+        action_generation = 0
+        status_reader = getattr(self.watcher, "status", None)
+        if callable(status_reader):
+            try:
+                status = status_reader() or {}
+                change_generation = int(status.get("last_change_ms") or 0)
+                action_generation = int(status.get("last_action_change_ms") or 0)
+                generation = max(change_generation, action_generation)
+            except Exception:
+                generation = 0
+        if self.after_change_ms and generation <= self.after_change_ms:
+            return
+        crops: list[tuple[Any, Region]] = []
+        source = ""
+        selected_generation = 0
+        action_is_fresh = (
+            not self.after_change_ms
+            or action_generation > self.after_change_ms
+        )
+        change_is_fresh = (
+            not self.after_change_ms
+            or change_generation > self.after_change_ms
+        )
+        action_reader = getattr(self.watcher, "action_evidence", None)
+        if callable(action_reader) and action_is_fresh:
+            try:
+                action_crops, transient = action_reader(1500)
+                if transient and action_crops:
+                    crops = list(action_crops)
+                    source = "action-transient"
+                    selected_generation = action_generation
+            except Exception:
+                crops = []
+        reader = getattr(self.watcher, "recent_evidence", None)
+        if callable(reader) and change_is_fresh:
+            if not crops:
+                try:
+                    crops = list(reader(1500) or [])
+                    if crops:
+                        source = "watcher-change"
+                        selected_generation = change_generation
+                except Exception:
+                    crops = []
+        if not crops:
+            if callable(action_reader) and action_is_fresh:
+                try:
+                    action_crops, _transient = action_reader(1500)
+                    crops = list(action_crops or [])
+                    if crops:
+                        source = "action-change"
+                        selected_generation = action_generation
+                except Exception:
+                    crops = []
+        if not crops:
+            return
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._evidence_count = len(crops[:4])
+            self._generation = selected_generation or generation
+            self._source = source
+
+        def worker() -> None:
+            started = time.monotonic()
+            texts: list[str] = []
+            processed_count = 0
+            error = ""
+            try:
+                for image, evidence_region in crops[:4]:
+                    recognized = ocr.recognize(
+                        image,
+                        origin=(evidence_region.left, evidence_region.top),
+                    )
+                    crop_texts = [
+                        str(element.text or "").strip()
+                        for element in recognized
+                        if str(element.text or "").strip()
+                    ]
+                    texts.extend(crop_texts)
+                    for start in range(len(crop_texts)):
+                        for width in (2, 3):
+                            segment = crop_texts[start:start + width]
+                            if len(segment) == width:
+                                texts.append(" ".join(segment))
+                    processed_count += 1
+                    if any(
+                        _match_visible_text(needle, candidate)
+                        for needle in self.needles
+                        for candidate in texts
+                    ):
+                        break
+            except Exception as exc:
+                error = str(exc)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            with self._lock:
+                self._texts = list(dict.fromkeys(texts))
+                self._sample_texts = self._texts[:8]
+                self._processed_count = processed_count
+                self._elapsed_ms = elapsed_ms
+                self._error = error
+                self._ready = True
+                self._done.set()
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="verify-predictive-ocr",
+        ).start()
+
+    def match(self, needle: str) -> bool:
+        with self._lock:
+            texts = list(self._texts) if self._ready else []
+        return any(_match_visible_text(needle, text) for text in texts)
+
+    def wait_match(self, needle: str, timeout_s: float = 0.45) -> bool:
+        with self._lock:
+            started = self._started
+            ready = self._ready
+        if started and not ready:
+            self._done.wait(max(0.0, float(timeout_s)))
+        return self.match(needle)
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "started": self._started,
+                "ready": self._ready,
+                "evidence_count": self._evidence_count,
+                "processed_count": self._processed_count,
+                "generation": self._generation,
+                "after_change_ms": self.after_change_ms,
+                "source": self._source,
+                "text_count": len(self._texts),
+                "sample_texts": list(self._sample_texts),
+                "elapsed_ms": self._elapsed_ms,
+                "error": self._error,
+            }
 
 
 # ------------------------------------------------------------ target window
@@ -145,12 +327,39 @@ def _full_screen_region() -> Region:
 
 
 # --------------------------------------------------------- condition checks
-def _find_text(needle: str, hwnd: int | None, level: int) -> tuple[bool, str]:
+def _find_text(
+    needle: str,
+    hwnd: int | None,
+    level: int,
+    text_probe: _AsyncTextProbe | None = None,
+) -> tuple[bool, str]:
     """Search for text with escalating perception. Returns (found, method)."""
     target = _target_hwnd(hwnd)
 
-    # Level 0: fused observe with whatever dimensions are enabled (fast path).
+    if text_probe is not None:
+        text_probe.maybe_start()
+        if text_probe.match(needle):
+            return True, "predictive-ocr"
+
+    # Level 0a: a property-indexed UIA query avoids walking the entire tree and
+    # skips all image dimensions. It covers native text plus browser DOM text
+    # and input values, while the fused/OCR paths below retain broad recall.
     if target:
+        try:
+            for element in uia.find_text(target, needle):
+                if _match_visible_text(needle, element.text):
+                    return True, "uia-query"
+        except Exception as exc:
+            logger.debug("verify: UIA text query failed: %s", exc)
+    if text_probe is not None:
+        text_probe.maybe_start()
+        if text_probe.match(needle):
+            return True, "predictive-ocr"
+
+    # Level 0b: fused observe with whatever dimensions are enabled.
+    if target and (text_probe is None or level >= 1):
+        if text_probe is not None and text_probe.wait_match(needle):
+            return True, "predictive-ocr"
         try:
             snapshot = fusion.observe(target, include_icons=False)
             for element in snapshot.elements:
@@ -158,6 +367,8 @@ def _find_text(needle: str, hwnd: int | None, level: int) -> tuple[bool, str]:
                     return True, element.source
         except Exception as exc:
             logger.debug("verify: fused observe 失败: %s", exc)
+    if text_probe is not None and text_probe.match(needle):
+        return True, "predictive-ocr"
 
     if level < 1 or not _ocr_enabled():
         return False, ""
@@ -239,15 +450,21 @@ def _check_screen_stable(spec: Any, hwnd: int | None,
 
 # ----------------------------------------------------------------- evaluate
 def _eval_once(expect: dict, hwnd: int | None, level: int,
-               deadline: float | None = None) -> VerifyOutcome:
+               deadline: float | None = None,
+               text_probe: _AsyncTextProbe | None = None) -> VerifyOutcome:
     """Evaluate every condition in the expect dict once (AND semantics)."""
+    methods: list[str] = []
     for key, value in expect.items():
         if key == "timeout_s":
             continue
         if key == "text_appears":
-            ok, method = _find_text(str(value), hwnd, level)
+            ok, method = _find_text(
+                str(value), hwnd, level, text_probe=text_probe,
+            )
             if not ok:
                 return VerifyOutcome(False, f'未找到文字 "{value}"', method)
+            if method:
+                methods.append(method)
         elif key == "text_gone":
             ok, method = _find_text(str(value), hwnd, max(level, 1))
             if ok:
@@ -256,22 +473,27 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
             ok, title = _check_window(str(value), want_present=True)
             if not ok:
                 return VerifyOutcome(False, f'窗口 "{value}" 未出现', "win32")
+            methods.append("win32")
         elif key == "window_gone":
             ok, title = _check_window(str(value), want_present=False)
             if not ok:
                 return VerifyOutcome(False, f'窗口 "{title}" 仍存在', "win32")
+            methods.append("win32")
         elif key == "window_title":
             ok, title = _check_window_title(str(value), hwnd)
             if not ok:
                 return VerifyOutcome(False, f'foreground window title "{title}" does not contain "{value}"', "win32")
+            methods.append("win32")
         elif key == "screen_stable":
             ok, detail = _check_screen_stable(value, hwnd, deadline=deadline)
             if not ok:
                 return VerifyOutcome(False, f"画面未稳定 ({detail})", "cv")
+            methods.append("cv")
         elif key == "color_match":
             ok, detail = _check_color(value, hwnd)
             if not ok:
                 return VerifyOutcome(False, f"颜色不符 ({detail})", "cv")
+            methods.append("cv")
         elif key in groundtruth.GROUNDTRUTH_KEYS:
             # Deterministic ground truth (filesystem/process/shell) — the
             # strongest signal; no perception escalation needed. Bound any
@@ -280,14 +502,21 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
             ok, detail = groundtruth.check(key, value, timeout_s=remaining)
             if not ok:
                 return VerifyOutcome(False, f"{key} 未满足 ({detail})", "groundtruth")
+            methods.append("groundtruth")
         else:
             return VerifyOutcome(False, f"不支持的验证条件: {key}", "")
-    return VerifyOutcome(True, "全部条件满足", "")
+    return VerifyOutcome(
+        True,
+        "全部条件满足",
+        "+".join(dict.fromkeys(methods)),
+    )
 
 
 def check(expect: dict, hwnd: int | None = None,
           timeout_s: float = _DEFAULT_TIMEOUT_S,
-          stop_event=None) -> VerifyOutcome:
+          stop_event=None,
+          watcher: Any = None,
+          watcher_change_baseline: int = 0) -> VerifyOutcome:
     """Poll the expect conditions until verified or timeout, escalating
     perception level (0=fused → 1=window OCR → 2=full-screen OCR) over time.
 
@@ -296,23 +525,58 @@ def check(expect: dict, hwnd: int | None = None,
     started = time.monotonic()
     deadline = started + timeout_s
     level = 0
+    polls = 0
+    text_probe = (
+        _AsyncTextProbe(
+            watcher,
+            after_change_ms=watcher_change_baseline,
+            needles=[str(expect.get("text_appears") or "")],
+        )
+        if watcher is not None and "text_appears" in expect
+        else None
+    )
     last = VerifyOutcome(False, "未开始", "")
+
+    def finish(outcome: VerifyOutcome) -> VerifyOutcome:
+        outcome.trace = {
+            "poll_count": polls,
+            "final_level": level,
+            "predictive_ocr": text_probe.to_dict() if text_probe is not None else {},
+        }
+        return outcome
+
     while True:
-        last = _eval_once(expect, hwnd, level, deadline=deadline)
+        polls += 1
+        last = _eval_once(
+            expect,
+            hwnd,
+            level,
+            deadline=deadline,
+            text_probe=text_probe,
+        )
         elapsed = time.monotonic() - started
         last.elapsed_ms = int(elapsed * 1000)
         if last.verified or time.monotonic() >= deadline:
             if last.verified and not last.method:
                 last.method = "fused"
-            return last
+            return finish(last)
         if stop_event is not None and stop_event.is_set():
-            return last  # Stop requested → don't keep polling
-        # escalate: >1/3 of budget → window OCR; >2/3 → full-screen OCR
-        if elapsed > timeout_s * 2 / 3:
+            return finish(last)  # Stop requested → don't keep polling
+        # Watcher-backed checks let UIA and ROI OCR race first. Escalate to a
+        # full fused/window pass only if neither cheap path resolves promptly.
+        level_one_after = (
+            min(timeout_s / 3, _FAST_ESCALATION_S)
+            if text_probe else timeout_s / 3
+        )
+        level_two_after = (
+            min(timeout_s * 2 / 3, _FAST_ESCALATION_S * 2)
+            if text_probe else timeout_s * 2 / 3
+        )
+        if elapsed > level_two_after:
             level = 2
-        elif elapsed > timeout_s / 3:
+        elif elapsed > level_one_after:
             level = 1
-        time.sleep(_POLL_INTERVAL_S)
+        time.sleep(_FAST_POLL_INTERVAL_S if text_probe else _POLL_INTERVAL_S)
 
 
 # --------------------------------------------------------------- post state
@@ -332,6 +596,8 @@ def run_with_verify(
     retryable: bool = True,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     stop_event=None,
+    watcher: Any = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute an action, verify the expectation, retry on failure.
 
@@ -350,6 +616,18 @@ def run_with_verify(
 
     while True:
         attempts += 1
+        watcher_change_baseline = 0
+        if watcher is not None:
+            status_reader = getattr(watcher, "status", None)
+            if callable(status_reader):
+                try:
+                    status = status_reader() or {}
+                    watcher_change_baseline = max(
+                        int(status.get("last_change_ms") or 0),
+                        int(status.get("last_action_change_ms") or 0),
+                    )
+                except Exception:
+                    watcher_change_baseline = 0
         try:
             result = action() or {}
         except Exception as exc:
@@ -369,15 +647,24 @@ def run_with_verify(
 
         # Shrink the verify budget to whatever's left of the overall cap.
         budget = max(1.0, min(timeout_s, overall_deadline - time.monotonic()))
-        outcome = check(expect, hwnd=hwnd, timeout_s=budget, stop_event=stop_event)
+        outcome = check(
+            expect,
+            hwnd=hwnd,
+            timeout_s=budget,
+            stop_event=stop_event,
+            watcher=watcher,
+            watcher_change_baseline=watcher_change_baseline,
+        )
         BUS.publish(
             "verify",
+            run_id=run_id,
             action=name,
             attempt=attempts,
             verified=outcome.verified,
             detail=outcome.detail,
             method=outcome.method,
             elapsed_ms=outcome.elapsed_ms,
+            trace=outcome.trace,
         )
         if outcome.verified:
             break
@@ -393,5 +680,6 @@ def run_with_verify(
         response["verified"] = outcome.verified
         response["verify_detail"] = outcome.detail
         response["verify_method"] = outcome.method
+        response["verify_trace"] = outcome.trace
     response["post_state"] = post_state_summary()
     return response

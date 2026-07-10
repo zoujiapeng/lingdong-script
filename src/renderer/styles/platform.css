@@ -272,7 +272,7 @@
 .arp-runtime-focus span { color: var(--arp-text-muted); }
 .arp-runtime-focus code { overflow: hidden; color: var(--arp-text-soft); text-overflow: ellipsis; white-space: nowrap; }
 
-.arp-metrics-row { margin-top: 10px; display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); border: 1px solid var(--arp-line); border-radius: 7px; background: var(--arp-surface); overflow: hidden; }
+.arp-metrics-row { margin-top: 10px; display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); border: 1px solid var(--arp-line); border-radius: 7px; background: var(--arp-surface); overflow: hidden; }
 .arp-metrics-row.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 14px 0; }
 .arp-metric { min-width: 0; min-height: 55px; padding: 9px 11px; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid var(--arp-line); }
 .arp-metric:last-child { border-right: 0; }
@@ -472,8 +472,9 @@
   .arp-metrics-row .arp-metric { border-right: 1px solid var(--arp-line); border-bottom: 1px solid var(--arp-line); }
   .arp-metrics-row:not(.compact) .arp-metric:nth-child(3n),
   .arp-metrics-row.compact .arp-metric:nth-child(2n) { border-right: 0; }
-  .arp-metrics-row:not(.compact) .arp-metric:nth-child(n+7),
+  .arp-metrics-row:not(.compact) .arp-metric:nth-child(n+10),
   .arp-metrics-row.compact .arp-metric:nth-child(n+5) { border-bottom: 0; }
+  .arp-metrics-row:not(.compact) .arp-metric:last-child { border-right: 0; }
   .arp-studio-toolbar { padding: 0 7px; gap: 5px; }
   .arp-studio-title { min-width: 54px; flex: 1; overflow: hidden; }
   .arp-studio-title > svg, .arp-studio-title span { display: none; }

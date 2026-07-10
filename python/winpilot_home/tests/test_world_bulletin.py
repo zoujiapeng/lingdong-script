@@ -224,6 +224,7 @@ def test_tool_session_preserves_pressed_state_when_after_frame_reverts():
 
     def click_with_transient_probe(_args):
         assert executor._sample_pressed_state() is True
+        assert session._fast_gui_controller.watcher.delta.changed is True
         return ToolResult('{"ok": true, "verified": false}')
 
     session._t_click = click_with_transient_probe

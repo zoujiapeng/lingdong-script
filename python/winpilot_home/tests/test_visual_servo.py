@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import numpy as np
 
@@ -68,7 +70,7 @@ def test_visual_servo_tracks_one_hover_move_and_confirms_before_click():
         capture_fn=capture,
         move_fn=move,
         ocr_fn=lambda *_args, **_kwargs: [],
-        config=ServoConfig(iterations=4, settle_ms=5),
+        config=ServoConfig(iterations=4, settle_ms=5, hover_guard_ms=5),
     )
 
     assert target is not None
@@ -89,7 +91,7 @@ def test_visual_servo_fails_closed_when_target_disappears():
         capture_fn=capture,
         move_fn=move,
         ocr_fn=lambda *_args, **_kwargs: [],
-        config=ServoConfig(iterations=3, settle_ms=5, strict=True),
+        config=ServoConfig(iterations=3, settle_ms=5, hover_guard_ms=5, strict=True),
     )
 
     assert target is None
@@ -107,7 +109,7 @@ def test_visual_servo_waits_through_stale_frame_after_hover_trigger():
         capture_fn=capture,
         move_fn=move,
         ocr_fn=lambda *_args, **_kwargs: [],
-        config=ServoConfig(iterations=5, settle_ms=5),
+        config=ServoConfig(iterations=5, settle_ms=5, hover_guard_ms=5),
     )
 
     assert target is not None
@@ -116,3 +118,47 @@ def test_visual_servo_waits_through_stale_frame_after_hover_trigger():
     assert trace["iterations"][0]["stable_streak"] == 1
     assert len(trace["iterations"]) >= 3
     assert (220, 140) in moves
+
+
+def test_visual_servo_does_not_converge_before_hover_guard_expires():
+    initial = _initial_element()
+    state = {"triggered_at": None, "left": 70, "top": 85}
+
+    def render():
+        image = np.full((320, 600, 3), 245, dtype=np.uint8)
+        left, top = state["left"], state["top"]
+        cv2.rectangle(image, (left, top), (left + 60, top + 30), (30, 30, 30), 2)
+        cv2.line(image, (left + 8, top + 8), (left + 52, top + 22), (0, 0, 0), 2)
+        cv2.circle(image, (left + 15, top + 15), 4, (0, 0, 0), -1)
+        return image
+
+    def capture(region):
+        if state["triggered_at"] is not None:
+            elapsed = (time.monotonic() - state["triggered_at"]) * 1000
+            if elapsed >= 55:
+                state.update(left=190, top=125)
+        frame = render()
+        return frame[region.top:region.bottom, region.left:region.right].copy()
+
+    def move(_x, _y):
+        if state["triggered_at"] is None:
+            state["triggered_at"] = time.monotonic()
+
+    target, trace = track_visual_target(
+        initial,
+        ["Export"],
+        capture_fn=capture,
+        move_fn=move,
+        ocr_fn=lambda *_args, **_kwargs: [],
+        config=ServoConfig(
+            iterations=6,
+            settle_ms=20,
+            hover_guard_ms=60,
+        ),
+    )
+
+    assert target is not None
+    assert (target.cx, target.cy) == (220, 140)
+    assert trace["confirmed"] is True
+    assert trace["iterations"][0]["hover_guard_complete"] is False
+    assert any(item["corrected"] for item in trace["iterations"])

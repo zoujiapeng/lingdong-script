@@ -112,6 +112,8 @@ class ScreenWatcher:
         self._bulletin = ScreenBulletin()
         self._last_event_ms = 0
         self._action_evidence: list[tuple[np.ndarray, Region]] = []
+        self._recent_evidence: list[tuple[np.ndarray, Region]] = []
+        self._recent_evidence_ms = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -150,6 +152,11 @@ class ScreenWatcher:
             self._prev = frame
             self._prev_region = region
         self._update_bulletin(delta, region, capture_ms, diff_ms)
+        if delta.changed:
+            crops = self._crop_evidence(frame, delta, region)
+            with self._lock:
+                self._recent_evidence = crops
+                self._recent_evidence_ms = _now_ms()
         return delta
 
     def record_action_delta(
@@ -176,23 +183,7 @@ class ScreenWatcher:
             action_delta=True,
         )
         if evidence_frame is not None and delta.changed:
-            root_left = region.left if region is not None else 0
-            root_top = region.top if region is not None else 0
-            frame_h, frame_w = evidence_frame.shape[:2]
-            crops: list[tuple[np.ndarray, Region]] = []
-            for changed in delta.regions[:8]:
-                pad = 24
-                left = max(root_left, changed.left - pad)
-                top = max(root_top, changed.top - pad)
-                right = min(root_left + frame_w, changed.right + pad)
-                bottom = min(root_top + frame_h, changed.bottom + pad)
-                if right <= left or bottom <= top:
-                    continue
-                crop = evidence_frame[
-                    top - root_top:bottom - root_top,
-                    left - root_left:right - root_left,
-                ].copy()
-                crops.append((crop, Region(left, top, right - left, bottom - top)))
+            crops = self._crop_evidence(evidence_frame, delta, region)
             with self._lock:
                 self._action_evidence = crops
                 self._bulletin.action_evidence_transient = bool(transient)
@@ -203,6 +194,39 @@ class ScreenWatcher:
             if age > max(0, int(max_age_ms)):
                 return [], False
             return list(self._action_evidence), bool(self._bulletin.action_evidence_transient)
+
+    def recent_evidence(self, max_age_ms: int = 1500) -> list[tuple[np.ndarray, Region]]:
+        """Return the newest watcher-triggered ROI crops for async perception."""
+        with self._lock:
+            age = _now_ms() - self._recent_evidence_ms if self._recent_evidence_ms else 10**9
+            if age > max(0, int(max_age_ms)):
+                return []
+            return list(self._recent_evidence)
+
+    @staticmethod
+    def _crop_evidence(
+        frame: np.ndarray,
+        delta: ScreenDelta,
+        region: Region | None,
+    ) -> list[tuple[np.ndarray, Region]]:
+        root_left = region.left if region is not None else 0
+        root_top = region.top if region is not None else 0
+        frame_h, frame_w = frame.shape[:2]
+        crops: list[tuple[np.ndarray, Region]] = []
+        for changed in delta.regions[:8]:
+            pad = 24
+            left = max(root_left, changed.left - pad)
+            top = max(root_top, changed.top - pad)
+            right = min(root_left + frame_w, changed.right + pad)
+            bottom = min(root_top + frame_h, changed.bottom + pad)
+            if right <= left or bottom <= top:
+                continue
+            crop = frame[
+                top - root_top:bottom - root_top,
+                left - root_left:right - root_left,
+            ].copy()
+            crops.append((crop, Region(left, top, right - left, bottom - top)))
+        return crops
 
     def wait_for_change(self, timeout_s: float = 3.0, min_ratio: float = 0.0005) -> ScreenDelta:
         deadline = time.monotonic() + float(timeout_s)

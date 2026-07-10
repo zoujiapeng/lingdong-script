@@ -23,6 +23,7 @@ class ServoConfig:
     iterations: int = 4
     tolerance_px: int = 5
     settle_ms: int = 24
+    hover_guard_ms: int = 96
     search_radius_px: int = 180
     min_template_confidence: float = 0.74
     strict: bool = True
@@ -48,6 +49,7 @@ class ServoConfig:
             iterations=bounded_int("servo_iterations", 4, 1, 6),
             tolerance_px=bounded_int("servo_tolerance_px", 5, 1, 30),
             settle_ms=bounded_int("servo_settle_ms", 24, 5, 120),
+            hover_guard_ms=bounded_int("servo_hover_guard_ms", 96, 20, 300),
             search_radius_px=bounded_int("servo_search_radius_px", 180, 60, 420),
             min_template_confidence=max(0.55, min(0.96, confidence)),
             strict=strict,
@@ -305,9 +307,12 @@ def track_visual_target(
     source_counts: dict[str, int] = {}
     lost_reason = ""
     stable_streak = 0
+    hover_started_ms: int | None = None
 
     for index in range(config.iterations):
         move_fn(int(current.cx), int(current.cy))
+        if hover_started_ms is None:
+            hover_started_ms = _now_ms()
         sleep_fn(config.settle_ms / 1000.0)
         region = _search_region(current, config, expansion=1.0 if index else 1.2)
         capture_started = _now_ms()
@@ -339,11 +344,15 @@ def track_visual_target(
         dx = int(estimated.cx) - int(current.cx)
         dy = int(estimated.cy) - int(current.cy)
         corrected = abs(dx) > config.tolerance_px or abs(dy) > config.tolerance_px
+        hover_elapsed_ms = max(0, _now_ms() - hover_started_ms)
+        guard_complete = hover_elapsed_ms >= config.hover_guard_ms
         if corrected:
             corrections += 1
             stable_streak = 0
-        else:
+        elif guard_complete:
             stable_streak += 1
+        else:
+            stable_streak = 0
         iterations.append({
             "index": index + 1,
             "found": True,
@@ -352,6 +361,8 @@ def track_visual_target(
             "correction": {"dx": dx, "dy": dy},
             "corrected": corrected,
             "stable_streak": stable_streak,
+            "hover_elapsed_ms": hover_elapsed_ms,
+            "hover_guard_complete": guard_complete,
             "region": [region.left, region.top, region.width, region.height],
             "capture_ms": capture_ms,
             "estimate_ms": estimate_ms,
@@ -437,6 +448,7 @@ def track_visual_target(
         "enabled": True,
         "confirmed": confirmed,
         "strict": config.strict,
+        "hover_guard_ms": config.hover_guard_ms,
         "initial": {"x": int(initial.cx), "y": int(initial.cy)},
         "final": {"x": int(current.cx), "y": int(current.cy)},
         "corrected": corrections > 0,

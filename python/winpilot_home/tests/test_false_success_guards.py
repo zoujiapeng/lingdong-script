@@ -392,6 +392,218 @@ def test_text_appears_tolerates_ocr_separator_errors(monkeypatch):
     assert out.verified
 
 
+def test_text_appears_uses_indexed_uia_query_before_fusion(monkeypatch):
+    from winpilot.action import verify
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(
+        verify.uia,
+        "find_text",
+        lambda hwnd, text: [SimpleNamespace(text="VISUAL_SERVO_OK")],
+    )
+    monkeypatch.setattr(
+        verify.fusion,
+        "observe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("indexed UIA hit must skip full fusion")
+        ),
+    )
+
+    out = verify._eval_once(
+        {"text_appears": "VISUAL_SERVO_OK"},
+        hwnd=123,
+        level=0,
+    )
+
+    assert out.verified is True
+    assert out.method == "uia-query"
+
+
+def test_text_appears_uses_async_watcher_roi_ocr_before_full_fusion(monkeypatch):
+    import numpy as np
+
+    from winpilot.action import verify
+    from winpilot.utils.screenshot import Region
+
+    class Watcher:
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            assert max_age_ms == 1500
+            return [(
+                np.zeros((48, 180, 3), dtype=np.uint8),
+                Region(100, 200, 180, 48),
+            )]
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(verify.uia, "find_text", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        verify.ocr,
+        "recognize",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="CUSTOM ROI DONE")],
+    )
+    monkeypatch.setattr(
+        verify.fusion,
+        "observe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("predictive ROI hit must skip full fusion")
+        ),
+    )
+
+    out = verify.check(
+        {"text_appears": "CUSTOM_ROI_DONE"},
+        hwnd=123,
+        timeout_s=1.0,
+        watcher=Watcher(),
+    )
+
+    assert out.verified is True
+    assert out.method == "predictive-ocr"
+    assert out.trace["predictive_ocr"]["started"] is True
+    assert out.trace["predictive_ocr"]["ready"] is True
+    assert out.trace["predictive_ocr"]["evidence_count"] == 1
+    assert out.trace["predictive_ocr"]["processed_count"] == 1
+
+
+def test_predictive_verify_ignores_roi_from_before_action(monkeypatch):
+    import time
+
+    import numpy as np
+
+    from winpilot.action import verify
+    from winpilot.utils.screenshot import Region
+
+    state = {"generation": 100}
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {"last_change_ms": state["generation"]}
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            return [(
+                np.zeros((32, 120, 3), dtype=np.uint8),
+                Region(10, 20, 120, 32),
+            )]
+
+    monkeypatch.setattr(
+        verify.ocr,
+        "recognize",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="NEW RESULT")],
+    )
+    probe = verify._AsyncTextProbe(Watcher(), after_change_ms=100)
+
+    probe.maybe_start()
+    assert probe.to_dict()["started"] is False
+
+    state["generation"] = 101
+    probe.maybe_start()
+    deadline = time.monotonic() + 0.5
+    while not probe.to_dict()["ready"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert probe.match("NEW_RESULT") is True
+    assert probe.to_dict()["generation"] == 101
+
+
+def test_predictive_verify_validates_each_evidence_source_generation(monkeypatch):
+    import time
+
+    import numpy as np
+
+    from winpilot.action import verify
+    from winpilot.utils.screenshot import Region
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {"last_change_ms": 101, "last_action_change_ms": 99}
+
+        @staticmethod
+        def action_evidence(max_age_ms=1500):
+            raise AssertionError("stale transient evidence must not be queried")
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            return [(
+                np.zeros((32, 120, 3), dtype=np.uint8),
+                Region(200, 20, 120, 32),
+            )]
+
+    monkeypatch.setattr(
+        verify.ocr,
+        "recognize",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="FRESH RESULT")],
+    )
+    probe = verify._AsyncTextProbe(
+        Watcher(),
+        after_change_ms=100,
+        needles=["FRESH_RESULT"],
+    )
+
+    probe.maybe_start()
+    deadline = time.monotonic() + 0.5
+    while not probe.to_dict()["ready"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    trace = probe.to_dict()
+    assert probe.match("FRESH_RESULT") is True
+    assert trace["source"] == "watcher-change"
+    assert trace["generation"] == 101
+
+
+def test_predictive_verify_prioritizes_transient_roi_and_stops_after_match(monkeypatch):
+    import time
+
+    import numpy as np
+
+    from winpilot.action import verify
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    crops = [
+        (np.zeros((32, 160, 3), dtype=np.uint8), Region(10, 20, 160, 32)),
+        (np.zeros((32, 80, 3), dtype=np.uint8), Region(200, 20, 80, 32)),
+    ]
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {"last_change_ms": 200, "last_action_change_ms": 201}
+
+        @staticmethod
+        def action_evidence(max_age_ms=1500):
+            return crops, True
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            raise AssertionError("transient action evidence must win")
+
+    def recognize(_image, origin=(0, 0)):
+        calls.append(origin)
+        return [SimpleNamespace(text="PRESS PULSE ACTIVE T")]
+
+    monkeypatch.setattr(verify.ocr, "recognize", recognize)
+    probe = verify._AsyncTextProbe(
+        Watcher(),
+        after_change_ms=199,
+        needles=["PRESS_PULSE_ACTIVE_1"],
+    )
+    probe.maybe_start()
+    deadline = time.monotonic() + 0.5
+    while not probe.to_dict()["ready"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    trace = probe.to_dict()
+    assert probe.match("PRESS_PULSE_ACTIVE_1") is True
+    assert trace["source"] == "action-transient"
+    assert trace["evidence_count"] == 2
+    assert trace["processed_count"] == 1
+    assert len(calls) == 1
+
+
 def test_text_match_rejects_ambiguous_short_digits():
     from winpilot.action.verify import _match_visible_text
 
@@ -399,6 +611,7 @@ def test_text_match_rejects_ambiguous_short_digits():
     assert not _match_visible_text("0", "LOCAL_COUNTER_20")
     assert _match_visible_text("75765", "Calculator display: 75765")
     assert _match_visible_text("LOCAL_COUNTER_4", "LOCAL COUNTER 4")
+    assert _match_visible_text("PRESS_PULSE_ACTIVE_1", "PRESS PULSE ACTIVE T")
 
 
 def test_verify_ignores_unrelated_foreground_when_target_scoped(monkeypatch):
