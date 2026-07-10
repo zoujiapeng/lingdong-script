@@ -36,7 +36,8 @@ _CODING_BUILD = re.compile(
     re.IGNORECASE,
 )
 _COMMUNICATION_HINTS = (
-    "发信息", "发消息", "发送", "回复", "私信", "聊天", "邮件",
+    "发信息", "发消息", "发送", "发图片", "发截图", "发一张", "传图", "传文件",
+    "回复", "私信", "聊天", "邮件",
     "message", "send", "reply", "email", "chat",
 )
 _DRAWING_TASK_RE = re.compile(

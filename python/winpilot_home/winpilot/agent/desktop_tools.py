@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+from io import BytesIO
 from pathlib import Path
 
 from ..action import executor
@@ -49,8 +50,79 @@ class DesktopToolMixin:
 
     def _t_screenshot(self, args: dict) -> ToolResult:
         quality = int(args.get("quality", 75))
+        save_path = str(args.get("path") or "").strip()
+        if save_path:
+            target = Path(save_path).expanduser()
+            if not target.is_absolute():
+                return ToolResult("screenshot path must be absolute")
+            if target.suffix.casefold() not in {".png", ".jpg", ".jpeg"}:
+                return ToolResult("screenshot path must end in .png, .jpg, or .jpeg")
+            if target.exists() and not bool(args.get("overwrite")):
+                return ToolResult(f"screenshot path already exists: {target}")
+            if not target.parent.is_dir():
+                return ToolResult(f"screenshot directory does not exist: {target.parent}")
+            try:
+                region = None
+                hwnd = None
+                if bool(args.get("window")):
+                    hwnd = int(args.get("hwnd") or getattr(self, "hwnd", 0) or 0)
+                    if not hwnd:
+                        action_hwnd = getattr(self, "_action_hwnd", None)
+                        hwnd = int(action_hwnd() or 0) if callable(action_hwnd) else 0
+                    if not hwnd:
+                        return ToolResult("screenshot window=true requires an active target window")
+                    region = window_region(hwnd)
+                elif all(key in args for key in ("x", "y", "width", "height")):
+                    region = Region(
+                        int(args["x"]), int(args["y"]),
+                        int(args["width"]), int(args["height"]),
+                    ).clamp_to_screen()
+                frame = capture(region)
+                from PIL import Image
+
+                image = Image.fromarray(frame[:, :, ::-1].copy())
+                payload = BytesIO()
+                image_format = "PNG" if target.suffix.casefold() == ".png" else "JPEG"
+                save_options = {"format": image_format}
+                if image_format == "JPEG":
+                    save_options.update({"quality": max(1, min(100, quality)), "optimize": True})
+                image.save(payload, **save_options)
+                target.write_bytes(payload.getvalue())
+                result = {
+                    "ok": True,
+                    "path": str(target),
+                    "width": int(image.width),
+                    "height": int(image.height),
+                    "size_bytes": len(payload.getvalue()),
+                    "scope": "window" if hwnd else ("region" if region else "screen"),
+                }
+                if region is not None:
+                    result["region"] = {
+                        "left": region.left,
+                        "top": region.top,
+                        "width": region.width,
+                        "height": region.height,
+                    }
+                saved = getattr(self, "saved_screenshot_paths", None)
+                if isinstance(saved, list):
+                    saved.append(str(target))
+                    self.saved_screenshot_paths = saved[-12:]
+                return ToolResult(self._fmt(result))
+            except Exception as exc:
+                return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
         result = executor.screenshot_base64(quality=quality)
         self._fold_base64(result)
+        return ToolResult(self._fmt(result))
+
+    def _t_paste_image_file(self, args: dict) -> ToolResult:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return ToolResult("paste_image_file requires an absolute image path")
+        target = args.get("hwnd") or getattr(self, "hwnd", None)
+        if not target:
+            action_hwnd = getattr(self, "_action_hwnd", None)
+            target = action_hwnd() if callable(action_hwnd) else None
+        result = executor.paste_image_file(path, hwnd=int(target) if target else None)
         return ToolResult(self._fmt(result))
 
     def _t_hold_key(self, args: dict) -> ToolResult:

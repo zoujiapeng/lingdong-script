@@ -88,6 +88,10 @@ element and coordinates.
    nonvisual summary, OCR/UIA/CV, deterministic output, or the controller
    evidence packet. Do not add a separate observe/read_text when the current
    verified execute_subgoal already matched the required evidence.
+6. Preserve the order of multi-app requests. When the task says "do A, then
+   open B/send C", do not launch, search in, or mutate B until A has grounded
+   completion evidence and any required artifact (for example a saved screenshot)
+   exists. Finish the current app stage before changing the target window.
 
 # Action priority
 a) Click/type by grounded pixel coordinates — this works for
@@ -109,6 +113,11 @@ For chat apps specifically:
 - A single click may only highlight/select without opening. Use native vision,
   VLM, OCR/CV summaries, or UI structure to confirm a full chat pane with message
   history and an input box appeared.
+- When a task asks to send a screenshot/image, save it directly with
+  screenshot(path=absolute_png_path, window=true) while the source app is
+  focused. Do not use run_shell, Snipping Tool, or a guessed attachment icon.
+  Focus the chat input, call paste_image_file(path=absolute_png_path), then send
+  only after the pasted preview or a new chat-area change is grounded.
 - The message input box content is NOT visible to OCR — do not try to read it.
   Instead, type once, send (Enter or click Send), then observe and use grounded
   visual evidence to confirm the message appeared in the chat history.

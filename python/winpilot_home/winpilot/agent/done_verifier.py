@@ -546,6 +546,34 @@ class DoneVerifierMixin:
                 )
         return None
 
+    def _deterministic_image_send_verdict(self) -> tuple[bool, str] | None:
+        """Accept a sent image only with current paste and visible delivery evidence."""
+        if not _is_communication_task(self.task):
+            return None
+        task = str(self.task or "").casefold()
+        if not any(marker in task for marker in ("截图", "screenshot", "图片", "image", "photo", "照片")):
+            return None
+        history = list(getattr(self, "_tool_history", []) or [])
+        paste_index = next(
+            (
+                index for index in range(len(history) - 1, -1, -1)
+                if history[index][0] == "paste_image_file"
+                and '"ok": true' in str(history[index][2] or "").casefold()
+            ),
+            None,
+        )
+        if paste_index is None:
+            return False, "图片发送任务尚未成功执行 paste_image_file。"
+        after_paste = "\n".join(str(item[2] or "") for item in history[paste_index + 1:])
+        has_sent_marker = any(marker in after_paste.casefold() for marker in ("已发送", "发送成功", " sent"))
+        has_attachment_size = bool(re.search(r"\d+(?:\.\d+)?\s*(?:kb|mb)", after_paste, re.IGNORECASE))
+        target_match = re.search(r"(?:给|to)\s*(我的手机|[^，。,.\s]{2,20})", str(self.task or ""), re.IGNORECASE)
+        target = target_match.group(1) if target_match else ""
+        target_visible = not target or target in after_paste
+        if has_sent_marker and has_attachment_size and target_visible:
+            return True, "目标会话可见图片附件大小与“已发送”状态，且本轮已执行图片粘贴。"
+        return False, "图片已粘贴，但尚未看到当前目标会话中的附件大小和已发送状态。"
+
     def _call_done_judge(self, client, screen: str, recent: str, evidence: str) -> bool:
         cfg = _config()
         api = cfg.get("api", default={})
@@ -684,6 +712,14 @@ class DoneVerifierMixin:
         force_unverified = steps_left <= 2
 
         recent, evidence = self._done_evidence()
+        image_send_verdict = self._deterministic_image_send_verdict()
+        if image_send_verdict is not None:
+            passed, reason = image_send_verdict
+            if passed:
+                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+                self._done_verified = True
+                return True
+            return self._reject_done(reason, f"[完成核验未通过] {reason}")
         communication_verdict = self._deterministic_communication_verdict()
         if communication_verdict is not None:
             passed, reason = communication_verdict

@@ -142,4 +142,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Notice: built-in actions
   showNotification: (title: string, body: string) => ipcRenderer.invoke('notification:show', title, body),
+  notifyTaskbar: (title: string, body: string) => ipcRenderer.invoke('taskbar:notify', title, body),
 });

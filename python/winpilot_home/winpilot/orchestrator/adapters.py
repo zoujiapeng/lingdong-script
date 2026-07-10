@@ -55,7 +55,14 @@ def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
             max_steps_override = int(max_steps) if max_steps else None
         except (TypeError, ValueError):
             max_steps_override = None
-        runner = build_runner(goal, stop_event=stop_event, max_steps_override=max_steps_override)
+        graph = context.get("graph") if isinstance(context.get("graph"), dict) else {}
+        policy = graph.get("policy") if isinstance(graph.get("policy"), dict) else {}
+        runner = build_runner(
+            goal,
+            stop_event=stop_event,
+            max_steps_override=max_steps_override,
+            allow_shell_tools=bool(policy.get("allow_shell", False)),
+        )
         if on_runner:
             on_runner(runner)
         BUS.publish(

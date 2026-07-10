@@ -1433,6 +1433,32 @@ ipcMain.handle('notification:show', (_, title: string, body: string) => {
   } catch { return false; }
 });
 
+ipcMain.handle('taskbar:notify', (_, title: string, body: string) => {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return false;
+  try {
+    window.flashFrame(true);
+    const clearAttention = () => {
+      if (!window.isDestroyed()) window.flashFrame(false);
+    };
+    const notification = new Notification({
+      title: title || '灵动脚本',
+      body: body || '',
+      silent: false,
+    });
+    notification.on('click', () => {
+      if (!window.isVisible()) window.show();
+      window.focus();
+      clearAttention();
+    });
+    window.once('focus', clearAttention);
+    notification.show();
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 // --- Schedule IPC ---
 const SCHEDULES_FILE = path.join(app.getPath('userData'), 'schedules.json');
 

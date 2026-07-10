@@ -79,6 +79,7 @@ export interface ElectronAPI {
 
   // Notifications
   showNotification: (title: string, body: string) => Promise<void>;
+  notifyTaskbar: (title: string, body: string) => Promise<boolean>;
 
   // Agent control
   agentStart: (goal: string, config?: Record<string, any>, supervise?: boolean, steps?: any[]) => Promise<any>;
