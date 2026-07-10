@@ -210,6 +210,12 @@ class InteractionToolMixin:
             pass
         return self.hwnd
 
+    def _verification_watcher(self):
+        try:
+            return self._fast_controller().watcher
+        except Exception:
+            return None
+
     def _t_click(self, args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)
         verify_mod = _tools_attr("verify", verify)
@@ -286,7 +292,10 @@ class InteractionToolMixin:
 
         result = verify_mod.run_with_verify(
             "click", action, expect=args.get("expect"), hwnd=self.hwnd,
-            timeout_s=_expect_timeout(args), stop_event=self.stop_event)
+            retryable=bool(args.get("retryable", False)),
+            timeout_s=_expect_timeout(args), stop_event=self.stop_event,
+            watcher=self._verification_watcher(),
+            run_id=getattr(self, "run_id", None))
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示点击已执行，必须 observe 确认界面变化")
@@ -332,7 +341,8 @@ class InteractionToolMixin:
         result = verify_mod.run_with_verify(
             "type_text", action, expect=args.get("expect"),
             hwnd=self.hwnd, retryable=False, timeout_s=_expect_timeout(args),
-            stop_event=self.stop_event)
+            stop_event=self.stop_event, watcher=self._verification_watcher(),
+            run_id=getattr(self, "run_id", None))
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示输入动作已执行，必须 observe/read_text 确认文本位置")
@@ -370,7 +380,9 @@ class InteractionToolMixin:
         result = verify_mod.run_with_verify(
             "hotkey", action,
             expect=args.get("expect"), hwnd=self.hwnd, retryable=False,
-            timeout_s=_expect_timeout(args), stop_event=self.stop_event)
+            timeout_s=_expect_timeout(args), stop_event=self.stop_event,
+            watcher=self._verification_watcher(),
+            run_id=getattr(self, "run_id", None))
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示快捷键已发送，必须 observe/read_text 确认结果")

@@ -1396,6 +1396,12 @@ def test_screen_watcher_updates_bulletin_with_changed_roi():
     assert changed["top"] <= 205
     assert changed["left"] + changed["width"] >= 114
     assert changed["top"] + changed["height"] >= 213
+    evidence = watcher.recent_evidence()
+    assert evidence
+    crop, crop_region = evidence[0]
+    assert crop.size > 0
+    assert crop_region.left <= 106
+    assert crop_region.top <= 205
 
 
 def test_screen_watcher_keeps_recent_changed_roi_after_stable_sample():

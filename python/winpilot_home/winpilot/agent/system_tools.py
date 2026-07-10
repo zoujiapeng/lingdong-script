@@ -326,6 +326,7 @@ class SystemToolMixin:
             retryable=False,
             timeout_s=3.0,
             stop_event=self.stop_event,
+            run_id=getattr(self, "run_id", None),
         )
         launch_window = None
         if result.get("ok") and result.get("verified") is not True:

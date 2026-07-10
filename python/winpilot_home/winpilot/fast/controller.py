@@ -240,6 +240,7 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
         "action_target",
         "needs_observe",
         "verify_method",
+        "verify_trace",
         "controller_state",
         "subgoal",
         "element_cache",

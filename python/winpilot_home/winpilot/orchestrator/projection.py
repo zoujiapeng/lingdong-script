@@ -65,7 +65,13 @@ class RunProjectionStore:
                 "decision_latency_ms": [],
                 "action_latency_ms": [],
                 "post_verify_latency_ms": [],
+                "semantic_verify_latency_ms": [],
+                "screen_delta_latency_ms": [],
                 "screen_capture_latency_ms": [],
+                "semantic_verify_count": 0,
+                "semantic_verify_passed_count": 0,
+                "semantic_verify_uia_query_count": 0,
+                "semantic_verify_ocr_count": 0,
                 "replan_count": 0,
                 "skill_reuse_count": 0,
                 "skill_suggestion_count": 0,
@@ -150,11 +156,6 @@ class RunProjectionStore:
                 run["metrics"]["tool_latency_ms"] = run["metrics"]["tool_latency_ms"][-200:]
                 run["metrics"]["action_latency_ms"].append(elapsed)
                 run["metrics"]["action_latency_ms"] = run["metrics"]["action_latency_ms"][-200:]
-                result_meta = event.get("result_meta") if isinstance(event.get("result_meta"), dict) else {}
-                screen_delta = result_meta.get("screen_delta") if isinstance(result_meta.get("screen_delta"), dict) else {}
-                if screen_delta.get("elapsed_ms") is not None:
-                    run["metrics"]["post_verify_latency_ms"].append(int(screen_delta.get("elapsed_ms") or 0))
-                    run["metrics"]["post_verify_latency_ms"] = run["metrics"]["post_verify_latency_ms"][-200:]
             if event_type == "agent_batch_action":
                 run["metrics"]["batch_action_count"] += 1
                 run["metrics"]["tool_count"] += 1
@@ -200,14 +201,30 @@ class RunProjectionStore:
                 capture_ms = int(event.get("capture_latency_ms") or 0)
                 run["metrics"]["screen_capture_latency_ms"].append(capture_ms)
                 run["metrics"]["screen_capture_latency_ms"] = run["metrics"]["screen_capture_latency_ms"][-200:]
+            if event_type == "verify":
+                elapsed = max(0, int(event.get("elapsed_ms") or 0))
+                method = str(event.get("method") or "").casefold()
+                run["metrics"]["semantic_verify_count"] += 1
+                if event.get("verified") is True:
+                    run["metrics"]["semantic_verify_passed_count"] += 1
+                if "uia-query" in method:
+                    run["metrics"]["semantic_verify_uia_query_count"] += 1
+                if "ocr" in method:
+                    run["metrics"]["semantic_verify_ocr_count"] += 1
+                run["metrics"]["semantic_verify_latency_ms"].append(elapsed)
+                run["metrics"]["semantic_verify_latency_ms"] = run["metrics"]["semantic_verify_latency_ms"][-200:]
+                run["metrics"]["post_verify_latency_ms"].append(elapsed)
+                run["metrics"]["post_verify_latency_ms"] = run["metrics"]["post_verify_latency_ms"][-200:]
             if (
                 (event_type == "agent_recovery" and event.get("kind") == "structured_replan")
                 or (event_type == "agent_plan" and event.get("action") == "revise")
             ):
                 run["metrics"]["replan_count"] += 1
             if event_type == "screen_delta" and event.get("diff_latency_ms") is not None:
-                run["metrics"]["post_verify_latency_ms"].append(int(event.get("diff_latency_ms") or 0))
-                run["metrics"]["post_verify_latency_ms"] = run["metrics"]["post_verify_latency_ms"][-200:]
+                run["metrics"]["screen_delta_latency_ms"].append(
+                    max(0, int(event.get("diff_latency_ms") or 0))
+                )
+                run["metrics"]["screen_delta_latency_ms"] = run["metrics"]["screen_delta_latency_ms"][-200:]
             if event_type == "memory" and event.get("action") == "reuse":
                 run["metrics"]["skill_reuse_count"] += 1
             if event_type == "memory" and event.get("action") == "reuse_suggested":
@@ -365,6 +382,8 @@ class RunProjectionStore:
         decision_samples = metrics.pop("decision_latency_ms", [])
         action_samples = metrics.pop("action_latency_ms", [])
         verify_samples = metrics.pop("post_verify_latency_ms", [])
+        semantic_verify_samples = metrics.pop("semantic_verify_latency_ms", [])
+        screen_delta_samples = metrics.pop("screen_delta_latency_ms", [])
         capture_samples = metrics.pop("screen_capture_latency_ms", [])
         servo_samples = metrics.pop("visual_servo_latency_ms", [])
         metrics["tool_latency_avg_ms"] = round(sum(tool_samples) / len(tool_samples), 1) if tool_samples else 0
@@ -377,8 +396,17 @@ class RunProjectionStore:
         metrics["action_decision_latency_max_ms"] = max(decision_samples) if decision_samples else 0
         metrics["action_execution_latency_avg_ms"] = round(sum(action_samples) / len(action_samples), 1) if action_samples else 0
         metrics["action_execution_latency_max_ms"] = max(action_samples) if action_samples else 0
-        metrics["post_action_verify_latency_avg_ms"] = round(sum(verify_samples) / len(verify_samples), 1) if verify_samples else 0
-        metrics["post_action_verify_latency_max_ms"] = max(verify_samples) if verify_samples else 0
+        post_verify_samples = verify_samples or screen_delta_samples
+        metrics["post_action_verify_latency_avg_ms"] = round(sum(post_verify_samples) / len(post_verify_samples), 1) if post_verify_samples else 0
+        metrics["post_action_verify_latency_max_ms"] = max(post_verify_samples) if post_verify_samples else 0
+        metrics["semantic_verify_latency_avg_ms"] = round(
+            sum(semantic_verify_samples) / len(semantic_verify_samples), 1,
+        ) if semantic_verify_samples else 0
+        metrics["semantic_verify_latency_max_ms"] = max(semantic_verify_samples) if semantic_verify_samples else 0
+        metrics["screen_delta_latency_avg_ms"] = round(
+            sum(screen_delta_samples) / len(screen_delta_samples), 1,
+        ) if screen_delta_samples else 0
+        metrics["screen_delta_latency_max_ms"] = max(screen_delta_samples) if screen_delta_samples else 0
         metrics["visual_servo_latency_avg_ms"] = round(
             sum(servo_samples) / len(servo_samples), 1,
         ) if servo_samples else 0
@@ -387,10 +415,19 @@ class RunProjectionStore:
         perceptions = max(1, int(metrics.get("perception_count") or 0))
         suggestions = max(1, int(metrics.get("skill_suggestion_count") or 0))
         tools = max(1, int(metrics.get("tool_count") or 0))
+        verify_count = max(1, int(metrics.get("semantic_verify_count") or 0))
         metrics["replan_frequency"] = round(int(metrics.get("replan_count") or 0) / decisions, 4)
         metrics["vlm_call_frequency"] = round(int(metrics.get("vlm_call_count") or 0) / perceptions, 4)
         metrics["skill_reuse_rate"] = round(int(metrics.get("skill_reuse_count") or 0) / suggestions, 4)
         metrics["batch_action_ratio"] = round(min(1.0, int(metrics.get("batch_action_count") or 0) / tools), 4)
+        metrics["semantic_verify_fast_path_rate"] = round(
+            int(metrics.get("semantic_verify_uia_query_count") or 0) / verify_count,
+            4,
+        )
+        metrics["semantic_verify_ocr_rate"] = round(
+            int(metrics.get("semantic_verify_ocr_count") or 0) / verify_count,
+            4,
+        )
         anchor_lookups = int(metrics.get("anchor_cache_lookup_count") or 0)
         anchor_hits = int(metrics.get("anchor_cache_hit_count") or 0)
         anchor_latency_total = float(metrics.pop("anchor_cache_lookup_latency_total_ms", 0.0) or 0.0)

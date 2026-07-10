@@ -252,6 +252,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         <Metric label="Decision" value={metrics?.action_decision_latency_avg_ms || 0} unit="ms" />
         <Metric label="Execution" value={metrics?.action_execution_latency_avg_ms || 0} unit="ms" />
         <Metric label="Post verify" value={metrics?.post_action_verify_latency_avg_ms || 0} unit="ms" />
+        <Metric label="Verify fast" value={`${Math.round((metrics?.semantic_verify_fast_path_rate || 0) * 100)}%`} />
         <Metric label="Replan rate" value={`${Math.round((metrics?.replan_frequency || 0) * 100)}%`} />
         <Metric label="VLM rate" value={`${Math.round((metrics?.vlm_call_frequency || 0) * 100)}%`} />
         <Metric label="Skill reuse" value={`${Math.round((metrics?.skill_reuse_rate || 0) * 100)}%`} />

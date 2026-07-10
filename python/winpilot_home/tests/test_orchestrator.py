@@ -609,6 +609,8 @@ def test_run_projection_preserves_transient_roi_evidence():
     assert run is not None
     assert run["metrics"]["screen_capture_latency_avg_ms"] == 19
     assert run["metrics"]["post_action_verify_latency_avg_ms"] == 3
+    assert run["metrics"]["screen_delta_latency_avg_ms"] == 3
+    assert run["metrics"]["semantic_verify_latency_avg_ms"] == 0
     assert run["evidence"][-1] == {
         "type": "screenshot",
         "path": "press/evidence_001_transient_press_roi.jpg",
@@ -617,6 +619,36 @@ def test_run_projection_preserves_transient_roi_evidence():
         "transient": True,
         "ts": 2.0,
     }
+
+
+def test_run_projection_tracks_semantic_verify_method_and_true_latency():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "agent_start", "ts": 1.0, "run_id": "verify-fast",
+        "task": "Verify visible result",
+    })
+    store.on_event({
+        "type": "screen_delta", "ts": 2.0, "run_id": "verify-fast",
+        "changed": True, "capture_latency_ms": 22, "diff_latency_ms": 7,
+    })
+    store.on_event({
+        "type": "verify", "ts": 2.1, "run_id": "verify-fast",
+        "action": "click", "verified": True, "method": "uia-query",
+        "elapsed_ms": 207,
+    })
+
+    run = store.get("verify-fast")
+
+    assert run is not None
+    assert run["metrics"]["post_action_verify_latency_avg_ms"] == 207
+    assert run["metrics"]["semantic_verify_latency_avg_ms"] == 207
+    assert run["metrics"]["screen_delta_latency_avg_ms"] == 7
+    assert run["metrics"]["semantic_verify_count"] == 1
+    assert run["metrics"]["semantic_verify_passed_count"] == 1
+    assert run["metrics"]["semantic_verify_fast_path_rate"] == 1.0
+    assert run["metrics"]["semantic_verify_ocr_rate"] == 0.0
 
 
 def test_run_projection_records_predictive_transient_ocr():

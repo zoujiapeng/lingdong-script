@@ -267,6 +267,21 @@ def collect(hwnd: int) -> list[UIElement]:
 
 def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
     """Query exact UIA names without walking and materializing the full tree."""
+    return _query_text(hwnd, text, limit=limit, substring=False)
+
+
+def find_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
+    """Query visible UIA Name/Value text with case-insensitive substring matching."""
+    return _query_text(hwnd, text, limit=limit, substring=True)
+
+
+def _query_text(
+    hwnd: int,
+    text: str,
+    *,
+    limit: int,
+    substring: bool,
+) -> list[UIElement]:
     needle = str(text or "").strip()
     if not needle:
         return []
@@ -281,10 +296,30 @@ def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
             root_children = []
         has_modern_browser_tree = _has_modern_chromium_tree(root_children)
         client = auto_core._AutomationClient.instance()
-        condition = client.IUIAutomation.CreatePropertyCondition(
-            auto_core.PropertyId.NameProperty,
-            needle,
-        )
+        if substring:
+            flags = (
+                client.UIAutomationCore.PropertyConditionFlags_IgnoreCase
+                | client.UIAutomationCore.PropertyConditionFlags_MatchSubstring
+            )
+            name_condition = client.IUIAutomation.CreatePropertyConditionEx(
+                auto_core.PropertyId.NameProperty,
+                needle,
+                flags,
+            )
+            value_condition = client.IUIAutomation.CreatePropertyConditionEx(
+                auto_core.PropertyId.ValueValueProperty,
+                needle,
+                flags,
+            )
+            condition = client.IUIAutomation.CreateOrCondition(
+                name_condition,
+                value_condition,
+            )
+        else:
+            condition = client.IUIAutomation.CreatePropertyCondition(
+                auto_core.PropertyId.NameProperty,
+                needle,
+            )
         matches = root.Element.FindAll(
             client.UIAutomationCore.TreeScope_Descendants,
             condition,
@@ -302,7 +337,7 @@ def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
                 elements.append(element)
         return elements
     except Exception as exc:
-        logger.debug("UIA exact-name query failed hwnd=%s text=%r: %s", hwnd, needle, exc)
+        logger.debug("UIA text query failed hwnd=%s text=%r: %s", hwnd, needle, exc)
         return []
 
 

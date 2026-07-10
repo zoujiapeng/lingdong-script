@@ -109,6 +109,16 @@ export interface RunMetrics {
   action_execution_latency_max_ms: number;
   post_action_verify_latency_avg_ms: number;
   post_action_verify_latency_max_ms: number;
+  semantic_verify_count: number;
+  semantic_verify_passed_count: number;
+  semantic_verify_uia_query_count: number;
+  semantic_verify_ocr_count: number;
+  semantic_verify_latency_avg_ms: number;
+  semantic_verify_latency_max_ms: number;
+  semantic_verify_fast_path_rate: number;
+  semantic_verify_ocr_rate: number;
+  screen_delta_latency_avg_ms: number;
+  screen_delta_latency_max_ms: number;
   replan_count: number;
   replan_frequency: number;
   vlm_call_frequency: number;
