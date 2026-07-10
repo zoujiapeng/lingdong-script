@@ -62,7 +62,8 @@
     "min_confidence": 0.55
   },
   "search": {
-    "everything_es_path": ""
+    "everything_es_path": "",
+    "everything_exe_path": ""
   },
   "coding": {
     "enabled": true,

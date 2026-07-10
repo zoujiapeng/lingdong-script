@@ -466,6 +466,89 @@ def test_text_appears_uses_async_watcher_roi_ocr_before_full_fusion(monkeypatch)
     assert out.trace["predictive_ocr"]["processed_count"] == 1
 
 
+def test_visible_and_groundtruth_checks_overlap_without_early_success(monkeypatch):
+    import threading
+
+    from winpilot.action import verify
+
+    groundtruth_started = threading.Event()
+    visible_started = threading.Event()
+
+    def check_groundtruth(key, value, timeout_s=15.0):
+        assert key == "file_exists"
+        assert value == r"C:\demo\result.txt"
+        groundtruth_started.set()
+        assert visible_started.wait(timeout=1.0)
+        return True, "exists"
+
+    def find_visible(_hwnd, _needle):
+        visible_started.set()
+        assert groundtruth_started.wait(timeout=1.0)
+        return [SimpleNamespace(text="VISIBLE RESULT")]
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(verify.groundtruth, "check", check_groundtruth)
+    monkeypatch.setattr(verify.uia, "find_text", find_visible)
+    monkeypatch.setattr(
+        verify.fusion,
+        "observe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("indexed UIA evidence should skip full fusion")
+        ),
+    )
+
+    out = verify.check(
+        {
+            "text_appears": "VISIBLE_RESULT",
+            "file_exists": r"C:\demo\result.txt",
+        },
+        hwnd=123,
+        timeout_s=1.0,
+    )
+
+    assert out.verified is True
+    assert out.method == "uia-query+groundtruth"
+    trace = out.trace["parallel_groundtruth"]
+    assert trace["started"] is True
+    assert trace["check_count"] == 1
+    assert trace["completed_count"] == 1
+    assert trace["checks"]["file_exists"]["ok"] is True
+
+
+def test_shell_true_verification_is_not_parallelized(monkeypatch):
+    from winpilot.action import verify
+
+    order = []
+
+    def find_visible(_hwnd, _needle):
+        order.append("visible")
+        return [SimpleNamespace(text="VISIBLE RESULT")]
+
+    def check_groundtruth(key, value, timeout_s=15.0):
+        order.append(key)
+        assert value == "Write-Output true"
+        return True, "true"
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr(verify.uia, "find_text", find_visible)
+    monkeypatch.setattr(verify.groundtruth, "check", check_groundtruth)
+
+    out = verify.check(
+        {
+            "text_appears": "VISIBLE_RESULT",
+            "shell_true": "Write-Output true",
+        },
+        hwnd=123,
+        timeout_s=1.0,
+    )
+
+    assert out.verified is True
+    assert order == ["visible", "shell_true"]
+    assert out.trace["parallel_groundtruth"] == {}
+
+
 def test_predictive_verify_ignores_roi_from_before_action(monkeypatch):
     import time
 

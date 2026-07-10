@@ -36,7 +36,7 @@ from .agent.router import build_runner
 from .agent.session import SESSION
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
 from .eval import summary as eval_summary
-from .perception import ocr, vlm
+from .perception import ocr, search, vlm
 from .recorder import human as human_mod
 from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
@@ -86,6 +86,9 @@ def _warm_perception_dimensions() -> None:
         started = ocr.warm_async()
         if started:
             logger.info("OCR 后台预热已启动")
+
+    if search.warm_async():
+        logger.info("Everything search IPC warmup started")
 
 
 @asynccontextmanager

@@ -27,6 +27,61 @@ import {
 let _cachedRendererState: any = null;
 let _rendererReady = false;
 let apiServer: http.Server | null = null;
+const _taskbarNotifiedRuns = new Set<string>();
+
+type TaskbarNotificationKind = 'success' | 'error' | 'info';
+
+function notifyTaskbarAttention(
+  title: string,
+  body: string,
+  kind: TaskbarNotificationKind = 'info',
+  runId = '',
+): boolean {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return false;
+  if (runId && _taskbarNotifiedRuns.has(runId)) return true;
+  if (runId) {
+    if (_taskbarNotifiedRuns.size >= 200) _taskbarNotifiedRuns.clear();
+    _taskbarNotifiedRuns.add(runId);
+  }
+
+  let cleared = false;
+  const clearAttention = () => {
+    if (cleared || window.isDestroyed()) return;
+    cleared = true;
+    window.removeListener('focus', clearAttention);
+    window.flashFrame(false);
+    window.setProgressBar(-1);
+  };
+
+  try {
+    const mode = kind === 'error' ? 'error' : kind === 'success' ? 'normal' : 'paused';
+    window.setProgressBar(1, { mode });
+    if (!window.isFocused()) window.flashFrame(true);
+    window.once('focus', clearAttention);
+    setTimeout(clearAttention, window.isFocused() ? 4000 : 30000);
+
+    if (Notification.isSupported()) {
+      const notification = new Notification({
+        title: title || '灵动脚本',
+        body: body || '',
+        silent: false,
+      });
+      notification.on('click', () => {
+        if (!window.isVisible()) window.show();
+        window.focus();
+        clearAttention();
+      });
+      notification.show();
+    }
+    console.log(`[taskbar] notified kind=${kind} run_id=${runId || '-'} title=${title}`);
+    return true;
+  } catch {
+    if (runId) _taskbarNotifiedRuns.delete(runId);
+    clearAttention();
+    return false;
+  }
+}
 
 // ── 模板上下文（供 AI 提示词参考）──
 let _cachedTemplateContext: string = '';
@@ -726,6 +781,22 @@ function startAgentProcess(goal: string, config?: Record<string, any>, supervise
         console.log('[agent]', msg.type, JSON.stringify(msg).slice(0, 200));
         if (msg.type === 'agent_done') {
           setAgentRunning(false);
+          const status = String(msg.status || '').toLowerCase();
+          const success = status === 'done' || status === 'completed' || status === 'reply';
+          const stopped = status === 'stopped' || status === 'canceled' || status === 'cancelled';
+          notifyTaskbarAttention(
+            success ? '任务完成' : stopped ? '任务已停止' : '任务失败',
+            String(msg.result || msg.error || msg.task || msg.run_id || '').slice(0, 220),
+            success ? 'success' : stopped ? 'info' : 'error',
+            String(msg.run_id || ''),
+          );
+        } else if (msg.type === 'agent_error') {
+          notifyTaskbarAttention(
+            '任务失败',
+            String(msg.error || msg.message || msg.run_id || '').slice(0, 220),
+            'error',
+            String(msg.run_id || ''),
+          );
         }
         mainWindow?.webContents.send('agent-message', msg);
       } catch {
@@ -1433,31 +1504,11 @@ ipcMain.handle('notification:show', (_, title: string, body: string) => {
   } catch { return false; }
 });
 
-ipcMain.handle('taskbar:notify', (_, title: string, body: string) => {
-  const window = mainWindow;
-  if (!window || window.isDestroyed()) return false;
-  try {
-    window.flashFrame(true);
-    const clearAttention = () => {
-      if (!window.isDestroyed()) window.flashFrame(false);
-    };
-    const notification = new Notification({
-      title: title || '灵动脚本',
-      body: body || '',
-      silent: false,
-    });
-    notification.on('click', () => {
-      if (!window.isVisible()) window.show();
-      window.focus();
-      clearAttention();
-    });
-    window.once('focus', clearAttention);
-    notification.show();
-    return true;
-  } catch {
-    return false;
-  }
-});
+ipcMain.handle(
+  'taskbar:notify',
+  (_, title: string, body: string, kind: TaskbarNotificationKind = 'info', runId = '') =>
+    notifyTaskbarAttention(title, body, kind, runId),
+);
 
 // --- Schedule IPC ---
 const SCHEDULES_FILE = path.join(app.getPath('userData'), 'schedules.json');
@@ -1557,6 +1608,7 @@ if (!gotTheLock) {
   // --- App Lifecycle ---
 
   app.whenReady().then(() => {
+    if (process.platform === 'win32') app.setAppUserModelId('com.lingdong.script');
     buildAppMenu();
     createWindow();
     // Launch the embedded WinPilot agent server (non-blocking; the Agent panel

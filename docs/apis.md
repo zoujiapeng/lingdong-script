@@ -54,6 +54,8 @@
 | GET/POST/DELETE | `/api/memory` | 经验记忆 |
 | PUT/DELETE | `/api/memory/{recipe_id}` | 单条经验记忆 |
 | GET/DELETE | `/api/session` | 会话记忆 |
+| GET/POST | `/api/agent-schedules` | 列出或创建 WinPilot Agent 计划任务 |
+| DELETE | `/api/agent-schedules/{schedule_id}` | 禁用计划任务 |
 | WS | `/ws/events` | BUS 事件流 |
 | GET | `/` | WinPilot webui |
 

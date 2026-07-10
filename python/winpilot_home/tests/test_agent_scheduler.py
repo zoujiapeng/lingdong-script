@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import threading
+from types import SimpleNamespace
 
 
 def test_agent_scheduler_create_due_finish_and_cancel(tmp_path, monkeypatch):
@@ -113,3 +115,79 @@ def test_agent_schedule_rest_rejects_invalid_run_at(tmp_path, monkeypatch):
         assert created.status_code == 400
         assert "run_at must be an ISO-8601 datetime" in created.text
         assert scheduler.list_tasks() == []
+
+
+def test_scheduler_thread_executes_due_task_through_unified_runner(tmp_path, monkeypatch):
+    from winpilot import scheduler, server
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+    state = server._RunState()
+    state.busy = lambda: False
+    scheduler_stop = threading.Event()
+    completed = threading.Event()
+    calls = {}
+    session_rows = []
+
+    class FakeRunner:
+        run_id = "scheduled-run-1"
+        task = "emit scheduler marker"
+        status = "running"
+        result_text = ""
+
+        def run(self):
+            self.status = "reply"
+            self.result_text = "SCHEDULER_THREAD_OK"
+            completed.set()
+            return {
+                "run_id": self.run_id,
+                "status": self.status,
+                "result": self.result_text,
+            }
+
+    def build_runner(task, **kwargs):
+        calls.update(task=task, kwargs=kwargs)
+        return FakeRunner()
+
+    fake_session = SimpleNamespace(
+        recent=lambda: ["prior context"],
+        append=lambda *args: session_rows.append(args),
+        all=lambda: list(session_rows),
+    )
+    fake_recorder = SimpleNamespace(start=lambda _run_id: None, stop=lambda: None)
+
+    monkeypatch.setattr(server, "STATE", state)
+    monkeypatch.setattr(server, "_SCHEDULER_STOP", scheduler_stop)
+    monkeypatch.setattr(server, "_SCHEDULER_THREAD", None)
+    monkeypatch.setattr(server, "build_runner", build_runner)
+    monkeypatch.setattr(server, "SESSION", fake_session)
+    monkeypatch.setattr(server.trace_mod, "RECORDER", fake_recorder)
+    monkeypatch.setattr(server.BUS, "publish", lambda *_args, **_kwargs: None)
+
+    entry = scheduler.create_task(
+        "emit scheduler marker",
+        delay_seconds=0,
+        max_steps=3,
+    )
+    server._start_scheduler_thread()
+    try:
+        assert completed.wait(timeout=2.5)
+        assert state.thread is not None
+        state.thread.join(timeout=1.0)
+        assert not state.thread.is_alive()
+    finally:
+        server._stop_scheduler_thread()
+        scheduler_thread = server._SCHEDULER_THREAD
+        if scheduler_thread is not None:
+            scheduler_thread.join(timeout=1.5)
+
+    updated = scheduler.list_tasks()[0]
+    assert updated["id"] == entry["id"]
+    assert updated["enabled"] is False
+    assert updated["running"] is False
+    assert updated["run_count"] == 1
+    assert updated["last_run_id"] == "scheduled-run-1"
+    assert updated["last_status"] == "reply"
+    assert calls["task"] == "emit scheduler marker"
+    assert calls["kwargs"]["max_steps_override"] == 3
+    assert calls["kwargs"]["session_context"] == ["prior context"]
+    assert session_rows[0][1:] == ("reply", "SCHEDULER_THREAD_OK", "scheduled-run-1")

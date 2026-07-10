@@ -287,6 +287,9 @@ class SystemToolMixin:
             str(args["query"]),
             max_results=int(args.get("max_results", 50)),
             path=args.get("path"),
+            kind=str(args.get("kind") or "any"),
+            extensions=args.get("extensions") if isinstance(args.get("extensions"), list) else None,
+            sort=str(args.get("sort") or "path"),
         )
         return ToolResult(self._fmt(result))
 

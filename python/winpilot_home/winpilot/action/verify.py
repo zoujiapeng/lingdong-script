@@ -41,6 +41,16 @@ SUPPORTED_CONDITIONS = (
     "screen_stable", "color_match",
 ) + groundtruth.GROUNDTRUTH_KEYS
 
+# Only checks that are intrinsically read-only may overlap UI perception.
+# shell_true deliberately stays synchronous because an arbitrary PowerShell
+# expression cannot be proven side-effect free.
+_PARALLEL_GROUNDTRUTH_KEYS = (
+    "file_exists",
+    "file_contains",
+    "process_running",
+    "process_gone",
+)
+
 
 def _norm_visible_text(value: str) -> str:
     return re.sub(r"[\s_\-:\uff1a]+", "", (value or "").casefold())
@@ -290,6 +300,89 @@ class _AsyncTextProbe:
             }
 
 
+class _AsyncGroundTruthProbe:
+    """Overlap read-only deterministic checks with UI perception.
+
+    Filesystem/process/shell checks do not touch the desktop, so they can run
+    while UIA or OCR verifies the visible result. The final verdict still waits
+    for every condition; this only removes avoidable serial latency.
+    """
+
+    def __init__(self, expect: dict[str, Any], timeout_s: float) -> None:
+        self._checks = {
+            key: value
+            for key, value in expect.items()
+            if key in _PARALLEL_GROUNDTRUTH_KEYS
+        }
+        self._timeout_s = max(1.0, float(timeout_s))
+        self._lock = threading.Lock()
+        self._events = {key: threading.Event() for key in self._checks}
+        self._results: dict[str, tuple[bool, str]] = {}
+        self._elapsed_ms: dict[str, int] = {}
+        self._started = False
+
+    def start(self) -> None:
+        if not self._checks:
+            return
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        for key, value in self._checks.items():
+            threading.Thread(
+                target=self._run_one,
+                args=(key, value),
+                daemon=True,
+                name=f"verify-groundtruth-{key}",
+            ).start()
+
+    def _run_one(self, key: str, value: Any) -> None:
+        started = time.monotonic()
+        try:
+            result = groundtruth.check(key, value, timeout_s=self._timeout_s)
+        except Exception as exc:  # groundtruth checks should never raise
+            result = (False, f"groundtruth check failed: {exc}")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        with self._lock:
+            self._results[key] = result
+            self._elapsed_ms[key] = elapsed_ms
+            self._events[key].set()
+
+    def wait_result(
+        self,
+        key: str,
+        deadline: float | None,
+    ) -> tuple[bool, str] | None:
+        event = self._events.get(key)
+        if event is None:
+            return None
+        timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if not event.wait(timeout=timeout):
+            return None
+        with self._lock:
+            return self._results.get(key)
+
+    def handles(self, key: str) -> bool:
+        return key in self._checks
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "started": self._started,
+                "check_count": len(self._checks),
+                "completed_count": len(self._results),
+                "pending": [key for key in self._checks if key not in self._results],
+                "checks": {
+                    key: {
+                        "ok": result[0],
+                        "detail": result[1][:160],
+                        "elapsed_ms": self._elapsed_ms.get(key, 0),
+                    }
+                    for key, result in self._results.items()
+                },
+            }
+
+
 # ------------------------------------------------------------ target window
 def _related_window(hwnd: int | None, target: int | None) -> bool:
     if not hwnd or not target:
@@ -451,10 +544,20 @@ def _check_screen_stable(spec: Any, hwnd: int | None,
 # ----------------------------------------------------------------- evaluate
 def _eval_once(expect: dict, hwnd: int | None, level: int,
                deadline: float | None = None,
-               text_probe: _AsyncTextProbe | None = None) -> VerifyOutcome:
+               text_probe: _AsyncTextProbe | None = None,
+               groundtruth_probe: _AsyncGroundTruthProbe | None = None) -> VerifyOutcome:
     """Evaluate every condition in the expect dict once (AND semantics)."""
     methods: list[str] = []
-    for key, value in expect.items():
+    # Deterministic checks may already be running in the background. Evaluate
+    # visible conditions first so their UIA/OCR latency overlaps that work.
+    items = [
+        item for item in expect.items()
+        if item[0] not in groundtruth.GROUNDTRUTH_KEYS
+    ] + [
+        item for item in expect.items()
+        if item[0] in groundtruth.GROUNDTRUTH_KEYS
+    ]
+    for key, value in items:
         if key == "timeout_s":
             continue
         if key == "text_appears":
@@ -499,7 +602,24 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
             # strongest signal; no perception escalation needed. Bound any
             # shell_true to the remaining verify budget so it can't overrun.
             remaining = max(1.0, deadline - time.monotonic()) if deadline else 15.0
-            ok, detail = groundtruth.check(key, value, timeout_s=remaining)
+            use_parallel_result = (
+                groundtruth_probe is not None
+                and groundtruth_probe.handles(key)
+            )
+            async_result = (
+                groundtruth_probe.wait_result(key, deadline)
+                if use_parallel_result
+                else None
+            )
+            if use_parallel_result and async_result is None:
+                return VerifyOutcome(
+                    False,
+                    f"{key} asynchronous check did not finish before timeout",
+                    "groundtruth-async",
+                )
+            ok, detail = async_result or groundtruth.check(
+                key, value, timeout_s=remaining,
+            )
             if not ok:
                 return VerifyOutcome(False, f"{key} 未满足 ({detail})", "groundtruth")
             methods.append("groundtruth")
@@ -535,6 +655,18 @@ def check(expect: dict, hwnd: int | None = None,
         if watcher is not None and "text_appears" in expect
         else None
     )
+    has_perception_condition = any(
+        key not in groundtruth.GROUNDTRUTH_KEYS and key != "timeout_s"
+        for key in expect
+    )
+    groundtruth_probe = (
+        _AsyncGroundTruthProbe(expect, timeout_s)
+        if has_perception_condition
+        and any(key in _PARALLEL_GROUNDTRUTH_KEYS for key in expect)
+        else None
+    )
+    if groundtruth_probe is not None:
+        groundtruth_probe.start()
     last = VerifyOutcome(False, "未开始", "")
 
     def finish(outcome: VerifyOutcome) -> VerifyOutcome:
@@ -542,6 +674,9 @@ def check(expect: dict, hwnd: int | None = None,
             "poll_count": polls,
             "final_level": level,
             "predictive_ocr": text_probe.to_dict() if text_probe is not None else {},
+            "parallel_groundtruth": (
+                groundtruth_probe.to_dict() if groundtruth_probe is not None else {}
+            ),
         }
         return outcome
 
@@ -553,6 +688,7 @@ def check(expect: dict, hwnd: int | None = None,
             level,
             deadline=deadline,
             text_probe=text_probe,
+            groundtruth_probe=groundtruth_probe,
         )
         elapsed = time.monotonic() - started
         last.elapsed_ms = int(elapsed * 1000)

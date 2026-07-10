@@ -182,6 +182,13 @@ not an app-specific calculator rule.
 
 `done_max_rejects` 后可能 force-accept，但会标记 `unverified`。这种 run 不应写入 trusted memory/skill。
 
+### 验证并发边界
+
+- 同一个 `expect` 同时包含可见状态与文件/进程状态时，文件存在、文件内容、进程运行/退出检查会在后台与 UIA/OCR 重叠，最终仍按 AND 语义等待全部通过。
+- `shell_true` 不进入并发白名单，因为任意 PowerShell 表达式无法证明无副作用。
+- 鼠标、键盘、窗口、剪贴板写入继续经过 single-writer Desktop Action Queue；当前不并发执行两个会操控桌面的任务。
+- OCR 与 Everything IPC 可在服务启动时后台预热。这些是只读准备工作，不改变桌面任务的顺序。
+
 ## Coding Runtime
 
 Coding 不是独立 agent。触发后：
@@ -220,9 +227,17 @@ WinPilot Agent 内部计划任务：
 - 数据：`python/winpilot_home/agent_schedules.json`。
 - 服务端线程：`server.py` 的 scheduler loop。
 - 到期后仍走 `router.build_runner() -> AgentRunner`。
+- 每次执行会写入独立 `run_id`、trace、`last_status` 和 `run_count`；一次性任务结束后自动禁用，周期任务计算下一次时间。
 - `run_at` 必须是 ISO-8601 时间；自然语言时间要先由模型/上层解析成明确时间，底层不会把无效时间静默当成“立刻执行”。
 
 这套不是 Windows Task Scheduler，也不同于 legacy Electron 模板调度器。
+
+## 本地搜索与任务提醒
+
+- `search_files` 默认调用 `winpilot/bin/es.exe` 查询已安装 Everything 的索引；支持 `kind=file|folder|any`、`extensions`、范围路径和排序。
+- Everything IPC 不可用时会尝试启动用户会话客户端；仍不可用则切换到有时间上限的 `os.scandir`，并用 `partial` 明确标记可能不完整的结果。
+- Electron 观察统一 run projection 的 active -> terminal 变化；极短任务即使跨过 active 轮询也会按新 terminal `run_id` 提醒。
+- 成功、失败、停止分别使用 Windows 任务栏 normal/error/paused 状态；后台窗口闪烁并发送系统通知，同一 `run_id` 去重。
 
 ## 如何复盘工具细节
 

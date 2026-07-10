@@ -559,11 +559,26 @@ def tool_schemas(
     if allow_files:
         tools.append(_tool(
             "search_files",
-            "Search user files by name. Do not use this to launch installed apps.",
+            "Fast local filename/folder search. Uses Everything syntax when available (for example ext:pdf or dm:today); do not use it to launch installed apps.",
             {
                 "query": _prop("string", "Filename keyword or wildcard."),
                 "max_results": _prop("integer", "Default 50."),
                 "path": _prop("string", "Optional directory scope."),
+                "kind": {
+                    "type": "string",
+                    "enum": ["any", "file", "folder"],
+                    "description": "Return files, folders, or both. Default any.",
+                },
+                "extensions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional extensions without dots, for example [pdf, docx].",
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": ["path", "name", "date_modified", "size"],
+                    "description": "Result order. Default path.",
+                },
             },
             ["query"],
         ))
