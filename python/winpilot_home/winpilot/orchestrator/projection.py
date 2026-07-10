@@ -76,6 +76,10 @@ class RunProjectionStore:
                 "anchor_cache_learned_count": 0,
                 "anchor_cache_lookup_latency_total_ms": 0.0,
                 "anchor_cache_lookup_latency_max_ms": 0,
+                "visual_servo_count": 0,
+                "visual_servo_correction_count": 0,
+                "visual_servo_failure_count": 0,
+                "visual_servo_latency_ms": [],
             },
         }
 
@@ -157,6 +161,19 @@ class RunProjectionStore:
                 elapsed = int(event.get("elapsed_ms") or 0)
                 run["metrics"]["action_latency_ms"].append(elapsed)
                 run["metrics"]["action_latency_ms"] = run["metrics"]["action_latency_ms"][-200:]
+                result_meta = event.get("result_meta") if isinstance(event.get("result_meta"), dict) else {}
+                servo = result_meta.get("visual_servo") if isinstance(result_meta.get("visual_servo"), dict) else {}
+                if servo.get("enabled"):
+                    run["metrics"]["visual_servo_count"] += 1
+                    run["metrics"]["visual_servo_correction_count"] += max(
+                        0, int(servo.get("correction_count") or 0),
+                    )
+                    if not servo.get("confirmed"):
+                        run["metrics"]["visual_servo_failure_count"] += 1
+                    run["metrics"]["visual_servo_latency_ms"].append(
+                        max(0, int(servo.get("elapsed_ms") or 0)),
+                    )
+                    run["metrics"]["visual_servo_latency_ms"] = run["metrics"]["visual_servo_latency_ms"][-200:]
             if event_type == "perception":
                 run["metrics"]["perception_count"] += 1
                 dims = event.get("dims") if isinstance(event.get("dims"), dict) else {}
@@ -349,6 +366,7 @@ class RunProjectionStore:
         action_samples = metrics.pop("action_latency_ms", [])
         verify_samples = metrics.pop("post_verify_latency_ms", [])
         capture_samples = metrics.pop("screen_capture_latency_ms", [])
+        servo_samples = metrics.pop("visual_servo_latency_ms", [])
         metrics["tool_latency_avg_ms"] = round(sum(tool_samples) / len(tool_samples), 1) if tool_samples else 0
         metrics["tool_latency_max_ms"] = max(tool_samples) if tool_samples else 0
         metrics["perception_latency_avg_ms"] = round(sum(perception_samples) / len(perception_samples), 1) if perception_samples else 0
@@ -361,6 +379,10 @@ class RunProjectionStore:
         metrics["action_execution_latency_max_ms"] = max(action_samples) if action_samples else 0
         metrics["post_action_verify_latency_avg_ms"] = round(sum(verify_samples) / len(verify_samples), 1) if verify_samples else 0
         metrics["post_action_verify_latency_max_ms"] = max(verify_samples) if verify_samples else 0
+        metrics["visual_servo_latency_avg_ms"] = round(
+            sum(servo_samples) / len(servo_samples), 1,
+        ) if servo_samples else 0
+        metrics["visual_servo_latency_max_ms"] = max(servo_samples) if servo_samples else 0
         decisions = max(1, int(metrics.get("decision_count") or 0))
         perceptions = max(1, int(metrics.get("perception_count") or 0))
         suggestions = max(1, int(metrics.get("skill_suggestion_count") or 0))

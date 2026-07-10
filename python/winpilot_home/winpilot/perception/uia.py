@@ -60,6 +60,54 @@ _TIME_BUDGET_S = 1.8
 _thread_state = threading.local()
 
 
+def _is_legacy_chromium_root_child(
+    class_name: str,
+    *,
+    has_modern_browser_tree: bool,
+) -> bool:
+    """Identify Chromium's stale top-level accessibility mirror."""
+    return (
+        has_modern_browser_tree
+        and str(class_name or "") == "Chrome_RenderWidgetHostHWND"
+    )
+
+
+def _control_class_name(control: auto.Control) -> str:
+    try:
+        return str(control.ClassName or "")
+    except Exception:
+        return ""
+
+
+def _has_modern_chromium_tree(children: list[auto.Control]) -> bool:
+    return any(_control_class_name(child) == "BrowserRootView" for child in children)
+
+
+def _is_legacy_chromium_match(
+    control: auto.Control,
+    *,
+    has_modern_browser_tree: bool,
+) -> bool:
+    """Return true when an exact UIA hit belongs to a direct stale renderer."""
+    if not has_modern_browser_tree:
+        return False
+    current = control
+    for _ in range(_MAX_DEPTH + 4):
+        if _control_class_name(current) == "Chrome_RenderWidgetHostHWND":
+            try:
+                parent = current.GetParentControl()
+                return bool(parent and parent.ControlTypeName == "WindowControl")
+            except Exception:
+                return False
+        try:
+            current = current.GetParentControl()
+        except Exception:
+            return False
+        if current is None:
+            return False
+    return False
+
+
 def _ensure_thread_initialized() -> None:
     """Keep COM/UIA initialized for every worker that owns live controls."""
     if getattr(_thread_state, "initializer", None) is None:
@@ -168,19 +216,41 @@ def collect(hwnd: int) -> list[UIElement]:
         logger.warning("UIA: ControlFromHandle 失败 hwnd=%s: %s", hwnd, exc)
         return []
 
-    def walk(ctrl: auto.Control, depth: int) -> None:
+    try:
+        root_children = root.GetChildren()
+    except Exception:
+        root_children = []
+    # Chromium can expose cached tabs as direct renderer children while its
+    # modern BrowserRootView contains the real active document. Those mirrors
+    # report plausible, non-offscreen coordinates and otherwise outrank the
+    # live page, so ignore only the direct copies when the modern tree exists.
+    has_modern_browser_tree = _has_modern_chromium_tree(root_children)
+
+    def walk(
+        ctrl: auto.Control,
+        depth: int,
+        children_override: list[auto.Control] | None = None,
+    ) -> None:
         if depth > _MAX_DEPTH or len(elements) >= _MAX_ELEMENTS:
             return
         if time.monotonic() - started > _TIME_BUDGET_S:
             return
-        try:
-            children = ctrl.GetChildren()
-        except Exception:
-            children = []
+        if children_override is not None:
+            children = children_override
+        else:
+            try:
+                children = ctrl.GetChildren()
+            except Exception:
+                children = []
         for child in children:
             if len(elements) >= _MAX_ELEMENTS:
                 return
             try:
+                if depth == 0 and _is_legacy_chromium_root_child(
+                    _control_class_name(child),
+                    has_modern_browser_tree=has_modern_browser_tree,
+                ):
+                    continue
                 element = _to_element(child)
                 if element is not None:
                     elements.append(element)
@@ -189,7 +259,7 @@ def collect(hwnd: int) -> list[UIElement]:
                 continue
 
     try:
-        walk(root, 0)
+        walk(root, 0, root_children)
     except Exception as exc:
         logger.warning("UIA: 遍历异常 hwnd=%s: %s", hwnd, exc)
     return elements
@@ -205,6 +275,11 @@ def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
         root = auto.ControlFromHandle(hwnd)
         if root is None:
             return []
+        try:
+            root_children = root.GetChildren()
+        except Exception:
+            root_children = []
+        has_modern_browser_tree = _has_modern_chromium_tree(root_children)
         client = auto_core._AutomationClient.instance()
         condition = client.IUIAutomation.CreatePropertyCondition(
             auto_core.PropertyId.NameProperty,
@@ -217,6 +292,11 @@ def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
         elements: list[UIElement] = []
         for index in range(min(int(matches.Length), max(1, int(limit)))):
             control = auto.Control.CreateControlFromElement(matches.GetElement(index))
+            if _is_legacy_chromium_match(
+                control,
+                has_modern_browser_tree=has_modern_browser_tree,
+            ):
+                continue
             element = _to_element(control)
             if element is not None:
                 elements.append(element)

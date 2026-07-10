@@ -104,6 +104,60 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
     ]
 
 
+def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(executor, "_dry_run", lambda: False)
+    monkeypatch.setattr(executor, "_no_mouse_steal", lambda: True)
+    monkeypatch.setattr(
+        executor,
+        "_post_click",
+        lambda *_args, **_kwargs: calls.append(("post",)) or True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_raw_click",
+        lambda x, y, button, double, hwnd, prepositioned=False: calls.append((
+            "raw", x, y, button, double, hwnd, prepositioned,
+        )),
+    )
+
+    out = executor.click(30, 40, hwnd=456, prepositioned=True)
+
+    assert out["ok"] is True
+    assert out["prepositioned"] is True
+    assert calls == [("raw", 30, 40, "left", False, 456, True)]
+
+
+def test_raw_prepositioned_click_does_not_refocus_or_repeat_slow_move(monkeypatch):
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(
+        executor,
+        "_raw_focus_window",
+        lambda hwnd: calls.append(("focus", hwnd)),
+    )
+    monkeypatch.setattr(executor, "_cursor_pos", lambda: (30, 40))
+    monkeypatch.setattr(
+        executor,
+        "_raw_move_mouse",
+        lambda x, y: calls.append(("move", x, y)),
+    )
+    monkeypatch.setattr(executor, "_mouse_input", lambda flag: flag)
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: calls.append(("send", tuple(inputs))),
+    )
+    monkeypatch.setattr(executor, "_sample_pressed_state", lambda: False)
+    monkeypatch.setattr(executor.time, "sleep", sleeps.append)
+
+    executor._raw_click(30, 40, "left", False, 456, prepositioned=True)
+
+    assert all(call[0] not in {"focus", "move"} for call in calls)
+    assert [call[0] for call in calls] == ["send", "send"]
+    assert sleeps == [0.008]
+
+
 def test_public_scroll_uses_one_outer_queue_event(monkeypatch):
     calls = []
     events = []

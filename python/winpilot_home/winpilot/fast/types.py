@@ -59,6 +59,10 @@ class BatchMetrics:
     internal_action_count: int = 0
     compound_round_trips_saved: int = 0
     controller_round_trips_saved: int = 0
+    visual_servo_count: int = 0
+    visual_servo_correction_count: int = 0
+    visual_servo_failure_count: int = 0
+    visual_servo_latency_ms: list[int] = field(default_factory=list)
     tool_latencies_ms: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,6 +81,14 @@ class BatchMetrics:
             "internal_action_count": int(self.internal_action_count),
             "compound_round_trips_saved": int(self.compound_round_trips_saved),
             "controller_round_trips_saved": int(self.controller_round_trips_saved),
+            "visual_servo_count": int(self.visual_servo_count),
+            "visual_servo_correction_count": int(self.visual_servo_correction_count),
+            "visual_servo_failure_count": int(self.visual_servo_failure_count),
+            "visual_servo_latency_avg_ms": round(
+                sum(self.visual_servo_latency_ms) / len(self.visual_servo_latency_ms), 1,
+            ) if self.visual_servo_latency_ms else 0,
+            "visual_servo_latency_max_ms": max(self.visual_servo_latency_ms)
+            if self.visual_servo_latency_ms else 0,
             "avg_tool_latency_ms": round(avg, 1),
             "tool_latencies_ms": list(self.tool_latencies_ms),
         }
