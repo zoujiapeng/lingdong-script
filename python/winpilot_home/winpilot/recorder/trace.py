@@ -21,9 +21,9 @@ import cv2
 from ..action import executor, verify
 from ..automation_ir import automation_ir_from_wps, validate_automation_ir
 from ..config import SCRIPTS_DIR, TRACES_DIR
-from ..perception import fusion, win32
+from ..perception import fusion, ocr, uia, win32
 from ..utils.log import BUS, logger
-from ..utils.screenshot import Region, capture
+from ..utils.screenshot import Region, capture, window_region
 from . import replay_control
 
 _SCREENSHOT_TOOLS = {
@@ -653,14 +653,156 @@ class Replayer:
     def __init__(self, stop_event: threading.Event | None = None) -> None:
         self.stop_event = stop_event or threading.Event()
         self.hwnd: int | None = None
+        self._target_signature = ""
         # wps/2: per-run variable store for ${var} interpolation.
         self.vars: dict[str, str] = {}
         # Inter-leaf pacing (overridable in tests for speed).
         self.step_delay: float = 0.25
         self._results: list[dict[str, Any]] = []
+        self._last_relocation: dict[str, Any] = {}
+
+    @staticmethod
+    def _relocation_ocr_region(elements: list[Any], fallback: Any) -> Region:
+        """Bound OCR to the union of duplicate semantic candidates."""
+        boxes: list[tuple[int, int, int, int]] = []
+        for element in elements:
+            width = int(getattr(element, "width", 0) or 0)
+            height = int(getattr(element, "height", 0) or 0)
+            if width <= 0 or height <= 0:
+                continue
+            left = int(getattr(element, "left", 0) or 0)
+            top = int(getattr(element, "top", 0) or 0)
+            pad_x = max(12, width // 3)
+            pad_y = max(12, height // 2)
+            boxes.append((
+                left - pad_x,
+                top - pad_y,
+                left + width + pad_x,
+                top + height + pad_y,
+            ))
+        if not boxes:
+            return Region(
+                int(fallback.left), int(fallback.top),
+                int(fallback.width), int(fallback.height),
+            )
+        left = max(int(fallback.left), min(box[0] for box in boxes))
+        top = max(int(fallback.top), min(box[1] for box in boxes))
+        right = min(int(fallback.left + fallback.width), max(box[2] for box in boxes))
+        bottom = min(int(fallback.top + fallback.height), max(box[3] for box in boxes))
+        candidate = Region(left, top, max(1, right - left), max(1, bottom - top))
+        fallback_area = max(1, int(fallback.width) * int(fallback.height))
+        if candidate.width * candidate.height > fallback_area * 0.4:
+            return Region(
+                int(fallback.left), int(fallback.top),
+                int(fallback.width), int(fallback.height),
+            )
+        return candidate
+
+    @classmethod
+    def _choose_visually_supported(
+        cls,
+        elements: list[Any],
+        fallback: Any,
+    ) -> tuple[Any | None, dict[str, Any]]:
+        """Pick the duplicate UIA box that is visibly rendered on screen."""
+        unique: dict[tuple[int, int, int, int], Any] = {}
+        for element in elements:
+            box = (
+                int(getattr(element, "left", 0) or 0),
+                int(getattr(element, "top", 0) or 0),
+                int(getattr(element, "width", 0) or 0),
+                int(getattr(element, "height", 0) or 0),
+            )
+            if box[2] > 0 and box[3] > 0:
+                unique.setdefault(box, element)
+        if len(unique) == 1 and len(elements) == 1:
+            return next(iter(unique.values())), {"method": "single-candidate"}
+        if len(unique) == 1:
+            return None, {
+                "method": "duplicate-same-bbox",
+                "duplicate_count": len(elements),
+                "confident": False,
+            }
+        if len(unique) < 2:
+            return None, {}
+
+        started = time.monotonic()
+        roi = cls._relocation_ocr_region(list(unique.values()), fallback)
+        frame = capture(roi)
+        scored: list[tuple[float, Any, dict[str, Any]]] = []
+        for (left, top, width, height), element in unique.items():
+            x1 = max(0, left - roi.left - 4)
+            y1 = max(0, top - roi.top - 4)
+            x2 = min(frame.shape[1], left + width - roi.left + 4)
+            y2 = min(frame.shape[0], top + height - roi.top + 4)
+            patch = frame[y1:y2, x1:x2]
+            if patch.size == 0:
+                continue
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            contrast = float(gray.std())
+            edge_ratio = float((cv2.Canny(gray, 50, 150) > 0).mean())
+            score = contrast / 32.0 + edge_ratio * 8.0
+            scored.append((score, element, {
+                "bbox": [left, top, width, height],
+                "score": round(score, 4),
+                "contrast": round(contrast, 2),
+                "edge_ratio": round(edge_ratio, 4),
+            }))
+        if not scored:
+            return None, {}
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        # Contrast proves that a candidate is rendered, not that it carries
+        # the requested text. Skip OCR only when every alternative is
+        # effectively blank; two visibly real controls require text evidence.
+        confident = best[0] >= 0.3 and runner_up < 0.3
+        metadata = {
+            "method": "visual-support",
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "roi": [roi.left, roi.top, roi.width, roi.height],
+            "candidates": [item[2] for item in scored],
+            "confident": confident,
+        }
+        return (best[1] if confident else None), metadata
+
+    @staticmethod
+    def _expanded_relocation_region(elements: list[Any], fallback: Any) -> Region:
+        boxes = [
+            (
+                int(getattr(element, "left", 0) or 0),
+                int(getattr(element, "top", 0) or 0),
+                int(getattr(element, "width", 0) or 0),
+                int(getattr(element, "height", 0) or 0),
+            )
+            for element in elements
+            if int(getattr(element, "width", 0) or 0) > 0
+            and int(getattr(element, "height", 0) or 0) > 0
+        ]
+        if not boxes:
+            return Region(
+                int(fallback.left), int(fallback.top),
+                int(fallback.width), int(fallback.height),
+            )
+        max_width = max(box[2] for box in boxes)
+        max_height = max(box[3] for box in boxes)
+        pad_x = max(64, max_width // 2)
+        pad_y = max(140, max_height * 3)
+        left = max(int(fallback.left), min(box[0] for box in boxes) - pad_x)
+        top = max(int(fallback.top), min(box[1] for box in boxes) - pad_y)
+        right = min(
+            int(fallback.left + fallback.width),
+            max(box[0] + box[2] for box in boxes) + pad_x,
+        )
+        bottom = min(
+            int(fallback.top + fallback.height),
+            max(box[1] + box[3] for box in boxes) + pad_y,
+        )
+        return Region(left, top, max(1, right - left), max(1, bottom - top))
 
     def _relocate(self, step: dict) -> tuple[int, int] | None:
         """Find click target on the live screen: text match → recorded coords."""
+        self._last_relocation = {}
         text = (step.get("text") or step.get("element_text") or "").strip()
         if text:
             hwnd = self._observe_hwnd()
@@ -668,16 +810,136 @@ class Replayer:
                 coords = step.get("coords")
                 return (int(coords[0]), int(coords[1])) if coords else None
             try:
-                snapshot = fusion.observe(hwnd, include_icons=False)
-                exact = [e for e in snapshot.elements if e.text.strip() == text]
-                partial = [e for e in snapshot.elements if text in e.text]
-                hit = (exact or partial or [None])[0]
+                observe_started = time.monotonic()
+                semantic_hits = uia.find_by_text(hwnd, text)
+                query_attempts = 1
+                unique_boxes = {
+                    (
+                        int(getattr(item, "left", 0) or 0),
+                        int(getattr(item, "top", 0) or 0),
+                        int(getattr(item, "width", 0) or 0),
+                        int(getattr(item, "height", 0) or 0),
+                    )
+                    for item in semantic_hits
+                }
+                if len(semantic_hits) > 1 and len(unique_boxes) == 1:
+                    if not self.stop_event.wait(0.04):
+                        refreshed = uia.find_by_text(hwnd, text)
+                        query_attempts += 1
+                        if refreshed:
+                            semantic_hits = refreshed
+                if semantic_hits:
+                    perception_ms = int((time.monotonic() - observe_started) * 1000)
+                    perception_region = window_region(hwnd)
+                    self._last_relocation = {
+                        "perception_ms": perception_ms,
+                        "perception_method": "uia-name-query",
+                        "perception_dims": {
+                            "uia_query": {
+                                "count": len(semantic_hits),
+                                "ms": perception_ms,
+                                "attempts": query_attempts,
+                            },
+                        },
+                    }
+                else:
+                    snapshot = fusion.observe(hwnd, include_icons=False)
+                    perception_region = snapshot.region
+                    self._last_relocation = {
+                        "perception_ms": int((time.monotonic() - observe_started) * 1000),
+                        "perception_method": "fusion",
+                        "perception_dims": dict(getattr(snapshot, "dim_stats", {}) or {}),
+                    }
+                    exact = [e for e in snapshot.elements if e.text.strip() == text]
+                    partial = [e for e in snapshot.elements if text in e.text]
+                    semantic_hits = exact or partial
+                hit = (semantic_hits or [None])[0]
                 if hit:
+                    visual_hits = [
+                        item for item in semantic_hits
+                        if getattr(item, "source", "") == "ocr"
+                    ]
+                    # Chromium can expose duplicate UIA trees for background
+                    # tabs. Resolve duplicate semantic matches against the
+                    # physical screenshot before sending input.
+                    if not visual_hits and len(semantic_hits) > 1:
+                        try:
+                            visual_hit, visual_meta = self._choose_visually_supported(
+                                semantic_hits,
+                                perception_region,
+                            )
+                            self._last_relocation["visual_disambiguation"] = visual_meta
+                            if visual_hit is not None:
+                                visual_hits = [visual_hit]
+                            else:
+                                roi = self._relocation_ocr_region(semantic_hits, perception_region)
+                                started = time.monotonic()
+                                visual_hits = ocr.find_text(roi, text, min_conf=0.3)
+                                self._last_relocation = {
+                                    **self._last_relocation,
+                                    "disambiguation_ms": int((time.monotonic() - started) * 1000),
+                                    "ocr_roi": [roi.left, roi.top, roi.width, roi.height],
+                                }
+                                if not visual_hits:
+                                    expanded = self._expanded_relocation_region(
+                                        semantic_hits,
+                                        perception_region,
+                                    )
+                                    expanded_started = time.monotonic()
+                                    visual_hits = ocr.find_text(expanded, text, min_conf=0.3)
+                                    self._last_relocation.update({
+                                        "expanded_disambiguation_ms": int(
+                                            (time.monotonic() - expanded_started) * 1000
+                                        ),
+                                        "expanded_ocr_roi": [
+                                            expanded.left, expanded.top,
+                                            expanded.width, expanded.height,
+                                        ],
+                                    })
+                        except Exception as exc:
+                            logger.debug("replay OCR coordinate cross-check failed: %s", exc)
+                    if visual_hits:
+                        hit = visual_hits[0]
+                    elif len(semantic_hits) > 1:
+                        self._last_relocation.update({
+                            "selector_rejected": True,
+                            "reason": "duplicate semantic candidates lacked matching pixel evidence",
+                        })
+                        hit = None
+                    if hit is None:
+                        return None
+                    self._last_relocation = {
+                        **self._last_relocation,
+                        "source": getattr(hit, "source", "semantic"),
+                        "text": getattr(hit, "text", text),
+                        "point": [int(hit.cx), int(hit.cy)],
+                    }
                     return hit.cx, hit.cy
             except Exception as exc:
                 logger.debug("replay 重定位失败: %s", exc)
         coords = step.get("coords")
-        return (int(coords[0]), int(coords[1])) if coords else None
+        if coords:
+            self._last_relocation = {
+                "source": "recorded_coords",
+                "point": [int(coords[0]), int(coords[1])],
+            }
+            return int(coords[0]), int(coords[1])
+        return None
+
+    def _capture_action_surface(self):
+        try:
+            return capture(window_region(self.hwnd)) if self.hwnd else capture()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _screen_change_ratio(before: Any, after: Any) -> float:
+        if before is None or after is None or getattr(before, "shape", None) != getattr(after, "shape", None):
+            return 0.0
+        delta = cv2.absdiff(before, after)
+        if len(delta.shape) == 3:
+            delta = delta.max(axis=2)
+        return float((delta > 12).sum()) / max(1, int(delta.size))
 
     def _observe_hwnd(self) -> int | None:
         """Return a window anchor for semantic replay relocation."""
@@ -758,6 +1020,11 @@ class Replayer:
             return {"ok": False, "required": True, "error": error, "hint": hint}
 
         self.hwnd = int(found["hwnd"])
+        self._target_signature = json.dumps(
+            {key: hint[key] for key in ("title", "process", "hwnd") if key in hint},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         return {
             "ok": True,
             "required": True,
@@ -771,9 +1038,17 @@ class Replayer:
         expect = step.get("expect")
 
         if tool == "launch":
+            verify_expect = expect
+            if isinstance(expect, dict) and expect.get("window_title"):
+                # A launch target need not win foreground focus on Windows.
+                # Search all windows immediately instead of spending three
+                # foreground-title retry rounds before the deterministic
+                # title fallback can run.
+                verify_expect = dict(expect)
+                verify_expect.setdefault("window_appears", verify_expect.pop("window_title"))
             result = verify.run_with_verify(
                 "launch", lambda: executor.launch(step["command"]),
-                expect=expect, hwnd=self.hwnd, timeout_s=10.0,
+                expect=verify_expect, hwnd=self.hwnd, timeout_s=10.0, retryable=False,
                 stop_event=self.stop_event)
             if result.get("ok"):
                 expected = expect if isinstance(expect, dict) else {}
@@ -786,6 +1061,16 @@ class Replayer:
                 if found and found.get("hwnd"):
                     self.hwnd = int(found["hwnd"])
                     result["target_hwnd"] = self.hwnd
+                    focus_result = executor.focus_window(self.hwnd)
+                    result["focused"] = bool(focus_result.get("ok", False))
+                    # Launch verification may have sampled the old foreground
+                    # window while Windows was still applying focus-stealing
+                    # rules. Finding the declared title is deterministic proof
+                    # that the requested target opened.
+                    if result.get("verified") is False:
+                        result["verified"] = True
+                        result["verify_detail"] = f'target window found: "{found.get("title", "")}"'
+                        result["verify_method"] = "win32-title"
                 elif (result.get("post_state") or {}).get("foreground_hwnd"):
                     self.hwnd = int(result["post_state"]["foreground_hwnd"])
                     result["target_hwnd"] = self.hwnd
@@ -801,11 +1086,60 @@ class Replayer:
             if point is None:
                 return {"ok": False, "error": "无法定位点击目标"}
             x, y = point
-            return verify.run_with_verify(
-                "click",
-                lambda: executor.click(x, y, button=step.get("button", "left"),
-                                       double=bool(step.get("double")), hwnd=self.hwnd),
-                expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
+            implicit_verify = not expect and not bool(step.get("allow_no_change"))
+            before = self._capture_action_surface() if implicit_verify else None
+            press_frames: list[Any] = []
+
+            def capture_pressed_state() -> None:
+                frame = self._capture_action_surface()
+                if frame is not None:
+                    press_frames.append(frame)
+
+            previous_probe = None
+            probe_installed = False
+            if before is not None and implicit_verify:
+                install_probe = getattr(executor, "install_press_probe", None)
+                if callable(install_probe):
+                    previous_probe = install_probe(capture_pressed_state)
+                    probe_installed = True
+            try:
+                result = verify.run_with_verify(
+                    "click",
+                    lambda: executor.click(x, y, button=step.get("button", "left"),
+                                           double=bool(step.get("double")), hwnd=self.hwnd),
+                    expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
+            finally:
+                if probe_installed:
+                    restore_probe = getattr(executor, "restore_press_probe", None)
+                    if callable(restore_probe):
+                        restore_probe(previous_probe)
+
+            result["resolved"] = dict(self._last_relocation)
+            if implicit_verify and result.get("ok"):
+                after = self._capture_action_surface()
+                post_ratio = self._screen_change_ratio(before, after)
+                candidates = [("after", post_ratio)]
+                candidates.extend(
+                    ("press", self._screen_change_ratio(before, frame))
+                    for frame in press_frames
+                )
+                delta_source, ratio = max(candidates, key=lambda item: item[1])
+                changed = ratio >= 0.00005
+                result.update({
+                    "verified": changed,
+                    "verify_method": "screen-delta",
+                    "verify_detail": (
+                        f"visible change observed ({delta_source}, ratio={ratio:.6f})"
+                        if changed
+                        else "click produced no visible change; set allow_no_change=true only when intentional"
+                    ),
+                    "screen_change_ratio": ratio,
+                    "post_change_ratio": post_ratio,
+                    "screen_delta_source": delta_source,
+                    "press_sample_count": len(press_frames),
+                    "transient_observed": bool(changed and delta_source == "press"),
+                })
+            return result
         if tool == "type_text":
             point = self._relocate(step)
 
@@ -871,6 +1205,8 @@ class Replayer:
         # wps/2: seed variables (all string-valued). v1 scripts have none.
         raw_vars = script.get("vars") or {}
         self.vars = {str(k): str(v) for k, v in raw_vars.items()}
+        self.hwnd = None
+        self._target_signature = ""
         self._results = []
         total = replay_control.count_leaves(steps)
         BUS.publish("replay", state="start", script=path.name, total=total)
@@ -881,6 +1217,72 @@ class Replayer:
         ok_all = self._exec_steps(steps)
         BUS.publish("replay", state="done", ok=ok_all)
         return {"ok": ok_all, "results": self._results, "preflight": preflight}
+
+    def run_steps(
+        self,
+        steps: list[dict[str, Any]],
+        *,
+        target_window: Any = None,
+        variables: dict[str, Any] | None = None,
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Execute an in-memory WPS segment without resetting replay state.
+
+        ARP uses this entry point for editable offline replay nodes. Window
+        anchors, variables, and prior state survive across adjacent nodes while
+        each call returns only the records produced by that segment.
+        """
+        script: dict[str, Any] = {"format": "wps/2", "steps": steps}
+        if target_window not in (None, "", {}):
+            script["target_window"] = target_window
+        error = validate_script(script)
+        if error:
+            return {
+                "ok": False,
+                "error": error,
+                "results": [],
+                "preflight": {"ok": False, "required": False, "error": error},
+            }
+
+        if variables:
+            self.vars.update({str(key): str(value) for key, value in variables.items()})
+        before = len(self._results)
+        preflight: dict[str, Any] = {"ok": True, "required": False}
+        target_hint = _target_window_hint(script)
+        target_signature = json.dumps(
+            {key: target_hint[key] for key in ("title", "process", "hwnd") if key in target_hint},
+            ensure_ascii=False,
+            sort_keys=True,
+        ) if target_hint else ""
+        if target_hint and (not self.hwnd or target_signature != self._target_signature):
+            preflight = self._preflight_target_window(script)
+            if not preflight.get("ok", False):
+                return {
+                    "ok": False,
+                    "error": str(preflight.get("error") or "target window preflight failed"),
+                    "results": self._results[before:],
+                    "preflight": preflight,
+                }
+
+        BUS.publish("replay", state="segment_start", total=replay_control.count_leaves(steps))
+        ok_all = self._exec_steps(steps, prefix=prefix)
+        results = self._results[before:]
+        BUS.publish("replay", state="segment_done", ok=ok_all, count=len(results))
+        response = {
+            "ok": ok_all,
+            "results": results,
+            "preflight": preflight,
+            "hwnd": self.hwnd,
+            "variables": dict(self.vars),
+        }
+        if not ok_all and results:
+            failed = next((item for item in reversed(results) if not item.get("ok")), results[-1])
+            response["error"] = str(
+                failed.get("error")
+                or failed.get("verify_detail")
+                or f"{failed.get('tool') or 'replay step'} failed"
+            )
+        return response
 
     # --------------------------------------------------------- step engine
     def _should_stop(self) -> bool:
@@ -929,11 +1331,17 @@ class Replayer:
         return True
 
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
+        detail_keys = (
+            "error", "verify_detail", "verify_method", "verified", "attempts",
+            "timeout", "stopped", "hint", "resolved", "screen_change_ratio",
+            "post_change_ratio", "screen_delta_source", "press_sample_count",
+            "transient_observed",
+        )
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
-                            if k in ("error", "verify_detail", "attempts", "timeout", "stopped", "hint")})
+                            if k in detail_keys})
         record = {"index": idx, "tool": tool, "ok": ok}
-        for key in ("error", "verify_detail", "attempts", "timeout", "stopped", "hint"):
+        for key in detail_keys:
             if key in result:
                 record[key] = result[key]
         self._results.append(record)

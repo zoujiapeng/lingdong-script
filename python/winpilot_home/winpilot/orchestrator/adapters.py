@@ -18,6 +18,12 @@ from .runtime import NodeHandler, NodeResult
 
 RunnerCallback = Callable[[Any], None]
 
+_REPLAY_SHELL_TOOLS = {"run_shell", "ext.run_shell", "run_detached"}
+_REPLAY_DESKTOP_TOOLS = {
+    "click", "type_text", "hotkey", "launch", "focus_window", "scroll",
+    "drag", "draw_strokes", "run_detached", "tray_click", "ext.clipboard_set",
+}
+
 
 def _json_result(text: str) -> dict[str, Any]:
     try:
@@ -101,6 +107,86 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         )
     finally:
         session.close()
+
+
+def _walk_replay_tools(step: dict[str, Any]) -> set[str]:
+    tools = {str(step.get("tool") or "")}
+    for key in ("then", "else", "body"):
+        nested = step.get(key)
+        if isinstance(nested, list):
+            for child in nested:
+                if isinstance(child, dict):
+                    tools.update(_walk_replay_tools(child))
+    return tools
+
+
+def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
+    step = node.config.get("step")
+    if not isinstance(step, dict):
+        return NodeResult(ok=False, branch="fail", error="replay_step requires config.step")
+
+    tools = _walk_replay_tools(step)
+    policy = ((context.get("graph") or {}).get("policy") or {})
+    if tools & _REPLAY_SHELL_TOOLS and not policy.get("allow_shell", False):
+        return NodeResult(ok=False, branch="fail", error="replay_step shell execution is disabled by graph policy")
+    if tools & _REPLAY_DESKTOP_TOOLS and not policy.get("allow_desktop_mutation", True):
+        return NodeResult(ok=False, branch="fail", error="replay_step desktop mutation is disabled by graph policy")
+
+    runtime_state = context.get("runtime_state")
+    if not isinstance(runtime_state, dict):
+        return NodeResult(ok=False, branch="fail", error="replay_step requires an ARP runtime session")
+    sessions = runtime_state.setdefault("replay_sessions", {})
+    session_id = str(node.config.get("session") or "default").strip() or "default"
+    replayer = sessions.get(session_id)
+    if not isinstance(replayer, trace_mod.Replayer):
+        replayer = trace_mod.Replayer(stop_event)
+        sessions[session_id] = replayer
+
+    try:
+        pace_ms = max(0, int(node.config.get("pace_ms") or 0))
+    except (TypeError, ValueError):
+        pace_ms = 0
+    replayer.step_delay = pace_ms / 1000.0
+    variables = context.get("variables") if isinstance(context.get("variables"), dict) else {}
+    seeded_variables = {str(key): str(value) for key, value in variables.items()}
+    try:
+        result = replayer.run_steps(
+            [step],
+            target_window=node.config.get("target_window"),
+            variables=variables,
+            prefix=f"{node.id}.",
+        )
+    except Exception as exc:
+        return NodeResult(ok=False, branch="fail", error=f"replay step failed: {exc}")
+
+    # Preserve native ARP value types unless the WPS segment actually changed
+    # or introduced that variable.
+    for key, value in replayer.vars.items():
+        if key not in seeded_variables or value != seeded_variables[key]:
+            variables[key] = value
+    verified_steps = [item for item in result.get("results", []) if item.get("ok") is True]
+    ok = bool(result.get("ok")) and bool(verified_steps)
+    if result.get("ok") and not verified_steps:
+        result = {**result, "ok": False, "error": "replay step produced no verified action"}
+    output = {
+        **result,
+        "session": session_id,
+        "tool": step.get("tool"),
+        "verified_steps": len(verified_steps),
+    }
+    return NodeResult(
+        ok=ok,
+        branch="next" if ok else "fail",
+        output=output,
+        evidence=[{
+            "type": "replay_step",
+            "session": session_id,
+            "tool": step.get("tool"),
+            "verified_steps": len(verified_steps),
+            "ok": True,
+        }] if ok else [],
+        error="" if ok else str(result.get("error") or "replay step failed"),
+    )
 
 
 def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
@@ -268,6 +354,7 @@ def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKin
     return {
         ArpNodeKind.AGENT_GOAL: _agent_handler(on_runner),
         ArpNodeKind.ACTION_BATCH: _batch_handler,
+        ArpNodeKind.REPLAY_STEP: _replay_step_handler,
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
         ArpNodeKind.LEGACY_FLOW: _legacy_handler,
     }

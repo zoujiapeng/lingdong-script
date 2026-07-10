@@ -142,6 +142,39 @@ export class ControlPlaneClient {
     return this.request('api/human/stop', { method: 'POST' });
   }
 
+  replayModes(): Promise<{ ok: boolean; modes: Array<Record<string, unknown>> }> {
+    return this.request('api/v2/replay/modes');
+  }
+
+  apprenticeStatus(): Promise<{
+    mode: 'apprentice';
+    recording: boolean;
+    session_id?: string | null;
+    task?: string;
+    app?: string;
+    started_at?: number | null;
+  }> {
+    return this.request('api/v2/replay/apprentice/status');
+  }
+
+  apprenticeStart(task: string, app = ''): Promise<Record<string, any>> {
+    return this.request('api/v2/replay/apprentice/start', {
+      method: 'POST',
+      body: JSON.stringify({ task, app }),
+    });
+  }
+
+  apprenticeStop(): Promise<Record<string, any>> {
+    return this.request('api/v2/replay/apprentice/stop', { method: 'POST' });
+  }
+
+  verifyMemory(memoryId: string, evidence: string): Promise<Record<string, any>> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}/verify`, {
+      method: 'POST',
+      body: JSON.stringify({ evidence, status: 'verified' }),
+    });
+  }
+
   traceScreenshotUrl(runId: string, path: string): string {
     const name = path.replace(/\\/g, '/').split('/').pop() || path;
     return new URL(`api/trace/${encodeURIComponent(runId)}/shot/${encodeURIComponent(name)}`, this.baseUrl).toString();
@@ -156,6 +189,11 @@ export class ControlPlaneClient {
       method: 'POST',
       body: JSON.stringify({ graph, inputs }),
     });
+    return response.run;
+  }
+
+  async arpRun(runId: string): Promise<ArpExecutionSnapshot> {
+    const response = await this.request<{ ok: boolean; run: ArpExecutionSnapshot }>(`api/v2/arp/runs/${encodeURIComponent(runId)}`);
     return response.run;
   }
 

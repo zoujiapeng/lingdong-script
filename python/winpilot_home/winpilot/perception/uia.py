@@ -6,9 +6,11 @@ the live automation element handle in `extra` for fast Invoke/SetValue paths.
 """
 from __future__ import annotations
 
+import threading
 import time
 
 import uiautomation as auto
+import uiautomation.uiautomation as auto_core
 
 from ..utils.log import logger
 from .model import UIElement
@@ -55,6 +57,20 @@ _CONTAINER_ROLES = {"window", "pane", "group", "list", "toolbar", "menubar"}
 _MAX_ELEMENTS = 300
 _MAX_DEPTH = 18
 _TIME_BUDGET_S = 1.8
+_thread_state = threading.local()
+
+
+def _ensure_thread_initialized() -> None:
+    """Keep COM/UIA initialized for every worker that owns live controls."""
+    if getattr(_thread_state, "initializer", None) is None:
+        try:
+            _thread_state.initializer = auto.UIAutomationInitializerInThread()
+        except Exception as exc:
+            # Some host threads already own a different COM apartment. UIA
+            # may still be usable there; preserve the dimension's never-raise
+            # contract and let the normal collection fallback decide.
+            _thread_state.initializer = False
+            logger.debug("UIA thread initialization skipped: %s", exc)
 
 
 def _states_of(ctrl: auto.Control) -> list[str]:
@@ -99,8 +115,49 @@ def _value_of(ctrl: auto.Control) -> str:
     return ""
 
 
+def _to_element(ctrl: auto.Control) -> UIElement | None:
+    try:
+        ctype = ctrl.ControlTypeName
+        role = _INTERESTING.get(ctype)
+        rect = ctrl.BoundingRectangle
+        width, height = rect.width(), rect.height()
+        name = (ctrl.Name or "").strip()
+        if not role or width <= 0 or height <= 0:
+            return None
+        value = _value_of(ctrl)
+        text = name or value
+        if value and name and value != name:
+            text = f"{name}={value}"
+        if role in _CONTAINER_ROLES and not text:
+            return None
+        states = _states_of(ctrl)
+        if "offscreen" in states:
+            return None
+        return UIElement(
+            source="uia",
+            role=role,
+            text=text,
+            cx=(rect.left + rect.right) // 2,
+            cy=(rect.top + rect.bottom) // 2,
+            left=rect.left,
+            top=rect.top,
+            width=width,
+            height=height,
+            states=states,
+            extra={
+                "automation_id": ctrl.AutomationId or "",
+                "class_name": ctrl.ClassName or "",
+                "control_type": ctype,
+                "uia_ctrl": ctrl,
+            },
+        )
+    except Exception:
+        return None
+
+
 def collect(hwnd: int) -> list[UIElement]:
     """Collect interesting UIA elements of the window. Never raises."""
+    _ensure_thread_initialized()
     started = time.monotonic()
     elements: list[UIElement] = []
     try:
@@ -124,41 +181,9 @@ def collect(hwnd: int) -> list[UIElement]:
             if len(elements) >= _MAX_ELEMENTS:
                 return
             try:
-                ctype = child.ControlTypeName
-                role = _INTERESTING.get(ctype)
-                rect = child.BoundingRectangle
-                width, height = rect.width(), rect.height()
-                name = (child.Name or "").strip()
-                visible = width > 0 and height > 0
-                if role and visible:
-                    value = _value_of(child)
-                    text = name or value
-                    if value and name and value != name:
-                        text = f"{name}={value}"
-                    is_container = role in _CONTAINER_ROLES
-                    if not is_container or text:
-                        states = _states_of(child)
-                        if "offscreen" not in states:
-                            elements.append(
-                                UIElement(
-                                    source="uia",
-                                    role=role,
-                                    text=text,
-                                    cx=(rect.left + rect.right) // 2,
-                                    cy=(rect.top + rect.bottom) // 2,
-                                    left=rect.left,
-                                    top=rect.top,
-                                    width=width,
-                                    height=height,
-                                    states=states,
-                                    extra={
-                                        "automation_id": child.AutomationId or "",
-                                        "class_name": child.ClassName or "",
-                                        "control_type": ctype,
-                                        "uia_ctrl": child,
-                                    },
-                                )
-                            )
+                element = _to_element(child)
+                if element is not None:
+                    elements.append(element)
                 walk(child, depth + 1)
             except Exception:
                 continue
@@ -168,6 +193,37 @@ def collect(hwnd: int) -> list[UIElement]:
     except Exception as exc:
         logger.warning("UIA: 遍历异常 hwnd=%s: %s", hwnd, exc)
     return elements
+
+
+def find_by_text(hwnd: int, text: str, limit: int = 40) -> list[UIElement]:
+    """Query exact UIA names without walking and materializing the full tree."""
+    needle = str(text or "").strip()
+    if not needle:
+        return []
+    _ensure_thread_initialized()
+    try:
+        root = auto.ControlFromHandle(hwnd)
+        if root is None:
+            return []
+        client = auto_core._AutomationClient.instance()
+        condition = client.IUIAutomation.CreatePropertyCondition(
+            auto_core.PropertyId.NameProperty,
+            needle,
+        )
+        matches = root.Element.FindAll(
+            client.UIAutomationCore.TreeScope_Descendants,
+            condition,
+        )
+        elements: list[UIElement] = []
+        for index in range(min(int(matches.Length), max(1, int(limit)))):
+            control = auto.Control.CreateControlFromElement(matches.GetElement(index))
+            element = _to_element(control)
+            if element is not None:
+                elements.append(element)
+        return elements
+    except Exception as exc:
+        logger.debug("UIA exact-name query failed hwnd=%s text=%r: %s", hwnd, needle, exc)
+        return []
 
 
 def find_by_automation_id(hwnd: int, automation_id: str) -> UIElement | None:

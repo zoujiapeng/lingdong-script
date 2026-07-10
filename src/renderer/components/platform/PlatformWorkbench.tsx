@@ -13,6 +13,7 @@ import {
   Eye,
   FileCode2,
   Gauge,
+  GraduationCap,
   GitBranch,
   History,
   Library,
@@ -31,6 +32,7 @@ import {
   Sun,
   TerminalSquare,
   UserCheck,
+  Workflow,
   X,
   XCircle,
   Zap,
@@ -441,11 +443,15 @@ interface MemoryItem {
   provisional?: boolean;
 }
 
+type ReplayMode = 'offline_graph' | 'skill' | 'apprentice';
+
 function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => void }) {
   const [traces, setTraces] = useState<TraceItem[]>([]);
   const [scripts, setScripts] = useState<ScriptItem[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [recording, setRecording] = useState(false);
+  const [replayMode, setReplayMode] = useState<ReplayMode>('offline_graph');
+  const [apprenticeTask, setApprenticeTask] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const loadScript = useStore((state) => state.loadScript);
@@ -454,10 +460,12 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     if (!plane.baseUrl) return;
     try {
       const client = plane.getClient();
-      const [nextTraces, nextScripts, nextMemories, human] = await Promise.all([
-        client.traces(), client.scripts(), client.memories(), client.humanStatus(),
+      const [nextTraces, nextScripts, nextMemories, apprentice] = await Promise.all([
+        client.traces(), client.scripts(), client.memories(), client.apprenticeStatus(),
       ]);
-      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setRecording(Boolean(human.recording)); setError('');
+      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setRecording(Boolean(apprentice.recording));
+      if (apprentice.task) setApprenticeTask((current) => current || apprentice.task || '');
+      setError('');
     } catch (refreshError) { setError(refreshError instanceof Error ? refreshError.message : String(refreshError)); }
   }, [plane.baseUrl]);
 
@@ -488,18 +496,50 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   };
 
   const toggleRecording = async () => {
+    if (!recording && !apprenticeTask.trim()) {
+      setError('Enter the workflow the apprentice should learn.');
+      return;
+    }
     setBusy(true);
     try {
-      if (recording) await plane.getClient().humanStop(); else await plane.getClient().humanStart();
+      if (recording) {
+        const result = await plane.getClient().apprenticeStop();
+        await refresh();
+        if (result.file) await openSkill(String(result.file));
+        return;
+      }
+      await plane.getClient().apprenticeStart(apprenticeTask.trim());
       await refresh();
     } catch (recordError) { setError(recordError instanceof Error ? recordError.message : String(recordError)); }
     finally { setBusy(false); }
   };
 
+  const verifyMemory = async (item: MemoryItem) => {
+    setBusy(true); setError('');
+    try {
+      await plane.getClient().verifyMemory(item.id, `Human verified apprentice replay for: ${item.task || item.id}`);
+      await refresh();
+    } catch (verifyError) { setError(verifyError instanceof Error ? verifyError.message : String(verifyError)); }
+    finally { setBusy(false); }
+  };
+
   return (
     <div className="arp-page arp-assets-page">
-      <div className="arp-page-title"><div><span className="arp-kicker">Reuse</span><h2>Skills and demonstrations</h2></div><button className={`arp-button ${recording ? 'arp-button-danger' : ''}`} onClick={toggleRecording} disabled={busy}>{recording ? <CircleStop size={14} /> : <Radio size={14} />} {recording ? 'Stop recording' : 'Record demonstration'}</button></div>
+      <div className="arp-page-title"><div><span className="arp-kicker">Replay</span><h2>Skills and learning</h2></div></div>
       {error && <div className="arp-inline-error"><XCircle size={14} />{error}</div>}
+      <div className="arp-replay-toolbar">
+        <div className="arp-replay-modes" role="tablist" aria-label="Replay mode">
+          <button className={replayMode === 'offline_graph' ? 'active' : ''} onClick={() => setReplayMode('offline_graph')} role="tab" aria-selected={replayMode === 'offline_graph'} disabled={recording}><Workflow size={14} />Offline graph</button>
+          <button className={replayMode === 'skill' ? 'active' : ''} onClick={() => setReplayMode('skill')} role="tab" aria-selected={replayMode === 'skill'} disabled={recording}><RefreshCw size={14} />Skill replay</button>
+          <button className={replayMode === 'apprentice' ? 'active' : ''} onClick={() => setReplayMode('apprentice')} role="tab" aria-selected={replayMode === 'apprentice'}><GraduationCap size={14} />Apprentice</button>
+        </div>
+        {replayMode === 'apprentice' && (
+          <div className="arp-apprentice-control">
+            <input value={apprenticeTask} onChange={(event) => setApprenticeTask(event.target.value)} placeholder="Workflow to learn" disabled={recording || busy} aria-label="Workflow to learn" />
+            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && !apprenticeTask.trim())}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? 'Finish lesson' : 'Start lesson'}</button>
+          </div>
+        )}
+      </div>
       <div className="arp-assets-grid">
         <section className="arp-panel">
           <div className="arp-panel-heading"><div><Library size={15} /><strong>Reusable skills</strong></div><span>{scripts.length}</span></div>
@@ -509,7 +549,9 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                 <div className="arp-asset-icon"><FileCode2 size={16} /></div>
                 <div><strong>{item.name || item.file}</strong><span>{item.steps} steps · {item.task || 'Recorded workflow'}</span></div>
                 <button className="arp-icon-button" title="Open in ARP Studio" onClick={() => openSkill(item.file)} disabled={busy}><Braces size={15} /></button>
-                <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />Replay</button>
+                {replayMode === 'offline_graph' && <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />Open graph</button>}
+                {replayMode === 'skill' && <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />Replay</button>}
+                {replayMode === 'apprentice' && <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><GraduationCap size={13} />Review</button>}
               </div>
             ))}
             {!scripts.length && <EmptyState icon={Library} title="No reusable skills" />}
@@ -539,7 +581,8 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                   <span>{item.status || (item.provisional ? 'provisional' : 'active')} / {item.successes || 0}:{item.uses || 0} success / {Math.round((item.confidence || 0) * 100)}% confidence{item.app ? ` / ${item.app}` : ''}</span>
                 </div>
                 {item.script && <button className="arp-icon-button" title="Open linked skill in ARP Studio" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
-                {item.script && <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />Replay</button>}
+                {item.script && item.provisional && <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy}><Check size={13} />Verify</button>}
+                {item.script && !item.provisional && <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />Replay</button>}
               </div>
             ))}
             {!memories.length && <EmptyState icon={BrainCircuit} title="No reusable memories" />}

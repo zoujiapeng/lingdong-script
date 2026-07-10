@@ -171,21 +171,23 @@ def record(
     script: str = "",
     conditions: list[str] | None = None,
     evidence: list[str] | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     if not enabled() or not steps:
-        return
+        return None
     if is_volatile_state_task(task):
-        return
+        return None
     clean_steps = _clean_steps(steps)
     if not clean_steps:
-        return
+        return None
     store = _store()
     # Preserve old replacement semantics for identical task recipes.
     for node in store.list_nodes(kinds=ACTION_KINDS, include_inactive=True, limit=500):
         if str(node.get("title") or "") == task:
             store.delete_node(node["id"])
     provisional = not (verified and script)
-    kind = "skill" if verified and script else "procedure"
+    # A recorded script is a skill candidate even before it is trusted. Its
+    # provisional status keeps retrieval from replaying it until promotion.
+    kind = "skill" if script else "procedure"
     payload = {
         "task": task[:200],
         "app": app_hint[:80],
@@ -215,6 +217,38 @@ def record(
     )
     if node and script:
         store.add_artifact(node["id"], "wps_script", script)
+    return _recipe_from_node(store.get_node(node["id"])) if node else None
+
+
+def promote_skill(recipe_id: str, evidence: str = "", status: str = "verified") -> dict[str, Any] | None:
+    """Promote a replayable candidate only after explicit external evidence."""
+    store = _store()
+    node = store.get_node(recipe_id)
+    if not node:
+        return None
+    payload = dict(node.get("payload") or {})
+    script = str(payload.get("script") or _script(node)).strip()
+    if not script:
+        return None
+    if evidence.strip():
+        store.add_evidence(recipe_id, evidence.strip(), required=True)
+    store.record_attempt(recipe_id, "manual_verify", status=status, success=True)
+    payload.update({
+        "script": script,
+        "provisional": False,
+        "successes": int(payload.get("successes") or 0) + 1,
+        "uses": int(payload.get("uses") or 0) + 1,
+    })
+    updated = store.update_node(
+        recipe_id,
+        {
+            "kind": "skill",
+            "status": "active",
+            "confidence": min(0.98, float(node.get("confidence") or 0.5) + 0.1),
+            "payload": payload,
+        },
+    )
+    return _recipe_from_node(updated)
 
 
 def feedback(recipe_ids: list[str], success: bool) -> None:

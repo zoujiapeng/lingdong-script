@@ -68,6 +68,27 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       ],
     },
   },
+  replay_step: {
+    type: 'replay_step',
+    label: 'Replay Step',
+    description: 'Run one exact, editable WPS step in a shared offline session.',
+    icon: 'ListRestart',
+    category: 'agent',
+    color: '#475569',
+    defaultParams: {
+      step: { tool: 'ext.delay', seconds: 0 },
+      session: 'default',
+      pace_ms: 0,
+      allow_shell: false,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: 'Done', type: 'flow' },
+        { id: 'fail', label: 'Failed', type: 'flow' },
+      ],
+    },
+  },
   skill_replay: {
     type: 'skill_replay',
     label: 'Skill Replay',

@@ -124,6 +124,7 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
   switch (node.type) {
     case 'agent_goal':
     case 'action_batch':
+    case 'replay_step':
     case 'skill_replay':
     case 'evidence_gate':
     case 'human_gate':

@@ -5,6 +5,7 @@ export type ArpNodeKind =
   | 'end'
   | 'agent_goal'
   | 'action_batch'
+  | 'replay_step'
   | 'skill_replay'
   | 'condition'
   | 'delay'

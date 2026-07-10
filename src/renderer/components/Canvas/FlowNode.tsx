@@ -15,6 +15,7 @@ function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
 function getNodeSummary(node: FlowNodeType): string {
   const p = node.params as any;
   switch (node.type) {
+    case 'replay_step': return `Offline: ${String(p.step?.tool || 'unconfigured')}`;
     case 'click': return `坐标: (${p.x}, ${p.y})  ${p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击'}`;
     case 'image_click': {
       const targets = (p as any).targets || [];

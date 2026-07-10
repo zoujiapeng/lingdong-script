@@ -40,6 +40,22 @@ def capability_catalog() -> list[CapabilitySpec]:
             input_schema={"script": "string?", "task": "string?", "memory_id": "string?"},
         ),
         CapabilitySpec(
+            id="replay.step",
+            name="Offline replay step",
+            category="replay",
+            description="Execute one editable WPS step in a shared zero-token replay session.",
+            node_kind=ArpNodeKind.REPLAY_STEP,
+            latency_class="milliseconds",
+            deterministic=True,
+            requires_llm=False,
+            input_schema={
+                "step": "object",
+                "target_window": "string|object?",
+                "session": "string?",
+                "pace_ms": "integer?",
+            },
+        ),
+        CapabilitySpec(
             id="control.condition",
             name="Condition",
             category="control",

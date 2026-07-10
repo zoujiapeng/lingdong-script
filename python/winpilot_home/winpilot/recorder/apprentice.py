@@ -1,0 +1,133 @@
+"""Apprentice-mode lifecycle built on deterministic human recording."""
+from __future__ import annotations
+
+import json
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from ..config import SCRIPTS_DIR
+from ..memory import experience
+from . import human as human_mod
+from . import trace as trace_mod
+
+
+REPLAY_MODES = (
+    {
+        "id": "offline_graph",
+        "name": "Offline graph",
+        "llm_in_loop": False,
+        "editable": True,
+        "source": "wps",
+    },
+    {
+        "id": "skill",
+        "name": "Skill replay",
+        "llm_in_loop": False,
+        "editable": False,
+        "source": "verified_memory",
+    },
+    {
+        "id": "apprentice",
+        "name": "Apprentice",
+        "llm_in_loop": False,
+        "editable": True,
+        "source": "human_demonstration",
+    },
+)
+
+
+class ApprenticeManager:
+    """Turns one human lesson into an editable graph and skill candidate."""
+
+    def __init__(self, recorder: Any = None) -> None:
+        self.recorder = recorder or human_mod.RECORDER
+        self._lock = threading.RLock()
+        self._session: dict[str, Any] | None = None
+
+    def start(self, task: str, *, name: str = "", app: str = "") -> dict[str, Any]:
+        task = str(task or "").strip()
+        if not task:
+            raise ValueError("apprentice mode requires a task")
+        with self._lock:
+            if self.recorder.is_recording():
+                raise RuntimeError("a demonstration is already recording")
+            session = {
+                "session_id": f"lesson-{uuid.uuid4().hex[:12]}",
+                "mode": "apprentice",
+                "task": task,
+                "app": str(app or "").strip(),
+                "name": str(name or "").strip() or task[:80],
+                "started_at": time.time(),
+            }
+            self.recorder.start(session["name"])
+            self._session = session
+            return {**session, "recording": True}
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            session = dict(self._session or {})
+            return {
+                "mode": "apprentice",
+                "recording": bool(self.recorder.is_recording()),
+                "session_id": session.get("session_id"),
+                "task": session.get("task", ""),
+                "app": session.get("app", ""),
+                "started_at": session.get("started_at"),
+            }
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            session = dict(self._session or {})
+            if not session:
+                raise RuntimeError("no apprentice lesson is active")
+            result = self.recorder.stop()
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or "failed to stop demonstration"))
+
+            path = (Path(SCRIPTS_DIR) / str(result.get("file") or "")).resolve()
+            try:
+                path.relative_to(Path(SCRIPTS_DIR).resolve())
+            except ValueError as exc:
+                raise RuntimeError("recorded lesson escaped the scripts directory") from exc
+            script = json.loads(path.read_text(encoding="utf-8"))
+            script.update({
+                "format": "wps/2",
+                "task": session["task"],
+                "source": "apprentice",
+                "source_session": session["session_id"],
+            })
+            error = trace_mod.validate_script(script)
+            if error:
+                raise RuntimeError(f"recorded lesson is invalid: {error}")
+            path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
+
+            summaries = [json.dumps(step, ensure_ascii=False, sort_keys=True) for step in script.get("steps", [])]
+            recipe = experience.record(
+                session["task"],
+                session.get("app", ""),
+                summaries,
+                verified=False,
+                script=path.name,
+                conditions=[
+                    "Reuse only for the same demonstrated workflow goal.",
+                    *([f'Current app or window must match "{session["app"]}".'] if session.get("app") else []),
+                ],
+                evidence=[
+                    "Replay the lesson and visibly verify the final state before promoting it.",
+                ],
+            )
+            self._session = None
+            return {
+                **result,
+                "mode": "apprentice",
+                "session_id": session["session_id"],
+                "task": session["task"],
+                "script": script,
+                "memory": recipe,
+            }
+
+
+APPRENTICE = ApprenticeManager()
