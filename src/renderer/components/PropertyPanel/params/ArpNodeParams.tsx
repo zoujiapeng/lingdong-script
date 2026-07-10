@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { NodeType } from '../../../types';
 
 interface Props {
-  type: Extract<NodeType, 'agent_goal' | 'action_batch' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
+  type: Extract<NodeType, 'agent_goal' | 'action_batch' | 'replay_step' | 'skill_replay' | 'evidence_gate' | 'human_gate'>;
   params: Record<string, any>;
   onChange: (params: Record<string, any>) => void;
 }
@@ -19,11 +19,23 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 export function ArpNodeParams({ type, params, onChange }: Props) {
   const [actionsText, setActionsText] = useState(() => JSON.stringify(params.actions || [], null, 2));
+  const [stepText, setStepText] = useState(() => JSON.stringify(params.step || {}, null, 2));
+  const [targetText, setTargetText] = useState(() => (
+    typeof params.target_window === 'string'
+      ? params.target_window
+      : JSON.stringify(params.target_window || '', null, 2)
+  ));
   const [jsonError, setJsonError] = useState('');
 
   useEffect(() => {
     if (type === 'action_batch') setActionsText(JSON.stringify(params.actions || [], null, 2));
-  }, [type]);
+    if (type === 'replay_step') {
+      setStepText(JSON.stringify(params.step || {}, null, 2));
+      setTargetText(typeof params.target_window === 'string'
+        ? params.target_window
+        : JSON.stringify(params.target_window || '', null, 2));
+    }
+  }, [type, params.actions, params.step, params.target_window]);
 
   const patch = (values: Record<string, unknown>) => onChange({ ...params, ...values });
   const commitActions = () => {
@@ -31,6 +43,35 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
       const value = JSON.parse(actionsText);
       if (!Array.isArray(value)) throw new Error('Actions must be a JSON array.');
       patch({ actions: value });
+      setJsonError('');
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const commitStep = () => {
+    try {
+      const value = JSON.parse(stepText);
+      if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('Step must be a JSON object.');
+      if (!String(value.tool || '').trim()) throw new Error('Step requires a tool.');
+      patch({ step: value });
+      setJsonError('');
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const commitTarget = () => {
+    const raw = targetText.trim();
+    if (!raw) {
+      patch({ target_window: undefined });
+      setJsonError('');
+      return;
+    }
+    try {
+      const value = raw.startsWith('{') || raw.startsWith('"') ? JSON.parse(raw) : raw;
+      if (typeof value !== 'string' && (!value || Array.isArray(value) || typeof value !== 'object')) {
+        throw new Error('Target window must be a title or JSON object.');
+      }
+      patch({ target_window: value });
       setJsonError('');
     } catch (error) {
       setJsonError(error instanceof Error ? error.message : String(error));
@@ -80,6 +121,30 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
           <Field label="Memory ID" hint="Optional exact memory graph node ID.">
             <input className="form-input" value={params.memory_id || ''} onChange={(event) => patch({ memory_id: event.target.value })} placeholder="skill-..." />
           </Field>
+        </>
+      )}
+
+      {type === 'replay_step' && (
+        <>
+          <Field label="WPS step" hint="The exact zero-token action or control step executed by the local Replayer.">
+            <textarea className="form-input arp-code-editor" spellCheck={false} value={stepText} onChange={(event) => setStepText(event.target.value)} onBlur={commitStep} />
+          </Field>
+          <Field label="Target window" hint="A window title, or JSON such as {&quot;title&quot;:&quot;Notepad&quot;,&quot;process&quot;:&quot;notepad.exe&quot;}.">
+            <textarea className="form-input arp-textarea arp-textarea-compact" spellCheck={false} value={targetText} onChange={(event) => setTargetText(event.target.value)} onBlur={commitTarget} />
+          </Field>
+          <div className="arp-policy-grid">
+            <Field label="Session">
+              <input className="form-input" value={params.session || 'default'} onChange={(event) => patch({ session: event.target.value })} />
+            </Field>
+            <Field label="Pace (ms)">
+              <input className="form-input" type="number" min={0} max={60000} value={params.pace_ms ?? 0} onChange={(event) => patch({ pace_ms: Math.max(0, Number(event.target.value) || 0) })} />
+            </Field>
+          </div>
+          <label className="form-checkbox-label">
+            <input type="checkbox" checked={params.allow_shell === true} onChange={(event) => patch({ allow_shell: event.target.checked })} />
+            Allow shell execution in this workflow
+          </label>
+          {jsonError && <div className="arp-field-error">{jsonError}</div>}
         </>
       )}
 

@@ -2,6 +2,26 @@ import threading
 import time
 
 
+def test_runtime_preview_preserves_replay_evidence_structure():
+    from winpilot.orchestrator.runtime import _json_preview
+
+    payload = {
+        "results": [{
+            "tool": "click",
+            "resolved": {"source": "ocr", "point": [296, 613]},
+            "screen_change_ratio": 0.008,
+        }],
+        "large_text": "x" * 800,
+    }
+
+    preview = _json_preview(payload)
+
+    assert isinstance(preview, dict)
+    assert preview["results"][0]["resolved"]["point"] == [296, 613]
+    assert preview["results"][0]["screen_change_ratio"] == 0.008
+    assert preview["large_text"].endswith("...")
+
+
 def _graph(nodes, edges, **extra):
     from winpilot.orchestrator.contracts import ArpGraph, ArpPolicy
 
@@ -76,6 +96,113 @@ def test_graph_validation_rejects_empty_evidence_gate_and_unknown_legacy_node():
     assert result.valid is False
     assert any("concrete evidence token" in error for error in result.errors)
     assert any("cannot execute legacy node type 'tool_call'" in error for error in result.errors)
+
+
+def test_graph_validation_uses_exact_wps_contract_for_replay_steps():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
+
+    valid = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="replay",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={"step": {"tool": "click", "coords": [10, 20]}},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="replay"),
+            ArpEdge(id="e2", source="replay", target="end"),
+        ],
+    )
+    invalid = valid.model_copy(deep=True)
+    invalid.nodes[1].config = {"step": {"tool": "click"}}
+
+    assert validate_graph(valid).valid is True
+    result = validate_graph(invalid)
+    assert result.valid is False
+    assert any("click requires" in error for error in result.errors)
+
+
+def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution
+
+    class FakeReplayer:
+        instances = []
+
+        def __init__(self, stop_event):
+            self.stop_event = stop_event
+            self.vars = {}
+            self.hwnd = 777
+            self.step_delay = 0
+            self.calls = []
+            self.__class__.instances.append(self)
+
+        def run_steps(self, steps, *, target_window=None, variables=None, prefix=""):
+            self.vars.update({str(key): str(value) for key, value in (variables or {}).items()})
+            step = steps[0]
+            if step["tool"] == "ext.var_set":
+                self.vars[str(step["name"])] = str(step["value"])
+            self.calls.append((step["tool"], target_window, prefix, dict(self.vars)))
+            return {
+                "ok": True,
+                "results": [{"index": f"{prefix}1", "tool": step["tool"], "ok": True}],
+                "preflight": {"ok": True, "required": bool(target_window)},
+                "variables": dict(self.vars),
+            }
+
+    monkeypatch.setattr(adapters.trace_mod, "Replayer", FakeReplayer)
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="seed",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={
+                    "step": {"tool": "ext.var_set", "name": "from_replay", "value": "yes"},
+                    "target_window": "Target App",
+                    "session": "demo",
+                },
+            ),
+            ArpNode(
+                id="native",
+                kind=ArpNodeKind.SET_VARIABLE,
+                config={"name": "from_arp", "value": "ready"},
+            ),
+            ArpNode(
+                id="press",
+                kind=ArpNodeKind.REPLAY_STEP,
+                config={
+                    "step": {"tool": "hotkey", "keys": ["enter"]},
+                    "target_window": "Target App",
+                    "session": "demo",
+                },
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="seed"),
+            ArpEdge(id="e2", source="seed", target="native"),
+            ArpEdge(id="e3", source="native", target="press"),
+            ArpEdge(id="e4", source="press", target="end"),
+        ],
+        policy=ArpPolicy(require_evidence_on_done=True),
+    )
+
+    execution = ArpExecution(graph, adapters.default_handlers(), run_id="mixed-offline-replay")
+    result = execution.run()
+
+    assert result["status"] == "done"
+    assert len(FakeReplayer.instances) == 1
+    replayer = FakeReplayer.instances[0]
+    assert [call[0] for call in replayer.calls] == ["ext.var_set", "hotkey"]
+    assert [call[2] for call in replayer.calls] == ["seed.", "press."]
+    assert replayer.calls[-1][3]["from_replay"] == "yes"
+    assert replayer.calls[-1][3]["from_arp"] == "ready"
+    assert [item["type"] for item in result["evidence"]] == ["replay_step", "replay_step"]
 
 
 def test_graph_validation_rejects_unsupported_controller_action_before_run():

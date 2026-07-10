@@ -44,6 +44,31 @@ def test_experience_api_stays_recipe_like(tmp_path, monkeypatch):
     assert exp.delete(note["id"])
 
 
+def test_apprentice_skill_is_not_reusable_until_verified(tmp_path, monkeypatch):
+    exp = _fresh_experience(tmp_path, monkeypatch)
+    candidate = exp.record(
+        "send a message to my phone",
+        "QQ",
+        ["click Send"],
+        verified=False,
+        script="qq-message.wps.json",
+        evidence=["message is visible in chat history"],
+    )
+
+    assert candidate is not None
+    assert candidate["kind"] == "skill"
+    assert candidate["provisional"] is True
+    assert exp.reusable_script_for("send a message to my phone")[0] == ""
+
+    promoted = exp.promote_skill(candidate["id"], "message appeared in chat history")
+
+    assert promoted is not None
+    assert promoted["provisional"] is False
+    assert promoted["status"] == "active"
+    assert promoted["successes"] == 1
+    assert exp.reusable_script_for("send a message to my phone")[0] == "qq-message.wps.json"
+
+
 def test_legacy_json_migration_is_idempotent(tmp_path, monkeypatch):
     exp = _fresh_experience(tmp_path, monkeypatch)
     legacy = tmp_path / "experience_memory.json"

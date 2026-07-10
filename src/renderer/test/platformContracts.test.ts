@@ -122,6 +122,35 @@ describe('flow to ARP compiler', () => {
     expect(graph.nodes.find((node) => node.id === 'condition')).toMatchObject({ kind: 'condition', config: { source: 'variables.ready', operator: 'eq', value: 'yes' } });
   });
 
+  it('compiles exact replay steps as native zero-token nodes with explicit shell policy', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0, {
+      id: 'offline',
+      type: 'replay_step',
+      x: 0,
+      y: 0,
+      params: {
+        step: { tool: 'ext.run_shell', command: 'Write-Output ok' },
+        session: 'recording-1',
+        pace_ms: 0,
+        allow_shell: true,
+        target_window: { title: 'Target' },
+      },
+    });
+
+    const graph = flowToArpGraph(script);
+    expect(graph.nodes.find((node) => node.id === 'offline')).toMatchObject({
+      kind: 'replay_step',
+      config: {
+        step: { tool: 'ext.run_shell', command: 'Write-Output ok' },
+        session: 'recording-1',
+        target_window: { title: 'Target' },
+      },
+    });
+    expect(graph.policy.allow_shell).toBe(true);
+    expect(graph.metadata.compilation).toMatchObject({ replay_nodes: 1, legacy_nodes: 0 });
+  });
+
   it('compiles common GUI nodes into one controller batch per node', () => {
     const script = scriptFixture();
     script.nodes.splice(1, 0,

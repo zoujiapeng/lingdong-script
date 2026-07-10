@@ -141,3 +141,47 @@ def test_get_script_as_automation_ir(client, tmp_path):
     assert data["format"] == "automation-ir/1"
     assert data["source"]["kind"] == "wps"
     assert data["steps"] == [{"tool": "click", "coords": [1, 2]}]
+
+
+def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):
+    from winpilot import server
+
+    class FakeApprentice:
+        def __init__(self):
+            self.recording = False
+            self.task = ""
+
+        def start(self, task, *, name="", app=""):
+            self.recording = True
+            self.task = task
+            return {"session_id": "lesson-1", "task": task, "recording": True}
+
+        def stop(self):
+            self.recording = False
+            return {
+                "file": "lesson.wps.json",
+                "steps": 1,
+                "memory": {"id": "skill-1", "provisional": True},
+            }
+
+        def status(self):
+            return {"mode": "apprentice", "recording": self.recording, "task": self.task}
+
+    fake = FakeApprentice()
+    monkeypatch.setattr(server.apprentice_mod, "APPRENTICE", fake)
+
+    modes = client.get("/api/v2/replay/modes")
+    assert modes.status_code == 200
+    assert [item["id"] for item in modes.json()["modes"]] == [
+        "offline_graph", "skill", "apprentice",
+    ]
+
+    started = client.post("/api/v2/replay/apprentice/start", json={"task": "Send message"})
+    assert started.status_code == 200
+    assert started.json()["session"]["recording"] is True
+    assert client.get("/api/v2/replay/apprentice/status").json()["task"] == "Send message"
+
+    stopped = client.post("/api/v2/replay/apprentice/stop")
+    assert stopped.status_code == 200
+    assert stopped.json()["file"] == "lesson.wps.json"
+    assert stopped.json()["memory"]["provisional"] is True

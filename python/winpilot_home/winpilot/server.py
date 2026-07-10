@@ -38,6 +38,7 @@ from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
 from .eval import summary as eval_summary
 from .perception import ocr, vlm
 from .recorder import human as human_mod
+from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
 from .runtime_info import runtime_fingerprint
 from .utils.log import BUS, logger
@@ -348,6 +349,12 @@ class HumanStartRequest(BaseModel):
     name: str | None = None
 
 
+class ApprenticeStartRequest(BaseModel):
+    task: str
+    name: str = ""
+    app: str = ""
+
+
 class ArpGateDecisionRequest(BaseModel):
     node_id: str
     approved: bool
@@ -541,6 +548,14 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
+
+
+@app.get("/api/v2/arp/runs/{run_id}")
+def get_arp_run(run_id: str) -> dict[str, Any]:
+    execution = ARP_RUNS.get(run_id)
+    if not execution:
+        raise HTTPException(404, "ARP run not found")
+    return {"ok": True, "run": execution.to_dict()}
 
 
 @app.post("/api/v2/arp/runs/{run_id}/cancel")
@@ -907,6 +922,40 @@ def human_status() -> dict[str, Any]:
     return {"recording": human_mod.RECORDER.is_recording()}
 
 
+@app.get("/api/v2/replay/modes")
+def replay_modes() -> dict[str, Any]:
+    return {"ok": True, "modes": list(apprentice_mod.REPLAY_MODES)}
+
+
+@app.post("/api/v2/replay/apprentice/start")
+def apprentice_start(req: ApprenticeStartRequest) -> dict[str, Any]:
+    with STATE.lock:
+        if STATE.busy():
+            raise HTTPException(409, "another agent, replay, or recording is active")
+        try:
+            session = apprentice_mod.APPRENTICE.start(req.task, name=req.name, app=req.app)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(500, f"cannot start apprentice lesson: {exc}") from exc
+    return {"ok": True, "session": session}
+
+
+@app.post("/api/v2/replay/apprentice/stop")
+def apprentice_stop() -> dict[str, Any]:
+    try:
+        return {"ok": True, **apprentice_mod.APPRENTICE.stop()}
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"cannot finish apprentice lesson: {exc}") from exc
+
+
+@app.get("/api/v2/replay/apprentice/status")
+def apprentice_status() -> dict[str, Any]:
+    return apprentice_mod.APPRENTICE.status()
+
+
 @app.post("/api/replay")
 def replay(req: ReplayRequest) -> dict[str, Any]:
     script_path = _ensure_inside(SCRIPTS_DIR / req.script, SCRIPTS_DIR, "脚本")
@@ -1093,6 +1142,9 @@ def memory_verify(recipe_id: str, req: MemoryVerifyRequest) -> dict[str, Any]:
     node = store.get_node(recipe_id)
     if not node:
         raise HTTPException(404, "memory not found")
+    promoted = experience.promote_skill(recipe_id, req.evidence, req.status)
+    if promoted:
+        return {"ok": True, "memory": promoted}
     if req.evidence.strip():
         store.add_evidence(recipe_id, req.evidence.strip(), required=True)
     store.record_attempt(recipe_id, "manual_verify", status=req.status, success=True)

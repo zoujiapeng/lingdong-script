@@ -374,7 +374,14 @@
 .arp-run-detail-head h3 { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-run-detail-head code { display: block; margin-top: 4px; color: var(--arp-text-muted); font-size: 8px; }
 
-.arp-assets-grid { height: calc(100% - 48px); min-height: 520px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: minmax(230px, 1fr) minmax(190px, 0.75fr); gap: 10px; }
+.arp-replay-toolbar { min-height: 39px; margin-bottom: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.arp-replay-modes { height: 31px; display: inline-grid; grid-template-columns: repeat(3, auto); padding: 2px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-subtle); }
+.arp-replay-modes button { min-width: 112px; height: 25px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 4px; color: var(--arp-text-muted); background: transparent; font-size: 9px; cursor: pointer; }
+.arp-replay-modes button.active { color: var(--arp-text); background: var(--arp-surface); box-shadow: 0 0 0 1px var(--arp-line); }
+.arp-apprentice-control { min-width: 330px; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.arp-apprentice-control input { min-width: 180px; height: 31px; flex: 1; padding: 0 8px; border: 1px solid var(--arp-line); border-radius: 5px; outline: none; color: var(--arp-text); background: var(--arp-surface); font-size: 10px; user-select: text; }
+.arp-apprentice-control input:focus { border-color: var(--arp-accent); }
+.arp-assets-grid { height: calc(100% - 96px); min-height: 520px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: minmax(230px, 1fr) minmax(190px, 0.75fr); gap: 10px; }
 .arp-assets-grid .arp-panel { display: flex; flex-direction: column; }
 .arp-memory-assets { grid-column: 1 / -1; }
 .arp-asset-list { min-height: 0; flex: 1; overflow: auto; }
@@ -444,6 +451,10 @@
   .arp-metric:nth-child(4n) { border-right: 0; }
   .arp-metric:nth-child(-n+4) { border-bottom: 1px solid var(--arp-line); }
   .arp-assets-grid, .arp-system-grid { height: auto; grid-template-columns: 1fr; grid-template-rows: none; }
+  .arp-replay-toolbar { align-items: stretch; flex-direction: column; }
+  .arp-replay-modes { width: 100%; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .arp-replay-modes button { min-width: 0; }
+  .arp-apprentice-control { min-width: 0; width: 100%; }
   .arp-memory-assets { grid-column: auto; }
   .arp-assets-grid .arp-panel { min-height: 260px; max-height: 420px; }
   .arp-assets-grid .arp-memory-assets { max-height: 340px; }

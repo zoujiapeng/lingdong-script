@@ -7,6 +7,7 @@ export type NodeType =
   | 'end'
   | 'agent_goal'
   | 'action_batch'
+  | 'replay_step'
   | 'skill_replay'
   | 'evidence_gate'
   | 'human_gate'
@@ -452,6 +453,17 @@ export interface ActionBatchNodeParams {
   description?: string;
 }
 
+export interface ReplayStepNodeParams {
+  step: Record<string, unknown>;
+  target_window?: unknown;
+  session?: string;
+  pace_ms?: number;
+  allow_shell?: boolean;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
 export interface SkillReplayNodeParams {
   script: string;
   retry_max_attempts?: number;
@@ -489,6 +501,7 @@ export type NodeParams =
   | EndNodeParams
   | AgentGoalNodeParams
   | ActionBatchNodeParams
+  | ReplayStepNodeParams
   | SkillReplayNodeParams
   | EvidenceGateNodeParams
   | HumanGateNodeParams

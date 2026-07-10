@@ -48,7 +48,7 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
     assert data["api_version"] == "2"
     assert data["contracts"]["arp"] == "arp/1"
     capability_ids = {item["id"] for item in data["capabilities"]}
-    assert {"agent.goal", "controller.batch", "skill.replay", "evidence.gate"} <= capability_ids
+    assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate"} <= capability_ids
 
 
 def test_validate_and_run_arp_graph_through_api(client):
@@ -61,6 +61,10 @@ def test_validate_and_run_arp_graph_through_api(client):
     created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {"source": "test"}})
     assert created.status_code == 200
     run_id = created.json()["run_id"]
+
+    direct = client.get(f"/api/v2/arp/runs/{run_id}")
+    assert direct.status_code == 200
+    assert direct.json()["run"]["run_id"] == run_id
 
     deadline = time.time() + 2
     detail = None

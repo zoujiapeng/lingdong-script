@@ -30,6 +30,7 @@ class ArpNodeKind(str, Enum):
     END = "end"
     AGENT_GOAL = "agent_goal"
     ACTION_BATCH = "action_batch"
+    REPLAY_STEP = "replay_step"
     SKILL_REPLAY = "skill_replay"
     CONDITION = "condition"
     DELAY = "delay"
@@ -131,6 +132,27 @@ def _validate_node_config(node: ArpNode) -> list[str]:
             errors.append(f"{prefix} requires config.goal")
     elif node.kind == ArpNodeKind.ACTION_BATCH:
         errors.extend(f"{prefix}: {error}" for error in validate_batch_actions(config.get("actions")))
+    elif node.kind == ArpNodeKind.REPLAY_STEP:
+        step = config.get("step")
+        if not isinstance(step, dict):
+            errors.append(f"{prefix} requires config.step object")
+        else:
+            # Keep WPS validation in one place so graph execution and file replay
+            # accept exactly the same deterministic step language.
+            from ..recorder.trace import validate_script
+
+            script = {"format": "wps/2", "steps": [step]}
+            if config.get("target_window") not in (None, "", {}):
+                script["target_window"] = config["target_window"]
+            error = validate_script(script)
+            if error:
+                errors.append(f"{prefix}: {error}")
+        try:
+            pace_ms = int(config.get("pace_ms") or 0)
+            if pace_ms < 0 or pace_ms > 60000:
+                errors.append(f"{prefix} requires config.pace_ms between 0 and 60000")
+        except (TypeError, ValueError):
+            errors.append(f"{prefix} requires integer config.pace_ms")
     elif node.kind == ArpNodeKind.SKILL_REPLAY:
         if not any(str(config.get(key) or "").strip() for key in ("script", "task", "memory_id")):
             errors.append(f"{prefix} requires config.script, config.task, or config.memory_id")
@@ -240,6 +262,7 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
             evidence_kinds = {
                 ArpNodeKind.AGENT_GOAL,
                 ArpNodeKind.ACTION_BATCH,
+                ArpNodeKind.REPLAY_STEP,
                 ArpNodeKind.SKILL_REPLAY,
                 ArpNodeKind.EVIDENCE_GATE,
                 ArpNodeKind.HUMAN_GATE,

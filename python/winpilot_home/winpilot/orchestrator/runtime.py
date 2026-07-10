@@ -24,23 +24,55 @@ class NodeResult:
 NodeHandler = Callable[[ArpNode, dict[str, Any], threading.Event], NodeResult]
 
 
-def _json_preview(value: Any, limit: int = 500) -> Any:
+def _json_preview(
+    value: Any,
+    limit: int = 500,
+    *,
+    _depth: int = 0,
+    _budget: list[int] | None = None,
+) -> Any:
+    """Return bounded JSON-safe data without flattening useful structure."""
+    budget = _budget if _budget is not None else [400]
+    if budget[0] <= 0:
+        return "<truncated>"
+    budget[0] -= 1
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
         return value if len(value) <= limit else value[:limit] + "..."
+    if _depth >= 8:
+        return "<max-depth>"
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if budget[0] <= 0:
+                out["_truncated"] = True
+                break
+            out[str(key)] = _json_preview(
+                item,
+                limit,
+                _depth=_depth + 1,
+                _budget=budget,
+            )
+        return out
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in value:
+            if budget[0] <= 0:
+                out.append("<truncated>")
+                break
+            out.append(_json_preview(
+                item,
+                limit,
+                _depth=_depth + 1,
+                _budget=budget,
+            ))
+        return out
     try:
         text = json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
         text = str(value)
-    if len(text) > limit:
-        return text[:limit] + "..."
-    if isinstance(value, (dict, list, tuple)):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-    return text
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 class ArpExecution:
@@ -62,6 +94,10 @@ class ArpExecution:
         self.outputs: dict[str, Any] = {}
         self.evidence: list[Any] = []
         self.history: list[dict[str, Any]] = []
+        # Handler-owned state lives for the duration of one graph execution.
+        # It is intentionally omitted from to_dict because it may hold live
+        # controller or replay session objects.
+        self.runtime_state: dict[str, Any] = {}
         self.result: Any = None
         self.error = ""
         self.created_at = time.time()
@@ -117,6 +153,7 @@ class ArpExecution:
             "variables": self.variables,
             "outputs": self.outputs,
             "evidence": self.evidence,
+            "runtime_state": self.runtime_state,
             "last": {
                 "ok": last.ok,
                 "branch": last.branch,

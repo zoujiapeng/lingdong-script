@@ -2,7 +2,7 @@ import type { FlowNode, FlowScript } from '../types';
 import type { ArpEdge, ArpGraph, ArpNode, ArpNodeKind } from './contracts';
 
 const NATIVE_KINDS = new Set<ArpNodeKind>([
-  'start', 'end', 'agent_goal', 'action_batch', 'skill_replay', 'evidence_gate', 'human_gate',
+  'start', 'end', 'agent_goal', 'action_batch', 'replay_step', 'skill_replay', 'evidence_gate', 'human_gate',
 ]);
 
 function retryOf(params: Record<string, any>) {
@@ -218,6 +218,7 @@ export function edgeBranch(fromPort: string, label?: string): string {
 export function flowToArpGraph(script: FlowScript): ArpGraph {
   const nodes = script.nodes.map(nodeToArp);
   const legacyNodes = nodes.filter((node) => node.kind === 'legacy_flow');
+  const replayNodes = nodes.filter((node) => node.kind === 'replay_step');
   const edges: ArpEdge[] = script.edges.map((edge) => ({
     id: edge.id,
     source: edge.from_node,
@@ -237,7 +238,7 @@ export function flowToArpGraph(script: FlowScript): ArpGraph {
       max_node_visits: 100,
       fail_fast: script.settings.error_handling === 'stop',
       require_evidence_on_done: true,
-      allow_shell: false,
+      allow_shell: replayNodes.some((node) => node.config.allow_shell === true),
       allow_desktop_mutation: true,
     },
     metadata: {
@@ -246,6 +247,7 @@ export function flowToArpGraph(script: FlowScript): ArpGraph {
       compiled_at: new Date().toISOString(),
       compilation: {
         native_nodes: nodes.length - legacyNodes.length,
+        replay_nodes: replayNodes.length,
         legacy_nodes: legacyNodes.length,
         legacy_types: [...new Set(legacyNodes.map((node) => String(node.config.node_type || 'unknown')))],
       },
