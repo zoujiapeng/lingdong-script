@@ -104,6 +104,20 @@ export class ControlPlaneClient {
     return this.request('api/scripts');
   }
 
+  memories(): Promise<Array<{
+    id: string;
+    task: string;
+    app?: string;
+    script?: string;
+    status?: string;
+    confidence?: number;
+    uses?: number;
+    successes?: number;
+    provisional?: boolean;
+  }>> {
+    return this.request('api/memory');
+  }
+
   script<T = Record<string, unknown>>(file: string): Promise<T> {
     return this.request(`api/script/${encodeURIComponent(file)}`);
   }
@@ -205,18 +219,22 @@ export function createGoalGraph(goal: string, maxSteps = 30): ArpGraph {
     format: 'arp/1',
     id: `goal-${timestamp}`,
     name: goal.slice(0, 80) || 'Agent goal',
-    description: 'Native goal run created by the Agent Cockpit.',
+    description: 'Memory-first goal run created by the Agent Cockpit.',
     nodes: [
       { id: 'start', kind: 'start', name: 'Start', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 0 },
-      { id: 'goal', kind: 'agent_goal', name: 'Agent Goal', config: { goal, max_steps: maxSteps }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 120 },
-      { id: 'end', kind: 'end', name: 'Done', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 240 },
+      { id: 'skill', kind: 'skill_replay', name: 'Reuse verified skill', config: { task: goal }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 120 },
+      { id: 'goal', kind: 'agent_goal', name: 'Agent exception handler', config: { goal, max_steps: maxSteps }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 180, y: 240 },
+      { id: 'end', kind: 'end', name: 'Done', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 360 },
     ],
     edges: [
-      { id: 'start-goal', source: 'start', target: 'goal', branch: 'next', label: '' },
+      { id: 'start-skill', source: 'start', target: 'skill', branch: 'next', label: '' },
+      { id: 'skill-end', source: 'skill', target: 'end', branch: 'next', label: 'reused' },
+      { id: 'skill-miss-goal', source: 'skill', target: 'goal', branch: 'miss', label: 'explore' },
+      { id: 'skill-fail-goal', source: 'skill', target: 'goal', branch: 'fail', label: 'recover' },
       { id: 'goal-end', source: 'goal', target: 'end', branch: 'next', label: '' },
     ],
     variables: {},
     policy: { max_node_visits: 20, fail_fast: true, require_evidence_on_done: true, allow_shell: false, allow_desktop_mutation: true },
-    metadata: { source: 'agent-cockpit' },
+    metadata: { source: 'agent-cockpit', routing: 'verified-skill-first-agent-on-miss-or-failure' },
   };
 }

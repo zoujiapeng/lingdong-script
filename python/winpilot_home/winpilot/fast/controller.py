@@ -12,50 +12,15 @@ from ..agent.tool_result import ToolResult
 from ..perception import ocr, vision_cv
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
+from .action_contract import (
+    ALLOWED_BATCH_ACTIONS,
+    BATCH_MUTATING_ACTIONS,
+    BATCH_OBSERVE_ACTIONS,
+)
 from .element_cache import ElementCache, anchor_from_dict
 from .input_locator import locate_input
 from .types import BatchMetrics
 from .watcher import ScreenWatcher
-
-ALLOWED_BATCH_ACTIONS = {
-    "observe",
-    "click",
-    "click_element",
-    "type_into_element",
-    "type_text",
-    "hotkey",
-    "scroll",
-    "drag",
-    "draw_strokes",
-    "select_color",
-    "focus_window",
-    "wait",
-    "wait_change",
-    "wait_stable",
-    "read_text",
-    "zoom",
-    "clipboard_write",
-    "clipboard_paste",
-}
-BATCH_MUTATING_ACTIONS = {
-    "click",
-    "click_element",
-    "type_into_element",
-    "type_text",
-    "hotkey",
-    "scroll",
-    "drag",
-    "draw_strokes",
-    "select_color",
-    "focus_window",
-    "clipboard_paste",
-}
-BATCH_OBSERVE_ACTIONS = {
-    "observe",
-    "read_text",
-    "zoom",
-    "auto_visual_verify",
-}
 _ANCHOR_HINT_KEYS = {
     "anchor",
     "label",
@@ -1429,10 +1394,11 @@ class FastGuiController:
                 or (screen_change_required and not bool(screen_delta.get("changed")))
                 or (transient_required and not bool(screen_delta.get("transient_observed")))
             )
-            if not evidence_requirement_failed and (
+            evidence_requirement_verified = not evidence_requirement_failed and (
                 (query_required and query_matches)
                 or (screen_change_required and bool(screen_delta.get("changed")))
-            ):
+            )
+            if evidence_requirement_verified:
                 current_state_verified = True
                 verified_any = True
                 item["verified"] = True
@@ -1442,7 +1408,7 @@ class FastGuiController:
                 if has_expect:
                     verified_expect_any = True
             elif data.get("verified") is False:
-                if name in BATCH_MUTATING_ACTIONS:
+                if name in BATCH_MUTATING_ACTIONS and (has_expect or not evidence_requirement_verified):
                     current_state_verified = False
                 if has_expect:
                     verified_expect_false_any = True
@@ -1461,7 +1427,7 @@ class FastGuiController:
             if evidence_requirement_failed:
                 item["error"] = "required controller evidence was not observed"
             if "verified" in data:
-                item["verified"] = bool(data.get("verified"))
+                item["verified"] = evidence_requirement_verified or bool(data.get("verified"))
             if data:
                 item["data"] = data
                 auto_observe = data.get("controller_auto_observe")

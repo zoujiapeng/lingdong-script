@@ -75,11 +75,12 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     icon: 'RefreshCw',
     category: 'agent',
     color: '#7c3aed',
-    defaultParams: { script: '' },
+    defaultParams: { script: '', task: '', memory_id: '' },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [
         { id: 'output', label: 'Done', type: 'flow' },
+        { id: 'miss', label: 'No match', type: 'flow' },
         { id: 'fail', label: 'Failed', type: 'flow' },
       ],
     },

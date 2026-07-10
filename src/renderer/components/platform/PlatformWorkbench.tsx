@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Bot,
+  BrainCircuit,
   Braces,
   Check,
   CheckCircle2,
@@ -301,6 +302,7 @@ function Studio({ plane }: { plane: Plane }) {
   const [mobilePanel, setMobilePanel] = useState<'library' | 'properties' | null>(null);
   const processedNodeEvents = useRef(new Set<string>());
   const graph = useMemo(() => flowToArpGraph(script), [script]);
+  const compilation = graph.metadata.compilation as { native_nodes?: number; legacy_nodes?: number; legacy_types?: string[] } | undefined;
 
   useEffect(() => {
     setUI({ panels_visible: true, show_node_library: true, show_property_panel: true });
@@ -358,7 +360,8 @@ function Studio({ plane }: { plane: Plane }) {
   return (
     <div className="arp-studio-page">
       <header className="arp-studio-toolbar">
-        <div className="arp-studio-title"><GitBranch size={16} /><div><strong>{script.meta.name}</strong><span>{graph.nodes.length} nodes · {graph.edges.length} edges · arp/1</span></div></div>
+        <div className="arp-studio-title"><GitBranch size={16} /><div><strong>{script.meta.name}</strong><span>{graph.nodes.length} nodes / {graph.edges.length} edges / {compilation?.native_nodes ?? graph.nodes.length} native</span></div></div>
+        {Boolean(compilation?.legacy_nodes) && <StatusPill status="failed" label={`${compilation?.legacy_nodes} unsupported`} />}
         {validation && <StatusPill status={validation.valid ? 'success' : 'failed'} label={validation.valid ? 'valid' : `${validation.errors.length} errors`} />}
         {error && <span className="arp-toolbar-error">{error}</span>}
         <div className="arp-action-spacer" />
@@ -426,10 +429,22 @@ function RunsView({ plane }: { plane: Plane }) {
 
 interface TraceItem { run_id: string; task: string; status: string; steps: number }
 interface ScriptItem { file: string; name: string; task: string; steps: number }
+interface MemoryItem {
+  id: string;
+  task: string;
+  app?: string;
+  script?: string;
+  status?: string;
+  confidence?: number;
+  uses?: number;
+  successes?: number;
+  provisional?: boolean;
+}
 
 function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => void }) {
   const [traces, setTraces] = useState<TraceItem[]>([]);
   const [scripts, setScripts] = useState<ScriptItem[]>([]);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -439,8 +454,10 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     if (!plane.baseUrl) return;
     try {
       const client = plane.getClient();
-      const [nextTraces, nextScripts, human] = await Promise.all([client.traces(), client.scripts(), client.humanStatus()]);
-      setTraces(nextTraces); setScripts(nextScripts); setRecording(Boolean(human.recording)); setError('');
+      const [nextTraces, nextScripts, nextMemories, human] = await Promise.all([
+        client.traces(), client.scripts(), client.memories(), client.humanStatus(),
+      ]);
+      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setRecording(Boolean(human.recording)); setError('');
     } catch (refreshError) { setError(refreshError instanceof Error ? refreshError.message : String(refreshError)); }
   }, [plane.baseUrl]);
 
@@ -509,6 +526,23 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
               </div>
             ))}
             {!traces.length && <EmptyState icon={Database} title="No exploration traces" />}
+          </div>
+        </section>
+        <section className="arp-panel arp-memory-assets">
+          <div className="arp-panel-heading"><div><BrainCircuit size={15} /><strong>Memory graph</strong></div><span>{memories.length}</span></div>
+          <div className="arp-asset-list">
+            {memories.map((item) => (
+              <div className="arp-asset-row" key={item.id}>
+                <div className="arp-asset-icon"><BrainCircuit size={16} /></div>
+                <div>
+                  <strong>{item.task || item.id}</strong>
+                  <span>{item.status || (item.provisional ? 'provisional' : 'active')} / {item.successes || 0}:{item.uses || 0} success / {Math.round((item.confidence || 0) * 100)}% confidence{item.app ? ` / ${item.app}` : ''}</span>
+                </div>
+                {item.script && <button className="arp-icon-button" title="Open linked skill in ARP Studio" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
+                {item.script && <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />Replay</button>}
+              </div>
+            ))}
+            {!memories.length && <EmptyState icon={BrainCircuit} title="No reusable memories" />}
           </div>
         </section>
       </div>

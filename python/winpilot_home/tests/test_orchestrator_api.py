@@ -29,13 +29,13 @@ def _graph_payload():
         "nodes": [
             {"id": "start", "kind": "start"},
             {"id": "set", "kind": "set_variable", "config": {"name": "ready", "value": True}},
-            {"id": "gate", "kind": "evidence_gate", "config": {"required": []}},
+            {"id": "gate", "kind": "human_gate", "config": {"approved": True}},
             {"id": "end", "kind": "end"},
         ],
         "edges": [
             {"id": "e1", "source": "start", "target": "set"},
             {"id": "e2", "source": "set", "target": "gate"},
-            {"id": "e3", "source": "gate", "target": "end", "branch": "pass"},
+            {"id": "e3", "source": "gate", "target": "end", "branch": "approved"},
         ],
     }
 

@@ -41,7 +41,7 @@ from .recorder import human as human_mod
 from .recorder import trace as trace_mod
 from .runtime_info import runtime_fingerprint
 from .utils.log import BUS, logger
-from .orchestrator.adapters import default_handlers
+from .orchestrator.adapters import default_handlers, finalize_memory_feedback
 from .orchestrator.catalog import capability_catalog
 from .orchestrator.contracts import ArpGraph, ArpRunRequest, validate_graph
 from .orchestrator.projection import RUN_PROJECTIONS
@@ -516,8 +516,11 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
             STATE.stop_event = execution.stop_event
             trace_mod.RECORDER.start(execution.run_id)
 
-        def on_finish(_execution: ArpExecution) -> None:
-            trace_mod.RECORDER.stop()
+        def on_finish(finished_execution: ArpExecution) -> None:
+            try:
+                finalize_memory_feedback(finished_execution)
+            finally:
+                trace_mod.RECORDER.stop()
 
         execution = ARP_RUNS.start(
             graph,

@@ -6,8 +6,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..fast.action_contract import validate_batch_actions
+
 
 ARP_FORMAT = "arp/1"
+LEGACY_ACTION_NODE_TYPES = {
+    "click",
+    "click_text",
+    "input_text",
+    "keyboard",
+    "focus_window",
+    "launch_program",
+}
+CONDITION_OPERATORS = {
+    "truthy", "falsy", "true", "false", "always_true", "always_false",
+    "eq", "equals", "==", "ne", "not_equals", "!=",
+    "contains", "gt", ">", "gte", ">=", "lt", "<", "lte", "<=",
+}
 
 
 class ArpNodeKind(str, Enum):
@@ -104,6 +119,50 @@ class ArpRunRequest(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+def _validate_node_config(node: ArpNode) -> list[str]:
+    config = node.config
+    errors: list[str] = []
+    prefix = f"node {node.id!r} ({node.kind.value})"
+    if node.disabled:
+        return errors
+    if node.kind == ArpNodeKind.AGENT_GOAL:
+        goal = str(config.get("goal") or config.get("task") or node.name or "").strip()
+        if not goal:
+            errors.append(f"{prefix} requires config.goal")
+    elif node.kind == ArpNodeKind.ACTION_BATCH:
+        errors.extend(f"{prefix}: {error}" for error in validate_batch_actions(config.get("actions")))
+    elif node.kind == ArpNodeKind.SKILL_REPLAY:
+        if not any(str(config.get(key) or "").strip() for key in ("script", "task", "memory_id")):
+            errors.append(f"{prefix} requires config.script, config.task, or config.memory_id")
+    elif node.kind == ArpNodeKind.CONDITION:
+        if not str(config.get("source") or "").strip():
+            errors.append(f"{prefix} requires config.source")
+        operator = str(config.get("operator") or "truthy").casefold()
+        if operator not in CONDITION_OPERATORS:
+            errors.append(f"{prefix} has unsupported operator {operator!r}")
+    elif node.kind == ArpNodeKind.DELAY:
+        try:
+            if int(config.get("duration_ms") or 0) < 0:
+                errors.append(f"{prefix} requires a non-negative config.duration_ms")
+        except (TypeError, ValueError):
+            errors.append(f"{prefix} requires integer config.duration_ms")
+    elif node.kind == ArpNodeKind.SET_VARIABLE:
+        if not str(config.get("name") or "").strip():
+            errors.append(f"{prefix} requires config.name")
+    elif node.kind == ArpNodeKind.EVIDENCE_GATE:
+        required = config.get("required")
+        if not isinstance(required, list) or not any(str(item).strip() for item in required):
+            errors.append(f"{prefix} requires at least one concrete evidence token")
+    elif node.kind == ArpNodeKind.LEGACY_FLOW:
+        node_type = str(config.get("node_type") or "").strip()
+        if node_type not in LEGACY_ACTION_NODE_TYPES:
+            errors.append(
+                f"{prefix} cannot execute legacy node type {node_type or '<empty>'!r}; "
+                "migrate it to a native ARP capability"
+            )
+    return errors
+
+
 def validate_graph(graph: ArpGraph) -> GraphValidation:
     errors: list[str] = []
     warnings: list[str] = []
@@ -119,6 +178,8 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
         errors.append("edge ids must be unique")
 
     node_map = {node.id: node for node in graph.nodes}
+    for node in graph.nodes:
+        errors.extend(_validate_node_config(node))
     starts = [node.id for node in graph.nodes if node.kind == ArpNodeKind.START]
     ends = [node.id for node in graph.nodes if node.kind == ArpNodeKind.END]
     if len(starts) != 1:
@@ -130,6 +191,10 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
             errors.append(f"edge {edge.id!r} references missing source {edge.source!r}")
         if edge.target not in node_map:
             errors.append(f"edge {edge.id!r} references missing target {edge.target!r}")
+    route_keys = [(edge.source, edge.branch) for edge in graph.edges]
+    duplicate_routes = sorted({key for key in route_keys if route_keys.count(key) > 1})
+    for source, branch in duplicate_routes:
+        errors.append(f"node {source!r} has multiple routes for branch {branch!r}")
 
     reachable: list[str] = []
     if len(starts) == 1 and not errors:
@@ -150,6 +215,27 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
             warnings.append("unreachable nodes: " + ", ".join(unreachable))
         if not any(end in seen for end in ends):
             errors.append("no end node is reachable from start")
+        outgoing: dict[str, list[ArpEdge]] = {node_id: [] for node_id in node_map}
+        for edge in graph.edges:
+            outgoing[edge.source].append(edge)
+        for node_id in reachable:
+            node = node_map[node_id]
+            if node.kind != ArpNodeKind.END and not outgoing.get(node_id):
+                errors.append(f"reachable node {node_id!r} has no outgoing route")
+            if node.kind == ArpNodeKind.CONDITION:
+                branches = {edge.branch for edge in outgoing.get(node_id, [])}
+                missing = {"yes", "no"} - branches
+                if missing:
+                    errors.append(
+                        f"condition node {node_id!r} requires yes/no routes; missing "
+                        + ", ".join(sorted(missing))
+                    )
+            if node.kind == ArpNodeKind.SKILL_REPLAY and not str(node.config.get("script") or "").strip():
+                branches = {edge.branch for edge in outgoing.get(node_id, [])}
+                if "miss" not in branches:
+                    errors.append(
+                        f"memory-backed skill node {node_id!r} requires a miss route for Agent fallback"
+                    )
         if graph.policy.require_evidence_on_done:
             evidence_kinds = {
                 ArpNodeKind.AGENT_GOAL,

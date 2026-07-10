@@ -374,8 +374,9 @@
 .arp-run-detail-head h3 { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-run-detail-head code { display: block; margin-top: 4px; color: var(--arp-text-muted); font-size: 8px; }
 
-.arp-assets-grid { height: calc(100% - 48px); min-height: 380px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.arp-assets-grid { height: calc(100% - 48px); min-height: 520px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: minmax(230px, 1fr) minmax(190px, 0.75fr); gap: 10px; }
 .arp-assets-grid .arp-panel { display: flex; flex-direction: column; }
+.arp-memory-assets { grid-column: 1 / -1; }
 .arp-asset-list { min-height: 0; flex: 1; overflow: auto; }
 .arp-asset-row { min-height: 61px; padding: 9px 10px; display: grid; grid-template-columns: 31px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--arp-line); }
 .arp-asset-icon { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 5px; color: var(--arp-blue); background: var(--arp-blue-soft); }
@@ -442,7 +443,10 @@
   .arp-metrics-row { grid-template-columns: repeat(4, 1fr); }
   .arp-metric:nth-child(4n) { border-right: 0; }
   .arp-metric:nth-child(-n+4) { border-bottom: 1px solid var(--arp-line); }
-  .arp-assets-grid, .arp-system-grid { height: auto; grid-template-columns: 1fr; }
+  .arp-assets-grid, .arp-system-grid { height: auto; grid-template-columns: 1fr; grid-template-rows: none; }
+  .arp-memory-assets { grid-column: auto; }
+  .arp-assets-grid .arp-panel { min-height: 260px; max-height: 420px; }
+  .arp-assets-grid .arp-memory-assets { max-height: 340px; }
   .arp-runs-layout { grid-template-columns: 1fr; height: auto; }
   .arp-run-list { max-height: 330px; border-right: 0; border-bottom: 1px solid var(--arp-line); }
   .arp-run-detail { min-height: 460px; }

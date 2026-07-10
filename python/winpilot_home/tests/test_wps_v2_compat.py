@@ -216,6 +216,28 @@ def test_replayer_preflight_binds_declared_target_window(tmp_path, monkeypatch):
     assert [c["tool"] for c in r.leaf_calls] == ["click"]
 
 
+def test_replayer_launch_binds_verified_window_for_semantic_followup(monkeypatch):
+    from winpilot.recorder import trace as trace_mod
+
+    monkeypatch.setattr(
+        trace_mod.verify,
+        "run_with_verify",
+        lambda *args, **kwargs: {"ok": True, "verified": True, "post_state": {"foreground_hwnd": 111}},
+    )
+    monkeypatch.setattr(trace_mod.win32, "find_window", lambda title: {"hwnd": 456, "title": title})
+
+    replayer = trace_mod.Replayer()
+    result = replayer._run_step("1", {
+        "tool": "launch",
+        "command": "https://example.test",
+        "expect": {"window_title": "Example"},
+    })
+
+    assert result["ok"] is True
+    assert result["target_hwnd"] == 456
+    assert replayer.hwnd == 456
+
+
 def test_replayer_preflight_fails_before_actions_when_target_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(trace_mod.win32, "find_window", lambda title: None)
     script = {

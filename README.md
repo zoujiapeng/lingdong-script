@@ -7,12 +7,13 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - **ARP Runtime + Studio**：用版本化 `arp/1` 图编排 Agent、Controller、Skill、证据门和人工门。
 - **World Model + Run Projection**：统一屏幕状态、元素、页面阶段、timeline、evidence 和延迟指标。
 
-Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。前端 FlowScript 通过 `flowToArpGraph.ts` 保守编译；不支持的旧节点显式进入 `legacy_flow` 适配，不会伪装成已等价迁移。
+Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。前端 FlowScript 通过 `flowToArpGraph.ts` 保守编译；常用 GUI 节点直接收敛到 Controller action batch，不支持的旧节点会显式标记为 `legacy_flow` 并在运行前校验失败，不会伪装成已等价迁移。
 
 ## 当前事实
 
 - 主线分支是 `master`。大改造先在 `codex/*` 分支验证，再合并回 `master`。
 - 用户始终面对一个 WinPilot Agent；Agent、ARP 图和 Controller 的事件统一投影成同一种 Run。
+- Agent Cockpit 创建的目标图先本地检索并重放已验证 Skill；未命中或重放失败才走 `agent_goal`，显式 `miss` / `fail` 分支不会被 `fail_fast` 提前吞掉。
 - 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
@@ -116,4 +117,4 @@ MIT
 
 ### Memory Graph Note
 
-WinPilot long-term memory now uses `python/winpilot_home/memory.db` as a SQLite Memory Graph. `experience_memory.json` is still kept for migration/compatibility, and old recipe-like APIs remain available. Dynamic long-term memory is injected as a bounded Memory Pack user message, not in the stable system prompt. Replay success is not done evidence.
+WinPilot long-term memory now uses `python/winpilot_home/memory.db` as a SQLite Memory Graph. `experience_memory.json` is still kept for migration/compatibility, and old recipe-like APIs remain available. Dynamic long-term memory is injected as a bounded Memory Pack user message, not in the stable system prompt. A replay is ARP evidence only when it contains at least one verified step; cache lookup, replay start, and empty scripts are never done evidence.

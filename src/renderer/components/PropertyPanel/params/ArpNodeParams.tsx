@@ -70,9 +70,17 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
       )}
 
       {type === 'skill_replay' && (
-        <Field label="Skill file" hint="A tested .wps.json skill from the reusable asset library.">
-          <input className="form-input" value={params.script || ''} onChange={(event) => patch({ script: event.target.value })} placeholder="example.wps.json" />
-        </Field>
+        <>
+          <Field label="Skill file" hint="Use an exact tested .wps.json skill, or leave empty to retrieve by goal.">
+            <input className="form-input" value={params.script || ''} onChange={(event) => patch({ script: event.target.value })} placeholder="example.wps.json" />
+          </Field>
+          <Field label="Goal lookup" hint="Find the strongest verified skill locally before invoking an Agent fallback.">
+            <input className="form-input" value={params.task || ''} onChange={(event) => patch({ task: event.target.value })} placeholder="Export the current report" />
+          </Field>
+          <Field label="Memory ID" hint="Optional exact memory graph node ID.">
+            <input className="form-input" value={params.memory_id || ''} onChange={(event) => patch({ memory_id: event.target.value })} placeholder="skill-..." />
+          </Field>
+        </>
       )}
 
       {type === 'evidence_gate' && (

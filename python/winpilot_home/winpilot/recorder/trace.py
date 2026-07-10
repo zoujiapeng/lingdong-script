@@ -771,10 +771,25 @@ class Replayer:
         expect = step.get("expect")
 
         if tool == "launch":
-            return verify.run_with_verify(
+            result = verify.run_with_verify(
                 "launch", lambda: executor.launch(step["command"]),
                 expect=expect, hwnd=self.hwnd, timeout_s=10.0,
                 stop_event=self.stop_event)
+            if result.get("ok"):
+                expected = expect if isinstance(expect, dict) else {}
+                title = str(
+                    expected.get("window_title")
+                    or expected.get("window_appears")
+                    or ""
+                ).strip()
+                found = win32.find_window(title) if title else None
+                if found and found.get("hwnd"):
+                    self.hwnd = int(found["hwnd"])
+                    result["target_hwnd"] = self.hwnd
+                elif (result.get("post_state") or {}).get("foreground_hwnd"):
+                    self.hwnd = int(result["post_state"]["foreground_hwnd"])
+                    result["target_hwnd"] = self.hwnd
+            return result
         if tool == "focus_window":
             found = win32.find_window(step.get("title", ""))
             if not found:
