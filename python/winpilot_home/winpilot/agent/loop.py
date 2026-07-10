@@ -125,7 +125,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def __init__(self, task: str, stop_event: threading.Event | None = None,
                  session_context: list | None = None,
                  max_steps_override: int | None = None,
-                 runtime_profile: RuntimeProfile | None = None) -> None:
+                 runtime_profile: RuntimeProfile | None = None,
+                 allow_shell_tools: bool | None = None) -> None:
         self.task = task
         self.run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.stop_event = stop_event or threading.Event()
@@ -163,6 +164,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
         self.max_steps_override = max_steps_override
+        self.allow_shell_tools = allow_shell_tools
         self.run_state = RunStateMachine()
         self.session.run_state = self.run_state
         # Coding is now an in-process runtime capability of this AgentRunner,
@@ -2316,10 +2318,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except Exception as exc:
                 logger.debug("复用建议注入失败: %s", exc)
         is_gui_only_task = _is_gui_only_task(self.task)
-        allow_shell_tools = not (
-            is_gui_only_task
-            and _gui_only_forbids_shell(self.task)
-        )
+        allow_shell_tools = self.allow_shell_tools
+        if allow_shell_tools is None:
+            allow_shell_tools = not (
+                is_gui_only_task
+                and _gui_only_forbids_shell(self.task)
+            )
         # GUI-only runs may keep a tightly checked read-only shell verifier, but
         # file/search tools invite non-GUI shortcuts and hide fake success.
         allow_file_tools = (not is_gui_only_task) and allow_shell_tools

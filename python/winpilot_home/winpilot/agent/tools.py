@@ -48,7 +48,7 @@ from .window_tools import WindowToolMixin
 _MUTATING_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
     "focus_window", "wait", "tray_click", "run_shell", "run_detached",
-    "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "mouse_down",
+    "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "paste_image_file", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
     "coordinate_click_test",
 }
@@ -60,6 +60,7 @@ _ACTION_SCREEN_DELTA_TOOLS = {
     "focus_window",
     "tray_click",
     "clipboard_paste",
+    "paste_image_file",
     "mouse_down",
     "mouse_up",
     "move_mouse",
@@ -125,6 +126,7 @@ class ToolSession(
         self._predictive_ocr_lock = threading.Lock()
         self._predictive_ocr_cache: dict[str, Any] | None = None
         self.visible_evidence_ledger: list[dict[str, Any]] = []
+        self.saved_screenshot_paths: list[str] = []
         # Recipe ids whose replay was actually attempted via reuse_skill.
         # Prompt-injected hints alone must not be scored as successful reuse.
         self.used_memory_recipe_ids: list[str] = []

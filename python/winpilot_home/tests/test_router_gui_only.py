@@ -36,6 +36,12 @@ def test_runner_and_tool_session_share_runtime_profile():
     assert runner.session.runtime_profile is runner.runtime_profile
 
 
+def test_runner_can_disable_shell_tools_for_arp_policy():
+    runner = build_runner("Open Calculator and send a screenshot in QQ", allow_shell_tools=False)
+
+    assert runner.allow_shell_tools is False
+
+
 def test_explicit_project_artifact_task_uses_coding_runtime():
     runner = build_runner("这是一个 Python 项目编程任务：创建 main.py 并确认 stdout 是 7")
 

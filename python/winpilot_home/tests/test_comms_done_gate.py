@@ -77,6 +77,21 @@ def test_comms_done_gate_no_payload_passes_with_read_text():
     assert result is True
 
 
+def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
+    runner = _make_runner("用计算器计算88和76的商，然后打开QQ给我的手机发一张计算器结果的截图")
+    runner._tool_history = [
+        ("screenshot", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true}'),
+        ("paste_image_file", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true, "via": "clipboard_dib"}'),
+        ("observe", {"query": "已发送"}, '我的手机\n28.58KB已发送'),
+    ]
+
+    verdict = runner._deterministic_image_send_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is True
+    assert "图片附件" in verdict[1]
+
+
 def test_bounded_chat_requires_a_reply_turn_before_done():
     runner = _make_runner("用QQ和我的手机聊天")
     runner._tool_history = [

@@ -20,6 +20,7 @@ import threading
 import time
 from ctypes import wintypes
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable
 
 import win32api
@@ -740,6 +741,75 @@ def clipboard_write(text: str) -> dict:
             return {"ok": True, "length": len(text), "via": "win32"}
         except Exception as exc2:
             return {"ok": False, "error": str(exc2)}
+
+
+def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
+    """Read a raster image into the CF_DIB payload accepted by Windows apps."""
+    from PIL import Image
+
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        buffer = BytesIO()
+        image.save(buffer, format="BMP")
+    # CF_DIB contains a BITMAPINFOHEADER, while BMP files prefix it with file
+    # metadata that clipboard consumers do not expect.
+    return buffer.getvalue()[14:], int(width), int(height)
+
+
+@queued_desktop_action("paste_image_file")
+def paste_image_file(path: str, hwnd: int | None = None) -> dict:
+    """Paste an existing PNG/JPEG as an image, without opening an attachment UI."""
+    if _dry_run():
+        return {"ok": True, "dry_run": True, "path": str(path)}
+    image_path = Path(str(path or "")).expanduser()
+    if not image_path.is_file():
+        return {"ok": False, "error": f"image file not found: {image_path}"}
+    if image_path.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+        return {"ok": False, "error": "paste_image_file requires a PNG, JPEG, BMP, or WebP file"}
+    try:
+        import win32clipboard
+
+        dib, width, height = _image_file_to_dib(image_path)
+        if hwnd:
+            focused = _raw_focus_window(int(hwnd))
+            if not focused.get("ok"):
+                return {"ok": False, "error": focused.get("error", "failed to focus target window")}
+        opened = False
+        last_error: Exception | None = None
+        for _attempt in range(4):
+            try:
+                win32clipboard.OpenClipboard()
+                opened = True
+                break
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.04)
+        if not opened:
+            raise RuntimeError(f"clipboard is busy: {last_error}")
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
+        finally:
+            win32clipboard.CloseClipboard()
+        _raw_press_keys(["ctrl", "v"])
+        BUS.publish(
+            "action",
+            action="paste_image_file",
+            path=str(image_path),
+            width=width,
+            height=height,
+        )
+        return {
+            "ok": True,
+            "path": str(image_path),
+            "width": width,
+            "height": height,
+            "via": "clipboard_dib",
+        }
+    except Exception as exc:
+        logger.debug("paste_image_file failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
 
 
 @queued_desktop_action("clipboard_paste")

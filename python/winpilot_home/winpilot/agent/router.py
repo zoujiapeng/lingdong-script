@@ -19,6 +19,7 @@ def build_runner(
     stop_event: threading.Event | None = None,
     session_context: list | None = None,
     max_steps_override: int | None = None,
+    allow_shell_tools: bool | None = None,
 ) -> AgentRunner:
     """Return the unified AgentRunner for every task.
 
@@ -34,4 +35,5 @@ def build_runner(
         session_context=session_context,
         max_steps_override=max_steps_override,
         runtime_profile=profile,
+        allow_shell_tools=allow_shell_tools,
     )

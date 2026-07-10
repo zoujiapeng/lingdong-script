@@ -4,9 +4,17 @@ import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunPr
 
 export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
 
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'paused', 'canceling']);
+const SUCCESS_RUN_STATUSES = new Set(['done', 'completed', 'success', 'reply']);
+const TERMINAL_RUN_STATUSES = new Set([
+  ...SUCCESS_RUN_STATUSES,
+  'failed', 'fail', 'error', 'canceled', 'stopped',
+]);
+
 export function useControlPlane() {
   const clientRef = useRef<ControlPlaneClient | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const taskbarRunState = useRef<{ runId: string; status: string } | null>(null);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [baseUrl, setBaseUrl] = useState('');
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
@@ -73,6 +81,22 @@ export function useControlPlane() {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (!currentRun) return;
+    const current = {
+      runId: currentRun.run_id,
+      status: String(currentRun.status || '').toLowerCase(),
+    };
+    const previous = taskbarRunState.current;
+    taskbarRunState.current = current;
+    if (!previous || previous.runId !== current.runId) return;
+    if (!ACTIVE_RUN_STATUSES.has(previous.status) || !TERMINAL_RUN_STATUSES.has(current.status)) return;
+    const success = SUCCESS_RUN_STATUSES.has(current.status);
+    const title = success ? '任务完成' : '任务未完成';
+    const detail = currentRun.error || currentRun.goal || currentRun.run_id;
+    void window.electronAPI?.notifyTaskbar?.(title, detail.slice(0, 220));
+  }, [currentRun]);
 
   const requireClient = () => {
     if (!clientRef.current) throw new Error('Control plane is not connected.');
