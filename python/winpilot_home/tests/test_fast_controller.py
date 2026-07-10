@@ -437,12 +437,32 @@ def test_fast_controller_visual_servo_corrects_target_before_click(monkeypatch):
             calls.append((name, args))
             return ToolResult('{"ok": true, "verified": true}')
 
-    monkeypatch.setattr(controller_mod.ocr, "collect", lambda region: [
-        UIElement(
-            source="ocr", role="text", text="Export",
-            cx=116, cy=109, left=86, top=94, width=60, height=30,
-        )
-    ])
+    def fake_track(initial, labels, **kwargs):
+        assert labels == ["Export"]
+        kwargs["move_fn"](116, 109)
+        return UIElement(
+            elem_id=initial.elem_id,
+            source="servo-template",
+            role="button",
+            text="Export",
+            cx=116,
+            cy=109,
+            left=86,
+            top=94,
+            width=60,
+            height=30,
+        ), {
+            "enabled": True,
+            "confirmed": True,
+            "corrected": True,
+            "correction_count": 1,
+            "elapsed_ms": 12,
+            "source_counts": {"servo-template": 2},
+            "lost_reason": "",
+            "final": {"x": 116, "y": 109},
+        }
+
+    monkeypatch.setattr(controller_mod, "track_visual_target", fake_track)
 
     out = FastGuiController(Session()).execute([{
         "action": "click_element",
@@ -453,11 +473,137 @@ def test_fast_controller_visual_servo_corrects_target_before_click(monkeypatch):
     }])
 
     assert out["ok"] is True
-    assert calls[0] == ("move_mouse", {"x": 100, "y": 100, "skip_screen_delta": True})
-    assert calls[1] == ("click", {"x": 116, "y": 109, "button": "left", "double": False, "physical": True})
+    assert calls[0] == ("move_mouse", {"x": 116, "y": 109, "skip_screen_delta": True})
+    assert calls[1] == ("click", {
+        "x": 116,
+        "y": 109,
+        "button": "left",
+        "double": False,
+        "physical": True,
+        "_prepositioned": True,
+    })
     servo = out["results"][0]["data"]["visual_servo"]
     assert servo["corrected"] is True
     assert servo["final"] == {"x": 116, "y": 109}
+    assert out["metrics"]["visual_servo_count"] == 1
+    assert out["metrics"]["visual_servo_correction_count"] == 1
+
+
+def test_fast_controller_visual_servo_lost_target_blocks_click(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Moving UI",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(
+                elem_id=5, role="button", text="Export",
+                cx=100, cy=100, left=70, top=85, width=60, height=30,
+            )],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    monkeypatch.setattr(
+        controller_mod,
+        "track_visual_target",
+        lambda *_args, **_kwargs: (None, {
+            "enabled": True,
+            "confirmed": False,
+            "corrected": False,
+            "correction_count": 0,
+            "elapsed_ms": 9,
+            "source_counts": {},
+            "lost_reason": "final_confirmation_lost_target",
+        }),
+    )
+
+    out = FastGuiController(Session()).execute([{
+        "action": "click_element",
+        "label": "Export",
+        "role": "button",
+        "visual_servo": True,
+    }])
+
+    assert out["ok"] is False
+    assert calls == []
+    assert out["results"][0]["data"]["blocked"] is True
+    assert out["results"][0]["data"]["visual_servo"]["confirmed"] is False
+    assert out["metrics"]["visual_servo_failure_count"] == 1
+
+
+def test_fast_controller_adaptively_servos_recently_changed_target(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    element = UIElement(
+        elem_id=5, role="button", text="Export",
+        cx=100, cy=100, left=70, top=85, width=60, height=30,
+    )
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Moving UI",
+            region=Region(0, 0, 1000, 600),
+            elements=[element],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {
+                "last_change_age_ms": 0,
+                "last_action_change_age_ms": 10_000,
+                "recent_changed_regions": [
+                    {"left": 80, "top": 90, "width": 30, "height": 20},
+                ],
+            }
+
+    monkeypatch.setattr(
+        controller_mod,
+        "track_visual_target",
+        lambda initial, *_args, **_kwargs: (initial, {
+            "enabled": True,
+            "confirmed": True,
+            "corrected": False,
+            "correction_count": 0,
+            "elapsed_ms": 5,
+            "source_counts": {"servo-template": 1},
+            "lost_reason": "",
+        }),
+    )
+
+    out = FastGuiController(Session(), watcher=Watcher()).execute([{
+        "action": "click_element",
+        "label": "Export",
+        "role": "button",
+    }])
+
+    assert out["ok"] is True
+    assert calls[0][0] == "click"
+    servo = out["results"][0]["data"]["visual_servo"]
+    assert servo["activation"] == "recent_target_roi_change"
+    assert out["metrics"]["visual_servo_count"] == 1
 
 
 def test_type_into_element_append_newline_moves_caret_to_end_first():

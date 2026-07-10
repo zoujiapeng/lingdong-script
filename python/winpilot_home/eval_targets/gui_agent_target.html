@@ -290,6 +290,38 @@
       font-weight: 700;
     }
 
+    .servo-pad {
+      position: relative;
+      height: 88px;
+      margin-top: 14px;
+      overflow: hidden;
+      border: 1px dashed #98a2b3;
+      border-radius: 8px;
+      background: #fbfcff;
+    }
+
+    .servo-pad > span {
+      position: absolute;
+      left: 12px;
+      top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .moving-target {
+      position: absolute;
+      left: 12px;
+      top: 36px;
+      width: 132px;
+      font-weight: 700;
+      transition: left 140ms ease-out, top 140ms ease-out;
+    }
+
+    .moving-target.moved {
+      left: 210px;
+      top: 40px;
+    }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -354,6 +386,11 @@
           <p class="status-detail" id="coordinateEcho">
             点击校准点后显示真实 screen/client 坐标。
           </p>
+        </div>
+
+        <div class="servo-pad">
+          <span>Visual servo target</span>
+          <button id="movingTargetBtn" class="moving-target">Moving target</button>
         </div>
 
         <div class="status-card" id="statusCard" data-state="idle">
@@ -424,6 +461,7 @@
     const dropTarget = document.getElementById('dropTarget');
     const calibrationPoint = document.getElementById('calibrationPoint');
     const coordinateEcho = document.getElementById('coordinateEcho');
+    const movingTargetBtn = document.getElementById('movingTargetBtn');
 
     let applyCounter = 0;
     let localCounter = 0;
@@ -431,6 +469,7 @@
     let pressSnapshot = null;
     let drawing = false;
     let strokePoints = 0;
+    let movingTargetMoved = false;
 
     function stamp() {
       return new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -522,6 +561,8 @@
       dropZone.classList.remove('done');
       dragToken.style.left = '18px';
       dragToken.style.top = '54px';
+      movingTargetMoved = false;
+      movingTargetBtn.classList.remove('moved');
       setStatus('idle', 'LOCAL_COUNTER_0', '靶场已重置到可见的归零状态。');
     });
 
@@ -578,6 +619,17 @@
       dragToken.style.left = 'calc(100% - 164px)';
       dragToken.style.top = '54px';
       log('DRAG_TOKEN_DROPPED');
+    });
+
+    movingTargetBtn.addEventListener('pointerenter', () => {
+      if (movingTargetMoved) return;
+      movingTargetMoved = true;
+      movingTargetBtn.classList.add('moved');
+      setStatus('warn', 'TARGET_IN_MOTION', 'The target moved after pointer entry. Track and confirm its new position before clicking.');
+    });
+
+    movingTargetBtn.addEventListener('click', () => {
+      setStatus('ok', 'VISUAL_SERVO_OK', 'A real click landed on the relocated target.');
     });
 
     calibrationPoint.addEventListener('click', (event) => {

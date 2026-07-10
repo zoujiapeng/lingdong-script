@@ -217,6 +217,7 @@ class InteractionToolMixin:
         button = args.get("button", "left")
         double = bool(args.get("double", False))
         physical = bool(args.get("physical") or args.get("force_physical"))
+        prepositioned = bool(args.get("_prepositioned"))
         replay: dict[str, Any] = {
             "tool": "click", "button": button, "double": double,
             "expect": args.get("expect"),
@@ -260,7 +261,11 @@ class InteractionToolMixin:
                     BUS.publish("action", action="uia_invoke", elem_id=element.elem_id,
                                 text=element.text)
                     return {"ok": True, "via": "uia_invoke"}
-                return executor_mod.click(x, y, button=button, double=double, hwnd=self._action_hwnd())
+                click_kwargs = {"prepositioned": True} if prepositioned else {}
+                return executor_mod.click(
+                    x, y, button=button, double=double,
+                    hwnd=self._action_hwnd(), **click_kwargs,
+                )
         elif "x" in args and "y" in args:
             x, y = int(args["x"]), int(args["y"])
             replay["coords"] = [x, y]
@@ -271,7 +276,11 @@ class InteractionToolMixin:
                     return blocked
 
             def action() -> dict:
-                return executor_mod.click(x, y, button=button, double=double, hwnd=self._action_hwnd())
+                click_kwargs = {"prepositioned": True} if prepositioned else {}
+                return executor_mod.click(
+                    x, y, button=button, double=double,
+                    hwnd=self._action_hwnd(), **click_kwargs,
+                )
         else:
             return ToolResult("click 需要 element_id 或 x,y 坐标")
 

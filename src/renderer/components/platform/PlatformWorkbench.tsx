@@ -419,6 +419,7 @@ function RunsView({ plane }: { plane: Plane }) {
                 <Metric label="Tools" value={selected.metrics.tool_count} />
                 <Metric label="VLM" value={selected.metrics.vlm_call_count} />
                 <Metric label="Anchor hit" value={`${Math.round((selected.metrics.anchor_cache_hit_rate || 0) * 100)}%`} />
+                <Metric label="Servo fixes" value={selected.metrics.visual_servo_correction_count || 0} />
               </div>
               {selected.error && <div className="arp-inline-error"><XCircle size={14} />{selected.error}</div>}
               <div className="arp-panel-heading"><div><Activity size={15} /><strong>Timeline</strong></div><span>{selected.timeline.length} events</span></div>

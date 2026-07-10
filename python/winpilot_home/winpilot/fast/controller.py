@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from ..agent.tool_result import ToolResult
+from ..config import CONFIG
 from ..perception import ocr, vision_cv
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
@@ -20,6 +21,7 @@ from .action_contract import (
 from .element_cache import ElementCache, anchor_from_dict
 from .input_locator import locate_input
 from .types import BatchMetrics
+from .visual_servo import ServoConfig, track_visual_target
 from .watcher import ScreenWatcher
 _ANCHOR_HINT_KEYS = {
     "anchor",
@@ -262,6 +264,18 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
             "role": resolved.get("role"),
             "source": resolved.get("source"),
             "bbox": resolved.get("bbox"),
+        }
+    servo = data.get("visual_servo")
+    if isinstance(servo, dict):
+        meta["visual_servo"] = {
+            "enabled": bool(servo.get("enabled")),
+            "confirmed": bool(servo.get("confirmed")),
+            "corrected": bool(servo.get("corrected")),
+            "correction_count": int(servo.get("correction_count") or 0),
+            "elapsed_ms": int(servo.get("elapsed_ms") or 0),
+            "activation": servo.get("activation"),
+            "lost_reason": servo.get("lost_reason"),
+            "source_counts": servo.get("source_counts") or {},
         }
     return meta
 
@@ -766,14 +780,30 @@ class FastGuiController:
                     payload["controller_auto_observe"] = auto_observe
                 return ToolResult(json.dumps(payload, ensure_ascii=False))
         servo_trace = None
-        if bool(action.get("visual_servo")):
-            element, servo_trace = self._visual_servo_target(element, anchor, action)
+        servo_enabled, servo_reason = self._should_visual_servo(element, action)
+        if servo_enabled:
+            tracked, servo_trace = self._visual_servo_target(element, anchor, action)
+            servo_trace["activation"] = servo_reason
+            if tracked is None:
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "error": "visual servo lost the target before mouse-down; click was not sent",
+                    "via": "click_element",
+                    "anchor": _anchor_payload(anchor),
+                    "anchor_locator": located.to_dict(),
+                    "resolved_element": element.to_dict(),
+                    "visual_servo": servo_trace,
+                }, ensure_ascii=False, default=str))
+            element = tracked
             args = {
                 "x": element.cx,
                 "y": element.cy,
                 "button": action.get("button", "left"),
                 "double": bool(action.get("double", False)),
                 "physical": True,
+                "_prepositioned": True,
             }
         else:
             args = {
@@ -813,84 +843,106 @@ class FastGuiController:
             result.replay.setdefault("resolved_element", element.to_dict())
         return result
 
+    def _should_visual_servo(
+        self,
+        element,
+        action: dict[str, Any],
+    ) -> tuple[bool, str]:
+        if "visual_servo" in action:
+            return _truthy(action.get("visual_servo")), "explicit"
+        if _truthy(action.get("moving_target") or action.get("track_target")):
+            return True, "moving_target_hint"
+        mode = str(
+            CONFIG.get("controller", "visual_servo_mode", default="adaptive")
+            or "adaptive"
+        ).casefold()
+        if mode in {"off", "false", "disabled", "none"}:
+            return False, "disabled"
+        if mode in {"on", "true", "always"}:
+            return True, "configured_always"
+        try:
+            status = self.watcher.status()
+        except Exception:
+            return False, "watcher_unavailable"
+        try:
+            max_age = max(50, int(CONFIG.get(
+                "controller", "visual_servo_recent_change_ms", default=900,
+            )))
+        except (TypeError, ValueError):
+            max_age = 900
+        def change_age(key: str) -> int:
+            raw = status.get(key)
+            if raw is None:
+                return 10**9
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                return 10**9
+
+        age = min(
+            change_age("last_change_age_ms"),
+            change_age("last_action_change_age_ms"),
+        )
+        if age > max_age:
+            return False, "target_region_stable"
+        width = max(16, int(getattr(element, "width", 0) or 0))
+        height = max(12, int(getattr(element, "height", 0) or 0))
+        target = Region(
+            int(getattr(element, "left", 0) or (int(element.cx) - width // 2)),
+            int(getattr(element, "top", 0) or (int(element.cy) - height // 2)),
+            width,
+            height,
+        )
+        for raw in [
+            *(status.get("action_changed_regions") or []),
+            *(status.get("recent_changed_regions") or []),
+        ]:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                changed = Region(
+                    int(raw["left"]), int(raw["top"]),
+                    int(raw["width"]), int(raw["height"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            intersects = (
+                target.left < changed.right
+                and target.right > changed.left
+                and target.top < changed.bottom
+                and target.bottom > changed.top
+            )
+            if intersects:
+                return True, "recent_target_roi_change"
+        return False, "change_outside_target"
+
     def _visual_servo_target(self, element, anchor, action: dict[str, Any]):
-        """Re-estimate a moving target locally immediately before clicking."""
-        try:
-            iterations = max(1, min(3, int(action.get("servo_iterations") or 2)))
-        except (TypeError, ValueError):
-            iterations = 2
-        try:
-            tolerance_px = max(1, min(40, int(action.get("servo_tolerance_px") or 5)))
-        except (TypeError, ValueError):
-            tolerance_px = 5
+        """Track and confirm a target locally immediately before mouse-down."""
         labels = [anchor.label, *anchor.fallback_text]
         labels = [str(label).strip() for label in labels if str(label).strip()]
-        current = element
-        trace: dict[str, Any] = {
-            "enabled": True,
-            "initial": {"x": int(element.cx), "y": int(element.cy)},
-            "iterations": [],
-        }
-        for index in range(iterations):
-            self._dispatch("move_mouse", {
-                "x": int(current.cx),
-                "y": int(current.cy),
+
+        def move_target(x: int, y: int) -> None:
+            result = self._dispatch("move_mouse", {
+                "x": int(x),
+                "y": int(y),
                 "skip_screen_delta": True,
             })
-            time.sleep(max(0.01, min(0.2, float(action.get("servo_settle_ms") or 35) / 1000.0)))
-            pad_x = max(80, int(getattr(current, "width", 0) or 0) * 2)
-            pad_y = max(45, int(getattr(current, "height", 0) or 0) * 2)
-            search_region = Region(
-                int(current.cx) - pad_x,
-                int(current.cy) - pad_y,
-                pad_x * 2,
-                pad_y * 2,
-            ).clamp_to_screen()
-            candidates = ocr.collect(search_region)
-            if labels:
-                matcher = getattr(ocr, "_match_text", None)
-                candidates = [
-                    candidate for candidate in candidates
-                    if any(
-                        bool(matcher(label, candidate.text)) if callable(matcher)
-                        else _norm_text(label) in _norm_text(candidate.text)
-                        for label in labels
-                    )
-                ]
-            if not candidates:
-                trace["iterations"].append({
-                    "index": index + 1,
-                    "found": False,
-                    "region": {
-                        "left": search_region.left,
-                        "top": search_region.top,
-                        "width": search_region.width,
-                        "height": search_region.height,
-                    },
-                })
-                break
-            candidate = min(
-                candidates,
-                key=lambda item: (item.cx - current.cx) ** 2 + (item.cy - current.cy) ** 2,
-            )
-            dx, dy = int(candidate.cx - current.cx), int(candidate.cy - current.cy)
-            trace["iterations"].append({
-                "index": index + 1,
-                "found": True,
-                "from": {"x": int(current.cx), "y": int(current.cy)},
-                "to": {"x": int(candidate.cx), "y": int(candidate.cy)},
-                "correction": {"dx": dx, "dy": dy},
-                "label": candidate.text,
-            })
-            current = candidate
-            if abs(dx) <= tolerance_px and abs(dy) <= tolerance_px:
-                break
-        trace["final"] = {"x": int(current.cx), "y": int(current.cy)}
-        trace["corrected"] = (
-            trace["final"]["x"] != trace["initial"]["x"]
-            or trace["final"]["y"] != trace["initial"]["y"]
+            if _failed(result):
+                raise RuntimeError(result.text[:240])
+
+        servo_action = dict(action)
+        servo_action.setdefault(
+            "servo_strict",
+            _truthy(CONFIG.get("controller", "visual_servo_strict", default=True)),
         )
-        return current, trace
+        return track_visual_target(
+            element,
+            labels,
+            capture_fn=self.capture_fn,
+            move_fn=move_target,
+            ocr_fn=ocr.recognize,
+            config=ServoConfig.from_action(servo_action),
+        )
 
     def _type_into_element(self, action: dict[str, Any]) -> ToolResult:
         text_marker = object()
@@ -1438,6 +1490,17 @@ class FastGuiController:
                 if isinstance(internal_count, int) and internal_count > 0:
                     metrics.internal_action_count += internal_count
                     metrics.compound_round_trips_saved += max(0, internal_count - 1)
+                servo = data.get("visual_servo")
+                if isinstance(servo, dict) and servo.get("enabled"):
+                    metrics.visual_servo_count += 1
+                    metrics.visual_servo_correction_count += max(
+                        0, int(servo.get("correction_count") or 0),
+                    )
+                    if not servo.get("confirmed"):
+                        metrics.visual_servo_failure_count += 1
+                    metrics.visual_servo_latency_ms.append(
+                        max(0, int(servo.get("elapsed_ms") or 0)),
+                    )
             results.append(item)
             if name in BATCH_OBSERVE_ACTIONS:
                 last_visual_region = None

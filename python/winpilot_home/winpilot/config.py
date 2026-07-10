@@ -78,6 +78,9 @@ _DEFAULTS: dict[str, Any] = {
     },
     "controller": {
         "physical_anchor_clicks": True,
+        "visual_servo_mode": "adaptive",
+        "visual_servo_recent_change_ms": 900,
+        "visual_servo_strict": True,
     },
     "ocr": {"use_gpu": True, "min_confidence": 0.55},
     "search": {"everything_es_path": ""},

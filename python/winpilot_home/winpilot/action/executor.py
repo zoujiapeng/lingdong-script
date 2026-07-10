@@ -256,7 +256,14 @@ def move_mouse(x: int, y: int) -> None:
 
 
 @queued_desktop_action("click")
-def click(x: int, y: int, button: str = "left", double: bool = False, hwnd: int | None = None) -> dict:
+def click(
+    x: int,
+    y: int,
+    button: str = "left",
+    double: bool = False,
+    hwnd: int | None = None,
+    prepositioned: bool = False,
+) -> dict:
     """Click at screen coords. Brings target window forward first if given.
 
     In no-mouse-steal mode, clicks go through background window messages (the
@@ -265,7 +272,11 @@ def click(x: int, y: int, button: str = "left", double: bool = False, hwnd: int 
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    if _no_mouse_steal():
+    # A visual-servo click deliberately owns the physical cursor: its final
+    # confirmation is only valid for the cursor position it just measured.
+    # Replacing that mouse-down with a background window message would break
+    # the move -> confirm -> click atomicity and can target a stale child HWND.
+    if _no_mouse_steal() and not prepositioned:
         if _post_click(x, y, button, double):
             BUS.publish("action", action="click", x=x, y=y, button=button,
                         double=double, via="post_message")
@@ -278,17 +289,36 @@ def click(x: int, y: int, button: str = "left", double: bool = False, hwnd: int 
             _restore_cursor(saved)
         BUS.publish("action", action="click", x=x, y=y, button=button,
                     double=double, via="sendinput_restored")
-        return {"ok": True, "x": x, "y": y, "via": "sendinput_restored"}
-    _raw_click(x, y, button, double, hwnd)
+        return {
+            "ok": True, "x": x, "y": y, "via": "sendinput_restored",
+            "prepositioned": bool(prepositioned),
+        }
+    if prepositioned:
+        _raw_click(x, y, button, double, hwnd, prepositioned=True)
+    else:
+        _raw_click(x, y, button, double, hwnd)
     BUS.publish("action", action="click", x=x, y=y, button=button, double=double)
-    return {"ok": True, "x": x, "y": y}
+    return {"ok": True, "x": x, "y": y, "prepositioned": bool(prepositioned)}
 
 
-def _raw_click(x: int, y: int, button: str, double: bool, hwnd: int | None) -> None:
-    if hwnd:
+def _raw_click(
+    x: int,
+    y: int,
+    button: str,
+    double: bool,
+    hwnd: int | None,
+    prepositioned: bool = False,
+) -> None:
+    if hwnd and not prepositioned:
         _raw_focus_window(hwnd)
-    _raw_move_mouse(x, y)
-    time.sleep(0.05)
+    if prepositioned:
+        current_x, current_y = _cursor_pos()
+        if abs(int(current_x) - int(x)) > 3 or abs(int(current_y) - int(y)) > 3:
+            _raw_move_mouse(x, y)
+        time.sleep(0.008)
+    else:
+        _raw_move_mouse(x, y)
+        time.sleep(0.05)
     if button == "left":
         down, up = win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP
     elif button == "right":

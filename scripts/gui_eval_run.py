@@ -130,6 +130,27 @@ SUITES: dict[str, list[dict[str, Any]]] = {
                 }
             ],
         },
+        {
+            "id": "target_visual_servo",
+            "task": (
+                "Open http://127.0.0.1:8877/gui_agent_target.html?v=visual-servo. "
+                "Use run_action_batch with click_element(label='Moving target', role='button', "
+                "visual_servo=true). The button moves when the pointer enters it. Finish only "
+                "after visible GUI evidence shows VISUAL_SERVO_OK. Do not use JavaScript, DOM, "
+                "DevTools, or shell inspection."
+            ),
+            "timeout_s": 240,
+            "setup": [
+                "$port = 8877; "
+                "$ok = $false; "
+                "try { $ok = (Test-NetConnection 127.0.0.1 -Port $port -InformationLevel Quiet) } catch { $ok = $false }; "
+                "if (-not $ok) { "
+                "Start-Process -FilePath python -ArgumentList @('-m','http.server','8877','--bind','127.0.0.1') "
+                "-WorkingDirectory 'C:\\Users\\zou\\Desktop\\claude\\python\\winpilot_home\\eval_targets' "
+                "-WindowStyle Hidden; Start-Sleep -Seconds 2 }"
+            ],
+            "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
+        },
     ],
     "gui-deep-10": [
         {

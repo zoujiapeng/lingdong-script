@@ -273,7 +273,7 @@
 .arp-runtime-focus code { overflow: hidden; color: var(--arp-text-soft); text-overflow: ellipsis; white-space: nowrap; }
 
 .arp-metrics-row { margin-top: 10px; display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); border: 1px solid var(--arp-line); border-radius: 7px; background: var(--arp-surface); overflow: hidden; }
-.arp-metrics-row.compact { grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 14px 0; }
+.arp-metrics-row.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 14px 0; }
 .arp-metric { min-width: 0; min-height: 55px; padding: 9px 11px; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid var(--arp-line); }
 .arp-metric:last-child { border-right: 0; }
 .arp-metric > span { font-size: 9px; color: var(--arp-text-muted); white-space: nowrap; }
@@ -448,7 +448,7 @@
   .arp-live-strip { grid-template-columns: 1fr; }
   .arp-phase-rail { justify-content: flex-start; overflow: hidden; }
   .arp-metrics-row { grid-template-columns: repeat(4, 1fr); }
-  .arp-metrics-row.compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .arp-metrics-row.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .arp-metric:nth-child(4n) { border-right: 0; }
   .arp-metrics-row:not(.compact) .arp-metric:nth-child(-n+8) { border-bottom: 1px solid var(--arp-line); }
   .arp-metrics-row.compact .arp-metric { border-right: 1px solid var(--arp-line); border-bottom: 0; }

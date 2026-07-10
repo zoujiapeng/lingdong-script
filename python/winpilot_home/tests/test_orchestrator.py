@@ -654,6 +654,14 @@ def test_run_projection_counts_direct_controller_batch_actions():
         "tool": "click_element",
         "elapsed_ms": 28,
         "ok": True,
+        "result_meta": {
+            "visual_servo": {
+                "enabled": True,
+                "confirmed": True,
+                "correction_count": 2,
+                "elapsed_ms": 18,
+            },
+        },
     })
 
     run = store.get("batch")
@@ -663,6 +671,11 @@ def test_run_projection_counts_direct_controller_batch_actions():
     assert run["metrics"]["batch_action_count"] == 1
     assert run["metrics"]["batch_action_ratio"] == 1.0
     assert run["metrics"]["action_execution_latency_avg_ms"] == 28
+    assert run["metrics"]["visual_servo_count"] == 1
+    assert run["metrics"]["visual_servo_correction_count"] == 2
+    assert run["metrics"]["visual_servo_failure_count"] == 0
+    assert run["metrics"]["visual_servo_latency_avg_ms"] == 18
+    assert run["metrics"]["visual_servo_latency_max_ms"] == 18
 
 
 def test_run_projection_aggregates_replay_anchor_cache_metrics():

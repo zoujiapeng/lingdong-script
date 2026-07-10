@@ -124,6 +124,11 @@ export interface RunMetrics {
   anchor_cache_hit_rate: number;
   anchor_cache_lookup_latency_avg_ms: number;
   anchor_cache_lookup_latency_max_ms: number;
+  visual_servo_count: number;
+  visual_servo_correction_count: number;
+  visual_servo_failure_count: number;
+  visual_servo_latency_avg_ms: number;
+  visual_servo_latency_max_ms: number;
 }
 
 export interface RunProjection {
