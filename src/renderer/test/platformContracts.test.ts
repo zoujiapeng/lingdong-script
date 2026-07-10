@@ -58,9 +58,11 @@ describe('control plane client contracts', () => {
   it('creates a valid high-level goal graph', () => {
     const graph = createGoalGraph('Export the current report', 24);
     expect(graph.format).toBe('arp/1');
-    expect(graph.nodes.map((node) => node.kind)).toEqual(['start', 'agent_goal', 'end']);
-    expect(graph.nodes[1].config).toMatchObject({ goal: 'Export the current report', max_steps: 24 });
-    expect(graph.edges).toHaveLength(2);
+    expect(graph.nodes.map((node) => node.kind)).toEqual(['start', 'skill_replay', 'agent_goal', 'end']);
+    expect(graph.nodes[1].config).toMatchObject({ task: 'Export the current report' });
+    expect(graph.nodes[2].config).toMatchObject({ goal: 'Export the current report', max_steps: 24 });
+    expect(graph.edges.map((edge) => edge.branch)).toEqual(['next', 'next', 'miss', 'fail', 'next']);
+    expect(graph.metadata.routing).toBe('verified-skill-first-agent-on-miss-or-failure');
   });
 
   it('reconnects the runtime event socket after a backend restart', () => {
@@ -120,14 +122,41 @@ describe('flow to ARP compiler', () => {
     expect(graph.nodes.find((node) => node.id === 'condition')).toMatchObject({ kind: 'condition', config: { source: 'variables.ready', operator: 'eq', value: 'yes' } });
   });
 
+  it('compiles common GUI nodes into one controller batch per node', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0,
+      { id: 'open', type: 'launch_program', x: 0, y: 0, params: { target: 'notepad.exe', args: '' } },
+      { id: 'focus', type: 'focus_window', x: 0, y: 0, params: { title: 'Notepad' } },
+      { id: 'type', type: 'input_text', x: 0, y: 0, params: { text: 'hello', x: 300, y: 200, click_before: true, clear_before: true, delay_after: 0.2 } },
+      { id: 'send', type: 'click_text', x: 0, y: 0, params: { text: 'Send', method: 'single', delay_after: 0 } },
+    );
+
+    const graph = flowToArpGraph(script);
+
+    expect(graph.nodes.find((node) => node.id === 'open')).toMatchObject({
+      kind: 'action_batch', config: { actions: [{ action: 'launch', command: 'notepad.exe' }] },
+    });
+    expect(graph.nodes.find((node) => node.id === 'type')?.config.actions).toEqual([
+      { action: 'click', x: 300, y: 200 },
+      { action: 'hotkey', keys: ['ctrl', 'a'] },
+      { action: 'type_text', text: 'hello' },
+      { action: 'wait', duration_ms: 200 },
+    ]);
+    expect(graph.nodes.find((node) => node.id === 'send')?.config.actions).toEqual([
+      { action: 'click_element', label: 'Send', fallback_text: [], button: 'left', double: false },
+    ]);
+    expect((graph.metadata.compilation as any).legacy_nodes).toBe(0);
+  });
+
   it('encapsulates unsupported legacy nodes instead of silently changing semantics', () => {
     const script = scriptFixture();
-    script.nodes.splice(1, 0, { id: 'legacy', type: 'screenshot', x: 2, y: 3, params: { save_path: 'proof.png' } });
+    script.nodes.splice(1, 0, { id: 'legacy', type: 'tool_call', x: 2, y: 3, params: { feature_name: 'future_tool', params: {} } });
     const graph = flowToArpGraph(script);
     expect(graph.nodes.find((node) => node.id === 'legacy')).toMatchObject({
       kind: 'legacy_flow',
-      config: { node_type: 'screenshot', params: { save_path: 'proof.png' } },
+      config: { node_type: 'tool_call', params: { feature_name: 'future_tool', params: {} } },
     });
+    expect(graph.metadata.compilation).toMatchObject({ legacy_nodes: 1, legacy_types: ['tool_call'] });
   });
 
   it('normalizes only flow-control aliases', () => {

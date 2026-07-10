@@ -60,7 +60,7 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
     id: 'arp-quickstart', name: 'ARP 低延迟起步流程', category: 'agent',
     description: '可直接验证和运行的 Agent Runtime Platform 起步流程',
     createScript: () => {
-      const ids = { start: nanoid(), batch: nanoid(), evidence: nanoid(), end: nanoid() };
+      const ids = { start: nanoid(), batch: nanoid(), checkpoint: nanoid(), evidence: nanoid(), end: nanoid() };
       return {
         meta: {
           id: nanoid(),
@@ -87,19 +87,33 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
             status: 'idle',
           },
           {
+            id: ids.checkpoint,
+            type: 'human_gate',
+            x: 360,
+            y: 330,
+            params: {
+              message: 'Local quickstart checkpoint',
+              timeout_s: 30,
+              approved: true,
+            },
+            label: 'Local checkpoint',
+            status: 'idle',
+          },
+          {
             id: ids.evidence,
             type: 'evidence_gate',
             x: 360,
-            y: 340,
-            params: { required: [] },
+            y: 480,
+            params: { required: ['human_gate'] },
             label: 'Evidence gate',
             status: 'idle',
           },
-          { id: ids.end, type: 'end', x: 360, y: 500, params: { label: 'Done' }, label: 'Done', status: 'idle' },
+          { id: ids.end, type: 'end', x: 360, y: 630, params: { label: 'Done' }, label: 'Done', status: 'idle' },
         ],
         edges: [
           { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.batch, to_port: 'input' },
-          { id: nanoid(), from_node: ids.batch, from_port: 'output', to_node: ids.evidence, to_port: 'input' },
+          { id: nanoid(), from_node: ids.batch, from_port: 'output', to_node: ids.checkpoint, to_port: 'input' },
+          { id: nanoid(), from_node: ids.checkpoint, from_port: 'approved', to_node: ids.evidence, to_port: 'input' },
           { id: nanoid(), from_node: ids.evidence, from_port: 'pass', to_node: ids.end, to_port: 'input' },
         ],
         variables: {},

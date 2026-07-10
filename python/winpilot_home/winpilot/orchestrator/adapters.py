@@ -9,6 +9,7 @@ from ..agent.router import build_runner
 from ..agent.runtime_profile import build_runtime_profile
 from ..agent.tools import ToolSession
 from ..config import SCRIPTS_DIR
+from ..memory import experience
 from ..recorder import trace as trace_mod
 from ..utils.log import BUS
 from .contracts import ArpNode, ArpNodeKind
@@ -104,54 +105,153 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
 
 def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
     script_name = str(node.config.get("script") or "").strip()
+    recipe: dict[str, Any] | None = None
+    memory_id = str(node.config.get("memory_id") or "").strip()
+    task = str(node.config.get("task") or node.name or "").strip()
     if not script_name:
-        return NodeResult(ok=False, error="skill_replay requires config.script")
+        try:
+            script_name, recipe = experience.reusable_script_for(task, memory_id)
+        except Exception as exc:
+            return NodeResult(ok=False, branch="fail", error=f"skill lookup failed: {exc}")
+        memory_id = str((recipe or {}).get("id") or memory_id)
+    if not script_name:
+        return NodeResult(
+            ok=True,
+            branch="miss",
+            output={"memory_id": memory_id or None, "task": task, "reason": "no_verified_skill"},
+            error="",
+        )
     path = (SCRIPTS_DIR / script_name).resolve()
     try:
         path.relative_to(SCRIPTS_DIR.resolve())
     except ValueError:
-        return NodeResult(ok=False, error="skill script escapes the scripts directory")
+        return NodeResult(ok=False, branch="fail", error="skill script escapes the scripts directory")
     if not path.exists():
-        return NodeResult(ok=False, error=f"skill script not found: {script_name}")
+        return NodeResult(ok=False, branch="fail", error=f"skill script not found: {script_name}")
     BUS.publish(
         "arp_child_run",
         run_id=context["run_id"],
         node_id=node.id,
         child_kind="skill_replay",
         script=script_name,
+        memory_id=memory_id or None,
+        task=task,
     )
-    result = trace_mod.replay(path, stop_event=stop_event)
-    ok = bool(result.get("ok"))
+    if memory_id:
+        BUS.publish("memory", action="reuse", task=task, id=memory_id, run_id=context["run_id"])
+        try:
+            experience._store().record_attempt(
+                memory_id,
+                "used",
+                run_id=context["run_id"],
+                status="arp_skill_replay",
+                detail={"task": task, "script": script_name},
+            )
+        except Exception:
+            pass
+    try:
+        result = trace_mod.replay(path, stop_event=stop_event)
+    except Exception as exc:
+        if memory_id:
+            try:
+                experience._store().record_attempt(
+                    memory_id,
+                    "replay_failed",
+                    run_id=context["run_id"],
+                    status="exception",
+                    success=False,
+                    detail={"task": task, "script": script_name, "error": str(exc)},
+                )
+            except Exception:
+                pass
+        return NodeResult(ok=False, branch="fail", error=f"skill replay failed: {exc}")
+    verified_steps = [step for step in (result.get("results") or []) if step.get("ok") is True]
+    ok = bool(result.get("ok")) and bool(verified_steps)
+    if result.get("ok") and not verified_steps:
+        result = {**result, "ok": False, "error": "skill replay produced no verified steps"}
+    if memory_id:
+        try:
+            experience._store().record_attempt(
+                memory_id,
+                "replay_ok" if ok else "replay_failed",
+                run_id=context["run_id"],
+                status="ok" if ok else "failed_step",
+                success=ok,
+                detail={"task": task, "script": script_name},
+            )
+        except Exception:
+            pass
+    output = {
+        **result,
+        "script": script_name,
+        "memory_id": memory_id or None,
+        "memory_replay_ok": ok,
+    }
     return NodeResult(
         ok=ok,
         branch="next" if ok else "fail",
-        output=result,
-        evidence=[{"type": "skill_replay", "script": script_name, "ok": True}] if ok else [],
+        output=output,
+        evidence=[{
+            "type": "skill_replay",
+            "script": script_name,
+            "memory_id": memory_id or None,
+            "verified_steps": len(verified_steps),
+            "ok": True,
+        }] if ok else [],
         error="" if ok else str(result.get("error") or "skill replay failed"),
     )
+
+
+def _legacy_actions(node_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if node_type == "click":
+        method = str(params.get("method") or "single").casefold()
+        actions.append({
+            "action": "click",
+            "x": params.get("x"),
+            "y": params.get("y"),
+            "button": method if method in {"right", "middle"} else "left",
+            "double": method == "double",
+        })
+    elif node_type == "click_text":
+        actions.append({
+            "action": "click_element",
+            "label": params.get("text"),
+            "fallback_text": params.get("fallback_text") or [],
+        })
+    elif node_type == "input_text":
+        if params.get("click_before", True) and params.get("x") is not None and params.get("y") is not None:
+            actions.append({"action": "click", "x": params.get("x"), "y": params.get("y")})
+        if params.get("clear_before"):
+            actions.append({"action": "hotkey", "keys": ["ctrl", "a"]})
+        actions.append({"action": "type_text", "text": params.get("text", "")})
+    elif node_type == "keyboard":
+        keys = [str(key) for key in (params.get("modifiers") or [])]
+        keys.extend(str(key) for key in (params.get("keys") or []))
+        actions.append({"action": "hotkey", "keys": list(dict.fromkeys(keys))})
+    elif node_type == "focus_window":
+        actions.append({
+            "action": "focus_window",
+            "title": params.get("title") or params.get("window_title"),
+        })
+    elif node_type == "launch_program":
+        command = str(params.get("target") or params.get("path") or params.get("program") or "").strip()
+        arguments = str(params.get("args") or "").strip()
+        actions.append({"action": "launch", "command": f"{command} {arguments}".strip()})
+    delay_after = params.get("delay_after")
+    if isinstance(delay_after, (int, float)) and delay_after > 0:
+        actions.append({"action": "wait", "duration_ms": int(float(delay_after) * 1000)})
+    return actions
 
 
 def _legacy_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
     node_type = str(node.config.get("node_type") or "").strip()
     params = node.config.get("params") if isinstance(node.config.get("params"), dict) else {}
-    action: dict[str, Any] | None = None
-    if node_type == "click":
-        action = {"action": "click", "x": params.get("x"), "y": params.get("y")}
-    elif node_type == "click_text":
-        action = {"action": "click_element", "label": params.get("text")}
-    elif node_type == "input_text":
-        action = {"action": "type_text", "text": params.get("text", "")}
-        if params.get("x") is not None and params.get("y") is not None:
-            action.update({"x": params.get("x"), "y": params.get("y")})
-    elif node_type == "keyboard":
-        action = {"action": "hotkey", "keys": params.get("keys") or []}
-    elif node_type == "focus_window":
-        action = {"action": "focus_window", "title": params.get("title") or params.get("window_title")}
-    elif node_type == "launch_program":
-        action = {"action": "launch", "command": params.get("path") or params.get("program")}
-    if action is None:
+    actions = _legacy_actions(node_type, params)
+    if not actions:
         return NodeResult(
             ok=False,
+            branch="fail",
             error=(
                 f"legacy node {node_type!r} has no native ARP adapter; "
                 "run it through the Electron feature bridge or migrate it to an ARP capability"
@@ -159,7 +259,7 @@ def _legacy_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeR
         )
     adapted = node.model_copy(update={
         "kind": ArpNodeKind.ACTION_BATCH,
-        "config": {"actions": [action], "subgoal": node.name or node_type},
+        "config": {"actions": actions, "subgoal": node.name or node_type},
     })
     return _batch_handler(adapted, context, stop_event)
 
@@ -171,3 +271,33 @@ def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKin
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
         ArpNodeKind.LEGACY_FLOW: _legacy_handler,
     }
+
+
+def finalize_memory_feedback(execution: Any) -> None:
+    """Score replayed memories against the final ARP outcome, not the local step."""
+    successful_run = getattr(getattr(execution, "status", None), "value", "") == "done"
+    positive: set[str] = set()
+    negative: set[str] = set()
+    for output in getattr(execution, "outputs", {}).values():
+        if not isinstance(output, dict) or not isinstance(output.get("memory_replay_ok"), bool):
+            continue
+        memory_id = str(output.get("memory_id") or "").strip()
+        if not memory_id:
+            continue
+        if output["memory_replay_ok"] and successful_run:
+            positive.add(memory_id)
+        else:
+            negative.add(memory_id)
+    negative -= positive
+    if positive:
+        experience.feedback(sorted(positive), success=True)
+    if negative:
+        experience.feedback(sorted(negative), success=False)
+    for memory_id in sorted(positive | negative):
+        BUS.publish(
+            "memory",
+            action="arp_feedback",
+            id=memory_id,
+            success=memory_id in positive,
+            run_id=getattr(execution, "run_id", ""),
+        )

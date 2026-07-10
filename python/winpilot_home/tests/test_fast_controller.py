@@ -893,6 +893,35 @@ def test_fast_controller_requires_transient_screen_evidence_when_requested():
     assert out["results"][0]["error"] == "required controller evidence was not observed"
 
 
+def test_fast_controller_promotes_captured_transient_to_batch_evidence():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": False,
+                "verify_detail": "no explicit expect",
+                "screen_delta": {
+                    "changed": True,
+                    "delta_source": "press",
+                    "transient_observed": True,
+                },
+            }))
+
+    out = FastGuiController(Session()).execute([
+        {"action": "click", "x": 10, "y": 20, "require_transient": True},
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert out["verified"] is True
+    assert out["controller_state"]["verified"] is True
+    assert out["results"][0]["verified"] is True
+
+
 def test_fast_controller_required_observe_rejects_long_log_match():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

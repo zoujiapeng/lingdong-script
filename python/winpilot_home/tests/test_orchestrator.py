@@ -50,6 +50,59 @@ def test_graph_validation_enforces_evidence_policy_shape():
     assert any("evidence-capable" in error for error in result.errors)
 
 
+def test_graph_validation_rejects_empty_evidence_gate_and_unknown_legacy_node():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(id="gate", kind=ArpNodeKind.EVIDENCE_GATE, config={"required": []}),
+            ArpNode(
+                id="legacy",
+                kind=ArpNodeKind.LEGACY_FLOW,
+                config={"node_type": "tool_call", "params": {"feature_name": "missing"}},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="gate"),
+            ArpEdge(id="e2", source="gate", target="legacy", branch="pass"),
+            ArpEdge(id="e3", source="legacy", target="end"),
+        ],
+    )
+
+    result = validate_graph(graph)
+
+    assert result.valid is False
+    assert any("concrete evidence token" in error for error in result.errors)
+    assert any("cannot execute legacy node type 'tool_call'" in error for error in result.errors)
+
+
+def test_graph_validation_rejects_unsupported_controller_action_before_run():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, validate_graph
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="batch",
+                kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "invent_button"}]},
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="batch"),
+            ArpEdge(id="e2", source="batch", target="end"),
+        ],
+    )
+
+    result = validate_graph(graph)
+
+    assert result.valid is False
+    assert any("unsupported controller action" in error for error in result.errors)
+
+
 def test_evidence_gate_satisfies_done_policy():
     from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
     from winpilot.orchestrator.runtime import ArpExecution
@@ -57,7 +110,7 @@ def test_evidence_gate_satisfies_done_policy():
     graph = _graph(
         [
             ArpNode(id="start", kind=ArpNodeKind.START),
-            ArpNode(id="gate", kind=ArpNodeKind.EVIDENCE_GATE, config={"required": []}),
+            ArpNode(id="gate", kind=ArpNodeKind.EVIDENCE_GATE, config={"required": ["seed"]}),
             ArpNode(id="end", kind=ArpNodeKind.END),
         ],
         [
@@ -68,6 +121,7 @@ def test_evidence_gate_satisfies_done_policy():
     )
 
     execution = ArpExecution(graph, run_id="arp-evidence-policy")
+    execution.evidence.append({"type": "seed", "verified": True})
     result = execution.run()
 
     assert result["status"] == "done"
@@ -120,6 +174,7 @@ def test_arp_execution_retries_registered_handler():
             ArpNode(
                 id="batch",
                 kind=ArpNodeKind.ACTION_BATCH,
+                config={"actions": [{"action": "wait", "duration_ms": 0}]},
                 retry=ArpRetryPolicy(max_attempts=2),
             ),
             ArpNode(id="end", kind=ArpNodeKind.END),
@@ -137,6 +192,173 @@ def test_arp_execution_retries_registered_handler():
     assert calls == ["batch", "batch"]
     assert result["history"][1]["attempts"] == 2
     assert "batch verified" in result["evidence"]
+
+
+def test_arp_execution_routes_explicit_failure_before_fail_fast():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
+
+    def handler(node, context, stop_event):
+        return NodeResult(ok=False, branch="fail", error="cached skill diverged")
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"script": "known.wps.json"}),
+            ArpNode(id="recover", kind=ArpNodeKind.HUMAN_GATE, config={"approved": True}),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="skill"),
+            ArpEdge(id="e2", source="skill", target="end", branch="next"),
+            ArpEdge(id="e3", source="skill", target="recover", branch="fail"),
+            ArpEdge(id="e4", source="recover", target="end", branch="approved"),
+        ],
+        policy=ArpPolicy(fail_fast=True, require_evidence_on_done=True),
+    )
+
+    result = ArpExecution(
+        graph,
+        {ArpNodeKind.SKILL_REPLAY: handler},
+        run_id="arp-recover-failure",
+    ).run()
+
+    assert result["status"] == "done"
+    assert [item["node_id"] for item in result["history"]] == ["start", "skill", "recover", "end"]
+    assert result["history"][1]["ok"] is False
+
+
+def test_memory_miss_routes_to_agent_exception_handler():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind, ArpPolicy
+    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"task": "send report"}),
+            ArpNode(id="agent", kind=ArpNodeKind.AGENT_GOAL, config={"goal": "send report"}),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="e1", source="start", target="skill"),
+            ArpEdge(id="e2", source="skill", target="end", branch="next"),
+            ArpEdge(id="e3", source="skill", target="agent", branch="miss"),
+            ArpEdge(id="e4", source="agent", target="end", branch="next"),
+        ],
+        policy=ArpPolicy(require_evidence_on_done=True),
+    )
+    handlers = {
+        ArpNodeKind.SKILL_REPLAY: lambda node, context, stop: NodeResult(ok=True, branch="miss"),
+        ArpNodeKind.AGENT_GOAL: lambda node, context, stop: NodeResult(
+            ok=True,
+            evidence=[{"type": "agent", "verified": True}],
+        ),
+    }
+
+    result = ArpExecution(graph, handlers, run_id="arp-memory-miss").run()
+
+    assert result["status"] == "done"
+    assert [item["node_id"] for item in result["history"]] == ["start", "skill", "agent", "end"]
+
+
+def test_memory_backed_skill_miss_is_a_local_route_not_a_failed_run(monkeypatch):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+    monkeypatch.setattr(adapters.experience, "reusable_script_for", lambda task, memory_id: ("", None))
+    result = adapters._skill_handler(
+        ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"task": "send report"}),
+        {"run_id": "memory-miss"},
+        threading.Event(),
+    )
+
+    assert result.ok is True
+    assert result.branch == "miss"
+    assert result.output["reason"] == "no_verified_skill"
+
+
+def test_memory_backed_skill_replay_emits_verified_evidence(monkeypatch, tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+    script = tmp_path / "send-report.wps.json"
+    script.write_text('{"format":"wps/1","steps":[]}', encoding="utf-8")
+    attempts = []
+
+    class Store:
+        def record_attempt(self, *args, **kwargs):
+            attempts.append((args, kwargs))
+
+    monkeypatch.setattr(adapters, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        adapters.experience,
+        "reusable_script_for",
+        lambda task, memory_id: (script.name, {"id": "skill-memory", "task": task}),
+    )
+    monkeypatch.setattr(adapters.experience, "_store", lambda: Store())
+    monkeypatch.setattr(
+        adapters.trace_mod,
+        "replay",
+        lambda path, stop_event=None: {"ok": True, "results": [{"index": 1, "tool": "click", "ok": True}]},
+    )
+
+    result = adapters._skill_handler(
+        ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"task": "send report"}),
+        {"run_id": "memory-hit"},
+        threading.Event(),
+    )
+
+    assert result.ok is True
+    assert result.branch == "next"
+    assert result.output["memory_id"] == "skill-memory"
+    assert result.evidence[0]["verified_steps"] == 1
+    assert [call[0][1] for call in attempts] == ["used", "replay_ok"]
+
+
+def test_empty_skill_replay_cannot_satisfy_done_evidence(monkeypatch, tmp_path):
+    from winpilot.orchestrator import adapters
+    from winpilot.orchestrator.contracts import ArpNode, ArpNodeKind
+
+    script = tmp_path / "empty.wps.json"
+    script.write_text('{"format":"wps/1","steps":[]}', encoding="utf-8")
+    monkeypatch.setattr(adapters, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(adapters.trace_mod, "replay", lambda path, stop_event=None: {"ok": True, "results": []})
+
+    result = adapters._skill_handler(
+        ArpNode(id="skill", kind=ArpNodeKind.SKILL_REPLAY, config={"script": script.name}),
+        {"run_id": "empty-skill"},
+        threading.Event(),
+    )
+
+    assert result.ok is False
+    assert result.branch == "fail"
+    assert result.evidence == []
+    assert "no verified steps" in result.error
+
+
+def test_arp_memory_feedback_uses_final_run_outcome(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.orchestrator import adapters
+
+    feedback = []
+    monkeypatch.setattr(
+        adapters.experience,
+        "feedback",
+        lambda ids, success: feedback.append((tuple(ids), success)),
+    )
+    execution = SimpleNamespace(
+        run_id="arp-memory-feedback",
+        status=SimpleNamespace(value="failed"),
+        outputs={
+            "skill": {"memory_id": "memory-1", "memory_replay_ok": True},
+            "other": {"ok": True},
+        },
+    )
+
+    adapters.finalize_memory_feedback(execution)
+
+    assert feedback == [(('memory-1',), False)]
 
 
 def test_arp_human_gate_can_resume_from_manager():

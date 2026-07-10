@@ -141,7 +141,11 @@ class ArpExecution:
         operator = str(node.config.get("operator") or "truthy").casefold()
         expected = node.config.get("value")
         actual = self._lookup(source, last)
-        if operator in {"eq", "equals", "=="}:
+        if operator == "always_true":
+            matched = True
+        elif operator == "always_false":
+            matched = False
+        elif operator in {"eq", "equals", "=="}:
             matched = actual == expected
         elif operator in {"ne", "not_equals", "!="}:
             matched = actual != expected
@@ -163,7 +167,17 @@ class ArpExecution:
 
     def _human_gate(self, node: ArpNode) -> NodeResult:
         if node.config.get("approved") is True:
-            return NodeResult(ok=True, output={"approved": True, "mode": "preapproved"})
+            return NodeResult(
+                ok=True,
+                branch="approved",
+                output={"approved": True, "mode": "preapproved"},
+                evidence=[{
+                    "type": "human_gate",
+                    "node_id": node.id,
+                    "approved": True,
+                    "mode": "preapproved",
+                }],
+            )
         timeout_s = float(node.timeout_s or node.config.get("timeout_s") or 3600)
         with self._gate_condition:
             self.status = ArpRunStatus.PAUSED
@@ -260,15 +274,20 @@ class ArpExecution:
             return NodeResult(ok=False, error=f"no handler registered for {node.kind.value}")
         return handler(node, self._context(last), self.stop_event)
 
-    def _next_node(self, node_id: str, branch: str) -> str | None:
+    def _next_node(self, node_id: str, branch: str, *, ok: bool) -> str | None:
         outgoing = [edge for edge in self.graph.edges if edge.source == node_id]
         if not outgoing:
             return None
         exact = next((edge for edge in outgoing if edge.branch == branch), None)
         if exact:
             return exact.target
+        if not ok:
+            if self.graph.policy.fail_fast:
+                return None
+            default = next((edge for edge in outgoing if edge.branch == "default"), None)
+            return default.target if default else None
         default = next((edge for edge in outgoing if edge.branch in {"next", "default", "output"}), None)
-        return default.target if default else outgoing[0].target
+        return default.target if default else None
 
     def run(self) -> dict[str, Any]:
         validation = validate_graph(self.graph)
@@ -369,9 +388,9 @@ class ArpExecution:
                     self.status = ArpRunStatus.DONE
                     self.result = result.output if result.output is not None else last.output if last else None
                     break
-                if not result.ok and self.graph.policy.fail_fast and result.branch in {"next", "fail"}:
+                next_node = self._next_node(node.id, result.branch, ok=result.ok)
+                if not result.ok and next_node is None:
                     raise RuntimeError(result.error or f"node {node.id} failed")
-                next_node = self._next_node(node.id, result.branch)
                 if next_node is None:
                     raise RuntimeError(f"node {node.id!r} has no route for branch {result.branch!r}")
                 current = next_node

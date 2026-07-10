@@ -47,8 +47,10 @@ describe('store', () => {
     expect(state.script.edges.length).toBeGreaterThan(0);
     expect(state.script.meta.name).toBe('ARP 低延迟起步流程');
     expect(state.script.nodes.map((node) => node.type)).toEqual([
-      'start', 'action_batch', 'evidence_gate', 'end',
+      'start', 'action_batch', 'human_gate', 'evidence_gate', 'end',
     ]);
+    expect(state.script.nodes.find((node) => node.type === 'human_gate')?.params).toMatchObject({ approved: true });
+    expect(state.script.nodes.find((node) => node.type === 'evidence_gate')?.params).toMatchObject({ required: ['human_gate'] });
     expect(state.ui).toBeDefined();
     expect(state.ui.dark_mode).toBe(false);
     expect(state.ui.themeMode).toBe('system');

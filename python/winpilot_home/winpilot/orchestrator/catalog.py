@@ -37,7 +37,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             latency_class="milliseconds",
             deterministic=True,
             requires_llm=False,
-            input_schema={"script": "string"},
+            input_schema={"script": "string?", "task": "string?", "memory_id": "string?"},
         ),
         CapabilitySpec(
             id="control.condition",
@@ -87,7 +87,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             id="legacy.flow",
             name="Legacy Flow adapter",
             category="compatibility",
-            description="Run one legacy Flow/feature node behind the ARP contract.",
+            description="Run one explicitly supported legacy GUI node behind the controller contract.",
             node_kind=ArpNodeKind.LEGACY_FLOW,
             latency_class="mixed",
             deterministic=False,

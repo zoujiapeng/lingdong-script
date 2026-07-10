@@ -29,11 +29,11 @@ flowchart LR
 
 后端核心路径：
 
-- `orchestrator/contracts.py`：版本化 `arp/1` 图、节点、重试和验证契约。
-- `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试。
-- `orchestrator/adapters.py`：Agent Goal、Action Batch、Skill Replay、legacy 节点适配。
+- `orchestrator/contracts.py`：版本化 `arp/1` 图、节点、重试、Controller 动作白名单和运行前严格验证契约。
+- `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试；显式失败恢复边优先于 `fail_fast`。
+- `orchestrator/adapters.py`：Agent Goal、Action Batch、Memory-backed Skill Replay、legacy 节点适配和最终运行结果驱动的记忆反馈。
 - `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
-- `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；不支持的旧节点显式标记 `legacy_flow`，不静默改语义。
+- `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；点击、文字锚点、输入、键盘、拖拽、启动、聚焦、截图、剪贴板和部分组合节点直接编译为 Controller batch；其余旧节点显式标记 `legacy_flow` 并在运行前拒绝。
 
 ### ARP 节点
 
@@ -42,10 +42,13 @@ flowchart LR
 默认新流程是合法且无副作用的 `ARP 低延迟起步流程`，可以直接 Validate/Run。真实复杂流程通常是：
 
 ```text
-start -> agent_goal -> action_batch / skill_replay -> evidence_gate -> end
-                         | failure
-                         v
-                    agent_goal / human_gate
+start -> skill_replay -- hit ---------------------------> end
+             | miss / replay failure
+             v
+        agent_goal -> action_batch -> evidence_gate ---> end
+                           | explicit failure
+                           v
+                     agent_goal / human_gate
 ```
 
 ## 进程和端口
@@ -143,6 +146,7 @@ queued
 
 - LLM 可下达 `execute_subgoal` 或 ARP `agent_goal`；本地 controller 完成输入、点击、等待和验证 routine。
 - `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
+- 满足 `require_transient` 的 press 证据会覆盖底层“未提供 expect”的普通未验证状态并提升为节点级 evidence；捕获成功但证据没有上卷不允许到达 `end`。
 - `screen_watch` 持续做便宜帧差；动作前后差分与 watcher 独立，changed-only observe 只理解 ROI。
 - 鼠标 down 与 up 分离，down 期间同步采样。只在 `delta.changed=true`、press 帧强于 release 后帧时标记 `transient_observed`。
 - 瞬态帧会保存为 trace ROI 图片，携带真实屏幕坐标进入 World State；不是只保留 OCR 文本。
@@ -194,7 +198,7 @@ Agent live run
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。
 - WPS-only 节点带 `_requires_wps_replay`，前端 executor 必须 fail-fast。
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
-- `reuse_skill` 会强匹配历史成功脚本并 0-token replay；replay 成功后仍必须 observe/read_text/expect 证明最终状态再 done。
+- Agent 内的 `reuse_skill` 会强匹配历史成功脚本并 0-token replay，随后仍需当前状态证据。ARP `skill_replay` 也可按 task / memory id 检索；只有非空且每个执行叶子通过 Replayer 验证的脚本才产生节点 evidence，空脚本不能完成流程。
 
 不要把 Automation IR 写成已经统一了一切。当前真实状态是：IR 用来减少新入口继续发明并行 metadata，`.wps.json` 仍是 WinPilot Replayer 的直接输入，FlowScript 仍是前端画布格式，legacy DSL 仍由 `python/engine/` 处理。
 
@@ -206,6 +210,7 @@ Agent live run
 - `memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py` 组成运行时。
 - `memory/experience.py` 是旧 recipe API 的兼容门面。
 - `experience_memory.json` 只用于迁移/兼容，不是主运行时事实。
+- Agent Cockpit 默认目标图先走 Memory Graph 的 verified Skill fast path，`miss` / `fail` 再升级到 Agent；记忆正负反馈在整个 ARP run 结束后按最终结果计算，不按局部重放结果提前奖励。
 
 记忆不能弥补硬实力。清除记忆后 agent 变笨，通常说明 routine、感知或验证仍不足，不应依赖历史记忆撑通用能力。
 
