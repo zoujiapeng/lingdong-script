@@ -52,6 +52,23 @@ def test_schema_exposes_coordinate_calibration_tools_without_shell():
     assert {"coordinate_diagnostics", "coordinate_click_test"} <= names
 
 
+def test_search_files_schema_exposes_fast_local_filters():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(
+        planning=True,
+        coding_runtime=False,
+        allow_shell=False,
+        allow_files=True,
+    )
+    search = next(tool for tool in tools if tool["function"]["name"] == "search_files")
+    properties = search["function"]["parameters"]["properties"]
+
+    assert properties["kind"]["enum"] == ["any", "file", "folder"]
+    assert properties["sort"]["enum"] == ["path", "name", "date_modified", "size"]
+    assert properties["extensions"]["items"] == {"type": "string"}
+
+
 def test_strict_gui_schema_hides_file_tools_without_hiding_gui_tools():
     from winpilot.agent.tool_schemas import tool_schemas
 

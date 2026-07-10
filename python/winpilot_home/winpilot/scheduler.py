@@ -7,6 +7,7 @@ start them later through the same AgentRunner path as /api/chat.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -16,7 +17,10 @@ from typing import Any
 
 from .config import ROOT_DIR
 
-SCHEDULES_PATH = ROOT_DIR / "agent_schedules.json"
+SCHEDULES_PATH = Path(
+    os.environ.get("WINPILOT_SCHEDULES_PATH")
+    or ROOT_DIR / "agent_schedules.json"
+)
 _lock = threading.Lock()
 
 

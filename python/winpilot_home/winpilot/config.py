@@ -83,7 +83,7 @@ _DEFAULTS: dict[str, Any] = {
         "visual_servo_strict": True,
     },
     "ocr": {"use_gpu": True, "min_confidence": 0.55},
-    "search": {"everything_es_path": ""},
+    "search": {"everything_es_path": "", "everything_exe_path": ""},
     "coding": {"enabled": True, "workspace": "", "max_steps": 30},
     "integrations": {
         "chatgpt_desktop": {

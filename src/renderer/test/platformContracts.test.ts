@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FlowScript } from '../types';
-import { ControlPlaneClient, createGoalGraph, normalizeBaseUrl, websocketUrl } from '../platform/client';
+import {
+  ControlPlaneClient,
+  createGoalGraph,
+  normalizeBaseUrl,
+  resolveControlPlaneUrl,
+  websocketUrl,
+} from '../platform/client';
 import { edgeBranch, flowToArpGraph } from '../platform/flowToArpGraph';
 
 function scriptFixture(): FlowScript {
@@ -53,6 +59,26 @@ describe('control plane client contracts', () => {
   it('normalizes REST and WebSocket addresses', () => {
     expect(normalizeBaseUrl('http://127.0.0.1:8765')).toBe('http://127.0.0.1:8765/');
     expect(websocketUrl('https://example.test/runtime/')).toBe('wss://example.test/runtime/ws/events');
+  });
+
+  it('waits for the Electron-managed server instead of using a stale fallback port', async () => {
+    let calls = 0;
+    (window as any).electronAPI = {
+      ensureWinpilot: vi.fn(async () => {
+        calls += 1;
+        return calls === 1
+          ? { url: null, starting: true, error: null }
+          : { url: 'http://127.0.0.1:23456', starting: false, error: null };
+      }),
+      getWinpilotUrl: vi.fn(async () => null),
+    };
+
+    try {
+      await expect(resolveControlPlaneUrl()).resolves.toBe('http://127.0.0.1:23456/');
+      expect(calls).toBe(2);
+    } finally {
+      delete (window as any).electronAPI;
+    }
   });
 
   it('creates a valid high-level goal graph', () => {

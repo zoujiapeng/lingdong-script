@@ -11,6 +11,8 @@ import type {
 } from './contracts';
 
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
+const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
+const ELECTRON_SERVER_POLL_MS = 200;
 
 export function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim();
@@ -26,11 +28,20 @@ export function websocketUrl(baseUrl: string): string {
 
 export async function resolveControlPlaneUrl(): Promise<string> {
   if (typeof window !== 'undefined' && window.electronAPI) {
-    const ensured = await window.electronAPI.ensureWinpilot?.();
-    if (ensured?.url) return normalizeBaseUrl(ensured.url);
-    const existing = await window.electronAPI.getWinpilotUrl?.();
-    if (existing) return normalizeBaseUrl(existing);
-    if (ensured?.error) throw new Error(ensured.error);
+    const api = window.electronAPI;
+    const canResolveManagedServer = Boolean(api.ensureWinpilot || api.getWinpilotUrl);
+    if (canResolveManagedServer) {
+      const deadline = Date.now() + ELECTRON_SERVER_READY_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const ensured = await api.ensureWinpilot?.();
+        if (ensured?.url) return normalizeBaseUrl(ensured.url);
+        const existing = await api.getWinpilotUrl?.();
+        if (existing) return normalizeBaseUrl(existing);
+        if (ensured?.error) throw new Error(ensured.error);
+        await new Promise((resolve) => setTimeout(resolve, ELECTRON_SERVER_POLL_MS));
+      }
+      throw new Error('WinPilot managed server did not become ready within 35 seconds.');
+    }
   }
   return FALLBACK_URL;
 }

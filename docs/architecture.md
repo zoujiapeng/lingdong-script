@@ -62,6 +62,7 @@ start -> skill_replay -- hit ---------------------------> end
 | GUI eval script | `scripts/gui_eval_run.py` | 走同一个 `/api/chat` 路径，写 compact eval 报告 |
 
 `/api/status.runtime` 会返回 repo root、branch、commit、dirty、PID、port。排查多 worktree 或旧服务时先看它。
+Electron renderer 会等待 `winpilot:ensure` 返回本实例托管的随机端口；固定 `127.0.0.1:8765` 只用于纯浏览器/手动服务 fallback，不能在托管服务仍处于 `starting` 时抢先连接旧实例。
 
 ## Agent 与 Controller
 
@@ -151,6 +152,7 @@ queued
 - 鼠标 down 与 up 分离，down 期间同步采样。只在 `delta.changed=true`、press 帧强于 release 后帧时标记 `transient_observed`。
 - 瞬态帧会保存为 trace ROI 图片，携带真实屏幕坐标进入 World State；不是只保留 OCR 文本。
 - 动作触发后立即异步 OCR 变化 ROI；下一次 changed-only observe 可直接消费 predictive cache。
+- verify engine 只并行文件/进程等确定性只读检查与 UIA/OCR；`shell_true` 和所有桌面 mutation 不并发，最终证据仍是 AND 语义。
 - `ElementCache` 使用语义、角色、相对位置和当前快照复验；长日志、隐藏标签文本、地址栏不能冒充按钮。
 - `click_element` 支持 `visual_anchor`、fallback text、expected region、物理点击和点击前局部视觉伺服修正。
 - 分层感知已覆盖 UIA、Win32、OCR、传统 CV 和强 VLM fallback；UIA 丰富时跳过昂贵维度，查询不可靠时定向 OCR。
@@ -222,6 +224,11 @@ Agent live run
 - legacy Electron 模板调度：`src/main/schedulerBridge.ts` + `python/engine/scheduler_daemon.py`，数据是 Electron userData 下的 `schedules.json`，服务于流程图/模板体系。
 
 WinPilot Agent 内部调度不是 Windows Task Scheduler。
+
+相关运行时服务：
+
+- 本地文件名搜索：`perception/search.py` 优先走随包 ES 客户端和 Everything 索引，启动时异步预热 IPC；失败后使用有时间上限、会报告 `partial` 的本地扫描。
+- Windows 任务提醒：renderer 根据统一 run projection 识别终态，Electron main 统一设置任务栏进度/错误状态、后台闪烁和系统通知，并按 `run_id` 去重。
 
 ## 文档维护
 

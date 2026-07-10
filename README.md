@@ -108,9 +108,12 @@ python -m http.server 8877 --bind 127.0.0.1
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
 - 用户始终面对一个 Agent。新能力优先作为 Runtime/Capability/Skill 接入同一 runner；只有明确隔离、安全或生命周期边界时才引入独立 runner。
 - GUI 成功不能只看 agent 总结，必须用截图、文件、进程、窗口、trace 或工具证据验证。
+- 验证可做有限并发：文件/进程只读检查会与 UIA/OCR 重叠；`shell_true` 和真实桌面写操作仍保持同步、single-writer，不能为了速度制造竞态。
 - 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
 - WinPilot Agent 自带内部计划任务：`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 写入 `python/winpilot_home/agent_schedules.json`，到期后仍走同一个 `AgentRunner`；这不是 Windows Task Scheduler。
+- `search_files` 优先使用随包提供的 Everything ES 客户端连接本机 Everything 索引，支持文件/目录、扩展名和排序；索引不可用时只做有时间上限的本地扫描。
+- Electron 会在任务完成、失败或停止时设置 Windows 任务栏状态、闪烁后台窗口并发送系统通知；同一 `run_id` 只提醒一次。
 - 坐标偏移排查用 `coordinate_diagnostics` / `coordinate_click_test`；它们报告物理屏幕、截图、窗口、DPI 和真实鼠标点击路径，不等同于浏览器 CSS/client 坐标。
 
 MIT

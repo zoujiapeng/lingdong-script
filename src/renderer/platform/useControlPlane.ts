@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ControlPlaneClient, createGoalGraph, resolveControlPlaneUrl } from './client';
 import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
+import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
 export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
-
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'paused', 'canceling']);
-const SUCCESS_RUN_STATUSES = new Set(['done', 'completed', 'success', 'reply']);
-const TERMINAL_RUN_STATUSES = new Set([
-  ...SUCCESS_RUN_STATUSES,
-  'failed', 'fail', 'error', 'canceled', 'stopped',
-]);
 
 export function useControlPlane() {
   const clientRef = useRef<ControlPlaneClient | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const taskbarRunState = useRef<{ runId: string; status: string } | null>(null);
+  const taskbarRunState = useRef<TaskbarRunState | null>(null);
+  const liveStartedRuns = useRef(new Set<string>());
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [baseUrl, setBaseUrl] = useState('');
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
@@ -61,6 +56,10 @@ export function useControlPlane() {
         await refresh();
         if (disposed) return;
         disconnect = client.connectEvents((event) => {
+          if (event.run_id && (event.type === 'agent_start' || event.type === 'arp_run_start')) {
+            if (liveStartedRuns.current.size >= 200) liveStartedRuns.current.clear();
+            liveStartedRuns.current.add(event.run_id);
+          }
           if (event.type !== 'ping') setEvents((items) => [...items.slice(-199), event]);
           if (refreshTimer.current) clearTimeout(refreshTimer.current);
           refreshTimer.current = setTimeout(refresh, 60);
@@ -90,12 +89,20 @@ export function useControlPlane() {
     };
     const previous = taskbarRunState.current;
     taskbarRunState.current = current;
-    if (!previous || previous.runId !== current.runId) return;
-    if (!ACTIVE_RUN_STATUSES.has(previous.status) || !TERMINAL_RUN_STATUSES.has(current.status)) return;
-    const success = SUCCESS_RUN_STATUSES.has(current.status);
-    const title = success ? '任务完成' : '任务未完成';
-    const detail = currentRun.error || currentRun.goal || currentRun.run_id;
-    void window.electronAPI?.notifyTaskbar?.(title, detail.slice(0, 220));
+    const observedLiveStart = liveStartedRuns.current.has(current.run_id);
+    const notification = taskbarNotificationForTransition(
+      previous,
+      currentRun,
+      observedLiveStart,
+    );
+    if (!notification) return;
+    liveStartedRuns.current.delete(current.run_id);
+    void window.electronAPI?.notifyTaskbar?.(
+      notification.title,
+      notification.body,
+      notification.kind,
+      notification.runId,
+    );
   }, [currentRun]);
 
   const requireClient = () => {
