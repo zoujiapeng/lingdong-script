@@ -262,6 +262,136 @@ class PerceptionToolMixin:
                 kept.append(cand)
         return kept
 
+    @staticmethod
+    def _merge_ocr_line_elements(elements: list[UIElement]) -> list[UIElement]:
+        """Create compact line evidence when OCR splits one status token.
+
+        UI labels such as ``PRESS_PULSE_ACTIVE`` are often recognized as
+        separate words. A merged line keeps query matching and evidence honest
+        without changing the original OCR boxes used for precise coordinates.
+        """
+        rows: list[list[UIElement]] = []
+        for element in sorted(elements, key=lambda item: (item.cy, item.left)):
+            if not element.text:
+                continue
+            row = next((
+                candidate for candidate in rows
+                if abs(sum(item.cy for item in candidate) / len(candidate) - element.cy)
+                <= max(8, element.height)
+            ), None)
+            if row is None:
+                rows.append([element])
+            else:
+                row.append(element)
+        merged: list[UIElement] = []
+        for row in rows:
+            ordered = sorted(row, key=lambda item: item.left)
+            segments: list[list[UIElement]] = []
+            for element in ordered:
+                if not segments:
+                    segments.append([element])
+                    continue
+                previous = segments[-1][-1]
+                gap = element.left - (previous.left + previous.width)
+                if gap > max(64, max(previous.height, element.height) * 4):
+                    segments.append([element])
+                else:
+                    segments[-1].append(element)
+            for segment in segments:
+                if len(segment) < 2:
+                    continue
+                left = min(item.left for item in segment)
+                top = min(item.top for item in segment)
+                right = max(item.left + item.width for item in segment)
+                bottom = max(item.top + item.height for item in segment)
+                states = sorted({state for item in segment for state in item.states})
+                states.append("ocr_line_merge")
+                merged.append(UIElement(
+                    source="ocr",
+                    role="text",
+                    text=" ".join(item.text.strip() for item in segment if item.text.strip()),
+                    cx=(left + right) // 2,
+                    cy=(top + bottom) // 2,
+                    left=left,
+                    top=top,
+                    width=max(1, right - left),
+                    height=max(1, bottom - top),
+                    confidence=min(float(item.confidence) for item in segment),
+                    states=states,
+                ))
+        return merged
+
+    @staticmethod
+    def _text_matches_query(query: str, text: str) -> bool:
+        matcher = getattr(ocr, "_match_text", None)
+        if callable(matcher):
+            return bool(matcher(query, text))
+        return query.casefold() in text.casefold()
+
+    @classmethod
+    def _query_element_is_grounded(
+        cls,
+        query: str,
+        element: UIElement,
+        *,
+        actionable: bool = False,
+    ) -> bool:
+        text = str(element.text or "").strip()
+        if not text or not cls._text_matches_query(query, text):
+            return False
+        compact_query = "".join(ch for ch in query.casefold() if ch.isalnum())
+        compact_text = "".join(ch for ch in text.casefold() if ch.isalnum())
+        if len(compact_text) > max(96, len(compact_query) * 6):
+            return False
+        if not actionable:
+            return True
+        role = str(element.role or "").casefold()
+        if any(token in role for token in ("button", "link", "menuitem", "tab", "check", "radio")):
+            return True
+        # OCR labels are allowed because custom-drawn controls often have no
+        # native accessibility role; click_element still applies geometry.
+        return str(element.source or "").casefold() == "ocr"
+
+    @classmethod
+    def _query_grounded_elements(
+        cls,
+        query: str,
+        elements: list[UIElement],
+        *,
+        actionable: bool = False,
+    ) -> list[UIElement]:
+        return [
+            element for element in elements
+            if cls._query_element_is_grounded(query, element, actionable=actionable)
+        ]
+
+    def _predictive_ocr_for_regions(
+        self,
+        regions: list[Region],
+    ) -> tuple[list[UIElement], dict]:
+        lock = getattr(self, "_predictive_ocr_lock", None)
+        if lock is None:
+            return [], {}
+        with lock:
+            cache = dict(getattr(self, "_predictive_ocr_cache", None) or {})
+        if not cache:
+            return [], {}
+        created_ms = int(cache.get("created_ms") or 0)
+        max_age_ms = int(CONFIG.get("fusion", "changed_region_recent_ms", default=30000))
+        if created_ms and int(time.monotonic() * 1000) - created_ms > max_age_ms:
+            return [], {}
+        cached_elements = cache.get("elements") if isinstance(cache.get("elements"), list) else []
+        matched = [
+            element for element in cached_elements
+            if isinstance(element, UIElement)
+            and any(self._regions_intersect(self._element_region(element), region) for region in regions)
+        ]
+        return matched, {
+            "hit": bool(matched),
+            "source_elapsed_ms": int(cache.get("elapsed_ms") or 0),
+            "transient": bool(cache.get("transient")),
+        }
+
     def _changed_region_snapshot(
         self,
         hwnd: int,
@@ -294,16 +424,57 @@ class PerceptionToolMixin:
 
         started = time.monotonic()
         ocr_elements: list[UIElement] = []
+        transient_ocr_count = 0
+        predictive_meta: dict = {}
         try:
             ocr_mod = _tools_attr("ocr", ocr)
-            for region in regions:
-                ocr_elements.extend(ocr_mod.collect(region))
+            controller = getattr(self, "_fast_gui_controller", None)
+            watcher = getattr(controller, "watcher", None)
+            predictive_elements, predictive_meta = self._predictive_ocr_for_regions(regions)
+            if predictive_elements:
+                ocr_elements.extend(predictive_elements)
+                transient_ocr_count += sum(
+                    1 for element in predictive_elements
+                    if "transient_action_evidence" in element.states
+                    and "ocr_line_merge" not in element.states
+                )
+            evidence_reader = getattr(watcher, "action_evidence", None)
+            if not predictive_elements and callable(evidence_reader):
+                evidence_crops, is_transient = evidence_reader(
+                    int(CONFIG.get("fusion", "changed_region_recent_ms", default=30000))
+                )
+                for image, evidence_region in evidence_crops:
+                    if not any(self._regions_intersect(evidence_region, changed) for changed in regions):
+                        continue
+                    recognized = ocr_mod.recognize(
+                        image,
+                        origin=(evidence_region.left, evidence_region.top),
+                    )
+                    recognized_with_lines = [
+                        *recognized,
+                        *self._merge_ocr_line_elements(recognized),
+                    ]
+                    if is_transient:
+                        for element in recognized_with_lines:
+                            if "transient_action_evidence" not in element.states:
+                                element.states.append("transient_action_evidence")
+                    transient_ocr_count += len(recognized)
+                    ocr_elements.extend(recognized_with_lines)
+            prefer_cache = bool(CONFIG.get("fusion", "predictive_ocr_prefer_cache", default=True))
+            if not predictive_elements or not prefer_cache:
+                for region in regions:
+                    current_ocr = ocr_mod.collect(region)
+                    ocr_elements.extend(current_ocr)
+                    ocr_elements.extend(self._merge_ocr_line_elements(current_ocr))
         except Exception as exc:
             logger.warning("changed-only OCR observe failed: %s", exc)
         snapshot.dim_stats["ocr"] = {
             "count": len(ocr_elements),
             "ms": int((time.monotonic() - started) * 1000),
             "scope": "changed_roi",
+            "transient_evidence_count": transient_ocr_count,
+            "predictive_cache_hit": bool(predictive_meta.get("hit")),
+            "predictive_source_ms": int(predictive_meta.get("source_elapsed_ms") or 0),
         }
         elements.extend(ocr_elements)
 
@@ -328,6 +499,7 @@ class PerceptionToolMixin:
         snapshot.elements = elements
         BUS.publish(
             "perception",
+            run_id=getattr(self, "run_id", None),
             hwnd=hwnd,
             title=title,
             dims=snapshot.dim_stats,
@@ -537,10 +709,12 @@ class PerceptionToolMixin:
         query = str(args.get("query", "") or "")
         max_elements = int(args.get("max_elements", 160) or 160)
         query_norm = query.strip().casefold()
+        actionable_query = bool(args.get("actionable_query"))
         changed_query_fallback = False
-        if changed_regions and query_norm and not any(
-            query_norm in (element.text or "").casefold()
-            for element in self.snapshot.elements
+        if changed_regions and query_norm and not self._query_grounded_elements(
+            query_norm,
+            self.snapshot.elements,
+            actionable=actionable_query,
         ):
             full_cache_key = (
                 int(hwnd),
@@ -563,6 +737,54 @@ class PerceptionToolMixin:
                 self.store_observe_cache(full_cache_key, self.snapshot)
             self._remember_target(hwnd, self.snapshot.title)
             changed_query_fallback = True
+        ocr_stats = self.snapshot.dim_stats.get("ocr") or {}
+        full_ocr_already_ran = bool(
+            ocr_stats
+            and not ocr_stats.get("skipped")
+            and not ocr_stats.get("error")
+            and ocr_stats.get("scope") != "changed_roi"
+        )
+        if (
+            query_norm
+            and not full_ocr_already_ran
+            and not self._query_grounded_elements(
+                query_norm,
+                self.snapshot.elements,
+                actionable=actionable_query,
+            )
+        ):
+            query_ocr_started = time.monotonic()
+            query_hits: list[UIElement] = []
+            try:
+                target_region = _tools_attr("window_region", window_region)(hwnd)
+                ocr_mod = _tools_attr("ocr", ocr)
+                full_ocr = ocr_mod.collect(target_region)
+                full_ocr.extend(self._merge_ocr_line_elements(full_ocr))
+                query_hits = [
+                    element for element in full_ocr
+                    if self._query_element_is_grounded(
+                        query_norm,
+                        element,
+                        actionable=actionable_query,
+                    )
+                ]
+                for element in query_hits:
+                    if "query_directed_ocr" not in element.states:
+                        element.states.append("query_directed_ocr")
+                if query_hits:
+                    self.snapshot.elements = self._dedupe_elements([
+                        *self.snapshot.elements,
+                        *query_hits,
+                    ])
+                    for index, element in enumerate(self.snapshot.elements, start=1):
+                        element.elem_id = index
+            except Exception as exc:
+                logger.warning("query-directed OCR fallback failed: %s", exc)
+            self.snapshot.dim_stats["ocr_query"] = {
+                "count": len(query_hits),
+                "ms": int((time.monotonic() - query_ocr_started) * 1000),
+                "scope": "full_query_fallback",
+            }
         render_profile = "full_query_fallback" if changed_query_fallback else observe_profile
         text, _reduction, _trace_rel = self._render_observe_text(
             self.snapshot,
@@ -615,15 +837,53 @@ class PerceptionToolMixin:
         if not hwnd:
             return ToolResult("无目标窗口")
         fusion_mod = _tools_attr("fusion", fusion)
-        ocr_mod = _tools_attr("ocr", ocr)
-        snapshot = fusion_mod.observe(hwnd, include_icons=False,
-                                      perception_mode=self._perception_mode())
+        perception_mode = self._perception_mode()
+        cache_keys = [
+            (int(hwnd), include_icons, perception_mode, "full", (), self._screen_epoch)
+            for include_icons in (False, True)
+        ]
+        cache_ttl = float(CONFIG.get("fusion", "observe_cache_ttl_s", default=2.0))
+        snapshot = None
+        if cache_ttl > 0:
+            for cache_key in cache_keys:
+                snapshot = self.cached_observe(cache_key, cache_ttl)
+                if snapshot is not None:
+                    break
+        cache_hit = snapshot is not None
+        if snapshot is None:
+            snapshot = fusion_mod.observe(
+                hwnd,
+                include_icons=False,
+                perception_mode=perception_mode,
+            )
+            self.store_observe_cache(cache_keys[0], snapshot)
+        else:
+            dim_stats = getattr(snapshot, "dim_stats", None)
+            if isinstance(dim_stats, dict):
+                dim_stats["cache"] = {
+                    "count": len(snapshot.elements),
+                    "ms": 0,
+                    "profile": "read_text",
+                }
+        dim_stats = getattr(snapshot, "dim_stats", None)
+        ocr_stats = dim_stats.get("ocr") if isinstance(dim_stats, dict) else None
+        if not isinstance(ocr_stats, dict) or ocr_stats.get("skipped") or ocr_stats.get("error"):
+            try:
+                region = getattr(snapshot, "region", None) or _tools_attr(
+                    "window_region", window_region
+                )(hwnd)
+                supplemental = _tools_attr("ocr", ocr).collect(region)
+                snapshot.elements = [*snapshot.elements, *supplemental]
+            except Exception as exc:
+                logger.warning("read_text supplemental OCR failed: %s", exc)
+        self.snapshot = snapshot
+        title = str(getattr(snapshot, "title", "") or "")
+        self._remember_target(hwnd, title)
         texts = [e.text for e in snapshot.elements if e.text.strip()]
-        ocr_elements = ocr_mod.collect(snapshot.region, min_conf=0.45)
-        texts.extend(e.text for e in ocr_elements if e.text.strip())
         body = "\n".join(dict.fromkeys(texts))
+        source = "cache" if cache_hit else "fusion"
         return ToolResult(body or "（未识别到文字）",
-                          summary=f"[已折叠] read_text {len(texts)}条文字")
+                          summary=f"[已折叠] read_text {len(texts)}条文字 source={source}")
 
     def _t_find_image(self, args: dict) -> ToolResult:
         matches = vision_cv.match_template(str(args["template"]))

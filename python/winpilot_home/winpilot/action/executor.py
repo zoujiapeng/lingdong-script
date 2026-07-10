@@ -16,9 +16,11 @@ import os
 import re
 import string
 import subprocess
+import threading
 import time
 from ctypes import wintypes
 from io import BytesIO
+from typing import Any, Callable
 
 import win32api
 import win32con
@@ -29,6 +31,49 @@ from ..utils.log import BUS, logger
 from .desktop_queue import queued_desktop_action
 
 user32 = ctypes.windll.user32
+
+# ToolSession installs this callback only around a visible action. Sampling
+# after mouse-down makes short-lived pressed states part of action evidence.
+_press_probe_local = threading.local()
+
+
+def install_press_probe(callback: Callable[[], Any] | None) -> Callable[[], Any] | None:
+    previous = getattr(_press_probe_local, "callback", None)
+    _press_probe_local.callback = callback
+    return previous
+
+
+def restore_press_probe(previous: Callable[[], Any] | None) -> None:
+    _press_probe_local.callback = previous
+
+
+def _sample_pressed_state() -> bool:
+    callback = getattr(_press_probe_local, "callback", None)
+    if not callable(callback):
+        return False
+    try:
+        settle_ms = max(0, min(80, int(CONFIG.get("fusion", "press_probe_settle_ms", default=18))))
+        if settle_ms:
+            time.sleep(settle_ms / 1000.0)
+        try:
+            ctypes.windll.dwmapi.DwmFlush()
+        except (AttributeError, OSError):
+            pass
+        callback()
+        return True
+    except Exception:
+        logger.debug("pressed-state visual probe failed", exc_info=True)
+        return False
+
+
+def _settle_after_release() -> None:
+    settle_ms = max(0, min(80, int(CONFIG.get("fusion", "press_release_settle_ms", default=24))))
+    if settle_ms:
+        time.sleep(settle_ms / 1000.0)
+    try:
+        ctypes.windll.dwmapi.DwmFlush()
+    except (AttributeError, OSError):
+        pass
 
 # ---------------------------------------------------------------- SendInput
 _PUL = ctypes.POINTER(ctypes.c_ulong)
@@ -174,7 +219,13 @@ def _post_click(x: int, y: int, button: str, double: bool) -> bool:
         down, up, mk = _WM.get(button, _WM["left"])
         for _ in range(2 if double else 1):
             win32gui.PostMessage(target, down, mk, lparam)
-            win32gui.PostMessage(target, up, 0, lparam)
+            sampled = False
+            try:
+                sampled = _sample_pressed_state()
+            finally:
+                win32gui.PostMessage(target, up, 0, lparam)
+            if sampled:
+                _settle_after_release()
             if double:
                 time.sleep(0.05)
         return True
@@ -247,7 +298,14 @@ def _raw_click(x: int, y: int, button: str, double: bool, hwnd: int | None) -> N
     else:
         raise ValueError(f"未知鼠标键: {button}")
     for _ in range(2 if double else 1):
-        _send_inputs([_mouse_input(down), _mouse_input(up)])
+        _send_inputs([_mouse_input(down)])
+        sampled = False
+        try:
+            sampled = _sample_pressed_state()
+        finally:
+            _send_inputs([_mouse_input(up)])
+        if sampled:
+            _settle_after_release()
         if double:
             time.sleep(0.06)
 

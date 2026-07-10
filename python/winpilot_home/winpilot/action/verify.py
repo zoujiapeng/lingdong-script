@@ -64,18 +64,30 @@ def _match_visible_text_precise(needle: str, text: str) -> bool:
     if needle_lower in text_lower:
         return True
     norm_text = _norm_visible_text(text_lower)
-    return bool(norm_needle and norm_needle in norm_text)
+    if norm_needle and norm_needle in norm_text:
+        return True
+    # OCR commonly confuses identifier digits with similarly shaped letters.
+    # Keep correction restricted to long ASCII identifiers containing digits;
+    # ordinary prose and short numeric checks remain exact.
+    if (
+        len(norm_needle) >= 8
+        and any(ch.isdigit() for ch in norm_needle)
+        and re.fullmatch(r"[a-z0-9]+", norm_needle)
+    ):
+        table = str.maketrans({"o": "0", "i": "1", "l": "1"})
+        corrected_needle = norm_needle.translate(table)
+        for line in text_lower.splitlines():
+            norm_line = _norm_visible_text(line)
+            if not re.fullmatch(r"[a-z0-9]+", norm_line):
+                continue
+            corrected_line = norm_line.translate(table)
+            if corrected_needle == corrected_line:
+                return True
+    return False
 
 
 def _match_visible_text(needle: str, text: str) -> bool:
     return _match_visible_text_precise(needle, text)
-    needle_lower = (needle or "").casefold()
-    text_lower = (text or "").casefold()
-    if needle_lower in text_lower:
-        return True
-    norm_needle = re.sub(r"[\s_\-:：]+", "", needle_lower)
-    norm_text = re.sub(r"[\s_\-:：]+", "", text_lower)
-    return bool(norm_needle and norm_needle in norm_text)
 
 
 @dataclass

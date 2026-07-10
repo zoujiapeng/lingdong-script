@@ -111,6 +111,56 @@ def test_element_cache_rejects_browser_url_when_button_role_requested():
     assert located.element.elem_id == 9
 
 
+def test_element_cache_rejects_long_log_substring_as_click_anchor():
+    from winpilot.fast.element_cache import ElementCache, anchor_from_dict
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Target - Browser",
+        region=Region(0, 0, 1200, 800),
+        elements=[
+            UIElement(
+                elem_id=1,
+                source="uia",
+                role="text",
+                text='{"error":"Press pulse was not found", "trace":"' + "x" * 500 + '"}',
+                cx=300,
+                cy=650,
+                left=20,
+                top=610,
+                width=620,
+                height=80,
+            ),
+            UIElement(
+                elem_id=2,
+                source="ocr",
+                role="text",
+                text="Press pulse",
+                cx=250,
+                cy=180,
+                left=190,
+                top=160,
+                width=120,
+                height=40,
+            ),
+        ],
+    )
+    anchor = anchor_from_dict({
+        "label": "Press pulse",
+        "visual_anchor": "teal button",
+        "expected_region": "top-left",
+    })
+
+    located = ElementCache().locate_with_trace(snapshot, anchor)
+
+    assert anchor.role == "button"
+    assert located.element is not None
+    assert located.element.elem_id == 2
+
+
 def test_element_cache_revalidates_cached_anchor_without_reusing_old_element_id():
     from winpilot.fast.element_cache import ElementCache
     from winpilot.fast.types import VisualAnchor
@@ -183,6 +233,75 @@ def test_fast_controller_click_element_dispatches_click():
     assert out["controller_state"]["phase"] == "verified"
 
 
+def test_fast_controller_click_element_uses_real_mouse_by_default_when_enabled():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        physical_anchor_clicks = True
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=5, role="button", text="Pulse", cx=920, cy=50)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"action": "click_element", "label": "Pulse", "role": "button"}
+    ])
+
+    assert out["ok"]
+    assert calls == [(
+        "click",
+        {"element_id": 5, "button": "left", "double": False, "physical": True},
+    )]
+
+
+def test_fast_controller_click_element_can_prefer_uia_invoke():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        physical_anchor_clicks = True
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(elem_id=5, role="button", text="Export", cx=920, cy=50)],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    out = FastGuiController(Session()).execute([{
+        "action": "click_element",
+        "label": "Export",
+        "role": "button",
+        "prefer_uia_invoke": True,
+    }])
+
+    assert out["ok"]
+    assert calls == [(
+        "click",
+        {"element_id": 5, "button": "left", "double": False},
+    )]
+
+
 def test_fast_controller_click_element_auto_observes_then_retries_anchor():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -224,7 +343,7 @@ def test_fast_controller_click_element_auto_observes_then_retries_anchor():
 
     assert out["ok"]
     assert calls == [
-        ("observe", {"query": "Export", "max_elements": 160}),
+        ("observe", {"query": "Export", "max_elements": 160, "actionable_query": True}),
         ("click", {"element_id": 8, "button": "left", "double": False}),
     ]
     data = out["results"][0]["data"]
@@ -291,6 +410,54 @@ def test_fast_controller_type_into_element_clicks_clears_and_types():
     assert out["metrics"]["compound_round_trips_saved"] == 3
     assert out["metrics"]["controller_round_trips_saved"] == 3
     assert out["controller_state"]["phase"] == "verified"
+
+
+def test_fast_controller_visual_servo_corrects_target_before_click(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Moving UI",
+            region=Region(0, 0, 1000, 600),
+            elements=[UIElement(
+                elem_id=5, role="button", text="Export",
+                cx=100, cy=100, left=70, top=85, width=60, height=30,
+            )],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            return ToolResult('{"ok": true, "verified": true}')
+
+    monkeypatch.setattr(controller_mod.ocr, "collect", lambda region: [
+        UIElement(
+            source="ocr", role="text", text="Export",
+            cx=116, cy=109, left=86, top=94, width=60, height=30,
+        )
+    ])
+
+    out = FastGuiController(Session()).execute([{
+        "action": "click_element",
+        "label": "Export",
+        "role": "button",
+        "visual_servo": True,
+        "servo_iterations": 1,
+    }])
+
+    assert out["ok"] is True
+    assert calls[0] == ("move_mouse", {"x": 100, "y": 100, "skip_screen_delta": True})
+    assert calls[1] == ("click", {"x": 116, "y": 109, "button": "left", "double": False, "physical": True})
+    servo = out["results"][0]["data"]["visual_servo"]
+    assert servo["corrected"] is True
+    assert servo["final"] == {"x": 116, "y": 109}
 
 
 def test_type_into_element_append_newline_moves_caret_to_end_first():
@@ -699,6 +866,63 @@ def test_fast_controller_adds_short_timeout_to_batch_expect():
     assert out["ok"]
     assert calls[0][1]["expect"]["timeout_s"] == 2.0
     assert out["results"][0]["data"]["verified"] is True
+
+
+def test_fast_controller_requires_transient_screen_evidence_when_requested():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            return ToolResult(json.dumps({
+                "ok": True,
+                "screen_delta": {
+                    "changed": False,
+                    "transient_observed": False,
+                },
+            }))
+
+    out = FastGuiController(Session()).execute([
+        {"action": "click", "x": 10, "y": 20, "require_transient": True},
+    ], sync=False)
+
+    assert out["ok"] is False
+    assert out["metrics"]["failed_at"] == 1
+    assert out["results"][0]["error"] == "required controller evidence was not observed"
+
+
+def test_fast_controller_required_observe_rejects_long_log_match():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        snapshot = Snapshot(
+            hwnd=1,
+            title="Demo",
+            region=Region(0, 0, 1000, 700),
+            elements=[UIElement(
+                source="uia",
+                role="text",
+                text="PRESS_PULSE_ACTIVE appeared in an old trace " + "x" * 500,
+                cx=400,
+                cy=500,
+            )],
+        )
+
+        def dispatch(self, name, args):
+            return ToolResult("observe completed", is_observe=True)
+
+    out = FastGuiController(Session()).execute([
+        {"action": "observe", "query": "PRESS_PULSE_ACTIVE", "require_match": True},
+    ], sync=False)
+
+    assert out["ok"] is False
+    assert out["results"][0]["query_match"] is False
 
 
 def test_fast_controller_plain_action_error_fails_batch():
@@ -1688,6 +1912,15 @@ def test_subgoal_visible_text_ignores_observe_query_diagnostics():
     assert not _match_visible_text("LOCAL_COUNTER_0", visible_text)
 
 
+def test_visible_text_tolerates_bounded_ocr_digit_letter_confusion():
+    from winpilot.action.verify import _match_visible_text
+
+    assert _match_visible_text("LOCAL_COUNTER_0", "IDLE\nLOCAL COUNTER O")
+    assert _match_visible_text("BUILD_ID_101", "BUILD ID IOI")
+    assert not _match_visible_text("LOCAL_COUNTER_0", "LOCAL_COUNTER_20")
+    assert not _match_visible_text("10", "port 8100")
+
+
 def test_subgoal_visible_text_uses_internal_full_observe_text():
     from winpilot.action.verify import _match_visible_text
     from winpilot.fast.subgoal import _pick_text
@@ -1766,6 +1999,7 @@ def test_execute_subgoal_verifies_with_full_text_but_returns_public_results():
 
     assert payload["ok"] is True
     assert payload["verified"] is True
+    assert payload["controller_state"]["verified"] is True
     assert payload["evidence_packet"]["matched_texts"] == ["LOCAL_COUNTER_4"]
     assert "full_text" not in payload["results"][0]
 
@@ -2070,7 +2304,7 @@ def test_subgoal_anchor_failure_returns_visible_region_candidates():
     assert "retry execute_subgoal" in payload["fast_path_advice"]
     assert calls == [
         ("focus_window", {"hwnd": 1}),
-        ("observe", {"query": "Local Counter", "max_elements": 160}),
+        ("observe", {"query": "Local Counter", "max_elements": 160, "actionable_query": True}),
     ]
 
 

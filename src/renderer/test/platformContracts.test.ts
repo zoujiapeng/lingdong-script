@@ -1,0 +1,138 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { FlowScript } from '../types';
+import { ControlPlaneClient, createGoalGraph, normalizeBaseUrl, websocketUrl } from '../platform/client';
+import { edgeBranch, flowToArpGraph } from '../platform/flowToArpGraph';
+
+function scriptFixture(): FlowScript {
+  return {
+    meta: {
+      id: 'flow-1',
+      name: 'Export report',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      version: '1.0.0',
+    },
+    nodes: [
+      { id: 'start', type: 'start', x: 10, y: 20, params: {} },
+      {
+        id: 'goal', type: 'agent_goal', x: 10, y: 120,
+        label: 'Find report',
+        params: {
+          goal: 'Open the report', success_criteria: 'Report table is visible', max_steps: 20,
+          retry_max_attempts: 2, retry_delay_ms: 250,
+        },
+      },
+      {
+        id: 'batch', type: 'action_batch', x: 10, y: 220,
+        params: {
+          subgoal: 'Export', stop_on_error: true,
+          actions: [{ action: 'click_element', label: 'Export', expected_region: 'top-right' }],
+        },
+      },
+      { id: 'gate', type: 'evidence_gate', x: 10, y: 320, params: { required: ['download'] } },
+      { id: 'end', type: 'end', x: 10, y: 420, params: {} },
+    ],
+    edges: [
+      { id: 'e1', from_node: 'start', from_port: 'output', to_node: 'goal', to_port: 'input' },
+      { id: 'e2', from_node: 'goal', from_port: 'output', to_node: 'batch', to_port: 'input' },
+      { id: 'e3', from_node: 'batch', from_port: 'output', to_node: 'gate', to_port: 'input' },
+      { id: 'e4', from_node: 'gate', from_port: 'pass', to_node: 'end', to_port: 'input' },
+    ],
+    variables: { account: 'demo' },
+    settings: {
+      default_delay: 0.5,
+      error_handling: 'stop',
+      max_retries: 2,
+      retry_delay: 1,
+      log_level: 'info',
+    },
+  };
+}
+
+describe('control plane client contracts', () => {
+  it('normalizes REST and WebSocket addresses', () => {
+    expect(normalizeBaseUrl('http://127.0.0.1:8765')).toBe('http://127.0.0.1:8765/');
+    expect(websocketUrl('https://example.test/runtime/')).toBe('wss://example.test/runtime/ws/events');
+  });
+
+  it('creates a valid high-level goal graph', () => {
+    const graph = createGoalGraph('Export the current report', 24);
+    expect(graph.format).toBe('arp/1');
+    expect(graph.nodes.map((node) => node.kind)).toEqual(['start', 'agent_goal', 'end']);
+    expect(graph.nodes[1].config).toMatchObject({ goal: 'Export the current report', max_steps: 24 });
+    expect(graph.edges).toHaveLength(2);
+  });
+
+  it('reconnects the runtime event socket after a backend restart', () => {
+    vi.useFakeTimers();
+    const sockets: EventTarget[] = [];
+
+    class FakeSocket extends EventTarget {
+      close = vi.fn();
+      constructor(public readonly url: string) {
+        super();
+        sockets.push(this);
+      }
+    }
+
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const states: boolean[] = [];
+    const client = new ControlPlaneClient('http://127.0.0.1:8765');
+    const disconnect = client.connectEvents(() => undefined, (connected: boolean) => states.push(connected));
+
+    sockets[0].dispatchEvent(new Event('open'));
+    sockets[0].dispatchEvent(new Event('close'));
+    vi.advanceTimersByTime(500);
+
+    expect(sockets).toHaveLength(2);
+    expect(states).toEqual([true, false]);
+    disconnect();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});
+
+describe('flow to ARP compiler', () => {
+  it('preserves native runtime nodes, anchors, evidence, and retry policy', () => {
+    const graph = flowToArpGraph(scriptFixture());
+    const goal = graph.nodes.find((node) => node.id === 'goal')!;
+    const batch = graph.nodes.find((node) => node.id === 'batch')!;
+
+    expect(goal.kind).toBe('agent_goal');
+    expect(goal.config.goal).toContain('Completion evidence: Report table is visible');
+    expect(goal.retry).toEqual({ max_attempts: 2, delay_ms: 250, backoff: 1 });
+    expect(goal.config).not.toHaveProperty('retry_max_attempts');
+    expect(batch.config.actions).toEqual([
+      { action: 'click_element', label: 'Export', expected_region: 'top-right' },
+    ]);
+    expect(graph.variables).toEqual({ account: 'demo' });
+    expect(graph.edges.at(-1)?.branch).toBe('pass');
+  });
+
+  it('maps delays and supported variable conditions to runtime built-ins', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0,
+      { id: 'wait', type: 'wait', x: 0, y: 0, params: { wait_type: 'time', duration: 0.25 } },
+      { id: 'condition', type: 'condition', x: 0, y: 0, params: { condition_type: 'variable_equals', variable_name: 'ready', variable_value: 'yes' } },
+    );
+    const graph = flowToArpGraph(script);
+    expect(graph.nodes.find((node) => node.id === 'wait')).toMatchObject({ kind: 'delay', config: { duration_ms: 250 } });
+    expect(graph.nodes.find((node) => node.id === 'condition')).toMatchObject({ kind: 'condition', config: { source: 'variables.ready', operator: 'eq', value: 'yes' } });
+  });
+
+  it('encapsulates unsupported legacy nodes instead of silently changing semantics', () => {
+    const script = scriptFixture();
+    script.nodes.splice(1, 0, { id: 'legacy', type: 'screenshot', x: 2, y: 3, params: { save_path: 'proof.png' } });
+    const graph = flowToArpGraph(script);
+    expect(graph.nodes.find((node) => node.id === 'legacy')).toMatchObject({
+      kind: 'legacy_flow',
+      config: { node_type: 'screenshot', params: { save_path: 'proof.png' } },
+    });
+  });
+
+  it('normalizes only flow-control aliases', () => {
+    expect(edgeBranch('output')).toBe('next');
+    expect(edgeBranch('loop_body')).toBe('yes');
+    expect(edgeBranch('fail')).toBe('fail');
+  });
+});

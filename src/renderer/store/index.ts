@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { createWithEqualityFn } from 'zustand/traditional';
 import { immer } from 'zustand/middleware/immer';
 import { nanoid } from 'nanoid';
 import type {
@@ -282,9 +282,9 @@ function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
   historyIndex = history.length - 1;
 }
 
-export const useStore = create<AppStore>()(
+export const useStore = createWithEqualityFn<AppStore>()(
   immer((set, get) => ({
-    script: createTemplateScript('desktop-monitor'),
+    script: createTemplateScript('arp-quickstart'),
     scripts: {},
     activeScriptId: '',
     recentScripts: [],
@@ -318,7 +318,7 @@ export const useStore = create<AppStore>()(
     paramPromptQueue: [],
 
     newScript: () => {
-      const s = createTemplateScript('desktop-monitor');
+      const s = createTemplateScript('arp-quickstart');
       history = [];
       historyIndex = -1;
       pushHistory(s.nodes, s.edges);

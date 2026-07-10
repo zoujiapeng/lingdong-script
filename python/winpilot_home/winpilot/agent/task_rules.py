@@ -329,6 +329,31 @@ def _is_communication_task(task: str) -> bool:
     return any(hint in text for hint in _COMMUNICATION_HINTS)
 
 
+def _communication_mode(task: str) -> str:
+    """Classify external communication into a bounded execution policy.
+
+    A plain "chat" request is otherwise open ended: the model may either stop
+    after the first outbound message or wait forever for another turn.  Give it
+    a deterministic default of one round trip.  Explicit continuous wording
+    stays open until the user stops the run, while ordinary send/reply tasks
+    finish after one verified outbound message.
+    """
+    text = (task or "").casefold()
+    compact = re.sub(r"\s+", "", text)
+    continuous_markers = (
+        "持续聊天", "一直聊天", "继续聊天", "不停聊天", "保持聊天",
+        "持续聊", "一直聊", "继续聊", "continuous chat", "keep chatting",
+    )
+    if any(marker in compact for marker in continuous_markers):
+        return "continuous_chat"
+    chat_markers = (
+        "聊天", "聊聊", "聊一下", "聊一聊", "chat with", "have a chat",
+    )
+    if any(marker in compact for marker in chat_markers):
+        return "bounded_chat"
+    return "send"
+
+
 def _quoted_payloads(task: str) -> list[str]:
     matches = re.findall(r'"([^"]{1,120})"|“([^”]{1,120})”|「([^」]{1,120})」', task or "")
     payloads: list[str] = []

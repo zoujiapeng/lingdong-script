@@ -216,6 +216,7 @@ class InteractionToolMixin:
         element_id = args.get("element_id")
         button = args.get("button", "left")
         double = bool(args.get("double", False))
+        physical = bool(args.get("physical") or args.get("force_physical"))
         replay: dict[str, Any] = {
             "tool": "click", "button": button, "double": double,
             "expect": args.get("expect"),
@@ -255,7 +256,7 @@ class InteractionToolMixin:
                 return blocked
 
             def action() -> dict:
-                if button == "left" and not double and executor_mod.uia_invoke(element):
+                if button == "left" and not double and not physical and executor_mod.uia_invoke(element):
                     BUS.publish("action", action="uia_invoke", elem_id=element.elem_id,
                                 text=element.text)
                     return {"ok": True, "via": "uia_invoke"}

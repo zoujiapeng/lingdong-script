@@ -344,6 +344,7 @@
         <div class="actions">
           <button class="primary" id="applyBtn">应用输入</button>
           <button id="smallChangeBtn">只改局部状态</button>
+          <button id="pressPulseBtn">Press pulse</button>
           <button id="openModalBtn">打开弹窗</button>
           <button id="resetBtn">重置</button>
         </div>
@@ -404,6 +405,7 @@
     const input = document.getElementById('targetInput');
     const applyBtn = document.getElementById('applyBtn');
     const smallChangeBtn = document.getElementById('smallChangeBtn');
+    const pressPulseBtn = document.getElementById('pressPulseBtn');
     const openModalBtn = document.getElementById('openModalBtn');
     const resetBtn = document.getElementById('resetBtn');
     const statusCard = document.getElementById('statusCard');
@@ -425,6 +427,8 @@
 
     let applyCounter = 0;
     let localCounter = 0;
+    let pressPulseCounter = 0;
+    let pressSnapshot = null;
     let drawing = false;
     let strokePoints = 0;
 
@@ -462,6 +466,40 @@
       setStatus('warn', `LOCAL_COUNTER_${localCounter}`, '只有这个状态卡发生变化，用来测试局部 ROI。');
     });
 
+    pressPulseBtn.addEventListener('pointerdown', () => {
+      pressSnapshot = {
+        cardClass: statusCard.className,
+        state: statusCard.dataset.state,
+        badgeClass: statusBadge.className,
+        badge: statusBadge.textContent,
+        line: statusLine.textContent,
+        detail: statusDetail.textContent,
+      };
+      pressPulseCounter += 1;
+      statusCard.className = 'status-card warning';
+      statusCard.dataset.state = 'press-pulse';
+      statusBadge.className = 'badge';
+      statusBadge.textContent = 'PRESS';
+      statusLine.textContent = `PRESS_PULSE_ACTIVE_${pressPulseCounter}`;
+      statusDetail.textContent = '此状态只存在于 pointerdown 到 pointerup 之间。';
+      document.body.dataset.pressPulseCount = String(pressPulseCounter);
+    });
+
+    function releasePressPulse() {
+      if (!pressSnapshot) return;
+      statusCard.className = pressSnapshot.cardClass;
+      statusCard.dataset.state = pressSnapshot.state;
+      statusBadge.className = pressSnapshot.badgeClass;
+      statusBadge.textContent = pressSnapshot.badge;
+      statusLine.textContent = pressSnapshot.line;
+      statusDetail.textContent = pressSnapshot.detail;
+      pressSnapshot = null;
+    }
+
+    pressPulseBtn.addEventListener('pointerup', releasePressPulse);
+    pressPulseBtn.addEventListener('pointercancel', releasePressPulse);
+    window.addEventListener('pointerup', releasePressPulse);
+
     openModalBtn.addEventListener('click', () => {
       modalBackdrop.classList.add('open');
       log('MODAL_TARGET_VISIBLE');
@@ -476,6 +514,8 @@
       input.value = '';
       applyCounter = 0;
       localCounter = 0;
+      pressPulseCounter = 0;
+      document.body.dataset.pressPulseCount = '0';
       strokePoints = 0;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       canvasStatus.textContent = '画布状态：空白';

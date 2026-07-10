@@ -10,6 +10,7 @@ import { TemplateBrowser } from './TemplateBrowser';
 
 // Expose preset templates list for the dropdown
 const PRESET_LIST = [
+  { id: 'arp-quickstart', name: 'ARP 低延迟起步流程', desc: 'Agent 与控制器编排起点' },
   { id: 'desktop-monitor', name: '桌面图标监控', desc: '循环检测桌面目标图片' },
   { id: 'login-automation', name: '登录自动化', desc: '自动输入账号密码登录' },
   { id: 'form-filler', name: '表单填写器', desc: '循环填写表单数据' },

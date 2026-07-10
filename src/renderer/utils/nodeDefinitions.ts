@@ -27,6 +27,99 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
       outputs: [],
     },
   },
+  agent_goal: {
+    type: 'agent_goal',
+    label: 'Agent Goal',
+    description: 'Delegate a high-level goal to the planner and fast GUI controller.',
+    icon: 'Bot',
+    category: 'agent',
+    color: '#0f766e',
+    defaultParams: {
+      goal: '',
+      success_criteria: '',
+      max_steps: 30,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: 'Done', type: 'flow' },
+        { id: 'fail', label: 'Failed', type: 'flow' },
+      ],
+    },
+  },
+  action_batch: {
+    type: 'action_batch',
+    label: 'Action Batch',
+    description: 'Execute a short sequence inside the low-latency controller loop.',
+    icon: 'ListChecks',
+    category: 'agent',
+    color: '#0369a1',
+    defaultParams: {
+      subgoal: '',
+      actions: [],
+      stop_on_error: true,
+      sync: true,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: 'Done', type: 'flow' },
+        { id: 'fail', label: 'Failed', type: 'flow' },
+      ],
+    },
+  },
+  skill_replay: {
+    type: 'skill_replay',
+    label: 'Skill Replay',
+    description: 'Replay a proven skill without another planning round trip.',
+    icon: 'RefreshCw',
+    category: 'agent',
+    color: '#7c3aed',
+    defaultParams: { script: '' },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'output', label: 'Done', type: 'flow' },
+        { id: 'fail', label: 'Failed', type: 'flow' },
+      ],
+    },
+  },
+  evidence_gate: {
+    type: 'evidence_gate',
+    label: 'Evidence Gate',
+    description: 'Require visible evidence before the workflow can continue.',
+    icon: 'ShieldCheck',
+    category: 'agent',
+    color: '#15803d',
+    defaultParams: { required: [] },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'pass', label: 'Pass', type: 'flow' },
+        { id: 'fail', label: 'Missing', type: 'flow' },
+      ],
+    },
+  },
+  human_gate: {
+    type: 'human_gate',
+    label: 'Human Gate',
+    description: 'Pause the run for an explicit human approval or rejection.',
+    icon: 'UserCheck',
+    category: 'agent',
+    color: '#b45309',
+    defaultParams: {
+      message: 'Approve the next step?',
+      timeout_s: 3600,
+    },
+    ports: {
+      inputs: [{ id: 'input', type: 'flow' }],
+      outputs: [
+        { id: 'approved', label: 'Approved', type: 'flow' },
+        { id: 'rejected', label: 'Rejected', type: 'flow' },
+        { id: 'timeout', label: 'Timeout', type: 'flow' },
+      ],
+    },
+  },
   click: {
     type: 'click',
     label: '点击',
@@ -788,6 +881,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
 };
 
 export const NODE_CATEGORIES = [
+  { id: 'agent', label: 'Agent', icon: 'Bot' },
   { id: 'basic', label: '常用', icon: 'Zap' },
   { id: 'image', label: '图像', icon: 'Image' },
   { id: 'control', label: '控制', icon: 'GitBranch' },

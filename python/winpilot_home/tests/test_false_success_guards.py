@@ -708,6 +708,41 @@ def test_power_task_allows_power_labeled_click(monkeypatch):
     assert "Refused to click" not in result.text
 
 
+def test_physical_click_bypasses_uia_invoke(monkeypatch):
+    import winpilot.agent.tools as tools_mod
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    fake_executor = SimpleNamespace(
+        uia_invoke=lambda element: calls.append("uia") or True,
+        click=lambda *args, **kwargs: calls.append("mouse") or {"ok": True},
+    )
+    fake_verify = SimpleNamespace(
+        run_with_verify=lambda name, action, **kwargs: action(),
+        post_state_summary=lambda: {},
+    )
+    monkeypatch.setattr(tools_mod, "executor", fake_executor)
+    monkeypatch.setattr(tools_mod, "verify", fake_verify)
+
+    session = ToolSession(task="test the visible pressed state")
+    session.snapshot = Snapshot(
+        hwnd=1,
+        title="Target",
+        region=Region(0, 0, 500, 400),
+        elements=[UIElement(
+            elem_id=4, role="button", text="Press pulse",
+            cx=120, cy=80, left=80, top=60, width=80, height=40, source="uia",
+        )],
+    )
+
+    session._t_click({"element_id": 4, "physical": True})
+
+    assert calls == ["mouse"]
+
+
 def test_type_text_reuses_last_clicked_input(monkeypatch):
     import winpilot.agent.tools as tools_mod
     from winpilot.agent.tools import ToolSession

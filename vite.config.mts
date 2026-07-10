@@ -1,7 +1,10 @@
 /// <reference types="vitest" />
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import path from 'path';
+
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 /** Strip crossorigin from module script/link tags for Electron file:// compatibility */
 function removeCrossOrigin(): import('vite').Plugin {
@@ -15,15 +18,16 @@ function removeCrossOrigin(): import('vite').Plugin {
 
 export default defineConfig({
   root: 'src/renderer',
+  publicDir: path.resolve(projectRoot, 'assets'),
   base: './',
   plugins: [react(), removeCrossOrigin()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, 'src/renderer'),
+      '@': path.resolve(projectRoot, 'src/renderer'),
     },
   },
   build: {
-    outDir: path.resolve(__dirname, 'dist/renderer'),
+    outDir: path.resolve(projectRoot, 'dist/renderer'),
     emptyOutDir: true,
     chunkSizeWarningLimit: 800,
     rollupOptions: {
@@ -42,7 +46,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
-    setupFiles: [path.resolve(__dirname, 'src/renderer/test/setup.ts')],
+    setupFiles: [path.resolve(projectRoot, 'src/renderer/test/setup.ts')],
     include: ['test/**/*.{test,spec}.{ts,tsx}'],
     css: true,
   },

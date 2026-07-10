@@ -102,6 +102,34 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             ],
             "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
         },
+        {
+            "id": "target_transient_press",
+            "task": (
+                "Open http://127.0.0.1:8877/gui_agent_target.html?v=press-pulse. "
+                "Use a real physical mouse press on the button labeled Press pulse, then use "
+                "changed-only visual perception to confirm PRESS_PULSE_ACTIVE appeared during "
+                "the press. Do not use UIA Invoke, JavaScript, DevTools, or shell inspection."
+            ),
+            "timeout_s": 240,
+            "setup": [
+                "$port = 8877; "
+                "$ok = $false; "
+                "try { $ok = (Test-NetConnection 127.0.0.1 -Port $port -InformationLevel Quiet) } catch { $ok = $false }; "
+                "if (-not $ok) { "
+                "Start-Process -FilePath python -ArgumentList @('-m','http.server','8877','--bind','127.0.0.1') "
+                "-WorkingDirectory 'C:\\Users\\zou\\Desktop\\claude\\python\\winpilot_home\\eval_targets' "
+                "-WindowStyle Hidden; Start-Sleep -Seconds 2 }"
+            ],
+            "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
+            "trace_checks": [
+                {
+                    "name": "pressed_state_was_captured",
+                    "event_type": "screen_delta",
+                    "field": "transient_observed",
+                    "equals": True,
+                }
+            ],
+        },
     ],
     "gui-deep-10": [
         {
@@ -329,6 +357,32 @@ def _run_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return results
 
 
+def _run_trace_checks(events: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for check in checks:
+        event_type = str(check.get("event_type") or "")
+        field_path = [part for part in str(check.get("field") or "").split(".") if part]
+        expected = check.get("equals", True)
+        matches = []
+        for event in events:
+            if event_type and event.get("type") != event_type:
+                continue
+            value: Any = event
+            for part in field_path:
+                value = value.get(part) if isinstance(value, dict) else None
+            if value == expected:
+                matches.append(event)
+        results.append({
+            "name": str(check.get("name") or "trace_check"),
+            "passed": bool(matches),
+            "event_type": event_type,
+            "field": ".".join(field_path),
+            "expected": expected,
+            "match_count": len(matches),
+        })
+    return results
+
+
 def _gui_policy_applies(case: dict[str, Any]) -> bool:
     if "policy" in case:
         return bool(case["policy"])
@@ -535,9 +589,11 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                     if line.strip()
                 ]
             checks = _run_checks(list(case.get("checks", [])))
-            if checks:
-                report["ground_truth_checks"] = checks
-                report["ground_truth_passed"] = all(item["passed"] for item in checks)
+            trace_checks = _run_trace_checks(events, list(case.get("trace_checks", [])))
+            all_checks = [*checks, *trace_checks]
+            if all_checks:
+                report["ground_truth_checks"] = all_checks
+                report["ground_truth_passed"] = all(item["passed"] for item in all_checks)
             policy = _run_policy_checks(events, case)
             report["policy_checks"] = policy
             report["policy_passed"] = bool(policy.get("passed"))

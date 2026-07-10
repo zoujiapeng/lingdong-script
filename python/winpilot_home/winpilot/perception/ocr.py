@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from difflib import SequenceMatcher
 
 import numpy as np
 import onnxruntime as ort
@@ -22,6 +23,7 @@ from .model import UIElement
 
 _engine = None
 _engine_lock = threading.Lock()
+_inference_lock = threading.Lock()
 _warm_thread: threading.Thread | None = None
 _warm_thread_lock = threading.Lock()
 _active_provider = "uninitialized"
@@ -34,7 +36,26 @@ def _match_text(needle: str, text: str) -> bool:
         return True
     norm_needle = re.sub(r"[\s_\-:：]+", "", needle_lower)
     norm_text = re.sub(r"[\s_\-:：]+", "", text_lower)
-    return bool(norm_needle and norm_needle in norm_text)
+    if not norm_needle:
+        return False
+    if norm_needle in norm_text:
+        return True
+    # Correct digit/letter OCR confusion only for long machine-like identifiers.
+    # Matching inside a longer UI line is intentional; short numbers and prose
+    # remain exact to avoid false positive completion evidence.
+    if (
+        len(norm_needle) >= 8
+        and any(ch.isdigit() for ch in norm_needle)
+        and re.fullmatch(r"[a-z0-9]+", norm_needle)
+    ):
+        table = str.maketrans({"o": "0", "i": "1", "l": "1"})
+        return norm_needle.translate(table) in norm_text.translate(table)
+    # Status identifiers are especially prone to one-character OCR mistakes
+    # (1/I/T, C/G). Keep this bounded to similarly-sized, non-trivial strings
+    # so ordinary prose does not become a fuzzy match.
+    if len(norm_needle) >= 8 and 0.65 <= len(norm_text) / len(norm_needle) <= 1.45:
+        return SequenceMatcher(None, norm_needle, norm_text).ratio() >= 0.84
+    return False
 
 
 def _rebuild_with_dml(engine) -> bool:
@@ -132,7 +153,8 @@ def recognize(image: np.ndarray, origin: tuple[int, int] = (0, 0),
         min_conf = float(CONFIG.get("ocr", "min_confidence", default=0.55))
     ox, oy = origin
     try:
-        result, _elapsed = engine(image)
+        with _inference_lock:
+            result, _elapsed = engine(image)
     except Exception as exc:
         logger.warning("OCR 识别异常: %s", exc)
         return []

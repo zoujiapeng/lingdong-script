@@ -138,6 +138,15 @@ def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
                 score = max(score, 0.82)
             elif text and text in term:
                 score = max(score, 0.55)
+        # Accessibility trees can expose hidden tabs, logs, and JSON blobs.
+        # A substring inside a large body of text is not a click target.
+        longest_term = max((len(term) for term in terms), default=0)
+        if score and text not in terms and len(text) > max(96, longest_term * 6):
+            score = min(score, 0.22)
+        element_area = max(0, int(element.width)) * max(0, int(element.height))
+        window_area = max(1, int(window.width)) * max(1, int(window.height))
+        if score and element_area / window_area > 0.18:
+            score -= 0.25
     if anchor.role:
         score += _role_penalty(element, anchor)
     if anchor.expected_region and _region_match(element, window, anchor.expected_region):
@@ -308,12 +317,16 @@ def anchor_from_dict(data: dict) -> VisualAnchor:
     fallback = data.get("fallback_text") or data.get("fallback") or []
     if isinstance(fallback, str):
         fallback = [fallback]
+    visual_anchor = str(data.get("visual_anchor") or "")
+    role = str(data.get("role") or "")
+    if not role and any(token in visual_anchor.casefold() for token in ("button", "按钮", "btn")):
+        role = "button"
     return VisualAnchor(
         label=str(data.get("label") or ""),
         expected_region=str(data.get("expected_region") or ""),
-        visual_anchor=str(data.get("visual_anchor") or ""),
+        visual_anchor=visual_anchor,
         fallback_text=tuple(str(item) for item in fallback if item),
-        role=str(data.get("role") or ""),
+        role=role,
     )
 
 

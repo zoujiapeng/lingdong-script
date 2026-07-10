@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { Search, Zap, Image, GitBranch, Monitor, Database, Settings, Wrench, X, Check, Loader2, Sparkles, FileType } from 'lucide-react';
+import { Search, Zap, Image, GitBranch, Monitor, Database, Settings, Wrench, X, Check, Loader2, Sparkles, FileType, Bot } from 'lucide-react';
 import { NodeType } from '../../types';
 import { NODE_DEFINITIONS, NODE_CATEGORIES } from '../../utils/nodeDefinitions';
 import { useStore } from '../../store';
@@ -10,6 +10,7 @@ import { itemMarker } from '../../utils/itemMarker';
 import * as LucideIcons from 'lucide-react';
 
 const CategoryIcons: Record<string, React.FC<any>> = {
+  agent: Bot,
   basic: Zap,
   image: Image,
   control: GitBranch,
@@ -402,7 +403,9 @@ export const NodeLibrary = React.memo(function NodeLibrary() {
                 指令库
               </div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                {featureList.length > 0 ? `${allItems.length} 个指令可用` : '加载中...'}
+                {featureList.length > 0
+                  ? `${allItems.length} 个指令可用`
+                  : `${allItems.length} 个内置指令可用`}
               </div>
             </div>
             <div className="search-box">

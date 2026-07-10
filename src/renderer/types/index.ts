@@ -5,6 +5,11 @@
 export type NodeType =
   | 'start'
   | 'end'
+  | 'agent_goal'
+  | 'action_batch'
+  | 'skill_replay'
+  | 'evidence_gate'
+  | 'human_gate'
   | 'click'
   | 'image_click'
   | 'click_text'
@@ -426,6 +431,49 @@ export interface CameraRecordParams {
   description?: string;
 }
 
+// --- Agent Runtime Platform nodes ---
+
+export interface AgentGoalNodeParams {
+  goal: string;
+  success_criteria?: string;
+  max_steps: number;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
+export interface ActionBatchNodeParams {
+  subgoal: string;
+  actions: Array<Record<string, unknown>>;
+  stop_on_error: boolean;
+  sync?: boolean;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
+export interface SkillReplayNodeParams {
+  script: string;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
+export interface EvidenceGateNodeParams {
+  required: string[];
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
+export interface HumanGateNodeParams {
+  message: string;
+  timeout_s: number;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  description?: string;
+}
+
 /** Param prompt dialog: missing parameters that need user input before execution */
 export interface ParamPromptItem {
   nodeId: string;
@@ -439,6 +487,11 @@ export interface ParamPromptItem {
 export type NodeParams =
   | StartNodeParams
   | EndNodeParams
+  | AgentGoalNodeParams
+  | ActionBatchNodeParams
+  | SkillReplayNodeParams
+  | EvidenceGateNodeParams
+  | HumanGateNodeParams
   | ClickNodeParams
   | ImageClickNodeParams
   | ClickTextNodeParams
@@ -707,7 +760,7 @@ export interface UIState {
   grid_size: number;
   dark_mode: boolean;
   themeMode: 'light' | 'dark' | 'system';
-  viewMode: 'overview' | 'canvas' | 'pseudocode' | 'settings' | 'agent' | 'replay' | 'templates';
+  viewMode: 'overview' | 'canvas' | 'pseudocode' | 'settings' | 'agent' | 'replay' | 'templates' | 'studio' | 'runs' | 'assets' | 'system';
   panels_visible: boolean;
   show_node_library: boolean;
   show_property_panel: boolean;
@@ -738,7 +791,7 @@ export interface NodeDefinition {
   label: string;
   description: string;
   icon: string;
-  category: 'basic' | 'image' | 'control' | 'device' | 'data' | 'system' | 'tools';
+  category: 'agent' | 'basic' | 'image' | 'control' | 'device' | 'data' | 'system' | 'tools';
   color: string;
   defaultParams: NodeParams;
   ports: {

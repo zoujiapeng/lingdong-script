@@ -1,4 +1,4 @@
-"""End-to-end behavioural tests for "用QQ找我的手机持续聊天".
+"""End-to-end behavioural tests for "用QQ找我的手机聊天".
 
 These tests do NOT hit a real QQ process or LLM. They verify that:
 
@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 
-TASK = "用QQ找我的手机持续聊天"
+TASK = "用QQ找我的手机聊天"
 
 
 # ---------------------------------------------------------------------------

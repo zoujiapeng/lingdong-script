@@ -50,6 +50,7 @@ from .reflection import ReflectionMixin
 from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
 from .runtime_profile import RuntimeProfile, build_runtime_profile
 from .task_rules import (
+    _communication_mode,
     _blocks_store_search_action,
     _blocks_upload_media_analysis,
     _gui_only_forbids_shell,
@@ -250,16 +251,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Always use plain text; screenshot is injected as a separate user message via
         # _inject_observe_screenshot when image_b64 is empty (fallback path).
         content = result_text
-        if tool_name in {
-            "execute_subgoal",
-            "run_action_batch",
-            "zoom",
-            "screenshot",
-            "draw_strokes",
-            "drag",
-            "complete_subgoal",
-            "revise_plan",
-        }:
+        if tool_name and tool_name not in {"observe", "read_text"}:
             content = self._compact_tool_evidence(tool_name, result_text)
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": content})
@@ -372,6 +364,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """Run the (blocking) completion in a worker thread so a Stop can
         abandon an in-flight LLM call immediately, instead of waiting up to the
         120s request timeout. Returns the response, or None if stopped."""
+        decision_started = time.monotonic()
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
         # Escalate ONE decision to a stronger model when we just got stuck
@@ -453,6 +446,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "model": model,
                     "reason": "stop_event",
                 })
+                BUS.publish(
+                    "agent_decision",
+                    run_id=self.run_id,
+                    model=model,
+                    ok=False,
+                    canceled=True,
+                    elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+                )
                 return None  # abandon the in-flight request (it finishes unused)
             thread.join(timeout=0.2)
         if "exc" in box:
@@ -461,6 +462,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "model": model,
                 "error": str(box["exc"]),
             })
+            BUS.publish(
+                "agent_decision",
+                run_id=self.run_id,
+                model=model,
+                ok=False,
+                elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+            )
             raise box["exc"]
         if box.get("resp") is not None:
             self._trace_debug("llm_response", {
@@ -468,6 +476,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "model": model,
                 "response": box.get("resp"),
             })
+        BUS.publish(
+            "agent_decision",
+            run_id=self.run_id,
+            model=model,
+            ok=box.get("resp") is not None,
+            elapsed_ms=int((time.monotonic() - decision_started) * 1000),
+        )
         return box.get("resp")
 
     def _track_usage(self, resp) -> None:
@@ -1035,7 +1050,39 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 ),
             }
             return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
-        return (result_text or "")[:1200]
+        compact = {
+            key: data.get(key)
+            for key in (
+                "ok", "verified", "error", "blocked", "tool",
+                "wrapped_by_fast_controller", "source_action",
+                "source_action_ok", "source_action_verified",
+                "needs_observe", "last_action", "fast_path_advice", "metrics",
+            )
+            if data.get(key) is not None
+        }
+        delta = data.get("screen_delta")
+        if isinstance(delta, dict):
+            compact["screen_delta"] = {
+                key: delta.get(key)
+                for key in (
+                    "changed", "ratio", "elapsed_ms", "capture_latency_ms",
+                    "delta_source", "transient_observed",
+                    "changed_in_target_region", "foreground_matches_target",
+                )
+                if delta.get(key) is not None
+            }
+        children = data.get("results")
+        if isinstance(children, list):
+            compact["results"] = [
+                {
+                    key: item.get(key)
+                    for key in ("action", "ok", "verified", "elapsed_ms")
+                    if isinstance(item, dict) and item.get(key) is not None
+                }
+                for item in children[:8]
+                if isinstance(item, dict)
+            ]
+        return json.dumps(compact or data, ensure_ascii=False, default=str)[:1800]
 
     @staticmethod
     def _should_fast_wrap_visual_action(tool_name: str, args: dict[str, Any]) -> bool:
@@ -2160,6 +2207,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         ]
         if _is_communication_task(self.task):
             payloads = _quoted_payloads(self.task)
+            communication_mode = _communication_mode(self.task)
             wants_decor = any(k in (self.task or "").lower() for k in (
                 "表情", "emoji", "sticker", "表情包", "贴纸", "emoticon",
             ))
@@ -2170,6 +2218,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     f"先把要发送的正文 '{core}' 真正送达并重新 observe/read_text 验证。"
                     "如果界面里正文已经出现在输入框，就优先完成发送，不要为了装饰项在发送区附近反复试探模糊图标。"
                     f"{extra}"
+                )
+            elif communication_mode == "bounded_chat":
+                hint_body = (
+                    "这是普通聊天任务，按一轮往返有界执行：先打开目标聊天并发送一句自然开场，"
+                    "等待对方出现一条新的可见回复，再基于对方回复自然回复一次。"
+                    "第二条发送内容通过 read_text 出现在聊天记录后立即 done；"
+                    "不要第一条发送后就结束，也不要无限等待。"
+                )
+            elif communication_mode == "continuous_chat":
+                hint_body = (
+                    "这是明确的持续聊天任务：等待可见新回复并基于最新内容继续回复。"
+                    "每轮先用 read_text 确认新回复，再发送一条相关回复并重新验证。"
+                    "只有用户实时要求停止或任务给定的结束条件成立时才结束；不要自行调用 done。"
                 )
             else:
                 hint_body = (

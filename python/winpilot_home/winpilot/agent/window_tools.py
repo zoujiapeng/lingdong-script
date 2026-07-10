@@ -7,11 +7,55 @@ import win32con
 import win32gui
 
 from ..action import executor
-from ..perception import apps, fusion, win32
+from ..perception import apps, fusion, uia, win32
 from .tool_result import ToolResult
 
 
 class WindowToolMixin:
+    @staticmethod
+    def _activate_browser_tab(query: str, windows: list[dict]) -> tuple[int, str] | None:
+        """Activate a matching Chrome/Edge tab when it is not the window title.
+
+        Chromium exposes background tabs through UI Automation even though
+        Win32 only reports the active tab as the top-level window title.
+        """
+        folded = str(query or "").strip().casefold()
+        if not folded:
+            return None
+        for window in windows:
+            class_name = str(window.get("class_name") or "").casefold()
+            title = str(window.get("title") or "").casefold()
+            if "chrome_widgetwin" not in class_name and not any(
+                marker in title for marker in ("chrome", "edge")
+            ):
+                continue
+            hwnd = int(window.get("hwnd") or 0)
+            if not hwnd or not win32gui.IsWindow(hwnd):
+                continue
+            try:
+                tabs = [
+                    element for element in uia.collect(hwnd)
+                    if element.role == "tab" and folded in element.text.casefold()
+                ]
+            except Exception:
+                continue
+            if not tabs:
+                continue
+            tab = tabs[0]
+            try:
+                executor.focus_window(hwnd)
+                activated = executor.uia_invoke(tab)
+                if not activated:
+                    result = executor.click(tab.cx, tab.cy, hwnd=hwnd)
+                    activated = bool((result or {}).get("ok"))
+                if not activated:
+                    continue
+                time.sleep(0.12)
+                return hwnd, win32._window_text(hwnd) or str(window.get("title") or "")
+            except Exception:
+                continue
+        return None
+
     def _t_list_windows(self, _args: dict) -> ToolResult:
         windows = win32.list_windows()
         lines = [
@@ -149,9 +193,43 @@ class WindowToolMixin:
         return matches
 
     def _t_focus_window(self, args: dict) -> ToolResult:
-        hwnd = int(args["hwnd"])
+        raw_hwnd = args.get("hwnd")
+        query = str(args.get("title") or args.get("query") or args.get("name") or "").strip()
+        resolved_by = "hwnd"
+        try:
+            hwnd = int(raw_hwnd) if raw_hwnd not in (None, "") else 0
+        except (TypeError, ValueError):
+            hwnd = 0
+        if not hwnd and query:
+            windows = win32.list_windows()
+            folded = query.casefold()
+            exact = [item for item in windows if str(item.get("title") or "").casefold() == folded]
+            partial = [
+                item for item in windows
+                if folded in str(item.get("title") or "").casefold()
+                or folded in str(item.get("class_name") or "").casefold()
+            ]
+            matches = exact or partial
+            if matches:
+                hwnd = int(matches[0].get("hwnd") or 0)
+                resolved_by = "exact_title" if exact else "title_contains"
+            else:
+                browser_tab = WindowToolMixin._activate_browser_tab(query, windows)
+                if browser_tab is not None:
+                    hwnd, _activated_title = browser_tab
+                    resolved_by = "browser_tab"
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return ToolResult(self._fmt({
+                "ok": False,
+                "error": "focus_window requires a live hwnd or matching title/query/name",
+                "query": query,
+            }))
         title = win32._window_text(hwnd)
         result = executor.focus_window(hwnd)
+        result = dict(result or {})
+        result.setdefault("hwnd", hwnd)
+        result.setdefault("title", title)
+        result.setdefault("resolved_by", resolved_by)
         if result.get("ok"):
             self._remember_target(hwnd, title)
         return ToolResult(

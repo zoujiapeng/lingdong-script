@@ -15,6 +15,7 @@ from ..config import CONFIG
 from ..perception import fusion, intent, vision_cv
 from ..utils.log import BUS, logger
 from .task_rules import (
+    _communication_mode,
     _desktop_icon_target_names,
     _gui_search_payloads,
     _is_desktop_icon_drag_task,
@@ -469,6 +470,82 @@ class DoneVerifierMixin:
         logger.info("done 被快速核验拒绝(通信任务-无payload): %s", reason)
         return self._reject_done(reason, f"[完成核验未通过] {reason}。")
 
+    @staticmethod
+    def _communication_text_visible(needle: str, text: str) -> bool:
+        needle_norm = re.sub(r"\s+", "", str(needle or "").casefold())
+        text_norm = re.sub(r"\s+", "", str(text or "").casefold())
+        return bool(needle_norm and len(needle_norm) >= 2 and needle_norm in text_norm)
+
+    def _communication_outbound_payloads(self) -> list[str]:
+        """Recover text the controller really typed from structured history."""
+        values: list[str] = []
+        for name, args, _output in getattr(self, "_tool_history", []):
+            candidates: list[object] = []
+            if name == "type_text":
+                candidates.append(args.get("text"))
+            elif name == "execute_subgoal":
+                input_spec = args.get("input")
+                if isinstance(input_spec, dict):
+                    candidates.append(input_spec.get("text") or input_spec.get("value"))
+            elif name == "run_action_batch":
+                for action in args.get("actions") or []:
+                    if not isinstance(action, dict):
+                        continue
+                    if action.get("action") in {"type_text", "type_into_element"}:
+                        candidates.append(action.get("text") or action.get("value"))
+            for candidate in candidates:
+                value = str(candidate or "").strip()
+                if 2 <= len(value) <= 240 and value not in values:
+                    values.append(value)
+        return values
+
+    def _communication_readouts(self) -> list[str]:
+        return [
+            str(output or "")
+            for name, _args, output in getattr(self, "_tool_history", [])
+            if name == "read_text" and str(output or "").strip()
+        ]
+
+    def _deterministic_communication_verdict(self) -> tuple[bool, str] | None:
+        """Return a local done verdict when real send/read evidence is enough."""
+        if not _is_communication_task(self.task):
+            return None
+        mode = _communication_mode(self.task)
+        if mode == "continuous_chat":
+            return False, (
+                "这是持续聊天任务；除非用户明确停止或给出结束条件，否则不能自行 done。"
+                "继续等待可见回复并基于最新回复作答。"
+            )
+
+        readouts = self._communication_readouts()
+        if not readouts:
+            return None
+        visible_text = "\n".join(readouts[-4:])
+        declared = _quoted_payloads(self.task)
+        outbound = self._communication_outbound_payloads()
+        visible_declared = [
+            value for value in declared
+            if self._communication_text_visible(value, visible_text)
+        ]
+        visible_outbound = [
+            value for value in outbound
+            if self._communication_text_visible(value, visible_text)
+        ]
+
+        if declared and visible_declared:
+            return True, "目标会话的 read_text 已出现用户指定的发送正文。"
+        if mode == "send" and visible_outbound:
+            return True, "目标会话的 read_text 已出现控制器实际输入的发送正文。"
+        if mode == "bounded_chat":
+            if len(visible_outbound) >= 2:
+                return True, "普通聊天已完成一轮往返，且两条实际发送内容均在聊天记录中可见。"
+            if visible_outbound:
+                return False, (
+                    "普通聊天默认需要完成一轮往返：开场消息已经发送并可见，"
+                    "请等待对方的新回复，基于该回复再回复一次，read_text 确认后 done。"
+                )
+        return None
+
     def _call_done_judge(self, client, screen: str, recent: str, evidence: str) -> bool:
         cfg = _config()
         api = cfg.get("api", default={})
@@ -607,6 +684,14 @@ class DoneVerifierMixin:
         force_unverified = steps_left <= 2
 
         recent, evidence = self._done_evidence()
+        communication_verdict = self._deterministic_communication_verdict()
+        if communication_verdict is not None:
+            passed, reason = communication_verdict
+            if passed:
+                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
+                self._done_verified = True
+                return True
+            return self._reject_done(reason, f"[完成核验未通过] {reason}")
         if _is_drawing_task(self.task):
             if not self._verify_drawing_done(evidence):
                 return False

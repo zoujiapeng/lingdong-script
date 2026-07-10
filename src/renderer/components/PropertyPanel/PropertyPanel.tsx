@@ -26,6 +26,7 @@ import { WebBrowserParams } from './params/WebBrowserParams';
 import { CameraCaptureParams } from './params/CameraCaptureParams';
 import { CameraRecordParams } from './params/CameraRecordParams';
 import { CommonNodeSettings } from './params/CommonNodeSettings';
+import { ArpNodeParams } from './params/ArpNodeParams';
 
 function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
   const Icon = (LucideIcons as any)[name];
@@ -121,6 +122,12 @@ export function PropertyPanel() {
 
 function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams: (p: any) => void }) {
   switch (node.type) {
+    case 'agent_goal':
+    case 'action_batch':
+    case 'skill_replay':
+    case 'evidence_gate':
+    case 'human_gate':
+      return <ArpNodeParams type={node.type} params={node.params as any} onChange={updateParams} />;
     case 'click': return <ClickParams params={node.params as any} onChange={updateParams} />;
     case 'image_click': return <ImageClickParams params={node.params as any} onChange={updateParams} />;
     case 'click_text': return <ClickTextParams params={node.params as any} onChange={updateParams} />;

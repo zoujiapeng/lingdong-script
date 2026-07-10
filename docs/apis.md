@@ -63,6 +63,17 @@
 
 `/api/memory` 的 recipe/note 结构包含 `task`、`app`、`steps`，并可带 `conditions` 和 `evidence` 数组；`PUT /api/memory/{recipe_id}` 也允许更新这两个字段。它们用于说明该记忆何时适用、复用前后需要什么证据，不能把 replay 执行成功当成任务完成证明。
 
+## ChatGPT / Codex desktop MCP
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v2/integrations/chatgpt` | MCP readiness, local endpoint, tool catalog, and no-key mode |
+| POST | `/mcp` | Official MCP Streamable HTTP endpoint for the logged-in desktop client |
+
+The `/mcp` catalog is controller-first and intentionally excludes shell/file
+tools. ChatGPT-hosted ARP calls reject `agent_goal`; the connected desktop model
+is already the high-level planner.
+
 ## Electron IPC
 
 实现：`python/agent/__main__.py`。名称仍叫 `agent`，但当前作用是 IPC adapter：接收 Electron 启动命令后调用 `winpilot.agent.router.build_runner()`。

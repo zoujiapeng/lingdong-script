@@ -45,7 +45,7 @@ def test_comms_done_gate_no_payload_requires_read_text():
 
 def test_comms_done_gate_no_payload_passes_with_read_text():
     """Without quoted payload, done is allowed when read_text has real chat content."""
-    runner = _make_runner("打开QQ找我的手机持续聊天")
+    runner = _make_runner("打开QQ给我的手机发一条消息")
     # Simulate a real chat window read_text: long enough lines that look like
     # actual message bubbles, not a short contacts-list preview.
     runner._recent_results = [(
@@ -75,6 +75,52 @@ def test_comms_done_gate_no_payload_passes_with_read_text():
         result = runner._verify_done(client, steps_left=10)
 
     assert result is True
+
+
+def test_bounded_chat_requires_a_reply_turn_before_done():
+    runner = _make_runner("用QQ和我的手机聊天")
+    runner._tool_history = [
+        ("type_text", {"text": "你好，这是一条测试消息"}, "{\"ok\": true}"),
+        ("read_text", {}, "我的手机\n17:20\n你好，这是一条测试消息\n好的"),
+    ]
+
+    verdict = runner._deterministic_communication_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is False
+    assert "一轮往返" in verdict[1]
+
+
+def test_bounded_chat_accepts_two_visible_outbound_turns():
+    runner = _make_runner("用QQ和我的手机聊天")
+    chat = (
+        "我的手机\n17:20\n你好，这是一条测试消息\n好的\n"
+        "17:21\n收到，那我们稍后再聊"
+    )
+    runner._tool_history = [
+        ("type_text", {"text": "你好，这是一条测试消息"}, "{\"ok\": true}"),
+        ("read_text", {}, chat),
+        ("type_text", {"text": "收到，那我们稍后再聊"}, "{\"ok\": true}"),
+        ("read_text", {}, chat),
+    ]
+
+    verdict = runner._deterministic_communication_verdict()
+
+    assert verdict == (True, "普通聊天已完成一轮往返，且两条实际发送内容均在聊天记录中可见。")
+
+
+def test_continuous_chat_waits_for_user_stop():
+    runner = _make_runner("打开QQ找我的手机持续聊天")
+    runner._tool_history = [
+        ("type_text", {"text": "你好"}, "{\"ok\": true}"),
+        ("read_text", {}, "我的手机\n你好\n好的"),
+    ]
+
+    verdict = runner._deterministic_communication_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is False
+    assert "持续聊天" in verdict[1]
 
 
 # ---- done-gate: with-payload path (existing behaviour, must not regress) ---

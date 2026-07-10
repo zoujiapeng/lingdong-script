@@ -1,46 +1,52 @@
-# 当前架构
+# GUI Agent + ARP 架构
 
-项目对用户呈现为一个 WinPilot Agent。内部由一个主 runner、多种 Runtime/Capability、低延迟 GUI controller、记忆/replay 系统和 legacy 流程图体系组成。
+项目对用户呈现为一个原生 Agent Runtime Platform。主模型负责目标、异常和策略；ARP 图负责编排；Fast GUI Controller 负责动作内环；World Model、分层感知、trace 和 Run Projection 共同维护可验证状态。
 
 ## 总览
 
 ```mermaid
 flowchart LR
-  User["用户 / 前端 Agent 页面"] --> Electron["Electron 主进程"]
-  Electron --> WinPilot["WinPilot FastAPI\npython/winpilot_home/serve.py"]
-  WinPilot --> Runner["AgentRunner\nagent/loop.py"]
-  Runner --> Runtime["RuntimeProfile\nDesktop / Coding"]
-  Runner --> Tools["ToolSession.dispatch\nagent/tools.py"]
-  Tools --> GUI["GUI tools\nwindow/perception/interaction/system"]
-  Tools --> Fast["Fast GUI Controller\nfast/controller.py + fast/subgoal.py"]
-  Tools --> Coding["Coding Runtime\nagent/coding_tools.py"]
-  Tools --> Memory["Memory / Replay / Scheduler"]
-  Electron --> Flow["Flow editor / DSL\nsrc/renderer + python/engine + python/features"]
+  User["Agent Cockpit / ARP Studio"] --> Control["FastAPI Control Plane\n/api/v2 + /ws/events"]
+  Control --> ARP["ARP Runtime\narp/1 graph"]
+  Control --> Projection["Unified Run Projection\nmetrics / timeline / evidence"]
+  ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
+  ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
+  ARP --> Skills["Skill Replay\n0-token fast path"]
+  Runner --> Tools["ToolSession + World Model"]
+  Tools --> Perception["L0 delta -> L1 OCR/CV -> UIA -> VLM fallback"]
+  Controller --> Watcher["5-15 FPS watcher\nchange-triggered ROI"]
+  Watcher --> Prefetch["Predictive OCR\nparallel with decision"]
+  Tools --> Trace["Trace + exact transient evidence"]
+  Controller --> Trace
+  Skills --> Trace
+  Trace --> Projection
+  Projection --> User
 ```
 
-## 两条主线
+## 统一控制平面
 
-### WinPilot desktop agent
+前端 `src/renderer/components/platform/PlatformWorkbench.tsx` 不再嵌入旧 WebUI。Agent、ARP Studio、Runs、Skills、System 都读取同一套 `/api/v2` contract 和 WebSocket 事件。
 
-路径：`python/winpilot_home/winpilot/`
+后端核心路径：
 
-职责是真实 Windows 桌面操作。核心约束：
+- `orchestrator/contracts.py`：版本化 `arp/1` 图、节点、重试和验证契约。
+- `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试。
+- `orchestrator/adapters.py`：Agent Goal、Action Batch、Skill Replay、legacy 节点适配。
+- `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
+- `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；不支持的旧节点显式标记 `legacy_flow`，不静默改语义。
 
-- 只有一个用户可见 Agent。
-- 所有任务进入 `agent/router.py -> AgentRunner`。
-- GUI/Computer Use 是默认能力；Coding、Shell、File、Browser、Replay、Scheduler 是按任务和配置启用的 capability。
-- done 前必须经过真实证据核验，不能只信模型总结。
+### ARP 节点
 
-### 流程图 / DSL 自动化
+原生节点包括 `start`、`end`、`agent_goal`、`action_batch`、`skill_replay`、`condition`、`delay`、`set_variable`、`evidence_gate`、`human_gate`。每个节点都有 retry、timeout、disabled 和分支语义。
 
-路径：`src/renderer/`、`python/engine/`、`python/features/`
+默认新流程是合法且无副作用的 `ARP 低延迟起步流程`，可以直接 Validate/Run。真实复杂流程通常是：
 
-职责是可视化编排和 legacy 自动化。它和 WinPilot 的关系是桥接，不是共享工具池：
-
-- FlowScript 是前端画布 JSON。
-- `python/engine/` 是 legacy DSL/Flow 执行引擎。
-- `python/features/` 是 `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用。
-- WinPilot 成功 trace 可导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 保守导入 FlowScript。
+```text
+start -> agent_goal -> action_batch / skill_replay -> evidence_gate -> end
+                         | failure
+                         v
+                    agent_goal / human_gate
+```
 
 ## 进程和端口
 
@@ -48,17 +54,17 @@ flowchart LR
 | --- | --- | --- |
 | Electron HTTP API | `src/main/api.ts` | 默认 `127.0.0.1:7880`，供外部控制前端和查询状态 |
 | WinPilot FastAPI | `python/winpilot_home/serve.py` | 由 Electron 托管或手动启动；不要直接跑 uvicorn |
-| WinPilot Web UI | `python/winpilot_home/winpilot/webui/` | 前端 Agent 页面通过 iframe 使用 |
+| 原生 Runtime Platform | `src/renderer/components/platform/` | Agent Cockpit、ARP Studio、Runs、Skills、System |
 | Legacy IPC agent | `python/agent/__main__.py` | Electron stdin/stdout JSON-line 到 WinPilot BUS 的适配器 |
 | GUI eval script | `scripts/gui_eval_run.py` | 走同一个 `/api/chat` 路径，写 compact eval 报告 |
 
 `/api/status.runtime` 会返回 repo root、branch、commit、dirty、PID、port。排查多 worktree 或旧服务时先看它。
 
-## Agent 内部
+## Agent 与 Controller
 
 ```mermaid
 flowchart TD
-  Chat["/api/chat"] --> Router["agent/router.py"]
+  Chat["/api/chat 或 ARP agent_goal"] --> Router["agent/router.py"]
   Router --> Runner["AgentRunner"]
   Runner --> Profile["RuntimeProfile"]
   Runner --> Schema["tool_schemas(profile, allow flags)"]
@@ -71,6 +77,7 @@ flowchart TD
   Mixins --> Trace["BUS + trace + screenshots"]
   Fast --> Trace
   Coding --> Trace
+  Trace --> Projection["Run Projection"]
   Trace --> Done["done_verifier.py"]
 ```
 
@@ -134,31 +141,39 @@ queued
 
 当前已落地：
 
-- LLM 可下达 `execute_subgoal`，由本地 controller 完成输入/点击/等待/验证 routine。
-- `run_action_batch` 连续执行多个 GUI 动作，减少每个动作都回 LLM 的 round-trip。
-- 顶层 GUI mutation 可自动 fast-wrap 成 batch。
-- `screen_watch`、`screen_delta`、changed-only observe、ROI query fallback、perception reducer 已接入。
+- LLM 可下达 `execute_subgoal` 或 ARP `agent_goal`；本地 controller 完成输入、点击、等待和验证 routine。
+- `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
+- `screen_watch` 持续做便宜帧差；动作前后差分与 watcher 独立，changed-only observe 只理解 ROI。
+- 鼠标 down 与 up 分离，down 期间同步采样。只在 `delta.changed=true`、press 帧强于 release 后帧时标记 `transient_observed`。
+- 瞬态帧会保存为 trace ROI 图片，携带真实屏幕坐标进入 World State；不是只保留 OCR 文本。
+- 动作触发后立即异步 OCR 变化 ROI；下一次 changed-only observe 可直接消费 predictive cache。
+- `ElementCache` 使用语义、角色、相对位置和当前快照复验；长日志、隐藏标签文本、地址栏不能冒充按钮。
+- `click_element` 支持 `visual_anchor`、fallback text、expected region、物理点击和点击前局部视觉伺服修正。
+- 分层感知已覆盖 UIA、Win32、OCR、传统 CV 和强 VLM fallback；UIA 丰富时跳过昂贵维度，查询不可靠时定向 OCR。
+- Perception reducer 只给 LLM compact state，完整元素写入 trace。
 - `scope_guard` 在 GUI mutation 前检查前台/目标窗口。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - 坐标排查工具 `coordinate_diagnostics` / `coordinate_click_test` 使用物理屏幕坐标和真实鼠标点击路径。
+- `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
 - `action/desktop_queue.py` 已提供 single-writer Desktop Action Queue：同步 `run()` 已接入真实鼠标、键盘、窗口、剪贴板写入和启动动作；内部后台 `submit/wait/cancel/get_job` job worker 已可用于后续 replay/recovery/Flow real executor 接入。trace 中分别发布 `desktop_action_queue` 和 `desktop_action_queue_job` 事件。
 - `action/executor.py` 的 public `click/scroll/drag/draw_strokes/type_text/clipboard_paste` 外层仍进队列，但内部已使用 raw `move/focus/press` helper，避免一次真实动作产生多层 public queue wrapper；完整 Raw Device Executor 仍未完成。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
 
 成熟度判断：
 
-- Raw Device Executor 是“已有 raw helper + 部分内层去重”，不是完整分层。Fast controller 的某些 routine 仍通过 `ToolSession.dispatch()` 走外层工具生命周期。
-- Desktop Action Queue 是全局 single-writer 队列。它保护真实鼠标、键盘、窗口、剪贴板写入不会互相打架；`target_hwnd` 暂时不是多 hwnd 并发锁。
-- Perception daemon 目前等价于 Level 0 screen delta watcher + 按需 OCR/UIA/CV/VLM。它还没有跨任务维护语义元素缓存、登录态、页面阶段和 VLM 兜底策略。
-- 低延迟收益在计算器、记事本、网页靶场、简单绘图/拖拽上已经能看到；对 QQ/微信/Steam/抖音/网易云这类真实复杂软件还缺系统化 E2E 证据。
+- Raw Device Executor 已有 press probe、single-writer queue 和部分内层去重；部分 routine 仍通过 `ToolSession.dispatch()` 走完整工具生命周期。
+- World Model 已保存窗口、screen bulletin、元素、动作和最近变化；跨 run 的页面阶段分类仍需继续泛化。
+- 常规动作可在 Controller/Skill 内环完成，失败回到 Agent/ARP；“所有常规动作都不经 LLM”还不是对任意软件成立的承诺。
+- 网页靶场已覆盖真实物理按压的瞬态状态：DOM 收据、非零 ROI、持久化 press 帧、predictive OCR、changed-only 命中和 0 VLM 同时通过。
+- 复杂消费软件、远程桌面、游戏和高 DPI 多显示器仍需要更大的 E2E 基准矩阵。
 
 仍未完成：
 
-- 常驻轻量视觉模型/YOLO 主循环。
-- 成熟视觉伺服控制。
-- 按 target hwnd 的细粒度锁，以及 Raw Device Executor 的完整内环。
-- LLM 只处理异常、常规动作完全本地化。
-- 稳定 dashboard：p50/p95 GUI latency、LLM round trips、VLM count、skill reuse rate 等。
+- 带正式权重、可部署和可评估的常驻轻量学习型 UI detector（当前 Level 2 是 UIA + OCR + 传统 CV，不冒充 YOLO 已落地）。
+- 多显示器/缩放/动画目标下的连续视觉伺服，而不只是点击前局部迭代修正。
+- 按 target hwnd 的细粒度并发锁和完整 Raw Device Executor 内环。
+- 跨软件高成功率 skill 参数化、版本迁移和失效检测。
+- 历史分位数 dashboard（当前为每 run avg/max 和频率指标）。
 
 ## Replay / Skill
 
