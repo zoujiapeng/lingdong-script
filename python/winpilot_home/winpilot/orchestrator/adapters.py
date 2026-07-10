@@ -25,6 +25,18 @@ _REPLAY_DESKTOP_TOOLS = {
 }
 
 
+def _publish_anchor_metrics(result: dict[str, Any], context: dict[str, Any], node: ArpNode) -> None:
+    metrics = result.get("anchor_cache")
+    if not isinstance(metrics, dict) or not metrics.get("enabled"):
+        return
+    BUS.publish(
+        "replay_anchor_cache",
+        run_id=context["run_id"],
+        node_id=node.id,
+        **metrics,
+    )
+
+
 def _json_result(text: str) -> dict[str, Any]:
     try:
         value = json.loads(text or "{}")
@@ -141,6 +153,10 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
     if not isinstance(replayer, trace_mod.Replayer):
         replayer = trace_mod.Replayer(stop_event)
         sessions[session_id] = replayer
+    graph_id = str(((context.get("graph") or {}).get("id") or "graph")).strip() or "graph"
+    configure_cache = getattr(replayer, "configure_anchor_cache", None)
+    if callable(configure_cache):
+        configure_cache(f"arp:{graph_id}:{session_id}")
 
     try:
         pace_ms = max(0, int(node.config.get("pace_ms") or 0))
@@ -158,6 +174,7 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         )
     except Exception as exc:
         return NodeResult(ok=False, branch="fail", error=f"replay step failed: {exc}")
+    _publish_anchor_metrics(result, context, node)
 
     # Preserve native ARP value types unless the WPS segment actually changed
     # or introduced that variable.
@@ -251,6 +268,7 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
             except Exception:
                 pass
         return NodeResult(ok=False, branch="fail", error=f"skill replay failed: {exc}")
+    _publish_anchor_metrics(result, context, node)
     verified_steps = [step for step in (result.get("results") or []) if step.get("ok") is True]
     ok = bool(result.get("ok")) and bool(verified_steps)
     if result.get("ok") and not verified_steps:

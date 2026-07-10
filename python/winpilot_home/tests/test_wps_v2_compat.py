@@ -475,6 +475,41 @@ def test_replayer_launch_binds_verified_window_for_semantic_followup(monkeypatch
     assert replayer.hwnd == 456
 
 
+def test_url_launch_waits_for_new_browser_surface_before_followup(monkeypatch):
+    before = np.zeros((80, 120, 3), dtype=np.uint8)
+    settled = []
+    monkeypatch.setattr(
+        trace_mod.verify,
+        "run_with_verify",
+        lambda *args, **kwargs: {"ok": True, "verified": True, "post_state": {}},
+    )
+    monkeypatch.setattr(
+        trace_mod.win32,
+        "find_window",
+        lambda title: {"hwnd": 456, "title": title},
+    )
+    monkeypatch.setattr(trace_mod.executor, "focus_window", lambda _hwnd: {"ok": True})
+
+    replayer = trace_mod.Replayer()
+    replayer.hwnd = 111
+    monkeypatch.setattr(replayer, "_capture_action_surface", lambda: before)
+    monkeypatch.setattr(
+        replayer,
+        "_wait_for_url_launch_settle",
+        lambda frame: settled.append(frame) or {"observed_change": True, "waited_ms": 80},
+    )
+
+    result = replayer._run_step("1", {
+        "tool": "launch",
+        "command": "https://example.test/app",
+        "expect": {"window_title": "Example"},
+    })
+
+    assert settled == [before]
+    assert result["launch_settle"]["observed_change"] is True
+    assert replayer.hwnd == 456
+
+
 def test_replayer_launch_accepts_declared_window_when_foreground_focus_lags(monkeypatch):
     focused = []
     monkeypatch.setattr(

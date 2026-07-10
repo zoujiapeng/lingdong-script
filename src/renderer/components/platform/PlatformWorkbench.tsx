@@ -255,6 +255,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         <Metric label="Replan rate" value={`${Math.round((metrics?.replan_frequency || 0) * 100)}%`} />
         <Metric label="VLM rate" value={`${Math.round((metrics?.vlm_call_frequency || 0) * 100)}%`} />
         <Metric label="Skill reuse" value={`${Math.round((metrics?.skill_reuse_rate || 0) * 100)}%`} />
+        <Metric label="Anchor hit" value={`${Math.round((metrics?.anchor_cache_hit_rate || 0) * 100)}%`} />
       </section>
 
       <div className="arp-agent-grid">
@@ -417,6 +418,7 @@ function RunsView({ plane }: { plane: Plane }) {
                 <Metric label="Decisions" value={selected.metrics.decision_count} />
                 <Metric label="Tools" value={selected.metrics.tool_count} />
                 <Metric label="VLM" value={selected.metrics.vlm_call_count} />
+                <Metric label="Anchor hit" value={`${Math.round((selected.metrics.anchor_cache_hit_rate || 0) * 100)}%`} />
               </div>
               {selected.error && <div className="arp-inline-error"><XCircle size={14} />{selected.error}</div>}
               <div className="arp-panel-heading"><div><Activity size={15} /><strong>Timeline</strong></div><span>{selected.timeline.length} events</span></div>

@@ -21,7 +21,8 @@ import cv2
 from ..action import executor, verify
 from ..automation_ir import automation_ir_from_wps, validate_automation_ir
 from ..config import SCRIPTS_DIR, TRACES_DIR
-from ..perception import fusion, ocr, uia, win32
+from ..memory import replay_anchors
+from ..perception import fusion, ocr, uia, vision_cv, win32
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import replay_control
@@ -650,7 +651,11 @@ def _normalize_hotkeys(keys: Any) -> list[str]:
 class Replayer:
     """Offline script execution: selector-based re-location + verify."""
 
-    def __init__(self, stop_event: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        stop_event: threading.Event | None = None,
+        anchor_profile: str = "",
+    ) -> None:
         self.stop_event = stop_event or threading.Event()
         self.hwnd: int | None = None
         self._target_signature = ""
@@ -660,6 +665,288 @@ class Replayer:
         self.step_delay: float = 0.25
         self._results: list[dict[str, Any]] = []
         self._last_relocation: dict[str, Any] = {}
+        self.anchor_profile = ""
+        self._anchors: dict[str, dict[str, Any]] = {}
+        self._anchor_dirty = False
+        self._anchor_metrics: dict[str, Any] = {}
+        self._reset_anchor_metrics()
+        if anchor_profile:
+            self.configure_anchor_cache(anchor_profile)
+
+    def _reset_anchor_metrics(self) -> None:
+        self._anchor_metrics = {
+            "lookup_count": 0,
+            "hit_count": 0,
+            "miss_count": 0,
+            "fallback_count": 0,
+            "learned_count": 0,
+            "lookup_latency_ms": [],
+        }
+
+    def configure_anchor_cache(self, profile: str) -> None:
+        profile = str(profile or "").strip()
+        if profile == self.anchor_profile:
+            return
+        self._flush_anchor_cache()
+        self.anchor_profile = profile
+        self._anchors = replay_anchors.load_profile(profile) if profile else {}
+        self._anchor_dirty = False
+
+    def _flush_anchor_cache(self) -> None:
+        if not self.anchor_profile or not self._anchor_dirty:
+            return
+        replay_anchors.save_profile(self.anchor_profile, self._anchors)
+        self._anchor_dirty = False
+
+    def _anchor_summary(self) -> dict[str, Any]:
+        metrics = self._anchor_metrics
+        latencies = [int(value) for value in metrics.get("lookup_latency_ms", [])]
+        lookups = int(metrics.get("lookup_count") or 0)
+        hits = int(metrics.get("hit_count") or 0)
+        return {
+            "enabled": bool(self.anchor_profile),
+            "profile": self.anchor_profile,
+            "stored_count": len(self._anchors),
+            "lookup_count": lookups,
+            "hit_count": hits,
+            "miss_count": int(metrics.get("miss_count") or 0),
+            "fallback_count": int(metrics.get("fallback_count") or 0),
+            "learned_count": int(metrics.get("learned_count") or 0),
+            "hit_rate": round(hits / lookups, 4) if lookups else 0.0,
+            "lookup_latency_avg_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0,
+            "lookup_latency_max_ms": max(latencies) if latencies else 0,
+        }
+
+    def _focus_for_anchor_lookup(self) -> bool:
+        if not self.hwnd:
+            return False
+        try:
+            foreground = int(win32.win32gui.GetForegroundWindow())
+        except Exception:
+            foreground = 0
+        if foreground == int(self.hwnd):
+            return True
+        try:
+            result = executor.focus_window(int(self.hwnd))
+            return bool(result.get("ok", False))
+        except Exception:
+            return False
+
+    def _finish_anchor_lookup(
+        self,
+        key: str,
+        anchor: dict[str, Any],
+        started: float,
+        *,
+        hit: bool,
+        reason: str,
+        confidence: float = 0.0,
+    ) -> int:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        self._anchor_metrics["lookup_count"] += 1
+        self._anchor_metrics["lookup_latency_ms"].append(elapsed_ms)
+        now = int(time.time())
+        anchor["updated_at"] = now
+        if hit:
+            self._anchor_metrics["hit_count"] += 1
+            anchor["hits"] = int(anchor.get("hits") or 0) + 1
+            anchor["last_used_at"] = now
+            anchor["confidence"] = max(float(anchor.get("confidence") or 0.0), confidence)
+        else:
+            self._anchor_metrics["miss_count"] += 1
+            self._anchor_metrics["fallback_count"] += 1
+            anchor["misses"] = int(anchor.get("misses") or 0) + 1
+        self._anchors[key] = anchor
+        self._anchor_dirty = True
+        return elapsed_ms
+
+    def _relocate_from_anchor(
+        self,
+        step: dict[str, Any],
+        anchor_key: str,
+    ) -> tuple[tuple[int, int] | None, dict[str, Any]]:
+        key = str(anchor_key or "").strip()
+        anchor = self._anchors.get(key)
+        if not self.anchor_profile or not key or not isinstance(anchor, dict) or not self.hwnd:
+            return None, {}
+        started = time.monotonic()
+        text = str(step.get("text") or step.get("element_text") or "").strip()
+        learned_text = str(anchor.get("text") or "").strip()
+        if text and learned_text and text.casefold() != learned_text.casefold():
+            elapsed = self._finish_anchor_lookup(
+                key, anchor, started, hit=False, reason="selector_changed",
+            )
+            return None, {
+                "anchor_cache": {
+                    "key": key, "hit": False, "reason": "selector_changed",
+                    "lookup_ms": elapsed,
+                },
+            }
+        if not self._focus_for_anchor_lookup():
+            elapsed = self._finish_anchor_lookup(
+                key, anchor, started, hit=False, reason="focus_failed",
+            )
+            return None, {
+                "anchor_cache": {
+                    "key": key, "hit": False, "reason": "focus_failed",
+                    "lookup_ms": elapsed,
+                },
+            }
+        try:
+            window = window_region(int(self.hwnd))
+            rel = anchor["relative_bbox"]
+            predicted = Region(
+                window.left + int(round(float(rel[0]) * window.width)),
+                window.top + int(round(float(rel[1]) * window.height)),
+                max(8, int(round(float(rel[2]) * window.width))),
+                max(8, int(round(float(rel[3]) * window.height))),
+            )
+            pad_x = max(24, int(predicted.width * 0.75))
+            pad_y = max(20, int(predicted.height * 1.25))
+            left = max(window.left, predicted.left - pad_x)
+            top = max(window.top, predicted.top - pad_y)
+            right = min(window.right, predicted.right + pad_x)
+            bottom = min(window.bottom, predicted.bottom + pad_y)
+            search = Region(left, top, max(9, right - left), max(9, bottom - top))
+            matches = vision_cv.match_template(
+                str(anchor["template"]),
+                region=search,
+                threshold=0.83,
+                max_matches=4,
+            )
+            if matches:
+                predicted_center = predicted.center
+                hit = min(
+                    matches,
+                    key=lambda item: (
+                        (int(item.cx) - predicted_center[0]) ** 2
+                        + (int(item.cy) - predicted_center[1]) ** 2
+                    ),
+                )
+                offset = anchor["click_offset"]
+                x = int(round(int(hit.left) + float(offset[0]) * int(hit.width)))
+                y = int(round(int(hit.top) + float(offset[1]) * int(hit.height)))
+                confidence = float(getattr(hit, "confidence", 0.0) or 0.0)
+                elapsed = self._finish_anchor_lookup(
+                    key, anchor, started, hit=True, reason="template_match",
+                    confidence=confidence,
+                )
+                return (x, y), {
+                    "source": "anchor_cache",
+                    "text": text or learned_text,
+                    "point": [x, y],
+                    "bbox": [int(hit.left), int(hit.top), int(hit.width), int(hit.height)],
+                    "perception_ms": elapsed,
+                    "perception_method": "anchor-template-roi",
+                    "perception_dims": {
+                        "template": {
+                            "count": len(matches),
+                            "ms": elapsed,
+                            "roi": [search.left, search.top, search.width, search.height],
+                        },
+                    },
+                    "anchor_cache": {
+                        "key": key,
+                        "hit": True,
+                        "reason": "template_match",
+                        "confidence": round(confidence, 4),
+                        "lookup_ms": elapsed,
+                        "predicted_bbox": [
+                            predicted.left, predicted.top, predicted.width, predicted.height,
+                        ],
+                    },
+                }
+            reason = "template_not_found"
+        except Exception as exc:
+            logger.debug("replay anchor lookup failed: %s", exc)
+            reason = "lookup_error"
+        elapsed = self._finish_anchor_lookup(
+            key, anchor, started, hit=False, reason=reason,
+        )
+        return None, {
+            "anchor_cache": {
+                "key": key, "hit": False, "reason": reason, "lookup_ms": elapsed,
+            },
+        }
+
+    def _learn_anchor(
+        self,
+        anchor_key: str,
+        step: dict[str, Any],
+        before: Any,
+        surface: Region | None,
+    ) -> bool:
+        key = str(anchor_key or "").strip()
+        text = str(step.get("text") or step.get("element_text") or "").strip()
+        resolved = self._last_relocation
+        point = resolved.get("point") if isinstance(resolved, dict) else None
+        if (
+            not self.anchor_profile or not key or not text or before is None
+            or not isinstance(point, list) or len(point) != 2 or not self.hwnd
+        ):
+            return False
+        try:
+            surface = surface or window_region(int(self.hwnd))
+            raw_bbox = resolved.get("bbox")
+            if isinstance(raw_bbox, list) and len(raw_bbox) == 4:
+                left, top, width, height = (int(value) for value in raw_bbox)
+            else:
+                width, height = 120, 52
+                left = int(point[0]) - width // 2
+                top = int(point[1]) - height // 2
+            left -= 3
+            top -= 3
+            width += 6
+            height += 6
+            width = min(320, max(12, width))
+            height = min(140, max(12, height))
+            left = max(surface.left, min(left, surface.right - 12))
+            top = max(surface.top, min(top, surface.bottom - 12))
+            right = min(surface.right, left + width)
+            bottom = min(surface.bottom, top + height)
+            left = max(surface.left, right - width)
+            top = max(surface.top, bottom - height)
+            width = right - left
+            height = bottom - top
+            x1, y1 = left - surface.left, top - surface.top
+            x2, y2 = x1 + width, y1 + height
+            crop = before[y1:y2, x1:x2]
+            if crop.shape[0] < 8 or crop.shape[1] < 8:
+                return False
+            name = replay_anchors.template_name(self.anchor_profile, key)
+            path = vision_cv.save_template_image(crop, name)
+            previous = self._anchors.get(key) or {}
+            now = int(time.time())
+            source = str(resolved.get("source") or "")
+            confidence = 0.9 if source == "uia" else 0.78 if source == "ocr" else 0.7
+            self._anchors[key] = {
+                "key": key,
+                "text": text,
+                "role": str(step.get("role") or step.get("element_role") or "")[:80],
+                "template": path.name,
+                "relative_bbox": [
+                    (left - surface.left) / max(1, surface.width),
+                    (top - surface.top) / max(1, surface.height),
+                    width / max(1, surface.width),
+                    height / max(1, surface.height),
+                ],
+                "click_offset": [
+                    max(0.0, min(1.0, (int(point[0]) - left) / max(1, width))),
+                    max(0.0, min(1.0, (int(point[1]) - top) / max(1, height))),
+                ],
+                "confidence": confidence,
+                "hits": int(previous.get("hits") or 0),
+                "misses": int(previous.get("misses") or 0),
+                "learned_at": int(previous.get("learned_at") or now),
+                "updated_at": now,
+                "last_used_at": int(previous.get("last_used_at") or 0),
+            }
+            self._anchor_metrics["learned_count"] += 1
+            self._anchor_dirty = True
+            return True
+        except Exception as exc:
+            logger.debug("replay anchor learning failed: %s", exc)
+            return False
 
     @staticmethod
     def _relocation_ocr_region(elements: list[Any], fallback: Any) -> Region:
@@ -800,15 +1087,24 @@ class Replayer:
         )
         return Region(left, top, max(1, right - left), max(1, bottom - top))
 
-    def _relocate(self, step: dict) -> tuple[int, int] | None:
+    def _relocate(self, step: dict, anchor_key: str = "") -> tuple[int, int] | None:
         """Find click target on the live screen: text match → recorded coords."""
-        self._last_relocation = {}
+        cached_point, cache_meta = self._relocate_from_anchor(step, anchor_key)
+        self._last_relocation = dict(cache_meta)
+        if cached_point is not None:
+            return cached_point
         text = (step.get("text") or step.get("element_text") or "").strip()
         if text:
             hwnd = self._observe_hwnd()
             if not hwnd:
                 coords = step.get("coords")
-                return (int(coords[0]), int(coords[1])) if coords else None
+                if coords:
+                    self._last_relocation.update({
+                        "source": "recorded_coords",
+                        "point": [int(coords[0]), int(coords[1])],
+                    })
+                    return int(coords[0]), int(coords[1])
+                return None
             try:
                 observe_started = time.monotonic()
                 semantic_hits = uia.find_by_text(hwnd, text)
@@ -832,6 +1128,7 @@ class Replayer:
                     perception_ms = int((time.monotonic() - observe_started) * 1000)
                     perception_region = window_region(hwnd)
                     self._last_relocation = {
+                        **self._last_relocation,
                         "perception_ms": perception_ms,
                         "perception_method": "uia-name-query",
                         "perception_dims": {
@@ -846,6 +1143,7 @@ class Replayer:
                     snapshot = fusion.observe(hwnd, include_icons=False)
                     perception_region = snapshot.region
                     self._last_relocation = {
+                        **self._last_relocation,
                         "perception_ms": int((time.monotonic() - observe_started) * 1000),
                         "perception_method": "fusion",
                         "perception_dims": dict(getattr(snapshot, "dim_stats", {}) or {}),
@@ -908,18 +1206,29 @@ class Replayer:
                         hit = None
                     if hit is None:
                         return None
-                    self._last_relocation = {
+                    resolved = {
                         **self._last_relocation,
                         "source": getattr(hit, "source", "semantic"),
                         "text": getattr(hit, "text", text),
                         "point": [int(hit.cx), int(hit.cy)],
                     }
+                    hit_width = int(getattr(hit, "width", 0) or 0)
+                    hit_height = int(getattr(hit, "height", 0) or 0)
+                    if hit_width > 0 and hit_height > 0:
+                        resolved["bbox"] = [
+                            int(getattr(hit, "left", 0) or 0),
+                            int(getattr(hit, "top", 0) or 0),
+                            hit_width,
+                            hit_height,
+                        ]
+                    self._last_relocation = resolved
                     return hit.cx, hit.cy
             except Exception as exc:
                 logger.debug("replay 重定位失败: %s", exc)
         coords = step.get("coords")
         if coords:
             self._last_relocation = {
+                **self._last_relocation,
                 "source": "recorded_coords",
                 "point": [int(coords[0]), int(coords[1])],
             }
@@ -931,6 +1240,49 @@ class Replayer:
             return capture(window_region(self.hwnd)) if self.hwnd else capture()
         except Exception:
             return None
+
+    def _wait_for_url_launch_settle(
+        self,
+        before: Any,
+        timeout_s: float = 1.2,
+    ) -> dict[str, Any]:
+        """Wait for a newly opened browser tab to replace an existing surface."""
+        if before is None or not self.hwnd:
+            return {"observed_change": False, "waited_ms": 0}
+        started = time.monotonic()
+        deadline = started + max(0.2, timeout_s)
+        previous = before
+        observed_change = False
+        stable_samples = 0
+        peak_ratio = 0.0
+        while time.monotonic() < deadline:
+            if self.stop_event.wait(0.04):
+                break
+            current = self._capture_action_surface()
+            if current is None:
+                break
+            from_start = self._screen_change_ratio(before, current)
+            between_frames = self._screen_change_ratio(previous, current)
+            peak_ratio = max(peak_ratio, from_start)
+            if from_start >= 0.00005:
+                observed_change = True
+            if observed_change and between_frames < 0.00005:
+                stable_samples += 1
+                if stable_samples >= 2 and time.monotonic() - started >= 0.35:
+                    break
+            else:
+                stable_samples = 0
+            # If Windows reused the current tab without any visible transition,
+            # retain a short grace period but do not spend the full timeout.
+            if not observed_change and time.monotonic() - started >= 0.45:
+                break
+            previous = current
+        return {
+            "observed_change": observed_change,
+            "waited_ms": int((time.monotonic() - started) * 1000),
+            "peak_change_ratio": peak_ratio,
+            "stable_samples": stable_samples,
+        }
 
     @staticmethod
     def _screen_change_ratio(before: Any, after: Any) -> float:
@@ -1038,6 +1390,19 @@ class Replayer:
         expect = step.get("expect")
 
         if tool == "launch":
+            command = str(step.get("command") or "")
+            is_url_launch = bool(re.match(r"^https?://", command, flags=re.IGNORECASE))
+            launch_before = self._capture_action_surface() if self.hwnd and is_url_launch else None
+            if is_url_launch and launch_before is None and isinstance(expect, dict):
+                existing_title = str(
+                    expect.get("window_title") or expect.get("window_appears") or ""
+                ).strip()
+                existing = win32.find_window(existing_title) if existing_title else None
+                if existing and existing.get("hwnd"):
+                    try:
+                        launch_before = capture(window_region(int(existing["hwnd"])))
+                    except Exception:
+                        launch_before = None
             verify_expect = expect
             if isinstance(expect, dict) and expect.get("window_title"):
                 # A launch target need not win foreground focus on Windows.
@@ -1074,6 +1439,8 @@ class Replayer:
                 elif (result.get("post_state") or {}).get("foreground_hwnd"):
                     self.hwnd = int(result["post_state"]["foreground_hwnd"])
                     result["target_hwnd"] = self.hwnd
+                if launch_before is not None and self.hwnd:
+                    result["launch_settle"] = self._wait_for_url_launch_settle(launch_before)
             return result
         if tool == "focus_window":
             found = win32.find_window(step.get("title", ""))
@@ -1082,12 +1449,23 @@ class Replayer:
             self.hwnd = found["hwnd"]
             return executor.focus_window(self.hwnd)
         if tool == "click":
-            point = self._relocate(step)
+            anchor_key = str(idx)
+            point = self._relocate(step, anchor_key)
             if point is None:
                 return {"ok": False, "error": "无法定位点击目标"}
             x, y = point
             implicit_verify = not expect and not bool(step.get("allow_no_change"))
-            before = self._capture_action_surface() if implicit_verify else None
+            needs_learning = bool(
+                self.anchor_profile
+                and self._last_relocation.get("source") != "anchor_cache"
+            )
+            surface = None
+            if needs_learning and self.hwnd:
+                try:
+                    surface = window_region(int(self.hwnd))
+                except Exception:
+                    surface = None
+            before = self._capture_action_surface() if implicit_verify or needs_learning else None
             press_frames: list[Any] = []
 
             def capture_pressed_state() -> None:
@@ -1139,9 +1517,30 @@ class Replayer:
                     "press_sample_count": len(press_frames),
                     "transient_observed": bool(changed and delta_source == "press"),
                 })
+            if (
+                result.get("ok")
+                and result.get("verified", True) is not False
+                and needs_learning
+                and self._learn_anchor(anchor_key, step, before, surface)
+            ):
+                self._last_relocation["anchor_learned"] = True
+                result["resolved"] = dict(self._last_relocation)
             return result
         if tool == "type_text":
-            point = self._relocate(step)
+            anchor_key = str(idx)
+            point = self._relocate(step, anchor_key)
+            needs_learning = bool(
+                point
+                and self.anchor_profile
+                and self._last_relocation.get("source") != "anchor_cache"
+            )
+            surface = None
+            if needs_learning and self.hwnd:
+                try:
+                    surface = window_region(int(self.hwnd))
+                except Exception:
+                    surface = None
+            before = self._capture_action_surface() if needs_learning else None
 
             def action() -> dict:
                 if point:
@@ -1149,9 +1548,19 @@ class Replayer:
                     time.sleep(0.15)
                 return executor.type_text(step.get("text_input", ""))
 
-            return verify.run_with_verify(
+            result = verify.run_with_verify(
                 "type_text", action, expect=expect, hwnd=self.hwnd, retryable=False,
                 stop_event=self.stop_event)
+            result["resolved"] = dict(self._last_relocation)
+            if (
+                result.get("ok")
+                and result.get("verified", True) is not False
+                and needs_learning
+                and self._learn_anchor(anchor_key, step, before, surface)
+            ):
+                self._last_relocation["anchor_learned"] = True
+                result["resolved"] = dict(self._last_relocation)
+            return result
         if tool == "hotkey":
             return verify.run_with_verify(
                 "hotkey", lambda: executor.press_keys(_normalize_hotkeys(step.get("keys", []))),
@@ -1208,15 +1617,28 @@ class Replayer:
         self.hwnd = None
         self._target_signature = ""
         self._results = []
+        self._reset_anchor_metrics()
         total = replay_control.count_leaves(steps)
         BUS.publish("replay", state="start", script=path.name, total=total)
         preflight = self._preflight_target_window(script)
         if not preflight.get("ok", False):
             BUS.publish("replay", state="done", ok=False)
-            return {"ok": False, "results": self._results, "preflight": preflight}
+            self._flush_anchor_cache()
+            return {
+                "ok": False,
+                "results": self._results,
+                "preflight": preflight,
+                "anchor_cache": self._anchor_summary(),
+            }
         ok_all = self._exec_steps(steps)
         BUS.publish("replay", state="done", ok=ok_all)
-        return {"ok": ok_all, "results": self._results, "preflight": preflight}
+        self._flush_anchor_cache()
+        return {
+            "ok": ok_all,
+            "results": self._results,
+            "preflight": preflight,
+            "anchor_cache": self._anchor_summary(),
+        }
 
     def run_steps(
         self,
@@ -1244,6 +1666,7 @@ class Replayer:
                 "preflight": {"ok": False, "required": False, "error": error},
             }
 
+        self._reset_anchor_metrics()
         if variables:
             self.vars.update({str(key): str(value) for key, value in variables.items()})
         before = len(self._results)
@@ -1262,18 +1685,21 @@ class Replayer:
                     "error": str(preflight.get("error") or "target window preflight failed"),
                     "results": self._results[before:],
                     "preflight": preflight,
+                    "anchor_cache": self._anchor_summary(),
                 }
 
         BUS.publish("replay", state="segment_start", total=replay_control.count_leaves(steps))
         ok_all = self._exec_steps(steps, prefix=prefix)
         results = self._results[before:]
         BUS.publish("replay", state="segment_done", ok=ok_all, count=len(results))
+        self._flush_anchor_cache()
         response = {
             "ok": ok_all,
             "results": results,
             "preflight": preflight,
             "hwnd": self.hwnd,
             "variables": dict(self.vars),
+            "anchor_cache": self._anchor_summary(),
         }
         if not ok_all and results:
             failed = next((item for item in reversed(results) if not item.get("ok")), results[-1])
@@ -1335,7 +1761,7 @@ class Replayer:
             "error", "verify_detail", "verify_method", "verified", "attempts",
             "timeout", "stopped", "hint", "resolved", "screen_change_ratio",
             "post_change_ratio", "screen_delta_source", "press_sample_count",
-            "transient_observed",
+            "transient_observed", "launch_settle",
         )
         BUS.publish("replay", state="step", index=idx, tool=tool, ok=ok,
                     detail={k: v for k, v in result.items()
@@ -1416,8 +1842,16 @@ class Replayer:
             return {"ok": False, "error": str(exc)}
 
 
-def replay(script_path: str | Path, stop_event: threading.Event | None = None) -> dict:
-    return Replayer(stop_event).run(script_path)
+def replay(
+    script_path: str | Path,
+    stop_event: threading.Event | None = None,
+    anchor_profile: str = "",
+) -> dict:
+    path = Path(script_path)
+    if not path.is_absolute():
+        path = SCRIPTS_DIR / path
+    profile = anchor_profile or replay_anchors.script_profile(path)
+    return Replayer(stop_event, anchor_profile=profile).run(path)
 
 
 # ------------------------------------------------------------- clipboard
