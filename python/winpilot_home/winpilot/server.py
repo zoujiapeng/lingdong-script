@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,9 +41,26 @@ from .recorder import human as human_mod
 from .recorder import trace as trace_mod
 from .runtime_info import runtime_fingerprint
 from .utils.log import BUS, logger
+from .orchestrator.adapters import default_handlers
+from .orchestrator.catalog import capability_catalog
+from .orchestrator.contracts import ArpGraph, ArpRunRequest, validate_graph
+from .orchestrator.projection import RUN_PROJECTIONS
+from .orchestrator.runtime import ARP_RUNS, ArpExecution
 
 WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
+CHATGPT_MCP = None
+CHATGPT_MCP_APP = None
+CHATGPT_MCP_BRIDGE = None
+CHATGPT_MCP_ERROR = ""
+CHATGPT_MCP_LIFESPAN_USED = False
+CHATGPT_MCP_ACTIVITY = {
+    "request_count": 0,
+    "last_request_at": 0.0,
+    "last_user_agent": "",
+}
+CHATGPT_MCP_ACTIVITY_LOCK = threading.Lock()
+_CHATGPT_MCP_ACTIVE_TTL_S = 45.0
 
 
 def _started_by_direct_uvicorn() -> bool:
@@ -72,10 +89,20 @@ def _warm_perception_dimensions() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global CHATGPT_MCP_LIFESPAN_USED
+    RUN_PROJECTIONS.hydrate_directory(TRACES_DIR)
     _warm_perception_dimensions()
     _start_scheduler_thread()
     try:
-        yield
+        if CHATGPT_MCP_LIFESPAN_USED:
+            _install_chatgpt_mcp()
+        mcp_app = CHATGPT_MCP_APP
+        CHATGPT_MCP_LIFESPAN_USED = True
+        if mcp_app is None:
+            yield
+        else:
+            async with mcp_app.router.lifespan_context(mcp_app):
+                yield
     finally:
         _stop_scheduler_thread()
 
@@ -141,7 +168,7 @@ class _RunState:
         }
 
     def busy(self) -> bool:
-        return any(self.busy_breakdown().values())
+        return any(self.busy_breakdown().values()) or ARP_RUNS.busy()
 
 
 STATE = _RunState()
@@ -321,6 +348,12 @@ class HumanStartRequest(BaseModel):
     name: str | None = None
 
 
+class ArpGateDecisionRequest(BaseModel):
+    node_id: str
+    approved: bool
+    comment: str = ""
+
+
 # ----------------------------------------------------------------- endpoints
 @app.post("/api/chat")
 def start_chat(req: ChatRequest) -> dict[str, Any]:
@@ -363,6 +396,9 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
 @app.post("/api/stop")
 def stop_run() -> dict[str, Any]:
     STATE.stop_event.set()
+    current_arp = ARP_RUNS.current()
+    if current_arp and current_arp.status.value in {"queued", "running", "paused"}:
+        current_arp.cancel()
     return {"ok": True}
 
 
@@ -384,11 +420,13 @@ def interject(req: ChatRequest) -> dict[str, Any]:
 def status() -> dict[str, Any]:
     runner = STATE.runner
     busy = STATE.busy_breakdown()
+    arp_running = ARP_RUNS.busy()
     return {
-        "running": any(busy.values()),
+        "running": any(busy.values()) or arp_running,
         "busy": busy,
         "agent_running": busy["agent"],
         "replay_running": busy["replay"],
+        "arp_running": arp_running,
         "human_recording": busy["human_recording"],
         "run_id": runner.run_id if runner else None,
         "run_status": runner.status if runner else None,
@@ -401,6 +439,242 @@ def status() -> dict[str, Any]:
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
         "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
+        "current_run": RUN_PROJECTIONS.current(),
+    }
+
+
+# ------------------------------------------------------- unified control plane
+@app.get("/api/v2/platform")
+def platform_overview() -> dict[str, Any]:
+    return {
+        "api_version": "2",
+        "product": "WinPilot ARP",
+        "status": status(),
+        "current_run": RUN_PROJECTIONS.current(),
+        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
+        "contracts": {
+            "arp": "arp/1",
+            "automation_ir": "automation-ir/1",
+            "event_stream": "/ws/events",
+            "mcp": "/mcp",
+        },
+    }
+
+
+@app.get("/api/v2/capabilities")
+def platform_capabilities() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
+    }
+
+
+@app.get("/api/v2/runs")
+def platform_runs(limit: int = 50) -> dict[str, Any]:
+    return {"ok": True, "runs": RUN_PROJECTIONS.list(max(1, min(limit, 200)))}
+
+
+@app.get("/api/v2/runs/current")
+def platform_current_run() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "run": RUN_PROJECTIONS.current(),
+        "arp": ARP_RUNS.current().to_dict() if ARP_RUNS.current() else None,
+    }
+
+
+@app.get("/api/v2/runs/{run_id}")
+def platform_run(run_id: str) -> dict[str, Any]:
+    projection = RUN_PROJECTIONS.get(run_id)
+    arp = ARP_RUNS.get(run_id)
+    if not projection and not arp:
+        raise HTTPException(404, "run not found")
+    return {
+        "ok": True,
+        "run": projection,
+        "arp": arp.to_dict() if arp else None,
+    }
+
+
+@app.post("/api/v2/arp/validate")
+def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
+    return validate_graph(graph).model_dump(mode="json")
+
+
+def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
+    validation = validate_graph(graph)
+    if not validation.valid:
+        raise ValueError("; ".join(validation.errors))
+    with STATE.lock:
+        if STATE.busy():
+            raise RuntimeError("another agent, replay, recording, or ARP run is active")
+
+        def on_runner(runner: AgentRunner) -> None:
+            STATE.runner = runner
+
+        def on_start(execution: ArpExecution) -> None:
+            STATE.stop_event = execution.stop_event
+            trace_mod.RECORDER.start(execution.run_id)
+
+        def on_finish(_execution: ArpExecution) -> None:
+            trace_mod.RECORDER.stop()
+
+        execution = ARP_RUNS.start(
+            graph,
+            default_handlers(on_runner),
+            inputs=inputs,
+            on_start=on_start,
+            on_finish=on_finish,
+        )
+    return execution
+
+
+@app.post("/api/v2/arp/runs")
+def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
+    try:
+        execution = _start_arp_execution(req.graph, req.inputs)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
+
+
+@app.post("/api/v2/arp/runs/{run_id}/cancel")
+def cancel_arp_run(run_id: str) -> dict[str, Any]:
+    if not ARP_RUNS.cancel(run_id):
+        raise HTTPException(404, "ARP run not found")
+    return {"ok": True, "run": ARP_RUNS.get(run_id).to_dict()}
+
+
+@app.post("/api/v2/arp/runs/{run_id}/gate")
+def decide_arp_gate(run_id: str, req: ArpGateDecisionRequest) -> dict[str, Any]:
+    if not ARP_RUNS.decide_gate(run_id, req.node_id, req.approved, req.comment):
+        raise HTTPException(409, "run is not waiting at this human gate")
+    return {"ok": True}
+
+
+def _chatgpt_bridge_status() -> dict[str, Any]:
+    runtime_status = status()
+    enabled = bool(CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True))
+    server_ready = CHATGPT_MCP_APP is not None
+    with CHATGPT_MCP_ACTIVITY_LOCK:
+        activity = dict(CHATGPT_MCP_ACTIVITY)
+    last_request_at = float(activity.get("last_request_at") or 0.0)
+    client_active = bool(
+        enabled
+        and server_ready
+        and last_request_at
+        and time.time() - last_request_at <= _CHATGPT_MCP_ACTIVE_TTL_S
+    )
+    current = RUN_PROJECTIONS.current()
+    current_summary = None
+    if current:
+        current_summary = {
+            key: current.get(key)
+            for key in (
+                "run_id", "kind", "status", "phase", "goal", "graph_id",
+                "current_node_id", "current_tool", "error", "metrics",
+            )
+        }
+        current_summary["evidence_count"] = len(current.get("evidence") or [])
+    return {
+        "ok": server_ready,
+        "integration": "chatgpt_desktop",
+        "transport": "mcp_streamable_http",
+        "planner": (
+            "connected ChatGPT/Codex desktop MCP client"
+            if client_active
+            else "ChatGPT/Codex desktop via MCP when connected"
+        ),
+        "requires_openai_api_key": False,
+        "enabled": enabled,
+        "server_ready": server_ready,
+        "client_active": client_active,
+        "connection_status": (
+            "disabled" if not enabled
+            else "active" if client_active
+            else "ready" if server_ready
+            else "error"
+        ),
+        "last_client_seen_at": last_request_at or None,
+        "request_count": int(activity.get("request_count") or 0),
+        "last_client": str(activity.get("last_user_agent") or ""),
+        "security_mode": "loopback_only",
+        "proxy_bypass": "NO_PROXY=127.0.0.1,localhost",
+        "allow_desktop_mutation": bool(
+            CONFIG.get("integrations", "chatgpt_desktop", "allow_desktop_mutation", default=True)
+        ),
+        "runtime": {
+            key: runtime_status.get(key)
+            for key in (
+                "running", "busy", "agent_running", "replay_running", "arp_running",
+                "human_recording", "run_id", "run_status", "ocr_provider",
+                "vlm_configured", "vlm_reason", "enabled_dimensions", "is_admin",
+                "shell_enabled", "desktop_action_queue",
+            )
+        },
+        "world_model_enabled": bool(CONFIG.get("agent", "world_model", default=True)),
+        "current_run": current_summary,
+        "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
+        **({"error": CHATGPT_MCP_ERROR} if CHATGPT_MCP_ERROR else {}),
+    }
+
+
+def _chatgpt_bridge_start_graph(graph: ArpGraph, inputs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        execution = _start_arp_execution(graph, inputs)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
+
+
+def _chatgpt_bridge_get_run(run_id: str) -> dict[str, Any]:
+    projection = RUN_PROJECTIONS.get(run_id)
+    execution = ARP_RUNS.get(run_id)
+    if not projection and not execution:
+        return {"ok": False, "error": "run not found", "run_id": run_id}
+    return {
+        "ok": True,
+        "run": projection,
+        "arp": execution.to_dict() if execution else None,
+    }
+
+
+def _chatgpt_bridge_cancel_run(run_id: str) -> dict[str, Any]:
+    if not ARP_RUNS.cancel(run_id):
+        return {"ok": False, "error": "active ARP run not found", "run_id": run_id}
+    execution = ARP_RUNS.get(run_id)
+    return {"ok": True, "run": execution.to_dict() if execution else None}
+
+
+def _chatgpt_bridge_decide_gate(
+    run_id: str,
+    node_id: str,
+    approved: bool,
+    comment: str,
+) -> dict[str, Any]:
+    if not ARP_RUNS.decide_gate(run_id, node_id, approved, comment):
+        return {"ok": False, "error": "run is not waiting at this human gate"}
+    return {"ok": True}
+
+
+@app.get("/api/v2/integrations/chatgpt")
+async def chatgpt_integration(request: Request) -> dict[str, Any]:
+    endpoint = str(request.base_url).rstrip("/") + "/mcp"
+    tool_names = []
+    if CHATGPT_MCP is not None:
+        tool_names = [tool.name for tool in await CHATGPT_MCP.list_tools()]
+    return {
+        **_chatgpt_bridge_status(),
+        "endpoint": endpoint,
+        "tool_count": len(tool_names),
+        "tools": tool_names,
+        "registration": {
+            "client": "Codex desktop",
+            "command": f"codex mcp add winpilot --url {endpoint}",
+            "environment": "NO_PROXY=127.0.0.1,localhost",
+        },
     }
 
 
@@ -889,3 +1163,64 @@ def index() -> FileResponse:
 
 
 app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
+
+
+def _install_chatgpt_mcp() -> None:
+    global CHATGPT_MCP, CHATGPT_MCP_APP, CHATGPT_MCP_BRIDGE, CHATGPT_MCP_ERROR
+    CHATGPT_MCP = None
+    CHATGPT_MCP_APP = None
+    CHATGPT_MCP_BRIDGE = None
+    CHATGPT_MCP_ERROR = ""
+    try:
+        from .integrations.chatgpt_mcp import ChatGPTBridgeHooks, build_chatgpt_mcp
+
+        hooks = ChatGPTBridgeHooks(
+            status=_chatgpt_bridge_status,
+            start_graph=_chatgpt_bridge_start_graph,
+            get_run=_chatgpt_bridge_get_run,
+            cancel_run=_chatgpt_bridge_cancel_run,
+            decide_gate=_chatgpt_bridge_decide_gate,
+            busy=STATE.busy,
+            enabled=lambda: bool(
+                CONFIG.get("integrations", "chatgpt_desktop", "enabled", default=True)
+            ),
+            mutation_allowed=lambda: bool(
+                CONFIG.get(
+                    "integrations",
+                    "chatgpt_desktop",
+                    "allow_desktop_mutation",
+                    default=True,
+                )
+            ),
+        )
+        CHATGPT_MCP, CHATGPT_MCP_APP, CHATGPT_MCP_BRIDGE = build_chatgpt_mcp(hooks)
+    except Exception as exc:
+        CHATGPT_MCP_ERROR = str(exc)
+        logger.exception("ChatGPT desktop MCP bridge failed to initialize")
+
+
+_install_chatgpt_mcp()
+if CHATGPT_MCP_APP is not None:
+    # Existing API/static routes are registered first; this root mount only
+    # receives the MCP protocol path and keeps the canonical URL at /mcp.
+    class _ChatGPTMcpDelegate:
+        async def __call__(self, scope, receive, send) -> None:
+            current = CHATGPT_MCP_APP
+            if current is None:
+                await JSONResponse(
+                    {"error": CHATGPT_MCP_ERROR or "ChatGPT MCP bridge unavailable"},
+                    status_code=503,
+                )(scope, receive, send)
+                return
+            if scope.get("type") == "http" and str(scope.get("path") or "").startswith("/mcp"):
+                headers = {
+                    bytes(key).decode("latin-1").casefold(): bytes(value).decode("latin-1")
+                    for key, value in scope.get("headers") or []
+                }
+                with CHATGPT_MCP_ACTIVITY_LOCK:
+                    CHATGPT_MCP_ACTIVITY["request_count"] += 1
+                    CHATGPT_MCP_ACTIVITY["last_request_at"] = time.time()
+                    CHATGPT_MCP_ACTIVITY["last_user_agent"] = headers.get("user-agent", "unknown MCP client")[:240]
+            await current(scope, receive, send)
+
+    app.mount("/", _ChatGPTMcpDelegate(), name="chatgpt-desktop-mcp")

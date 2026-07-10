@@ -1,21 +1,24 @@
 # 灵动脚本 / Lingdong Script
 
-Windows 桌面自动化项目。当前代码由两条主线组成：
+Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由一个统一控制平面组成：
 
-- **WinPilot desktop agent**：`python/winpilot_home/winpilot/`，负责用 LLM 操控真实 Windows 桌面。
-- **流程图 / DSL 自动化系统**：`src/renderer/`、`python/engine/`、`python/features/`，负责可视化编排、传统自动化执行和外部集成。
+- **Main LLM Agent**：理解目标、下达子目标、处理异常和调整策略。
+- **Fast GUI Controller**：变化触发感知、视觉锚点、批量动作、视觉伺服和动作后验证。
+- **ARP Runtime + Studio**：用版本化 `arp/1` 图编排 Agent、Controller、Skill、证据门和人工门。
+- **World Model + Run Projection**：统一屏幕状态、元素、页面阶段、timeline、evidence 和延迟指标。
 
-两条主线刻意解耦。WinPilot 不直接使用 `python/features/` 的 `@feature` 注册表，也不直接理解流程图节点；成功的 agent trace 可以导出 `.wps.json` 或 `automation-ir/1`，再由 `src/renderer/utils/wpsToFlowScript.ts` / `src/renderer/utils/automationIR.ts` 桥接到 FlowScript。
+Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。前端 FlowScript 通过 `flowToArpGraph.ts` 保守编译；不支持的旧节点显式进入 `legacy_flow` 适配，不会伪装成已等价迁移。
 
 ## 当前事实
 
 - 主线分支是 `master`。大改造先在 `codex/*` 分支验证，再合并回 `master`。
-- 用户始终面对一个 WinPilot Agent。`agent/router.py` 只构建 `AgentRunner`；Coding、Computer Use、Terminal、Browser 等是同一 runner 下按任务启用的 Runtime/Capability。
+- 用户始终面对一个 WinPilot Agent；Agent、ARP 图和 Controller 的事件统一投影成同一种 Run。
 - 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
 - 感知默认组合 UIA、Win32、OCR、CV；VLM 默认关闭，只有在 `vlm` 配置有效时才作为辅助感知。
-- 低延迟 GUI 目前已落地 controller-first routine、批量动作、变化区域观察、perception reducer、scope guard、UIA-off input locator、绘图 `draw/draws`、视觉颜色证据、工具 schema profile 和 trace 指标。它仍不是完整视觉伺服，也不是“LLM 只处理异常”的最终形态。
+- 低延迟 GUI 已落地 batch/subgoal、5-15 FPS watcher、ROI observe、predictive OCR、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
+- 强 VLM 是未知界面/失败恢复 fallback，不在常规感知循环；当前尚未内置带正式权重的常驻学习型 UI detector。
 - `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 成熟度快照
@@ -26,9 +29,9 @@ Windows 桌面自动化项目。当前代码由两条主线组成：
 | --- | --- |
 | Raw Device Executor | `action/executor.py` 已有 raw mouse/key/focus helper，public action 进 `DesktopActionQueue`；但 Fast GUI controller 内层仍有路径回到 `ToolSession.dispatch()`，完整独立 raw executor 尚未完成。 |
 | Action Queue | `action/desktop_queue.py` 是全局 single-writer 队列，支持同步 `run()` 和后台 job；`target_hwnd` 目前是元数据，不是按 hwnd 并发锁。全局串行更安全，但还不是细粒度 runtime。 |
-| Perception daemon | `fast/watcher.py` 提供低成本 screen delta watcher 和 bulletin board；OCR/UIA/CV/VLM 语义理解仍按 observe/controller 触发，不是跨任务常驻语义感知 daemon。 |
-| Automation IR | `automation-ir/1` 是 WPS/Flow/skill 的最小共享 envelope；`.wps.json`、FlowScript、legacy DSL 仍并存，IR 还不是唯一中间层。 |
-| 前端 | Electron/React 已采用统一工作台外壳，Agent cockpit 是第一屏，FlowCanvas/Replay/设置作为真实组件展开；但整体仍偏开发者工作台，概念密度高，不是消费级“一句话 Agent”界面。 |
+| Perception daemon | Level 0 watcher 常驻；变化触发 predictive OCR，UIA/Win32/OCR/CV 按成本融合，VLM 兜底。跨 run 语义页面分类仍在扩展。 |
+| ARP / Automation IR | `arp/1` 是 Agent/Controller/Skill 的可执行图契约；`automation-ir/1` 是 WPS/Flow/skill envelope；legacy DSL 仍兼容存在。 |
+| 前端 | 原生 Cockpit、ARP Studio、Runs、Skills、System 共用 `/api/v2` 和 WebSocket，不再依赖 iframe Agent 页面。 |
 | 真实能力 | 计算器、记事本、网页靶场、简单绘图/拖拽已有回归；QQ/微信/Steam/抖音/网易云等真实复杂软件还缺系统化非破坏性 E2E，不能用靶场成绩替代。 |
 
 ## 快速启动
@@ -38,7 +41,9 @@ npm install
 npm run dev
 ```
 
-前端 Agent 页面会嵌入 WinPilot 原生 Web UI。API key 可在前端设置页或 `python/winpilot_home/config.json` 中配置。
+启动后第一屏就是原生 Agent Cockpit；ARP Studio 可直接 Validate/Run 默认安全图。API key 可在 System 页面或 `python/winpilot_home/config.json` 中配置。
+
+当前已登录的 ChatGPT/Codex 桌面客户端也可直接作为高层规划器，不需要另配 API key：WinPilot 在 `/mcp` 暴露观察、controller 子目标、批量动作、Skill 与 ARP 工具。连接方式和安全边界见 [docs/chatgpt-desktop.md](docs/chatgpt-desktop.md)。
 
 ## 常用验证
 
@@ -78,8 +83,9 @@ python -m http.server 8877 --bind 127.0.0.1
 | 路径 | 职责 |
 | --- | --- |
 | `src/main/` | Electron 主进程、HTTP API、Python 子进程、WinPilot 服务生命周期 |
-| `src/renderer/` | React 流程图编辑器、Agent iframe、录制导入 UI |
+| `src/renderer/` | 原生 Agent Cockpit、ARP Studio、Runs、Skills、System、FlowCanvas |
 | `python/winpilot_home/winpilot/` | 当前 WinPilot agent、感知、动作、录制、记忆、REST |
+| `python/winpilot_home/winpilot/orchestrator/` | `arp/1` contract、runtime、adapter、capability catalog、Run Projection |
 | `python/agent/__main__.py` | Electron IPC 到 WinPilot 的适配器 |
 | `python/engine/` | legacy FlowScript/DSL 执行引擎 |
 | `python/features/` | legacy `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用 |

@@ -71,6 +71,33 @@ def test_observe_includes_fast_screen_bulletin_when_available(monkeypatch):
     assert "roi=5,6,7x8" in result.text
 
 
+def test_full_observe_query_runs_targeted_ocr_when_uia_misses_content(monkeypatch):
+    from winpilot.agent import perception_tools, tools
+
+    session = ToolSession(task="click Press pulse")
+    session.run_id = "query-ocr"
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(perception_tools.CONFIG, "get", lambda section, key=None, default=None: 0.0 if key == "observe_cache_ttl_s" else default)
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.fusion, "observe", lambda *args, **kwargs: _snapshot("Browser"))
+    monkeypatch.setattr(perception_tools.ocr, "collect", lambda region: [
+        UIElement(
+            source="ocr", role="text", text="Press pulse",
+            cx=200, cy=160, left=160, top=145, width=80, height=30,
+        )
+    ])
+
+    result = session._t_observe({"query": "Press pulse", "include_icons": False})
+
+    assert "Press pulse" in result.text
+    assert "query_directed_ocr" in result.text
+    assert session.snapshot.dim_stats["ocr_query"]["count"] == 1
+
+
 def test_observe_changed_only_uses_recent_screen_delta_roi(monkeypatch):
     from types import SimpleNamespace
 
@@ -141,6 +168,90 @@ def test_observe_changed_only_uses_recent_screen_delta_roi(monkeypatch):
     assert captured_regions == [Region(85, 85, 60, 50)]
     assert session.snapshot is not None
     assert session.snapshot.region == Region(85, 85, 60, 50)
+
+
+def test_changed_only_ocr_reads_cached_transient_press_frame(monkeypatch):
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from winpilot.agent import perception_tools, tools
+
+    session = ToolSession(task="read PRESS_PULSE_ACTIVE")
+    session.run_id = "transient-observe"
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Transient Target")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [])
+    monkeypatch.setattr(perception_tools.ocr, "collect", lambda region: [
+        UIElement(source="ocr", role="text", text="IDLE", cx=region.left + 20, cy=region.top + 20, left=region.left, top=region.top + 10, width=40, height=20),
+    ])
+    monkeypatch.setattr(perception_tools.ocr, "recognize", lambda image, origin=(0, 0), min_conf=None: [
+        UIElement(source="ocr", role="text", text=text, cx=origin[0] + left + 25, cy=origin[1] + 20, left=origin[0] + left, top=origin[1] + 10, width=50, height=20)
+        for text, left in (("PRESS", 0), ("PULSE", 52), ("ACTIVE 1", 104))
+    ])
+    monkeypatch.setattr(perception_tools.vision_cv, "detect_icon_candidates", lambda region: [])
+    monkeypatch.setattr(perception_tools.CONFIG, "get", lambda section, key=None, default=None: 0.0 if key == "observe_cache_ttl_s" else default)
+
+    session._fast_gui_controller = SimpleNamespace(watcher=SimpleNamespace(
+        status=lambda: {
+            "action_changed_regions": [{"left": 100, "top": 120, "width": 120, "height": 40}],
+            "last_action_change_age_ms": 20,
+        },
+        action_evidence=lambda max_age_ms=5000: ([(np.zeros((50, 140, 3), dtype=np.uint8), Region(90, 110, 140, 50))], True),
+    ))
+
+    result = session._t_observe({"changed_only": True, "query": "PRESS_PULSE_ACTIVE", "include_icons": False})
+
+    assert "PRESS PULSE ACTIVE 1" in result.text
+    assert "transient_action_evidence" in result.text
+    assert session.snapshot.dim_stats["ocr"]["transient_evidence_count"] == 3
+
+
+def test_changed_only_observe_uses_predictive_ocr_without_second_inference(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from winpilot.agent import perception_tools, tools
+
+    session = ToolSession(task="read PRESS_PULSE_ACTIVE")
+    session.run_id = "predictive-hit"
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Transient Target")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [])
+    monkeypatch.setattr(perception_tools.ocr, "collect", lambda region: (_ for _ in ()).throw(AssertionError("predictive hit should skip current OCR")))
+    monkeypatch.setattr(perception_tools.ocr, "recognize", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("predictive hit should skip evidence OCR")))
+    monkeypatch.setattr(perception_tools.CONFIG, "get", lambda section, key=None, default=None: 0.0 if key == "observe_cache_ttl_s" else default)
+    element = UIElement(
+        source="ocr", role="text", text="PRESS PULSE ACTIVE 9",
+        cx=170, cy=140, left=100, top=130, width=140, height=20,
+        states=["predictive_ocr", "transient_action_evidence", "ocr_line_merge"],
+    )
+    session._predictive_ocr_cache = {
+        "created_ms": int(time.monotonic() * 1000),
+        "elements": [element],
+        "transient": True,
+        "elapsed_ms": 120,
+    }
+    session._fast_gui_controller = SimpleNamespace(watcher=SimpleNamespace(status=lambda: {
+        "action_changed_regions": [{"left": 90, "top": 120, "width": 170, "height": 50}],
+        "last_action_change_age_ms": 10,
+    }))
+
+    result = session._t_observe({"changed_only": True, "query": "PRESS_PULSE_ACTIVE", "include_icons": False})
+
+    assert "PRESS PULSE ACTIVE 9" in result.text
+    assert session.snapshot.dim_stats["ocr"]["predictive_cache_hit"] is True
+    assert session.snapshot.dim_stats["ocr"]["ms"] < 50
 
 
 def test_observe_changed_only_query_miss_falls_back_to_full_observe(monkeypatch):
@@ -374,3 +485,38 @@ def test_canvas_fast_observe_query_forces_full_fusion(monkeypatch):
 
     assert calls["full"] == 1
     assert "Search" in result.text
+def test_actionable_query_rejects_long_uia_log_but_accepts_ocr_label():
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.model import UIElement
+
+    long_log = UIElement(
+        source="uia",
+        role="text",
+        text="Press pulse failed in old run " + "x" * 500,
+        cx=100,
+        cy=100,
+    )
+    ocr_label = UIElement(
+        source="ocr",
+        role="text",
+        text="Press pulse",
+        cx=100,
+        cy=100,
+    )
+
+    assert ToolSession._query_element_is_grounded("Press pulse", long_log, actionable=True) is False
+    assert ToolSession._query_element_is_grounded("Press pulse", ocr_label, actionable=True) is True
+
+
+def test_ocr_identifier_match_tolerates_one_character_error():
+    from winpilot.perception.ocr import _match_text
+
+    assert _match_text("PRESS_PULSE_ACTIVE", "PRESSPULSEACTLVE1") is True
+    assert _match_text("PRESS_PULSE_ACTIVE", "unrelated historical message") is False
+
+
+def test_ocr_identifier_match_corrects_digit_letter_confusion_inside_ui_line():
+    from winpilot.perception.ocr import _match_text
+
+    assert _match_text("LOCAL_COUNTER_0", "Status: IDLE LOCAL COUNTER O") is True
+    assert _match_text("LOCAL_COUNTER_0", "LOCAL_COUNTER_20") is False

@@ -4,17 +4,19 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
 from ..utils.screenshot import Region, capture
+from ..utils.log import BUS
 from .types import ScreenDelta
 from .vision import changed_regions
 
 
 CaptureFn = Callable[[Region | None], np.ndarray]
 RegionProvider = Callable[[], Region | None]
+EventContextProvider = Callable[[], dict[str, Any]]
 
 
 @dataclass
@@ -34,6 +36,7 @@ class ScreenBulletin:
     last_sample_ms: int = 0
     last_change_ms: int = 0
     last_action_change_ms: int = 0
+    action_evidence_transient: bool = False
     last_change_ratio: float = 0.0
     samples: int = 0
 
@@ -70,6 +73,7 @@ class ScreenBulletin:
             "last_change_ms": self.last_change_ms,
             "last_change_age_ms": max(0, now - self.last_change_ms) if self.last_change_ms else 0,
             "last_action_change_ms": self.last_action_change_ms,
+            "action_evidence_transient": self.action_evidence_transient,
             "last_action_change_age_ms": (
                 max(0, now - self.last_action_change_ms)
                 if self.last_action_change_ms else 0
@@ -92,11 +96,13 @@ class ScreenWatcher:
         capture_fn: CaptureFn = capture,
         fps: float = 8.0,
         pixel_thresh: int = 12,
+        event_context_provider: EventContextProvider | None = None,
     ) -> None:
         self.region_provider = region_provider or (lambda: None)
         self.capture_fn = capture_fn
         self.fps = max(1.0, float(fps))
         self.pixel_thresh = int(pixel_thresh)
+        self.event_context_provider = event_context_provider or (lambda: {})
         self._lock = threading.Lock()
         self._sample_lock = threading.Lock()
         self._stop = threading.Event()
@@ -104,6 +110,8 @@ class ScreenWatcher:
         self._prev: np.ndarray | None = None
         self._prev_region: Region | None = None
         self._bulletin = ScreenBulletin()
+        self._last_event_ms = 0
+        self._action_evidence: list[tuple[np.ndarray, Region]] = []
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -150,6 +158,8 @@ class ScreenWatcher:
         region: Region | None,
         capture_ms: int = 0,
         diff_ms: int | None = None,
+        evidence_frame: np.ndarray | None = None,
+        transient: bool = False,
     ) -> None:
         """Publish an independently measured action delta.
 
@@ -165,6 +175,34 @@ class ScreenWatcher:
             int(delta.elapsed_ms if diff_ms is None else diff_ms),
             action_delta=True,
         )
+        if evidence_frame is not None and delta.changed:
+            root_left = region.left if region is not None else 0
+            root_top = region.top if region is not None else 0
+            frame_h, frame_w = evidence_frame.shape[:2]
+            crops: list[tuple[np.ndarray, Region]] = []
+            for changed in delta.regions[:8]:
+                pad = 24
+                left = max(root_left, changed.left - pad)
+                top = max(root_top, changed.top - pad)
+                right = min(root_left + frame_w, changed.right + pad)
+                bottom = min(root_top + frame_h, changed.bottom + pad)
+                if right <= left or bottom <= top:
+                    continue
+                crop = evidence_frame[
+                    top - root_top:bottom - root_top,
+                    left - root_left:right - root_left,
+                ].copy()
+                crops.append((crop, Region(left, top, right - left, bottom - top)))
+            with self._lock:
+                self._action_evidence = crops
+                self._bulletin.action_evidence_transient = bool(transient)
+
+    def action_evidence(self, max_age_ms: int = 5000) -> tuple[list[tuple[np.ndarray, Region]], bool]:
+        with self._lock:
+            age = _now_ms() - self._bulletin.last_action_change_ms if self._bulletin.last_action_change_ms else 10**9
+            if age > max(0, int(max_age_ms)):
+                return [], False
+            return list(self._action_evidence), bool(self._bulletin.action_evidence_transient)
 
     def wait_for_change(self, timeout_s: float = 3.0, min_ratio: float = 0.0005) -> ScreenDelta:
         deadline = time.monotonic() + float(timeout_s)
@@ -213,6 +251,8 @@ class ScreenWatcher:
         action_delta: bool = False,
     ) -> None:
         now = _now_ms()
+        publish_event = False
+        sequence = 0
         with self._lock:
             self._bulletin.sequence += 1
             self._bulletin.region = region
@@ -223,6 +263,7 @@ class ScreenWatcher:
             self._bulletin.diff_latency_ms = diff_ms
             self._bulletin.last_sample_ms = now
             self._bulletin.samples += 1
+            sequence = self._bulletin.sequence
             if delta.changed:
                 self._bulletin.last_change_ms = now
                 self._bulletin.last_change_ratio = delta.ratio
@@ -230,3 +271,24 @@ class ScreenWatcher:
                 if action_delta:
                     self._bulletin.last_action_change_ms = now
                     self._bulletin.action_changed_regions = list(delta.regions)
+                if not action_delta and now - self._last_event_ms >= 80:
+                    self._last_event_ms = now
+                    publish_event = True
+        if publish_event:
+            try:
+                context = self.event_context_provider() or {}
+            except Exception:
+                context = {}
+            BUS.publish(
+                "screen_watch",
+                **context,
+                sequence=sequence,
+                changed=True,
+                ratio=round(float(delta.ratio), 6),
+                regions=[
+                    {"left": r.left, "top": r.top, "width": r.width, "height": r.height}
+                    for r in delta.regions
+                ],
+                capture_latency_ms=int(capture_ms),
+                diff_latency_ms=int(diff_ms),
+            )

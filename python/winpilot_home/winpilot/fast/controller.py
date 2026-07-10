@@ -83,6 +83,22 @@ def _is_json_object(text: str) -> bool:
     return (text or "").lstrip().startswith("{")
 
 
+def _grounded_query_matches(snapshot: Any, query: str) -> list[Any]:
+    needle = _norm_text(query)
+    if not needle or snapshot is None:
+        return []
+    matches = []
+    for element in getattr(snapshot, "elements", []) or []:
+        text = str(getattr(element, "text", "") or "").strip()
+        compact = _norm_text(text)
+        if not compact or needle not in compact:
+            continue
+        if len(compact) > max(96, len(needle) * 6):
+            continue
+        matches.append(element)
+    return matches
+
+
 def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -385,7 +401,10 @@ class FastGuiController:
     ) -> None:
         self.session = session
         self.cache = cache or ElementCache()
-        self.watcher = watcher or ScreenWatcher(region_provider=self._target_region)
+        self.watcher = watcher or ScreenWatcher(
+            region_provider=self._target_region,
+            event_context_provider=lambda: {"run_id": getattr(self.session, "run_id", None)},
+        )
         self.capture_fn = capture_fn
         self._color_palette_button_cache: dict[tuple[int, int, int, int, int], tuple[int, int]] = {}
 
@@ -739,7 +758,11 @@ class FastGuiController:
                     max_elements = max(1, int(action.get("max_elements") or 160))
                 except (TypeError, ValueError):
                     max_elements = 160
-                observe_args = {"query": query, "max_elements": max_elements}
+                observe_args = {
+                    "query": query,
+                    "max_elements": max_elements,
+                    "actionable_query": True,
+                }
                 observe = self._dispatch("observe", observe_args)
                 auto_observe = {
                     "used": True,
@@ -777,11 +800,33 @@ class FastGuiController:
                 if auto_observe is not None:
                     payload["controller_auto_observe"] = auto_observe
                 return ToolResult(json.dumps(payload, ensure_ascii=False))
-        args = {
-            "element_id": element.elem_id,
-            "button": action.get("button", "left"),
-            "double": bool(action.get("double", False)),
-        }
+        servo_trace = None
+        if bool(action.get("visual_servo")):
+            element, servo_trace = self._visual_servo_target(element, anchor, action)
+            args = {
+                "x": element.cx,
+                "y": element.cy,
+                "button": action.get("button", "left"),
+                "double": bool(action.get("double", False)),
+                "physical": True,
+            }
+        else:
+            args = {
+                "element_id": element.elem_id,
+                "button": action.get("button", "left"),
+                "double": bool(action.get("double", False)),
+            }
+            explicit_physical = action.get("physical")
+            prefer_uia = bool(action.get("prefer_uia_invoke")) or explicit_physical is False
+            default_physical = bool(
+                getattr(self.session, "physical_anchor_clicks", False)
+            )
+            if not prefer_uia and (
+                explicit_physical is True
+                or action.get("force_physical")
+                or default_physical
+            ):
+                args["physical"] = True
         if isinstance(action.get("expect"), dict):
             args["expect"] = action["expect"]
         result = self._dispatch("click", args)
@@ -792,6 +837,8 @@ class FastGuiController:
             data["anchor"] = _anchor_payload(anchor)
             data["resolved_element"] = element.to_dict()
             data["anchor_locator"] = located.to_dict()
+            if servo_trace is not None:
+                data["visual_servo"] = servo_trace
             if auto_observe is not None:
                 auto_observe["found_after_retry"] = True
                 data["controller_auto_observe"] = auto_observe
@@ -800,6 +847,85 @@ class FastGuiController:
             result.replay.setdefault("anchor", _anchor_payload(anchor))
             result.replay.setdefault("resolved_element", element.to_dict())
         return result
+
+    def _visual_servo_target(self, element, anchor, action: dict[str, Any]):
+        """Re-estimate a moving target locally immediately before clicking."""
+        try:
+            iterations = max(1, min(3, int(action.get("servo_iterations") or 2)))
+        except (TypeError, ValueError):
+            iterations = 2
+        try:
+            tolerance_px = max(1, min(40, int(action.get("servo_tolerance_px") or 5)))
+        except (TypeError, ValueError):
+            tolerance_px = 5
+        labels = [anchor.label, *anchor.fallback_text]
+        labels = [str(label).strip() for label in labels if str(label).strip()]
+        current = element
+        trace: dict[str, Any] = {
+            "enabled": True,
+            "initial": {"x": int(element.cx), "y": int(element.cy)},
+            "iterations": [],
+        }
+        for index in range(iterations):
+            self._dispatch("move_mouse", {
+                "x": int(current.cx),
+                "y": int(current.cy),
+                "skip_screen_delta": True,
+            })
+            time.sleep(max(0.01, min(0.2, float(action.get("servo_settle_ms") or 35) / 1000.0)))
+            pad_x = max(80, int(getattr(current, "width", 0) or 0) * 2)
+            pad_y = max(45, int(getattr(current, "height", 0) or 0) * 2)
+            search_region = Region(
+                int(current.cx) - pad_x,
+                int(current.cy) - pad_y,
+                pad_x * 2,
+                pad_y * 2,
+            ).clamp_to_screen()
+            candidates = ocr.collect(search_region)
+            if labels:
+                matcher = getattr(ocr, "_match_text", None)
+                candidates = [
+                    candidate for candidate in candidates
+                    if any(
+                        bool(matcher(label, candidate.text)) if callable(matcher)
+                        else _norm_text(label) in _norm_text(candidate.text)
+                        for label in labels
+                    )
+                ]
+            if not candidates:
+                trace["iterations"].append({
+                    "index": index + 1,
+                    "found": False,
+                    "region": {
+                        "left": search_region.left,
+                        "top": search_region.top,
+                        "width": search_region.width,
+                        "height": search_region.height,
+                    },
+                })
+                break
+            candidate = min(
+                candidates,
+                key=lambda item: (item.cx - current.cx) ** 2 + (item.cy - current.cy) ** 2,
+            )
+            dx, dy = int(candidate.cx - current.cx), int(candidate.cy - current.cy)
+            trace["iterations"].append({
+                "index": index + 1,
+                "found": True,
+                "from": {"x": int(current.cx), "y": int(current.cy)},
+                "to": {"x": int(candidate.cx), "y": int(candidate.cy)},
+                "correction": {"dx": dx, "dy": dy},
+                "label": candidate.text,
+            })
+            current = candidate
+            if abs(dx) <= tolerance_px and abs(dy) <= tolerance_px:
+                break
+        trace["final"] = {"x": int(current.cx), "y": int(current.cy)}
+        trace["corrected"] = (
+            trace["final"]["x"] != trace["initial"]["x"]
+            or trace["final"]["y"] != trace["initial"]["y"]
+        )
+        return current, trace
 
     def _type_into_element(self, action: dict[str, Any]) -> ToolResult:
         text_marker = object()
@@ -1287,6 +1413,29 @@ class FastGuiController:
                 item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)
             has_expect = isinstance(normalised_args.get("expect"), dict)
+            query_required = bool(normalised_args.get("require_match"))
+            query_matches = []
+            if query_required and name in BATCH_OBSERVE_ACTIONS:
+                query = str(normalised_args.get("query") or normalised_args.get("text") or "")
+                query_matches = _grounded_query_matches(getattr(self.session, "snapshot", None), query)
+                item["query"] = query
+                item["query_match"] = bool(query_matches)
+                item["query_match_count"] = len(query_matches)
+            screen_delta = data.get("screen_delta") if isinstance(data.get("screen_delta"), dict) else {}
+            transient_required = bool(normalised_args.get("require_transient"))
+            screen_change_required = bool(normalised_args.get("require_screen_change")) or transient_required
+            evidence_requirement_failed = (
+                (query_required and not query_matches)
+                or (screen_change_required and not bool(screen_delta.get("changed")))
+                or (transient_required and not bool(screen_delta.get("transient_observed")))
+            )
+            if not evidence_requirement_failed and (
+                (query_required and query_matches)
+                or (screen_change_required and bool(screen_delta.get("changed")))
+            ):
+                current_state_verified = True
+                verified_any = True
+                item["verified"] = True
             if data.get("verified") is True:
                 verified_any = True
                 current_state_verified = True
@@ -1307,8 +1456,10 @@ class FastGuiController:
             failed = _failed(result) or plain_error or (
                 has_expect
                 and data.get("verified") is False
-            )
+            ) or evidence_requirement_failed
             item["ok"] = not failed
+            if evidence_requirement_failed:
+                item["error"] = "required controller evidence was not observed"
             if "verified" in data:
                 item["verified"] = bool(data.get("verified"))
             if data:

@@ -42,10 +42,13 @@ describe('store', () => {
     const state = useStore.getState();
 
     expect(state.script).toBeDefined();
-    // Store loads "desktop-monitor" template by default
+    // Store loads a valid, side-effect-free ARP workflow by default.
     expect(state.script.nodes.length).toBeGreaterThan(0);
     expect(state.script.edges.length).toBeGreaterThan(0);
-    expect(state.script.meta.name).toBe('桌面图标监控');
+    expect(state.script.meta.name).toBe('ARP 低延迟起步流程');
+    expect(state.script.nodes.map((node) => node.type)).toEqual([
+      'start', 'action_batch', 'evidence_gate', 'end',
+    ]);
     expect(state.ui).toBeDefined();
     expect(state.ui.dark_mode).toBe(false);
     expect(state.ui.themeMode).toBe('system');
@@ -88,8 +91,7 @@ describe('store', () => {
 
     useStore.getState().newScript();
     const state = useStore.getState();
-    // newScript loads the "desktop-monitor" template
-    expect(state.script.meta.name).toBe('桌面图标监控');
+    expect(state.script.meta.name).toBe('ARP 低延迟起步流程');
     expect(state.script.nodes.some(n => n.id === addedId)).toBe(false);
     expect(state.isDirty).toBe(false);
   });

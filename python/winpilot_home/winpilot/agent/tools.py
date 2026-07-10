@@ -9,6 +9,7 @@ condition (see action/verify.py DSL) and runs through Action→Verify→Retry.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
@@ -20,6 +21,7 @@ from ..action import executor, shell, verify
 from ..config import CONFIG
 from ..fast.vision import changed_regions
 from ..perception import apps, fusion, ocr, search, tray, vision_cv, win32, world
+from ..perception.model import UIElement
 from ..perception.app_aliases import expand as expand_app_aliases
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
@@ -107,6 +109,12 @@ class ToolSession(
         # Macro recovery: give the model one forced reconsideration before a
         # fail() actually terminates the run.
         self.replan_on_fail: bool = bool(CONFIG.get("agent", "replan_on_fail", default=True))
+        # Real mouse press/release is the default for grounded anchors so the
+        # screen-delta press probe can observe transient pointer-down states.
+        # Individual actions may opt back into UIA Invoke.
+        self.physical_anchor_clicks: bool = bool(
+            CONFIG.get("controller", "physical_anchor_clicks", default=True)
+        )
         self._fail_softened = False
         self.plan: planner.Plan | None = None
         # Lightweight undo stack: things this run created that can be rolled back.
@@ -114,6 +122,8 @@ class ToolSession(
         self._screen_epoch = 0
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
+        self._predictive_ocr_lock = threading.Lock()
+        self._predictive_ocr_cache: dict[str, Any] | None = None
         self.visible_evidence_ledger: list[dict[str, Any]] = []
         # Recipe ids whose replay was actually attempted via reuse_skill.
         # Prompt-injected hints alone must not be scored as successful reuse.
@@ -138,13 +148,25 @@ class ToolSession(
         if guard_result is not None:
             return guard_result
         screen_delta_context = None
+        press_probe_previous = None
+        press_probe_installed = False
         if self._action_screen_delta_enabled(name, args):
             screen_delta_context = self._prime_action_screen_delta()
+            callback = screen_delta_context.get("_screen_delta_press_probe")
+            install_probe = getattr(executor, "install_press_probe", None)
+            if callable(callback) and callable(install_probe):
+                press_probe_previous = install_probe(callback)
+                press_probe_installed = True
         try:
             result = handler(args)
         except Exception as exc:
             logger.exception("工具 %s 执行异常", name)
             return ToolResult(f"工具 {name} 执行异常: {exc}")
+        finally:
+            if press_probe_installed:
+                restore_probe = getattr(executor, "restore_press_probe", None)
+                if callable(restore_probe):
+                    restore_probe(press_probe_previous)
         if screen_delta_context is not None:
             result = self._attach_action_screen_delta(result, screen_delta_context)
         if self.world_enabled:
@@ -186,6 +208,18 @@ class ToolSession(
                 context["_screen_delta_before_frame"] = frame
                 context["_screen_delta_region"] = region
                 context["_screen_delta_capture_ms"] = int((time.monotonic() - started) * 1000)
+                context["_screen_delta_press_frames"] = []
+                context["_screen_delta_press_capture_ms"] = []
+
+                def capture_pressed_state() -> None:
+                    probe_started = time.monotonic()
+                    pressed_frame = capture_fn(region)
+                    context["_screen_delta_press_frames"].append(pressed_frame)
+                    context["_screen_delta_press_capture_ms"].append(
+                        int((time.monotonic() - probe_started) * 1000)
+                    )
+
+                context["_screen_delta_press_probe"] = capture_pressed_state
             else:
                 controller.watcher.sample_once()
             context["screen_delta_primed"] = True
@@ -203,27 +237,82 @@ class ToolSession(
             controller = self._fast_controller()
             watcher = controller.watcher
             before_frame = before_context.get("_screen_delta_before_frame")
+            source = "after"
+            after_delta = None
+            selected_capture_ms = 0
             if before_frame is not None and callable(getattr(controller, "capture_fn", None)):
                 region = before_context.get("_screen_delta_region")
                 capture_started = time.monotonic()
                 after_frame = controller.capture_fn(region)
                 capture_ms = int((time.monotonic() - capture_started) * 1000)
-                delta = changed_regions(
+                after_delta = changed_regions(
                     before_frame,
                     after_frame,
                     root_region=region,
                     pixel_thresh=getattr(watcher, "pixel_thresh", 12),
                 )
-                if hasattr(watcher, "record_action_delta"):
-                    watcher.record_action_delta(
-                        delta,
-                        region,
-                        capture_ms=capture_ms,
-                        diff_ms=delta.elapsed_ms,
+                candidates = [("after", after_delta, capture_ms, after_frame)]
+                press_frames = before_context.get("_screen_delta_press_frames") or []
+                press_latencies = before_context.get("_screen_delta_press_capture_ms") or []
+                for index, pressed_frame in enumerate(press_frames):
+                    pressed_delta = changed_regions(
+                        before_frame,
+                        pressed_frame,
+                        root_region=region,
+                        pixel_thresh=getattr(watcher, "pixel_thresh", 12),
                     )
+                    latency = int(press_latencies[index]) if index < len(press_latencies) else 0
+                    candidates.append(("press", pressed_delta, latency, pressed_frame))
+                source, delta, selected_capture_ms, selected_frame = max(
+                    candidates,
+                    key=lambda item: (
+                        bool(item[1].changed),
+                        float(item[1].ratio),
+                        sum(r.width * r.height for r in item[1].regions),
+                        item[0] == "press",
+                    ),
+                )
+                if hasattr(watcher, "record_action_delta"):
+                    try:
+                        watcher.record_action_delta(
+                            delta,
+                            region,
+                            capture_ms=selected_capture_ms,
+                            diff_ms=delta.elapsed_ms,
+                            evidence_frame=selected_frame,
+                            transient=source == "press",
+                        )
+                    except TypeError:
+                        watcher.record_action_delta(
+                            delta,
+                            region,
+                            capture_ms=selected_capture_ms,
+                            diff_ms=delta.elapsed_ms,
+                        )
+                evidence_path = None
+                evidence_region = None
+                if delta.changed and callable(getattr(watcher, "action_evidence", None)):
+                    crops, _ = watcher.action_evidence(5000)
+                    if crops:
+                        evidence_frame, evidence_roi = crops[0]
+                        try:
+                            from ..recorder.trace import RECORDER
+
+                            evidence_path = RECORDER.save_evidence_image(
+                                evidence_frame,
+                                "transient_press_roi" if source == "press" else "action_delta_roi",
+                            )
+                            evidence_region = self._region_dict(evidence_roi)
+                        except Exception:
+                            logger.debug("action evidence persistence failed", exc_info=True)
+                if delta.changed:
+                    self._schedule_predictive_ocr(watcher)
             else:
                 capture_ms = 0
                 delta = watcher.sample_once()
+                after_delta = delta
+                evidence_path = None
+                evidence_region = None
             status = self._fast_screen_status()
         except Exception:
             logger.debug("action screen-delta post-sample failed", exc_info=True)
@@ -240,8 +329,25 @@ class ToolSession(
         }
         after_context = self._action_target_context()
         delta_data = delta.to_dict()
-        if capture_ms:
-            delta_data["capture_latency_ms"] = capture_ms
+        effective_capture_ms = selected_capture_ms if before_frame is not None else capture_ms
+        if effective_capture_ms:
+            delta_data["capture_latency_ms"] = effective_capture_ms
+        if before_frame is not None:
+            press_count = len(before_context.get("_screen_delta_press_frames") or [])
+            delta_data["press_sample_count"] = press_count
+            delta_data["delta_source"] = source
+            delta_data["transient_observed"] = bool(
+                delta.changed
+                and source == "press"
+                and after_delta is not None
+                and (not after_delta.changed or float(delta.ratio) > float(after_delta.ratio))
+            )
+        if evidence_path:
+            delta_data["evidence_path"] = evidence_path
+            delta_data["evidence_region"] = evidence_region
+            delta_data["evidence_kind"] = (
+                "transient_press_roi" if delta_data.get("transient_observed") else "action_delta_roi"
+            )
         target_region = self._region_from_dict(
             after_context.get("target_region") or public_before_context.get("target_region")
         )
@@ -269,8 +375,86 @@ class ToolSession(
         })
         if status:
             data.setdefault("screen_watch", status)
+        BUS.publish(
+            "screen_delta",
+            run_id=getattr(self, "run_id", None),
+            action=data.get("action") or "visible_action",
+            changed=bool(delta_data.get("changed")),
+            ratio=delta_data.get("ratio", 0.0),
+            regions=delta_data.get("regions", []),
+            transient_observed=bool(delta_data.get("transient_observed")),
+            delta_source=delta_data.get("delta_source", "after"),
+            capture_latency_ms=delta_data.get("capture_latency_ms", 0),
+            diff_latency_ms=delta_data.get("elapsed_ms", 0),
+            screenshot=delta_data.get("evidence_path"),
+            screenshot_kind=delta_data.get("evidence_kind"),
+            screenshot_region=delta_data.get("evidence_region"),
+        )
         result.text = self._fmt(data)
         return result
+
+    def _schedule_predictive_ocr(self, watcher: Any) -> None:
+        if not bool(CONFIG.get("fusion", "predictive_ocr_enabled", default=True)):
+            return
+        evidence_reader = getattr(watcher, "action_evidence", None)
+        if not callable(evidence_reader):
+            return
+        crops, transient = evidence_reader(5000)
+        if not crops:
+            return
+        status = watcher.status() if callable(getattr(watcher, "status", None)) else {}
+        generation = int(status.get("last_action_change_ms") or 0)
+        run_id = getattr(self, "run_id", None)
+
+        def worker() -> None:
+            started = time.monotonic()
+            elements: list[UIElement] = []
+            for image, evidence_region in crops:
+                recognized = ocr.recognize(
+                    image,
+                    origin=(evidence_region.left, evidence_region.top),
+                )
+                merged = self._merge_ocr_line_elements(recognized)
+                for element in [*recognized, *merged]:
+                    if "predictive_ocr" not in element.states:
+                        element.states.append("predictive_ocr")
+                    if transient and "transient_action_evidence" not in element.states:
+                        element.states.append("transient_action_evidence")
+                elements.extend(recognized)
+                elements.extend(merged)
+            current = watcher.status() if callable(getattr(watcher, "status", None)) else {}
+            if generation and int(current.get("last_action_change_ms") or 0) != generation:
+                return
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            sample_texts = list(dict.fromkeys(
+                str(element.text or "").strip()
+                for element in elements
+                if str(element.text or "").strip()
+            ))[:12]
+            with self._predictive_ocr_lock:
+                self._predictive_ocr_cache = {
+                    "generation": generation,
+                    "created_ms": int(time.monotonic() * 1000),
+                    "elements": elements,
+                    "transient": bool(transient),
+                    "elapsed_ms": elapsed_ms,
+                    "texts": sample_texts,
+                }
+            BUS.publish(
+                "perception_prefetch",
+                run_id=run_id,
+                dimension="ocr",
+                count=len(elements),
+                elapsed_ms=elapsed_ms,
+                transient=bool(transient),
+                texts=sample_texts,
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"predictive-ocr-{str(run_id or 'session')[-12:]}",
+        ).start()
 
     @staticmethod
     def _region_dict(region: Region | None) -> dict[str, int] | None:

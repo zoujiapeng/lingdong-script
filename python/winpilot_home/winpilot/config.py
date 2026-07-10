@@ -50,7 +50,11 @@ _DEFAULTS: dict[str, Any] = {
     "fusion": {"escalate_on_empty": True, "ocr_skip_when_uia_rich": True,
                "vlm_skip_when_uia_rich": True, "uia_rich_threshold": 20,
                "vlm_assist_threshold": 60, "observe_cache_ttl_s": 2.0,
-               "screen_watch_autostart": True},
+               "screen_watch_autostart": True,
+               "predictive_ocr_enabled": True,
+               "predictive_ocr_prefer_cache": True,
+               "press_probe_settle_ms": 18,
+               "press_release_settle_ms": 24},
     "agent": {
         "max_steps": 40,
         "max_retries": 2,
@@ -72,9 +76,18 @@ _DEFAULTS: dict[str, Any] = {
         "llm_trace": True,
         "reflect_interval": 8,
     },
+    "controller": {
+        "physical_anchor_clicks": True,
+    },
     "ocr": {"use_gpu": True, "min_confidence": 0.55},
     "search": {"everything_es_path": ""},
     "coding": {"enabled": True, "workspace": "", "max_steps": 30},
+    "integrations": {
+        "chatgpt_desktop": {
+            "enabled": True,
+            "allow_desktop_mutation": True,
+        },
+    },
     "server": {"host": "127.0.0.1", "port": 8765},
 }
 

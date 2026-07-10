@@ -78,6 +78,7 @@ class TraceRecorder:
         self._run_id: str | None = None
         self._file = None
         self._step = 0
+        self._evidence_step = 0
         BUS.add_sink(self._on_event)
 
     def start(self, run_id: str) -> None:
@@ -88,6 +89,7 @@ class TraceRecorder:
             self._file = open(TRACES_DIR / f"{run_id}.jsonl", "a", encoding="utf-8")
             self._run_id = run_id
             self._step = 0
+            self._evidence_step = 0
         BUS.publish("trace", state="recording", run_id=run_id)
 
     def stop(self) -> None:
@@ -167,6 +169,36 @@ class TraceRecorder:
                 return rel
         except Exception as exc:
             logger.debug("trace 截图失败: %s", exc)
+        return None
+
+    def save_evidence_image(self, image: Any, kind: str = "evidence") -> str | None:
+        """Persist an already-captured evidence frame in the active trace.
+
+        Action verification can observe states that disappear before the normal
+        post-action screenshot. Saving that exact frame keeps the trace and UI
+        grounded in what the controller actually evaluated.
+        """
+        with self._lock:
+            run_id = self._run_id
+            if not run_id or self._file is None:
+                return None
+            self._evidence_step += 1
+            step = self._evidence_step
+        try:
+            frame = image
+            h, w = frame.shape[:2]
+            if w > _SCREENSHOT_MAX_W:
+                scale = _SCREENSHOT_MAX_W / w
+                frame = cv2.resize(frame, (_SCREENSHOT_MAX_W, max(1, int(h * scale))))
+            safe_kind = re.sub(r"[^a-z0-9_-]+", "_", str(kind).casefold()).strip("_") or "evidence"
+            rel = f"{run_id}/evidence_{step:03d}_{safe_kind}.jpg"
+            path = TRACES_DIR / rel
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if ok:
+                path.write_bytes(buf.tobytes())
+                return rel
+        except Exception as exc:
+            logger.debug("trace evidence image save failed: %s", exc)
         return None
 
 

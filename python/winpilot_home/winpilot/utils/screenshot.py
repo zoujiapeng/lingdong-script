@@ -25,10 +25,10 @@ except (AttributeError, OSError):
 _local = threading.local()
 
 
-def _get_mss() -> mss.mss:
+def _get_mss() -> mss.MSS:
     """mss instances are not thread-safe; keep one per thread."""
     if not hasattr(_local, "sct"):
-        _local.sct = mss.mss()
+        _local.sct = mss.MSS()
     return _local.sct
 
 

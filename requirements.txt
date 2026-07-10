@@ -29,11 +29,13 @@ easyocr>=1.7.0
 
 # WinPilot agent dependencies
 openai>=1.0                  # LLM client (DeepSeek/OpenAI-compatible)
+chardet>=5,<6                # requests compatibility; chardet 7 emits runtime warnings
 onnxruntime>=1.17            # ONNX inference (RapidOCR DirectML, CV)
 mss>=9.0                     # Fast screenshot capture
 fastapi>=0.110               # WinPilot agent web server (embedded in Agent panel)
 uvicorn>=0.29                # ASGI server for WinPilot
 pydantic>=2.0                # WinPilot server request models
+mcp>=1.26,<2                 # ChatGPT/Codex desktop Streamable HTTP bridge
 
 # Development
 # pytest>=7.0.0

@@ -57,6 +57,57 @@ interface ScriptTemplate {
 
 export const PRESET_TEMPLATES: ScriptTemplate[] = [
   {
+    id: 'arp-quickstart', name: 'ARP 低延迟起步流程', category: 'agent',
+    description: '可直接验证和运行的 Agent Runtime Platform 起步流程',
+    createScript: () => {
+      const ids = { start: nanoid(), batch: nanoid(), evidence: nanoid(), end: nanoid() };
+      return {
+        meta: {
+          id: nanoid(),
+          name: 'ARP 低延迟起步流程',
+          description: '控制器批处理、证据门和确定性终态组成的安全起步流程',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          version: '2.0.0',
+        },
+        nodes: [
+          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: 'Start' }, label: 'Start', status: 'idle' },
+          {
+            id: ids.batch,
+            type: 'action_batch',
+            x: 360,
+            y: 180,
+            params: {
+              subgoal: 'Establish a stable controller baseline',
+              actions: [{ action: 'wait', duration_ms: 80 }],
+              stop_on_error: true,
+              sync: false,
+            },
+            label: 'Controller batch',
+            status: 'idle',
+          },
+          {
+            id: ids.evidence,
+            type: 'evidence_gate',
+            x: 360,
+            y: 340,
+            params: { required: [] },
+            label: 'Evidence gate',
+            status: 'idle',
+          },
+          { id: ids.end, type: 'end', x: 360, y: 500, params: { label: 'Done' }, label: 'Done', status: 'idle' },
+        ],
+        edges: [
+          { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.batch, to_port: 'input' },
+          { id: nanoid(), from_node: ids.batch, from_port: 'output', to_node: ids.evidence, to_port: 'input' },
+          { id: nanoid(), from_node: ids.evidence, from_port: 'pass', to_node: ids.end, to_port: 'input' },
+        ],
+        variables: {},
+        settings: { ...DEFAULT_SETTINGS },
+      };
+    },
+  },
+  {
     id: 'desktop-monitor', name: '桌面图标监控', category: 'image',
     description: '循环检测桌面多张目标图片，按优先级点击第一个匹配的',
     createScript: () => {
@@ -354,6 +405,8 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
 ];
 
 export const PRESET_TEMPLATE_META = [
+  { id: 'arp-quickstart', name: 'ARP 低延迟起步流程', description: '可直接验证和运行的 Agent Runtime Platform 起步流程', category: 'agent',
+    aliases: ['ARP', 'GUI Agent', '低延迟流程', 'agent workflow'], keywords: ['Agent', 'ARP', '低延迟', '编排', '批处理'], tags: ['agent', 'arp', 'workflow'] },
   { id: 'desktop-monitor', name: '桌面图标监控', description: '循环检测桌面多张目标图片，按优先级点击第一个匹配的', category: 'image',
     aliases: ['桌面监控', '图标监控', 'monitor'], keywords: ['监控', '检测', '桌面', '图标', '图片'], tags: ['image', 'monitor', 'loop'] },
   { id: 'login-automation', name: '登录自动化', description: '自动打开登录页，输入账号密码，点击登录，截图确认结果', category: 'app',

@@ -1067,6 +1067,17 @@ class SubgoalExecutor:
                     "button": click_spec.get("button", "left"),
                     "double": bool(click_spec.get("double", False)),
                 })
+                for option in (
+                    "physical",
+                    "force_physical",
+                    "prefer_uia_invoke",
+                    "visual_servo",
+                    "servo_iterations",
+                    "servo_tolerance_px",
+                    "servo_settle_ms",
+                ):
+                    if option in click_spec:
+                        action[option] = click_spec[option]
                 count_source = (
                     click_spec.get("click_count")
                     or click_spec.get("count")
@@ -1406,6 +1417,7 @@ class SubgoalExecutor:
             "subgoal_route": "controller_first",
             "controller_state": {
                 **(batch.get("controller_state") or {}),
+                "verified": bool(verified),
                 "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
             },
             "actions_executed": actions,
