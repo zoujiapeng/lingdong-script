@@ -182,6 +182,13 @@ class MemoryToolMixin:
         except Exception as exc:
             record_attempt(False, "replay_failed", "exception")
             return ToolResult(f"Replay failed with exception: {exc}. Use live GUI actions.")
+        anchor_metrics = result.get("anchor_cache")
+        if isinstance(anchor_metrics, dict) and anchor_metrics.get("enabled"):
+            BUS.publish(
+                "replay_anchor_cache",
+                run_id=getattr(self, "run_id", ""),
+                **anchor_metrics,
+            )
         steps = result.get("results", [])
         if result.get("ok"):
             record_attempt(True, "replay_ok", "ok")

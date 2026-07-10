@@ -102,6 +102,22 @@ def save_template(region: Region, name: str) -> Path:
     return path
 
 
+def save_template_image(image: np.ndarray, name: str) -> Path:
+    """Persist an already captured BGR crop as a reusable template."""
+    safe = "".join(c for c in name if c.isalnum() or c in "-_")[:80]
+    if not safe:
+        raise ValueError("template name is empty after sanitization")
+    if image is None or image.ndim != 3 or image.shape[0] < 8 or image.shape[1] < 8:
+        raise ValueError("template image must be a BGR crop of at least 8x8 pixels")
+    TEMPLATES_IMG_DIR.mkdir(exist_ok=True)
+    path = TEMPLATES_IMG_DIR / f"{safe}.png"
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("PNG encoding failed")
+    buf.tofile(str(path))
+    return path
+
+
 def match_template(
     template_name: str,
     region: Region | None = None,

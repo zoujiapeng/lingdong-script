@@ -116,6 +116,14 @@ export interface RunMetrics {
   skill_suggestion_count: number;
   skill_reuse_rate: number;
   batch_action_ratio: number;
+  anchor_cache_lookup_count: number;
+  anchor_cache_hit_count: number;
+  anchor_cache_miss_count: number;
+  anchor_cache_fallback_count: number;
+  anchor_cache_learned_count: number;
+  anchor_cache_hit_rate: number;
+  anchor_cache_lookup_latency_avg_ms: number;
+  anchor_cache_lookup_latency_max_ms: number;
 }
 
 export interface RunProjection {

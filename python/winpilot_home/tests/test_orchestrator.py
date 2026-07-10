@@ -139,7 +139,11 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
             self.hwnd = 777
             self.step_delay = 0
             self.calls = []
+            self.anchor_profiles = []
             self.__class__.instances.append(self)
+
+        def configure_anchor_cache(self, profile):
+            self.anchor_profiles.append(profile)
 
         def run_steps(self, steps, *, target_window=None, variables=None, prefix=""):
             self.vars.update({str(key): str(value) for key, value in (variables or {}).items()})
@@ -200,6 +204,7 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
     replayer = FakeReplayer.instances[0]
     assert [call[0] for call in replayer.calls] == ["ext.var_set", "hotkey"]
     assert [call[2] for call in replayer.calls] == ["seed.", "press."]
+    assert replayer.anchor_profiles == ["arp:graph-test:demo", "arp:graph-test:demo"]
     assert replayer.calls[-1][3]["from_replay"] == "yes"
     assert replayer.calls[-1][3]["from_arp"] == "ready"
     assert [item["type"] for item in result["evidence"]] == ["replay_step", "replay_step"]
@@ -658,6 +663,31 @@ def test_run_projection_counts_direct_controller_batch_actions():
     assert run["metrics"]["batch_action_count"] == 1
     assert run["metrics"]["batch_action_ratio"] == 1.0
     assert run["metrics"]["action_execution_latency_avg_ms"] == 28
+
+
+def test_run_projection_aggregates_replay_anchor_cache_metrics():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": "anchors",
+        "graph_name": "Cached replay",
+    })
+    store.on_event({
+        "type": "replay_anchor_cache", "ts": 2.0, "run_id": "anchors",
+        "lookup_count": 3, "hit_count": 2, "miss_count": 1,
+        "fallback_count": 1, "learned_count": 1,
+        "lookup_latency_avg_ms": 12.0, "lookup_latency_max_ms": 18,
+    })
+
+    run = store.get("anchors")
+
+    assert run is not None
+    assert run["metrics"]["anchor_cache_hit_rate"] == 0.6667
+    assert run["metrics"]["anchor_cache_lookup_latency_avg_ms"] == 12.0
+    assert run["metrics"]["anchor_cache_lookup_latency_max_ms"] == 18
+    assert run["metrics"]["anchor_cache_fallback_count"] == 1
+    assert run["metrics"]["anchor_cache_learned_count"] == 1
 
 
 def test_run_projection_counts_arp_evidence_as_done_check():

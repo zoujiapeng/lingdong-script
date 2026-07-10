@@ -69,6 +69,13 @@ class RunProjectionStore:
                 "replan_count": 0,
                 "skill_reuse_count": 0,
                 "skill_suggestion_count": 0,
+                "anchor_cache_lookup_count": 0,
+                "anchor_cache_hit_count": 0,
+                "anchor_cache_miss_count": 0,
+                "anchor_cache_fallback_count": 0,
+                "anchor_cache_learned_count": 0,
+                "anchor_cache_lookup_latency_total_ms": 0.0,
+                "anchor_cache_lookup_latency_max_ms": 0,
             },
         }
 
@@ -78,7 +85,10 @@ class RunProjectionStore:
             return "planning"
         if event_type in {"agent_plan", "agent_step", "agent_decision"}:
             return "deciding"
-        if event_type in {"perception", "perception_prefetch", "screen_watch", "screen_delta"}:
+        if event_type in {
+            "perception", "perception_prefetch", "screen_watch", "screen_delta",
+            "replay_anchor_cache",
+        }:
             return "perceiving"
         if event_type in {"agent_tool_start", "agent_batch_action_start", "arp_node_start"}:
             return "acting"
@@ -187,6 +197,28 @@ class RunProjectionStore:
                 run["metrics"]["skill_suggestion_count"] += 1
             if event_type == "arp_child_run" and event.get("child_kind") == "skill_replay":
                 run["metrics"]["skill_reuse_count"] += 1
+            if event_type == "replay_anchor_cache":
+                lookups = max(0, int(event.get("lookup_count") or 0))
+                run["metrics"]["anchor_cache_lookup_count"] += lookups
+                run["metrics"]["anchor_cache_hit_count"] += max(
+                    0, int(event.get("hit_count") or 0)
+                )
+                run["metrics"]["anchor_cache_miss_count"] += max(
+                    0, int(event.get("miss_count") or 0)
+                )
+                run["metrics"]["anchor_cache_fallback_count"] += max(
+                    0, int(event.get("fallback_count") or 0)
+                )
+                run["metrics"]["anchor_cache_learned_count"] += max(
+                    0, int(event.get("learned_count") or 0)
+                )
+                run["metrics"]["anchor_cache_lookup_latency_total_ms"] += (
+                    float(event.get("lookup_latency_avg_ms") or 0) * lookups
+                )
+                run["metrics"]["anchor_cache_lookup_latency_max_ms"] = max(
+                    int(run["metrics"].get("anchor_cache_lookup_latency_max_ms") or 0),
+                    int(event.get("lookup_latency_max_ms") or 0),
+                )
             if event_type == "done_check":
                 run["metrics"]["done_checks"] += 1
                 if event.get("passed") is True:
@@ -337,6 +369,15 @@ class RunProjectionStore:
         metrics["vlm_call_frequency"] = round(int(metrics.get("vlm_call_count") or 0) / perceptions, 4)
         metrics["skill_reuse_rate"] = round(int(metrics.get("skill_reuse_count") or 0) / suggestions, 4)
         metrics["batch_action_ratio"] = round(min(1.0, int(metrics.get("batch_action_count") or 0) / tools), 4)
+        anchor_lookups = int(metrics.get("anchor_cache_lookup_count") or 0)
+        anchor_hits = int(metrics.get("anchor_cache_hit_count") or 0)
+        anchor_latency_total = float(metrics.pop("anchor_cache_lookup_latency_total_ms", 0.0) or 0.0)
+        metrics["anchor_cache_hit_rate"] = round(
+            anchor_hits / anchor_lookups, 4,
+        ) if anchor_lookups else 0.0
+        metrics["anchor_cache_lookup_latency_avg_ms"] = round(
+            anchor_latency_total / anchor_lookups, 1,
+        ) if anchor_lookups else 0
         return data
 
     def get(self, run_id: str) -> dict[str, Any] | None:
