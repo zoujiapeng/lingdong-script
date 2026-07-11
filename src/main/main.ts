@@ -2,6 +2,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { randomBytes } from 'crypto';
 const fsp = fs.promises;
 import { spawn, ChildProcess } from 'child_process';
 import * as http from 'http';
@@ -12,7 +13,7 @@ import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPython
 import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
 import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
-import { startWinpilotServer, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer } from './winpilotServer';
+import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -27,6 +28,7 @@ import {
 let _cachedRendererState: any = null;
 let _rendererReady = false;
 let apiServer: http.Server | null = null;
+const LOCAL_CONTROL_TOKEN = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32).toString('base64url');
 const _taskbarNotifiedRuns = new Set<string>();
 
 type TaskbarNotificationKind = 'success' | 'error' | 'info';
@@ -439,27 +441,19 @@ function createWindow() {
       mainWindow?.minimize();
     }
     _rendererReady = true;
-    // 注入 API 配置环境变量到前端（每次启动覆盖 localStorage）
+    // Only non-secret model metadata is exposed to the renderer. API keys stay
+    // in the main process / managed WinPilot configuration.
     const envKey = process.env.ANTHROPIC_API_KEY || '';
     const envBase = process.env.LLM_API_BASE || 'https://api.deepseek.com/v1';
     const envModel = process.env.LLM_MODEL || 'deepseek-chat';
     const envMultimodal = process.env.LLM_MULTIMODAL === 'true';
-    if (envKey) {
-      mainWindow?.webContents.executeJavaScript(`
-        (function() {
-          const k = '__DEEPSEEK_KEY__'; const b = '__LLM_API_BASE__'; const m = '__LLM_MODEL__'; const mm = '__LLM_MULTIMODAL__';
-          const lk = 'lingdong-deepseek-key'; const lb = 'lingdong-llm-base'; const lmd = 'lingdong-llm-model'; const lmm = 'lingdong-llm-multimodal';
-          window[k] = ${JSON.stringify(envKey)};
-          window[b] = ${JSON.stringify(envBase)};
-          window[m] = ${JSON.stringify(envModel)};
-          window[mm] = ${JSON.stringify(envMultimodal)};
-          localStorage.setItem(lk, window[k]);
-          localStorage.setItem(lb, window[b]);
-          localStorage.setItem(lmd, window[m]);
-          localStorage.setItem(lmm, window[mm] ? 'true' : 'false');
-        })();
-      `);
-    }
+    mainWindow?.webContents.executeJavaScript(`
+      (function() {
+        window.__LLM_API_BASE__ = ${JSON.stringify(envBase)};
+        window.__LLM_MODEL__ = ${JSON.stringify(envModel)};
+        window.__LLM_MULTIMODAL__ = ${JSON.stringify(envMultimodal)};
+      })();
+    `);
     // 自动启动 Agent（如果设置了 AGENT_GOAL 环境变量）
     const autoGoal = process.env.AGENT_GOAL || '';
     if (autoGoal) {
@@ -576,16 +570,16 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 <div class="section"><div class="section-title">核心能力</div>
 <div class="tags">
 <span class="tag">流程图编排</span>
-<span class="tag">243 @feature 工具</span>
-<span class="tag">AI Agent 监督执行</span>
+<span class="tag">统一 Agent + RuntimeProfile</span>
+<span class="tag">低延迟 GUI Controller</span>
 <span class="tag">OCR / 视觉定位</span>
 <span class="tag">@feature 注册表</span>
-<span class="tag">5 种 Agent 模式</span>
+<span class="tag">ARP / Automation IR</span>
 <span class="tag">宏录制 (支持视觉)</span>
 <span class="tag">DSL 引擎 (~130 关键字)</span>
 <span class="tag">MCP / HTTP API / CLI</span>
 <span class="tag">摄像头监控</span>
-<span class="tag">计划可视化 (HTN)</span>
+<span class="tag">RuntimeJob / 证据门</span>
 <span class="tag">条件 / 循环 / 分支</span>
 <span class="tag">流程模板库</span>
 <span class="tag">触发器 / 定时调度</span>
@@ -860,8 +854,9 @@ ipcMain.handle('agent:guidance', (_, text: string) => {
   return { success: true };
 });
 
-// WinPilot embedded server URL for the Agent panel iframe (null until ready).
+// WinPilot control-plane connection for the native renderer (null until ready).
 ipcMain.handle('winpilot:url', () => getWinpilotUrl());
+ipcMain.handle('winpilot:connection', () => getWinpilotConnection());
 
 // Trigger a (re)start if the server isn't up, and report status (url/starting/
 // error). The Agent panel polls this so a failed startup can recover from UI.
@@ -1632,6 +1627,8 @@ if (!gotTheLock) {
         catch { return { error: result.stderr?.trim() || 'DSL转换失败' }; }
       },
       startAgent: startAgentProcess,
+      controlToken: LOCAL_CONTROL_TOKEN,
+      allowUnsafeEval: isDev && process.env.LINGDONG_ENABLE_UNSAFE_EVAL === '1',
     });
 
     // ── MCP 自动注册到 Claude Code ──
@@ -1641,14 +1638,13 @@ if (!gotTheLock) {
         let claudeConfig: any = {};
         try { claudeConfig = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8')); } catch {}
         if (!claudeConfig.mcpServers) claudeConfig.mcpServers = {};
-        if (!claudeConfig.mcpServers['lingdong-script']) {
-          claudeConfig.mcpServers['lingdong-script'] = {
-            type: 'http',
-            url: `http://127.0.0.1:${parseInt(process.env.API_PORT || '7880', 10)}/mcp`,
-          };
-          fs.writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2), 'utf-8');
-          console.log('[MCP] Auto-registered lingdong-script in ~/.claude.json');
-        }
+        claudeConfig.mcpServers['lingdong-script'] = {
+          type: 'http',
+          url: `http://127.0.0.1:${parseInt(process.env.API_PORT || '7880', 10)}/mcp`,
+          headers: { Authorization: `Bearer ${LOCAL_CONTROL_TOKEN}` },
+        };
+        fs.writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2), 'utf-8');
+        console.log('[MCP] Registered authenticated lingdong-script endpoint in ~/.claude.json');
       } catch (e: any) {
         console.error('[MCP] Auto-register failed:', e.message);
       }

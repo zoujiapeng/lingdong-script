@@ -14,7 +14,7 @@ WinPilot 的长期记忆现在以 SQLite Memory Graph / Memory Capsule 为主存
 - `payload_json`：保留旧 recipe 字段和扩展元数据
 - anchors、conditions、evidence、attempts、artifacts、relations
 
-`observation` 默认是易变记忆，不能当长期 fact。`skill` 必须有 conditions 和 evidence；否则会降级为 provisional `procedure`。绑定 `.wps.json` 的 replay 脚本通过 payload 或 `memory_artifacts` 保存。
+`observation` 默认是易变记忆，不能当长期 fact。`skill` 必须有 conditions 和 evidence；否则会降级为 provisional `procedure`。新 Skill 绑定规范 Automation IR artifact；旧 `.wps.json` 仍可作为兼容来源迁移。
 
 ## Graph Relations
 

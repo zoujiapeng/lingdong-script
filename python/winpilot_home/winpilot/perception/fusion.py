@@ -16,7 +16,7 @@ import win32gui
 
 from ..config import CONFIG
 from ..utils.log import BUS, logger
-from ..utils.screenshot import Region, screen_size, window_region
+from ..utils.screenshot import Region, virtual_screen_region, window_region
 from . import ocr, uia, vision_cv, vlm, win32
 from .model import UIElement
 
@@ -175,7 +175,7 @@ def _escalate_empty(snapshot: Snapshot, region: Region,
     steps: list[tuple[str, object]] = [
         ("esc_ocr_window", lambda: ocr.collect(region, min_conf=_ESCALATE_OCR_CONF)),
         ("esc_ocr_screen", lambda: ocr.collect(
-            Region(0, 0, *screen_size()), min_conf=_ESCALATE_OCR_CONF)),
+            virtual_screen_region(), min_conf=_ESCALATE_OCR_CONF)),
     ]
     if vlm.is_configured():
         steps.append(("esc_vlm", lambda: vlm.collect(region)))

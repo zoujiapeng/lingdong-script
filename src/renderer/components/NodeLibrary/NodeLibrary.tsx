@@ -7,7 +7,7 @@ import { getLibraryFeatures, FeatureNodeItem, getFeatureCategoryLabel } from '..
 import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../utils/unifiedSearch';
 import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
-import * as LucideIcons from 'lucide-react';
+import { getNodeIcon } from '../../utils/nodeIconMap';
 
 const CategoryIcons: Record<string, React.FC<any>> = {
   agent: Bot,
@@ -21,8 +21,7 @@ const CategoryIcons: Record<string, React.FC<any>> = {
 };
 
 function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
-  const Icon = (LucideIcons as any)[name];
-  if (!Icon) return <Zap size={size} />;
+  const Icon = getNodeIcon(name);
   return <Icon size={size} />;
 }
 

@@ -14,6 +14,7 @@
  */
 
 import * as http from 'http';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import { toolRegistry } from '../tools/registry';
 import { getSystemPrompt, PromptLevel } from '../prompt';
 import { APIResponse } from '../tools/types';
@@ -23,9 +24,6 @@ let currentPromptLevel: PromptLevel = 'strong';
 function jsonResponse(res: http.ServerResponse, status: number, data: any): void {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
   res.end(JSON.stringify(data));
 }
@@ -48,14 +46,21 @@ function parseBody(req: http.IncomingMessage): Promise<any> {
 }
 
 export async function startHTTPServer(port: number = 3456): Promise<void> {
+  const controlToken = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32).toString('base64url');
   const server = http.createServer(async (req, res) => {
+    const origin = String(req.headers.origin || '');
+    const originAllowed = !origin || origin === 'null'
+      || /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin);
+    if (!originAllowed) {
+      jsonResponse(res, 403, { success: false, error: 'Origin not allowed' });
+      return;
+    }
+    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     // CORS preflight
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      });
+      res.writeHead(204);
       res.end();
       return;
     }
@@ -63,6 +68,18 @@ export async function startHTTPServer(port: number = 3456): Promise<void> {
     const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = reqUrl.pathname;
     const method = req.method || 'GET';
+
+    if (pathname !== '/health') {
+      const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const expectedBuffer = Buffer.from(controlToken);
+      const suppliedBuffer = Buffer.from(supplied);
+      const authenticated = expectedBuffer.length === suppliedBuffer.length
+        && timingSafeEqual(expectedBuffer, suppliedBuffer);
+      if (!authenticated) {
+        jsonResponse(res, 401, { success: false, error: 'Authentication required' });
+        return;
+      }
+    }
 
     try {
       // --- GET /health ---
@@ -218,7 +235,7 @@ export async function startHTTPServer(port: number = 3456): Promise<void> {
     }
   });
 
-  server.listen(port, () => {
+  server.listen(port, '127.0.0.1', () => {
     console.log(JSON.stringify({
       type: 'info',
       message: `灵动脚本 AI Interface HTTP API 已启动`,
@@ -231,6 +248,8 @@ export async function startHTTPServer(port: number = 3456): Promise<void> {
         promptSwitch: 'POST /v1/prompt/switch',
       },
       promptLevel: currentPromptLevel,
+      authentication: 'Authorization: Bearer <token>',
+      controlToken,
     }));
   });
 

@@ -506,6 +506,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             total=dict(self.usage_total),
         )
 
+    def _track_aux_model_response(self, resp, *, purpose: str, model: str) -> None:
+        previous_model = self._last_llm_model
+        self._last_llm_model = str(model or previous_model or "")
+        try:
+            self._track_usage(resp)
+        finally:
+            self._last_llm_model = previous_model
+        BUS.publish(
+            "agent_model_call",
+            run_id=self.run_id,
+            purpose=str(purpose),
+            model=str(model),
+            accounted=True,
+        )
+
     # ---------------------------------------------------------------- steps
     def _record_step(self, name: str, args: dict, replay: dict | None = None) -> None:
         """Log an intent-level step for experience memory.
@@ -1908,15 +1923,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "raw_arguments": tc.function.arguments,
                     "error": str(exc),
                 })
-                BUS.publish("agent_tool", run_id=self.run_id, tool=tc.function.name,
-                            error=str(exc))
+                BUS.publish("agent_tool", run_id=self.run_id, action_id=tc.id,
+                            tool=tc.function.name, error=str(exc))
                 continue
 
             args = self._maybe_expand_execute_subgoal_draws_from_plan(tc.function.name, args)
             self.run_state.before_tool(tc.function.name, args)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
             BUS.publish("agent_tool_start", run_id=self.run_id,
-                        tool=tc.function.name, args=args)
+                        action_id=tc.id, tool=tc.function.name, args=args)
             started = time.monotonic()
             blocked_store_action = _blocks_store_search_action(self.task, tc.function.name, args)
             blocked_upload_action = _blocks_upload_media_analysis(self.task, tc.function.name, args)
@@ -2156,6 +2171,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             BUS.publish(
                 "agent_tool",
                 run_id=self.run_id,
+                action_id=tc.id,
                 tool=tc.function.name,
                 args=args,
                 result_preview=result.text[:300],
@@ -2415,7 +2431,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.result_text = str(exc)
             BUS.publish("agent_error", run_id=self.run_id, error=str(exc))
 
-        # Record a reusable recipe (+ export a replayable .wps.json) ONLY for
+        # Record a reusable recipe (+ export canonical Automation IR) ONLY for
         # non-coding successes. Coding tasks are excluded from the reusable
         # scope entirely — solved fresh next time, guided by the playbook.
         if self.status == "done" and not self._is_coding:
@@ -2427,13 +2443,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 (self._done_verified
                  or (self._had_verified_action and self._last_verify_ok is not False))
                 and not self._done_unverified)
-            # Reuse-like-scripts: a trusted success becomes a replayable .wps.json
+            # A trusted success becomes replayable canonical Automation IR
             # linked to the recipe, so a future identical task can reuse_skill it.
             script_name = ""
             if verified_run:
                 try:
                     from ..recorder import trace as _trace
-                    script_path = _trace.export_script(self.run_id)
+                    script_path = _trace.export_automation_ir(self.run_id)
                     script_name = script_path.name
                 except (FileNotFoundError, ValueError) as exc:
                     logger.debug("成功流程无可重放步骤，跳过导出: %s", exc)

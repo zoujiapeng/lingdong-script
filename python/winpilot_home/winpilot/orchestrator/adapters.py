@@ -75,6 +75,27 @@ def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
         )
         result = runner.run()
         ok = runner.status == "done"
+        evidence: list[dict[str, Any]] = []
+        if ok and bool(getattr(runner, "_done_verified", False)):
+            evidence.append({
+                "predicate": "agent.done",
+                "value": goal,
+                "source": "done_gate",
+                "verified": True,
+                "action_id": runner.run_id,
+            })
+            for item in (getattr(runner, "_visible_evidence_ledger", []) or [])[-20:]:
+                target = str(item.get("target") or "").strip()
+                if not target:
+                    continue
+                evidence.append({
+                    "predicate": "visible.text",
+                    "value": target,
+                    "source": str(item.get("source") or "agent_observe"),
+                    "verified": True,
+                    "text": str(item.get("snippet") or "")[:500],
+                    "action_id": runner.run_id,
+                })
         return NodeResult(
             ok=ok,
             branch="next" if ok else "fail",
@@ -84,7 +105,7 @@ def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
                 "result": result,
                 "usage": dict(runner.usage_total),
             },
-            evidence=[runner.result_text] if ok and runner.result_text else [],
+            evidence=evidence,
             error="" if ok else runner.result_text or f"agent ended with {runner.status}",
         )
 
@@ -116,7 +137,12 @@ def _batch_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         )
         evidence = []
         if verified:
-            evidence.append({"type": "controller", "subgoal": task, "verified": True})
+            evidence.append({
+                "predicate": "controller.batch",
+                "value": task,
+                "source": "fast_gui_controller",
+                "verified": True,
+            })
         return NodeResult(
             ok=ok,
             branch="next" if ok else "fail",
@@ -203,11 +229,14 @@ def _replay_step_handler(node: ArpNode, context: dict[str, Any], stop_event) -> 
         branch="next" if ok else "fail",
         output=output,
         evidence=[{
-            "type": "replay_step",
-            "session": session_id,
-            "tool": step.get("tool"),
-            "verified_steps": len(verified_steps),
-            "ok": True,
+            "predicate": "replay.step",
+            "value": step.get("tool"),
+            "source": "wps_replayer",
+            "verified": True,
+            "metadata": {
+                "session": session_id,
+                "verified_steps": len(verified_steps),
+            },
         }] if ok else [],
         error="" if ok else str(result.get("error") or "replay step failed"),
     )
@@ -303,11 +332,14 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
         branch="next" if ok else "fail",
         output=output,
         evidence=[{
-            "type": "skill_replay",
-            "script": script_name,
-            "memory_id": memory_id or None,
-            "verified_steps": len(verified_steps),
-            "ok": True,
+            "predicate": "skill.replay",
+            "value": script_name,
+            "source": "memory_skill_replayer",
+            "verified": True,
+            "metadata": {
+                "memory_id": memory_id or None,
+                "verified_steps": len(verified_steps),
+            },
         }] if ok else [],
         error="" if ok else str(result.get("error") or "skill replay failed"),
     )

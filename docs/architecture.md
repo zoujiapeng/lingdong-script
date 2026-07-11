@@ -7,11 +7,12 @@
 ```mermaid
 flowchart LR
   User["Agent Cockpit / ARP Studio"] --> Control["FastAPI Control Plane\n/api/v2 + /ws/events"]
-  Control --> ARP["ARP Runtime\narp/1 graph"]
+  Control --> Jobs["RuntimeJob Manager\nquery / cancel / resource lease"]
+  Jobs --> ARP["ARP Runtime\narp/1 graph"]
   Control --> Projection["Unified Run Projection\nmetrics / timeline / evidence"]
   ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
   ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
-  ARP --> Skills["Skill Replay\n0-token fast path"]
+  ARP --> Skills["Automation IR Skill Replay\n0-token fast path"]
   Runner --> Tools["ToolSession + World Model"]
   Tools --> Perception["L0 delta -> L1 OCR/CV -> UIA -> VLM fallback"]
   Controller --> Watcher["5-15 FPS watcher\nchange-triggered ROI"]
@@ -33,6 +34,8 @@ flowchart LR
 - `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试；显式失败恢复边优先于 `fail_fast`。
 - `orchestrator/adapters.py`：Agent Goal、Action Batch、Memory-backed Skill Replay、legacy 节点适配和最终运行结果驱动的记忆反馈。
 - `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
+- `runtime_jobs.py`：统一 Agent、ARP、Replay 和 schedule 的异步生命周期、取消、查询和 `interactive_runtime` 资源租约。
+- `automation_ir.py`：新流程和 Skill 的规范 artifact；WPS/FlowScript 是受检 adapter。
 - `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；点击、文字锚点、输入、键盘、拖拽、启动、聚焦、截图、剪贴板和部分组合节点直接编译为 Controller batch；其余旧节点显式标记 `legacy_flow` 并在运行前拒绝。
 
 ### ARP 节点
@@ -68,7 +71,8 @@ Electron renderer 会等待 `winpilot:ensure` 返回本实例托管的随机端�
 
 ```mermaid
 flowchart TD
-  Chat["/api/chat 或 ARP agent_goal"] --> Router["agent/router.py"]
+  Chat["/api/chat 或 ARP agent_goal"] --> Job["RuntimeJob / ARP node"]
+  Job --> Router["agent/router.py"]
   Router --> Runner["AgentRunner"]
   Runner --> Profile["RuntimeProfile"]
   Runner --> Schema["tool_schemas(profile, allow flags)"]
@@ -99,9 +103,11 @@ flowchart TD
 | `agent/done_verifier.py` | 防假成功核验 |
 | `fast/subgoal.py` | controller-first routine：输入、点击、绘图、等待、验证 |
 | `fast/controller.py` | 本地低延迟动作执行和 fast metrics |
+| `action/raw_device.py` | batch 内常见动作直接调用已授权 handler，避免递归 dispatch |
+| `fast/perception_daemon.py` | 按 hwnd 共享 watcher 与 ElementCache 的短期常驻 lease |
 | `perception/fusion.py` | UIA/Win32/OCR/CV/VLM snapshot 融合 |
 | `perception/reducer.py` | 给 LLM 的 compact 感知摘要 |
-| `recorder/trace.py` | trace、`.wps.json`、replay |
+| `recorder/trace.py` | 异步 trace/截图、Automation IR 主导出、WPS 兼容导出、replay |
 | `scheduler.py` | WinPilot Agent 内部计划任务 |
 | `model_adapter.py` | provider、thinking 默认、usage/cache/cost 归一化 |
 
@@ -111,6 +117,7 @@ flowchart TD
 
 ```text
 queued
+  -> waiting_resources（已有交互任务时）
   -> running
   -> LLM step
   -> tool dispatch
@@ -123,7 +130,7 @@ queued
 
 - `agent_done` 只是运行结束事件，不等于真实任务成功。
 - GUI 成功要看 `done_check`、截图、文件/进程/窗口状态和工具 evidence。
-- done 被拒绝后，runner 会继续给模型机会修复；超过 `done_max_rejects` 才可能 unverified force-accept，这种结果不能写入 trusted skill。
+- done 被拒绝后，runner 会继续给模型机会修复；judge 异常和超过拒绝阈值都 fail-closed，不会把未验证结果强制升级成 trusted success。
 
 ## RuntimeProfile
 
@@ -159,15 +166,17 @@ queued
 - Perception reducer 只给 LLM compact state，完整元素写入 trace。
 - `scope_guard` 在 GUI mutation 前检查前台/目标窗口。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
-- 坐标排查工具 `coordinate_diagnostics` / `coordinate_click_test` 使用物理屏幕坐标和真实鼠标点击路径。
+- `winpilot` 包入口先初始化 Per-Monitor V2，保证只导入 action executor 的进程也不会落入 DPI 虚拟坐标；`coordinate_diagnostics` / `coordinate_click_test` 再核对物理屏幕和真实鼠标路径。
 - `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
-- `action/desktop_queue.py` 已提供 single-writer Desktop Action Queue：同步 `run()` 已接入真实鼠标、键盘、窗口、剪贴板写入和启动动作；内部后台 `submit/wait/cancel/get_job` job worker 已可用于后续 replay/recovery/Flow real executor 接入。trace 中分别发布 `desktop_action_queue` 和 `desktop_action_queue_job` 事件。
-- `action/executor.py` 的 public `click/scroll/drag/draw_strokes/type_text/clipboard_paste` 外层仍进队列，但内部已使用 raw `move/focus/press` helper，避免一次真实动作产生多层 public queue wrapper；完整 Raw Device Executor 仍未完成。
+- `action/desktop_queue.py` 提供 single-writer Desktop Action Queue；Controller batch 取得一次 coalesced lease，内部 public action 不重复排队。
+- `action/raw_device.py` 让常见 batch 子动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
+- `fast/perception_daemon.py` 按 hwnd 复用 watcher + ElementCache，lease 归零后保留 45 秒热状态；昂贵 OCR/CV/VLM 仍由变化或请求触发。
+- `recorder/trace.py` 把截图编码/写盘放到有界异步队列，并以 `action_id` 配对 before/after。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
 
 成熟度判断：
 
-- Raw Device Executor 已有 press probe、single-writer queue 和部分内层去重；部分 routine 仍通过 `ToolSession.dispatch()` 走完整工具生命周期。
+- Raw Device adapter 已覆盖常见 Controller mutation；复杂工具仍有意走完整 `ToolSession` 生命周期。
 - World Model 已保存窗口、screen bulletin、元素、动作和最近变化；跨 run 的页面阶段分类仍需继续泛化。
 - 常规动作可在 Controller/Skill 内环完成，失败回到 Agent/ARP；“所有常规动作都不经 LLM”还不是对任意软件成立的承诺。
 - 网页靶场已覆盖真实物理按压的瞬态状态：DOM 收据、非零 ROI、持久化 press 帧、predictive OCR、changed-only 命中和 0 VLM 同时通过。
@@ -186,15 +195,15 @@ queued
 ```text
 Agent live run
   -> trace JSONL + screenshots
-  -> export .wps.json / automation-ir/1
+  -> export automation-ir/1 (+ optional .wps.json compatibility copy)
   -> Replayer 0-token replay
   -> optional FlowScript import for editing
 ```
 
 当前事实：
 
-- `.wps.json` 是 WinPilot 语义重放格式。
-- `automation-ir/1` 是 WPS/Flow/skill 的最小共享 envelope，当前不是唯一事实源。
+- `.wps.json` 是 WinPilot 旧语义重放兼容格式，不是新 artifact 的事实源。
+- `automation-ir/1` 是新保存 Flow、Skill 和 trace 导出的规范中间层；WPS/FlowScript/DSL 是兼容格式。
 - `recorder/trace.py` 是离线 replay 源。
 - `POST /api/replay` 返回 `replay_id`；`GET /api/replay/{replay_id}` 查询状态、结果和失败细节；`POST /api/replay/{replay_id}/cancel` 取消。
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。
@@ -202,7 +211,7 @@ Agent live run
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
 - Agent 内的 `reuse_skill` 会强匹配历史成功脚本并 0-token replay，随后仍需当前状态证据。ARP `skill_replay` 也可按 task / memory id 检索；只有非空且每个执行叶子通过 Replayer 验证的脚本才产生节点 evidence，空脚本不能完成流程。
 
-不要把 Automation IR 写成已经统一了一切。当前真实状态是：IR 用来减少新入口继续发明并行 metadata，`.wps.json` 仍是 WinPilot Replayer 的直接输入，FlowScript 仍是前端画布格式，legacy DSL 仍由 `python/engine/` 处理。
+Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps，Flow editor 内存仍使用 FlowScript，legacy DSL 仍由 `python/engine/` 处理；但所有新持久化、Skill 和运行编译入口必须先经过 IR，不再新增第四种 metadata envelope。
 
 ## Memory
 
@@ -218,9 +227,9 @@ Agent live run
 
 ## Scheduler
 
-有两套调度系统：
+当前仍有两套调度系统，主线新功能只进入第一套：
 
-- WinPilot Agent 内部调度：`python/winpilot_home/winpilot/scheduler.py`，工具是 `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task`，数据是 `agent_schedules.json`，到期后仍走 `AgentRunner`。
+- WinPilot Agent 内部调度：`python/winpilot_home/winpilot/scheduler.py`，System 页面与 Agent 工具共用 `agent_schedules.json`，到期后提交统一 RuntimeJob 再走 `AgentRunner`。
 - legacy Electron 模板调度：`src/main/schedulerBridge.ts` + `python/engine/scheduler_daemon.py`，数据是 Electron userData 下的 `schedules.json`，服务于流程图/模板体系。
 
 WinPilot Agent 内部调度不是 Windows Task Scheduler。
@@ -236,5 +245,5 @@ WinPilot Agent 内部调度不是 Windows Task Scheduler。
 - `CLAUDE.md` 写 AI 最短接手说明。
 - `docs/architecture.md` 写结构和边界。
 - `docs/winpilot-agent.md` 写运行机制和复盘细节。
-- `docs/replay-recording.md` 写 trace / `.wps.json` / replay / FlowScript 导入。
+- `docs/replay-recording.md` 写 trace / Automation IR / 兼容 WPS / replay / FlowScript 导入。
 - 历史 run id 不继续堆进主文档；需要保留时写 eval 报告或 trace。

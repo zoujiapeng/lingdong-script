@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import * as LucideIcons from 'lucide-react';
 import { MousePointer2, Settings, Info } from 'lucide-react';
 import { useStore } from '../../store';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
@@ -27,10 +26,10 @@ import { CameraCaptureParams } from './params/CameraCaptureParams';
 import { CameraRecordParams } from './params/CameraRecordParams';
 import { CommonNodeSettings } from './params/CommonNodeSettings';
 import { ArpNodeParams } from './params/ArpNodeParams';
+import { getNodeIcon } from '../../utils/nodeIconMap';
 
 function NodeIcon({ name, size = 16 }: { name: string; size?: number }) {
-  const Icon = (LucideIcons as any)[name];
-  if (!Icon) return null;
+  const Icon = getNodeIcon(name);
   return <Icon size={size} />;
 }
 

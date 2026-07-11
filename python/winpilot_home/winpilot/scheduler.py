@@ -60,10 +60,10 @@ def _read_unlocked() -> list[dict[str, Any]]:
 
 
 def _write_unlocked(items: list[dict[str, Any]]) -> None:
-    SCHEDULES_PATH.write_text(
-        json.dumps(items, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    SCHEDULES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SCHEDULES_PATH.with_suffix(SCHEDULES_PATH.suffix + ".tmp")
+    temporary.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, SCHEDULES_PATH)
 
 
 def list_tasks(enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -102,7 +102,7 @@ def create_task(
         try:
             interval = max(1.0, float(interval_seconds))
         except (TypeError, ValueError):
-            interval = None
+            raise ValueError("interval_seconds must be a number") from None
     entry: dict[str, Any] = {
         "id": f"agent_sched_{uuid.uuid4().hex[:12]}",
         "name": str(name or "").strip() or task[:60],
@@ -124,6 +124,70 @@ def create_task(
         items.append(entry)
         _write_unlocked(items)
     return entry
+
+
+def update_task(schedule_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+    """Update a persisted Agent schedule using the same validation as create."""
+    schedule_id = str(schedule_id or "").strip()
+    allowed = {
+        "name", "task", "enabled", "run_at", "delay_seconds",
+        "interval_seconds", "max_steps",
+    }
+    updates = {key: value for key, value in dict(changes or {}).items() if key in allowed}
+    with _lock:
+        items = _read_unlocked()
+        entry = next((item for item in items if item.get("id") == schedule_id), None)
+        if entry is None:
+            return None
+        if "task" in updates:
+            task = str(updates["task"] or "").strip()
+            if not task:
+                raise ValueError("task is required")
+            entry["task"] = task
+        if "name" in updates:
+            entry["name"] = str(updates["name"] or "").strip() or str(entry.get("task") or "")[:60]
+        if "enabled" in updates:
+            entry["enabled"] = bool(updates["enabled"])
+            if entry["enabled"]:
+                entry.pop("cancelled_at", None)
+        if "interval_seconds" in updates:
+            raw_interval = updates["interval_seconds"]
+            if raw_interval in (None, ""):
+                entry["interval_seconds"] = None
+            else:
+                try:
+                    entry["interval_seconds"] = max(1.0, float(raw_interval))
+                except (TypeError, ValueError):
+                    raise ValueError("interval_seconds must be a number") from None
+        if "max_steps" in updates:
+            raw_steps = updates["max_steps"]
+            if raw_steps in (None, ""):
+                entry.pop("max_steps", None)
+            else:
+                try:
+                    max_steps = int(raw_steps)
+                except (TypeError, ValueError):
+                    raise ValueError("max_steps must be a positive integer") from None
+                if max_steps <= 0:
+                    raise ValueError("max_steps must be a positive integer")
+                entry["max_steps"] = max_steps
+        if "run_at" in updates or "delay_seconds" in updates:
+            run_at = str(updates.get("run_at") or "").strip()
+            due = _parse_time(run_at)
+            if run_at and due is None:
+                raise ValueError("run_at must be an ISO-8601 datetime")
+            if due is None:
+                try:
+                    delay = float(updates.get("delay_seconds") or 0.0)
+                except (TypeError, ValueError):
+                    raise ValueError("delay_seconds must be a number") from None
+                due = _now() + timedelta(seconds=max(0.0, delay))
+            entry["next_run_at"] = _iso(due)
+        elif entry.get("enabled") and not entry.get("next_run_at"):
+            entry["next_run_at"] = _iso(_now())
+        entry["updated_at"] = _iso(_now())
+        _write_unlocked(items)
+        return dict(entry)
 
 
 def cancel_task(schedule_id: str) -> bool:

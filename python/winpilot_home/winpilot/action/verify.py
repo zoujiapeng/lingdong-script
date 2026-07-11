@@ -28,7 +28,7 @@ import win32gui
 from ..config import CONFIG
 from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..utils.log import BUS, logger
-from ..utils.screenshot import Region, screen_size, window_region
+from ..utils.screenshot import Region, virtual_screen_region, window_region
 
 _POLL_INTERVAL_S = 0.35
 _FAST_POLL_INTERVAL_S = 0.08
@@ -415,8 +415,7 @@ def _target_hwnd(hwnd: int | None) -> int | None:
 
 
 def _full_screen_region() -> Region:
-    sw, sh = screen_size()
-    return Region(0, 0, sw, sh)
+    return virtual_screen_region()
 
 
 # --------------------------------------------------------- condition checks

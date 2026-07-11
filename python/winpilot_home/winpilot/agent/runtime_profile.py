@@ -10,14 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..config import CONFIG
+from ..config import CONFIG, PROJECT_ROOT
 from .task_rules import _is_coding_task, _is_gui_only_task
 
 
 def coding_workspace_dir() -> Path:
     """Configured repository workspace for Coding Runtime tools."""
     ws = CONFIG.get("coding", "workspace", default="") or ""
-    return Path(ws).expanduser().resolve() if ws else Path.home().resolve()
+    return Path(ws).expanduser().resolve() if ws else PROJECT_ROOT.resolve()
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,10 @@ class RuntimeProfile:
     scheduler: bool = True
     automation_ir: bool = True
     action_queue: bool = True
+    browser: bool = True
+    safety: bool = True
+    async_jobs: bool = True
+    perception_daemon: bool = True
 
     @property
     def label(self) -> str:
@@ -52,6 +56,14 @@ class RuntimeProfile:
             active.append("automation_ir")
         if self.action_queue:
             active.append("desktop_action_queue")
+        if self.browser:
+            active.append("browser")
+        if self.safety:
+            active.append("safety")
+        if self.async_jobs:
+            active.append("async_jobs")
+        if self.perception_daemon:
+            active.append("perception_daemon")
         return tuple(active)
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,6 +78,10 @@ class RuntimeProfile:
             "scheduler": self.scheduler,
             "automation_ir": self.automation_ir,
             "action_queue": self.action_queue,
+            "browser": self.browser,
+            "safety": self.safety,
+            "async_jobs": self.async_jobs,
+            "perception_daemon": self.perception_daemon,
         }
 
     def prompt_section(self) -> str:

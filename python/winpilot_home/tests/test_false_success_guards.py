@@ -2540,7 +2540,7 @@ def test_desktop_drag_task_does_not_force_accept_after_rejects():
 
     assert runner._verify_done(_Client()) is False
     assert runner._done_unverified is False
-    assert "unverified force-accept is disabled" in runner._last_done_reject_reason
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
 def test_drawing_task_does_not_force_accept_after_rejects():
@@ -2558,7 +2558,44 @@ def test_drawing_task_does_not_force_accept_after_rejects():
 
     assert runner._verify_done(_Client()) is False
     assert runner._done_unverified is False
-    assert "unverified force-accept is disabled" in runner._last_done_reject_reason
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
+
+
+def test_done_judge_failure_is_not_treated_as_success():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window and report its state")
+    runner.result_text = "done"
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise RuntimeError("provider unavailable")
+
+    assert runner._verify_done(_Client(), steps_left=0) is False
+    assert runner._done_verified is False
+    assert runner._done_unverified is False
+    assert "remains unverified" in runner._last_done_reject_reason
+
+
+def test_generic_task_never_force_accepts_after_repeated_rejects():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window")
+    runner._done_rejects = 99
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **_k):
+                    raise AssertionError("repeated rejects should terminate before the judge")
+
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_unverified is False
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
 def test_desktop_drag_done_accepts_controller_plan_evidence_without_full_ocr_name(monkeypatch):

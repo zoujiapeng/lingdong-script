@@ -215,3 +215,18 @@ export interface RuntimeEvent {
   run_id?: string;
   [key: string]: unknown;
 }
+
+export interface AgentSchedule {
+  id: string;
+  name: string;
+  task: string;
+  enabled: boolean;
+  running: boolean;
+  next_run_at?: string | null;
+  interval_seconds?: number | null;
+  max_steps?: number;
+  last_run_at?: string | null;
+  last_run_id?: string | null;
+  last_status?: string | null;
+  run_count: number;
+}

@@ -56,3 +56,12 @@ def test_scope_guard_blocks_when_refocus_cannot_recover(monkeypatch):
     assert payload["blocked"] is True
     assert payload["scope_guard"]["recovery_attempted"] is True
     assert payload["tool"] == "type_text"
+
+
+def test_scope_guard_does_not_encode_application_specific_task_order():
+    session = _Session()
+    session.task = "calculate a quotient, save a screenshot, then open QQ"
+    session.visible_evidence_ledger = []
+    session.saved_screenshot_paths = []
+
+    assert scope_guard.ensure_scope(session, "launch", {"command": "QQ"}) is None

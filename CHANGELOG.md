@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Unified runtime hardening
+
+- Added authenticated loopback control planes with strict renderer origins, WebSocket authentication, atomic WinPilot configuration writes, and DPAPI-backed legacy execution-vault storage/migration.
+- Added `RuntimeJobManager` for queued Agent, ARP, Replay, and scheduled jobs. Interactive desktop jobs declare the shared `interactive_runtime` resource instead of failing with a server-wide busy response.
+- Added a raw desktop device adapter and per-target desktop action queue. Fast controller batches no longer recurse through the full outer `ToolSession` lifecycle for every child action.
+- Added a shared per-window perception daemon with screen-delta and element-cache leases, plus action-id based asynchronous trace screenshots.
+- Made `automation-ir/1` the canonical persisted automation artifact. Trace export, apprentice lessons, memory skills, replay, Flow import/export, and ARP execution now cross checked adapters around that IR; `.wps.json` remains a compatibility format.
+- Made completion verification fail closed: model narrative and repeated done attempts cannot force acceptance without current typed evidence.
+- Added virtual-desktop/DPI/ROI coordinate diagnostics and actual cursor-position checks for negative-origin and multi-monitor layouts.
+- Replaced the iframe-era renderer with the native `PlatformWorkbench`, added schedule controls and taskbar completion/failure notifications, and removed unreachable HTN/Node-RED/legacy panel code and dependencies.
+- Reduced the production renderer bundle by replacing whole-package Lucide imports and deleting dead styles/components.
+
 ### Refactoring
 
 - Split WinPilot GUI tool schema construction from runtime dispatch:
@@ -68,8 +80,8 @@
 - Prefer a matching foreground top-level window over a stale remembered hwnd
   when resolving the current target window, reducing false success with
   duplicate same-title windows.
-- GUI tasks route to `AgentRunner`; coding/repository tasks route to `CodingRunner`.
-- `CodingRunner` includes `github_search` and run-gate logic for clone/install/run tasks.
+- GUI and coding/repository tasks route to the same `AgentRunner`; Coding is enabled as a runtime capability.
+- The unified runner includes `github_search` and run-gate logic for clone/install/run tasks; `CodingRunner` remains only as an import-compatibility shim.
 - GUI-only tasks restrict shell/file shortcuts that would bypass real frontend operation.
 - Done verification includes stronger guards for drawing, communication, GUI search, upload/publish, and run-gated coding tasks.
 - Perception fusion combines UIA, Win32, OCR, CV, and optional VLM, with modal-window UIA skip and visual summaries for canvas/drawing/color tasks.

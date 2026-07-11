@@ -31,7 +31,7 @@ from .task_rules import (
     _required_visible_payloads,
     _visible_state_targets,
 )
-from ..utils.screenshot import screen_size
+from ..utils.screenshot import virtual_screen_region
 
 
 _JUDGE_MAX_TOKENS = 2500
@@ -396,7 +396,7 @@ class DoneVerifierMixin:
             return True
         wants_top_right = any(term in (self.task or "").casefold() for term in ("top-right", "top right")) \
             or "\u53f3\u4e0a" in (self.task or "")
-        sw, sh = screen_size()
+        desktop = virtual_screen_region()
         for target in targets:
             line_match = re.search(
                 rf'listitem\s+"{re.escape(target)}".*?center=\((\d+),(\d+)\).*?bbox=\((\d+),(\d+),(\d+),(\d+)\)',
@@ -407,8 +407,9 @@ class DoneVerifierMixin:
                 continue
             cx, cy, left, top, width, height = [int(v) for v in line_match.groups()]
             if wants_top_right and not (
-                cx >= int(sw * 0.72) and cy <= int(sh * 0.20)
-                and left + width >= int(sw * 0.78)
+                cx >= int(desktop.left + desktop.width * 0.72)
+                and cy <= int(desktop.top + desktop.height * 0.20)
+                and left + width >= int(desktop.left + desktop.width * 0.78)
             ):
                 continue
             return True
@@ -619,6 +620,9 @@ class DoneVerifierMixin:
                 temperature=0.0,
                 max_tokens=_JUDGE_MAX_TOKENS,
             )
+            tracker = getattr(self, "_track_aux_model_response", None)
+            if callable(tracker):
+                tracker(resp, purpose="done_judge", model=judge_model)
             self._trace_debug("done_check_response", {
                 "run_id": self.run_id,
                 "model": judge_model,
@@ -643,14 +647,19 @@ class DoneVerifierMixin:
                 except json.JSONDecodeError:
                     is_done = False
                     reason = "完成核验返回的 JSON 损坏，不能接受为完成"
-        except Exception as exc:  # fail-open - never deadlock on judge errors
-            logger.warning("done 核验调用失败，放行: %s", exc)
+        except Exception as exc:
+            logger.warning("done verification failed closed: %s", exc)
             self._trace_debug("done_check_error", {
                 "run_id": self.run_id,
                 "model": judge_model,
                 "error": str(exc),
             })
-            return True
+            reason = f"Completion judge unavailable; task remains unverified: {exc}"
+            return self._reject_done(
+                reason,
+                "[done check failed] The independent verifier is unavailable. "
+                "Collect deterministic evidence and retry, or call fail with the exact blocker.",
+            )
 
         BUS.publish("done_check", run_id=self.run_id, passed=is_done, reason=reason)
         if is_done:
@@ -666,21 +675,6 @@ class DoneVerifierMixin:
         logger.info("done 被核验拦截(第%d次): %s", self._done_rejects, reason)
         return False
 
-    def _allows_unverified_done_force_accept(self) -> bool:
-        if _is_drawing_task(self.task):
-            return False
-        if _is_desktop_icon_drag_task(self.task):
-            return False
-        if _is_communication_task(self.task):
-            return False
-        if _is_gui_search_task(self.task):
-            return False
-        if _required_visible_payloads(self.task) or _required_literal_tokens(self.task):
-            return False
-        if _required_image_paths(self.task):
-            return False
-        return True
-
     def _verify_done(self, client, steps_left: int = 99) -> bool:
         """Independently verify a ``done`` claim before accepting it."""
         cfg = _config()
@@ -688,28 +682,12 @@ class DoneVerifierMixin:
             return True
         max_rejects = int(cfg.get("agent", "done_max_rejects", default=2))
         if self._done_rejects >= max_rejects:
-            if not self._allows_unverified_done_force_accept():
-                reason = (
-                    "Done was rejected repeatedly and this task has real GUI side effects; "
-                    "unverified force-accept is disabled. Continue repairing or fail with "
-                    "the exact missing evidence."
-                )
-                BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
-                self._last_done_reject_reason = reason
-                self._done_rejects += 1
-                self.messages.append({
-                    "role": "user",
-                    "content": f"[done check failed] {reason}",
-                })
-                return False
             reason = (
-                "Done force-accepted after done_max_rejects; result is marked "
-                f"unverified (done_rejects={self._done_rejects})."
+                "Done was rejected repeatedly and cannot be force-accepted. "
+                "Continue only if new deterministic evidence can be collected; "
+                "otherwise call fail with the exact blocker."
             )
-            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason, unverified=True)
-            self._done_unverified = True
-            return True
-        force_unverified = steps_left <= 2
+            return self._reject_done(reason, f"[done check failed] {reason}")
 
         recent, evidence = self._done_evidence()
         image_send_verdict = self._deterministic_image_send_verdict()
@@ -769,12 +747,4 @@ class DoneVerifierMixin:
             return False
         if not self._verify_communication_done(screen):
             return False
-        if force_unverified:
-            reason = (
-                "Done accepted without LLM judge after deterministic guards passed "
-                f"(steps_left={steps_left}, done_rejects={self._done_rejects})."
-            )
-            BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason, unverified=True)
-            self._done_unverified = True
-            return True
         return self._call_done_judge(client, screen, recent, evidence)

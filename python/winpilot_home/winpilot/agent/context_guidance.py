@@ -13,7 +13,15 @@ class ContextGuidanceMixin:
         if not should_plan_upfront(self.task):
             return
         api = CONFIG.get("api", default={})
-        steps = make_plan(client, api.get("model", "deepseek-v4-flash"), self.task)
+        model = api.get("model", "deepseek-v4-flash")
+        steps = make_plan(
+            client,
+            model,
+            self.task,
+            on_response=lambda response: self._track_aux_model_response(
+                response, purpose="planner", model=model,
+            ),
+        )
         if not steps:
             return
         self.session.plan = Plan(steps)

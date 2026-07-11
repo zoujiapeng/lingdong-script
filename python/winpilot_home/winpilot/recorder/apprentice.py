@@ -103,6 +103,12 @@ class ApprenticeManager:
             if error:
                 raise RuntimeError(f"recorded lesson is invalid: {error}")
             path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
+            canonical_path = trace_mod.write_automation_ir(
+                script,
+                name=session["name"],
+                basename=path.name.removesuffix(".wps.json"),
+                directory=path.parent,
+            )
 
             summaries = [json.dumps(step, ensure_ascii=False, sort_keys=True) for step in script.get("steps", [])]
             recipe = experience.record(
@@ -110,7 +116,7 @@ class ApprenticeManager:
                 session.get("app", ""),
                 summaries,
                 verified=False,
-                script=path.name,
+                script=canonical_path.name,
                 conditions=[
                     "Reuse only for the same demonstrated workflow goal.",
                     *([f'Current app or window must match "{session["app"]}".'] if session.get("app") else []),
@@ -122,6 +128,8 @@ class ApprenticeManager:
             self._session = None
             return {
                 **result,
+                "legacy_file": path.name,
+                "file": canonical_path.name,
                 "mode": "apprentice",
                 "session_id": session["session_id"],
                 "task": session["task"],

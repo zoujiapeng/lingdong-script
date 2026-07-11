@@ -40,7 +40,7 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
         "record",
         lambda *args, **kwargs: captured.append((args, kwargs)) or {
             "id": "skill-candidate",
-            "script": "lesson.wps.json",
+            "script": "lesson.automation.json",
             "provisional": True,
         },
     )
@@ -52,15 +52,19 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
 
     result = manager.stop()
     saved = json.loads((tmp_path / "lesson.wps.json").read_text(encoding="utf-8"))
+    canonical = json.loads((tmp_path / "lesson.automation.json").read_text(encoding="utf-8"))
 
     assert result["mode"] == "apprentice"
     assert result["memory"]["provisional"] is True
+    assert result["file"] == "lesson.automation.json"
+    assert result["legacy_file"] == "lesson.wps.json"
+    assert canonical["format"] == "automation-ir/1"
     assert saved["task"] == "Send a message"
     assert saved["source"] == "apprentice"
     assert saved["source_session"] == started["session_id"]
     assert captured[0][0][:2] == ("Send a message", "QQ")
     assert captured[0][1]["verified"] is False
-    assert captured[0][1]["script"] == "lesson.wps.json"
+    assert captured[0][1]["script"] == "lesson.automation.json"
     assert manager.status()["recording"] is False
 
 

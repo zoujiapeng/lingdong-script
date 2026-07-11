@@ -9,7 +9,7 @@ from pathlib import Path
 from ..action import executor
 from ..action.verify import _match_visible_text
 from ..perception import vision_cv
-from ..utils.screenshot import Region, capture, screen_size, window_region
+from ..utils.screenshot import Region, capture, desktop_geometry, screen_size, window_region
 from .interaction_tools import normalize_key_sequence
 from .tool_result import ToolResult
 
@@ -138,13 +138,30 @@ class DesktopToolMixin:
         """Report coordinate/capture geometry for DPI/ROI mismatch debugging."""
         payload: dict = {"ok": True}
         try:
+            geometry = desktop_geometry()
             sw, sh = screen_size()
-            payload["screen_size"] = {"width": int(sw), "height": int(sh), "source": "GetSystemMetrics"}
+            payload["screen_size"] = {
+                "left": geometry.virtual.left,
+                "top": geometry.virtual.top,
+                "right": geometry.virtual.right,
+                "bottom": geometry.virtual.bottom,
+                "width": int(sw),
+                "height": int(sh),
+                "source": "GetSystemMetrics virtual desktop",
+            }
+            payload["primary_screen"] = {
+                "left": geometry.primary.left,
+                "top": geometry.primary.top,
+                "width": geometry.primary.width,
+                "height": geometry.primary.height,
+            }
         except Exception as exc:
             payload["screen_size_error"] = str(exc)
         try:
             full = capture()
             payload["full_capture"] = {
+                "left": payload.get("screen_size", {}).get("left", 0),
+                "top": payload.get("screen_size", {}).get("top", 0),
                 "width": int(full.shape[1]),
                 "height": int(full.shape[0]),
                 "source": "mss",
@@ -251,6 +268,20 @@ class DesktopToolMixin:
             ),
         }
         try:
+            virtual = desktop_geometry().virtual
+            payload["virtual_screen"] = {
+                "left": virtual.left,
+                "top": virtual.top,
+                "right": virtual.right,
+                "bottom": virtual.bottom,
+            }
+            if not (virtual.left <= x < virtual.right and virtual.top <= y < virtual.bottom):
+                payload["blocked"] = True
+                payload["error"] = "Requested point is outside the virtual desktop bounds."
+                return ToolResult(self._fmt(payload))
+        except Exception as exc:
+            payload["geometry_error"] = str(exc)
+        try:
             payload["cursor_before"] = executor.cursor_position()
         except Exception as exc:
             payload["cursor_before_error"] = str(exc)
@@ -289,7 +320,16 @@ class DesktopToolMixin:
             payload["error"] = str(exc)
             return ToolResult(self._fmt(payload))
         try:
-            payload["cursor_after"] = executor.cursor_position()
+            cursor_after = executor.cursor_position()
+            payload["cursor_after"] = cursor_after
+            if cursor_after.get("ok"):
+                dx = int(cursor_after.get("x", x)) - x
+                dy = int(cursor_after.get("y", y)) - y
+                payload["cursor_error"] = {"dx": dx, "dy": dy}
+                payload["coordinate_verified"] = abs(dx) <= 1 and abs(dy) <= 1
+                if not payload["coordinate_verified"]:
+                    payload["ok"] = False
+                    payload["error"] = "Real cursor position does not match the requested physical coordinate."
         except Exception as exc:
             payload["cursor_after_error"] = str(exc)
         wait_ms = args.get("wait_ms", 250)

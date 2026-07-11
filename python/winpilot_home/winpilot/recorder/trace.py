@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import threading
 import time
@@ -19,10 +20,10 @@ from typing import Any
 import cv2
 
 from ..action import executor, verify
-from ..automation_ir import automation_ir_from_wps, validate_automation_ir
+from ..automation_ir import automation_ir_from_wps, validate_automation_ir, wps_from_automation_ir
 from ..config import SCRIPTS_DIR, TRACES_DIR
 from ..memory import replay_anchors
-from ..perception import fusion, ocr, uia, vision_cv, win32
+from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import replay_control
@@ -80,22 +81,40 @@ class TraceRecorder:
         self._file = None
         self._step = 0
         self._evidence_step = 0
+        self._accepting = False
+        self._action_steps: dict[str, int] = {}
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1024)
+        self._dropped_events = 0
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="WinPilotTraceWriter",
+        )
+        self._worker.start()
         BUS.add_sink(self._on_event)
 
     def start(self, run_id: str) -> None:
         with self._lock:
-            self._close()
+            active = self._file is not None
+        if active:
+            self.stop()
+        with self._lock:
             TRACES_DIR.mkdir(exist_ok=True)
             (TRACES_DIR / run_id).mkdir(exist_ok=True)
             self._file = open(TRACES_DIR / f"{run_id}.jsonl", "a", encoding="utf-8")
             self._run_id = run_id
             self._step = 0
             self._evidence_step = 0
+            self._action_steps = {}
+            self._accepting = True
         BUS.publish("trace", state="recording", run_id=run_id)
 
     def stop(self) -> None:
         with self._lock:
             run_id = self._run_id
+            self._accepting = False
+        self._queue.join()
+        with self._lock:
             self._close()
         if run_id:
             BUS.publish("trace", state="stopped", run_id=run_id)
@@ -108,42 +127,106 @@ class TraceRecorder:
                 pass
         self._file = None
         self._run_id = None
+        self._accepting = False
 
     def _on_event(self, event: dict[str, Any]) -> None:
-        # Phase 1 (locked): claim a step number; never do I/O while locked.
         with self._lock:
-            if self._file is None or event.get("type") == "trace":
+            if not self._accepting or self._file is None or event.get("type") == "trace":
                 return
             run_id = self._run_id
-            step = None
+            step: int | None = None
             phase = "after"
-            if event.get("type") == "agent_tool_start" and event.get("tool") in _SCREENSHOT_TOOLS:
+            event_type = str(event.get("type") or "")
+            action_key = self._action_key(event)
+            if event_type == "agent_tool_start" and event.get("tool") in _SCREENSHOT_TOOLS:
                 self._step += 1
                 step = self._step
                 phase = "before"
-            elif event.get("type") == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
-                step = self._step or 1
+                self._action_steps[action_key] = step
+            elif event_type == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
+                step = self._action_steps.pop(action_key, None)
+                if step is None:
+                    self._step += 1
+                    step = self._step
                 phase = "after"
-            elif (
-                event.get("type") == "agent_batch_action_start"
-                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
-            ):
+            elif event_type == "agent_batch_action_start" and event.get("tool") in _BATCH_SCREENSHOT_TOOLS:
                 self._step += 1
                 step = self._step
                 phase = "batch_before"
-            elif (
-                event.get("type") == "agent_batch_action"
-                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
-            ):
-                step = self._step or 1
+                self._action_steps[action_key] = step
+            elif event_type == "agent_batch_action" and event.get("tool") in _BATCH_SCREENSHOT_TOOLS:
+                step = self._action_steps.pop(action_key, None)
+                if step is None:
+                    self._step += 1
+                    step = self._step
                 phase = "batch_after"
-        # Phase 2 (unlocked): screen grab + JPEG encode are slow.
-        record = dict(event)
+
+        frame = None
         if step is not None:
-            shot = self._save_screenshot(run_id, step, phase)
+            try:
+                from ..fast.perception_daemon import PERCEPTION_DAEMON
+
+                latest = PERCEPTION_DAEMON.latest_frame(run_id=str(run_id or ""), max_age_ms=500)
+                if latest is not None:
+                    frame, _region = latest
+            except Exception:
+                frame = None
+        self._enqueue({
+            "kind": "event",
+            "run_id": run_id,
+            "record": dict(event),
+            "step": step,
+            "phase": phase,
+            "frame": frame,
+        })
+
+    @staticmethod
+    def _action_key(event: dict[str, Any]) -> str:
+        action_id = str(event.get("action_id") or "").strip()
+        if action_id:
+            return f"action:{action_id}"
+        batch_id = str(event.get("batch_id") or "").strip()
+        batch_index = str(event.get("batch_index") or "").strip()
+        if batch_id or batch_index:
+            return f"batch:{batch_id}:{batch_index}"
+        return f"legacy:{event.get('tool') or ''}"
+
+    def _enqueue(self, item: dict[str, Any]) -> bool:
+        try:
+            self._queue.put(item, timeout=0.05)
+            return True
+        except queue.Full:
+            with self._lock:
+                self._dropped_events += 1
+            logger.warning("trace queue full; dropped %s", item.get("kind"))
+            return False
+
+    def _worker_loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item.get("kind") == "event":
+                    self._write_event(item)
+                elif item.get("kind") == "evidence":
+                    self._write_image(item.get("frame"), item.get("path"), quality=82)
+            except Exception as exc:
+                logger.warning("trace worker failed: %s", exc)
+            finally:
+                self._queue.task_done()
+
+    def _write_event(self, item: dict[str, Any]) -> None:
+        run_id = item.get("run_id")
+        record = dict(item.get("record") or {})
+        step = item.get("step")
+        if step is not None:
+            shot = self._save_screenshot(
+                run_id,
+                int(step),
+                str(item.get("phase") or "after"),
+                image=item.get("frame"),
+            )
             if shot:
                 record["screenshot"] = shot
-        # Phase 3 (locked): append, re-checking the file is still open.
         with self._lock:
             if self._file is None or self._run_id != run_id:
                 return
@@ -153,11 +236,18 @@ class TraceRecorder:
             except OSError as exc:
                 logger.warning("trace 写入失败: %s", exc)
 
-    def _save_screenshot(self, run_id: str | None, step: int, phase: str = "after") -> str | None:
+    def _save_screenshot(
+        self,
+        run_id: str | None,
+        step: int,
+        phase: str = "after",
+        *,
+        image: Any = None,
+    ) -> str | None:
         if not run_id:
             return None
         try:
-            image = capture()
+            image = capture() if image is None else image
             h, w = image.shape[:2]
             if w > _SCREENSHOT_MAX_W:
                 scale = _SCREENSHOT_MAX_W / w
@@ -181,26 +271,34 @@ class TraceRecorder:
         """
         with self._lock:
             run_id = self._run_id
-            if not run_id or self._file is None:
+            if not run_id or self._file is None or not self._accepting:
                 return None
             self._evidence_step += 1
             step = self._evidence_step
         try:
-            frame = image
-            h, w = frame.shape[:2]
-            if w > _SCREENSHOT_MAX_W:
-                scale = _SCREENSHOT_MAX_W / w
-                frame = cv2.resize(frame, (_SCREENSHOT_MAX_W, max(1, int(h * scale))))
+            frame = image.copy()
             safe_kind = re.sub(r"[^a-z0-9_-]+", "_", str(kind).casefold()).strip("_") or "evidence"
             rel = f"{run_id}/evidence_{step:03d}_{safe_kind}.jpg"
-            path = TRACES_DIR / rel
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
-            if ok:
-                path.write_bytes(buf.tobytes())
+            if self._enqueue({"kind": "evidence", "run_id": run_id, "frame": frame, "path": rel}):
                 return rel
         except Exception as exc:
             logger.debug("trace evidence image save failed: %s", exc)
         return None
+
+    @staticmethod
+    def _write_image(frame: Any, path: str | None, quality: int) -> bool:
+        if frame is None or not path:
+            return False
+        image = frame
+        h, w = image.shape[:2]
+        if w > _SCREENSHOT_MAX_W:
+            scale = _SCREENSHOT_MAX_W / w
+            image = cv2.resize(image, (_SCREENSHOT_MAX_W, max(1, int(h * scale))))
+        target = TRACES_DIR / str(path)
+        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+        if ok:
+            target.write_bytes(buf.tobytes())
+        return bool(ok)
 
 
 RECORDER = TraceRecorder()
@@ -394,25 +492,38 @@ def build_script(run_id: str, name: str | None = None) -> dict[str, Any]:
 
 
 def export_script(run_id: str, name: str | None = None) -> Path:
-    """Distill a trace into a replayable .wps.json script."""
+    """Write the legacy WPS adapter and a canonical Automation IR sibling."""
     script = build_script(run_id, name=name)
     SCRIPTS_DIR.mkdir(exist_ok=True)
     path = SCRIPTS_DIR / f"{name or run_id}.wps.json"
     path.write_text(json.dumps(script, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_automation_ir(script, name=name, basename=name or run_id)
     BUS.publish("trace", state="exported", run_id=run_id, script=str(path))
+    return path
+
+
+def write_automation_ir(
+    script: dict[str, Any],
+    *,
+    name: str | None,
+    basename: str,
+    directory: Path | None = None,
+) -> Path:
+    ir = automation_ir_from_wps(script, name=name)
+    err = validate_automation_ir(ir)
+    if err:
+        raise ValueError(f"exported Automation IR is invalid: {err}")
+    root = directory or SCRIPTS_DIR
+    root.mkdir(exist_ok=True)
+    path = root / f"{basename}.automation.json"
+    path.write_text(json.dumps(ir, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
 
 
 def export_automation_ir(run_id: str, name: str | None = None) -> Path:
     """Distill a trace into Automation IR v1 for skill/Flow/replay handoff."""
     script = build_script(run_id, name=name)
-    ir = automation_ir_from_wps(script, name=name)
-    err = validate_automation_ir(ir)
-    if err:
-        raise ValueError(f"exported Automation IR is invalid: {err}")
-    SCRIPTS_DIR.mkdir(exist_ok=True)
-    path = SCRIPTS_DIR / f"{name or run_id}.automation.json"
-    path.write_text(json.dumps(ir, ensure_ascii=False, indent=1), encoding="utf-8")
+    path = write_automation_ir(script, name=name, basename=name or run_id)
     BUS.publish("trace", state="exported_ir", run_id=run_id, ir=str(path))
     return path
 
@@ -420,12 +531,32 @@ def export_automation_ir(run_id: str, name: str | None = None) -> Path:
 def list_scripts() -> list[dict[str, Any]]:
     SCRIPTS_DIR.mkdir(exist_ok=True)
     out = []
+    canonical_bases: set[str] = set()
+    for path in sorted(SCRIPTS_DIR.glob("*.automation.json"), reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if validate_automation_ir(data):
+                continue
+            canonical_bases.add(path.name.removesuffix(".automation.json"))
+            source = data.get("source") if isinstance(data.get("source"), dict) else {}
+            out.append({
+                "file": path.name,
+                "name": data.get("name", path.stem),
+                "task": source.get("task", ""),
+                "steps": len(data.get("steps", [])),
+                "format": "automation-ir/1",
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
     for path in sorted(SCRIPTS_DIR.glob("*.wps.json"), reverse=True):
+        if path.name.removesuffix(".wps.json") in canonical_bases:
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             out.append({
                 "file": path.name, "name": data.get("name", path.stem),
                 "task": data.get("task", ""), "steps": len(data.get("steps", [])),
+                "format": data.get("format", "wps/2"),
             })
         except (json.JSONDecodeError, OSError):
             continue
@@ -1385,6 +1516,173 @@ class Replayer:
             "hint": hint,
         }
 
+    @staticmethod
+    def _condition_checks(script: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        conditions = script.get("conditions")
+        if not isinstance(conditions, dict):
+            return [], []
+        checks: list[dict[str, Any]] = []
+        ignored: list[str] = []
+        target_keys = {"target_window", "target", "window_title", "window_appears"}
+        direct = {
+            key: value for key, value in conditions.items()
+            if key in verify.SUPPORTED_CONDITIONS and key not in target_keys
+        }
+        if direct:
+            checks.append(direct)
+        anchors = conditions.get("visible_anchors")
+        if isinstance(anchors, str):
+            anchors = [anchors]
+        if isinstance(anchors, list):
+            checks.extend(
+                {"text_appears": str(anchor)}
+                for anchor in anchors
+                if str(anchor).strip()
+            )
+        raw_checks = conditions.get("checks")
+        if isinstance(raw_checks, dict):
+            raw_checks = [raw_checks]
+        if isinstance(raw_checks, list):
+            for raw in raw_checks:
+                if not isinstance(raw, dict):
+                    ignored.append(str(raw))
+                    continue
+                check = {key: value for key, value in raw.items() if key in verify.SUPPORTED_CONDITIONS}
+                unknown = [key for key in raw if key not in verify.SUPPORTED_CONDITIONS and key != "timeout_s"]
+                if unknown:
+                    ignored.extend(unknown)
+                if check:
+                    if "timeout_s" in raw:
+                        check["timeout_s"] = raw["timeout_s"]
+                    checks.append(check)
+        return checks, ignored
+
+    def _preflight(self, script: dict[str, Any]) -> dict[str, Any]:
+        target = self._preflight_target_window(script)
+        if not target.get("ok", False):
+            return target
+        safety = script.get("safety") if isinstance(script.get("safety"), dict) else {}
+        hint = _target_window_hint(script)
+        if (
+            safety.get("requires_preflight")
+            and safety.get("mutates_desktop")
+            and not hint
+        ):
+            error = "desktop Automation IR requires an explicit target_window preflight"
+            result = {"ok": False, "error": error, "safety": safety}
+            self._emit_step("preflight", "preflight.target_window", False, result)
+            return {"ok": False, "required": True, "error": error, "safety": safety}
+
+        checks, ignored = self._condition_checks(script)
+        results: list[dict[str, Any]] = []
+        for index, check in enumerate(checks, start=1):
+            visual = any(
+                key not in {"timeout_s", *groundtruth.GROUNDTRUTH_KEYS}
+                for key in check
+            )
+            if visual and not self.hwnd:
+                error = "visual replay preflight checks require target_window"
+                result = {"ok": False, "error": error, "check": check}
+                self._emit_step(f"preflight.{index}", "preflight.condition", False, result)
+                return {
+                    "ok": False,
+                    "required": True,
+                    "error": error,
+                    "target": target,
+                    "checks": results + [result],
+                    "ignored": ignored,
+                }
+            timeout_s = max(0.2, min(float(check.get("timeout_s") or 2.0), 10.0))
+            outcome = verify.check(
+                check,
+                hwnd=self.hwnd,
+                timeout_s=timeout_s,
+                stop_event=self.stop_event,
+            )
+            record = {"ok": outcome.verified, "check": check, **outcome.to_dict()}
+            results.append(record)
+            if not outcome.verified:
+                self._emit_step(f"preflight.{index}", "preflight.condition", False, record)
+                return {
+                    "ok": False,
+                    "required": True,
+                    "error": f"replay preflight condition failed: {outcome.detail}",
+                    "target": target,
+                    "checks": results,
+                    "ignored": ignored,
+                }
+        return {
+            "ok": True,
+            "required": bool(target.get("required") or checks or safety.get("requires_preflight")),
+            "target": target,
+            "checks": results,
+            "ignored": ignored,
+            **({"hwnd": self.hwnd} if self.hwnd else {}),
+        }
+
+    @staticmethod
+    def _evidence_expectation(requirement: Any) -> dict[str, Any] | None:
+        if not isinstance(requirement, dict):
+            return None
+        direct = {
+            key: value for key, value in requirement.items()
+            if key in verify.SUPPORTED_CONDITIONS
+        }
+        if direct:
+            return direct
+        predicate = str(requirement.get("predicate") or "").strip().casefold()
+        value = requirement.get("value")
+        mapping = {
+            "visible.text": "text_appears",
+            "window.visible": "window_appears",
+            "file.exists": "file_exists",
+            "process.running": "process_running",
+        }
+        key = mapping.get(predicate)
+        return {key: value} if key and value not in (None, "") else None
+
+    def _postflight_evidence(self, script: dict[str, Any]) -> dict[str, Any]:
+        evidence = script.get("evidence")
+        required = evidence.get("required", []) if isinstance(evidence, dict) else evidence
+        if not isinstance(required, list):
+            return {"ok": True, "required": False, "checks": []}
+        checks: list[dict[str, Any]] = []
+        advisory: list[str] = []
+        unsupported: list[Any] = []
+        for requirement in required:
+            expectation = self._evidence_expectation(requirement)
+            if expectation:
+                checks.append(expectation)
+            elif isinstance(requirement, str):
+                advisory.append(requirement)
+            else:
+                unsupported.append(requirement)
+        if unsupported:
+            error = "unsupported structured evidence requirement"
+            result = {"ok": False, "error": error, "unsupported": unsupported}
+            self._emit_step("postflight", "postflight.evidence", False, result)
+            return {**result, "required": True, "checks": [], "advisory": advisory}
+        results = []
+        for index, check in enumerate(checks, start=1):
+            outcome = verify.check(
+                check,
+                hwnd=self.hwnd,
+                timeout_s=max(0.2, min(float(check.get("timeout_s") or 2.0), 10.0)),
+                stop_event=self.stop_event,
+            )
+            record = {"ok": outcome.verified, "check": check, **outcome.to_dict()}
+            results.append(record)
+            if not outcome.verified:
+                self._emit_step(f"postflight.{index}", "postflight.evidence", False, record)
+                return {
+                    "ok": False,
+                    "required": True,
+                    "error": f"replay evidence requirement failed: {outcome.detail}",
+                    "checks": results,
+                    "advisory": advisory,
+                }
+        return {"ok": True, "required": bool(checks), "checks": results, "advisory": advisory}
+
     def _run_step(self, idx: int, step: dict) -> dict[str, Any]:
         tool = step.get("tool", "")
         expect = step.get("expect")
@@ -1610,6 +1908,20 @@ class Replayer:
         if not path.is_absolute():
             path = SCRIPTS_DIR / path
         script = json.loads(path.read_text(encoding="utf-8"))
+        if script.get("format") == "automation-ir/1":
+            script = wps_from_automation_ir(script)
+        return self.run_script(script, script_name=path.name)
+
+    def run_script(self, script: dict[str, Any], *, script_name: str = "in-memory") -> dict[str, Any]:
+        error = validate_script(script)
+        if error:
+            return {
+                "ok": False,
+                "error": error,
+                "results": [],
+                "preflight": {"ok": False, "required": False, "error": error},
+                "anchor_cache": self._anchor_summary(),
+            }
         steps = script.get("steps", [])
         # wps/2: seed variables (all string-valued). v1 scripts have none.
         raw_vars = script.get("vars") or {}
@@ -1619,8 +1931,8 @@ class Replayer:
         self._results = []
         self._reset_anchor_metrics()
         total = replay_control.count_leaves(steps)
-        BUS.publish("replay", state="start", script=path.name, total=total)
-        preflight = self._preflight_target_window(script)
+        BUS.publish("replay", state="start", script=script_name, total=total)
+        preflight = self._preflight(script)
         if not preflight.get("ok", False):
             BUS.publish("replay", state="done", ok=False)
             self._flush_anchor_cache()
@@ -1631,12 +1943,19 @@ class Replayer:
                 "anchor_cache": self._anchor_summary(),
             }
         ok_all = self._exec_steps(steps)
+        postflight = (
+            self._postflight_evidence(script)
+            if ok_all
+            else {"ok": False, "required": False, "checks": [], "skipped": True}
+        )
+        ok_all = bool(ok_all and postflight.get("ok", False))
         BUS.publish("replay", state="done", ok=ok_all)
         self._flush_anchor_cache()
         return {
             "ok": ok_all,
             "results": self._results,
             "preflight": preflight,
+            "postflight": postflight,
             "anchor_cache": self._anchor_summary(),
         }
 

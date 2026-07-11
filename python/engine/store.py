@@ -12,6 +12,8 @@ from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from .secure_store import is_protected, protect_text, unprotect_text
+
 
 _DB_PATH = None
 
@@ -142,6 +144,23 @@ class ExecutionStore:
             CREATE INDEX IF NOT EXISTS idx_learned_targets_updated ON learned_targets(updated_at);
         """)
         conn.commit()
+        self._migrate_plaintext_vault(conn)
+
+    @staticmethod
+    def _migrate_plaintext_vault(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT key, value FROM vault").fetchall()
+        migrated = False
+        for row in rows:
+            stored = str(row["value"])
+            if is_protected(stored):
+                continue
+            conn.execute(
+                "UPDATE vault SET value = ? WHERE key = ?",
+                (protect_text(stored), row["key"]),
+            )
+            migrated = True
+        if migrated:
+            conn.commit()
 
     # ── Checkpoint API ──────────────────────────────────────────
 
@@ -334,18 +353,18 @@ class ExecutionStore:
     # ── Vault API ───────────────────────────────────────────────
 
     def vault_set(self, key: str, value: str):
-        """存储敏感信息（TODO: 实际加密）"""
+        """Store a secret encrypted for the current Windows user via DPAPI."""
         conn = self._get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO vault (key, value, created_at) VALUES (?, ?, ?)",
-            (key, value, time.time()),
+            (key, protect_text(value), time.time()),
         )
         conn.commit()
 
     def vault_get(self, key: str) -> Optional[str]:
         conn = self._get_conn()
         row = conn.execute("SELECT value FROM vault WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else None
+        return unprotect_text(row["value"]) if row else None
 
     def vault_delete(self, key: str):
         conn = self._get_conn()

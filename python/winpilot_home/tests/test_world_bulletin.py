@@ -341,8 +341,9 @@ def test_predictive_ocr_prefetches_action_evidence(monkeypatch):
     assert "transient_action_evidence" in element.states
 
 
-def test_tool_session_auto_starts_and_stops_screen_watch_for_target():
+def test_tool_session_auto_starts_and_releases_shared_screen_watch_for_target(monkeypatch):
     from winpilot.agent.tools import ToolSession
+    from winpilot.fast.perception_daemon import PERCEPTION_DAEMON
 
     class Watcher:
         def __init__(self):
@@ -371,6 +372,10 @@ def test_tool_session_auto_starts_and_stops_screen_watch_for_target():
             }
 
     watcher = Watcher()
+    released = []
+    lease = SimpleNamespace(hwnd=123, watcher=watcher, cache=SimpleNamespace())
+    monkeypatch.setattr(PERCEPTION_DAEMON, "acquire", lambda hwnd, run_id="": lease)
+    monkeypatch.setattr(PERCEPTION_DAEMON, "release", lambda item: released.append(item))
     session = ToolSession(task="demo")
     session.run_id = "run-1"
     session._window_alive = lambda hwnd: bool(hwnd)
@@ -383,8 +388,9 @@ def test_tool_session_auto_starts_and_stops_screen_watch_for_target():
 
     session.close()
 
-    assert watcher.stop_calls == 1
-    assert watcher.running is False
+    assert released == [lease]
+    assert watcher.stop_calls == 0
+    assert watcher.running is True
 
 
 def test_tool_session_auto_watch_requires_real_run_id():

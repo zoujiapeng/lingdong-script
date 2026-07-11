@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 
 from ..agent.tool_result import ToolResult
+from ..action.desktop_queue import DESKTOP_ACTION_QUEUE
+from ..action.raw_device import RawDeviceExecutor
 from ..config import CONFIG
 from ..perception import ocr, vision_cv
 from ..utils.log import BUS
@@ -386,6 +388,7 @@ class FastGuiController:
             event_context_provider=lambda: {"run_id": getattr(self.session, "run_id", None)},
         )
         self.capture_fn = capture_fn
+        self.raw_device = RawDeviceExecutor(session)
         self._color_palette_button_cache: dict[tuple[int, int, int, int, int], tuple[int, int]] = {}
 
     def _target_region(self):
@@ -665,7 +668,10 @@ class FastGuiController:
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
-        result = self.session.dispatch(name, args)
+        if self.raw_device.supports(name):
+            result = self.raw_device.execute(name, args)
+        else:
+            result = self.session.dispatch(name, args)
         elapsed = max(0, _now_ms() - started)
         result.replay = result.replay or {}
         result.replay.setdefault("elapsed_ms", elapsed)
@@ -1356,6 +1362,39 @@ class FastGuiController:
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
     def execute(
+        self,
+        actions: list[dict[str, Any]],
+        stop_on_error: bool = True,
+        sync: dict[str, Any] | bool | None = None,
+        subgoal: str = "",
+    ) -> dict[str, Any]:
+        has_mutation = False
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            name, args = _normalise_action(action)
+            name, _args, _upgraded_from = _upgrade_semantic_action(name, args)
+            if name in BATCH_MUTATING_ACTIONS:
+                has_mutation = True
+                break
+        execute = lambda: self._execute_in_lease(
+            actions,
+            stop_on_error=stop_on_error,
+            sync=sync,
+            subgoal=subgoal,
+        )
+        if not has_mutation:
+            return execute()
+        target = getattr(self.session, "hwnd", None)
+        return DESKTOP_ACTION_QUEUE.run(
+            "controller_batch",
+            execute,
+            target_hwnd=int(target) if target else None,
+            metadata={"subgoal": str(subgoal or ""), "action_count": len(actions)},
+            coalesce_nested=True,
+        )
+
+    def _execute_in_lease(
         self,
         actions: list[dict[str, Any]],
         stop_on_error: bool = True,

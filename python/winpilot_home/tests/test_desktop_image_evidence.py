@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 
 import cv2
 import numpy as np
@@ -69,6 +70,43 @@ def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch)
     assert "r1/batch_after_001.jpg" in screenshots
     assert (tmp_path / "r1" / "batch_before_001.jpg").exists()
     assert (tmp_path / "r1" / "batch_after_001.jpg").exists()
+
+
+def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkeypatch):
+    from winpilot.recorder import trace as trace_mod
+
+    recorder = trace_mod.TraceRecorder()
+    trace_mod.BUS.remove_sink(recorder._on_event)
+    image = np.full((20, 30, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+
+    def slow_capture():
+        time.sleep(0.05)
+        return image.copy()
+
+    monkeypatch.setattr(trace_mod, "capture", slow_capture)
+    try:
+        recorder.start("async")
+        started = time.monotonic()
+        recorder._on_event({"type": "agent_tool_start", "action_id": "a", "tool": "click"})
+        recorder._on_event({"type": "agent_tool_start", "action_id": "b", "tool": "click"})
+        recorder._on_event({"type": "agent_tool", "action_id": "a", "tool": "click"})
+        recorder._on_event({"type": "agent_tool", "action_id": "b", "tool": "click"})
+        enqueue_elapsed = time.monotonic() - started
+        recorder.stop()
+    finally:
+        trace_mod.BUS.remove_sink(recorder._on_event)
+
+    assert enqueue_elapsed < 0.04
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "async.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    by_action = {}
+    for event in events:
+        by_action.setdefault(event.get("action_id"), []).append(event.get("screenshot"))
+    assert by_action["a"] == ["async/before_001.jpg", "async/after_001.jpg"]
+    assert by_action["b"] == ["async/before_002.jpg", "async/after_002.jpg"]
 
 
 def test_fold_base64_adds_likely_canvas_summary_for_mixed_zoom():

@@ -1,8 +1,7 @@
-"""Automation IR v1: shared envelope for replay, FlowScript, and skills.
+"""Automation IR v1: canonical handoff for replay, FlowScript, and skills.
 
-The IR is intentionally small. It does not replace `.wps.json` or FlowScript
-yet; it gives them one common, validated handoff shape so new automation
-features do not keep inventing parallel metadata.
+Legacy WPS and FlowScript documents remain import/export formats. New saved
+automations and skills use this validated envelope as their runtime boundary.
 """
 from __future__ import annotations
 
@@ -155,6 +154,8 @@ def wps_from_automation_ir(ir: dict[str, Any]) -> dict[str, Any]:
         "created": _created_at(ir.get("created")),
         "vars": _clone(ir.get("variables") or {}),
         "steps": _clone(ir.get("steps") or []),
+        "safety": _clone(ir.get("safety") or {}),
+        "fallback": _clone(ir.get("fallback") or {}),
     }
     target_window = conditions.get("target_window")
     if target_window not in (None, "", {}):

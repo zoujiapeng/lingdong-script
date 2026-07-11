@@ -3,7 +3,8 @@
 WinPilot 的复用链路是：
 
 ```text
-Agent 实时操作 -> trace -> .wps.json / automation-ir/1 -> Replayer 或 FlowScript
+Agent/人类操作 -> trace -> automation-ir/1 -> Replayer / ARP / Flow editor
+                                  \-> .wps.json 兼容导出
 ```
 
 ## Trace
@@ -27,7 +28,7 @@ Agent 实时操作 -> trace -> .wps.json / automation-ir/1 -> Replayer 或 FlowS
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
 ```
 
-脚本走 `/api/chat`，也就是前端 Agent 页面同一路径；它不会直接调用内部 runner。输出在 `python/winpilot_home/evals/`，只保存本机评测索引，不提交。报告会列出 `run_id`、trace 文件、截图目录、工具序列和 done 核验摘要。
+脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标入口走 `/api/v2/arp/runs`，会先尝试 Skill，再在 miss/fail 时进入同一个 AgentRunner；两条入口共享 RuntimeJob、ToolSession、Controller、trace 和 done gate，但路由前缀不同。
 
 当前低延迟 GUI 靶场位于 `python/winpilot_home/eval_targets/gui_agent_target.html`。它用于测试 `run_action_batch(subgoal=...)`、自动 `screen_watch`、recent/action ROI、`observe(changed_only=true)` 和 fresh-screen done gate，不是生产功能的专属规则。
 
@@ -39,7 +40,8 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `export_script()` 会收集顶层 `agent_tool.replay`，也会收集 `run_action_batch` 内部的 `agent_batch_action.replay`；只有 Replayer 已知的可执行工具会进入脚本，`auto_visual_verify`、`observe`、`execute_subgoal` 等观测/复合/校验事件不会变成重放动作。
 - 保存前会做结构校验：未知工具、缺少 click 目标、缺少 type_text 文本、无效 `draw_strokes` 笔画、无效 loop 类型等会被拒绝，避免“能保存但不能重放”。`ctrl.if` 必须带 `cond` 对象，确实无条件时显式写 `{"always": true}`；`ctrl.loop` 的 `count` / `max_iters` 必须是数字，`while` / `until` 必须带 `cond` 对象，避免空条件循环跑到上限才停。
 - Replayer 当前支持 `click`、`type_text`、`hotkey`、`launch`、`focus_window`、`scroll`、`drag`、`draw_strokes`、`wait`、`run_shell`、`run_detached`、`tray_click`，以及 `ctrl.if` / `ctrl.loop` 和 `ext.*` 便利步骤。
-- 脚本如果声明 `target_window`，或在 `conditions` 里声明 `target_window` / `window_title` / `window_appears`，Replayer 会在执行任何动作前做窗口 preflight：找到目标后绑定 `hwnd`，找不到则 fail-fast，并把 `preflight.target_window` 错误写入 replay results。新导出的 agent trace 会尽量从 `launch.expect`、`target_window` 参数或 perception reducer 中写入稳定的 `title/process`，但不会持久化上次运行的易变 `hwnd`。
+- 脚本如果声明 `target_window`，Replayer 会在任何动作前绑定稳定 title/process；Automation IR 声明桌面 mutation 却没有目标窗口时 fail-fast。`conditions.checks` 还可强制 `file_exists`、`process_running`、可见文本等 preflight。
+- 结构化 `evidence.required` 会在步骤完成后执行 postflight；`visible.text`、`window.visible`、`file.exists`、`process.running` 或直接 verify DSL 不通过时，replay 整体失败。旧字符串 evidence 仅作为 advisory，不冒充已验证证据。
 - 文本 selector 只会通过已聚焦/已锚定窗口 `fusion.observe()` 重新定位；Replayer 不会猜 `list_windows()[0]` 作为锚点。没有目标窗口时，文本重定位会失败，只有坐标型步骤能继续按录制坐标兜底。
 - `elapsed_ms` 等 trace 计时字段不是重放语义，导出时会剥离；selector 文本会去掉未读数、消息数等易变噪声。
 
@@ -66,11 +68,11 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `GET /api/replay/{replay_id}`
 - `POST /api/replay/{replay_id}/cancel`
 
-`POST /api/replay` 当前会启动 replay job 并返回 `replay_id`。桌面动作仍由全局运行状态串行保护；查询接口返回 `status`、`ok`、`result.results`、`preflight`、`error` 和时间戳，前端不要再只依赖 websocket 事件或 `{ok: true}` 判断 replay 结果。
+`POST /api/replay` 会提交统一 RuntimeJob 并返回 `replay_id`。Agent、ARP、Replay 和计划任务共享 `interactive_runtime` 排队，不再互相直接返回 busy 409；查询接口返回步骤、preflight、postflight、error 和时间戳。
 
 ## Automation IR v1
 
-`python/winpilot_home/winpilot/automation_ir.py` 和 `src/renderer/utils/automationIR.ts` 提供当前最小共享 envelope：
+`python/winpilot_home/winpilot/automation_ir.py` 和 `src/renderer/utils/automationIR.ts` 提供规范中间层：
 
 - `format: "automation-ir/1"`
 - `id` / `name` / `source`
@@ -78,7 +80,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `steps` / `variables`
 - `safety` / `fallback`
 
-当前 IR 是 WPS/Flow/skill 的共同 handoff，不是唯一事实源。`.wps.json` 仍是 WinPilot Replayer 的直接输入，FlowScript 仍是前端流程图格式。只有 `source.kind == "wps"` 的 IR 允许回转成 `.wps.json`；FlowScript-sourced IR 不能静默转 WPS，避免不可等价执行的流程被假装成可离线 replay。
+新保存流程、成功 trace、Apprentice draft 和 Memory Skill 默认写 `.automation.json`。Flow editor 的运行链也是 Flow state -> IR -> `arp/1`。WPS、FlowScript 和 DSL 继续作为兼容 adapter；只有 `source.kind == "wps"` 的 IR 可回转为 WPS，避免不可等价执行的 Flow 被假装成离线 replay。
 
 ## 人类演示录制
 

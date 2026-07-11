@@ -10,13 +10,13 @@ __pycache__/
 Thumbs.db
 screenshot_*.png
 *.js.map
-*.js
 # WinPilot webui source: vanilla JS, not build artifacts — must be tracked
 !python/winpilot_home/webui/*.js
 python-runtime/
 
 # Build assets (icons, screenshots)
-assets/
+assets/*
+!assets/icon.png
 
 # Runtime artifacts
 electron_err.txt

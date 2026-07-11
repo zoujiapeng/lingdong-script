@@ -16,6 +16,7 @@ import { matchExact } from '../utils/templateMatcher';
 import { createFlowExecutor } from './executor';
 import type { ExecutionController } from './executor';
 import { generateText } from '../utils/textGenerator';
+import { automationIrFromFlowScript } from '../utils/automationIR';
 import { DEFAULT_SETTINGS, DEFAULT_UI_STATE, PRESET_TEMPLATES, PRESET_TEMPLATE_META, STORAGE_KEY, MAX_HISTORY } from './defaults';
 import { loadCustomTemplates, saveCustomTemplates, loadAgentHistory, saveAgentHistory } from './persistence';
 export { loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut, loadCustomTemplates, saveCustomTemplates } from './persistence';
@@ -389,7 +390,8 @@ export const useStore = createWithEqualityFn<AppStore>()(
         state.isDirty = false;
       });
       const script = get().script;
-      const json = JSON.stringify(script, null, 2);
+      const automation = automationIrFromFlowScript(script, `air-${script.meta.id}`);
+      const json = JSON.stringify(automation, null, 2);
       const pseudoCode = (() => {
         try {
           return generateText(script, 'pseudocode');
@@ -398,10 +400,10 @@ export const useStore = createWithEqualityFn<AppStore>()(
 
       const api = (window as any).electronAPI;
       if (api?.saveFileDialog) {
-        const result = await api.saveFileDialog(`${script.meta.name}.json`);
+        const result = await api.saveFileDialog(`${script.meta.name}.automation.json`);
         if (!result.canceled && result.filePath) {
           try {
-            const basePath = result.filePath.replace(/\.json$/, '');
+            const basePath = result.filePath.replace(/\.automation\.json$|\.json$/, '');
             await api.writeFile(result.filePath, json);
             await api.writeFile(basePath + '.flow', pseudoCode);
             return;
@@ -420,7 +422,7 @@ export const useStore = createWithEqualityFn<AppStore>()(
         a.click();
         URL.revokeObjectURL(url);
       };
-      dl(json, `${script.meta.name}.json`, 'application/json');
+      dl(json, `${script.meta.name}.automation.json`, 'application/json');
       dl(pseudoCode, `${script.meta.name}.flow`, 'text/plain');
     },
 
@@ -1448,8 +1450,8 @@ function _registerListeners() {
       const msgType = typeof msg?.type === 'string' ? msg.type : '';
       if (!msgType) return;
 
-      // WinPilot native events. The detailed step/tool/usage stream is rendered
-      // by AgentView; the store only tracks coarse run status + history.
+      // WinPilot native events. PlatformWorkbench reads the control-plane
+      // projection; this compatibility store keeps coarse status + history.
       if (msgType === 'agent_start') {
         _agentStartTime = Date.now();
         _agentDoneRunId = '';

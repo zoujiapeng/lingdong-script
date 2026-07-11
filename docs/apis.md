@@ -4,7 +4,7 @@
 
 ## Electron HTTP API
 
-实现：`src/main/api.ts`。默认监听 `127.0.0.1:7880`，可由 `API_PORT` 覆盖。主要服务流程图编辑器、宏、`@feature` 和外部工具控制。
+实现：`src/main/api.ts`。默认监听 `127.0.0.1:7880`，可由 `API_PORT` 覆盖。除 `/api/ping` 外要求 Electron 进程生成的 bearer token，并严格限制本地 origin。`/api/execute-js` 默认禁用，只能用显式开发环境变量开启。
 
 当前端点：
 
@@ -17,23 +17,23 @@
 - 截图/OCR：`/api/screenshot/capture`、`/api/screenshot/select-region`、`/api/ocr/region`、`/api/wheel-select`
 - 宏：`/api/macro/start-recording`、`/api/macro/stop-recording`、`/api/macro/play`、`/api/macro/list`、`/api/macro/delete`、`/api/macro/get-events`、`/api/macro/recording-status`
 - `@feature`：`/api/features/list`、`/api/features/reload`、`/api/features/call`
-- 模板/标记：`/api/save-template`、`/api/list-templates`、`/api/search-templates`、`/api/marks/save`、`/api/marks/load`
+- 模板/标记：`/api/save-template`、`/api/list-templates`、`/api/marks/save`、`/api/marks/load`
 - AI/命令：`/api/ai/generate`、`/api/command`、`/api/execute-js`
 - 旧 Agent IPC：`/api/agent-start`
 - HTTP MCP：`POST /mcp`
 
 ## WinPilot REST
 
-实现：`python/winpilot_home/winpilot/server.py`。由 `serve.py` 启动，Electron 通常选择动态本地端口。服务前端 Agent 面板和 WinPilot webui。
+实现：`python/winpilot_home/winpilot/server.py`。由 `serve.py` 启动，Electron 通常选择动态本地端口。原生 React 工作台通过该控制面运行 Agent/ARP/Replay；`/` 下的旧 webui 只保留为兼容和诊断入口。
 
 当前端点：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| POST | `/api/chat` | 启动一个 WinPilot 任务 |
+| POST | `/api/chat` | 提交 Agent RuntimeJob，返回 `run_id/job_id/status` |
 | POST | `/api/stop` | 请求停止当前任务 |
 | POST | `/api/interject` | 向运行中的任务插话 |
-| GET | `/api/status` | 当前任务状态 |
+| GET | `/api/status` | 当前任务、job queue、Desktop queue、Perception daemon 状态 |
 | POST | `/api/elevate` | 权限提升/辅助启动 |
 | GET/PATCH | `/api/config` | 读取/更新配置 |
 | GET | `/api/traces` | 列 trace |
@@ -51,17 +51,20 @@
 | POST | `/api/replay` | 启动 `.wps.json` replay job，返回 `replay_id` |
 | GET | `/api/replay/{replay_id}` | 查询 replay job 状态、结果、失败细节 |
 | POST | `/api/replay/{replay_id}/cancel` | 取消 replay job |
+| GET | `/api/v2/jobs` | 查询统一 Agent/ARP/Replay/Schedule jobs |
+| GET/POST | `/api/v2/jobs/{job_id}`、`/cancel` | 查询或取消任意 runtime job |
 | GET/POST/DELETE | `/api/memory` | 经验记忆 |
 | PUT/DELETE | `/api/memory/{recipe_id}` | 单条经验记忆 |
 | GET/DELETE | `/api/session` | 会话记忆 |
 | GET/POST | `/api/agent-schedules` | 列出或创建 WinPilot Agent 计划任务 |
+| PATCH | `/api/agent-schedules/{schedule_id}` | 更新、启用或重新定时计划任务 |
 | DELETE | `/api/agent-schedules/{schedule_id}` | 禁用计划任务 |
 | WS | `/ws/events` | BUS 事件流 |
 | GET | `/` | WinPilot webui |
 
 `/api/trace/{run_id}/summary` 里的 `low_latency` / `fast_gui` 字段是当前性能复盘入口：包含截图、感知、LLM 决策、动作执行、动作后验证、VLM/重规划/skill 复用频率、p50/p95 latency，以及 batch subgoal、controller phase、锚点点击/缓存/失败统计。
 
-`/api/status` 的 `busy` 字段会拆分 `agent`、`replay`、`human_recording`，旧字段 `running` 仍表示三者任一为 true。`desktop_action_queue` 字段返回当前 single-writer 桌面动作队列的累计提交、完成、失败、重入次数、后台 async job 状态和最后一次动作耗时；trace summary 的 `low_latency.desktop_action_queue` 会汇总本次 run 的同步队列等待/执行耗时和 async job 的 queued/done/error/canceled 指标。
+WinPilot API 除 `/api/ping` 外要求 Electron 托管进程传入的 bearer token；WebSocket 使用同一 token query。浏览器 `OPTIONS` 不携带最终 Authorization，因此先交给严格 origin/method/header 的 CORS 预检，实际 API 请求仍必须鉴权。Agent、ARP、Replay 与计划任务按 `interactive_runtime` 资源排队，不再仅因另一个交互 job 活跃就返回 409。`desktop_action_queue` 仍串行真实鼠标键盘写入。
 
 `/api/memory` 的 recipe/note 结构包含 `task`、`app`、`steps`，并可带 `conditions` 和 `evidence` 数组；`PUT /api/memory/{recipe_id}` 也允许更新这两个字段。它们用于说明该记忆何时适用、复用前后需要什么证据，不能把 replay 执行成功当成任务完成证明。
 

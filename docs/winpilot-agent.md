@@ -15,10 +15,11 @@
 
 ## 主循环
 
-一次 `/api/chat` 任务的真实路径：
+直接 `/api/chat` 与原生前端 ARP 目标最终共享同一个 AgentRunner：
 
 ```text
-server.py _RunState
+/api/chat -> RuntimeJob(interactive_runtime)
+/api/v2/arp/runs -> RuntimeJob -> skill_replay miss/fail -> agent_goal
   -> router.build_runner()
   -> AgentRunner.run()
   -> build messages + tool_schemas()
@@ -49,6 +50,7 @@ server.py _RunState
 - plan/world/undo stack。
 - RuntimeProfile；`runtime.to_dict().capabilities` 记录本轮 desktop/coding/replay/scheduler/automation_ir/desktop_action_queue 等能力。
 - `dispatch()` 到各个 mixin。
+- Perception daemon lease：按 target hwnd 复用 watcher 与 ElementCache。
 
 工具实现分布：
 
@@ -131,6 +133,8 @@ not an app-specific calculator rule.
 
 `run_action_batch` 在本地连续执行多个动作，并返回每个子动作结果。顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 也会自动 fast-wrap 成单动作 batch。
 
+Controller batch 外层只取得一次 Desktop Action Queue lease；`action/raw_device.py` 直接调用常见动作 handler，避免每个子动作重新经过完整 `ToolSession.dispatch()`。复杂工具仍走完整 dispatch，确保权限、scope 和证据边界不丢失。
+
 排查字段：
 
 - `wrapped_by_fast_controller`
@@ -149,7 +153,7 @@ not an app-specific calculator rule.
 - `coordinate_diagnostics`
 - `coordinate_click_test`
 
-它们报告物理屏幕、截图尺寸、monitor、窗口 region/DPI、目标相对坐标、真实鼠标点击路径。不要把浏览器 CSS/client 坐标当成真实 Windows 鼠标坐标。
+`winpilot/__init__.py` 会先调用 `utils/dpi.py` 设置 Per-Monitor V2，避免只导入动作模块时被 Windows DPI 虚拟化。诊断工具报告物理屏幕、截图尺寸、monitor、窗口 region/DPI、目标相对坐标和真实鼠标点击路径；不要把浏览器 CSS/client 坐标当成真实 Windows 鼠标坐标。
 
 ### 真实软件评测边界
 
@@ -160,7 +164,7 @@ not an app-specific calculator rule.
 - 多窗口干扰：至少覆盖“一个已登录主窗口 + 一个登录页/错误窗口”的场景，确认 agent 不会死盯错误窗口。
 - 证据要求：每个 run 都要保存 trace、LLM request/response、tool result 和截图；结论以截图/文件/窗口/可见文本为准，不以 agent 口头 done 为准。
 
-这些评测应走 `scripts/gui_eval_run.py` 或前端 Agent 页的同一 `/api/chat` 路径。内部 runner/CLI 路径只能做单元级定位，不能替代前端真实路径。
+直接 Agent 评测走 `scripts/gui_eval_run.py` 的公开 `/api/chat`；前端目标页走 `/api/v2/arp/runs`。两者不是同一个 HTTP 入口，但共享 RuntimeJob、AgentRunner、ToolSession、Controller、trace 和 done gate；内部 runner/CLI 仍不能替代前端路径。
 
 ## Done Gate
 
@@ -180,7 +184,7 @@ not an app-specific calculator rule.
 - `agent/failure_classifier.py`
 - `agent/failure_recovery.py`
 
-`done_max_rejects` 后可能 force-accept，但会标记 `unverified`。这种 run 不应写入 trusted memory/skill。
+模型 judge 异常或达到 `done_max_rejects` 都 fail-closed；未验证结果不会因重试次数耗尽被强制升级为成功。
 
 ### 验证并发边界
 
@@ -202,9 +206,9 @@ GUI-only 任务不应暴露 coding/file/search 工具。
 
 ## Replay / Skill
 
-- `recorder/trace.py` 记录 BUS 事件、截图、LLM request/response 和 `.wps.json`。
-- `.wps.json` 是 WinPilot 语义重放格式。
-- `reuse_skill` 会强匹配历史成功 `.wps.json`，0-token replay 后仍要求当前状态验证。
+- `recorder/trace.py` 通过有界异步 writer 记录 BUS、截图和 LLM I/O，before/after 由 `action_id` 配对。
+- `automation-ir/1` 是新 Skill/Flow/trace artifact；`.wps.json` 是兼容步骤格式。
+- `reuse_skill` 会强匹配已验证 `.automation.json`（旧 WPS 仍可读），0-token replay 后仍要求当前状态验证。
 - Replay 成功不是 done 证据；必须 observe/read_text/expect 证明最终结果。
 - FlowScript 导入只是编辑桥。WPS-only 节点 fail-fast，WPS 来源基础 GUI 节点要求真实 Electron feature bridge。
 
@@ -226,7 +230,7 @@ WinPilot Agent 内部计划任务：
 - 工具：`schedule_task`、`list_scheduled_tasks`、`cancel_scheduled_task`。
 - 数据：`python/winpilot_home/agent_schedules.json`。
 - 服务端线程：`server.py` 的 scheduler loop。
-- 到期后仍走 `router.build_runner() -> AgentRunner`。
+- 到期后提交统一 RuntimeJob，再走 `router.build_runner() -> AgentRunner`；忙时排队，不另建第二套 agent thread。
 - 每次执行会写入独立 `run_id`、trace、`last_status` 和 `run_count`；一次性任务结束后自动禁用，周期任务计算下一次时间。
 - `run_at` 必须是 ISO-8601 时间；自然语言时间要先由模型/上层解析成明确时间，底层不会把无效时间静默当成“立刻执行”。
 

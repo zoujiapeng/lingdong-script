@@ -621,7 +621,38 @@ class ToolSession(
         if hint:
             self.target_hint = hint
         if self._window_alive(self.hwnd):
+            self._bind_perception_target(int(self.hwnd))
             self._ensure_screen_watch("target")
+
+    def _bind_perception_target(self, hwnd: int) -> None:
+        controller = getattr(self, "_fast_gui_controller", None)
+        if controller is None:
+            return
+        current = getattr(self, "_perception_lease", None)
+        if current is not None and int(getattr(current, "hwnd", 0) or 0) == int(hwnd):
+            return
+        try:
+            from ..fast.perception_daemon import PERCEPTION_DAEMON
+
+            previous_watcher = getattr(controller, "watcher", None)
+            if current is not None:
+                PERCEPTION_DAEMON.release(current)
+            lease = PERCEPTION_DAEMON.acquire(
+                int(hwnd),
+                run_id=str(getattr(self, "run_id", "") or ""),
+            )
+            if (
+                current is None
+                and previous_watcher is not None
+                and previous_watcher is not lease.watcher
+                and not getattr(previous_watcher, "_perception_daemon_managed", False)
+            ):
+                previous_watcher.stop()
+            controller.watcher = lease.watcher
+            controller.cache = lease.cache
+            self._perception_lease = lease
+        except Exception:
+            logger.debug("perception daemon target bind failed", exc_info=True)
 
     def _ensure_screen_watch(self, reason: str = "") -> None:
         if not CONFIG.get("fusion", "screen_watch_autostart", default=True):
@@ -660,6 +691,16 @@ class ToolSession(
             return
         watcher = getattr(controller, "watcher", None)
         if watcher is None:
+            return
+        lease = getattr(self, "_perception_lease", None)
+        if lease is not None:
+            try:
+                from ..fast.perception_daemon import PERCEPTION_DAEMON
+
+                PERCEPTION_DAEMON.release(lease)
+            except Exception:
+                logger.debug("perception daemon release failed", exc_info=True)
+            self._perception_lease = None
             return
         try:
             status = watcher.status()
