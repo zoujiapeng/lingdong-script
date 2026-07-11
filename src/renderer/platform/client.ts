@@ -10,6 +10,7 @@ import type {
   RuntimeEvent,
   AgentSchedule,
 } from './contracts';
+import type { AutomationIR } from '../utils/automationIR';
 
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
 const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
@@ -252,11 +253,36 @@ export class ControlPlaneClient {
     return this.request('api/v2/arp/validate', { method: 'POST', body: JSON.stringify(graph) });
   }
 
+  validateAutomation(automation: AutomationIR): Promise<GraphValidation> {
+    return this.request('api/v2/automation-ir/validate', {
+      method: 'POST',
+      body: JSON.stringify(automation),
+    });
+  }
+
   async startGraph(graph: ArpGraph, inputs: Record<string, unknown> = {}): Promise<ArpExecutionSnapshot> {
     const response = await this.request<{ ok: boolean; run_id: string; run: ArpExecutionSnapshot }>('api/v2/arp/runs', {
       method: 'POST',
       body: JSON.stringify({ graph, inputs }),
     });
+    return response.run;
+  }
+
+  async startAutomation(
+    automation: AutomationIR,
+    inputs: Record<string, unknown> = {},
+  ): Promise<ArpExecutionSnapshot> {
+    const response = await this.request<{
+      ok: boolean;
+      runtime_kind: string;
+      run?: ArpExecutionSnapshot;
+    }>('api/v2/automation-ir/runs', {
+      method: 'POST',
+      body: JSON.stringify({ automation, inputs }),
+    });
+    if (!response.run) {
+      throw new Error(`Automation runtime ${response.runtime_kind || 'unknown'} did not create an ARP run`);
+    }
     return response.run;
   }
 

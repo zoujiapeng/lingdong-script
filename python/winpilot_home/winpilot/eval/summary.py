@@ -175,6 +175,16 @@ def _low_latency_metrics(
         1 for e in tool_events
         if _screen_watch_status(e).get("running") is True
     )
+    incremental_prefetch_events = [
+        event for event in events
+        if event.get("type") == "perception_prefetch"
+        and event.get("source") == "perception_daemon"
+    ]
+    incremental_prefetch_ms = [
+        int(event.get("elapsed_ms") or 0)
+        for event in incremental_prefetch_events
+        if event.get("elapsed_ms") is not None
+    ]
     desktop_queue_events = [
         event for event in events
         if event.get("type") == "desktop_action_queue"
@@ -197,6 +207,10 @@ def _low_latency_metrics(
         for event in desktop_queue_done
         if event.get("elapsed_ms") is not None
     ]
+    desktop_queue_scopes = Counter(
+        str(event.get("scope") or "unspecified")
+        for event in desktop_queue_starts
+    )
     desktop_job_events = [
         event for event in events
         if event.get("type") == "desktop_action_queue_job"
@@ -235,10 +249,27 @@ def _low_latency_metrics(
         "skill_reuse_rate": round(skill_reuse_count / denominator, 3),
         "screen_watch_auto_starts": auto_watch_starts,
         "screen_watch_running_tool_events": watch_running_events,
+        "incremental_perception": {
+            "prefetches": len(incremental_prefetch_events),
+            "action_delta_prefetches": sum(
+                1 for event in incremental_prefetch_events
+                if event.get("action_delta") is True
+            ),
+            "transient_prefetches": sum(
+                1 for event in incremental_prefetch_events
+                if event.get("transient") is True
+            ),
+            "elements": sum(
+                int(event.get("count") or 0)
+                for event in incremental_prefetch_events
+            ),
+            "latency": _latency_summary(incremental_prefetch_ms),
+        },
         "desktop_action_queue": {
             "actions": len(desktop_queue_done),
             "errors": sum(1 for event in desktop_queue_done if event.get("state") == "error"),
             "reentrant": sum(1 for event in desktop_queue_starts if event.get("reentrant") is True),
+            "scopes": dict(desktop_queue_scopes),
             "wait_latency": _latency_summary(desktop_queue_wait_ms),
             "execution_latency": _latency_summary(desktop_queue_elapsed_ms),
             "async_jobs": {

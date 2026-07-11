@@ -5,6 +5,9 @@ import {
   automationDocumentToFlowScript,
   automationIrToFlowScript,
   automationIrToWps,
+  automationProjectionFingerprint,
+  automationRuntimeGraph,
+  validateAutomationRuntime,
   validateAutomationIR,
 } from '../utils/automationIR';
 import type { FlowScript } from '../types';
@@ -31,6 +34,8 @@ describe('Automation IR adapters', () => {
     expect(ir.variables).toEqual({ msg: 'hello' });
     expect(ir.safety.mutates_desktop).toBe(true);
     expect(ir.steps[0]).toEqual({ tool: 'click', coords: [1, 2] });
+    expect(ir.runtime).toEqual({ kind: 'wps_replay' });
+    expect(validateAutomationRuntime(ir)).toBeUndefined();
   });
 
   it('roundtrips Automation IR back to a WPS envelope when steps are WPS-shaped', () => {
@@ -94,6 +99,12 @@ describe('Automation IR adapters', () => {
       params: { x: 1, y: 2, method: 'single', delay_after: 0 },
     });
     expect(ir.safety.executor).toBe('flowscript');
+    expect(ir.runtime?.kind).toBe('arp_graph');
+    expect(automationRuntimeGraph(ir).metadata.source_ir).toBe('air-flow');
+    const stale = structuredClone(ir);
+    stale.steps[1].tool = 'changed-after-compile';
+    expect(validateAutomationRuntime(stale)).toContain('projection is stale');
+    expect(() => automationRuntimeGraph(stale)).toThrow('projection is stale');
 
     const restored = automationIrToFlowScript(ir);
     expect(restored.meta.id).toBe('flow-1');
@@ -144,5 +155,53 @@ describe('Automation IR adapters', () => {
       variables: {},
       steps: [{}],
     })).toContain('requires tool');
+  });
+
+  it('rejects Flow IR without a canonical runtime graph at execution time', () => {
+    const ir = {
+      format: 'automation-ir/1' as const,
+      id: 'air-old-flow',
+      name: 'old flow',
+      created: 1,
+      source: { kind: 'flowscript' },
+      conditions: {},
+      evidence: {},
+      safety: {},
+      fallback: {},
+      variables: {},
+      steps: [{ tool: 'start', node_id: 'start', params: {} }],
+    };
+
+    expect(validateAutomationIR(ir)).toBeUndefined();
+    expect(validateAutomationRuntime(ir)).toContain('runtime.kind');
+    expect(() => automationRuntimeGraph(ir)).toThrow('runtime.kind');
+  });
+
+  it('keeps the projection fingerprint cross-runtime stable', () => {
+    expect(automationProjectionFingerprint(
+      [{ tool: 'start', node_id: 's', params: { x: 1, text: '你好' } }],
+      { token: 'x' },
+    )).toBe('fnv1a32:f875dabb');
+  });
+
+  it('rejects dangling editor projection edges', () => {
+    expect(validateAutomationIR({
+      format: 'automation-ir/1',
+      id: 'air-edge',
+      name: 'bad edge',
+      created: 1,
+      source: { kind: 'flowscript' },
+      conditions: {},
+      evidence: {},
+      safety: {},
+      fallback: {},
+      variables: {},
+      steps: [{
+        tool: 'start',
+        node_id: 'start',
+        params: {},
+        outgoing: [{ to_node: 'missing' }],
+      }],
+    })).toContain('unknown to_node');
   });
 });

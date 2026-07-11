@@ -254,6 +254,78 @@ def test_changed_only_observe_uses_predictive_ocr_without_second_inference(monke
     assert session.snapshot.dim_stats["ocr"]["ms"] < 50
 
 
+def test_changed_only_observe_reuses_shared_daemon_incremental_ocr(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.agent import perception_tools, tools
+    from winpilot.fast.perception_daemon import PERCEPTION_DAEMON
+
+    session = ToolSession(task="read DAEMON_STATUS_READY")
+    session.run_id = "daemon-hit"
+    session._perception_lease = SimpleNamespace(hwnd=123)
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(tools, "window_region", lambda hwnd: Region(0, 0, 500, 400))
+    monkeypatch.setattr(perception_tools.win32, "_window_text", lambda hwnd: "Daemon Target")
+    monkeypatch.setattr(perception_tools.win32, "collect", lambda hwnd: [])
+    monkeypatch.setattr(
+        perception_tools.ocr,
+        "collect",
+        lambda region: (_ for _ in ()).throw(
+            AssertionError("daemon cache hit should skip current OCR")
+        ),
+    )
+    monkeypatch.setattr(
+        perception_tools.ocr,
+        "recognize",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("daemon cache hit should skip evidence OCR")
+        ),
+    )
+    monkeypatch.setattr(
+        perception_tools.CONFIG,
+        "get",
+        lambda section, key=None, default=None: (
+            0.0 if key == "observe_cache_ttl_s" else default
+        ),
+    )
+    element = UIElement(
+        source="ocr", role="text", text="DAEMON_STATUS_READY",
+        cx=170, cy=140, left=100, top=130, width=180, height=20,
+        states=["predictive_ocr", "incremental_perception"],
+    )
+    monkeypatch.setattr(
+        PERCEPTION_DAEMON,
+        "incremental_elements",
+        lambda hwnd, **kwargs: ([element], {
+            "hit": True,
+            "source": "perception_daemon",
+            "source_elapsed_ms": 90,
+            "record_count": 1,
+            "inflight": False,
+        }),
+    )
+    session._fast_gui_controller = SimpleNamespace(watcher=SimpleNamespace(status=lambda: {
+        "action_changed_regions": [
+            {"left": 90, "top": 120, "width": 220, "height": 50}
+        ],
+        "last_action_change_age_ms": 10,
+    }))
+
+    result = session._t_observe({
+        "changed_only": True,
+        "query": "DAEMON_STATUS_READY",
+        "include_icons": False,
+    })
+
+    assert "DAEMON_STATUS_READY" in result.text
+    assert session.snapshot.dim_stats["ocr"]["predictive_cache_hit"] is True
+    assert session.snapshot.dim_stats["ocr"]["predictive_source"] == "perception_daemon"
+
+
 def test_observe_changed_only_query_miss_falls_back_to_full_observe(monkeypatch):
     from types import SimpleNamespace
 

@@ -601,6 +601,7 @@ def test_run_projection_folds_agent_child_into_parent_arp_run():
     assert parent["kind"] == "arp"
     assert parent["goal"] == "Parent workflow"
     assert parent["status"] == "running"
+    assert parent["phase"] != "terminal"
     assert parent["metrics"]["action_decision_latency_avg_ms"] == 125
     assert parent["timeline"][-1]["child_run_id"] == "child"
     assert store.get("child") is None
@@ -608,6 +609,54 @@ def test_run_projection_folds_agent_child_into_parent_arp_run():
     store.on_event({"type": "arp_run_done", "ts": 6.0, "run_id": "parent", "status": "done"})
     store.on_event({"type": "trace", "ts": 6.1, "run_id": "parent", "state": "stopped"})
     assert store.current()["status"] == "done"
+
+
+def test_run_projection_terminal_phase_survives_late_perception_prefetch():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "late-prefetch"
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": run_id,
+        "graph_name": "Late perception",
+    })
+    store.on_event({
+        "type": "arp_run_done", "ts": 2.0, "run_id": run_id,
+        "status": "done",
+    })
+    store.on_event({
+        "type": "perception_prefetch", "ts": 2.5, "run_id": run_id,
+        "elapsed_ms": 37, "texts": ["READY"],
+    })
+
+    run = store.get(run_id)
+
+    assert run is not None
+    assert run["status"] == "done"
+    assert run["phase"] == "terminal"
+    assert run["finished_at"] == 2.0
+    assert run["metrics"]["perception_count"] == 1
+    assert run["timeline"][-1]["type"] == "perception_prefetch"
+    assert run["timeline"][-1]["phase"] == "terminal"
+
+
+def test_run_projection_late_event_does_not_replace_newer_current_run():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({"type": "agent_start", "ts": 1.0, "run_id": "old", "task": "Old"})
+    store.on_event({"type": "agent_done", "ts": 2.0, "run_id": "old", "status": "done"})
+    store.on_event({"type": "agent_start", "ts": 3.0, "run_id": "new", "task": "New"})
+    store.on_event({
+        "type": "perception_prefetch", "ts": 3.5, "run_id": "old",
+        "elapsed_ms": 10,
+    })
+
+    current = store.current()
+
+    assert current is not None
+    assert current["run_id"] == "new"
+    assert store.get("old")["phase"] == "terminal"
 
 
 def test_run_projection_preserves_transient_roi_evidence():

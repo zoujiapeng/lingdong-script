@@ -133,7 +133,7 @@ not an app-specific calculator rule.
 
 `run_action_batch` 在本地连续执行多个动作，并返回每个子动作结果。顶层 `click/type_text/hotkey/scroll/focus_window/draw_strokes/drag` 也会自动 fast-wrap 成单动作 batch。
 
-Controller batch 外层只取得一次 Desktop Action Queue lease；`action/raw_device.py` 直接调用常见动作 handler，避免每个子动作重新经过完整 `ToolSession.dispatch()`。复杂工具仍走完整 dispatch，确保权限、scope 和证据边界不丢失。
+Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`action/raw_device.py` 直接调用常见动作 handler，避免每个子动作重新经过完整 `ToolSession.dispatch()`。物理鼠标/键盘全局单写；明确后台安全的 PostMessage 动作才按 hwnd 并发。复杂工具仍走完整 dispatch，确保权限、scope 和证据边界不丢失。
 
 排查字段：
 
@@ -190,7 +190,7 @@ Controller batch 外层只取得一次 Desktop Action Queue lease；`action/raw_
 
 - 同一个 `expect` 同时包含可见状态与文件/进程状态时，文件存在、文件内容、进程运行/退出检查会在后台与 UIA/OCR 重叠，最终仍按 AND 语义等待全部通过。
 - `shell_true` 不进入并发白名单，因为任意 PowerShell 表达式无法证明无副作用。
-- 鼠标、键盘、窗口、剪贴板写入继续经过 single-writer Desktop Action Queue；当前不并发执行两个会操控桌面的任务。
+- 鼠标和键盘写入继续经过全局 `physical` single-writer；同一 hwnd 和剪贴板资源也串行。只有不改变前台、光标和键盘焦点的后台窗口消息动作可在不同 hwnd 并发。
 - OCR 与 Everything IPC 可在服务启动时后台预热。这些是只读准备工作，不改变桌面任务的顺序。
 
 ## Coding Runtime

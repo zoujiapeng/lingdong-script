@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ControlPlaneClient, createGoalGraph, resolveControlPlaneConnection } from './client';
 import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
+import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
 export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
@@ -124,6 +125,22 @@ export function useControlPlane() {
 
   const validateGraph = useCallback((graph: ArpGraph): Promise<GraphValidation> => requireClient().validateGraph(graph), []);
 
+  const startAutomation = useCallback(async (
+    automation: AutomationIR,
+    inputs: Record<string, unknown> = {},
+  ) => {
+    const run = await requireClient().startAutomation(automation, inputs);
+    await refresh();
+    return run;
+  }, [refresh]);
+
+  const validateAutomation = useCallback(
+    (automation: AutomationIR): Promise<GraphValidation> => (
+      requireClient().validateAutomation(automation)
+    ),
+    [],
+  );
+
   const cancelCurrent = useCallback(async () => {
     if (!currentRun) return;
     await requireClient().cancelRun(currentRun.run_id);
@@ -151,6 +168,8 @@ export function useControlPlane() {
     startGoal,
     startGraph,
     validateGraph,
+    startAutomation,
+    validateAutomation,
     cancelCurrent,
     decideGate,
     getClient: requireClient,

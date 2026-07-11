@@ -18,7 +18,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；两者除公开 ping 外都使用进程随机 bearer token。不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
 - 感知默认组合 UIA、Win32、OCR、CV；VLM 默认关闭，只有在 `vlm` 配置有效时才作为辅助感知。
-- 低延迟 GUI 已落地 batch/subgoal、5-15 FPS watcher、ROI observe、predictive OCR、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
+- 低延迟 GUI 已落地 batch/subgoal、5-15 FPS watcher、变化 ROI 的增量 OCR/Win32 预取、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
 - 强 VLM 是未知界面/失败恢复 fallback，不在常规感知循环；当前尚未内置带正式权重的常驻学习型 UI detector。
 - `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
@@ -29,10 +29,10 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | 方向 | 当前状态 |
 | --- | --- |
 | Raw Device Executor | `action/raw_device.py` 让 Controller batch 的常见 click/type/key/drag/focus/launch 子动作直接调用已授权 handler，不再递归支付完整 `ToolSession.dispatch()`；少数复杂动作仍走外层工具生命周期。 |
-| Action Queue | `action/desktop_queue.py` 是全局 single-writer 队列，支持同步 `run()` 和后台 job；`target_hwnd` 目前是元数据，不是按 hwnd 并发锁。全局串行更安全，但还不是细粒度 runtime。 |
-| Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，最后 lease 释放后保留 45 秒热状态；变化触发 predictive OCR，VLM 仅兜底。它还不是常驻学习型 YOLO/UI detector。 |
+| Action Queue | `action/desktop_queue.py` 是公平资源队列：真实鼠标/键盘仍按 `physical` 全局单写；明确使用 PostMessage、不会移动鼠标的后台窗口动作可按 `window:<hwnd>` 在不同窗口并发，同一 hwnd 串行；剪贴板另有独占资源。 |
+| Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，并在有意义的 ROI 变化后合并调度轻量 OCR/Win32；changed-only observe 可消费热缓存，UIA/VLM 不进入 daemon 内环。它还不是常驻学习型 YOLO/UI detector。 |
 | Runtime jobs | Agent、ARP、Replay 和计划任务统一进入 `runtime_jobs.py`；API 可查询/取消，交互任务按 `interactive_runtime` 排队，真实鼠标键盘仍由 Desktop Action Queue 单写保护。 |
-| ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层，Flow editor 运行链是 Flow state -> IR -> `arp/1`；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
+| ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层。Flow editor 在 IR 的 `runtime.arp_graph` 中保存一次编译后的 `arp/1` 投影及 fingerprint，后端校验后直接运行；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
 | 前端 | 原生 Cockpit、ARP Studio、Runs、Skills、System 共用 `/api/v2` 和 WebSocket，不再依赖 iframe Agent 页面。 |
 | 真实能力 | 计算器、记事本、网页靶场、简单绘图/拖拽已有回归；QQ/微信/Steam/抖音/网易云等真实复杂软件还缺系统化非破坏性 E2E，不能用靶场成绩替代。 |
 
@@ -109,7 +109,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
 - 用户始终面对一个 Agent。新能力优先作为 Runtime/Capability/Skill 接入同一 runner；只有明确隔离、安全或生命周期边界时才引入独立 runner。
 - GUI 成功不能只看 agent 总结，必须用截图、文件、进程、窗口、trace 或工具证据验证。
-- 验证可做有限并发：文件/进程只读检查会与 UIA/OCR 重叠；`shell_true` 和真实桌面写操作仍保持同步、single-writer，不能为了速度制造竞态。
+- 验证可做有限并发：文件/进程只读检查会与 UIA/OCR 重叠；`shell_true` 不并发。真实物理输入保持全局 single-writer，只有明确证明为后台安全的窗口消息动作才允许跨 hwnd 并发。
 - 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
 - WinPilot Agent 自带计划任务：System 页面和 `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 共用 `python/winpilot_home/agent_schedules.json`；到期后提交统一 RuntimeJob，再走同一个 `AgentRunner`。这不是 Windows Task Scheduler。

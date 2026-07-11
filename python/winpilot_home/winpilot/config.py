@@ -54,6 +54,12 @@ _DEFAULTS: dict[str, Any] = {
                "screen_watch_autostart": True,
                "predictive_ocr_enabled": True,
                "predictive_ocr_prefer_cache": True,
+               "incremental_perception_enabled": True,
+               "incremental_perception_debounce_ms": 80,
+               "incremental_perception_max_crops": 4,
+               "incremental_perception_wait_ms": 1200,
+               "incremental_perception_min_ratio": 0.00015,
+               "incremental_perception_max_ratio": 0.35,
                "press_probe_settle_ms": 18,
                "press_release_settle_ms": 24},
     "agent": {

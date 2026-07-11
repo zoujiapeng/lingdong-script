@@ -652,7 +652,7 @@ def launch(command: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@queued_desktop_action("close_window")
+@queued_desktop_action("close_window", scope="window")
 def close_window(hwnd: int) -> dict:
     if _dry_run():
         return {"ok": True, "dry_run": True}
@@ -702,6 +702,7 @@ def uia_set_value(element, value: str) -> bool:
 # ------------------------------------------------------------------- clipboard
 # Ported from cc-haha runtime/win_helper.py
 
+@queued_desktop_action("clipboard_read", scope="clipboard")
 def clipboard_read() -> str:
     """Read the current clipboard text content."""
     try:
@@ -719,7 +720,7 @@ def clipboard_read() -> str:
             return ""
 
 
-@queued_desktop_action("clipboard_write")
+@queued_desktop_action("clipboard_write", scope="clipboard")
 def clipboard_write(text: str) -> dict:
     """Write text to the system clipboard."""
     if _dry_run():
@@ -757,7 +758,7 @@ def _image_file_to_dib(path: Path) -> tuple[bytes, int, int]:
     return buffer.getvalue()[14:], int(width), int(height)
 
 
-@queued_desktop_action("paste_image_file")
+@queued_desktop_action("paste_image_file", scope="physical_clipboard")
 def paste_image_file(path: str, hwnd: int | None = None) -> dict:
     """Paste an existing PNG/JPEG as an image, without opening an attachment UI."""
     if _dry_run():
@@ -812,7 +813,7 @@ def paste_image_file(path: str, hwnd: int | None = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@queued_desktop_action("clipboard_paste")
+@queued_desktop_action("clipboard_paste", scope="physical_clipboard")
 def clipboard_paste() -> dict:
     """Paste from clipboard via Ctrl+V."""
     if _dry_run():

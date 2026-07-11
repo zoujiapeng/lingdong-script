@@ -16,7 +16,7 @@ flowchart LR
   Runner --> Tools["ToolSession + World Model"]
   Tools --> Perception["L0 delta -> L1 OCR/CV -> UIA -> VLM fallback"]
   Controller --> Watcher["5-15 FPS watcher\nchange-triggered ROI"]
-  Watcher --> Prefetch["Predictive OCR\nparallel with decision"]
+  Watcher --> Prefetch["Incremental ROI OCR + Win32\ncoalesced in background"]
   Tools --> Trace["Trace + exact transient evidence"]
   Controller --> Trace
   Skills --> Trace
@@ -158,7 +158,7 @@ queued
 - `screen_watch` 持续做便宜帧差；动作前后差分与 watcher 独立，changed-only observe 只理解 ROI。
 - 鼠标 down 与 up 分离，down 期间同步采样。只在 `delta.changed=true`、press 帧强于 release 后帧时标记 `transient_observed`。
 - 瞬态帧会保存为 trace ROI 图片，携带真实屏幕坐标进入 World State；不是只保留 OCR 文本。
-- 动作触发后立即异步 OCR 变化 ROI；下一次 changed-only observe 可直接消费 predictive cache。
+- watcher 把普通变化和动作差分 ROI 推给共享 PerceptionDaemon；daemon 合并普通抖动、优先动作变化，只做 OCR/Win32 增量分析，下一次 changed-only observe 可直接消费热缓存。
 - verify engine 只并行文件/进程等确定性只读检查与 UIA/OCR；`shell_true` 和所有桌面 mutation 不并发，最终证据仍是 AND 语义。
 - `ElementCache` 使用语义、角色、相对位置和当前快照复验；长日志、隐藏标签文本、地址栏不能冒充按钮。
 - `click_element` 支持 `visual_anchor`、fallback text、expected region、物理点击和点击前局部视觉伺服修正。
@@ -168,9 +168,9 @@ queued
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - `winpilot` 包入口先初始化 Per-Monitor V2，保证只导入 action executor 的进程也不会落入 DPI 虚拟坐标；`coordinate_diagnostics` / `coordinate_click_test` 再核对物理屏幕和真实鼠标路径。
 - `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
-- `action/desktop_queue.py` 提供 single-writer Desktop Action Queue；Controller batch 取得一次 coalesced lease，内部 public action 不重复排队。
+- `action/desktop_queue.py` 提供公平资源租约。`physical` 输入全局单写；后台安全的 PostMessage 窗口动作按 `window:<hwnd>` 隔离，不同 hwnd 可并行；同一 hwnd、剪贴板及未知物理目标仍串行。Controller batch 取得一次组合 lease，内部 public action 不重复排队。
 - `action/raw_device.py` 让常见 batch 子动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
-- `fast/perception_daemon.py` 按 hwnd 复用 watcher + ElementCache，lease 归零后保留 45 秒热状态；昂贵 OCR/CV/VLM 仍由变化或请求触发。
+- `fast/perception_daemon.py` 按 hwnd 复用 watcher + ElementCache，并维护变化 ROI 的短历史；它过滤光标噪声/大面积视频变化、合并同 ROI 普通更新、保留显式瞬态动作证据。daemon 内环不调用 UIA/VLM，完整融合仍是请求/fallback 路径。
 - `recorder/trace.py` 把截图编码/写盘放到有界异步队列，并以 `action_id` 配对 before/after。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
 
@@ -186,7 +186,7 @@ queued
 
 - 带正式权重、可部署和可评估的常驻轻量学习型 UI detector（当前 Level 2 是 UIA + OCR + 传统 CV，不冒充 YOLO 已落地）。
 - 多显示器/缩放/动画目标下的连续视觉伺服，而不只是点击前局部迭代修正。
-- 按 target hwnd 的细粒度并发锁和完整 Raw Device Executor 内环。
+- Raw Device adapter 尚未覆盖少数复杂工具；后台并发只开放给已证明不会移动真实鼠标/键盘的动作，不能把任意带 hwnd 的动作误当成可并发。
 - 跨软件高成功率 skill 参数化、版本迁移和失效检测。
 - 历史分位数 dashboard（当前为每 run avg/max 和频率指标）。
 
@@ -203,7 +203,7 @@ Agent live run
 当前事实：
 
 - `.wps.json` 是 WinPilot 旧语义重放兼容格式，不是新 artifact 的事实源。
-- `automation-ir/1` 是新保存 Flow、Skill 和 trace 导出的规范中间层；WPS/FlowScript/DSL 是兼容格式。
+- `automation-ir/1` 是新保存 Flow、Skill 和 trace 导出的规范中间层；`runtime.kind` 区分 `wps_replay` 与 `arp_graph`。Flow IR 保存编译后的 graph 和跨 Python/TypeScript 一致的 projection fingerprint，运行前会拒绝陈旧或被篡改的投影。
 - `recorder/trace.py` 是离线 replay 源。
 - `POST /api/replay` 返回 `replay_id`；`GET /api/replay/{replay_id}` 查询状态、结果和失败细节；`POST /api/replay/{replay_id}/cancel` 取消。
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。

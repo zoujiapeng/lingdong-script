@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..utils.screenshot import Region, capture
-from ..utils.log import BUS
+from ..utils.log import BUS, logger
 from .types import ScreenDelta
 from .vision import changed_regions
 
@@ -17,6 +17,10 @@ from .vision import changed_regions
 CaptureFn = Callable[[Region | None], np.ndarray]
 RegionProvider = Callable[[], Region | None]
 EventContextProvider = Callable[[], dict[str, Any]]
+ChangeListener = Callable[
+    [ScreenDelta, list[tuple[np.ndarray, Region]], dict[str, Any]],
+    None,
+]
 
 
 @dataclass
@@ -114,6 +118,17 @@ class ScreenWatcher:
         self._action_evidence: list[tuple[np.ndarray, Region]] = []
         self._recent_evidence: list[tuple[np.ndarray, Region]] = []
         self._recent_evidence_ms = 0
+        self._change_listeners: list[ChangeListener] = []
+
+    def add_change_listener(self, listener: ChangeListener) -> None:
+        with self._lock:
+            if listener not in self._change_listeners:
+                self._change_listeners.append(listener)
+
+    def remove_change_listener(self, listener: ChangeListener) -> None:
+        with self._lock:
+            if listener in self._change_listeners:
+                self._change_listeners.remove(listener)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -157,6 +172,7 @@ class ScreenWatcher:
             with self._lock:
                 self._recent_evidence = crops
                 self._recent_evidence_ms = _now_ms()
+            self._notify_change(delta, crops, action_delta=False, transient=False)
         return delta
 
     def record_action_delta(
@@ -182,11 +198,49 @@ class ScreenWatcher:
             int(delta.elapsed_ms if diff_ms is None else diff_ms),
             action_delta=True,
         )
+        crops: list[tuple[np.ndarray, Region]] = []
         if evidence_frame is not None and delta.changed:
             crops = self._crop_evidence(evidence_frame, delta, region)
             with self._lock:
                 self._action_evidence = crops
                 self._bulletin.action_evidence_transient = bool(transient)
+        if delta.changed:
+            self._notify_change(
+                delta,
+                crops,
+                action_delta=True,
+                transient=bool(transient),
+            )
+
+    def _notify_change(
+        self,
+        delta: ScreenDelta,
+        crops: list[tuple[np.ndarray, Region]],
+        *,
+        action_delta: bool,
+        transient: bool,
+    ) -> None:
+        with self._lock:
+            listeners = list(self._change_listeners)
+            sequence = int(self._bulletin.sequence)
+        if not listeners:
+            return
+        try:
+            context = dict(self.event_context_provider() or {})
+        except Exception:
+            context = {}
+        metadata = {
+            **context,
+            "sequence": sequence,
+            "action_delta": bool(action_delta),
+            "transient": bool(transient),
+            "created_ms": _now_ms(),
+        }
+        for listener in listeners:
+            try:
+                listener(delta, list(crops), dict(metadata))
+            except Exception:
+                logger.debug("screen change listener failed", exc_info=True)
 
     def action_evidence(self, max_age_ms: int = 5000) -> tuple[list[tuple[np.ndarray, Region]], bool]:
         with self._lock:

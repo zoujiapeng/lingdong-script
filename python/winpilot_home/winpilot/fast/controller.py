@@ -17,6 +17,7 @@ from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .action_contract import (
     ALLOWED_BATCH_ACTIONS,
+    BATCH_CLIPBOARD_ACTIONS,
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
 )
@@ -1369,6 +1370,7 @@ class FastGuiController:
         subgoal: str = "",
     ) -> dict[str, Any]:
         has_mutation = False
+        has_clipboard = False
         for action in actions:
             if not isinstance(action, dict):
                 continue
@@ -1376,20 +1378,29 @@ class FastGuiController:
             name, _args, _upgraded_from = _upgrade_semantic_action(name, args)
             if name in BATCH_MUTATING_ACTIONS:
                 has_mutation = True
-                break
+            if name in BATCH_CLIPBOARD_ACTIONS:
+                has_clipboard = True
         execute = lambda: self._execute_in_lease(
             actions,
             stop_on_error=stop_on_error,
             sync=sync,
             subgoal=subgoal,
         )
-        if not has_mutation:
+        if not has_mutation and not has_clipboard:
             return execute()
         target = getattr(self.session, "hwnd", None)
+        scope = (
+            "physical_clipboard"
+            if has_mutation and has_clipboard
+            else "physical"
+            if has_mutation
+            else "clipboard"
+        )
         return DESKTOP_ACTION_QUEUE.run(
             "controller_batch",
             execute,
             target_hwnd=int(target) if target else None,
+            scope=scope,
             metadata={"subgoal": str(subgoal or ""), "action_count": len(actions)},
             coalesce_nested=True,
         )

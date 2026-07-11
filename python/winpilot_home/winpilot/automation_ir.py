@@ -6,6 +6,7 @@ automations and skills use this validated envelope as their runtime boundary.
 from __future__ import annotations
 
 import copy
+import json
 import time
 import uuid
 from typing import Any
@@ -25,7 +26,7 @@ _DESKTOP_MUTATION_TOOLS = frozenset({
     "tray_click",
     "ext.clipboard_set",
 })
-_SHELL_TOOLS = frozenset({"run_shell", "ext.run_shell"})
+_SHELL_TOOLS = frozenset({"run_shell", "run_detached", "ext.run_shell"})
 
 
 def _clone(value: Any) -> Any:
@@ -132,6 +133,7 @@ def automation_ir_from_wps(
             "on_preflight_fail": "live_agent_takeover",
             "on_step_fail": "resume_live_from_failed_step",
         },
+        "runtime": {"kind": "wps_replay"},
     }
 
 
@@ -193,4 +195,146 @@ def validate_automation_ir(data: Any) -> str | None:
             return f"steps[{i}] must be an object"
         if not _nonempty_str(step.get("tool")):
             return f"steps[{i}] requires tool"
+    source = data.get("source") or {}
+    if not _nonempty_str(source.get("kind")):
+        return "Automation IR source.kind is required"
+    source_kind = _nonempty_str(source.get("kind"))
+    if source_kind not in {"wps", "flowscript"}:
+        return f"unsupported Automation IR source.kind: {source_kind!r}"
+    if source_kind == "flowscript":
+        node_ids: list[str] = []
+        for index, step in enumerate(steps, start=1):
+            node_id = _nonempty_str(step.get("node_id"))
+            if not node_id:
+                return f"steps[{index}] requires node_id for flowscript source"
+            node_ids.append(node_id)
+            if not isinstance(step.get("params"), dict):
+                return f"steps[{index}].params must be an object"
+            outgoing = step.get("outgoing")
+            if outgoing is not None and not isinstance(outgoing, list):
+                return f"steps[{index}].outgoing must be a list"
+        if len(node_ids) != len(set(node_ids)):
+            return "flowscript Automation IR node_id values must be unique"
+        known = set(node_ids)
+        for index, step in enumerate(steps, start=1):
+            for edge_index, edge in enumerate(step.get("outgoing") or [], start=1):
+                if not isinstance(edge, dict):
+                    return f"steps[{index}].outgoing[{edge_index}] must be an object"
+                target = _nonempty_str(edge.get("to_node"))
+                if not target or target not in known:
+                    return (
+                        f"steps[{index}].outgoing[{edge_index}] references "
+                        f"unknown to_node {target!r}"
+                    )
+    runtime = data.get("runtime")
+    if runtime is not None:
+        if not isinstance(runtime, dict):
+            return "Automation IR runtime must be an object"
+        kind = _nonempty_str(runtime.get("kind"))
+        if kind not in {"wps_replay", "arp_graph"}:
+            return f"unsupported Automation IR runtime kind: {kind or '<empty>'}"
     return None
+
+
+def automation_runtime_kind(ir: dict[str, Any]) -> str:
+    runtime = ir.get("runtime")
+    if isinstance(runtime, dict):
+        kind = _nonempty_str(runtime.get("kind"))
+        if kind:
+            return kind
+    source = ir.get("source")
+    if isinstance(source, dict) and source.get("kind") == "wps":
+        return "wps_replay"
+    return ""
+
+
+def automation_projection_fingerprint(
+    steps: list[dict[str, Any]],
+    variables: dict[str, Any],
+    graph: dict[str, Any] | None = None,
+) -> str:
+    content: dict[str, Any] = {"steps": steps, "variables": variables}
+    if graph is not None:
+        content["graph"] = graph
+    payload = json.dumps(
+        content,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    value = 0x811C9DC5
+    for byte in payload:
+        value = ((value ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return f"fnv1a32:{value:08x}"
+
+
+def arp_graph_from_automation_ir(
+    ir: dict[str, Any],
+    *,
+    require_valid: bool = True,
+):
+    """Return a validated ArpGraph from the canonical runtime projection."""
+    error = validate_automation_ir(ir)
+    if error:
+        raise ValueError(error)
+    runtime = ir.get("runtime")
+    if not isinstance(runtime, dict) or runtime.get("kind") != "arp_graph":
+        raise ValueError(
+            "Automation IR has no canonical ARP runtime graph; "
+            "reopen the source in Studio and save it again"
+        )
+    raw_graph = runtime.get("graph")
+    if not isinstance(raw_graph, dict):
+        raise ValueError("Automation IR arp_graph runtime requires graph object")
+    expected = _nonempty_str(runtime.get("projection_fingerprint"))
+    if not expected:
+        raise ValueError("Automation IR arp_graph runtime requires projection_fingerprint")
+    actual = automation_projection_fingerprint(
+        ir.get("steps") or [],
+        ir.get("variables") or {},
+        raw_graph,
+    )
+    if expected != actual:
+        raise ValueError(
+            "Automation IR runtime projection is stale: "
+            f"expected {expected}, calculated {actual}"
+        )
+    from .orchestrator.contracts import ArpGraph, validate_graph
+
+    try:
+        graph = ArpGraph.model_validate(raw_graph)
+    except Exception as exc:
+        raise ValueError(f"Automation IR ARP graph parse failed: {exc}") from exc
+    if require_valid:
+        validation = validate_graph(graph)
+        if not validation.valid:
+            raise ValueError("; ".join(validation.errors))
+    return graph
+
+
+def validate_automation_runtime(ir: dict[str, Any]) -> str | None:
+    """Validate the executable projection, not just the IR envelope."""
+    error = validate_automation_ir(ir)
+    if error:
+        return error
+    kind = automation_runtime_kind(ir)
+    if kind == "wps_replay":
+        try:
+            expected_safety = _default_safety(ir.get("steps") or [])
+            safety = ir.get("safety") or {}
+            for field, required in expected_safety.items():
+                if required is True and safety.get(field) is not True:
+                    return f"Automation IR safety.{field} must be true for its WPS steps"
+            script = wps_from_automation_ir(ir)
+            from .recorder.trace import validate_script
+
+            return validate_script(script)
+        except ValueError as exc:
+            return str(exc)
+    if kind == "arp_graph":
+        try:
+            arp_graph_from_automation_ir(ir)
+        except ValueError as exc:
+            return str(exc)
+        return None
+    return "Automation IR requires a supported runtime.kind"
