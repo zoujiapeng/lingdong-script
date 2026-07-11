@@ -115,7 +115,9 @@ def test_visual_servo_waits_through_stale_frame_after_hover_trigger():
     assert target is not None
     assert (target.cx, target.cy) == (220, 140)
     assert trace["confirmed"] is True
-    assert trace["iterations"][0]["stable_streak"] == 1
+    assert trace["iterations"][0]["corrected"] is False
+    assert any(item["corrected"] for item in trace["iterations"][1:])
+    assert max(item["stable_streak"] for item in trace["iterations"]) >= 2
     assert len(trace["iterations"]) >= 3
     assert (220, 140) in moves
 
