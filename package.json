@@ -33,14 +33,9 @@
     "start": "electron ."
   },
   "dependencies": {
-    "@rjsf/core": "^6.5.2",
-    "@rjsf/validator-ajv8": "^6.5.2",
-    "electron-store": "^8.1.0",
     "immer": "^10.0.0",
     "lucide-react": "^0.400.0",
     "nanoid": "^5.0.0",
-    "node-red": "^4.1.10",
-    "node-red-contrib-lobster": "file:python/node-red-nodes/lobster",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "zustand": "^4.5.0"

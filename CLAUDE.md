@@ -14,13 +14,13 @@
 2. `src/renderer/` + `python/engine/` + `python/features/`
    - legacy 流程图 / DSL / `@feature` 自动化系统。
    - 仍在使用，但不是 WinPilot 主 agent 的工具池。
-   - WinPilot 成功 trace 可导出 `.wps.json`，再保守转换成 FlowScript 供编辑。
+   - WinPilot 成功 trace 会生成规范 `.automation.json`，同时保留 `.wps.json` 兼容导出；Studio 从 Automation IR 进入编辑和 ARP 编译。
 
 ## 优先阅读
 
 | 文件 | 作用 |
 | --- | --- |
-| `python/winpilot_home/winpilot/server.py` | FastAPI `/api/chat`、状态、trace、replay、agent schedule 入口 |
+| `python/winpilot_home/winpilot/server.py` | FastAPI control plane、RuntimeJob、trace、replay、schedule 入口 |
 | `python/winpilot_home/serve.py` | 支持的 WinPilot 服务启动入口 |
 | `python/winpilot_home/winpilot/config.py` | 默认配置和本机 `config.json` 读取 |
 | `python/winpilot_home/winpilot/agent/router.py` | 只构建统一 `AgentRunner` |
@@ -30,8 +30,11 @@
 | `python/winpilot_home/winpilot/agent/tools.py` | `ToolSession` 状态、dispatch、目标窗口解析 |
 | `python/winpilot_home/winpilot/agent/*_tools.py` | 窗口、感知、动作、系统、计划、文件、记忆等工具 mixin |
 | `python/winpilot_home/winpilot/fast/` | 低延迟 controller、subgoal、watcher、input locator |
+| `python/winpilot_home/winpilot/action/raw_device.py` | Controller batch 内层低开销动作 adapter |
+| `python/winpilot_home/winpilot/runtime_jobs.py` | Agent/ARP/Replay/Schedule 异步 job、资源租约和取消 |
+| `python/winpilot_home/winpilot/automation_ir.py` | 新 automation artifact 的规范中间层与 WPS adapter |
 | `python/winpilot_home/winpilot/perception/` | UIA/Win32/OCR/CV/VLM 融合、reducer、world |
-| `python/winpilot_home/winpilot/recorder/trace.py` | trace、`.wps.json` 导出、离线 replay |
+| `python/winpilot_home/winpilot/recorder/trace.py` | 异步 trace/截图、Automation IR 主导出、WPS 兼容导出、离线 replay |
 | `python/winpilot_home/winpilot/model_adapter.py` | provider、thinking、usage/cache/cost 归一化 |
 | `src/main/winpilotServer.ts` | Electron 托管 WinPilot FastAPI 子进程 |
 | `python/agent/__main__.py` | Electron IPC 到 WinPilot BUS 的适配器 |
@@ -49,9 +52,9 @@
 ## 运行时路径
 
 ```text
-Frontend Agent page or scripts/gui_eval_run.py
-  -> WinPilot FastAPI /api/chat
-  -> agent/router.py builds one AgentRunner
+Frontend Agent page -> /api/v2/arp/runs -> RuntimeJob -> Skill fast path / agent_goal
+scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
+  -> agent/router.py builds the same AgentRunner
   -> RuntimeProfile enables desktop/coding capabilities
   -> AgentRunner builds messages + tool schema
   -> LLM function calling
@@ -76,15 +79,17 @@ Frontend Agent page or scripts/gui_eval_run.py
 - `agent/scope_guard.py`：GUI mutation 前检查目标窗口/前台，避免点到 Codex、日志窗口或错误窗口。
 - `drawing_gui` schema profile：绘图/画布任务只暴露必要 GUI/controller 工具，降低 prompt 成本。
 - 物理坐标排查工具：`coordinate_diagnostics` / `coordinate_click_test`。
-- `action/desktop_queue.py`：真实桌面写入动作进入全局 single-writer 队列，支持同步执行和后台 job。
-- `action/executor.py`：已有 raw click/move/focus/key helper，但还不是完整独立 Raw Device Executor。
+- `action/desktop_queue.py`：真实桌面写入动作进入全局 single-writer 队列，Controller batch 可合并嵌套动作生命周期。
+- `action/raw_device.py`：Controller 内层常见动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
+- `fast/perception_daemon.py`：按 hwnd 复用 watcher + ElementCache，短 run 之间保留 45 秒热状态。
+- `runtime_jobs.py`：Agent、ARP、Replay 和 schedule 统一排队、查询和取消，不再各自维护临时 worker 状态。
 
 仍未完成：
 
-- 没有成熟视觉伺服控制。
+- 当前只有点击前局部视觉伺服和动作后变化验证，还没有鼠标移动全过程连续闭环伺服。
 - 没有常驻轻量 UI 视觉模型/YOLO 主循环。
-- 没有跨任务常驻的 OCR/UIA/CV/VLM 语义 perception daemon；当前常驻部分主要是 screen delta watcher。
-- 没有按 hwnd 的细粒度 action queue；`target_hwnd` 目前主要用于记录和后续策略，不提供多窗口并行动作。
+- Perception daemon 已复用 watcher/cache，但还不持续运行昂贵 OCR/CV/VLM，也不是学习型 UI detector。
+- Desktop queue 仍全局串行；`target_hwnd` 用于 scope/诊断和队列元数据，不允许两个物理鼠标任务并发。
 - 还没做到所有常规动作都不经过 LLM、LLM 只处理异常。
 - Skill 复用率、VLM 兜底调度和低延迟 dashboard 仍需继续打磨。
 
@@ -93,13 +98,13 @@ Frontend Agent page or scripts/gui_eval_run.py
 - 计算器、记事本、网页靶场、简单绘图/拖拽可以作为基础回归，但不能证明通用 computer use 能力。
 - QQ、微信、Steam、抖音、网易云等真实复杂软件需要非破坏性 E2E：打开、聚焦正确窗口、定位输入框/搜索框、输入草稿或搜索词、观察结果、清理草稿；未经用户明确允许不要真实发送消息或发布内容。
 - 通信任务的 `click/type_text/hotkey ok` 不是成功证据。必须看到目标会话、目标联系人、消息文本出现在输入框或聊天记录中；真实发送还要看到发送后的聊天记录证据。
-- 前端目前采用统一工作台外壳：Agent cockpit 是第一屏，Flow/Replay/Settings 作为上下文层展开。改前端时必须保留真实 FlowCanvas、Agent iframe、Replay/trace 调试入口，不要把 executor、Automation IR 或 WPS 安全逻辑回退成视觉 demo。
+- 前端目前是原生 `PlatformWorkbench`：Agent cockpit 第一屏，另有 ARP Studio、Runs、Skills、System；没有 Agent iframe。改前端时必须保留真实 FlowCanvas、Run/trace、Skill/Replay、计划任务和配置入口。
 
 ## Replay / FlowScript 边界
 
-- `.wps.json` 是 WinPilot 语义重放格式，离线 0-token replay 由 `recorder/trace.py` 执行。
-- FlowScript 是前端画布 JSON，执行器在 `src/renderer/store/executor.ts`。
-- WPS 导入 FlowScript 是编辑桥，不代表完全等价执行。
+- `automation-ir/1` 是新保存流程和 Skill 的规范中间层；`.wps.json` 与 FlowScript 是兼容 adapter。
+- 离线 0-token replay 由 `recorder/trace.py` 执行，IR 会先通过受检 adapter 转成 WPS runtime steps。
+- Studio 运行链为 Flow editor state -> Automation IR -> `arp/1`；旧 `store/executor.ts` 仅保留兼容执行入口。
 - WPS-only 步骤会导入为 `_requires_wps_replay` 占位，前端 executor 必须 fail-fast。
 - 从 WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会优先走真实 Electron `callFeature` bridge；没有 bridge 或 bridge 返回失败时节点失败，不能浏览器模拟成功。
 

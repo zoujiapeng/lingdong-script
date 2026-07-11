@@ -2,12 +2,22 @@ import * as http from 'http';
 import * as cp from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomBytes, timingSafeEqual } from 'crypto';
 
 export async function serveCommand(port: number): Promise<void> {
+  const controlToken = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32).toString('base64url');
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = String(req.headers.origin || '');
+    const originAllowed = !origin || origin === 'null'
+      || /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin);
+    if (!originAllowed) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Origin not allowed' }));
+      return;
+    }
+    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -18,6 +28,19 @@ export async function serveCommand(port: number): Promise<void> {
     try {
       const url = new URL(req.url || '/', `http://localhost:${port}`);
       const pathname = url.pathname;
+
+      if (pathname !== '/health') {
+        const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        const expectedBuffer = Buffer.from(controlToken);
+        const suppliedBuffer = Buffer.from(supplied);
+        const authenticated = expectedBuffer.length === suppliedBuffer.length
+          && timingSafeEqual(expectedBuffer, suppliedBuffer);
+        if (!authenticated) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Authentication required' }));
+          return;
+        }
+      }
 
       // --- Health ---
       if (req.method === 'GET' && pathname === '/health') {
@@ -112,7 +135,7 @@ export async function serveCommand(port: number): Promise<void> {
     }
   });
 
-  server.listen(port, () => {
+  server.listen(port, '127.0.0.1', () => {
     const msg = JSON.stringify({
       type: 'info',
       message: `灵动脚本 API 运行在 http://localhost:${port}`,
@@ -121,6 +144,8 @@ export async function serveCommand(port: number): Promise<void> {
         run: `POST /run  { script | pseudo }`,
         list: `GET /list`,
       },
+      authentication: 'Authorization: Bearer <token>',
+      controlToken,
     });
     console.log(msg);
   });

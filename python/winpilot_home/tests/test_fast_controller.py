@@ -1147,6 +1147,32 @@ def test_fast_controller_records_subgoal_and_needs_observe_phase():
     assert out["controller_state"]["phase"] == "needs_observe"
 
 
+def test_fast_controller_uses_raw_device_adapter_inside_batch():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        snapshot = None
+        hwnd = 42
+
+        def _t_click(self, args):
+            calls.append(("raw", args))
+            return ToolResult('{"ok": true, "verified": false}')
+
+        def dispatch(self, name, args):
+            raise AssertionError(f"recursive ToolSession dispatch: {name} {args}")
+
+    out = FastGuiController(Session()).execute(
+        [{"click": {"x": 11, "y": 22}}],
+        sync=False,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("raw", {"x": 11, "y": 22})]
+
+
 def test_fast_controller_batches_visual_actions_without_extra_observe():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController

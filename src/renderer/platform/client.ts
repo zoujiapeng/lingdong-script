@@ -8,6 +8,7 @@ import type {
   PlatformOverview,
   RunProjection,
   RuntimeEvent,
+  AgentSchedule,
 } from './contracts';
 
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
@@ -20,30 +21,50 @@ export function normalizeBaseUrl(value: string): string {
   return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 }
 
-export function websocketUrl(baseUrl: string): string {
+export interface ControlPlaneConnection {
+  url: string;
+  token: string;
+}
+
+export function websocketUrl(baseUrl: string, token = ''): string {
   const url = new URL('ws/events', normalizeBaseUrl(baseUrl));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (token) url.searchParams.set('token', token);
   return url.toString();
 }
 
-export async function resolveControlPlaneUrl(): Promise<string> {
+export async function resolveControlPlaneConnection(): Promise<ControlPlaneConnection> {
   if (typeof window !== 'undefined' && window.electronAPI) {
     const api = window.electronAPI;
-    const canResolveManagedServer = Boolean(api.ensureWinpilot || api.getWinpilotUrl);
+    const canResolveManagedServer = Boolean(api.ensureWinpilot || api.getWinpilotConnection || api.getWinpilotUrl);
     if (canResolveManagedServer) {
       const deadline = Date.now() + ELECTRON_SERVER_READY_TIMEOUT_MS;
       while (Date.now() < deadline) {
         const ensured = await api.ensureWinpilot?.();
-        if (ensured?.url) return normalizeBaseUrl(ensured.url);
+        if (ensured?.url) {
+          const connection = await api.getWinpilotConnection?.();
+          return {
+            url: normalizeBaseUrl(connection?.url || ensured.url),
+            token: connection?.token || ensured.token || '',
+          };
+        }
+        const connection = await api.getWinpilotConnection?.();
+        if (connection?.url) {
+          return { url: normalizeBaseUrl(connection.url), token: connection.token || '' };
+        }
         const existing = await api.getWinpilotUrl?.();
-        if (existing) return normalizeBaseUrl(existing);
+        if (existing) return { url: normalizeBaseUrl(existing), token: '' };
         if (ensured?.error) throw new Error(ensured.error);
         await new Promise((resolve) => setTimeout(resolve, ELECTRON_SERVER_POLL_MS));
       }
       throw new Error('WinPilot managed server did not become ready within 35 seconds.');
     }
   }
-  return FALLBACK_URL;
+  return { url: FALLBACK_URL, token: '' };
+}
+
+export async function resolveControlPlaneUrl(): Promise<string> {
+  return (await resolveControlPlaneConnection()).url;
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -61,9 +82,11 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export class ControlPlaneClient {
   readonly baseUrl: string;
+  readonly token: string;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, token = '') {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.token = token;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -71,6 +94,7 @@ export class ControlPlaneClient {
       ...init,
       headers: {
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         ...init?.headers,
       },
     });
@@ -101,6 +125,37 @@ export class ControlPlaneClient {
 
   patchConfig(patch: Record<string, unknown>): Promise<Record<string, any>> {
     return this.request('api/config', { method: 'PATCH', body: JSON.stringify(patch) });
+  }
+
+  async schedules(): Promise<AgentSchedule[]> {
+    const response = await this.request<{ ok: boolean; schedules: AgentSchedule[] }>('api/agent-schedules');
+    return response.schedules;
+  }
+
+  async createSchedule(input: {
+    task: string;
+    name?: string;
+    delay_seconds?: number;
+    interval_seconds?: number | null;
+    max_steps?: number;
+  }): Promise<AgentSchedule> {
+    const response = await this.request<{ ok: boolean; schedule: AgentSchedule }>('api/agent-schedules', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return response.schedule;
+  }
+
+  async updateSchedule(id: string, patch: Partial<AgentSchedule> & { delay_seconds?: number }): Promise<AgentSchedule> {
+    const response = await this.request<{ ok: boolean; schedule: AgentSchedule }>(`api/agent-schedules/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    return response.schedule;
+  }
+
+  cancelSchedule(id: string): Promise<{ ok: boolean; id: string }> {
+    return this.request(`api/agent-schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   chatgptIntegration(): Promise<ChatGPTDesktopIntegration> {
@@ -188,7 +243,9 @@ export class ControlPlaneClient {
 
   traceScreenshotUrl(runId: string, path: string): string {
     const name = path.replace(/\\/g, '/').split('/').pop() || path;
-    return new URL(`api/trace/${encodeURIComponent(runId)}/shot/${encodeURIComponent(name)}`, this.baseUrl).toString();
+    const url = new URL(`api/trace/${encodeURIComponent(runId)}/shot/${encodeURIComponent(name)}`, this.baseUrl);
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
   }
 
   validateGraph(graph: ArpGraph): Promise<GraphValidation> {
@@ -238,7 +295,7 @@ export class ControlPlaneClient {
 
     const connect = () => {
       if (disposed) return;
-      socket = new WebSocket(websocketUrl(this.baseUrl));
+      socket = new WebSocket(websocketUrl(this.baseUrl, this.token));
       socket.addEventListener('open', () => {
         reconnectAttempt = 0;
         onState?.(true);

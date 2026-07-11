@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
+from ..fast.perception_daemon import PERCEPTION_DAEMON
 from ..fast.subgoal import SubgoalExecutor
 from .tool_result import ToolResult
 
@@ -82,7 +83,22 @@ class FastToolMixin:
     def _fast_controller(self) -> FastGuiController:
         controller = getattr(self, "_fast_gui_controller", None)
         if controller is None:
-            controller = FastGuiController(self)
+            lease = None
+            try:
+                hwnd = int(getattr(self, "hwnd", 0) or 0)
+                if hwnd:
+                    lease = PERCEPTION_DAEMON.acquire(
+                        hwnd,
+                        run_id=str(getattr(self, "run_id", "") or ""),
+                    )
+            except Exception:
+                lease = None
+            controller = FastGuiController(
+                self,
+                cache=lease.cache if lease else None,
+                watcher=lease.watcher if lease else None,
+            )
+            self._perception_lease = lease
             self._fast_gui_controller = controller
         return controller
 

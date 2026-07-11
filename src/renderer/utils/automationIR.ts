@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 import type { FlowScript, FlowNode, FlowEdge } from '../types';
-import type { WpsScript, WpsStep } from './wpsToFlowScript';
+import { wpsToFlowScript, type WpsScript, type WpsStep } from './wpsToFlowScript';
 
 export interface AutomationIR {
   format: 'automation-ir/1';
@@ -124,10 +124,14 @@ function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, un
   return {
     tool: node.type,
     node_id: node.id,
+    x: node.x,
+    y: node.y,
+    label: node.label || '',
     params: clone(node.params || {}),
     outgoing: edges
       .filter((edge) => edge.from_node === node.id)
       .map((edge) => ({
+        edge_id: edge.id,
         from_port: edge.from_port,
         to_node: edge.to_node,
         to_port: edge.to_port,
@@ -145,6 +149,8 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
       kind: 'flowscript',
       format: script.meta?.version || '1.0.0',
       flow_id: script.meta?.id || '',
+      meta: clone(script.meta || {}),
+      settings: clone(script.settings || {}),
     },
     conditions: {},
     evidence: { required: [] },
@@ -178,6 +184,8 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
     created: created(ir.created),
     vars: clone(ir.variables || {}),
     steps: clone(ir.steps || []) as WpsStep[],
+    safety: clone(ir.safety || {}),
+    fallback: clone(ir.fallback || {}),
   };
   if (conditions.target_window !== undefined && conditions.target_window !== null && conditions.target_window !== '') {
     script.target_window = clone(conditions.target_window);
@@ -191,6 +199,86 @@ export function automationIrToWps(ir: AutomationIR): WpsScript {
     script.evidence = clone(evidence);
   }
   return script;
+}
+
+export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
+  const error = validateAutomationIR(ir);
+  if (error) throw new Error(error);
+  const source = ir.source || {};
+  if (source.kind === 'wps') return wpsToFlowScript(automationIrToWps(ir));
+  if (source.kind !== 'flowscript') {
+    throw new Error(`Unsupported Automation IR source kind: ${String(source.kind || '')}`);
+  }
+  const nodes: FlowNode[] = (ir.steps || []).map((raw, index) => {
+    const step = raw as Record<string, any>;
+    return {
+      id: str(step.node_id) || `ir-node-${index + 1}`,
+      type: str(step.tool) as FlowNode['type'],
+      x: Number.isFinite(Number(step.x)) ? Number(step.x) : 80,
+      y: Number.isFinite(Number(step.y)) ? Number(step.y) : index * 112,
+      params: clone(step.params || {}),
+      ...(str(step.label) ? { label: str(step.label) } : {}),
+    };
+  });
+  const edges: FlowEdge[] = [];
+  for (const raw of ir.steps || []) {
+    const step = raw as Record<string, any>;
+    const fromNode = str(step.node_id);
+    for (const outgoing of Array.isArray(step.outgoing) ? step.outgoing : []) {
+      edges.push({
+        id: str(outgoing.edge_id) || nanoid(8),
+        from_node: fromNode,
+        from_port: str(outgoing.from_port) || 'output',
+        to_node: str(outgoing.to_node),
+        to_port: str(outgoing.to_port) || 'input',
+      });
+    }
+  }
+  const meta = clone((source.meta as FlowScript['meta']) || {}) as FlowScript['meta'];
+  const now = new Date(created(ir.created) * 1000).toISOString();
+  const settings = clone((source.settings as FlowScript['settings']) || {}) as FlowScript['settings'];
+  return {
+    meta: {
+      id: str(meta.id) || str(source.flow_id) || nanoid(10),
+      name: str(meta.name) || ir.name,
+      description: str(meta.description),
+      created_at: str(meta.created_at) || now,
+      updated_at: str(meta.updated_at) || now,
+      version: str(meta.version) || str(source.format) || '1.0.0',
+      ...(meta.source ? { source: meta.source } : {}),
+      ...(meta.tags ? { tags: meta.tags } : {}),
+    },
+    nodes,
+    edges,
+    variables: clone(ir.variables || {}) as Record<string, string>,
+    settings: {
+      default_delay: Number(settings.default_delay ?? 0),
+      error_handling: settings.error_handling || 'stop',
+      max_retries: Number(settings.max_retries ?? 2),
+      retry_delay: Number(settings.retry_delay ?? 1),
+      log_level: settings.log_level || 'info',
+      ...(settings.require_real_features !== undefined
+        ? { require_real_features: settings.require_real_features }
+        : {}),
+    },
+  };
+}
+
+export function automationDocumentToFlowScript(value: unknown): FlowScript {
+  const document = value as Record<string, any>;
+  if (!document || typeof document !== 'object' || Array.isArray(document)) {
+    throw new Error('Automation document must be a JSON object');
+  }
+  if (document.format === 'automation-ir/1') {
+    return automationIrToFlowScript(document as AutomationIR);
+  }
+  if (String(document.format || '').startsWith('wps/')) {
+    return wpsToFlowScript(document as WpsScript);
+  }
+  if (document.meta && Array.isArray(document.nodes) && Array.isArray(document.edges)) {
+    return clone(document) as FlowScript;
+  }
+  throw new Error(`Unsupported automation document: ${String(document.format || 'unknown format')}`);
 }
 
 export function validateAutomationIR(value: unknown): string | undefined {

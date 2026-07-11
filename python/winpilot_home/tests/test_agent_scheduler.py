@@ -117,6 +117,33 @@ def test_agent_schedule_rest_rejects_invalid_run_at(tmp_path, monkeypatch):
         assert scheduler.list_tasks() == []
 
 
+def test_agent_schedule_rest_updates_and_reenables_task(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from winpilot import scheduler, server
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+    with TestClient(server.app) as client:
+        created = client.post(
+            "/api/agent-schedules",
+            json={"task": "old task", "delay_seconds": 3600},
+        ).json()["schedule"]
+        client.delete(f"/api/agent-schedules/{created['id']}")
+        updated = client.patch(
+            f"/api/agent-schedules/{created['id']}",
+            json={"task": "new task", "enabled": True, "delay_seconds": 120, "max_steps": 8},
+        )
+
+    assert updated.status_code == 200
+    schedule = updated.json()["schedule"]
+    assert schedule["task"] == "new task"
+    assert schedule["enabled"] is True
+    assert schedule["max_steps"] == 8
+    assert schedule["next_run_at"]
+
+
 def test_scheduler_thread_executes_due_task_through_unified_runner(tmp_path, monkeypatch):
     from winpilot import scheduler, server
 
@@ -171,9 +198,10 @@ def test_scheduler_thread_executes_due_task_through_unified_runner(tmp_path, mon
     server._start_scheduler_thread()
     try:
         assert completed.wait(timeout=2.5)
-        assert state.thread is not None
-        state.thread.join(timeout=1.0)
-        assert not state.thread.is_alive()
+        job = state.job_for_run("scheduled-run-1")
+        assert job is not None
+        assert job.done.wait(timeout=1.0)
+        assert job.status == "done"
     finally:
         server._stop_scheduler_thread()
         scheduler_thread = server._SCHEDULER_THREAD

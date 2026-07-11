@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from enum import Enum
+import time
 from typing import Any
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -115,6 +117,27 @@ class CapabilitySpec(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceRecord(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    predicate: str
+    value: Any = None
+    source: str
+    verified: bool = False
+    captured_at: float = Field(default_factory=time.time)
+    action_id: str = ""
+    node_id: str = ""
+    run_id: str = ""
+    text: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceRequirement(BaseModel):
+    predicate: str
+    equals: Any = None
+    source: str = ""
+    max_age_ms: int | None = Field(default=None, ge=0, le=86_400_000)
+
+
 class ArpRunRequest(BaseModel):
     graph: ArpGraph
     inputs: dict[str, Any] = Field(default_factory=dict)
@@ -173,8 +196,18 @@ def _validate_node_config(node: ArpNode) -> list[str]:
             errors.append(f"{prefix} requires config.name")
     elif node.kind == ArpNodeKind.EVIDENCE_GATE:
         required = config.get("required")
-        if not isinstance(required, list) or not any(str(item).strip() for item in required):
+        if not isinstance(required, list) or not any(
+            isinstance(item, dict) or str(item).strip() for item in required
+        ):
             errors.append(f"{prefix} requires at least one concrete evidence token")
+        elif isinstance(required, list):
+            for index, item in enumerate(required):
+                try:
+                    requirement = EvidenceRequirement.model_validate(item) if isinstance(item, dict) else EvidenceRequirement(predicate=str(item).strip())
+                    if not requirement.predicate.strip():
+                        raise ValueError("predicate is empty")
+                except Exception as exc:
+                    errors.append(f"{prefix} required[{index}] is invalid: {exc}")
     elif node.kind == ArpNodeKind.LEGACY_FLOW:
         node_type = str(config.get("node_type") or "").strip()
         if node_type not in LEGACY_ACTION_NODE_TYPES:

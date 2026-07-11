@@ -5,7 +5,6 @@ and mss agree (physical pixels).
 """
 from __future__ import annotations
 
-import ctypes
 import ctypes.wintypes
 import threading
 from dataclasses import dataclass
@@ -13,14 +12,9 @@ from dataclasses import dataclass
 import mss
 import numpy as np
 
-# Per-Monitor v2 DPI awareness — must happen before any window/screen query.
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-except (AttributeError, OSError):
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except (AttributeError, OSError):
-        pass
+from .dpi import ensure_process_dpi_awareness
+
+ensure_process_dpi_awareness()
 
 _local = threading.local()
 
@@ -53,33 +47,78 @@ class Region:
     def center(self) -> tuple[int, int]:
         return (self.left + self.width // 2, self.top + self.height // 2)
 
-    def clamp_to_screen(self) -> "Region":
-        sw, sh = screen_size()
-        left = max(0, min(self.left, sw - 1))
-        top = max(0, min(self.top, sh - 1))
-        right = max(left + 1, min(self.right, sw))
-        bottom = max(top + 1, min(self.bottom, sh))
+    def clamp_to(self, bounds: "Region") -> "Region":
+        left = max(bounds.left, min(self.left, bounds.right - 1))
+        top = max(bounds.top, min(self.top, bounds.bottom - 1))
+        right = max(left + 1, min(self.right, bounds.right))
+        bottom = max(top + 1, min(self.bottom, bounds.bottom))
         return Region(left, top, right - left, bottom - top)
+
+    def clamp_to_screen(self) -> "Region":
+        return self.clamp_to(virtual_screen_region())
+
+
+@dataclass(frozen=True)
+class DesktopGeometry:
+    """Authoritative physical-pixel coordinate space for the desktop."""
+
+    virtual: Region
+    primary: Region
+
+    def screen_from_capture(self, x: int, y: int, region: Region | None = None) -> tuple[int, int]:
+        origin = region or self.virtual
+        return origin.left + int(x), origin.top + int(y)
+
+    def capture_from_screen(self, x: int, y: int, region: Region | None = None) -> tuple[int, int]:
+        origin = region or self.virtual
+        return int(x) - origin.left, int(y) - origin.top
+
+
+def _virtual_metrics() -> tuple[int, int, int, int]:
+    user32 = ctypes.windll.user32
+    return (
+        int(user32.GetSystemMetrics(76)),
+        int(user32.GetSystemMetrics(77)),
+        int(user32.GetSystemMetrics(78)),
+        int(user32.GetSystemMetrics(79)),
+    )
+
+
+def virtual_screen_region() -> Region:
+    left, top, width, height = _virtual_metrics()
+    if width <= 0 or height <= 0:
+        monitor = _get_mss().monitors[0]
+        return Region(
+            int(monitor["left"]), int(monitor["top"]),
+            int(monitor["width"]), int(monitor["height"]),
+        )
+    return Region(left, top, width, height)
+
+
+def primary_screen_region() -> Region:
+    user32 = ctypes.windll.user32
+    return Region(0, 0, int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
+
+
+def desktop_geometry() -> DesktopGeometry:
+    return DesktopGeometry(virtual=virtual_screen_region(), primary=primary_screen_region())
 
 
 def screen_size() -> tuple[int, int]:
-    user32 = ctypes.windll.user32
-    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    region = virtual_screen_region()
+    return region.width, region.height
 
 
 def capture(region: Region | None = None) -> np.ndarray:
     """Capture screen (or region) as BGR ndarray (OpenCV convention)."""
     sct = _get_mss()
-    if region is None:
-        monitor = sct.monitors[0]
-    else:
-        region = region.clamp_to_screen()
-        monitor = {
-            "left": region.left,
-            "top": region.top,
-            "width": region.width,
-            "height": region.height,
-        }
+    region = (region or virtual_screen_region()).clamp_to_screen()
+    monitor = {
+        "left": region.left,
+        "top": region.top,
+        "width": region.width,
+        "height": region.height,
+    }
     shot = sct.grab(monitor)
     frame = np.asarray(shot, dtype=np.uint8)  # BGRA
     return frame[:, :, :3].copy()  # BGR

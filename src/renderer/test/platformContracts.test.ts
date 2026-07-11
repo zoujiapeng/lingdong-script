@@ -4,6 +4,7 @@ import {
   ControlPlaneClient,
   createGoalGraph,
   normalizeBaseUrl,
+  resolveControlPlaneConnection,
   resolveControlPlaneUrl,
   websocketUrl,
 } from '../platform/client';
@@ -59,6 +60,35 @@ describe('control plane client contracts', () => {
   it('normalizes REST and WebSocket addresses', () => {
     expect(normalizeBaseUrl('http://127.0.0.1:8765')).toBe('http://127.0.0.1:8765/');
     expect(websocketUrl('https://example.test/runtime/')).toBe('wss://example.test/runtime/ws/events');
+    expect(websocketUrl('https://example.test/runtime/', 'secret')).toBe('wss://example.test/runtime/ws/events?token=secret');
+  });
+
+  it('keeps the managed control token in the client transport', async () => {
+    (window as any).electronAPI = {
+      ensureWinpilot: vi.fn(async () => ({
+        url: 'http://127.0.0.1:23456', token: 'managed-token', starting: false, error: null,
+      })),
+      getWinpilotConnection: vi.fn(async () => ({
+        url: 'http://127.0.0.1:23456', token: 'managed-token',
+      })),
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const connection = await resolveControlPlaneConnection();
+      expect(connection).toEqual({ url: 'http://127.0.0.1:23456/', token: 'managed-token' });
+      await new ControlPlaneClient(connection.url, connection.token).overview();
+      expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({
+        Authorization: 'Bearer managed-token',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      delete (window as any).electronAPI;
+    }
   });
 
   it('waits for the Electron-managed server instead of using a stale fallback port', async () => {

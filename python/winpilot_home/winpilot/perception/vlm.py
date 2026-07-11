@@ -95,6 +95,7 @@ def describe(region: Region, question: str) -> str:
     if not is_configured():
         issue = configuration_issue()
         return f"VLM 未配置{f'：{issue}' if issue else ''}"
+    region = region.clamp_to_screen()
     b64, _scale = _encode_region(region)
     vlm = CONFIG.get("vlm", default={})
     try:
@@ -156,6 +157,7 @@ def collect(region: Region) -> list[UIElement]:
     if not is_configured():
         return []
     try:
+        region = region.clamp_to_screen()
         b64, scale = _encode_region(region)
         vlm = CONFIG.get("vlm", default={})
         resp = _client().chat.completions.create(

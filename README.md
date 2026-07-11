@@ -7,7 +7,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - **ARP Runtime + Studio**：用版本化 `arp/1` 图编排 Agent、Controller、Skill、证据门和人工门。
 - **World Model + Run Projection**：统一屏幕状态、元素、页面阶段、timeline、evidence 和延迟指标。
 
-Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。前端 FlowScript 通过 `flowToArpGraph.ts` 保守编译；常用 GUI 节点直接收敛到 Controller action batch，不支持的旧节点会显式标记为 `legacy_flow` 并在运行前校验失败，不会伪装成已等价迁移。
+`automation-ir/1` 是新保存流程、Skill、WPS 导出和 Flow 编辑的规范中间层；`arp/1` 是可执行图契约。Legacy WPS、FlowScript 和 DSL 仍作为导入/导出或兼容格式存在，不支持的旧节点会显式标记为 `legacy_flow` 并在运行前失败，不会伪装成等价迁移。
 
 ## 当前事实
 
@@ -15,7 +15,7 @@ Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。�
 - 用户始终面对一个 WinPilot Agent；Agent、ARP 图和 Controller 的事件统一投影成同一种 Run。
 - Agent Cockpit 创建的目标图先本地检索并重放已验证 Skill；未命中或重放失败才走 `agent_goal`，显式 `miss` / `fail` 分支不会被 `fail_fast` 提前吞掉。
 - 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
-- Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；不要直接运行 `uvicorn winpilot.server:app`。
+- Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；两者除公开 ping 外都使用进程随机 bearer token。不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
 - 感知默认组合 UIA、Win32、OCR、CV；VLM 默认关闭，只有在 `vlm` 配置有效时才作为辅助感知。
 - 低延迟 GUI 已落地 batch/subgoal、5-15 FPS watcher、ROI observe、predictive OCR、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
@@ -28,10 +28,11 @@ Legacy FlowScript/DSL 仍保留，但 ARP 是新控制平面的运行契约。�
 
 | 方向 | 当前状态 |
 | --- | --- |
-| Raw Device Executor | `action/executor.py` 已有 raw mouse/key/focus helper，public action 进 `DesktopActionQueue`；但 Fast GUI controller 内层仍有路径回到 `ToolSession.dispatch()`，完整独立 raw executor 尚未完成。 |
+| Raw Device Executor | `action/raw_device.py` 让 Controller batch 的常见 click/type/key/drag/focus/launch 子动作直接调用已授权 handler，不再递归支付完整 `ToolSession.dispatch()`；少数复杂动作仍走外层工具生命周期。 |
 | Action Queue | `action/desktop_queue.py` 是全局 single-writer 队列，支持同步 `run()` 和后台 job；`target_hwnd` 目前是元数据，不是按 hwnd 并发锁。全局串行更安全，但还不是细粒度 runtime。 |
-| Perception daemon | Level 0 watcher 常驻；变化触发 predictive OCR，UIA/Win32/OCR/CV 按成本融合，VLM 兜底。跨 run 语义页面分类仍在扩展。 |
-| ARP / Automation IR | `arp/1` 是 Agent/Controller/Skill 的可执行图契约；`automation-ir/1` 是 WPS/Flow/skill envelope；legacy DSL 仍兼容存在。 |
+| Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，最后 lease 释放后保留 45 秒热状态；变化触发 predictive OCR，VLM 仅兜底。它还不是常驻学习型 YOLO/UI detector。 |
+| Runtime jobs | Agent、ARP、Replay 和计划任务统一进入 `runtime_jobs.py`；API 可查询/取消，交互任务按 `interactive_runtime` 排队，真实鼠标键盘仍由 Desktop Action Queue 单写保护。 |
+| ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层，Flow editor 运行链是 Flow state -> IR -> `arp/1`；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
 | 前端 | 原生 Cockpit、ARP Studio、Runs、Skills、System 共用 `/api/v2` 和 WebSocket，不再依赖 iframe Agent 页面。 |
 | 真实能力 | 计算器、记事本、网页靶场、简单绘图/拖拽已有回归；QQ/微信/Steam/抖音/网易云等真实复杂软件还缺系统化非破坏性 E2E，不能用靶场成绩替代。 |
 
@@ -62,7 +63,7 @@ npm run clean
 
 `npm run clean:runtime` 会额外删除忽略的 `python-runtime/`。只有确认可重新准备运行时环境时再使用。
 
-真实 GUI 评测应走和前端一致的 `/api/chat` 路径：
+直接 Agent GUI 评测走 `/api/chat`；当前原生前端目标入口走 `/api/v2/arp/runs`，先尝试已验证 Skill，miss/fail 后才进入同一个 `AgentRunner`：
 
 ```bash
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
@@ -100,7 +101,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - [docs/architecture.md](docs/architecture.md)：当前架构、状态机和边界。
 - [docs/winpilot-agent.md](docs/winpilot-agent.md)：WinPilot agent 运行机制和 trace 复盘方法。
 - [docs/model-providers.md](docs/model-providers.md)：模型 provider、cache、usage/cost。
-- [docs/replay-recording.md](docs/replay-recording.md)：trace、`.wps.json`、replay、导入流程图。
+- [docs/replay-recording.md](docs/replay-recording.md)：trace、Automation IR、兼容 WPS、replay、导入流程图。
 - [docs/flow-editor.md](docs/flow-editor.md)：流程图/DSL/`@feature` 体系。
 
 ## 维护原则
@@ -111,10 +112,10 @@ python -m http.server 8877 --bind 127.0.0.1
 - 验证可做有限并发：文件/进程只读检查会与 UIA/OCR 重叠；`shell_true` 和真实桌面写操作仍保持同步、single-writer，不能为了速度制造竞态。
 - 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。
-- WinPilot Agent 自带内部计划任务：`schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 写入 `python/winpilot_home/agent_schedules.json`，到期后仍走同一个 `AgentRunner`；这不是 Windows Task Scheduler。
+- WinPilot Agent 自带计划任务：System 页面和 `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 共用 `python/winpilot_home/agent_schedules.json`；到期后提交统一 RuntimeJob，再走同一个 `AgentRunner`。这不是 Windows Task Scheduler。
 - `search_files` 优先使用随包提供的 Everything ES 客户端连接本机 Everything 索引，支持文件/目录、扩展名和排序；索引不可用时只做有时间上限的本地扫描。
 - Electron 会在任务完成、失败或停止时设置 Windows 任务栏状态、闪烁后台窗口并发送系统通知；同一 `run_id` 只提醒一次。
-- 坐标偏移排查用 `coordinate_diagnostics` / `coordinate_click_test`；它们报告物理屏幕、截图、窗口、DPI 和真实鼠标点击路径，不等同于浏览器 CSS/client 坐标。
+- `winpilot/__init__.py` 会在任何动作/感知模块之前通过 `utils/dpi.py` 初始化 Per-Monitor V2；坐标偏移排查用 `coordinate_diagnostics` / `coordinate_click_test`，它们报告物理屏幕、截图、窗口、DPI 和真实鼠标点击路径，不等同于浏览器 CSS/client 坐标。
 
 MIT
 

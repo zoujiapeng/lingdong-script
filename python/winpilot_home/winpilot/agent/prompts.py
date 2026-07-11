@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..utils.screenshot import screen_size
+from ..utils.screenshot import virtual_screen_region
 
 
 _SYSTEM_TEMPLATE = """You are WinPilot, an agent controlling a real Windows desktop.
 {vision_line}
-Current physical screen size: {screen_w}x{screen_h}.
+Virtual desktop bounds in physical pixels: left={screen_left}, top={screen_top}, width={screen_w}, height={screen_h}.
 {runtime_section}
 
 # Observation protocol
@@ -152,7 +152,7 @@ Downloads={downloads}
 
 _COMPACT_SYSTEM_TEMPLATE = """You are WinPilot, an agent controlling a real Windows desktop.
 {vision_line}
-Screen: {screen_w}x{screen_h}. Desktop={desktop}
+Virtual screen: ({screen_left},{screen_top}) {screen_w}x{screen_h}. Desktop={desktop}
 {runtime_section}
 
 Native-vision models receive a screenshot after observe. Text-only models cannot
@@ -221,7 +221,7 @@ def system_prompt(
     main_model_has_vision: bool = False,
     runtime_section: str = "",
 ) -> str:
-    screen_w, screen_h = screen_size()
+    screen = virtual_screen_region()
     home = Path.home()
     experience_section = (
         _EXPERIENCE_HEADER.format(recipes=experience_hints) if experience_hints else ""
@@ -229,8 +229,10 @@ def system_prompt(
     vision_line = _VISION_NATIVE if main_model_has_vision else _VISION_TEXT_ONLY
     template = _COMPACT_SYSTEM_TEMPLATE if style == "compact" else _SYSTEM_TEMPLATE
     return template.format(
-        screen_w=screen_w,
-        screen_h=screen_h,
+        screen_left=screen.left,
+        screen_top=screen.top,
+        screen_w=screen.width,
+        screen_h=screen.height,
         vision_line=vision_line,
         runtime_section=("\n" + runtime_section.strip()) if runtime_section else "",
         vlm_section=_VLM_SECTION if vlm_enabled else "",

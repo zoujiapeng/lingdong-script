@@ -113,7 +113,7 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
             try:
                 from ..recorder import trace as trace_mod
 
-                script_path = trace_mod.export_script(run_id)
+                script_path = trace_mod.export_automation_ir(run_id)
                 script = script_path.name
             except (FileNotFoundError, ValueError) as exc:
                 logger.debug("run has no replayable script: %s", exc)

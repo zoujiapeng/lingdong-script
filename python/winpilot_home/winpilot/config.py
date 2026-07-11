@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = ROOT_DIR.parents[1]
 CONFIG_PATH = ROOT_DIR / "config.json"
 TRACES_DIR = ROOT_DIR / "traces"
 SCRIPTS_DIR = ROOT_DIR / "scripts"
@@ -128,10 +129,12 @@ class Config:
 
     def save(self) -> None:
         with _lock:
-            CONFIG_PATH.write_text(
+            temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+            temporary.write_text(
                 json.dumps(self._data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            temporary.replace(CONFIG_PATH)
 
     def get(self, *path: str, default: Any = None) -> Any:
         with _lock:

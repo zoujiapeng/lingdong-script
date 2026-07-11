@@ -19,7 +19,7 @@ import numpy as np
 
 from ..config import TEMPLATES_IMG_DIR
 from ..utils.log import logger
-from ..utils.screenshot import Region, capture
+from ..utils.screenshot import Region, capture, virtual_screen_region
 from .model import UIElement
 
 _ICON_MIN, _ICON_MAX = 12, 64          # icon side length range (px)
@@ -138,9 +138,7 @@ def match_template(
         return []
 
     if region is None:
-        from ..utils.screenshot import screen_size
-        sw, sh = screen_size()
-        region = Region(0, 0, sw, sh)
+        region = virtual_screen_region()
     region = region.clamp_to_screen()
     haystack = capture(region)
 

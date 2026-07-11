@@ -1,14 +1,13 @@
 import React, { useCallback, useRef, useMemo } from 'react';
-import * as LucideIcons from 'lucide-react';
-import { Zap, AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import { FlowNode as FlowNodeType } from '../../types';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 import { getNodeDimensions } from '../../utils/constants';
+import { getNodeIcon } from '../../utils/nodeIconMap';
 import { useStore } from '../../store';
 
 function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
-  const Icon = (LucideIcons as any)[name];
-  if (!Icon) return <Zap size={size} />;
+  const Icon = getNodeIcon(name);
   return <Icon size={size} />;
 }
 

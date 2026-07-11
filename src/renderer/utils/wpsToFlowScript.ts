@@ -19,6 +19,8 @@ export interface WpsScript {
   target?: unknown;
   conditions?: Record<string, unknown>;
   evidence?: unknown[] | Record<string, unknown>;
+  safety?: Record<string, unknown>;
+  fallback?: Record<string, unknown>;
   vars?: Record<string, string>;
   steps: WpsStep[];
 }

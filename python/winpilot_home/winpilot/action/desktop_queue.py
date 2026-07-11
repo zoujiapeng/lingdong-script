@@ -281,6 +281,7 @@ class DesktopActionQueue:
         *,
         target_hwnd: int | None = None,
         metadata: dict[str, Any] | None = None,
+        coalesce_nested: bool = False,
     ) -> T:
         depth = int(getattr(self._local, "depth", 0) or 0)
         job_id = f"daq-{next(self._ids)}"
@@ -293,6 +294,8 @@ class DesktopActionQueue:
         with self._lock:
             wait_ms = int((time.monotonic() - queued_at) * 1000)
             self._local.depth = depth + 1
+            previous_coalesce = bool(getattr(self._local, "coalesce_nested", False))
+            self._local.coalesce_nested = previous_coalesce or bool(coalesce_nested)
             started = time.monotonic()
             BUS.publish(
                 "desktop_action_queue",
@@ -330,6 +333,7 @@ class DesktopActionQueue:
                 raise
             finally:
                 self._local.depth = depth
+                self._local.coalesce_nested = previous_coalesce
 
             elapsed_ms = int((time.monotonic() - started) * 1000)
             with self._metrics_lock:
@@ -349,6 +353,12 @@ class DesktopActionQueue:
             )
             return result
 
+    def coalescing_nested_actions(self) -> bool:
+        return bool(
+            int(getattr(self._local, "depth", 0) or 0) > 0
+            and getattr(self._local, "coalesce_nested", False)
+        )
+
 
 DESKTOP_ACTION_QUEUE = DesktopActionQueue()
 
@@ -359,6 +369,8 @@ def queued_desktop_action(action: str):
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> T:
+            if DESKTOP_ACTION_QUEUE.coalescing_nested_actions():
+                return fn(*args, **kwargs)
             target_hwnd = kwargs.get("hwnd")
             try:
                 target = int(target_hwnd) if target_hwnd not in (None, "") else None

@@ -1,6 +1,7 @@
 """FastAPI server: REST control surface + WebSocket event stream + static UI.
 
-One agent run at a time. All BUS events stream to every connected browser.
+Runtime jobs queue on declared resources; desktop mutations remain serialized.
+All BUS events stream to every authenticated connected client.
 
 IMPORTANT: Start this server via serve.py only — never directly with uvicorn.
   Correct:  python serve.py [PORT] [HOST]
@@ -14,6 +15,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import sys
 import threading
 import time
@@ -41,6 +43,8 @@ from .recorder import human as human_mod
 from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
 from .runtime_info import runtime_fingerprint
+from .runtime_jobs import RUNTIME_JOBS, RuntimeJob
+from .fast.perception_daemon import PERCEPTION_DAEMON
 from .utils.log import BUS, logger
 from .orchestrator.adapters import default_handlers, finalize_memory_feedback
 from .orchestrator.catalog import capability_catalog
@@ -62,6 +66,7 @@ CHATGPT_MCP_ACTIVITY = {
 }
 CHATGPT_MCP_ACTIVITY_LOCK = threading.Lock()
 _CHATGPT_MCP_ACTIVE_TTL_S = 45.0
+CONTROL_TOKEN = os.environ.get("WINPILOT_CONTROL_TOKEN", "").strip()
 
 
 def _started_by_direct_uvicorn() -> bool:
@@ -113,17 +118,46 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
-# The server binds 127.0.0.1 only. Allow any origin so the Electron renderer
-# (file:// in prod, http://localhost:5200 in dev) can call the REST API
-# cross-origin — e.g. the React 重放 editor listing traces/scripts and the
-# human-recorder controls. The embedded iframe webui is same-origin and was
-# unaffected, which is why only the React panel hit CORS failures.
+# The server binds to loopback and accepts only the production renderer's null
+# origin plus the two Vite development origins. Every non-ping request still
+# requires the per-process bearer token.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["null", "http://localhost:5200", "http://127.0.0.1:5200"],
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-WinPilot-Token"],
 )
+
+
+def _request_token(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return (
+        request.headers.get("x-winpilot-token", "").strip()
+        or request.query_params.get("token", "").strip()
+    )
+
+
+@app.middleware("http")
+async def require_control_token(request: Request, call_next):
+    # Browser preflight requests do not carry the eventual Authorization
+    # header. Let CORSMiddleware validate the declared origin/method/headers;
+    # the real request below remains token protected.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    protected = path.startswith("/api/") or path == "/mcp" or path.startswith("/mcp/")
+    if protected and path != "/api/ping" and CONTROL_TOKEN:
+        supplied = _request_token(request)
+        if not supplied or not secrets.compare_digest(supplied, CONTROL_TOKEN):
+            return JSONResponse({"detail": "Authentication required"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/api/ping")
+def api_ping() -> dict[str, bool]:
+    return {"ok": True}
 
 
 def _ensure_inside(path: Path, root: Path, what: str) -> Path:
@@ -144,25 +178,37 @@ def _is_admin() -> bool:
 
 
 # ----------------------------------------------------------------- run state
+_INTERACTIVE_RUNTIME_RESOURCE = "interactive_runtime"
+
+
 class _RunState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.runner: AgentRunner | None = None
-        self.thread: threading.Thread | None = None
-        self.replay_thread: threading.Thread | None = None
-        self.replay_jobs: dict[str, dict[str, Any]] = {}
-        self.stop_event = threading.Event()
+        self.runners: dict[str, AgentRunner] = {}
+        self.run_jobs: dict[str, str] = {}
+
+    def register_runner(self, runner: AgentRunner, job_id: str = "") -> None:
+        with self.lock:
+            self.runners[runner.run_id] = runner
+            if job_id:
+                self.run_jobs[runner.run_id] = job_id
+
+    def bind_runner(self, runner: AgentRunner, job_id: str = "") -> None:
+        self.register_runner(runner, job_id)
+        with self.lock:
+            self.runner = runner
+
+    def job_for_run(self, run_id: str) -> RuntimeJob | None:
+        with self.lock:
+            job_id = self.run_jobs.get(str(run_id or ""), "")
+        return RUNTIME_JOBS.get(job_id) if job_id else None
 
     def replay_busy(self) -> bool:
-        legacy_running = self.replay_thread is not None and self.replay_thread.is_alive()
-        job_running = any(
-            job.get("status") in {"queued", "running", "canceling"}
-            for job in self.replay_jobs.values()
-        )
-        return legacy_running or job_running
+        return RUNTIME_JOBS.busy(kind="replay")
 
     def agent_busy(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
+        return RUNTIME_JOBS.busy(kind="agent")
 
     def busy_breakdown(self) -> dict[str, bool]:
         return {
@@ -180,52 +226,81 @@ _SCHEDULER_STOP = threading.Event()
 _SCHEDULER_THREAD: threading.Thread | None = None
 
 
-def _public_replay_job(job: dict[str, Any]) -> dict[str, Any]:
+def _public_runtime_replay_job(job: RuntimeJob) -> dict[str, Any]:
+    status = {
+        "waiting_resources": "queued",
+        "canceled": "stopped",
+        "failed": "error",
+    }.get(job.status, job.status)
+    result = job.result if isinstance(job.result, dict) else None
     return {
-        "replay_id": job["id"],
-        "script": job.get("script", ""),
-        "status": job.get("status", "unknown"),
-        "ok": job.get("ok"),
-        "error": job.get("error", ""),
-        "created_at": job.get("created_at"),
-        "started_at": job.get("started_at"),
-        "finished_at": job.get("finished_at"),
-        "result": job.get("result"),
+        "replay_id": job.id,
+        "script": str(job.metadata.get("script") or ""),
+        "status": status,
+        "ok": result.get("ok") if result is not None else (False if status in {"error", "stopped"} else None),
+        "error": job.error,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "result": job.result,
+        "resources": list(job.resources),
     }
 
-
-def _update_replay_job(replay_id: str, **changes: Any) -> dict[str, Any] | None:
-    with STATE.lock:
-        job = STATE.replay_jobs.get(replay_id)
-        if not job:
-            return None
-        job.update(changes)
-        return _public_replay_job(job)
-
-
-def _scheduled_worker(runner: AgentRunner, schedule_id: str) -> None:
+def _run_agent_job(
+    runner: AgentRunner,
+    *,
+    schedule_id: str = "",
+    schedule_name: str = "",
+) -> dict[str, Any]:
+    STATE.bind_runner(runner)
+    trace_mod.RECORDER.start(runner.run_id)
+    if schedule_id:
+        agent_scheduler.mark_started(schedule_id, runner.run_id)
+        BUS.publish(
+            "schedule",
+            action="start",
+            schedule_id=schedule_id,
+            run_id=runner.run_id,
+            name=schedule_name,
+        )
+    BUS.publish("chat", run_id=runner.run_id, role="user", content=runner.task)
     try:
         result = runner.run()
         SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
         BUS.publish("session", action="append", count=len(SESSION.all()))
-        agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
-        BUS.publish(
-            "schedule",
-            action="finished",
-            schedule_id=schedule_id,
-            run_id=runner.run_id,
-            status=runner.status,
-            result=result,
-        )
+        if schedule_id:
+            agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
+            BUS.publish(
+                "schedule",
+                action="finished",
+                schedule_id=schedule_id,
+                run_id=runner.run_id,
+                status=runner.status,
+                result=result,
+            )
+        return {
+            "ok": runner.status in {"done", "reply"},
+            "run_id": runner.run_id,
+            "status": runner.status,
+            "result": result,
+            **({"error": runner.result_text} if runner.status not in {"done", "reply"} else {}),
+        }
     except Exception as exc:
-        logger.exception("scheduled agent worker crashed")
+        logger.exception("agent runtime job crashed")
         runner.status = "error"
-        runner.result_text = f"Scheduled agent worker crashed: {exc}"
+        runner.result_text = f"Agent runtime job crashed: {exc}"
         SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
-        agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
+        if schedule_id:
+            agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
         BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
         BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
         BUS.publish("session", action="append", count=len(SESSION.all()))
+        return {
+            "ok": False,
+            "run_id": runner.run_id,
+            "status": runner.status,
+            "error": runner.result_text,
+        }
     finally:
         trace_mod.RECORDER.stop()
 
@@ -235,41 +310,39 @@ def _try_start_scheduled(entry: dict[str, Any]) -> bool:
     schedule_id = str(entry.get("id") or "")
     if not task or not schedule_id:
         return False
-    with STATE.lock:
-        if STATE.busy():
-            agent_scheduler.mark_skipped(schedule_id, "busy", defer_seconds=30.0)
-            BUS.publish("schedule", action="deferred", schedule_id=schedule_id, reason="busy")
-            return False
-        STATE.stop_event = threading.Event()
-        max_steps = entry.get("max_steps")
-        try:
-            max_steps_override = int(max_steps) if max_steps else None
-        except (TypeError, ValueError):
-            max_steps_override = None
-        runner = build_runner(
-            task,
-            stop_event=STATE.stop_event,
-            session_context=SESSION.recent(),
-            max_steps_override=max_steps_override,
-        )
-        STATE.runner = runner
-        trace_mod.RECORDER.start(runner.run_id)
-        agent_scheduler.mark_started(schedule_id, runner.run_id)
-        BUS.publish(
-            "schedule",
-            action="start",
+    max_steps = entry.get("max_steps")
+    try:
+        max_steps_override = int(max_steps) if max_steps else None
+    except (TypeError, ValueError):
+        max_steps_override = None
+    stop_event = threading.Event()
+    runner = build_runner(
+        task,
+        stop_event=stop_event,
+        session_context=SESSION.recent(),
+        max_steps_override=max_steps_override,
+    )
+    job_id = f"schedule-{schedule_id}-{runner.run_id}"
+    STATE.register_runner(runner, job_id)
+    agent_scheduler.mark_started(schedule_id, runner.run_id)
+    BUS.publish("schedule", action="queued", schedule_id=schedule_id, run_id=runner.run_id)
+    RUNTIME_JOBS.submit(
+        "agent",
+        lambda _stop: _run_agent_job(
+            runner,
             schedule_id=schedule_id,
-            run_id=runner.run_id,
-            name=entry.get("name", ""),
-        )
-        BUS.publish("chat", run_id=runner.run_id, role="user", content=task)
-        STATE.thread = threading.Thread(
-            target=_scheduled_worker,
-            args=(runner, schedule_id),
-            daemon=True,
-            name="agent-schedule",
-        )
-        STATE.thread.start()
+            schedule_name=str(entry.get("name") or ""),
+        ),
+        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+        metadata={"run_id": runner.run_id, "task": task, "schedule_id": schedule_id},
+        job_id=job_id,
+        stop_event=stop_event,
+        on_finish=lambda job: (
+            agent_scheduler.mark_finished(schedule_id, runner.run_id, "canceled")
+            if job.status == "canceled" and runner.status == "pending"
+            else None
+        ),
+    )
     return True
 
 
@@ -306,6 +379,16 @@ class AgentScheduleRequest(BaseModel):
     delay_seconds: float | None = None
     interval_seconds: float | None = None
     enabled: bool = True
+    max_steps: int | None = None
+
+
+class AgentSchedulePatch(BaseModel):
+    task: str | None = None
+    name: str | None = None
+    run_at: str | None = None
+    delay_seconds: float | None = None
+    interval_seconds: float | None = None
+    enabled: bool | None = None
     max_steps: int | None = None
 
 
@@ -371,45 +454,40 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
     if not task:
         raise HTTPException(400, "任务不能为空")
     with STATE.lock:
-        if STATE.busy():
+        if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行，请先停止")
-        STATE.stop_event = threading.Event()
+        stop_event = threading.Event()
         max_steps = req.max_steps if req.max_steps and req.max_steps > 0 else None
-        runner = build_runner(task, stop_event=STATE.stop_event,
-                              session_context=SESSION.recent(),
-                              max_steps_override=max_steps)
-        STATE.runner = runner
-        trace_mod.RECORDER.start(runner.run_id)
-        BUS.publish("chat", run_id=runner.run_id, role="user", content=task)
-
-        def worker() -> None:
-            try:
-                result = runner.run()
-                SESSION.append(task, runner.status, runner.result_text, runner.run_id)
-                BUS.publish("session", action="append", count=len(SESSION.all()))
-            except Exception as exc:
-                logger.exception("agent worker crashed")
-                runner.status = "error"
-                runner.result_text = f"Agent worker crashed: {exc}"
-                SESSION.append(task, runner.status, runner.result_text, runner.run_id)
-                BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
-                BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
-                BUS.publish("session", action="append", count=len(SESSION.all()))
-            finally:
-                trace_mod.RECORDER.stop()
-
-        STATE.thread = threading.Thread(target=worker, daemon=True, name="agent-run")
-        STATE.thread.start()
-    return {"run_id": runner.run_id}
+        runner = build_runner(
+            task,
+            stop_event=stop_event,
+            session_context=SESSION.recent(),
+            max_steps_override=max_steps,
+        )
+        job_id = f"agent-{runner.run_id}"
+        STATE.runners[runner.run_id] = runner
+        STATE.run_jobs[runner.run_id] = job_id
+        job = RUNTIME_JOBS.submit(
+            "agent",
+            lambda _stop: _run_agent_job(runner),
+            resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+            metadata={"run_id": runner.run_id, "task": task},
+            job_id=job_id,
+            stop_event=stop_event,
+        )
+    return {"run_id": runner.run_id, "job_id": job.id, "status": job.status}
 
 
 @app.post("/api/stop")
 def stop_run() -> dict[str, Any]:
-    STATE.stop_event.set()
+    canceled_jobs = []
+    for job in RUNTIME_JOBS.active(resource=_INTERACTIVE_RUNTIME_RESOURCE):
+        RUNTIME_JOBS.cancel(job.id)
+        canceled_jobs.append(job.id)
     current_arp = ARP_RUNS.current()
     if current_arp and current_arp.status.value in {"queued", "running", "paused"}:
         current_arp.cancel()
-    return {"ok": True}
+    return {"ok": True, "canceled_jobs": canceled_jobs}
 
 
 @app.post("/api/interject")
@@ -419,7 +497,8 @@ def interject(req: ChatRequest) -> dict[str, Any]:
     if not text:
         raise HTTPException(400, "内容不能为空")
     runner = STATE.runner
-    agent_alive = STATE.thread is not None and STATE.thread.is_alive()
+    job = STATE.job_for_run(runner.run_id) if runner else None
+    agent_alive = bool(job and job.status == "running") or ARP_RUNS.busy()
     if not runner or not agent_alive:
         raise HTTPException(409, "当前没有运行中的任务")
     runner.interject(text)
@@ -449,6 +528,8 @@ def status() -> dict[str, Any]:
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
         "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
+        "runtime_jobs": RUNTIME_JOBS.list(20),
+        "perception_daemon": PERCEPTION_DAEMON.status(),
         "current_run": RUN_PROJECTIONS.current(),
     }
 
@@ -484,6 +565,31 @@ def platform_runs(limit: int = 50) -> dict[str, Any]:
     return {"ok": True, "runs": RUN_PROJECTIONS.list(max(1, min(limit, 200)))}
 
 
+@app.get("/api/v2/jobs")
+def platform_jobs(limit: int = 50) -> dict[str, Any]:
+    return {"ok": True, "jobs": RUNTIME_JOBS.list(max(1, min(limit, 200)))}
+
+
+@app.get("/api/v2/jobs/{job_id}")
+def platform_job(job_id: str) -> dict[str, Any]:
+    job = RUNTIME_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "runtime job not found")
+    return {"ok": True, "job": job.snapshot()}
+
+
+@app.post("/api/v2/jobs/{job_id}/cancel")
+def cancel_platform_job(job_id: str) -> dict[str, Any]:
+    job = RUNTIME_JOBS.cancel(job_id)
+    if not job:
+        raise HTTPException(404, "runtime job not found")
+    run_id = str(job.metadata.get("run_id") or "")
+    execution = ARP_RUNS.get(run_id) if run_id else None
+    if execution:
+        execution.cancel()
+    return {"ok": True, "job": job.snapshot()}
+
+
 @app.get("/api/v2/runs/current")
 def platform_current_run() -> dict[str, Any]:
     return {
@@ -515,30 +621,55 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))
+    if human_mod.RECORDER.is_recording():
+        raise RuntimeError("a human or apprentice recording is active")
+
+    job_ref: dict[str, str] = {}
+
+    def on_runner(runner: AgentRunner) -> None:
+        STATE.bind_runner(runner, job_ref.get("job_id", ""))
+
+    def on_start(started: ArpExecution) -> None:
+        trace_mod.RECORDER.start(started.run_id)
+
+    def on_finish(finished: ArpExecution) -> None:
+        try:
+            finalize_memory_feedback(finished)
+        finally:
+            trace_mod.RECORDER.stop()
+
+    execution = ARP_RUNS.prepare(
+        graph,
+        default_handlers(on_runner),
+        inputs=inputs,
+    )
+    job_id = f"arp-job-{execution.run_id}"
+    job_ref["job_id"] = job_id
     with STATE.lock:
-        if STATE.busy():
-            raise RuntimeError("another agent, replay, recording, or ARP run is active")
+        STATE.run_jobs[execution.run_id] = job_id
 
-        def on_runner(runner: AgentRunner) -> None:
-            STATE.runner = runner
-
-        def on_start(execution: ArpExecution) -> None:
-            STATE.stop_event = execution.stop_event
-            trace_mod.RECORDER.start(execution.run_id)
-
-        def on_finish(finished_execution: ArpExecution) -> None:
-            try:
-                finalize_memory_feedback(finished_execution)
-            finally:
-                trace_mod.RECORDER.stop()
-
-        execution = ARP_RUNS.start(
-            graph,
-            default_handlers(on_runner),
-            inputs=inputs,
+    def worker(_stop: threading.Event) -> dict[str, Any]:
+        snapshot = ARP_RUNS.run_prepared(
+            execution,
             on_start=on_start,
             on_finish=on_finish,
         )
+        ok = snapshot.get("status") == "done"
+        return {
+            "ok": ok,
+            "run_id": execution.run_id,
+            "run": snapshot,
+            **({"error": snapshot.get("error") or "ARP run failed"} if not ok else {}),
+        }
+
+    RUNTIME_JOBS.submit(
+        "arp",
+        worker,
+        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+        metadata={"run_id": execution.run_id, "graph_id": graph.id, "graph_name": graph.name},
+        job_id=job_id,
+        stop_event=execution.stop_event,
+    )
     return execution
 
 
@@ -565,6 +696,9 @@ def get_arp_run(run_id: str) -> dict[str, Any]:
 def cancel_arp_run(run_id: str) -> dict[str, Any]:
     if not ARP_RUNS.cancel(run_id):
         raise HTTPException(404, "ARP run not found")
+    job = STATE.job_for_run(run_id)
+    if job:
+        RUNTIME_JOBS.cancel(job.id)
     return {"ok": True, "run": ARP_RUNS.get(run_id).to_dict()}
 
 
@@ -665,6 +799,9 @@ def _chatgpt_bridge_get_run(run_id: str) -> dict[str, Any]:
 def _chatgpt_bridge_cancel_run(run_id: str) -> dict[str, Any]:
     if not ARP_RUNS.cancel(run_id):
         return {"ok": False, "error": "active ARP run not found", "run_id": run_id}
+    job = STATE.job_for_run(run_id)
+    if job:
+        RUNTIME_JOBS.cancel(job.id)
     execution = ARP_RUNS.get(run_id)
     return {"ok": True, "run": execution.to_dict() if execution else None}
 
@@ -721,6 +858,20 @@ def create_agent_schedule(req: AgentScheduleRequest) -> dict[str, Any]:
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "schedule": entry}
+
+
+@app.patch("/api/agent-schedules/{schedule_id}")
+def update_agent_schedule(schedule_id: str, req: AgentSchedulePatch) -> dict[str, Any]:
+    try:
+        entry = agent_scheduler.update_task(
+            schedule_id,
+            req.model_dump(exclude_unset=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if entry is None:
+        raise HTTPException(404, "schedule not found")
     return {"ok": True, "schedule": entry}
 
 
@@ -836,8 +987,8 @@ def scripts() -> list[dict[str, Any]]:
 
 
 def _script_path(file: str) -> Path:
-    if not file.endswith(".wps.json"):
-        raise HTTPException(400, "文件名必须以 .wps.json 结尾")
+    if not (file.endswith(".wps.json") or file.endswith(".automation.json")):
+        raise HTTPException(400, "file must end in .automation.json or .wps.json")
     return _ensure_inside(SCRIPTS_DIR / file, SCRIPTS_DIR, "脚本")
 
 
@@ -849,20 +1000,27 @@ def _ir_path(file: str) -> Path:
 
 @app.get("/api/script/{file}")
 def get_script(file: str) -> dict[str, Any]:
-    """Read one .wps.json document (for the visual editor to load as a graph)."""
+    """Read canonical Automation IR or a legacy WPS compatibility document."""
     path = _script_path(file)
     if not path.exists():
         raise HTTPException(404, "脚本不存在")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         raise HTTPException(400, f"脚本解析失败: {exc}") from exc
+    if data.get("format") == "automation-ir/1":
+        error = validate_automation_ir(data)
+    else:
+        error = trace_mod.validate_script(data)
+    if error:
+        raise HTTPException(400, f"script validation failed: {error}")
+    return data
 
 
 @app.get("/api/script/{file}/ir")
 def get_script_ir(file: str) -> dict[str, Any]:
     script = get_script(file)
-    ir = automation_ir_from_wps(script)
+    ir = script if script.get("format") == "automation-ir/1" else automation_ir_from_wps(script)
     err = validate_automation_ir(ir)
     if err:
         raise HTTPException(400, f"Automation IR validation failed: {err}")
@@ -889,7 +1047,11 @@ def put_script(file: str, req: ScriptSaveRequest) -> dict[str, Any]:
     """Save an edited .wps.json after structural validation (reject unknown
     tools / malformed nesting before it can ever be replayed)."""
     path = _script_path(file)
-    err = trace_mod.validate_script(req.script)
+    err = (
+        validate_automation_ir(req.script)
+        if req.script.get("format") == "automation-ir/1"
+        else trace_mod.validate_script(req.script)
+    )
     if err:
         raise HTTPException(400, f"脚本校验失败: {err}")
     SCRIPTS_DIR.mkdir(exist_ok=True)
@@ -965,79 +1127,52 @@ def replay(req: ReplayRequest) -> dict[str, Any]:
     if not script_path.exists():
         raise HTTPException(404, "脚本不存在")
     with STATE.lock:
-        if STATE.busy():
+        if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行")
         replay_id = f"replay-{uuid.uuid4().hex[:12]}"
         stop_event = threading.Event()
-        STATE.stop_event = stop_event
-        job: dict[str, Any] = {
-            "id": replay_id,
-            "script": req.script,
-            "status": "queued",
-            "ok": None,
-            "error": "",
-            "result": None,
-            "created_at": time.time(),
-            "started_at": None,
-            "finished_at": None,
-            "stop_event": stop_event,
-        }
-        STATE.replay_jobs[replay_id] = job
-
-        def worker() -> None:
-            _update_replay_job(replay_id, status="running", started_at=time.time())
+        def worker(runtime_stop: threading.Event) -> dict[str, Any]:
             BUS.publish("replay", state="job_start", replay_id=replay_id, script=req.script)
             try:
-                result = trace_mod.replay(script_path, stop_event=stop_event)
-                status = "stopped" if stop_event.is_set() and not result.get("ok", False) else "done"
-                _update_replay_job(
-                    replay_id,
-                    status=status,
-                    ok=bool(result.get("ok", False)),
-                    result=result,
-                    finished_at=time.time(),
-                )
+                result = trace_mod.replay(script_path, stop_event=runtime_stop)
+                status = "stopped" if runtime_stop.is_set() and not result.get("ok", False) else "done"
                 BUS.publish("replay", state="job_done", replay_id=replay_id,
                             ok=bool(result.get("ok", False)), status=status)
+                return result
             except Exception as exc:
                 logger.exception("重放失败")
-                _update_replay_job(
-                    replay_id,
-                    status="error",
-                    ok=False,
-                    error=str(exc),
-                    finished_at=time.time(),
-                )
                 BUS.publish("replay", state="error", replay_id=replay_id, error=str(exc))
+                raise
 
-        STATE.replay_thread = threading.Thread(target=worker, daemon=True, name="replay")
-        STATE.replay_thread.start()
-        public = _public_replay_job(job)
+        job = RUNTIME_JOBS.submit(
+            "replay",
+            worker,
+            resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+            metadata={"script": req.script},
+            job_id=replay_id,
+            stop_event=stop_event,
+        )
+        public = _public_runtime_replay_job(job)
     return {"ok": True, "replay_id": replay_id, "job": public}
 
 
 @app.get("/api/replay/{replay_id}")
 def replay_status(replay_id: str) -> dict[str, Any]:
-    with STATE.lock:
-        job = STATE.replay_jobs.get(replay_id)
-        if not job:
-            raise HTTPException(404, "replay job not found")
-        return _public_replay_job(job)
+    job = RUNTIME_JOBS.get(replay_id)
+    if not job or job.kind != "replay":
+        raise HTTPException(404, "replay job not found")
+    return _public_runtime_replay_job(job)
 
 
 @app.post("/api/replay/{replay_id}/cancel")
 def replay_cancel(replay_id: str) -> dict[str, Any]:
-    with STATE.lock:
-        job = STATE.replay_jobs.get(replay_id)
-        if not job:
-            raise HTTPException(404, "replay job not found")
-        if job.get("status") in {"done", "error", "stopped"}:
-            return {"ok": True, "job": _public_replay_job(job)}
-        stop_event = job.get("stop_event")
-        if isinstance(stop_event, threading.Event):
-            stop_event.set()
-        job["status"] = "canceling"
-        public = _public_replay_job(job)
+    job = RUNTIME_JOBS.get(replay_id)
+    if not job or job.kind != "replay":
+        raise HTTPException(404, "replay job not found")
+    if job.status in {"done", "failed", "canceled"}:
+        return {"ok": True, "job": _public_runtime_replay_job(job)}
+    job = RUNTIME_JOBS.cancel(replay_id)
+    public = _public_runtime_replay_job(job)
     BUS.publish("replay", state="job_cancel", replay_id=replay_id)
     return {"ok": True, "job": public}
 
@@ -1197,6 +1332,13 @@ def session_clear() -> dict[str, Any]:
 # ---------------------------------------------------------------- websocket
 @app.websocket("/ws/events")
 async def ws_events(ws: WebSocket) -> None:
+    if CONTROL_TOKEN:
+        authorization = ws.headers.get("authorization", "")
+        header_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        supplied = header_token or ws.query_params.get("token", "").strip()
+        if not supplied or not secrets.compare_digest(supplied, CONTROL_TOKEN):
+            await ws.close(code=4401, reason="Authentication required")
+            return
     await ws.accept()
     q = BUS.subscribe()
     try:

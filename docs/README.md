@@ -10,10 +10,8 @@
 | [winpilot-agent.md](winpilot-agent.md) | WinPilot agent 运行机制、工具复盘、done gate |
 | [model-providers.md](model-providers.md) | 模型 provider、thinking、cache、usage/cost |
 | [apis.md](apis.md) | Electron HTTP API、WinPilot REST、IPC、MCP |
-| [replay-recording.md](replay-recording.md) | trace、`.wps.json`、replay、导入流程图 |
+| [replay-recording.md](replay-recording.md) | trace、Automation IR、兼容 WPS、replay、导入流程图 |
 | [flow-editor.md](flow-editor.md) | 流程图、DSL、`@feature` 体系 |
-| [replay-runtime-skill-convergence.md](replay-runtime-skill-convergence.md) | Replay/ARP/FlowScript 收敛方向 |
-| [现状评估与改进路线-2026-06.md](现状评估与改进路线-2026-06.md) | 工程债和改进路线，偏战略 |
 | [项目导览-面试版.md](项目导览-面试版.md) | 以当前代码为准的面试导览、架构讲法、高频问答和过时说法清单 |
 
 ## 可信边界
@@ -22,7 +20,7 @@
 - 流程图/DSL 体系以 `src/renderer/`、`python/engine/`、`python/features/` 为准。
 - Runtime、低延迟 GUI、记忆、上下文折叠以 `CLAUDE.md`、`architecture.md`、`winpilot-agent.md` 为准。
 - 本机运行数据以 `config.json`、`traces/`、`evals/`、`experience_memory.json` 为主，不作为架构事实提交。
-- 低延迟 GUI、Replay/IR、前端成熟度和真实软件能力以 README 的“成熟度快照”和 `architecture.md` 的边界描述为准；不要把路线图目标当成已完成事实。
+- 低延迟 GUI、RuntimeJob、Replay/IR、前端成熟度和真实软件能力以 README 的“成熟度快照”和 `architecture.md` 的边界描述为准；不要把路线图目标当成已完成事实。
 
 ## 维护规则
 

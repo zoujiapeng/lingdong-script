@@ -207,7 +207,7 @@ def test_replay_steps_share_one_session_and_mix_with_native_arp(monkeypatch):
     assert replayer.anchor_profiles == ["arp:graph-test:demo", "arp:graph-test:demo"]
     assert replayer.calls[-1][3]["from_replay"] == "yes"
     assert replayer.calls[-1][3]["from_arp"] == "ready"
-    assert [item["type"] for item in result["evidence"]] == ["replay_step", "replay_step"]
+    assert [item["predicate"] for item in result["evidence"]] == ["replay.step", "replay.step"]
 
 
 def test_graph_validation_rejects_unsupported_controller_action_before_run():
@@ -257,7 +257,29 @@ def test_evidence_gate_satisfies_done_policy():
     result = execution.run()
 
     assert result["status"] == "done"
-    assert result["evidence"][-1]["type"] == "evidence_gate"
+    assert result["evidence"][-1]["predicate"] == "evidence.gate"
+
+
+def test_typed_evidence_gate_rejects_agent_text_and_stale_records():
+    import time
+
+    from winpilot.orchestrator.contracts import EvidenceRecord, EvidenceRequirement
+    from winpilot.orchestrator.evidence import evidence_matches, normalize_evidence
+
+    claim = EvidenceRequirement(predicate="message.sent", max_age_ms=1000)
+    agent_text = normalize_evidence("message sent successfully")
+    stale = EvidenceRecord(
+        predicate="message.sent",
+        value="hello",
+        source="chat_observe",
+        verified=True,
+        captured_at=time.time() - 5,
+    )
+    fresh = stale.model_copy(update={"captured_at": time.time()})
+
+    assert evidence_matches(agent_text, claim) is False
+    assert evidence_matches(stale, claim) is False
+    assert evidence_matches(fresh, claim) is True
 
 
 def test_arp_execution_routes_condition_and_updates_variables():
@@ -323,7 +345,9 @@ def test_arp_execution_retries_registered_handler():
     assert result["status"] == "done"
     assert calls == ["batch", "batch"]
     assert result["history"][1]["attempts"] == 2
-    assert "batch verified" in result["evidence"]
+    assert result["evidence"][0]["predicate"] == "legacy.unverified"
+    assert result["evidence"][0]["verified"] is False
+    assert result["evidence"][0]["value"] == "batch verified"
 
 
 def test_arp_execution_routes_explicit_failure_before_fail_fast():
@@ -443,7 +467,8 @@ def test_memory_backed_skill_replay_emits_verified_evidence(monkeypatch, tmp_pat
     assert result.ok is True
     assert result.branch == "next"
     assert result.output["memory_id"] == "skill-memory"
-    assert result.evidence[0]["verified_steps"] == 1
+    assert result.evidence[0]["predicate"] == "skill.replay"
+    assert result.evidence[0]["metadata"]["verified_steps"] == 1
     assert [call[0][1] for call in attempts] == ["used", "replay_ok"]
 
 

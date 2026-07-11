@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Callable, Any
 
 from ..config import CONFIG
 from ..utils.log import logger
@@ -342,7 +343,13 @@ def _parse_loose_step_list(raw: str) -> list[str]:
     return out
 
 
-def make_plan(client, model: str, task: str, temperature: float = 0.2) -> list[dict]:
+def make_plan(
+    client,
+    model: str,
+    task: str,
+    temperature: float = 0.2,
+    on_response: Callable[[Any], None] | None = None,
+) -> list[dict]:
     """One focused LLM call -> ordered subgoals (each {goal, check}). [] on failure."""
     try:
         resp = client.chat.completions.create(
@@ -354,6 +361,8 @@ def make_plan(client, model: str, task: str, temperature: float = 0.2) -> list[d
             temperature=temperature,
             max_tokens=500,
         )
+        if on_response is not None:
+            on_response(resp)
         steps = _parse_steps(resp.choices[0].message.content or "")
         logger.info("规划生成 %d 个子目标 (%d 个带核验)",
                     len(steps), sum(1 for s in steps if s.get("check")))

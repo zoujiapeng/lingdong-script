@@ -56,6 +56,19 @@ def test_desktop_action_queue_allows_reentrant_nested_jobs():
     assert status["reentrant"] == 1
 
 
+def test_desktop_action_queue_marks_controller_lease_for_nested_coalescing():
+    queue = DesktopActionQueue()
+
+    observed = queue.run(
+        "controller_batch",
+        queue.coalescing_nested_actions,
+        coalesce_nested=True,
+    )
+
+    assert observed is True
+    assert queue.coalescing_nested_actions() is False
+
+
 def test_desktop_action_queue_emits_bus_events_and_errors():
     queue = DesktopActionQueue()
     events = []

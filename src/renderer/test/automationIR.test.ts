@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   automationIrFromFlowScript,
   automationIrFromWps,
+  automationDocumentToFlowScript,
+  automationIrToFlowScript,
   automationIrToWps,
   validateAutomationIR,
 } from '../utils/automationIR';
@@ -92,6 +94,15 @@ describe('Automation IR adapters', () => {
       params: { x: 1, y: 2, method: 'single', delay_after: 0 },
     });
     expect(ir.safety.executor).toBe('flowscript');
+
+    const restored = automationIrToFlowScript(ir);
+    expect(restored.meta.id).toBe('flow-1');
+    expect(restored.nodes).toEqual(flow.nodes);
+    expect(restored.edges).toEqual(flow.edges);
+    expect(restored.variables).toEqual(flow.variables);
+    expect(restored.settings).toEqual(flow.settings);
+    expect(automationDocumentToFlowScript(ir)).toEqual(restored);
+    expect(automationDocumentToFlowScript(flow)).toEqual(flow);
   });
 
   it('does not convert FlowScript-sourced IR back to WPS', () => {

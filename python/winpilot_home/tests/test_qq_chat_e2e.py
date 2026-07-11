@@ -276,7 +276,7 @@ class TestDoneGate:
 
         assert result is False
         assert runner._done_unverified is False
-        assert "unverified force-accept is disabled" in runner._last_done_reject_reason
+        assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
 # ---------------------------------------------------------------------------

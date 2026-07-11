@@ -11,6 +11,7 @@ resolution and the startup guard, so it is intentionally blocked.
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 
 # Ensure the directory containing this file (winpilot_home/) is on sys.path
@@ -30,6 +31,7 @@ def main() -> None:
     host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
     os.environ["WINPILOT_SERVE_PORT"] = str(port)
     os.environ["WINPILOT_SERVE_HOST"] = host
+    os.environ.setdefault("WINPILOT_CONTROL_TOKEN", secrets.token_urlsafe(32))
     uvicorn.run("winpilot.server:app", host=host, port=port, log_level="warning")
 
 

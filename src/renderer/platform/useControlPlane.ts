@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ControlPlaneClient, createGoalGraph, resolveControlPlaneUrl } from './client';
+import { ControlPlaneClient, createGoalGraph, resolveControlPlaneConnection } from './client';
 import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
@@ -48,11 +48,11 @@ export function useControlPlane() {
     let interval: ReturnType<typeof setInterval> | undefined;
     const connect = async () => {
       try {
-        const url = await resolveControlPlaneUrl();
+        const connection = await resolveControlPlaneConnection();
         if (disposed) return;
-        const client = new ControlPlaneClient(url);
+        const client = new ControlPlaneClient(connection.url, connection.token);
         clientRef.current = client;
-        setBaseUrl(url);
+        setBaseUrl(connection.url);
         await refresh();
         if (disposed) return;
         disconnect = client.connectEvents((event) => {

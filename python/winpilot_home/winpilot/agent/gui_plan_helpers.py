@@ -73,8 +73,10 @@ def _schema_profile_for_task(task: str, *, is_coding: bool) -> str:
         return configured
     if is_coding:
         return "standard"
-    if _is_gui_only_task(task) and _is_drawing_task(task):
+    if _is_drawing_task(task):
         return "drawing_gui"
+    if _is_gui_only_task(task):
+        return "lean_gui"
     return "standard"
 
 

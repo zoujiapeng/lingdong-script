@@ -10,7 +10,7 @@
 
 - `types/index.ts`：FlowScript 类型和 `NodeType`。
 - `utils/nodeDefinitions.ts`：节点定义。
-- `components/workbench/WorkbenchPanels.tsx`：统一工作台外壳；Agent cockpit 为第一屏，Flow/Replay/Settings 作为上下文层承载真实组件。
+- `components/platform/PlatformWorkbench.tsx`：唯一生产工作台；Agent、ARP Studio、Runs、Skills、System 共用 control plane。
 - `components/PropertyPanel/`：参数编辑。
 - `store/defaults.ts`：默认设置和预置模板。
 - `store/persistence.ts`：localStorage 持久化 helper。
@@ -30,7 +30,15 @@
 
 `python/engine/executor.py` 仍很大，但共享类型已拆到 `executor_types.py`。它应作为 legacy Flow/DSL 执行器维护，不继续塞 WinPilot 能力。
 
-当前可靠性边界：
+当前生产运行链：
+
+```text
+Flow editor state -> automation-ir/1 -> flowToArpGraph -> arp/1 -> RuntimeJob
+```
+
+保存默认写 `.automation.json`；旧 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台的主运行时。
+
+可靠性边界：
 
 - `INPUT_TEXT`、`CLICK_TEXT`、`CLICK_IMAGE` / `IMAGE_CLICK` 已在 legacy `DSLExecutor` 中落到现有 `click`、`type`、`image_click` action handler，不再解析成功后静默 no-op。
 - 前端 `store/executor.ts` 是浏览器侧 FlowScript 模拟/桥接执行器，不等同于 WinPilot Replayer。`tool_call`、`process_action`、`clipboard_action`、`window_control`、`dialog_action`、`a11y_action`、`wifi_action`、`web_browser`、`system_power` 以及 `FEATURE_MAP` 节点会通过 feature 桥执行；feature 返回 `success: false`、`ok: false`、持久化子进程 `type: "error"` 或内部 `result: false` 时必须视为节点失败。
@@ -71,6 +79,6 @@
 
 ## 与 WinPilot 的桥
 
-WinPilot 成功 trace 可以导出 `.wps.json`，再由 `src/renderer/utils/wpsToFlowScript.ts` 转成 FlowScript。Agent 不需要直接理解 FlowScript 内部结构。
+WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter；Agent 不需要直接理解 FlowScript 内部结构。
 
 这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。WPS 导入的 FlowScript 会设置 `settings.require_real_features=true`；能桥接的基础 GUI 节点、窗口等待、弹窗处理和摄像头节点会通过 `@feature` 尝试真实执行，不能桥接或桥接失败时应让流程失败，而不是继续报告完成。没有真实桥的等待/条件/图像/颜色/缺失子脚本类节点在该模式下也必须失败，不能走浏览器模拟。

@@ -1,13 +1,13 @@
 /**
  * WinPilot server lifecycle — spawns the WinPilot FastAPI/uvicorn server as a
- * managed child process and exposes its localhost URL to the renderer. The
- * Agent panel embeds this server's native web UI in an iframe, so the full
- * WinPilot experience (chat, execution log, settings, traces, scripts, memory)
- * and its entire HTTP/WebSocket API are used directly — nothing reimplemented.
+ * managed child process and exposes its authenticated localhost connection to
+ * the native renderer workbench. The legacy server web UI remains available
+ * only as a compatibility/diagnostic surface.
  */
 import * as path from 'path';
 import * as http from 'http';
 import * as net from 'net';
+import { randomBytes } from 'crypto';
 import { ChildProcess } from 'child_process';
 import { spawnPython } from './engine';
 import { getBaseDir } from './env';
@@ -19,6 +19,7 @@ let _lastError: string | null = null;
 const _stderrTail: string[] = [];
 
 const HOST = '127.0.0.1';
+const CONTROL_TOKEN = process.env.WINPILOT_CONTROL_TOKEN || randomBytes(32).toString('base64url');
 
 function pushStderr(line: string): void {
   for (const l of line.split(/\r?\n/)) {
@@ -47,7 +48,13 @@ function waitReady(port: number, timeoutMs = 30000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
     const probe = () => {
-      const req = http.get({ host: HOST, port, path: '/', timeout: 2000 }, (res) => {
+      const req = http.get({
+        host: HOST,
+        port,
+        path: '/api/ping',
+        timeout: 2000,
+        headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+      }, (res) => {
         res.resume();
         if (res.statusCode && res.statusCode < 500) resolve();
         else retry();
@@ -74,6 +81,7 @@ export function startWinpilotServer(): Promise<number> {
     const proc = spawnPython(['-u', 'serve.py', String(port), HOST], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, WINPILOT_CONTROL_TOKEN: CONTROL_TOKEN },
     });
     _proc = proc;
     _lastError = null;
@@ -114,13 +122,18 @@ export function getWinpilotUrl(): string | null {
   return _port ? `http://${HOST}:${_port}/` : null;
 }
 
+export function getWinpilotConnection(): { url: string; token: string } | null {
+  const url = getWinpilotUrl();
+  return url ? { url, token: CONTROL_TOKEN } : null;
+}
+
 /** Trigger a (re)start if not running, and report current status. Idempotent —
  *  safe to call repeatedly from the renderer poll. */
-export async function ensureWinpilotServer(): Promise<{ url: string | null; starting: boolean; error: string | null }> {
+export async function ensureWinpilotServer(): Promise<{ url: string | null; token: string; starting: boolean; error: string | null }> {
   if (!_port && !_starting) {
     startWinpilotServer().catch(() => { /* error captured in _lastError */ });
   }
-  return { url: getWinpilotUrl(), starting: !!_starting, error: _lastError };
+  return { url: getWinpilotUrl(), token: CONTROL_TOKEN, starting: !!_starting, error: _lastError };
 }
 
 /** Stop the server (called on app quit). */

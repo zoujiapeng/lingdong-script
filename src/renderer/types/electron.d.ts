@@ -1,12 +1,12 @@
 /** Electron preload API 类型声明 */
 export interface ElectronAPI {
   // File dialogs
-  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
-  saveFileDialog: (defaultName?: string) => Promise<string | null>;
+  openFileDialog: (filters?: { name: string; extensions: string[] }[]) => Promise<{ canceled: boolean; filePaths: string[] }>;
+  saveFileDialog: (defaultName?: string) => Promise<{ canceled: boolean; filePath?: string }>;
 
   // File read/write
-  readFile: (filePath: string) => Promise<string>;
-  writeFile: (filePath: string, content: string) => Promise<void>;
+  readFile: (filePath: string) => Promise<{ content?: string; error?: string }>;
+  writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
 
   // Engine control
   engineStart: (scriptJson: string) => Promise<void>;
@@ -93,10 +93,11 @@ export interface ElectronAPI {
   agentChat: (text: string) => Promise<any>;
   agentStatus: () => Promise<any>;
 
-  // WinPilot embedded server URL (Agent panel iframe target)
+  // WinPilot authenticated control-plane connection
   getWinpilotUrl: () => Promise<string | null>;
-  // Ensure the WinPilot server is (re)starting; returns status for the Agent panel
-  ensureWinpilot: () => Promise<{ url: string | null; starting: boolean; error: string | null }>;
+  getWinpilotConnection: () => Promise<{ url: string; token: string } | null>;
+  // Ensure the WinPilot server is (re)starting; returns native workbench status
+  ensureWinpilot: () => Promise<{ url: string | null; token?: string; starting: boolean; error: string | null }>;
 
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;
@@ -107,16 +108,12 @@ export interface ElectronAPI {
 declare global {
   interface Window {
     electronAPI?: ElectronAPI;
-    /** DeepSeek API key injected at build-time */
-    __DEEPSEEK_KEY__?: string;
     /** Custom LLM API base URL */
     __LLM_API_BASE__?: string;
     /** Custom LLM model name */
     __LLM_MODEL__?: string;
     /** Multimodal (vision) support toggle */
     __LLM_MULTIMODAL__?: boolean;
-    /** Template search function exposed by App.tsx */
-    __searchTemplates?: (query: string, maxResults?: number) => string;
     /** Bridge state getter exposed by store */
     __bridge_getState?: () => any;
     /** Template registry (set by TemplateRegistry) */

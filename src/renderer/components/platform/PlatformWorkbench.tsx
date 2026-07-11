@@ -44,8 +44,9 @@ import { useStore } from '../../store';
 import type { UIState } from '../../types';
 import { flowToArpGraph } from '../../platform/flowToArpGraph';
 import { useControlPlane } from '../../platform/useControlPlane';
-import type { ChatGPTDesktopIntegration, GraphValidation, RunProjection, RuntimeEvent } from '../../platform/contracts';
+import type { AgentSchedule, ArpGraph, ChatGPTDesktopIntegration, GraphValidation, RunProjection, RuntimeEvent } from '../../platform/contracts';
 import { wpsToFlowScript, type WpsScript } from '../../utils/wpsToFlowScript';
+import { automationIrFromFlowScript, automationIrToFlowScript, type AutomationIR } from '../../utils/automationIR';
 
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
 type Plane = ReturnType<typeof useControlPlane>;
@@ -305,7 +306,21 @@ function Studio({ plane }: { plane: Plane }) {
   const [error, setError] = useState('');
   const [mobilePanel, setMobilePanel] = useState<'library' | 'properties' | null>(null);
   const processedNodeEvents = useRef(new Set<string>());
-  const graph = useMemo(() => flowToArpGraph(script), [script]);
+  const automation = useMemo(
+    () => automationIrFromFlowScript(script, `air-${script.meta.id}`),
+    [script],
+  );
+  const graph = useMemo<ArpGraph>(() => {
+    const compiled = flowToArpGraph(automationIrToFlowScript(automation));
+    return {
+      ...compiled,
+      metadata: {
+        ...compiled.metadata,
+        source: 'automation-ir',
+        source_ir: automation.id,
+      },
+    };
+  }, [automation]);
   const compilation = graph.metadata.compilation as { native_nodes?: number; legacy_nodes?: number; legacy_types?: string[] } | undefined;
 
   useEffect(() => {
@@ -478,8 +493,12 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const openSkill = async (file: string) => {
     setBusy(true);
     try {
-      const wps = await plane.getClient().script<WpsScript>(file);
-      loadScript(wpsToFlowScript(wps));
+      const asset = await plane.getClient().script<WpsScript | AutomationIR>(file);
+      loadScript(
+        asset.format === 'automation-ir/1'
+          ? automationIrToFlowScript(asset as AutomationIR)
+          : wpsToFlowScript(asset as WpsScript),
+      );
       openStudio();
     } catch (skillError) { setError(skillError instanceof Error ? skillError.message : String(skillError)); }
     finally { setBusy(false); }
@@ -609,12 +628,21 @@ function SystemView({ plane }: { plane: Plane }) {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [chatgptBridge, setChatgptBridge] = useState<ChatGPTDesktopIntegration | null>(null);
+  const [schedules, setSchedules] = useState<AgentSchedule[]>([]);
+  const [scheduleTask, setScheduleTask] = useState('');
+  const [scheduleDelayMinutes, setScheduleDelayMinutes] = useState(10);
+  const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState(0);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
 
   useEffect(() => {
     if (!plane.baseUrl) return;
     const client = plane.getClient();
-    Promise.all([client.config(), client.chatgptIntegration()])
-      .then(([nextConfig, integration]) => { setConfig(nextConfig); setChatgptBridge(integration); })
+    Promise.all([client.config(), client.chatgptIntegration(), client.schedules()])
+      .then(([nextConfig, integration, nextSchedules]) => {
+        setConfig(nextConfig);
+        setChatgptBridge(integration);
+        setSchedules(nextSchedules);
+      })
       .catch((loadError) => setError(String(loadError)));
   }, [plane.baseUrl]);
 
@@ -629,6 +657,38 @@ function SystemView({ plane }: { plane: Plane }) {
       setSaved(true); setTimeout(() => setSaved(false), 1800);
     } catch (saveError) { setError(saveError instanceof Error ? saveError.message : String(saveError)); }
     finally { setSaving(false); }
+  };
+
+  const createSchedule = async () => {
+    const task = scheduleTask.trim();
+    if (!task) return;
+    setScheduleSaving(true); setError('');
+    try {
+      const created = await plane.getClient().createSchedule({
+        task,
+        delay_seconds: Math.max(0, scheduleDelayMinutes) * 60,
+        interval_seconds: scheduleIntervalMinutes > 0 ? scheduleIntervalMinutes * 60 : null,
+      });
+      setSchedules((items) => [...items, created]);
+      setScheduleTask('');
+    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
+    finally { setScheduleSaving(false); }
+  };
+
+  const toggleSchedule = async (schedule: AgentSchedule) => {
+    setError('');
+    try {
+      const updated = await plane.getClient().updateSchedule(schedule.id, { enabled: !schedule.enabled });
+      setSchedules((items) => items.map((item) => item.id === updated.id ? updated : item));
+    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
+  };
+
+  const cancelSchedule = async (schedule: AgentSchedule) => {
+    setError('');
+    try {
+      await plane.getClient().cancelSchedule(schedule.id);
+      setSchedules((items) => items.map((item) => item.id === schedule.id ? { ...item, enabled: false, running: false } : item));
+    } catch (scheduleError) { setError(scheduleError instanceof Error ? scheduleError.message : String(scheduleError)); }
   };
 
   return (
@@ -673,6 +733,26 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>VLM configured</dt><dd>{String((plane.overview?.status as any)?.vlm_configured ?? '-')}</dd></div>
           </dl>
           <div className="arp-theme-control"><span>Theme</span><div>{(['light', 'dark', 'system'] as const).map((mode) => <button key={mode} className={themeMode === mode ? 'active' : ''} onClick={() => setUI({ themeMode: mode })}>{mode === 'light' ? <Sun size={13} /> : mode === 'dark' ? <Moon size={13} /> : <Settings size={13} />}{mode}</button>)}</div></div>
+        </section>
+        <section className="arp-panel arp-config-panel arp-schedule-panel">
+          <div className="arp-panel-heading"><div><Clock3 size={15} /><strong>Agent schedules</strong></div><span>{schedules.filter((item) => item.enabled).length} active</span></div>
+          <div className="arp-schedule-create">
+            <label className="wide"><span>Task</span><input value={scheduleTask} onChange={(event) => setScheduleTask(event.target.value)} placeholder="Run a verified Agent task" /></label>
+            <label><span>Delay (minutes)</span><input type="number" min="0" value={scheduleDelayMinutes} onChange={(event) => setScheduleDelayMinutes(Number(event.target.value) || 0)} /></label>
+            <label><span>Repeat (minutes, 0 = once)</span><input type="number" min="0" value={scheduleIntervalMinutes} onChange={(event) => setScheduleIntervalMinutes(Number(event.target.value) || 0)} /></label>
+            <button className="arp-button arp-button-primary" onClick={createSchedule} disabled={!scheduleTask.trim() || scheduleSaving}>{scheduleSaving ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}Schedule</button>
+          </div>
+          <div className="arp-schedule-list">
+            {schedules.length === 0 && <EmptyState icon={Clock3} title="No scheduled tasks" />}
+            {schedules.map((schedule) => (
+              <div className="arp-schedule-row" key={schedule.id}>
+                <div><strong>{schedule.name}</strong><span>{schedule.next_run_at ? new Date(schedule.next_run_at).toLocaleString() : schedule.last_status || 'inactive'}</span></div>
+                <StatusPill status={schedule.running ? 'running' : schedule.enabled ? 'queued' : 'canceled'} label={schedule.running ? 'running' : schedule.enabled ? 'enabled' : 'disabled'} />
+                <button className={`arp-toggle ${schedule.enabled ? 'on' : ''}`} onClick={() => toggleSchedule(schedule)} aria-label={`${schedule.enabled ? 'Disable' : 'Enable'} ${schedule.name}`} aria-pressed={schedule.enabled}><span /></button>
+                <button className="arp-icon-button" onClick={() => cancelSchedule(schedule)} aria-label={`Cancel ${schedule.name}`} title="Cancel schedule"><X size={14} /></button>
+              </div>
+            ))}
+          </div>
         </section>
         <section className="arp-panel arp-config-panel">
           <div className="arp-panel-heading"><div><Network size={15} /><strong>ChatGPT desktop</strong></div><StatusPill status={chatgptBridge?.client_active ? 'running' : chatgptBridge?.server_ready ? 'idle' : 'failed'} label={chatgptBridge?.client_active ? 'MCP active' : chatgptBridge?.server_ready ? 'Endpoint ready' : 'offline'} /></div>

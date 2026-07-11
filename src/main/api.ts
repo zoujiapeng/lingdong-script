@@ -5,6 +5,7 @@
 import * as http from 'http';
 import * as path from 'path';
 import * as fs from 'fs';
+import { timingSafeEqual } from 'crypto';
 import { ChildProcess } from 'child_process';
 import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
@@ -24,15 +25,34 @@ export interface ApiDeps {
   ocrRecognizeRegion: (region: any) => Promise<any>;
   dslToFlow: (dslText: string) => Promise<any>;
   startAgent: (goal: string, config: Record<string, string>, supervise: boolean) => void;
+  controlToken: string;
+  allowedOrigins?: string[];
+  allowUnsafeEval?: boolean;
 }
 
 const API_PORT = parseInt(process.env.API_PORT || '7880', 10);
 
 export function startApiServer(deps: ApiDeps): http.Server {
   const apiServer = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const allowedOrigins = new Set(deps.allowedOrigins || [
+      'null',
+      'http://localhost:5200',
+      'http://127.0.0.1:5200',
+    ]);
+    const origin = String(req.headers.origin || '');
+    const originAllowed = !origin || allowedOrigins.has(origin);
+    if (origin && originAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Lingdong-Token');
+
+    if (!originAllowed) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'Origin not allowed' }));
+      return;
+    }
 
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
@@ -41,6 +61,20 @@ export function startApiServer(deps: ApiDeps): http.Server {
       res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(data));
     };
+    const suppliedToken = String(
+      req.headers.authorization?.replace(/^Bearer\s+/i, '')
+      || req.headers['x-lingdong-token']
+      || '',
+    );
+    const expected = Buffer.from(deps.controlToken);
+    const supplied = Buffer.from(suppliedToken);
+    const authenticated = expected.length > 0
+      && expected.length === supplied.length
+      && timingSafeEqual(expected, supplied);
+    if (url.pathname !== '/api/ping' && !authenticated) {
+      send(401, { error: 'Authentication required' });
+      return;
+    }
     if (req.method === 'GET') {
       try {
         switch (url.pathname) {
@@ -61,6 +95,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
             send(200, { ok: true });
             return;
           case '/api/execute-js':
+            if (!deps.allowUnsafeEval) { send(404, { error: 'Endpoint disabled' }); return; }
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             {
               const code = url.searchParams.get('code') || '';
@@ -517,23 +552,6 @@ export function startApiServer(deps: ApiDeps): http.Server {
             break;
           }
 
-          // ─── Search templates ───
-          case '/api/search-templates':
-            if (!payload.query) { send(400, { error: '缺少 query' }); return; }
-            if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            (async () => {
-              try {
-                const maxResults = payload.maxResults || 5;
-                const results = await deps.mainWindow!.webContents.executeJavaScript(
-                  `(async () => { return await window.__searchTemplates(${JSON.stringify(payload.query)}, ${maxResults}) })()`, true
-                );
-                const parsed = JSON.parse(results);
-                if (parsed.error) { send(500, { error: parsed.error }); return; }
-                send(200, { ok: true, ...parsed });
-              } catch (e: any) { send(500, { error: e.message }); }
-            })();
-            break;
-
           // ─── Item marks save/load ───
           case '/api/marks/save':
             if (!payload.marks) { send(400, { error: '缺少 marks' }); return; }
@@ -587,6 +605,7 @@ export function startApiServer(deps: ApiDeps): http.Server {
 
           // ─── Execute JavaScript in renderer ───
           case '/api/execute-js':
+            if (!deps.allowUnsafeEval) { send(404, { error: 'Endpoint disabled' }); return; }
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
             if (!payload.code) { send(400, { error: '缺少 code' }); return; }
             (async () => {

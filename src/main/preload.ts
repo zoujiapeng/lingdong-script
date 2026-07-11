@@ -42,9 +42,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentStatus: () =>
     ipcRenderer.invoke('agent:status'),
 
-  // WinPilot embedded server URL (Agent panel iframe target)
+  // WinPilot authenticated control-plane connection
   getWinpilotUrl: () =>
     ipcRenderer.invoke('winpilot:url'),
+
+  getWinpilotConnection: () =>
+    ipcRenderer.invoke('winpilot:connection'),
 
   // Ensure the WinPilot server is (re)starting; returns {url, starting, error}
   ensureWinpilot: () =>

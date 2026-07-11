@@ -203,6 +203,17 @@ class ScreenWatcher:
                 return []
             return list(self._recent_evidence)
 
+    def latest_frame(self, max_age_ms: int = 500) -> tuple[np.ndarray, Region | None] | None:
+        """Return a cheap copy of the latest Level-0 frame for tracing/debug."""
+        with self._sample_lock:
+            frame = self._prev
+            region = self._prev_region
+            with self._lock:
+                sampled_at = self._bulletin.last_sample_ms
+            if frame is None or not sampled_at or _now_ms() - sampled_at > max(0, int(max_age_ms)):
+                return None
+            return frame.copy(), region
+
     @staticmethod
     def _crop_evidence(
         frame: np.ndarray,

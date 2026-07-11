@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from features.registry import feature, registry, P, TC, FeatureCategory as F
@@ -718,8 +719,8 @@ def import_template_from_file(filepath: str, copy_to_templates: bool = True) -> 
 
 @feature(
     name="search_flow_templates",
-    display_name="搜索前端模板",
-    description="【模板·前端】通过 Electron HTTP API 搜索前端模板注册表（含 HTN 复合模板 + 语义匹配），返回结构化候选列表。比 filesystem search_templates 更丰富（含自动注册的动态模板和语义评分）",
+    display_name="搜索本地流程模板",
+    description="【模板】确定性搜索本地 Flow/DSL/JSON 模板，不依赖前端窗口或另一套规划器。",
     category=F.AI,
     params=[
         P("query", "str", "搜索关键词（自然语言）", example="打开记事本输入文字"),
@@ -728,23 +729,48 @@ def import_template_from_file(filepath: str, copy_to_templates: bool = True) -> 
     returns="dict{htn, flat, autoSelect}",
 )
 def search_flow_templates(query: str, max_results: int = 5) -> dict:
-    """搜索前端模板注册表，返回 HTN + 语义匹配结果。"""
-    import urllib.request, urllib.error
-    payload = json.dumps({"query": query, "maxResults": max_results}).encode("utf-8")
-    req = urllib.request.Request(
-        "http://127.0.0.1:5877/api/search-templates",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data
-    except urllib.error.URLError as e:
-        return {"error": f"无法连接前端窗口 (是否已启动?): {e.reason}", "htn": [], "flat": [], "autoSelect": None}
-    except Exception as e:
-        return {"error": str(e), "htn": [], "flat": [], "autoSelect": None}
+    """Search local templates without depending on renderer state."""
+    needle = str(query or "").strip().casefold()
+    limit = max(1, min(int(max_results or 5), 50))
+    if not needle:
+        return {"error": "query is required", "htn": [], "flat": [], "autoSelect": None}
+    candidates = []
+    for path in sorted(Path(TEMPLATES_DIR).glob("*")):
+        if path.suffix.casefold() not in {".flow", ".dsl", ".json"} or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        name = path.stem
+        description = ""
+        if path.suffix.casefold() in {".flow", ".json"}:
+            try:
+                parsed = json.loads(content)
+                meta = parsed.get("meta") if isinstance(parsed, dict) else {}
+                if isinstance(meta, dict):
+                    name = str(meta.get("name") or name)
+                    description = str(meta.get("description") or "")
+            except json.JSONDecodeError:
+                pass
+        haystack = f"{name} {description} {path.name} {content[:2000]}".casefold()
+        if needle not in haystack:
+            continue
+        score = 1.0 if needle == name.casefold() else 0.8 if needle in name.casefold() else 0.5
+        candidates.append({
+            "id": path.stem,
+            "name": name,
+            "description": description,
+            "path": str(path),
+            "format": path.suffix.lstrip("."),
+            "score": score,
+        })
+    flat = sorted(candidates, key=lambda item: (-item["score"], item["name"]))[:limit]
+    return {
+        "htn": [],
+        "flat": flat,
+        "autoSelect": flat[0] if flat and flat[0]["score"] >= 0.8 else None,
+    }
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────

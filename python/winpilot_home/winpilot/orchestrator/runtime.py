@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ..utils.log import BUS, logger
 from .contracts import ArpGraph, ArpNode, ArpNodeKind, ArpRunStatus, validate_graph
+from .evidence import evidence_matches, has_verified_evidence, normalize_evidence, parse_requirement
 
 
 @dataclass
@@ -131,6 +132,9 @@ class ArpExecution:
     def cancel(self) -> None:
         self.stop_event.set()
         with self._gate_condition:
+            if self.status == ArpRunStatus.QUEUED:
+                self.status = ArpRunStatus.CANCELED
+                self.finished_at = time.time()
             self._gate_condition.notify_all()
 
     def decide_gate(self, node_id: str, approved: bool, comment: str = "") -> bool:
@@ -209,10 +213,12 @@ class ArpExecution:
                 branch="approved",
                 output={"approved": True, "mode": "preapproved"},
                 evidence=[{
-                    "type": "human_gate",
+                    "predicate": "human.approved",
+                    "source": "human_gate",
                     "node_id": node.id,
-                    "approved": True,
-                    "mode": "preapproved",
+                    "value": True,
+                    "verified": True,
+                    "metadata": {"mode": "preapproved"},
                 }],
             )
         timeout_s = float(node.timeout_s or node.config.get("timeout_s") or 3600)
@@ -249,38 +255,54 @@ class ArpExecution:
             branch="approved" if approved else "rejected",
             output=decision,
             evidence=[{
-                "type": "human_gate",
+                "predicate": "human.approved",
+                "source": "human_gate",
                 "node_id": node.id,
-                "approved": True,
-                "comment": decision.get("comment", ""),
+                "value": True,
+                "verified": True,
+                "text": str(decision.get("comment", "")),
             }] if approved else [],
             error="" if approved else "human rejected the gate",
         )
 
     def _evidence_gate(self, node: ArpNode) -> NodeResult:
-        required = [str(item).casefold() for item in node.config.get("required", []) if str(item).strip()]
-        haystack = json.dumps(self.evidence, ensure_ascii=False, default=str).casefold()
-        missing = [item for item in required if item not in haystack]
+        required = [
+            parse_requirement(item)
+            for item in node.config.get("required", [])
+            if isinstance(item, dict) or str(item).strip()
+        ]
+        records = [normalize_evidence(item, run_id=self.run_id) for item in self.evidence]
+        missing = [
+            requirement.model_dump(mode="json")
+            for requirement in required
+            if not any(evidence_matches(record, requirement) for record in records)
+        ]
         passed = not missing
         return NodeResult(
             ok=passed,
             branch="pass" if passed else "fail",
-            output={"required": required, "missing": missing},
+            output={
+                "required": [item.model_dump(mode="json") for item in required],
+                "missing": missing,
+            },
             evidence=[{
-                "type": "evidence_gate",
+                "predicate": "evidence.gate",
+                "source": "arp_runtime",
                 "node_id": node.id,
-                "required": required,
-                "passed": True,
+                "value": [item.predicate for item in required],
+                "verified": True,
             }] if passed else [],
-            error="" if not missing else "missing evidence: " + ", ".join(missing),
+            error="" if not missing else "missing typed evidence: " + ", ".join(
+                str(item.get("predicate") or "") for item in missing
+            ),
         )
 
     def _execute_builtin(self, node: ArpNode, last: NodeResult | None) -> NodeResult | None:
         if node.kind == ArpNodeKind.START:
             return NodeResult(ok=True)
         if node.kind == ArpNodeKind.END:
-            if self.graph.policy.require_evidence_on_done and not self.evidence:
-                return NodeResult(ok=False, error="run reached end without required evidence")
+            if self.graph.policy.require_evidence_on_done and not has_verified_evidence(self.evidence):
+                return NodeResult(ok=False, error="run reached end without verified evidence")
             return NodeResult(ok=True)
         if node.kind == ArpNodeKind.CONDITION:
             return self._condition(node, last)
@@ -395,8 +417,16 @@ class ArpExecution:
 
                 self.outputs[node.id] = result.output
                 if result.evidence:
-                    self.evidence.extend(result.evidence)
-                    for evidence in result.evidence:
+                    normalized_evidence = [
+                        normalize_evidence(
+                            evidence,
+                            run_id=self.run_id,
+                            node_id=node.id,
+                        ).model_dump(mode="json")
+                        for evidence in result.evidence
+                    ]
+                    self.evidence.extend(normalized_evidence)
+                    for evidence in normalized_evidence:
                         BUS.publish(
                             "arp_evidence",
                             run_id=self.run_id,
@@ -469,36 +499,64 @@ class ArpRunManager:
         on_start: Callable[[ArpExecution], None] | None = None,
         on_finish: Callable[[ArpExecution], None] | None = None,
     ) -> ArpExecution:
-        execution = ArpExecution(graph, handlers, inputs=inputs)
-        validation = validate_graph(graph)
-        if not validation.valid:
-            raise ValueError("; ".join(validation.errors))
         with self._lock:
             if self.busy():
                 raise RuntimeError("an ARP run is already active")
-            self._runs[execution.run_id] = execution
-            self._current_id = execution.run_id
-            if on_start:
-                on_start(execution)
+            execution = self.prepare(graph, handlers, inputs=inputs)
 
             def worker() -> None:
-                try:
-                    execution.run()
-                finally:
-                    if on_finish:
-                        try:
-                            on_finish(execution)
-                        except Exception:
-                            logger.exception("ARP on_finish callback failed")
+                self.run_prepared(execution, on_start=on_start, on_finish=on_finish)
 
             thread = threading.Thread(target=worker, daemon=True, name=f"arp-{execution.run_id[-6:]}")
             self._threads[execution.run_id] = thread
             thread.start()
         return execution
 
+    def prepare(
+        self,
+        graph: ArpGraph,
+        handlers: dict[ArpNodeKind, NodeHandler] | None = None,
+        *,
+        inputs: dict[str, Any] | None = None,
+    ) -> ArpExecution:
+        """Register a queued execution without creating another runtime thread."""
+        validation = validate_graph(graph)
+        if not validation.valid:
+            raise ValueError("; ".join(validation.errors))
+        execution = ArpExecution(graph, handlers, inputs=inputs)
+        with self._lock:
+            self._runs[execution.run_id] = execution
+            self._current_id = execution.run_id
+        return execution
+
+    def run_prepared(
+        self,
+        execution: ArpExecution,
+        *,
+        on_start: Callable[[ArpExecution], None] | None = None,
+        on_finish: Callable[[ArpExecution], None] | None = None,
+    ) -> dict[str, Any]:
+        """Run a prepared execution in the caller's job/thread boundary."""
+        if execution.stop_event.is_set():
+            execution.cancel()
+            return execution.to_dict()
+        if on_start:
+            on_start(execution)
+        try:
+            return execution.run()
+        finally:
+            if on_finish:
+                try:
+                    on_finish(execution)
+                except Exception:
+                    logger.exception("ARP on_finish callback failed")
+
     def busy(self) -> bool:
         with self._lock:
-            return any(thread.is_alive() for thread in self._threads.values())
+            return any(
+                run.status in {ArpRunStatus.QUEUED, ArpRunStatus.RUNNING, ArpRunStatus.PAUSED}
+                for run in self._runs.values()
+            )
 
     def get(self, run_id: str) -> ArpExecution | None:
         with self._lock:

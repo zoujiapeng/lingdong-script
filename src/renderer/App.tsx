@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect } from 'react';
 import { PlatformWorkbench } from './components/platform/PlatformWorkbench';
 import { useStore } from './store';
+import { automationDocumentToFlowScript } from './utils/automationIR';
 import './styles/globals.css';
 import './styles/platform.css';
 
@@ -23,11 +24,22 @@ export default function App() {
     try { localStorage.setItem('lingdong-theme-mode', themeMode); } catch { /* storage can be disabled */ }
   }, [themeMode]);
 
+  const openAutomation = useCallback(async () => {
+    const api = window.electronAPI;
+    if (!api?.openFileDialog || !api.readFile) return;
+    const selected = await api.openFileDialog([{ name: 'Automation', extensions: ['json'] }]);
+    if (selected.canceled || !selected.filePaths[0]) return;
+    const loaded = await api.readFile(selected.filePaths[0]);
+    if (loaded.error || !loaded.content) throw new Error(loaded.error || 'Automation file is empty');
+    useStore.getState().loadScript(automationDocumentToFlowScript(JSON.parse(loaded.content)));
+  }, []);
+
   const onKeyDown = useCallback((event: KeyboardEvent) => {
     const store = useStore.getState();
     const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
     if ((event.ctrlKey || event.metaKey) && !typing) {
       if (event.key.toLowerCase() === 's') { event.preventDefault(); store.saveScript(); }
+      if (event.key.toLowerCase() === 'o') { event.preventDefault(); void openAutomation().catch(console.error); }
       if (event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? store.redo() : store.undo(); }
       if (event.key.toLowerCase() === 'y') { event.preventDefault(); store.redo(); }
       if (event.key.toLowerCase() === 'c') { event.preventDefault(); store.copySelected(); }
@@ -40,12 +52,18 @@ export default function App() {
       if (selected.edges.length) store.deleteEdges(selected.edges);
     }
     if (!typing && event.key === 'Escape') store.clearSelection();
-  }, []);
+  }, [openAutomation]);
 
   useEffect(() => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onKeyDown]);
+
+  useEffect(() => window.electronAPI?.onMenuAction?.((action) => {
+    if (action === 'new') useStore.getState().newScript();
+    if (action === 'open') void openAutomation().catch(console.error);
+    if (action === 'save') void useStore.getState().saveScript();
+  }), [openAutomation]);
 
   return <PlatformWorkbench />;
 }

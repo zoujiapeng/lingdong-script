@@ -885,11 +885,11 @@ def screenshot_base64(display_id: int | None = None,
         from PIL import Image
 
         with mss.mss() as sct:
-            # If display_id specified, grab that monitor; otherwise primary
+            # If display_id is omitted capture the complete virtual desktop.
             if display_id is not None and display_id < len(sct.monitors) - 1:
                 monitor = sct.monitors[display_id + 1]  # sct.monitors[0] is "all"
             else:
-                monitor = sct.monitors[1]  # primary monitor
+                monitor = sct.monitors[0]
             raw = sct.grab(monitor)
             image = Image.frombytes("RGB", raw.size, raw.rgb)
         buffer = BytesIO()
@@ -898,6 +898,8 @@ def screenshot_base64(display_id: int | None = None,
         return {
             "ok": True,
             "base64": b64,
+            "left": int(monitor["left"]),
+            "top": int(monitor["top"]),
             "width": image.width,
             "height": image.height,
             "size_bytes": len(buffer.getvalue()),
@@ -905,16 +907,18 @@ def screenshot_base64(display_id: int | None = None,
     except ImportError:
         # mss not available — fall back to win32 screenshot
         try:
-            from ..utils.screenshot import capture, Region, screen_size
-            sw, sh = screen_size()
-            region = Region(0, 0, sw, sh)
-            image = capture(region)
+            from ..utils.screenshot import capture, virtual_screen_region
+            region = virtual_screen_region()
+            frame = capture(region)
+            image = Image.fromarray(frame[:, :, ::-1].copy())
             buffer = BytesIO()
             image.save(buffer, format="JPEG", quality=quality, optimize=True)
             b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
             return {
                 "ok": True,
                 "base64": b64,
+                "left": region.left,
+                "top": region.top,
                 "width": image.width,
                 "height": image.height,
                 "size_bytes": len(buffer.getvalue()),

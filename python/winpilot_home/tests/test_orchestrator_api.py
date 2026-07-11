@@ -12,10 +12,9 @@ def client(monkeypatch):
 
     with server.STATE.lock:
         server.STATE.runner = None
-        server.STATE.thread = None
-        server.STATE.replay_thread = None
-        server.STATE.replay_jobs.clear()
-        server.STATE.stop_event = threading.Event()
+        server.STATE.runners.clear()
+        server.STATE.run_jobs.clear()
+    server.RUNTIME_JOBS.clear_finished()
     monkeypatch.setattr(server.trace_mod.RECORDER, "start", lambda run_id: None)
     monkeypatch.setattr(server.trace_mod.RECORDER, "stop", lambda: None)
     return TestClient(server.app)
@@ -81,6 +80,11 @@ def test_validate_and_run_arp_graph_through_api(client):
     assert detail["arp"]["variables"]["ready"] is True
     assert detail["run"]["kind"] == "arp"
     assert detail["run"]["status"] == "done"
+
+    jobs = client.get("/api/v2/jobs").json()["jobs"]
+    job = next(item for item in jobs if item["metadata"].get("run_id") == run_id)
+    assert job["kind"] == "arp"
+    assert job["status"] == "done"
 
 
 def test_chatgpt_desktop_integration_exposes_real_mcp_handshake(monkeypatch):

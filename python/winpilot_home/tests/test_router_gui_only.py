@@ -27,6 +27,10 @@ def test_coding_task_uses_unified_agent_with_coding_runtime():
         "scheduler",
         "automation_ir",
         "desktop_action_queue",
+        "browser",
+        "safety",
+        "async_jobs",
+        "perception_daemon",
     ]
 
 

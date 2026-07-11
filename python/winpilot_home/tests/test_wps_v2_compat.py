@@ -98,7 +98,7 @@ def test_v2_if_true_runs_then_with_interpolation(tmp_path):
 def test_v2_loop_count_paths_indices(tmp_path):
     script = {"format": "wps/2", "steps": [
         {"tool": "ctrl.loop", "loop_type": "count", "count": 2,
-         "body": [{"tool": "click"}]},
+         "body": [{"tool": "click", "coords": [1, 2]}]},
     ]}
     r = SpyReplayer()
     out = r.run(_write(tmp_path, script))
@@ -665,3 +665,53 @@ def test_in_memory_segments_rebind_when_target_window_changes(monkeypatch):
     assert first["preflight"]["hwnd"] == 111
     assert second["preflight"]["hwnd"] == 222
     assert r.hwnd == 222
+
+
+def test_automation_ir_desktop_replay_requires_explicit_target_window(tmp_path):
+    from winpilot.automation_ir import automation_ir_from_wps
+
+    ir = automation_ir_from_wps({
+        "format": "wps/2",
+        "name": "unsafe coordinates",
+        "steps": [{"tool": "click", "coords": [10, 20]}],
+    })
+    result = SpyReplayer().run(_write(tmp_path, ir))
+
+    assert result["ok"] is False
+    assert "explicit target_window" in result["preflight"]["error"]
+
+
+def test_replay_preflight_enforces_structured_conditions(tmp_path):
+    marker = tmp_path / "ready.txt"
+    marker.write_text("ready", encoding="utf-8")
+    script = {
+        "format": "wps/2",
+        "conditions": {"checks": [{"file_exists": str(marker)}]},
+        "steps": [],
+    }
+
+    result = SpyReplayer().run(_write(tmp_path, script))
+
+    assert result["ok"] is True
+    assert result["preflight"]["required"] is True
+    assert result["preflight"]["checks"][0]["ok"] is True
+
+
+def test_replay_postflight_enforces_typed_evidence(tmp_path):
+    marker = tmp_path / "result.txt"
+    marker.write_text("done", encoding="utf-8")
+    script = {
+        "format": "wps/2",
+        "evidence": {"required": [{"predicate": "file.exists", "value": str(marker)}]},
+        "steps": [],
+    }
+
+    result = SpyReplayer().run(_write(tmp_path, script))
+    marker.unlink()
+    missing = SpyReplayer().run(_write(tmp_path, script))
+
+    assert result["ok"] is True
+    assert result["postflight"]["required"] is True
+    assert result["postflight"]["checks"][0]["ok"] is True
+    assert missing["ok"] is False
+    assert "evidence requirement failed" in missing["postflight"]["error"]
