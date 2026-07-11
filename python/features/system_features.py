@@ -367,7 +367,8 @@ def launch_program(target: str, args: str = "", wait: bool = False, force_new: b
             close = [i for i in all_items if target.lower() in i["name"] or i["name"] in target.lower()][:5]
             hint = ""
             if close:
-                    hint = f"，你是不是想启动: {' / '.join(f'「{c["name"]}」' for c in close)}"
+                suggestions = " / ".join(f"「{candidate['name']}」" for candidate in close)
+                hint = f"，你是不是想启动: {suggestions}"
             return {"success": False, "error": f"未找到程序「{target}」{hint}"}
 
         # If resolved target is a URL, open it with the default browser

@@ -710,7 +710,7 @@ def browser_set_value(selector: str, value: str) -> dict:
 
 def _do_set_value(selector: str, value: str):
     page = _get_page()
-    page.eval_on_selector(selector, f"el => el.value = '{value.replace(chr(39), '\\' + chr(39))}'")
+    page.eval_on_selector(selector, "(el, nextValue) => { el.value = nextValue; }", value)
     return {"success": True, "result": True}
 
 
@@ -1334,9 +1334,15 @@ def browser_get_local_storage(key: str = "") -> dict:
 def _do_get_storage(storage: str, key: str):
     page = _get_page()
     if key:
-        val = page.evaluate(f"{storage}.getItem('{key.replace(chr(39), '\\' + chr(39))}')")
+        val = page.evaluate(
+            "([storageName, key]) => window[storageName].getItem(key)",
+            [storage, key],
+        )
     else:
-        val = page.evaluate(f"Object.entries({storage})")
+        val = page.evaluate(
+            "storageName => Object.entries(window[storageName])",
+            storage,
+        )
     return {"success": True, "result": val}
 
 
@@ -1360,8 +1366,10 @@ def browser_set_local_storage(key: str, value: str) -> dict:
 
 def _do_set_storage(storage: str, key: str, value: str):
     page = _get_page()
-    safe_val = json.dumps(value)
-    page.evaluate(f"{storage}.setItem('{key.replace(chr(39), '\\' + chr(39))}', {safe_val})")
+    page.evaluate(
+        "([storageName, key, value]) => window[storageName].setItem(key, value)",
+        [storage, key, value],
+    )
     return {"success": True, "result": True}
 
 
@@ -1622,16 +1630,20 @@ def _do_state_restore(path: str, navigate: bool):
     # Restore localStorage
     for k, v in snapshot.get("localStorage", []):
         try:
-            safe_val = json.dumps(v)
-            page.evaluate(f"localStorage.setItem('{k.replace(chr(39), '\\' + chr(39))}', {safe_val})")
+            page.evaluate(
+                "([key, value]) => localStorage.setItem(key, value)",
+                [k, v],
+            )
         except Exception:
             pass
 
     # Restore sessionStorage
     for k, v in snapshot.get("sessionStorage", []):
         try:
-            safe_val = json.dumps(v)
-            page.evaluate(f"sessionStorage.setItem('{k.replace(chr(39), '\\' + chr(39))}', {safe_val})")
+            page.evaluate(
+                "([key, value]) => sessionStorage.setItem(key, value)",
+                [k, v],
+            )
         except Exception:
             pass
 
