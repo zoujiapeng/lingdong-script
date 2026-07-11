@@ -1,13 +1,16 @@
+# -*- coding: utf-8 -*-
 # Core
 pyautogui>=0.9.54           # deprecated: kept for screenshot fallback only
 opencv-python>=4.9.0
 numpy>=1.24.0
 Pillow>=10.0.0
+requests>=2.31
 
 # System
 PyGetWindow>=0.0.9
 psutil>=5.9.0
 pynput>=1.7.6
+APScheduler>=3.10,<4
 
 # Windows desktop automation (primary)
 pywin32>=306                 # win32api/win32gui — native Windows API access
