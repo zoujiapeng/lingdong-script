@@ -1,6 +1,9 @@
 import asyncio
 import base64
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 from winpilot.agent.tool_result import ToolResult
 from winpilot.integrations.chatgpt_mcp import (
@@ -9,6 +12,24 @@ from winpilot.integrations.chatgpt_mcp import (
     build_chatgpt_mcp,
 )
 from winpilot.orchestrator.projection import RUN_PROJECTIONS
+
+
+def test_runtime_python_cwd_does_not_shadow_official_mcp_sdk():
+    python_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import mcp; from mcp.server.fastmcp import FastMCP; print(mcp.__file__)",
+        ],
+        cwd=python_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(python_root / "mcp").lower() not in result.stdout.lower()
 
 
 def _hooks(**overrides):

@@ -84,7 +84,7 @@ is already the high-level planner.
 
 | MCP | 实现 | 说明 |
 | --- | --- | --- |
-| Python MCP | `python/mcp/server.py` | 从 `@feature` 注册表导出工具 |
+| Python MCP | `python/lobster_mcp/server.py` | 从 `@feature` 注册表导出工具 |
 | TypeScript MCP | `src/ai-interface/` | `run_flow/list_flows/create_flow/ask_ai/screen_capture` |
 | HTTP MCP | `src/main/api.ts` 的 `/mcp` | 通过 Electron HTTP API 暴露 |
 
