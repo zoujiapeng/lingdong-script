@@ -89,14 +89,14 @@ export function useControlPlane() {
     };
     const previous = taskbarRunState.current;
     taskbarRunState.current = current;
-    const observedLiveStart = liveStartedRuns.current.has(current.run_id);
+    const observedLiveStart = liveStartedRuns.current.has(current.runId);
     const notification = taskbarNotificationForTransition(
       previous,
       currentRun,
       observedLiveStart,
     );
     if (!notification) return;
-    liveStartedRuns.current.delete(current.run_id);
+    liveStartedRuns.current.delete(current.runId);
     void window.electronAPI?.notifyTaskbar?.(
       notification.title,
       notification.body,

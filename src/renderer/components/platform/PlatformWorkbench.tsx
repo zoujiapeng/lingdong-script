@@ -326,7 +326,7 @@ function Studio({ plane }: { plane: Plane }) {
       }
       if (event.type === 'arp_node_done') {
         const nextStatus = event.ok === false ? 'error' : 'success';
-        if (node.status !== nextStatus || (event.error && node.error !== String(event.error))) {
+        if (node.status !== nextStatus || (event.error && node.error_msg !== String(event.error))) {
           useStore.getState().updateNodeStatus(nodeId, nextStatus, String(event.error || ''));
         }
       }
