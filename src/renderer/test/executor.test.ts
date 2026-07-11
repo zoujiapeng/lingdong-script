@@ -4,7 +4,7 @@ import type { FlowScript, LogEntry } from '../types';
 
 function flowWith(node: FlowScript['nodes'][number]): FlowScript {
   return {
-    meta: { name: 'executor-test', version: '1.0.0', created_at: '', updated_at: '' },
+    meta: { id: 'executor-test', name: 'executor-test', version: '1.0.0', created_at: '', updated_at: '' },
     nodes: [
       { id: 'start', type: 'start', x: 0, y: 0, params: {}, status: 'idle' },
       node,
@@ -15,7 +15,7 @@ function flowWith(node: FlowScript['nodes'][number]): FlowScript {
       { id: 'e2', from_node: node.id, from_port: 'output', to_node: 'end', to_port: 'input' },
     ],
     variables: {},
-    settings: { error_handling: 'stop' },
+    settings: { default_delay: 0, error_handling: 'stop', max_retries: 0, retry_delay: 0, log_level: 'info' },
   };
 }
 
@@ -25,11 +25,11 @@ function flowSequence(
   variables: Record<string, string> = {},
 ): FlowScript {
   return {
-    meta: { name: 'executor-test', version: '1.0.0', created_at: '', updated_at: '' },
+    meta: { id: 'executor-test', name: 'executor-test', version: '1.0.0', created_at: '', updated_at: '' },
     nodes,
     edges,
     variables,
-    settings: { error_handling: 'stop' },
+    settings: { default_delay: 0, error_handling: 'stop', max_retries: 0, retry_delay: 0, log_level: 'info' },
   };
 }
 

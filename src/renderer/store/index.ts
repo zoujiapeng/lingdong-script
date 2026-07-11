@@ -182,7 +182,6 @@ interface AppStore {
 }
 
 // History for undo/redo
-const MAX_HISTORY = 50;
 let history: { nodes: FlowNode[]; edges: FlowEdge[] }[] = [];
 let historyIndex = -1;
 
@@ -1301,9 +1300,9 @@ for (const meta of PRESET_TEMPLATE_META) {
     name: meta.name,
     description: meta.description,
     category: meta.category,
-    aliases: meta.aliases,
-    keywords: meta.keywords,
-    tags: meta.tags,
+    aliases: [...meta.aliases],
+    keywords: [...meta.keywords],
+    tags: [...meta.tags],
     source: 'preset',
     hasScript: true,
     flowScript: preset?.createScript(),

@@ -12,7 +12,7 @@ export interface ExecutionController {
 }
 
 interface ExecCallbacks {
-  onNodeStatus: (nodeId: string, status: FlowNode['status'], error?: string) => void;
+  onNodeStatus: (nodeId: string, status: NonNullable<FlowNode['status']>, error?: string) => void;
   onLog: (entry: Omit<LogEntry, 'timestamp'>) => void;
   onDone: (status: 'completed' | 'stopped' | 'error') => void;
   onCurrentNode: (nodeId: string | undefined) => void;

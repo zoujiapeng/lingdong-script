@@ -390,7 +390,10 @@ export function TemplateBrowser({ onClose }: { onClose: () => void }) {
             const script = JSON.parse(r.dsl_or_json);
             useStore.getState().loadScript(script);
           } else if (r?.dsl_or_json && r?.filetype === 'dsl') {
-            useStore.getState().loadDSL(r.dsl_or_json);
+            const script = await api?.dslToFlow?.(r.dsl_or_json);
+            if (script && !script.error) {
+              useStore.getState().loadScript(script);
+            }
           }
         } catch { /* ignore */ }
       })();
