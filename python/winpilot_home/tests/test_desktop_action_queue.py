@@ -4,6 +4,7 @@ import time
 import pytest
 
 from winpilot.action import executor
+from winpilot.action import desktop_queue as desktop_queue_module
 from winpilot.action.desktop_queue import DesktopActionQueue
 from winpilot.utils.log import BUS
 
@@ -54,6 +55,196 @@ def test_desktop_action_queue_allows_reentrant_nested_jobs():
     assert status["submitted"] == 2
     assert status["completed"] == 2
     assert status["reentrant"] == 1
+
+
+def _run_competing_jobs(queue, jobs):
+    barrier = threading.Barrier(len(jobs))
+    active = 0
+    max_active = 0
+    active_names = set()
+    overlaps = set()
+    lock = threading.Lock()
+
+    def run(name, scope, hwnd):
+        nonlocal active, max_active
+        barrier.wait()
+
+        def body():
+            nonlocal active, max_active
+            with lock:
+                overlaps.update({tuple(sorted((name, other))) for other in active_names})
+                active_names.add(name)
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.04)
+            with lock:
+                active_names.remove(name)
+                active -= 1
+
+        queue.run(name, body, scope=scope, target_hwnd=hwnd)
+
+    threads = [
+        threading.Thread(target=run, args=job, daemon=True)
+        for job in jobs
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    return max_active, overlaps
+
+
+def test_window_scoped_actions_parallelize_only_across_different_hwnds():
+    queue = DesktopActionQueue()
+
+    max_active, overlaps = _run_competing_jobs(
+        queue,
+        [
+            ("window-101-a", "window", 101),
+            ("window-101-b", "window", 101),
+            ("window-202", "window", 202),
+        ],
+    )
+
+    assert max_active == 2
+    assert ("window-101-a", "window-101-b") not in overlaps
+    assert any("window-202" in pair for pair in overlaps)
+    assert queue.status()["parallel_peak"] == 2
+
+
+def test_physical_actions_remain_globally_serialized_across_hwnds():
+    queue = DesktopActionQueue()
+
+    max_active, overlaps = _run_competing_jobs(
+        queue,
+        [
+            ("physical-101", "physical", 101),
+            ("physical-202", "physical", 202),
+        ],
+    )
+
+    assert max_active == 1
+    assert overlaps == set()
+
+
+def test_physical_action_conflicts_with_same_window_but_not_other_window():
+    queue = DesktopActionQueue()
+    physical_started = threading.Event()
+    window_101_started = threading.Event()
+    window_202_started = threading.Event()
+    release_physical = threading.Event()
+
+    physical = threading.Thread(
+        target=lambda: queue.run(
+            "physical-101",
+            lambda: (physical_started.set(), release_physical.wait(timeout=2)),
+            target_hwnd=101,
+        ),
+        daemon=True,
+    )
+    physical.start()
+    assert physical_started.wait(timeout=1)
+
+    window_101 = threading.Thread(
+        target=lambda: queue.run(
+            "window-101",
+            window_101_started.set,
+            scope="window",
+            target_hwnd=101,
+        ),
+        daemon=True,
+    )
+    window_202 = threading.Thread(
+        target=lambda: queue.run(
+            "window-202",
+            window_202_started.set,
+            scope="window",
+            target_hwnd=202,
+        ),
+        daemon=True,
+    )
+    window_101.start()
+    window_202.start()
+
+    assert window_202_started.wait(timeout=1)
+    assert not window_101_started.wait(timeout=0.1)
+    release_physical.set()
+    assert window_101_started.wait(timeout=1)
+    for thread in (physical, window_101, window_202):
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_unknown_physical_target_blocks_every_window_resource():
+    queue = DesktopActionQueue()
+    physical_started = threading.Event()
+    window_101_started = threading.Event()
+    window_202_started = threading.Event()
+    release_physical = threading.Event()
+
+    physical = threading.Thread(
+        target=lambda: queue.run(
+            "physical-unknown",
+            lambda: (physical_started.set(), release_physical.wait(timeout=2)),
+        ),
+        daemon=True,
+    )
+    physical.start()
+    assert physical_started.wait(timeout=1)
+
+    windows = [
+        threading.Thread(
+            target=lambda hwnd=hwnd, started=started: queue.run(
+                f"window-{hwnd}",
+                started.set,
+                scope="window",
+                target_hwnd=hwnd,
+            ),
+            daemon=True,
+        )
+        for hwnd, started in ((101, window_101_started), (202, window_202_started))
+    ]
+    for thread in windows:
+        thread.start()
+
+    assert not window_101_started.wait(timeout=0.1)
+    assert not window_202_started.wait(timeout=0.1)
+    release_physical.set()
+    assert window_101_started.wait(timeout=1)
+    assert window_202_started.wait(timeout=1)
+    for thread in (physical, *windows):
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_clipboard_resource_is_independent_but_single_writer():
+    queue = DesktopActionQueue()
+
+    max_active, overlaps = _run_competing_jobs(
+        queue,
+        [
+            ("clipboard-a", "clipboard", None),
+            ("clipboard-b", "clipboard", None),
+            ("window-101", "window", 101),
+        ],
+    )
+
+    assert max_active == 2
+    assert ("clipboard-a", "clipboard-b") not in overlaps
+    assert any("window-101" in pair for pair in overlaps)
+
+
+def test_nested_action_cannot_escalate_its_resource_lease():
+    queue = DesktopActionQueue()
+
+    with pytest.raises(RuntimeError, match="cannot escalate resources"):
+        queue.run(
+            "outer-window",
+            lambda: queue.run("inner-physical", lambda: None, target_hwnd=101),
+            scope="window",
+            target_hwnd=101,
+        )
 
 
 def test_desktop_action_queue_marks_controller_lease_for_nested_coalescing():
@@ -115,6 +306,21 @@ def test_public_click_uses_one_outer_queue_event(monkeypatch):
         ("start", "click"),
         ("done", "click"),
     ]
+
+
+def test_window_scoped_decorator_binds_positional_hwnd(monkeypatch):
+    observed = {}
+
+    def fake_run(action, fn, **kwargs):
+        observed.update({"action": action, **kwargs})
+        return {"ok": True}
+
+    monkeypatch.setattr(desktop_queue_module.DESKTOP_ACTION_QUEUE, "run", fake_run)
+
+    assert executor.close_window(321) == {"ok": True}
+    assert observed["action"] == "close_window"
+    assert observed["scope"] == "window"
+    assert observed["target_hwnd"] == 321
 
 
 def test_prepositioned_click_keeps_physical_servo_path(monkeypatch):
@@ -337,6 +543,27 @@ def test_desktop_action_queue_async_worker_serializes_jobs():
     assert status["async_status"]["done"] == 4
 
 
+def test_desktop_action_queue_async_jobs_parallelize_by_window_resource():
+    queue = DesktopActionQueue()
+    started = {101: threading.Event(), 202: threading.Event()}
+    release = threading.Event()
+
+    def body(hwnd):
+        started[hwnd].set()
+        assert release.wait(timeout=2)
+        return hwnd
+
+    job_101 = queue.submit("window-101", lambda: body(101), scope="window", target_hwnd=101)
+    job_202 = queue.submit("window-202", lambda: body(202), scope="window", target_hwnd=202)
+
+    assert started[101].wait(timeout=1)
+    assert started[202].wait(timeout=1)
+    release.set()
+    assert queue.wait(job_101, timeout_s=2)["result"] == 101
+    assert queue.wait(job_202, timeout_s=2)["result"] == 202
+    assert queue.status()["parallel_peak"] == 2
+
+
 def test_desktop_action_queue_async_cancel_pending_job():
     queue = DesktopActionQueue()
     started = threading.Event()
@@ -412,6 +639,11 @@ def test_desktop_action_queue_async_reports_errors_and_bus_events():
         if event.get("type") == "desktop_action_queue_job"
         and event.get("job_id") == job_id
     ]
-    assert [event["state"] for event in job_events] == ["queued", "running", "error"]
+    assert [event["state"] for event in job_events] == [
+        "queued",
+        "waiting_resources",
+        "running",
+        "error",
+    ]
     assert job_events[0]["metadata"] == {"purpose": "test"}
     assert queue.status()["async_failed"] == 1

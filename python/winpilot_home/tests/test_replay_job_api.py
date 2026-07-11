@@ -140,6 +140,172 @@ def test_get_script_as_automation_ir(client, tmp_path):
     assert data["format"] == "automation-ir/1"
     assert data["source"]["kind"] == "wps"
     assert data["steps"] == [{"tool": "click", "coords": [1, 2]}]
+    assert data["runtime"] == {"kind": "wps_replay"}
+
+
+def _arp_automation_ir():
+    from winpilot.automation_ir import automation_projection_fingerprint
+
+    ir = {
+        "format": "automation-ir/1",
+        "id": "air-api",
+        "name": "API graph",
+        "source": {"kind": "flowscript"},
+        "conditions": {},
+        "evidence": {"required": []},
+        "steps": [
+            {"tool": "start", "node_id": "start", "params": {}},
+            {"tool": "end", "node_id": "end", "params": {}},
+        ],
+        "variables": {},
+        "safety": {"requires_preflight": False},
+        "fallback": {"on_step_fail": "stop"},
+        "runtime": {
+            "kind": "arp_graph",
+            "graph": {
+                "format": "arp/1",
+                "id": "graph-api",
+                "name": "API graph",
+                "nodes": [
+                    {"id": "start", "kind": "start"},
+                    {"id": "end", "kind": "end"},
+                ],
+                "edges": [
+                    {
+                        "id": "edge-api",
+                        "source": "start",
+                        "target": "end",
+                        "branch": "next",
+                    }
+                ],
+                "policy": {"require_evidence_on_done": False},
+            },
+        },
+    }
+    ir["runtime"]["projection_fingerprint"] = automation_projection_fingerprint(
+        ir["steps"],
+        ir["variables"],
+        ir["runtime"]["graph"],
+    )
+    return ir
+
+
+def test_automation_ir_api_validates_canonical_runtime(client):
+    response = client.post("/api/v2/automation-ir/validate", json=_arp_automation_ir())
+
+    assert response.status_code == 200
+    assert response.json()["valid"] is True
+    assert response.json()["entry_node"] == "start"
+
+
+def test_automation_ir_validate_api_preserves_individual_graph_errors(client):
+    ir = _arp_automation_ir()
+    ir["runtime"]["graph"]["nodes"] = [
+        {"id": "legacy-a", "kind": "legacy_flow", "config": {"node_type": "tool_call"}},
+        {"id": "legacy-b", "kind": "legacy_flow", "config": {"node_type": "camera_capture"}},
+    ]
+    ir["runtime"]["graph"]["edges"] = []
+    from winpilot.automation_ir import automation_projection_fingerprint
+    ir["runtime"]["projection_fingerprint"] = automation_projection_fingerprint(
+        ir["steps"],
+        ir["variables"],
+        ir["runtime"]["graph"],
+    )
+
+    response = client.post("/api/v2/automation-ir/validate", json=ir)
+
+    assert response.status_code == 200
+    assert response.json()["valid"] is False
+    assert len(response.json()["errors"]) >= 3
+    assert any("tool_call" in error for error in response.json()["errors"])
+    assert any("camera_capture" in error for error in response.json()["errors"])
+
+
+def test_automation_ir_api_starts_arp_projection(client, monkeypatch):
+    from winpilot import server
+
+    class FakeExecution:
+        run_id = "arp-from-ir"
+
+        def to_dict(self):
+            return {"run_id": self.run_id, "status": "queued"}
+
+    captured = []
+    monkeypatch.setattr(
+        server,
+        "_start_arp_execution",
+        lambda graph, inputs: captured.append((graph, inputs)) or FakeExecution(),
+    )
+
+    response = client.post(
+        "/api/v2/automation-ir/runs",
+        json={"automation": _arp_automation_ir(), "inputs": {"token": "x"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_kind"] == "arp_graph"
+    assert response.json()["run_id"] == "arp-from-ir"
+    assert captured[0][0].id == "graph-api"
+    assert captured[0][1] == {"token": "x"}
+
+
+def test_script_save_rejects_stale_automation_runtime_projection(client):
+    ir = _arp_automation_ir()
+    ir["steps"][0]["tool"] = "changed-after-runtime-compile"
+
+    response = client.put(
+        "/api/script/stale.automation.json",
+        json={"script": ir},
+    )
+
+    assert response.status_code == 400
+    assert "projection is stale" in response.json()["detail"]
+
+
+def test_automation_ir_api_routes_wps_runtime_to_replayer(client, monkeypatch):
+    from winpilot import automation_ir, server
+
+    class FakeReplayer:
+        def __init__(self, stop_event):
+            self.stop_event = stop_event
+
+        def run_script(self, script, *, script_name="in-memory"):
+            return {
+                "ok": True,
+                "script_name": script_name,
+                "steps": script["steps"],
+            }
+
+    monkeypatch.setattr(server.trace_mod, "Replayer", FakeReplayer)
+    ir = automation_ir.automation_ir_from_wps({
+        "format": "wps/2",
+        "name": "read only delay",
+        "steps": [{"tool": "ext.delay", "duration_ms": 1}],
+    })
+
+    response = client.post(
+        "/api/v2/automation-ir/runs",
+        json={"automation": ir},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime_kind"] == "wps_replay"
+    replay_id = response.json()["replay_id"]
+    done = _wait_for(client, replay_id, {"done"})
+    assert done["result"]["steps"][0]["tool"] == "ext.delay"
+
+
+def test_legacy_replay_endpoint_rejects_arp_automation_before_job_creation(
+    client,
+    tmp_path,
+):
+    path = tmp_path / "graph.automation.json"
+    path.write_text(json.dumps(_arp_automation_ir()), encoding="utf-8")
+
+    response = client.post("/api/replay", json={"script": path.name})
+
+    assert response.status_code == 400
+    assert "/api/v2/automation-ir/runs" in response.json()["detail"]
 
 
 def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):

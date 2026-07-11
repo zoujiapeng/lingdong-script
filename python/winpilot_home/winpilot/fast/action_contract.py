@@ -54,6 +54,12 @@ BATCH_OBSERVE_ACTIONS = {
     "auto_visual_verify",
 }
 
+BATCH_CLIPBOARD_ACTIONS = {
+    "clipboard_read",
+    "clipboard_write",
+    "clipboard_paste",
+}
+
 
 def batch_action_name(action: dict[str, Any]) -> str:
     """Return the action name for explicit and shorthand batch formats."""

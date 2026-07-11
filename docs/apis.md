@@ -47,6 +47,8 @@
 | GET/PUT | `/api/script/{file}` | 读取/保存 `.wps.json` |
 | GET | `/api/script/{file}/ir` | 将已有 `.wps.json` 包装为 `automation-ir/1` |
 | GET | `/api/automation-ir/{file}` | 读取并校验 `.automation.json` |
+| POST | `/api/v2/automation-ir/validate` | 校验 IR envelope、runtime、safety、graph 与 projection fingerprint |
+| POST | `/api/v2/automation-ir/runs` | 直接运行 `wps_replay` 或 `arp_graph` IR，返回统一 job/run 标识 |
 | POST/GET | `/api/human/start`、`/api/human/stop`、`/api/human/status` | 人类演示录制 |
 | POST | `/api/replay` | 启动 `.wps.json` replay job，返回 `replay_id` |
 | GET | `/api/replay/{replay_id}` | 查询 replay job 状态、结果、失败细节 |
@@ -64,7 +66,7 @@
 
 `/api/trace/{run_id}/summary` 里的 `low_latency` / `fast_gui` 字段是当前性能复盘入口：包含截图、感知、LLM 决策、动作执行、动作后验证、VLM/重规划/skill 复用频率、p50/p95 latency，以及 batch subgoal、controller phase、锚点点击/缓存/失败统计。
 
-WinPilot API 除 `/api/ping` 外要求 Electron 托管进程传入的 bearer token；WebSocket 使用同一 token query。浏览器 `OPTIONS` 不携带最终 Authorization，因此先交给严格 origin/method/header 的 CORS 预检，实际 API 请求仍必须鉴权。Agent、ARP、Replay 与计划任务按 `interactive_runtime` 资源排队，不再仅因另一个交互 job 活跃就返回 409。`desktop_action_queue` 仍串行真实鼠标键盘写入。
+WinPilot API 除 `/api/ping` 外要求 Electron 托管进程传入的 bearer token；WebSocket 使用同一 token query。浏览器 `OPTIONS` 不携带最终 Authorization，因此先交给严格 origin/method/header 的 CORS 预检，实际 API 请求仍必须鉴权。Agent、ARP、Replay 与计划任务按 `interactive_runtime` 资源排队，不再仅因另一个交互 job 活跃就返回 409。`desktop_action_queue` 串行真实鼠标键盘输入，只允许明确后台安全的窗口消息动作跨 hwnd 并发。
 
 `/api/memory` 的 recipe/note 结构包含 `task`、`app`、`steps`，并可带 `conditions` 和 `evidence` 数组；`PUT /api/memory/{recipe_id}` 也允许更新这两个字段。它们用于说明该记忆何时适用、复用前后需要什么证据，不能把 replay 执行成功当成任务完成证明。
 

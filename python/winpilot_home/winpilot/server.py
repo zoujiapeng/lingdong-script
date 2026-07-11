@@ -28,9 +28,16 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .automation_ir import automation_ir_from_wps, validate_automation_ir
+from .automation_ir import (
+    arp_graph_from_automation_ir,
+    automation_ir_from_wps,
+    automation_runtime_kind,
+    validate_automation_ir,
+    validate_automation_runtime,
+    wps_from_automation_ir,
+)
 from . import scheduler as agent_scheduler
 from .action.desktop_queue import DESKTOP_ACTION_QUEUE
 from .agent.loop import AgentRunner
@@ -48,7 +55,12 @@ from .fast.perception_daemon import PERCEPTION_DAEMON
 from .utils.log import BUS, logger
 from .orchestrator.adapters import default_handlers, finalize_memory_feedback
 from .orchestrator.catalog import capability_catalog
-from .orchestrator.contracts import ArpGraph, ArpRunRequest, validate_graph
+from .orchestrator.contracts import (
+    ArpGraph,
+    ArpRunRequest,
+    GraphValidation,
+    validate_graph,
+)
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
 
@@ -114,6 +126,7 @@ async def _lifespan(_app: FastAPI):
                 yield
     finally:
         _stop_scheduler_thread()
+        PERCEPTION_DAEMON.shutdown()
 
 
 app = FastAPI(title="WinPilot", docs_url=None, redoc_url=None, lifespan=_lifespan)
@@ -447,6 +460,11 @@ class ArpGateDecisionRequest(BaseModel):
     comment: str = ""
 
 
+class AutomationIrRunRequest(BaseModel):
+    automation: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
 # ----------------------------------------------------------------- endpoints
 @app.post("/api/chat")
 def start_chat(req: ChatRequest) -> dict[str, Any]:
@@ -617,6 +635,23 @@ def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
     return validate_graph(graph).model_dump(mode="json")
 
 
+@app.post("/api/v2/automation-ir/validate")
+def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, Any]:
+    if automation_runtime_kind(automation) == "wps_replay":
+        error = validate_automation_runtime(automation)
+        if error:
+            return GraphValidation(valid=False, errors=[error]).model_dump(mode="json")
+        return GraphValidation(
+            valid=True,
+            warnings=["WPS replay runtime is sequential and has no ARP entry node"],
+        ).model_dump(mode="json")
+    try:
+        graph = arp_graph_from_automation_ir(automation, require_valid=False)
+    except ValueError as exc:
+        return GraphValidation(valid=False, errors=[str(exc)]).model_dump(mode="json")
+    return validate_graph(graph).model_dump(mode="json")
+
+
 def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
     validation = validate_graph(graph)
     if not validation.valid:
@@ -682,6 +717,68 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
+
+
+@app.post("/api/v2/automation-ir/runs")
+def start_automation_ir_run(req: AutomationIrRunRequest) -> dict[str, Any]:
+    error = validate_automation_runtime(req.automation)
+    if error:
+        raise HTTPException(400, error)
+    runtime_kind = automation_runtime_kind(req.automation)
+    if runtime_kind == "wps_replay":
+        replay_id = f"replay-{uuid.uuid4().hex[:12]}"
+        script = wps_from_automation_ir(req.automation)
+        stop_event = threading.Event()
+
+        def replay_worker(runtime_stop: threading.Event) -> dict[str, Any]:
+            BUS.publish(
+                "replay",
+                state="job_start",
+                replay_id=replay_id,
+                automation_id=req.automation.get("id"),
+            )
+            result = trace_mod.Replayer(runtime_stop).run_script(
+                script,
+                script_name=f"{req.automation.get('id') or 'automation-ir'}.automation.json",
+            )
+            BUS.publish(
+                "replay",
+                state="job_done",
+                replay_id=replay_id,
+                ok=bool(result.get("ok", False)),
+                status="stopped" if runtime_stop.is_set() else "done",
+            )
+            return result
+
+        job = RUNTIME_JOBS.submit(
+            "replay",
+            replay_worker,
+            resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+            metadata={"automation_id": req.automation.get("id")},
+            job_id=replay_id,
+            stop_event=stop_event,
+        )
+        return {
+            "ok": True,
+            "runtime_kind": runtime_kind,
+            "automation_id": req.automation.get("id"),
+            "replay_id": replay_id,
+            "job": _public_runtime_replay_job(job),
+        }
+    try:
+        graph = arp_graph_from_automation_ir(req.automation)
+        execution = _start_arp_execution(graph, req.inputs)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "ok": True,
+        "runtime_kind": runtime_kind,
+        "automation_id": req.automation.get("id"),
+        "run_id": execution.run_id,
+        "run": execution.to_dict(),
+    }
 
 
 @app.get("/api/v2/arp/runs/{run_id}")
@@ -1048,7 +1145,7 @@ def put_script(file: str, req: ScriptSaveRequest) -> dict[str, Any]:
     tools / malformed nesting before it can ever be replayed)."""
     path = _script_path(file)
     err = (
-        validate_automation_ir(req.script)
+        validate_automation_runtime(req.script)
         if req.script.get("format") == "automation-ir/1"
         else trace_mod.validate_script(req.script)
     )
@@ -1126,6 +1223,18 @@ def replay(req: ReplayRequest) -> dict[str, Any]:
     script_path = _ensure_inside(SCRIPTS_DIR / req.script, SCRIPTS_DIR, "脚本")
     if not script_path.exists():
         raise HTTPException(404, "脚本不存在")
+    try:
+        replay_document = json.loads(script_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(400, f"script parse failed: {exc}") from exc
+    if (
+        replay_document.get("format") == "automation-ir/1"
+        and automation_runtime_kind(replay_document) == "arp_graph"
+    ):
+        raise HTTPException(
+            400,
+            "ARP-backed Automation IR must run through /api/v2/automation-ir/runs",
+        )
     with STATE.lock:
         if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行")

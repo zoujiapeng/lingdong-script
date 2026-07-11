@@ -1,6 +1,12 @@
 import { nanoid } from 'nanoid';
 import type { FlowScript, FlowNode, FlowEdge } from '../types';
+import { flowToArpGraph } from '../platform/flowToArpGraph';
+import type { ArpGraph } from '../platform/contracts';
 import { wpsToFlowScript, type WpsScript, type WpsStep } from './wpsToFlowScript';
+
+export type AutomationRuntime =
+  | { kind: 'wps_replay' }
+  | { kind: 'arp_graph'; graph: ArpGraph; projection_fingerprint: string };
 
 export interface AutomationIR {
   format: 'automation-ir/1';
@@ -14,6 +20,7 @@ export interface AutomationIR {
   variables: Record<string, string>;
   safety: Record<string, unknown>;
   fallback: Record<string, unknown>;
+  runtime?: AutomationRuntime;
 }
 
 const DESKTOP_MUTATION_TOOLS = new Set([
@@ -29,7 +36,7 @@ const DESKTOP_MUTATION_TOOLS = new Set([
   'tray_click',
   'ext.clipboard_set',
 ]);
-const SHELL_TOOLS = new Set(['run_shell', 'ext.run_shell']);
+const SHELL_TOOLS = new Set(['run_shell', 'run_detached', 'ext.run_shell']);
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value ?? null));
@@ -117,7 +124,34 @@ export function automationIrFromWps(script: WpsScript, id = `air-${nanoid(12)}`)
       on_preflight_fail: 'live_agent_takeover',
       on_step_fail: 'resume_live_from_failed_step',
     },
+    runtime: { kind: 'wps_replay' },
   };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => (
+      `${JSON.stringify(key)}:${stableJson(record[key])}`
+    )).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+export function automationProjectionFingerprint(
+  steps: Array<Record<string, unknown>>,
+  variables: Record<string, unknown>,
+  graph?: ArpGraph,
+): string {
+  const bytes = new TextEncoder().encode(stableJson({
+    steps,
+    variables,
+    ...(graph ? { graph } : {}),
+  }));
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return `fnv1a32:${hash.toString(16).padStart(8, '0')}`;
 }
 
 function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, unknown> {
@@ -140,6 +174,14 @@ function serializeFlowStep(node: FlowNode, edges: FlowEdge[]): Record<string, un
 }
 
 export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoid(12)}`): AutomationIR {
+  const graph = flowToArpGraph(script);
+  const steps = (script.nodes || []).map((node) => serializeFlowStep(node, script.edges || []));
+  const variables = clone(script.variables || {});
+  graph.metadata = {
+    ...graph.metadata,
+    source: 'automation-ir',
+    source_ir: id,
+  };
   return {
     format: 'automation-ir/1',
     id,
@@ -154,8 +196,8 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
     },
     conditions: {},
     evidence: { required: [] },
-    steps: (script.nodes || []).map((node) => serializeFlowStep(node, script.edges || [])),
-    variables: clone(script.variables || {}),
+    steps,
+    variables,
     safety: {
       requires_preflight: true,
       mutates_desktop: true,
@@ -166,7 +208,50 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
       on_preflight_fail: 'live_agent_takeover',
       on_step_fail: 'open_flow_editor_at_failed_node',
     },
+    runtime: {
+      kind: 'arp_graph',
+      graph,
+      projection_fingerprint: automationProjectionFingerprint(steps, variables, graph),
+    },
   };
+}
+
+export function automationRuntimeKind(ir: AutomationIR): AutomationRuntime['kind'] | '' {
+  const explicit = ir.runtime?.kind;
+  if (explicit === 'wps_replay' || explicit === 'arp_graph') return explicit;
+  if (ir.source?.kind === 'wps') return 'wps_replay';
+  return '';
+}
+
+export function automationRuntimeGraph(ir: AutomationIR): ArpGraph {
+  const error = validateAutomationRuntime(ir);
+  if (error) throw new Error(error);
+  if (ir.runtime?.kind !== 'arp_graph' || !ir.runtime.graph) {
+    throw new Error(
+      'Automation IR has no canonical ARP runtime graph; reopen the source in Studio and save it again',
+    );
+  }
+  return clone(ir.runtime.graph);
+}
+
+export function validateAutomationRuntime(ir: AutomationIR): string | undefined {
+  const error = validateAutomationIR(ir);
+  if (error) return error;
+  const kind = automationRuntimeKind(ir);
+  if (kind === 'wps_replay') return undefined;
+  if (kind !== 'arp_graph') return 'Automation IR requires a supported runtime.kind';
+  const graph = ir.runtime?.kind === 'arp_graph' ? ir.runtime.graph : undefined;
+  if (!graph || graph.format !== 'arp/1') return 'Automation IR arp_graph runtime requires graph format arp/1';
+  if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+    return 'Automation IR arp_graph runtime requires graph nodes and edges';
+  }
+  const expected = str(ir.runtime?.kind === 'arp_graph' ? ir.runtime.projection_fingerprint : '');
+  if (!expected) return 'Automation IR arp_graph runtime requires projection_fingerprint';
+  const actual = automationProjectionFingerprint(ir.steps, ir.variables, graph);
+  if (expected !== actual) {
+    return `Automation IR runtime projection is stale: expected ${expected}, calculated ${actual}`;
+  }
+  return undefined;
 }
 
 export function automationIrToWps(ir: AutomationIR): WpsScript {
@@ -296,6 +381,45 @@ export function validateAutomationIR(value: unknown): string | undefined {
     const step = ir.steps[i] as Record<string, unknown>;
     if (!step || typeof step !== 'object' || Array.isArray(step)) return `steps[${i + 1}] must be an object`;
     if (!str(step.tool)) return `steps[${i + 1}] requires tool`;
+  }
+  if (!str(ir.source.kind)) return 'Automation IR source.kind is required';
+  const sourceKind = str(ir.source.kind);
+  if (!['wps', 'flowscript'].includes(sourceKind)) {
+    return `unsupported Automation IR source.kind: ${sourceKind}`;
+  }
+  if (sourceKind === 'flowscript') {
+    const nodeIds: string[] = [];
+    for (let i = 0; i < ir.steps.length; i += 1) {
+      const step = ir.steps[i] as Record<string, unknown>;
+      const nodeId = str(step.node_id);
+      if (!nodeId) return `steps[${i + 1}] requires node_id for flowscript source`;
+      nodeIds.push(nodeId);
+      if (!step.params || typeof step.params !== 'object' || Array.isArray(step.params)) {
+        return `steps[${i + 1}].params must be an object`;
+      }
+      if (step.outgoing !== undefined && !Array.isArray(step.outgoing)) {
+        return `steps[${i + 1}].outgoing must be a list`;
+      }
+    }
+    if (new Set(nodeIds).size !== nodeIds.length) {
+      return 'flowscript Automation IR node_id values must be unique';
+    }
+    const known = new Set(nodeIds);
+    for (let i = 0; i < ir.steps.length; i += 1) {
+      const outgoing = Array.isArray(ir.steps[i].outgoing) ? ir.steps[i].outgoing as Array<Record<string, unknown>> : [];
+      for (let j = 0; j < outgoing.length; j += 1) {
+        const target = str(outgoing[j]?.to_node);
+        if (!target || !known.has(target)) {
+          return `steps[${i + 1}].outgoing[${j + 1}] references unknown to_node ${target}`;
+        }
+      }
+    }
+  }
+  if (ir.runtime !== undefined) {
+    if (!ir.runtime || typeof ir.runtime !== 'object') return 'Automation IR runtime must be an object';
+    if (!['wps_replay', 'arp_graph'].includes(str(ir.runtime.kind))) {
+      return `unsupported Automation IR runtime kind: ${str(ir.runtime.kind) || '<empty>'}`;
+    }
   }
   return undefined;
 }

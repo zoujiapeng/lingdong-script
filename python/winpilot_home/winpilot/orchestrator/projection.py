@@ -125,15 +125,26 @@ class RunProjectionStore:
             run_id = self._child_to_parent.get(source_run_id, source_run_id)
             is_child_event = run_id != source_run_id
             run = self._runs.get(run_id)
+            is_new_run = run is None
             if run is None:
                 run = self._new(run_id, event)
                 self._runs[run_id] = run
                 self._order.append(run_id)
-            self._current_id = run_id
+            if (
+                is_new_run
+                or self._current_id is None
+                or event_type in {"agent_start", "arp_run_start"}
+            ):
+                self._current_id = run_id
             run["updated_at"] = float(event.get("ts") or time.time())
             run["metrics"]["event_count"] += 1
             phase = self._phase(event_type, event)
-            if phase:
+            terminal_before_event = run.get("status") in _TERMINAL
+            if (
+                phase
+                and not (terminal_before_event and phase != "terminal")
+                and not (is_child_event and phase == "terminal")
+            ):
                 run["phase"] = phase
             if event.get("task") and not run.get("goal"):
                 run["goal"] = str(event.get("task"))

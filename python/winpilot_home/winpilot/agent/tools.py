@@ -422,6 +422,11 @@ class ToolSession(
     def _schedule_predictive_ocr(self, watcher: Any) -> None:
         if not bool(CONFIG.get("fusion", "predictive_ocr_enabled", default=True)):
             return
+        # Shared daemon-managed watchers publish every changed ROI to the
+        # persistent per-hwnd analyzer. Keep this legacy worker only for
+        # injected/standalone watchers used outside that runtime.
+        if getattr(watcher, "_perception_daemon_managed", False):
+            return
         evidence_reader = getattr(watcher, "action_evidence", None)
         if not callable(evidence_reader):
             return

@@ -9,6 +9,7 @@ import {
   websocketUrl,
 } from '../platform/client';
 import { edgeBranch, flowToArpGraph } from '../platform/flowToArpGraph';
+import { automationIrFromFlowScript } from '../utils/automationIR';
 
 function scriptFixture(): FlowScript {
   return {
@@ -61,6 +62,10 @@ describe('control plane client contracts', () => {
     expect(normalizeBaseUrl('http://127.0.0.1:8765')).toBe('http://127.0.0.1:8765/');
     expect(websocketUrl('https://example.test/runtime/')).toBe('wss://example.test/runtime/ws/events');
     expect(websocketUrl('https://example.test/runtime/', 'secret')).toBe('wss://example.test/runtime/ws/events?token=secret');
+    expect(
+      new ControlPlaneClient('https://example.test/runtime/', 'secret')
+        .traceScreenshotUrl('run 1', 'nested\\after 1.jpg'),
+    ).toBe('https://example.test/runtime/api/trace/run%201/shot/after%201.jpg?token=secret');
   });
 
   it('keeps the managed control token in the client transport', async () => {
@@ -147,6 +152,34 @@ describe('control plane client contracts', () => {
     disconnect();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it('submits Automation IR directly for validation and execution', async () => {
+    const automation = automationIrFromFlowScript(scriptFixture(), 'air-client');
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      const body = url.endsWith('/validate')
+        ? { valid: true, errors: [], warnings: [], entry_node: 'start', reachable_nodes: [] }
+        : { ok: true, runtime_kind: 'arp_graph', run: { run_id: 'arp-1', status: 'queued' } };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      await expect(client.validateAutomation(automation)).resolves.toMatchObject({ valid: true });
+      await expect(client.startAutomation(automation)).resolves.toMatchObject({ run_id: 'arp-1' });
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v2/automation-ir/validate');
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v2/automation-ir/runs');
+      const submitted = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+      expect(submitted.automation.runtime.kind).toBe('arp_graph');
+      expect(submitted.automation.runtime.projection_fingerprint).toMatch(/^fnv1a32:/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

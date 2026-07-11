@@ -64,6 +64,8 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `POST /api/export/{run_id}/ir`
 - `GET /api/script/{file}/ir`
 - `GET /api/automation-ir/{file}`
+- `POST /api/v2/automation-ir/validate`
+- `POST /api/v2/automation-ir/runs`
 - `POST /api/replay`
 - `GET /api/replay/{replay_id}`
 - `POST /api/replay/{replay_id}/cancel`
@@ -80,7 +82,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `steps` / `variables`
 - `safety` / `fallback`
 
-新保存流程、成功 trace、Apprentice draft 和 Memory Skill 默认写 `.automation.json`。Flow editor 的运行链也是 Flow state -> IR -> `arp/1`。WPS、FlowScript 和 DSL 继续作为兼容 adapter；只有 `source.kind == "wps"` 的 IR 可回转为 WPS，避免不可等价执行的 Flow 被假装成离线 replay。
+新保存流程、成功 trace、Apprentice draft 和 Memory Skill 默认写 `.automation.json`。`runtime.kind` 明确选择 `wps_replay` 或 `arp_graph`；Flow editor 将编译后的 graph 和 projection fingerprint 一并放入 IR，后端验证后直接提交 RuntimeJob，不再执行 IR -> Flow -> graph 的往返转换。WPS、FlowScript 和 DSL 继续作为兼容 adapter；只有 `source.kind == "wps"` 的 IR 可回转为 WPS，避免不可等价执行的 Flow 被假装成离线 replay。
 
 ## 人类演示录制
 

@@ -42,11 +42,16 @@ import { NodeLibrary } from '../NodeLibrary/NodeLibrary';
 import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { useStore } from '../../store';
 import type { UIState } from '../../types';
-import { flowToArpGraph } from '../../platform/flowToArpGraph';
 import { useControlPlane } from '../../platform/useControlPlane';
 import type { AgentSchedule, ArpGraph, ChatGPTDesktopIntegration, GraphValidation, RunProjection, RuntimeEvent } from '../../platform/contracts';
 import { wpsToFlowScript, type WpsScript } from '../../utils/wpsToFlowScript';
-import { automationIrFromFlowScript, automationIrToFlowScript, type AutomationIR } from '../../utils/automationIR';
+import {
+  automationIrFromFlowScript,
+  automationIrToFlowScript,
+  automationRuntimeKind,
+  automationRuntimeGraph,
+  type AutomationIR,
+} from '../../utils/automationIR';
 
 type PlatformView = 'agent' | 'studio' | 'runs' | 'assets' | 'system';
 type Plane = ReturnType<typeof useControlPlane>;
@@ -184,7 +189,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const screenshotKind = String(screenshot?.kind || 'screen').replaceAll('_', ' ');
   const screenshotRegion = screenshot?.region as Record<string, unknown> | undefined;
   const screenshotUrl = screenshot && plane.baseUrl && run
-    ? new URL(`api/trace/${encodeURIComponent(run.run_id)}/shot/${encodeURIComponent(String(screenshot.path).replace(/\\/g, '/').split('/').pop() || '')}`, plane.baseUrl).toString()
+    ? plane.getClient().traceScreenshotUrl(run.run_id, String(screenshot.path))
     : '';
 
   const execute = async () => {
@@ -311,15 +316,7 @@ function Studio({ plane }: { plane: Plane }) {
     [script],
   );
   const graph = useMemo<ArpGraph>(() => {
-    const compiled = flowToArpGraph(automationIrToFlowScript(automation));
-    return {
-      ...compiled,
-      metadata: {
-        ...compiled.metadata,
-        source: 'automation-ir',
-        source_ir: automation.id,
-      },
-    };
+    return automationRuntimeGraph(automation);
   }, [automation]);
   const compilation = graph.metadata.compilation as { native_nodes?: number; legacy_nodes?: number; legacy_types?: string[] } | undefined;
 
@@ -355,22 +352,22 @@ function Studio({ plane }: { plane: Plane }) {
   const validate = useCallback(async () => {
     setBusy(true); setError('');
     try {
-      const result = await plane.validateGraph(graph);
+      const result = await plane.validateAutomation(automation);
       setValidation(result);
       return result;
     } catch (validateError) {
       setError(validateError instanceof Error ? validateError.message : String(validateError));
       return null;
     } finally { setBusy(false); }
-  }, [plane, graph]);
+  }, [plane, automation]);
 
   const run = async () => {
     setBusy(true); setError('');
     try {
-      const result = await plane.validateGraph(graph);
+      const result = await plane.validateAutomation(automation);
       setValidation(result);
       if (!result.valid) return;
-      await plane.startGraph(graph);
+      await plane.startAutomation(automation);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : String(runError));
     } finally { setBusy(false); }
@@ -506,7 +503,19 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
 
   const replay = async (file: string) => {
     setBusy(true); setError('');
-    try { await plane.getClient().replay(file); await plane.refresh(); }
+    try {
+      const client = plane.getClient();
+      const asset = await client.script<WpsScript | AutomationIR>(file);
+      if (
+        asset.format === 'automation-ir/1'
+        && automationRuntimeKind(asset as AutomationIR) === 'arp_graph'
+      ) {
+        await client.startAutomation(asset as AutomationIR);
+      } else {
+        await client.replay(file);
+      }
+      await plane.refresh();
+    }
     catch (replayError) { setError(replayError instanceof Error ? replayError.message : String(replayError)); }
     finally { setBusy(false); }
   };

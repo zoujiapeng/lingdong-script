@@ -33,10 +33,10 @@
 当前生产运行链：
 
 ```text
-Flow editor state -> automation-ir/1 -> flowToArpGraph -> arp/1 -> RuntimeJob
+Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validation -> RuntimeJob
 ```
 
-保存默认写 `.automation.json`；旧 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台的主运行时。
+`toAutomationIR()` 只编译一次当前 Flow state，并把 `arp/1` graph 与 projection fingerprint 存入 `runtime`；Studio 直接把该 IR 提交到 `/api/v2/automation-ir/runs`。保存默认写 `.automation.json`；旧 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台的主运行时。
 
 可靠性边界：
 
@@ -79,6 +79,6 @@ Flow editor state -> automation-ir/1 -> flowToArpGraph -> arp/1 -> RuntimeJob
 
 ## 与 WinPilot 的桥
 
-WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter；Agent 不需要直接理解 FlowScript 内部结构。
+WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter、运行投影和 fingerprint；后端会重新计算 fingerprint，拒绝 steps/variables/graph 不一致的陈旧投影。Agent 不需要直接理解 FlowScript 内部结构。
 
 这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。WPS 导入的 FlowScript 会设置 `settings.require_real_features=true`；能桥接的基础 GUI 节点、窗口等待、弹窗处理和摄像头节点会通过 `@feature` 尝试真实执行，不能桥接或桥接失败时应让流程失败，而不是继续报告完成。没有真实桥的等待/条件/图像/颜色/缺失子脚本类节点在该模式下也必须失败，不能走浏览器模拟。

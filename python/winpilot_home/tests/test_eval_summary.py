@@ -231,9 +231,20 @@ def test_summarize_events_reports_low_latency_metrics():
         },
         {"type": "screen_watch", "action": "auto_start", "ts": 1.61},
         {
+            "type": "perception_prefetch",
+            "source": "perception_daemon",
+            "dimension": "incremental_ocr_win32",
+            "action_delta": True,
+            "transient": True,
+            "count": 4,
+            "elapsed_ms": 90,
+            "ts": 1.612,
+        },
+        {
             "type": "desktop_action_queue",
             "state": "start",
             "action": "click",
+            "scope": "physical",
             "reentrant": False,
             "wait_ms": 1,
             "ts": 1.615,
@@ -250,6 +261,7 @@ def test_summarize_events_reports_low_latency_metrics():
             "type": "desktop_action_queue",
             "state": "start",
             "action": "type_text",
+            "scope": "physical_clipboard",
             "reentrant": True,
             "wait_ms": 2,
             "ts": 1.625,
@@ -334,9 +346,18 @@ def test_summarize_events_reports_low_latency_metrics():
     assert metrics["skill_reuse_rate"] == 1.0
     assert metrics["screen_watch_auto_starts"] == 1
     assert metrics["screen_watch_running_tool_events"] == 1
+    assert metrics["incremental_perception"]["prefetches"] == 1
+    assert metrics["incremental_perception"]["action_delta_prefetches"] == 1
+    assert metrics["incremental_perception"]["transient_prefetches"] == 1
+    assert metrics["incremental_perception"]["elements"] == 4
+    assert metrics["incremental_perception"]["latency"]["avg_ms"] == 90
     assert metrics["desktop_action_queue"]["actions"] == 2
     assert metrics["desktop_action_queue"]["errors"] == 1
     assert metrics["desktop_action_queue"]["reentrant"] == 1
+    assert metrics["desktop_action_queue"]["scopes"] == {
+        "physical": 1,
+        "physical_clipboard": 1,
+    }
     assert metrics["desktop_action_queue"]["wait_latency"]["max_ms"] == 5
     assert metrics["desktop_action_queue"]["execution_latency"]["p50_ms"] == 13.5
     assert metrics["desktop_action_queue"]["execution_latency"]["max_ms"] == 20

@@ -8,6 +8,7 @@ import time
 from ..config import CONFIG, TRACES_DIR
 from ..perception.model import UIElement
 from ..perception import fusion, intent, ocr, reducer, vision_cv, vlm, win32
+from ..perception.ocr_lines import merge_line_elements
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
@@ -264,62 +265,7 @@ class PerceptionToolMixin:
 
     @staticmethod
     def _merge_ocr_line_elements(elements: list[UIElement]) -> list[UIElement]:
-        """Create compact line evidence when OCR splits one status token.
-
-        UI labels such as ``PRESS_PULSE_ACTIVE`` are often recognized as
-        separate words. A merged line keeps query matching and evidence honest
-        without changing the original OCR boxes used for precise coordinates.
-        """
-        rows: list[list[UIElement]] = []
-        for element in sorted(elements, key=lambda item: (item.cy, item.left)):
-            if not element.text:
-                continue
-            row = next((
-                candidate for candidate in rows
-                if abs(sum(item.cy for item in candidate) / len(candidate) - element.cy)
-                <= max(8, element.height)
-            ), None)
-            if row is None:
-                rows.append([element])
-            else:
-                row.append(element)
-        merged: list[UIElement] = []
-        for row in rows:
-            ordered = sorted(row, key=lambda item: item.left)
-            segments: list[list[UIElement]] = []
-            for element in ordered:
-                if not segments:
-                    segments.append([element])
-                    continue
-                previous = segments[-1][-1]
-                gap = element.left - (previous.left + previous.width)
-                if gap > max(64, max(previous.height, element.height) * 4):
-                    segments.append([element])
-                else:
-                    segments[-1].append(element)
-            for segment in segments:
-                if len(segment) < 2:
-                    continue
-                left = min(item.left for item in segment)
-                top = min(item.top for item in segment)
-                right = max(item.left + item.width for item in segment)
-                bottom = max(item.top + item.height for item in segment)
-                states = sorted({state for item in segment for state in item.states})
-                states.append("ocr_line_merge")
-                merged.append(UIElement(
-                    source="ocr",
-                    role="text",
-                    text=" ".join(item.text.strip() for item in segment if item.text.strip()),
-                    cx=(left + right) // 2,
-                    cy=(top + bottom) // 2,
-                    left=left,
-                    top=top,
-                    width=max(1, right - left),
-                    height=max(1, bottom - top),
-                    confidence=min(float(item.confidence) for item in segment),
-                    states=states,
-                ))
-        return merged
+        return merge_line_elements(elements)
 
     @staticmethod
     def _text_matches_query(query: str, text: str) -> bool:
@@ -367,15 +313,43 @@ class PerceptionToolMixin:
 
     def _predictive_ocr_for_regions(
         self,
+        hwnd: int,
         regions: list[Region],
     ) -> tuple[list[UIElement], dict]:
+        lease = getattr(self, "_perception_lease", None)
+        if lease is not None and int(getattr(lease, "hwnd", 0) or 0) == int(hwnd):
+            try:
+                from ..fast.perception_daemon import PERCEPTION_DAEMON
+
+                wait_ms = int(CONFIG.get(
+                    "fusion",
+                    "incremental_perception_wait_ms",
+                    default=1200,
+                ))
+                daemon_elements, daemon_meta = PERCEPTION_DAEMON.incremental_elements(
+                    int(hwnd),
+                    regions=regions,
+                    max_age_ms=int(CONFIG.get(
+                        "fusion",
+                        "changed_region_recent_ms",
+                        default=30000,
+                    )),
+                    wait_ms=wait_ms,
+                )
+                if daemon_elements:
+                    return daemon_elements, daemon_meta
+            except Exception:
+                logger.debug("incremental perception cache lookup failed", exc_info=True)
+                daemon_meta = {}
+        else:
+            daemon_meta = {}
         lock = getattr(self, "_predictive_ocr_lock", None)
         if lock is None:
-            return [], {}
+            return [], daemon_meta
         with lock:
             cache = dict(getattr(self, "_predictive_ocr_cache", None) or {})
         if not cache:
-            return [], {}
+            return [], daemon_meta
         created_ms = int(cache.get("created_ms") or 0)
         max_age_ms = int(CONFIG.get("fusion", "changed_region_recent_ms", default=30000))
         if created_ms and int(time.monotonic() * 1000) - created_ms > max_age_ms:
@@ -388,6 +362,7 @@ class PerceptionToolMixin:
         ]
         return matched, {
             "hit": bool(matched),
+            "source": "session_predictive_ocr",
             "source_elapsed_ms": int(cache.get("elapsed_ms") or 0),
             "transient": bool(cache.get("transient")),
         }
@@ -430,7 +405,10 @@ class PerceptionToolMixin:
             ocr_mod = _tools_attr("ocr", ocr)
             controller = getattr(self, "_fast_gui_controller", None)
             watcher = getattr(controller, "watcher", None)
-            predictive_elements, predictive_meta = self._predictive_ocr_for_regions(regions)
+            predictive_elements, predictive_meta = self._predictive_ocr_for_regions(
+                hwnd,
+                regions,
+            )
             if predictive_elements:
                 ocr_elements.extend(predictive_elements)
                 transient_ocr_count += sum(
@@ -474,7 +452,10 @@ class PerceptionToolMixin:
             "scope": "changed_roi",
             "transient_evidence_count": transient_ocr_count,
             "predictive_cache_hit": bool(predictive_meta.get("hit")),
+            "predictive_source": str(predictive_meta.get("source") or ""),
             "predictive_source_ms": int(predictive_meta.get("source_elapsed_ms") or 0),
+            "predictive_inflight": bool(predictive_meta.get("inflight")),
+            "predictive_record_count": int(predictive_meta.get("record_count") or 0),
         }
         elements.extend(ocr_elements)
 

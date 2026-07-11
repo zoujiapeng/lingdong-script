@@ -1173,6 +1173,47 @@ def test_fast_controller_uses_raw_device_adapter_inside_batch():
     assert calls == [("raw", {"x": 11, "y": 22})]
 
 
+def test_fast_controller_acquires_combined_clipboard_and_physical_lease(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_module
+    from winpilot.fast.controller import FastGuiController
+
+    leases = []
+
+    def fake_run(action, fn, **kwargs):
+        leases.append((action, kwargs.get("scope"), kwargs.get("target_hwnd")))
+        return fn()
+
+    monkeypatch.setattr(controller_module.DESKTOP_ACTION_QUEUE, "run", fake_run)
+
+    class Session:
+        snapshot = None
+        hwnd = 42
+
+        def dispatch(self, name, args):
+            return ToolResult('{"ok": true, "verified": true}')
+
+    controller = FastGuiController(Session())
+    clipboard_only = controller.execute(
+        [{"clipboard_write": {"text": "value"}}],
+        sync=False,
+    )
+    mixed = controller.execute(
+        [
+            {"clipboard_write": {"text": "value"}},
+            {"click": {"x": 11, "y": 22}},
+        ],
+        sync=False,
+    )
+
+    assert clipboard_only["ok"] is True
+    assert mixed["ok"] is True
+    assert leases == [
+        ("controller_batch", "clipboard", 42),
+        ("controller_batch", "physical_clipboard", 42),
+    ]
+
+
 def test_fast_controller_batches_visual_actions_without_extra_observe():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -1428,6 +1469,73 @@ def test_screen_watcher_updates_bulletin_with_changed_roi():
     assert crop.size > 0
     assert crop_region.left <= 106
     assert crop_region.top <= 205
+
+
+def test_screen_watcher_notifies_and_can_remove_change_listener():
+    from winpilot.fast.watcher import ScreenWatcher
+    from winpilot.utils.screenshot import Region
+
+    frames = [
+        np.zeros((30, 30, 3), dtype=np.uint8),
+        np.full((30, 30, 3), 255, dtype=np.uint8),
+        np.zeros((30, 30, 3), dtype=np.uint8),
+    ]
+    calls = 0
+
+    def capture_frame(_region):
+        nonlocal calls
+        frame = frames[min(calls, len(frames) - 1)]
+        calls += 1
+        return frame
+
+    watcher = ScreenWatcher(
+        region_provider=lambda: Region(50, 60, 30, 30),
+        capture_fn=capture_frame,
+        event_context_provider=lambda: {"run_id": "listener-run"},
+    )
+    observed = []
+
+    def listener(delta, crops, metadata):
+        observed.append((delta, crops, metadata))
+
+    watcher.add_change_listener(listener)
+    watcher.sample_once()
+    watcher.sample_once()
+    watcher.remove_change_listener(listener)
+    watcher.sample_once()
+
+    assert len(observed) == 1
+    delta, crops, metadata = observed[0]
+    assert delta.changed is True
+    assert crops and crops[0][1].left == 50
+    assert metadata["run_id"] == "listener-run"
+    assert metadata["action_delta"] is False
+
+
+def test_screen_watcher_notifies_transient_action_evidence():
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.fast.watcher import ScreenWatcher
+    from winpilot.utils.screenshot import Region
+
+    watcher = ScreenWatcher(region_provider=lambda: Region(0, 0, 40, 40))
+    observed = []
+    watcher.add_change_listener(
+        lambda delta, crops, metadata: observed.append((delta, crops, metadata))
+    )
+    frame = np.zeros((40, 40, 3), dtype=np.uint8)
+    frame[10:20, 10:20] = 255
+
+    watcher.record_action_delta(
+        ScreenDelta(True, 0.06, [Region(10, 10, 10, 10)], 2),
+        Region(0, 0, 40, 40),
+        evidence_frame=frame,
+        transient=True,
+    )
+
+    assert len(observed) == 1
+    assert observed[0][1]
+    assert observed[0][2]["action_delta"] is True
+    assert observed[0][2]["transient"] is True
 
 
 def test_screen_watcher_keeps_recent_changed_roi_after_stable_sample():
