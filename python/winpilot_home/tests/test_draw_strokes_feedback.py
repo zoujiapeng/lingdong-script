@@ -58,3 +58,30 @@ def test_draw_strokes_visual_change_marks_action_verified(monkeypatch):
     assert data["verified"] is True
     assert data["verify_method"] == "cv-diff"
     assert "instead of redrawing" in data["visual_feedback"]
+
+
+def test_draw_strokes_without_pixel_change_is_a_fail_closed_result(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    still_frame = np.full((80, 80, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(tools, "capture", lambda _region: still_frame.copy())
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(draw_strokes=lambda strokes, duration_s, hwnd: {
+            "ok": True,
+            "strokes_drawn": len(strokes),
+        }),
+    )
+
+    session = ToolSession(task="draw a visible line")
+    session.hwnd = 123
+    data = json.loads(session._t_draw_strokes({
+        "strokes": [[[10, 10], [50, 50]]],
+    }).text)
+
+    assert data["ok"] is False
+    assert data["verified"] is False
+    assert data["visual_change_detected"] is False
+    assert data["failure_type"] == "DRAW_NO_VISIBLE_CHANGE"

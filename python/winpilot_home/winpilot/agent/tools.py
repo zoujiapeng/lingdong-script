@@ -264,6 +264,12 @@ class ToolSession(
         if self.world_enabled:
             try:
                 self.world.record_action(name, args)
+                try:
+                    outcome = json.loads(result.text or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    outcome = {}
+                if isinstance(outcome, dict):
+                    self.world.record_action_outcome(name, outcome)
                 if result.is_observe and self.snapshot is not None:
                     self.world.observe_snapshot(self.snapshot)
                 screen_status = self._fast_screen_status()

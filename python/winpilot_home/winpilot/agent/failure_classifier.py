@@ -38,6 +38,7 @@ class FailureType(str, Enum):
     WINDOW_FOCUS_ERROR = "WINDOW_FOCUS_ERROR"
     TASK_CONSTRAINT_LOST = "TASK_CONSTRAINT_LOST"
     ACTION_SUCCEEDED_VERIFICATION_FAILED = "ACTION_SUCCEEDED_VERIFICATION_FAILED"
+    DRAW_NO_VISIBLE_CHANGE = "DRAW_NO_VISIBLE_CHANGE"
 
 
 @dataclass
@@ -105,6 +106,11 @@ _STRATEGIES: dict[FailureType, tuple[str, str, int]] = {
     FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED: (
         "reverify_perception_wait_or_adjust_overstrict_expect",
         "Treat the action as possibly successful. First check perception miss, insufficient wait, or overly strict verify condition; continue planning only when business evidence is truly absent.",
+        1,
+    ),
+    FailureType.DRAW_NO_VISIBLE_CHANGE: (
+        "reobserve_canvas_focus_tool_and_relocate",
+        "Do not redraw the same path. Re-observe the target surface, confirm foreground focus, active drawing tool/color, and canvas bounds; then relocate before one controlled retry.",
         1,
     ),
 }
@@ -381,6 +387,10 @@ class FailureClassifier:
         if click_offset is not None:
             return click_offset
 
+        draw_no_change = self._classify_draw_no_visible_change(data)
+        if draw_no_change is not None:
+            return draw_no_change
+
         action_verify = self._classify_action_succeeded_verify_failed(data, text)
         if action_verify is not None:
             return action_verify
@@ -415,6 +425,34 @@ class FailureClassifier:
                     retry_budget=1,
                 )
         return None
+
+    def _classify_draw_no_visible_change(
+        self,
+        data: dict[str, Any],
+    ) -> FailureClassification | None:
+        if not data:
+            return None
+        failed_draws: list[dict[str, Any]] = []
+        for item in _child_payloads(data):
+            if item.get("action") != "draw_strokes":
+                continue
+            if _truthy_bool(item.get("visual_change_detected")) is False:
+                failed_draws.append({
+                    "visual_change_ratio": item.get("visual_change_ratio"),
+                    "verify_detail": item.get("verify_detail"),
+                    "error": item.get("error"),
+                })
+        if not failed_draws:
+            return None
+        return _classification(
+            FailureType.DRAW_NO_VISIBLE_CHANGE,
+            0.97,
+            {"draw_failures": failed_draws[:4]},
+            "drawing input was issued but the intended canvas region did not change",
+            llm_required=False,
+            retryable=True,
+            retry_budget=1,
+        )
 
     def _classify_window_focus(
         self,

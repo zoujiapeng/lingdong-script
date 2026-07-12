@@ -774,6 +774,18 @@ class InteractionToolMixin:
                     result["verify_detail"] = (
                         "visible pixels changed across the requested action region"
                     )
+                if not changed:
+                    # Device input being accepted is not proof that it landed
+                    # on the intended drawable surface.  Keep this fail-closed:
+                    # callers must recover focus/tool/canvas grounding instead
+                    # of treating a no-op drag as completed work.
+                    result.update({
+                        "ok": False,
+                        "verified": False,
+                        "mutation_applied": False,
+                        "failure_type": "DRAW_NO_VISIBLE_CHANGE",
+                        "error": "draw strokes produced no visible pixel change in the intended region",
+                    })
                 result["visual_feedback"] = (
                     f"drew {result.get('strokes_drawn', 0)} strokes; "
                     + ("visible pixels changed across the figure region — good evidence "
@@ -787,6 +799,12 @@ class InteractionToolMixin:
                 )
             except Exception as exc:
                 logger.debug("draw_strokes post-capture/diff failed: %s", exc)
+        elif not deferred_verify:
+            # Capture failure must not silently become visual success. The
+            # caller can observe or retry, but cannot mark the stroke verified.
+            result.setdefault("verified", False)
+            result["needs_observe"] = True
+            result["verify_detail"] = "draw result has no visual capture evidence"
         return ToolResult(
             self._fmt(result),
             replay={"tool": "draw_strokes", "strokes": strokes, "duration": duration},

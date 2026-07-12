@@ -519,6 +519,30 @@ def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
         x, y, cw, ch, area = stats[label].tolist()
         if area < min_area or cw < max(120, w * 0.25) or ch < max(80, h * 0.18):
             continue
+        # A large white document can sit behind vertical sliders, floating
+        # panels, or a left navigation gutter.  The connected component still
+        # spans that obscured area, but its columns have poor white coverage.
+        # Keep the widest dense horizontal run so drawing starts on the actual
+        # work surface rather than under an overlay.
+        component = _labels[y:y + ch, x:x + cw] == label
+        coverage = component.mean(axis=0)
+        dense = coverage >= 0.72
+        runs: list[tuple[int, int]] = []
+        start: int | None = None
+        for index, present in enumerate(dense.tolist()):
+            if present and start is None:
+                start = index
+            elif start is not None and not present:
+                if index - start >= max(24, int(cw * 0.08)):
+                    runs.append((start, index))
+                start = None
+        if start is not None and cw - start >= max(24, int(cw * 0.08)):
+            runs.append((start, cw))
+        if runs:
+            run_start, run_end = max(runs, key=lambda run: run[1] - run[0])
+            if run_end - run_start >= max(80, int(cw * 0.35)):
+                x += run_start
+                cw = run_end - run_start
         bbox = [int(x), int(y), int(x + cw), int(y + ch)]
         if best is None or int(area) > best[0]:
             best = (int(area), bbox)

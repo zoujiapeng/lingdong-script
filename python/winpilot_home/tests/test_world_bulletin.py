@@ -34,6 +34,31 @@ def test_world_model_screen_bulletin_advisory_is_edge_triggered():
     assert second == ""
 
 
+def test_world_model_tracks_no_pixel_change_before_waiting_for_ocr_delta():
+    from winpilot.perception.world import WorldModel
+
+    world = WorldModel()
+    world.record_action("draw_strokes", {"strokes": [[[1, 1], [2, 2]]]})
+    world.record_action_outcome("draw_strokes", {
+        "visual_change_detected": False,
+        "visual_change_ratio": 0.0,
+        "failure_type": "DRAW_NO_VISIBLE_CHANGE",
+    })
+    world.record_action("draw_strokes", {"strokes": [[[3, 3], [4, 4]]]})
+    world.record_action_outcome("draw_strokes", {
+        "visual_change_detected": False,
+        "visual_change_ratio": 0.0,
+        "failure_type": "DRAW_NO_VISIBLE_CHANGE",
+    })
+
+    stuck, reason = world.is_stuck()
+
+    assert stuck is True
+    assert "visual actions" in reason
+    assert world.state()["visual_no_progress"] == 2
+    assert world.state()["last_visual_outcome"]["changed"] is False
+
+
 def test_world_model_retains_source_bound_facts_per_run():
     from winpilot.perception.world import WorldModel
 

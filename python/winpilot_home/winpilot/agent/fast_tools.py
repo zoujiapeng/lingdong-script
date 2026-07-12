@@ -8,6 +8,7 @@ from typing import Any
 from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
 from ..fast.perception_daemon import PERCEPTION_DAEMON
 from ..fast.subgoal import SubgoalExecutor
+from ..perception import win32
 from ..perception.reducer import _non_blocking_notice_context
 from .tool_result import ToolResult
 
@@ -55,6 +56,28 @@ def _needs_resolved_target_window(session: Any, args: dict[str, Any]) -> bool:
     try:
         if int(getattr(session, "hwnd", 0) or 0):
             return False
+    except Exception:
+        pass
+    # The controller can safely act on a visible process/title hint once it
+    # has been resolved locally. Do that here too so this outer guard does not
+    # create a needless LLM recovery turn before the controller is reached.
+    process = str(target.get("process") or target.get("exe") or "").strip()
+    title = str(target.get("title") or "").strip()
+    try:
+        if process:
+            for candidate in win32.find_app(process).get("windows") or []:
+                hwnd = int(candidate.get("hwnd") or 0)
+                if hwnd and candidate.get("visible"):
+                    setattr(session, "hwnd", hwnd)
+                    target["hwnd"] = hwnd
+                    return False
+        if title:
+            found = win32.find_window(title)
+            hwnd = int((found or {}).get("hwnd") or 0)
+            if hwnd:
+                setattr(session, "hwnd", hwnd)
+                target["hwnd"] = hwnd
+                return False
     except Exception:
         pass
     return True

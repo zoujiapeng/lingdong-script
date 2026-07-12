@@ -2018,6 +2018,208 @@ def test_fast_controller_auto_verifies_visual_mutation_region():
     assert out["metrics"]["observe_count"] == 1
 
 
+def test_fast_controller_fails_a_draw_action_when_pixels_do_not_change():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, _args):
+            if name == "draw_strokes":
+                return ToolResult(
+                    '{"ok": true, "verified": false, '
+                    '"visual_change_detected": false, "visual_change_ratio": 0.0}'
+                )
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"draw_strokes": {"strokes": [[[100, 100], [150, 150]]]}},
+    ], sync=False)
+
+    assert out["ok"] is False
+    assert out["controller_state"]["phase"] == "blocked"
+    assert out["metrics"]["failed_at"] == 1
+    assert out["results"][0]["error"] == "visual action produced no pixel change in its intended region"
+
+
+def test_batch_scope_guard_runs_before_controller_local_select_color(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+
+    blocked = ToolResult(
+        '{"ok": false, "verified": false, "blocked": true, '
+        '"error": "foreground window is not the target"}'
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: blocked)
+    controller = FastGuiController(Session())
+    monkeypatch.setattr(
+        controller,
+        "_select_color",
+        lambda _action: (_ for _ in ()).throw(AssertionError("must not inspect an out-of-scope window")),
+    )
+
+    out = controller.execute([{"select_color": {"color": "red"}}], sync=False)
+
+    assert out["ok"] is False
+    assert out["results"][0]["action"] == "select_color"
+    assert out["results"][0]["data"]["blocked"] is True
+
+
+def test_select_color_uses_vlm_labeled_control_after_swatch_cv_miss(monkeypatch):
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+    import winpilot.fast.controller as controller_module
+
+    class Session:
+        hwnd = None
+        snapshot = None
+
+    controller = FastGuiController(Session())
+    monkeypatch.setattr(controller_module.vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        controller_module.vlm,
+        "collect",
+        lambda _region: [
+            UIElement(
+                source="vlm", role="button", text="Redo",
+                cx=290, cy=120, left=275, top=106, width=30, height=28,
+                confidence=0.9,
+            ),
+            UIElement(
+                source="vlm", role="button", text="Red",
+                cx=340, cy=120, left=325, top=106, width=30, height=28,
+                confidence=0.8,
+            ),
+        ],
+    )
+
+    point, meta = controller._visible_color_label_point(Region(0, 0, 800, 500), "red")
+
+    assert point == (340, 120)
+    assert meta["element_source"] == "vlm"
+    assert meta["label"] == "Red"
+
+
+def test_select_color_uses_fresh_uia_palette_item_after_open(monkeypatch):
+    from winpilot.fast import controller as controller_module
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        hwnd = 7
+        snapshot = None
+
+    controller = FastGuiController(Session())
+    monkeypatch.setattr(controller_module.CONFIG, "enabled_dimensions", lambda: ["uia"])
+    monkeypatch.setattr(
+        controller_module.uia,
+        "collect",
+        lambda _hwnd: [UIElement(
+            source="uia", role="listitem", text="Red",
+            cx=872, cy=353, left=857, top=338, width=30, height=30,
+            confidence=1.0,
+        )],
+    )
+    vlm_calls = []
+    monkeypatch.setattr(controller_module.vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(controller_module.vlm, "collect", lambda _region: vlm_calls.append(True) or [])
+
+    point, meta = controller._visible_color_label_point(Region(480, 154, 1008, 720), "red")
+
+    assert point == (872, 353)
+    assert meta["element_source"] == "uia"
+    assert meta["source"] == "snapshot+uia"
+    assert vlm_calls == []
+
+
+def test_open_color_palette_uses_vlm_when_ocr_cannot_read_owner_drawn_ribbon(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+    import winpilot.fast.controller as controller_module
+
+    class Session:
+        hwnd = None
+        snapshot = None
+
+    controller = FastGuiController(Session())
+    clicks = []
+    monkeypatch.setattr(controller_module.ocr, "collect", lambda _region: [])
+    monkeypatch.setattr(controller_module.vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        controller_module.vlm,
+        "collect",
+        lambda _region: [UIElement(
+            source="vlm", role="button", text="Colors",
+            cx=420, cy=160, left=400, top=145, width=40, height=30,
+            confidence=0.8,
+        )],
+    )
+    monkeypatch.setattr(
+        controller,
+        "_dispatch",
+        lambda name, args: clicks.append((name, args)) or ToolResult('{"ok": true}'),
+    )
+
+    data = json.loads(controller._open_color_palette(Region(100, 100, 800, 500)).text)
+
+    assert data["ok"] is True
+    assert data["locator_source"] == "vlm"
+    assert clicks[0][0] == "click"
+    assert clicks[0][1]["x"] == 420
+
+
+def test_open_color_palette_prefers_structured_snapshot_button_over_vlm(monkeypatch):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_module
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        hwnd = 1
+        snapshot = type("Snapshot", (), {"elements": [UIElement(
+            source="uia", role="button", text="Colors",
+            cx=922, cy=298, left=901, top=270, width=42, height=57,
+            confidence=1.0,
+        )]})()
+
+    controller = FastGuiController(Session())
+    clicks = []
+    monkeypatch.setattr(controller_module.ocr, "collect", lambda _region: [])
+    monkeypatch.setattr(controller_module.vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        controller_module.vlm,
+        "collect",
+        lambda _region: [UIElement(
+            source="vlm", role="button", text="Colors",
+            cx=817, cy=263, left=800, top=250, width=34, height=26,
+            confidence=0.8,
+        )],
+    )
+    monkeypatch.setattr(
+        controller,
+        "_dispatch",
+        lambda name, args: clicks.append((name, args)) or ToolResult('{"ok": true}'),
+    )
+
+    data = json.loads(controller._open_color_palette(Region(480, 154, 1008, 720)).text)
+
+    assert data["ok"] is True
+    assert data["locator_source"] == "snapshot"
+    assert data["point"] == {"x": 922, "y": 298}
+    assert clicks == [("click", {"x": 922, "y": 298, "skip_screen_delta": True})]
+
+
 def test_fast_controller_publishes_batch_child_events():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
@@ -2480,8 +2682,11 @@ def test_execute_subgoal_format_is_an_executable_routine():
     }) is True
 
 
-def test_execute_subgoal_rejects_unresolved_target_window_without_controller():
+def test_execute_subgoal_rejects_unresolved_target_window_without_controller(monkeypatch):
+    from winpilot.agent import fast_tools
     from winpilot.agent.fast_tools import FastToolMixin
+
+    monkeypatch.setattr(fast_tools.win32, "find_app", lambda _process: {"windows": []})
 
     class Session(FastToolMixin):
         hwnd = None
@@ -5916,6 +6121,81 @@ def test_subgoal_target_hwnd_prefers_matching_foreground_over_stale_session(monk
     assert session.hwnd == 200
 
 
+def test_subgoal_target_hwnd_resolves_visible_process_hint(monkeypatch):
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast import subgoal as subgoal_mod
+
+    class Session:
+        hwnd = None
+
+    monkeypatch.setattr(
+        subgoal_mod.win32,
+        "find_app",
+        lambda _process: {"windows": [
+            {"hwnd": 101, "visible": False},
+            {"hwnd": 202, "visible": True},
+        ]},
+    )
+
+    session = Session()
+    executor = subgoal_mod.SubgoalExecutor(session, FastGuiController(session))
+
+    assert executor._target_hwnd(
+        subgoal_mod.parse_subgoal_request({"target_window": {"process": "mspaint"}}),
+        allow_foreground=False,
+    ) == 202
+    assert session.hwnd == 202
+
+
+def test_fast_tool_guard_resolves_visible_process_hint_before_blocking(monkeypatch):
+    from winpilot.agent import fast_tools
+
+    class Session:
+        hwnd = None
+
+    monkeypatch.setattr(
+        fast_tools.win32,
+        "find_app",
+        lambda _process: {"windows": [{"hwnd": 303, "visible": True}]},
+    )
+    args = {"target_window": {"process": "example-app"}}
+    session = Session()
+
+    assert fast_tools._needs_resolved_target_window(session, args) is False
+    assert session.hwnd == 303
+    assert args["target_window"]["hwnd"] == 303
+
+
+def test_subgoal_draw_raises_visible_low_opacity_slider_for_solid_color():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        task = "draw a solid red line"
+        snapshot = Snapshot(
+            hwnd=7,
+            title="Canvas",
+            region=Region(100, 100, 800, 600),
+            elements=[UIElement(
+                source="uia", role="slider", text="Opacity=30%",
+                cx=180, cy=350, left=160, top=200, width=40, height=300,
+                confidence=1.0,
+            )],
+        )
+
+    action = SubgoalExecutor(Session(), FastGuiController(Session()))._drawing_opacity_action(
+        parse_subgoal_request({"subgoal": "draw a red line", "draw": {"color": "red"}})
+    )
+
+    assert action is not None
+    assert action["context"].startswith("raise visible drawing opacity")
+    assert action["x"] == 180
+    assert action["y"] == 212
+
+
 def test_subgoal_verify_scope_does_not_inherit_unrelated_task_targets():
     from winpilot.fast.subgoal import parse_subgoal_request
 
@@ -6559,12 +6839,15 @@ def test_execute_subgoal_draw_generates_strokes_inside_likely_canvas(monkeypatch
         hwnd = 7
         run_id = "run-draw-subgoal"
         snapshot = None
+        calls = []
 
         def dispatch(self, name, args):
-            assert name == "focus_window"
+            self.calls.append(name)
+            assert name in {"focus_window", "observe"}
             return ToolResult('{"ok": true}')
 
-    result = SubgoalExecutor(Session(), Controller()).execute({
+    session = Session()
+    result = SubgoalExecutor(session, Controller()).execute({
         "subgoal": "draw a blue triangle on the visible canvas",
         "draw": {"shape": "triangle", "color": "blue"},
         "constraints": {"wait": False},
@@ -6576,6 +6859,7 @@ def test_execute_subgoal_draw_generates_strokes_inside_likely_canvas(monkeypatch
     canvas = draw["canvas_region"]
     assert payload["ok"] is True
     assert payload["verified"] is True
+    assert session.calls == ["focus_window", "observe"]
     assert draw["action"] == "draw_strokes"
     assert draw["shape"] == "triangle"
     assert draw["requested_color"] == "blue"
@@ -6636,7 +6920,7 @@ def test_execute_subgoal_draw_discards_stale_snapshot_for_different_target(monke
         snapshot = Snapshot(hwnd=99, title="Codex", region=Region(0, 0, 800, 600), elements=[])
 
         def dispatch(self, name, args):
-            assert name == "focus_window"
+            assert name in {"focus_window", "observe"}
             return ToolResult('{"ok": true}')
 
     session = Session()
@@ -6714,7 +6998,7 @@ def test_execute_subgoal_draw_rejects_missing_requested_color(monkeypatch):
         snapshot = None
 
         def dispatch(self, name, args):
-            assert name == "focus_window"
+            assert name in {"focus_window", "observe"}
             return ToolResult('{"ok": true}')
 
     result = SubgoalExecutor(Session(), Controller()).execute({
@@ -6947,7 +7231,7 @@ def test_normalized_drawing_geometry_maps_to_detected_canvas():
     )
 
     assert box == Region(200, 300, 300, 200)
-    assert strokes == [[[100, 200], [600, 450], [1100, 700]]]
+    assert strokes == [[[130, 215], [600, 450], [1070, 685]]]
     assert len(_shape_strokes("ellipse", box)[0]) == 41
     assert _shape_strokes("freeform", box) == []
 
@@ -7123,7 +7407,8 @@ def test_fast_controller_select_color_clicks_visible_palette_swatch():
     out = controller.execute([{"action": "select_color", "color": "blue"}], sync=False)
 
     assert out["ok"] is True
-    assert out["verified"] is True
+    assert out.get("verified") is not True
+    assert out["needs_observe"] is True
     assert clicks
     assert 235 <= clicks[0]["x"] <= 258
     assert 305 <= clicks[0]["y"] <= 322
@@ -7432,7 +7717,12 @@ def test_successful_partial_draw_specs_can_seed_incremental_scene_preflight():
         for item in ({"action": "select_color"}, {"action": "draw_strokes"})
     ]
     results = [
-        {"index": index, "ok": True}
+        {
+            "index": index,
+            "ok": True,
+            "data": {"visual_change_detected": True}
+            if actions[index - 1]["action"] == "draw_strokes" else {},
+        }
         for index in range(1, len(actions) + 1)
     ]
     results.append({"index": len(actions) + 1, "ok": False})

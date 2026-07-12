@@ -648,7 +648,8 @@ def _visible_state_targets(task: str) -> list[str]:
     )
     targets: list[str] = []
     generic_descriptions = {
-        "app", "application", "browser", "button", "control", "dialog",
+        "a", "an", "the", "actually", "after", "again", "before", "finally", "first",
+        "then", "when", "while", "app", "application", "browser", "button", "control", "dialog",
         "element", "field", "page", "popup", "screen", "text", "title",
         "window",
     }
