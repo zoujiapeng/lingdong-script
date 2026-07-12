@@ -25,3 +25,14 @@ def test_clone_run_task_accepts_runtime_check_as_attempt():
     assert runner._requires_run_attempt()
     assert runner._has_run_attempt()
     assert not runner._reject_incomplete_run_task()
+
+
+def test_report_filename_does_not_trigger_repo_run_gate():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "write software_report_e2e.txt file and verify its contents"
+    )
+
+    assert runner._is_coding is True
+    assert runner._requires_run_attempt() is False

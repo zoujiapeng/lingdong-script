@@ -611,6 +611,45 @@ def test_run_projection_folds_agent_child_into_parent_arp_run():
     assert store.current()["status"] == "done"
 
 
+def test_run_projection_folds_live_child_trace_screenshot_into_parent_once():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": "parent-shot",
+        "graph_id": "graph", "graph_name": "Screenshot workflow",
+    })
+    store.on_event({
+        "type": "arp_child_run", "ts": 2.0, "run_id": "parent-shot",
+        "child_run_id": "child-shot", "child_kind": "agent",
+    })
+    event = {
+        "type": "trace_screenshot",
+        "ts": 3.0,
+        "run_id": "child-shot",
+        "trace_run_id": "parent-shot",
+        "screenshot": "parent-shot/batch_after_001.jpg",
+        "screenshot_kind": "batch_after",
+    }
+    store.on_event(event)
+    # Hydration sees the screenshot on both the action record and the
+    # trace_screenshot follow-up. The projection must remain idempotent.
+    store.on_event({**event, "type": "agent_batch_action", "ts": 3.1})
+
+    parent = store.get("parent-shot")
+
+    assert parent is not None
+    screenshots = [item for item in parent["evidence"] if item["type"] == "screenshot"]
+    assert screenshots == [{
+        "type": "screenshot",
+        "path": "parent-shot/batch_after_001.jpg",
+        "kind": "batch_after",
+        "region": None,
+        "transient": False,
+        "ts": 3.0,
+    }]
+
+
 def test_run_projection_terminal_phase_survives_late_perception_prefetch():
     from winpilot.orchestrator.projection import RunProjectionStore
 
@@ -855,3 +894,134 @@ def test_run_projection_hydrates_persisted_trace_once(tmp_path):
     assert run["goal"] == "Saved run"
     assert run["metrics"]["done_check_passed"] == 1
     assert len(run["timeline"]) == 3
+
+
+def test_run_projection_marks_incomplete_hydrated_run_interrupted(tmp_path):
+    import json
+
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    path = tmp_path / "crashed.jsonl"
+    path.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "agent_start", "ts": 1.0,
+                "run_id": "crashed", "task": "Blocked perception",
+            }),
+            json.dumps({
+                "type": "agent_tool_start", "ts": 2.0,
+                "run_id": "crashed", "tool": "observe",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    store = RunProjectionStore()
+
+    assert store.hydrate_directory(
+        tmp_path,
+        mark_incomplete_interrupted=True,
+    ) == 1
+    run = store.get("crashed")
+
+    assert run is not None
+    assert run["status"] == "interrupted"
+    assert run["phase"] == "terminal"
+    assert run["current_tool"] is None
+    assert run["timeline"][-1]["type"] == "run_interrupted"
+
+
+def test_background_reminder_finishes_without_hijacking_current_run():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "arp_run_start", "ts": 1.0, "run_id": "parent",
+        "graph_name": "Schedule a reminder",
+    })
+    store.on_event({
+        "type": "schedule", "ts": 2.0, "run_id": "reminder",
+        "action": "queued", "schedule_id": "schedule-1",
+    })
+    store.on_event({
+        "type": "user_notification", "ts": 3.0, "run_id": "reminder",
+        "title": "Lunch", "body": "Eat now",
+    })
+
+    assert store.current()["run_id"] == "parent"
+
+    store.on_event({
+        "type": "schedule", "ts": 4.0, "run_id": "reminder",
+        "action": "finished", "status": "done", "result": {"ok": True},
+    })
+    reminder = store.get("reminder")
+
+    assert reminder["status"] == "done"
+    assert reminder["phase"] == "terminal"
+    assert reminder["finished_at"] == 4.0
+    assert store.current()["run_id"] == "parent"
+
+
+def test_handler_node_timeout_cancels_local_work_without_waiting_for_completion():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, ArpRunStatus, NodeResult
+
+    stopped = threading.Event()
+
+    def slow_handler(_node, _context, stop_event):
+        while not stop_event.wait(0.01):
+            pass
+        stopped.set()
+        return NodeResult(ok=False, branch="canceled", error="stopped")
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(
+                id="slow",
+                kind=ArpNodeKind.AGENT_GOAL,
+                config={"goal": "slow operation"},
+                timeout_s=0.05,
+            ),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [
+            ArpEdge(id="a", source="start", target="slow"),
+            ArpEdge(id="b", source="slow", target="end"),
+        ],
+    )
+    started = time.monotonic()
+
+    execution = ArpExecution(graph, {ArpNodeKind.AGENT_GOAL: slow_handler})
+    result = execution.run()
+
+    assert time.monotonic() - started < 0.5
+    assert stopped.wait(0.5)
+    assert execution.status == ArpRunStatus.FAILED
+    assert "timed out" in result["error"]
+
+
+def test_run_manager_prunes_old_terminal_runs():
+    from winpilot.orchestrator.contracts import ArpEdge, ArpNode, ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, ArpRunManager, ArpRunStatus
+
+    graph = _graph(
+        [
+            ArpNode(id="start", kind=ArpNodeKind.START),
+            ArpNode(id="end", kind=ArpNodeKind.END),
+        ],
+        [ArpEdge(id="a", source="start", target="end")],
+    )
+    manager = ArpRunManager(max_runs=20)
+    for index in range(25):
+        run = ArpExecution(graph)
+        run.status = ArpRunStatus.DONE
+        run.created_at = float(index)
+        run.finished_at = float(index)
+        manager._runs[run.run_id] = run
+        manager._threads[run.run_id] = threading.Thread()
+
+    with manager._lock:
+        manager._prune_locked()
+
+    assert len(manager._runs) == 20
+    assert set(manager._threads) == set(manager._runs)

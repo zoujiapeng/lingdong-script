@@ -46,6 +46,20 @@ _DRAWING_TASK_RE = re.compile(
     r"\u753b(?:\u4e00|\u4e2a|\u53ea|\u5f20|\u5e45|\u6761|\u4e9b|\u51fa|\u5728|\u6210)",
     re.IGNORECASE,
 )
+_FILE_ARTIFACT_BUILD = re.compile(
+    r"(写入|写到|保存到|输出到|导出到|生成|创建|新建|整理到|记录到|"
+    r"write|save|export|generate|create)"
+    r"[^。。，,;；\n]{0,40}"
+    r"(?:\.[a-z0-9]{1,8}\b|(?:txt|csv|json|jsonl|md|html|xml|yaml|yml|log|文本)文件)",
+    re.IGNORECASE,
+)
+_NATIVE_GUI_DRAWING_TARGET_RE = re.compile(
+    r"\b(?:ms\s*paint|mspaint|paint\s+app|whiteboard)\b|"
+    r"\u753b\u677f|\u767d\u677f|"
+    r"\u753b\u56fe(?:\u5e94\u7528|\u8f6f\u4ef6|\u5de5\u5177|\u753b\u5e03)|"
+    r"\u7ed8\u56fe(?:\u5e94\u7528|\u8f6f\u4ef6|\u5de5\u5177|\u753b\u5e03)",
+    re.IGNORECASE,
+)
 _DESKTOP_ICON_DRAG_RE = re.compile(
     r"desktop|drag|move|icon|folder|"
     r"\u684c\u9762|\u62d6\u52a8|\u79fb\u52a8|\u56fe\u6807|\u6587\u4ef6\u5939|\u6574\u7406|\u6392\u5217",
@@ -108,10 +122,25 @@ def _has_explicit_gui_only_marker(task: str) -> bool:
     )
 
 
+def _is_native_gui_drawing_task(task: str) -> bool:
+    """Recognize drawing work whose requested medium is a visible GUI app.
+
+    A request to create an image file or drawing program may legitimately use
+    coding tools.  A request to draw *on a board/in Paint*, however, is a
+    desktop interaction task even when the user does not spell out "GUI-only".
+    """
+    text = task or ""
+    return bool(
+        _DRAWING_TASK_RE.search(text)
+        and _NATIVE_GUI_DRAWING_TARGET_RE.search(text)
+    )
+
+
 def _is_gui_only_task(task: str) -> bool:
     text = (task or "").casefold()
     return (
         _has_explicit_gui_only_marker(task)
+        or _is_native_gui_drawing_task(task)
         or
         bool(re.search(r"\bgui[- ]only\b", text))
         or "must use gui" in text
@@ -132,6 +161,24 @@ def _is_gui_only_task(task: str) -> bool:
 
 def _is_drawing_task(task: str) -> bool:
     return bool(_DRAWING_TASK_RE.search(task or ""))
+
+
+def _is_multi_source_research_task(task: str) -> bool:
+    """Recognize cross-page collection where source/entity binding matters."""
+    text = str(task or "").casefold()
+    has_research = bool(re.search(
+        r"\b(?:search|research|compare|find|inspect|product\s+page|source\s+url)\b|"
+        r"搜索|调研|对比|查找|多个页面|产品页面|商品页面|来源|网址",
+        text,
+        re.IGNORECASE,
+    ))
+    has_multiple = bool(re.search(
+        r"\b(?:two|multiple|several|each|both|separate)\b|"
+        r"两个|多个|每个|各自|分别|独立|两款|多款",
+        text,
+        re.IGNORECASE,
+    ))
+    return has_research and has_multiple
 
 
 def _is_desktop_icon_drag_task(task: str) -> bool:
@@ -224,7 +271,8 @@ def _gui_only_forbids_shell(task: str) -> bool:
     text = (task or "").casefold()
     compact = re.sub(r"\s+", "", text)
     return (
-        "do not use shell" in text
+        _is_native_gui_drawing_task(task)
+        or "do not use shell" in text
         or "don't use shell" in text
         or "no shell" in text
         or "without shell" in text
@@ -234,8 +282,11 @@ def _gui_only_forbids_shell(task: str) -> bool:
         or "do not use command line" in text
         or "no command line" in text
         or "\u4e0d\u8981\u7528shell" in compact
+        or "\u4e0d\u8981\u4f7f\u7528shell" in compact
         or "\u4e0d\u80fd\u7528shell" in compact
+        or "\u4e0d\u80fd\u4f7f\u7528shell" in compact
         or "\u7981\u6b62\u7528shell" in compact
+        or "\u7981\u6b62\u4f7f\u7528shell" in compact
         or "\u53ea\u7528gui" in compact
         or "\u4ec5\u7528gui" in compact
         or "\u53ea\u901a\u8fc7gui" in compact
@@ -312,15 +363,29 @@ def _gui_only_blocked_hotkey(task: str, keys: list[str] | tuple[str, ...]) -> st
 def _is_coding_task(task: str) -> bool:
     text = (task or "").strip()
     low = text.lower()
+
+    def contains_keyword(keyword: str) -> bool:
+        candidate = keyword.strip().lower()
+        # Short ASCII coding tokens such as repo/git/bug must be lexical
+        # words. Substring matching classified ordinary words like "report"
+        # as repository work and exposed the wrong runtime/tool profile.
+        if re.fullmatch(r"[a-z][a-z0-9_.-]*", candidate):
+            return bool(re.search(
+                rf"(?<![a-z0-9_]){re.escape(candidate)}(?![a-z0-9_])",
+                low,
+            ))
+        return keyword.lower() in low
+
     explicit_coding = (
-        any(k in low for k in _CODING_EXPLICIT)
+        any(contains_keyword(k) for k in _CODING_EXPLICIT)
         or bool(_CODING_ARTIFACT_ACTION.search(text))
+        or bool(_FILE_ARTIFACT_BUILD.search(text))
     )
     if _OPEN_INTENT.match(text) and not explicit_coding:
         return False
     if explicit_coding:
         return True
-    if any(k in low for k in _CODING_STRONG):
+    if any(contains_keyword(k) for k in _CODING_STRONG):
         return True
     return bool(_CODING_BUILD.search(text))
 
@@ -328,6 +393,23 @@ def _is_coding_task(task: str) -> bool:
 def _is_communication_task(task: str) -> bool:
     text = (task or "").lower()
     return any(hint in text for hint in _COMMUNICATION_HINTS)
+
+
+def _is_arithmetic_task(task: str) -> bool:
+    text = (task or "").casefold()
+    intent = re.search(
+        r"\b(?:calculate|compute|evaluate|multiply|multiplied|sum|product)\b|"
+        r"\u8ba1\u7b97|\u76f8\u4e58|\u4e58\u79ef|\u6c42\u548c",
+        text,
+    )
+    expression = re.search(r"\d\s*(?:[+*/x\u00d7\u00f7-]|\u4e58)\s*\d", text)
+    date_product = (
+        any(marker in text for marker in ("today", "date", "\u4eca\u5929", "\u65e5\u671f"))
+        and any(marker in text for marker in (
+            "multiply", "multiplied", "product", "\u76f8\u4e58", "\u4e58\u79ef",
+        ))
+    )
+    return bool(intent and (expression or date_product))
 
 
 def _communication_mode(task: str) -> str:
@@ -341,16 +423,34 @@ def _communication_mode(task: str) -> str:
     """
     text = (task or "").casefold()
     compact = re.sub(r"\s+", "", text)
+    draft_markers = (
+        "do not send", "don't send", "without sending", "stop before sending",
+        "draft only", "prepare only",
+        "\u4e0d\u8981\u53d1\u9001", "\u522b\u53d1\u9001", "\u4e0d\u8981\u53d1\u51fa",
+        "\u53d1\u9001\u524d\u505c\u4e0b", "\u505c\u5728\u53d1\u9001\u524d",
+        "\u53ea\u8f93\u5165\u4e0d\u53d1\u9001", "\u53ea\u51c6\u5907\u4e0d\u53d1\u9001",
+    )
+    if any(marker.replace(" ", "") in compact for marker in draft_markers):
+        return "draft"
     continuous_markers = (
         "持续聊天", "一直聊天", "继续聊天", "不停聊天", "保持聊天",
         "持续聊", "一直聊", "继续聊", "continuous chat", "keep chatting",
     )
     if any(marker in compact for marker in continuous_markers):
         return "continuous_chat"
+    # Interface/evidence phrases such as "聊天记录" and "chat history" do not
+    # turn an explicit one-shot send into an open-ended conversation. Remove
+    # those nouns before looking for a chat intent verb.
+    intent_compact = compact
+    for neutral in (
+        "聊天记录", "聊天窗口", "聊天界面", "聊天历史",
+        "chathistory", "chatwindow", "chatpane", "chatrecord",
+    ):
+        intent_compact = intent_compact.replace(neutral, "")
     chat_markers = (
         "聊天", "聊聊", "聊一下", "聊一聊", "chat with", "have a chat",
     )
-    if any(marker in compact for marker in chat_markers):
+    if any(marker in intent_compact for marker in chat_markers):
         return "bounded_chat"
     return "send"
 
@@ -363,6 +463,98 @@ def _quoted_payloads(task: str) -> list[str]:
         if value:
             payloads.append(value)
     return payloads
+
+
+def _exact_document_text_block(task: str) -> str:
+    """Return an explicitly delimited multi-line document body."""
+    text = str(task or "").replace("\r\n", "\n").replace("\r", "\n")
+    headers = (
+        re.compile(
+            r"^(?=[^\n]{0,260}\b(?:type|input|write|enter|paste)\b)"
+            r"(?=[^\n]{0,260}\b(?:exactly|verbatim)\b)"
+            r"(?=[^\n]{0,260}\b(?:lines?|paragraphs?|document\s+body|body)\b)"
+            r"[^\n]*?[:\uff1a]\s*",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        re.compile(
+            r"^(?=[^\n]{0,260}(?:\u8f93\u5165|\u952e\u5165|\u5199\u5165|\u5f55\u5165|\u7c98\u8d34))"
+            r"(?=[^\n]{0,260}(?:\u51c6\u786e|\u7cbe\u786e|\u539f\u6837|\u5b8c\u5168\u4e00\u81f4))"
+            r"(?=[^\n]{0,260}(?:\u884c|\u6bb5|\u6b63\u6587|\u6587\u6863\u5185\u5bb9|\u4ee5\u4e0b|\u4e0b\u5217))"
+            r"[^\n]*?[:\uff1a]\s*",
+            re.MULTILINE,
+        ),
+    )
+    boundary = re.compile(
+        r"^(?:make|set|keep|format|save(?:\s+as)?|finally|then|verify|"
+        r"\u5c06|\u8bbe\u7f6e|\u4fdd\u6301|\u683c\u5f0f|\u4fdd\u5b58|\u53e6\u5b58\u4e3a|"
+        r"\u6700\u540e|\u7136\u540e|\u9a8c\u8bc1)\b",
+        re.IGNORECASE,
+    )
+    for header in headers:
+        match = header.search(text)
+        if not match:
+            continue
+        body_lines: list[str] = []
+        for line in text[match.end():].splitlines():
+            if boundary.match(line.strip()):
+                break
+            inline_boundary = re.search(
+                r"(?<=[.!?。！？])\s+"
+                r"(?=(?:make|set|keep|format|save(?:\s+as)?|finally|then|verify)\b)",
+                line,
+                re.IGNORECASE,
+            )
+            if inline_boundary:
+                body_lines.append(line[:inline_boundary.start()].rstrip())
+                break
+            body_lines.append(line.rstrip())
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+        while body_lines and not body_lines[-1].strip():
+            body_lines.pop()
+        if 1 <= len(body_lines) <= 40 and all(len(line) <= 500 for line in body_lines):
+            return "\n".join(body_lines)
+    return ""
+
+
+def _document_format_specs(task: str) -> list[dict[str, object]]:
+    """Extract application-independent rich-text range requirements."""
+    text = str(task or "").casefold()
+    if re.search(
+        r"\b(?:spreadsheet|workbook|worksheet|cells?|cell\s+range)\b|"
+        r"\u5de5\u4f5c\u7c3f|\u5de5\u4f5c\u8868|\u8868\u683c|\u5355\u5143\u683c|"
+        r"=[A-Z]{1,3}\d+\s*[*+\-/]|=SUM\s*\(",
+        text,
+        re.IGNORECASE,
+    ):
+        return []
+    first_scope = bool(re.search(
+        r"\bfirst\s+(?:line|paragraph)\b|\b(?:heading|title)\b|"
+        r"\u7b2c\u4e00(?:\u884c|\u6bb5)|\u9996(?:\u884c|\u6bb5)|\u6807\u9898",
+        text,
+    ))
+    wants_bold = bool(re.search(r"\bbold\b|\u52a0\u7c97", text))
+    wants_center = bool(re.search(r"\bcent(?:er|re)(?:ed)?\b|\u5c45\u4e2d", text))
+    body_scope = bool(re.search(
+        r"\b(?:remaining|rest|other|body)\b|\u5176\u4f59|\u6b63\u6587|\u5269\u4f59|"
+        r"\u540e(?:\u7eed|\u9762|\u4e09)?\u6bb5|\u5176\u4ed6\u6bb5\u843d",
+        text,
+    ))
+    wants_left = bool(re.search(
+        r"\bleft(?:[ -]align(?:ed|ment)?)?\b|\u5de6\u5bf9\u9f50",
+        text,
+    ))
+    specs: list[dict[str, object]] = []
+    if first_scope and (wants_bold or wants_center):
+        first: dict[str, object] = {"range": "first_line"}
+        if wants_bold:
+            first["bold"] = True
+        if wants_center:
+            first["alignment"] = "center"
+        specs.append(first)
+    if body_scope and wants_left:
+        specs.append({"range": "body_after_first_line", "alignment": "left"})
+    return specs
 
 
 def _required_visible_payloads(task: str) -> list[str]:
@@ -455,11 +647,16 @@ def _visible_state_targets(task: str) -> list[str]:
         r"\b([A-Za-z][A-Za-z0-9_\-]{2,80})\b\s+(?:appear|appears|show|shows|is visible|are visible)",
     )
     targets: list[str] = []
+    generic_descriptions = {
+        "app", "application", "browser", "button", "control", "dialog",
+        "element", "field", "page", "popup", "screen", "text", "title",
+        "window",
+    }
     for pattern in patterns:
         for match in re.findall(pattern, text, flags=re.IGNORECASE):
             value = match if isinstance(match, str) else next((item for item in match if item), "")
             value = value.strip().strip(".,;:!?()[]{}")
-            if value:
+            if value and value.casefold() not in generic_descriptions:
                 targets.append(value)
     targets.extend(_historical_visible_state_targets(task))
     return _dedupe_targets(targets)

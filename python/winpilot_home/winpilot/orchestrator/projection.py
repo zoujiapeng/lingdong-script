@@ -12,7 +12,10 @@ from typing import Any
 from ..utils.log import BUS
 
 
-_TERMINAL = {"done", "failed", "fail", "error", "stopped", "canceled", "reply"}
+_TERMINAL = {
+    "done", "failed", "fail", "error", "stopped", "canceled", "reply",
+    "interrupted",
+}
 
 
 def _compact(value: Any, limit: int = 600) -> Any:
@@ -110,6 +113,8 @@ class RunProjectionStore:
             return "awaiting_human"
         if event_type in {"agent_done", "agent_error", "arp_run_done"}:
             return "terminal"
+        if event_type == "schedule" and event.get("action") == "finished":
+            return "terminal"
         return None
 
     def on_event(self, event: dict[str, Any]) -> None:
@@ -126,12 +131,13 @@ class RunProjectionStore:
             is_child_event = run_id != source_run_id
             run = self._runs.get(run_id)
             is_new_run = run is None
+            background_event = event_type in {"schedule", "user_notification"}
             if run is None:
                 run = self._new(run_id, event)
                 self._runs[run_id] = run
                 self._order.append(run_id)
             if (
-                is_new_run
+                (is_new_run and not background_event)
                 or self._current_id is None
                 or event_type in {"agent_start", "arp_run_start"}
             ):
@@ -148,6 +154,8 @@ class RunProjectionStore:
                 run["phase"] = phase
             if event.get("task") and not run.get("goal"):
                 run["goal"] = str(event.get("task"))
+            if not run.get("goal") and event_type in {"schedule", "user_notification"}:
+                run["goal"] = str(event.get("name") or event.get("title") or event.get("body") or "")
             if event.get("graph_name"):
                 run["goal"] = str(event.get("graph_name"))
                 run["graph_id"] = event.get("graph_id")
@@ -162,6 +170,8 @@ class RunProjectionStore:
                 run["current_tool"] = event.get("tool")
             if event_type == "agent_tool":
                 run["metrics"]["tool_count"] += 1
+                if event.get("tool") in {"vlm_describe", "vlm_verify"}:
+                    run["metrics"]["vlm_call_count"] += 1
                 elapsed = int(event.get("elapsed_ms") or 0)
                 run["metrics"]["tool_latency_ms"].append(elapsed)
                 run["metrics"]["tool_latency_ms"] = run["metrics"]["tool_latency_ms"][-200:]
@@ -296,14 +306,22 @@ class RunProjectionStore:
                     "ts": event.get("ts"),
                 })
             if event.get("screenshot"):
-                run["evidence"].append({
-                    "type": "screenshot",
-                    "path": event.get("screenshot"),
-                    "kind": event.get("screenshot_kind") or "screen",
-                    "region": copy.deepcopy(event.get("screenshot_region")),
-                    "transient": bool(event.get("transient_observed")),
-                    "ts": event.get("ts"),
-                })
+                screenshot_path = str(event.get("screenshot") or "")
+                already_projected = any(
+                    item.get("type") == "screenshot"
+                    and str(item.get("path") or "") == screenshot_path
+                    for item in run["evidence"]
+                    if isinstance(item, dict)
+                )
+                if screenshot_path and not already_projected:
+                    run["evidence"].append({
+                        "type": "screenshot",
+                        "path": screenshot_path,
+                        "kind": event.get("screenshot_kind") or "screen",
+                        "region": copy.deepcopy(event.get("screenshot_region")),
+                        "transient": bool(event.get("transient_observed")),
+                        "ts": event.get("ts"),
+                    })
             if event_type == "arp_node_start":
                 run["current_node_id"] = event.get("node_id")
             if event_type == "arp_node_done":
@@ -324,6 +342,12 @@ class RunProjectionStore:
                 run["result"] = _compact(event.get("result"))
                 run["error"] = str(event.get("error") or "")
                 run["current_node_id"] = None
+                run["current_tool"] = None
+                run["finished_at"] = run["updated_at"]
+            elif event_type == "schedule" and event.get("action") == "finished":
+                run["status"] = str(event.get("status") or "done")
+                run["result"] = _compact(event.get("result"))
+                run["error"] = str(event.get("error") or "")
                 run["current_tool"] = None
                 run["finished_at"] = run["updated_at"]
             elif run.get("status") in _TERMINAL:
@@ -353,7 +377,13 @@ class RunProjectionStore:
             run["timeline"] = run["timeline"][-200:]
             run["evidence"] = run["evidence"][-100:]
 
-    def hydrate_directory(self, directory: Path, limit: int = 100) -> int:
+    def hydrate_directory(
+        self,
+        directory: Path,
+        limit: int = 100,
+        *,
+        mark_incomplete_interrupted: bool = False,
+    ) -> int:
         """Rebuild persisted read models from recent JSONL traces."""
         try:
             paths = sorted(
@@ -382,6 +412,33 @@ class RunProjectionStore:
                 hydrated += 1
             except OSError:
                 continue
+        if mark_incomplete_interrupted:
+            now = time.time()
+            with self._lock:
+                for run in self._runs.values():
+                    if run.get("status") in _TERMINAL:
+                        continue
+                    prior_phase = str(run.get("phase") or "")
+                    prior_tool = run.get("current_tool")
+                    run["status"] = "interrupted"
+                    run["phase"] = "terminal"
+                    run["error"] = (
+                        "Runtime exited before this persisted run emitted a terminal event."
+                    )
+                    run["current_tool"] = None
+                    run["updated_at"] = now
+                    run["finished_at"] = now
+                    run["timeline"].append({
+                        "type": "run_interrupted",
+                        "ts": now,
+                        "phase": "terminal",
+                        "node_id": run.get("current_node_id"),
+                        "tool": prior_tool,
+                        "status": "interrupted",
+                        "summary": f"Recovered incomplete persisted run from {prior_phase or 'unknown'} phase",
+                        "child_run_id": None,
+                    })
+                    run["timeline"] = run["timeline"][-200:]
         return hydrated
 
     @staticmethod

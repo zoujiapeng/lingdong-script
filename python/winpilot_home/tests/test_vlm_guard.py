@@ -41,3 +41,87 @@ def test_non_deepseek_multimodal_endpoint_stays_enabled(monkeypatch):
 
     assert vlm.configuration_issue() == ""
     assert vlm.is_configured()
+
+
+def test_mimo_v25_reuses_main_model_credentials_for_vision(monkeypatch):
+    monkeypatch.setitem(vlm.CONFIG._data, "api", {
+        "provider": "mimo",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "api_key": "main-key",
+        "model": "mimo-v2.5",
+    })
+    monkeypatch.setitem(vlm.CONFIG._data, "vlm", {
+        "enabled": True,
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "thinking": False,
+    })
+
+    settings = vlm._settings()
+
+    assert settings["model"] == "mimo-v2.5"
+    assert settings["base_url"] == "https://api.xiaomimimo.com/v1"
+    assert settings["api_key"] == "main-key"
+    assert vlm.is_configured()
+
+
+def test_semantic_visual_verifier_returns_strict_structured_evidence(monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.utils.screenshot import Region
+
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content='{"passed":false,"confidence":0.94,"subject_present":true,'
+                '"colorful":true,"detail_level":"low","observed":["cat"],'
+                '"issues":["too crude"]}'
+    ))])
+    completions = SimpleNamespace(create=lambda **_kwargs: response)
+    monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(vlm, "_settings", lambda: {"model": "mimo-v2.5"})
+    monkeypatch.setattr(vlm, "_encode_region", lambda *_args, **_kwargs: ("jpeg", 1.0))
+    monkeypatch.setattr(
+        vlm,
+        "_client",
+        lambda: SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+
+    result = vlm.verify(Region(0, 0, 100, 100), "a detailed colorful cat")
+
+    assert result["ok"] is True
+    assert result["verified"] is False
+    assert result["semantic_visual_verified"] is False
+    assert result["verify_method"] == "semantic-vlm"
+    assert result["verdict"]["issues"] == ["too crude"]
+
+
+def test_tool_vlm_verify_keeps_original_user_goal_in_narrow_checklist(monkeypatch):
+    import json
+
+    from winpilot.agent import perception_tools
+    from winpilot.agent.tools import ToolSession
+    from winpilot.utils.screenshot import Region
+
+    captured = []
+    monkeypatch.setattr(perception_tools.vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(perception_tools, "window_region", lambda _hwnd: Region(0, 0, 100, 100))
+    monkeypatch.setattr(
+        perception_tools.vlm,
+        "verify",
+        lambda _region, criteria: captured.append(criteria) or {
+            "ok": True,
+            "verified": False,
+            "semantic_visual_verified": False,
+            "verify_method": "semantic-vlm",
+            "verdict": {"passed": False, "detail_level": "low"},
+        },
+    )
+    session = ToolSession(task="draw a very detailed colorful cat")
+    session.hwnd = 1
+
+    result = session._t_vlm_verify({"criteria": "three colored stripes are visible"})
+    payload = json.loads(result.text)
+
+    assert "draw a very detailed colorful cat" in captured[0]
+    assert "three colored stripes are visible" in captured[0]
+    assert payload["full_goal_included"] is True

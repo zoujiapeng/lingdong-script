@@ -198,7 +198,7 @@ def test_projection_fingerprint_matches_cross_runtime_contract():
     assert automation_ir.automation_projection_fingerprint(
         [{"tool": "start", "node_id": "s", "params": {"x": 1, "text": "你好"}}],
         {"token": "x"},
-    ) == "fnv1a32:f875dabb"
+    ) == "sha256:f6996f5a13fe5cbb9a6c41e57a3ee5feb366e844d6055b54737d6f28fafcb302"
 
 
 def test_wps_runtime_safety_cannot_understate_detached_shell_execution():

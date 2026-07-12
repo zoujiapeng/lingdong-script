@@ -20,6 +20,7 @@ _EXPECT_SCHEMA = {
         '{"window_appears":"Notepad"}, {"window_title":"file.txt - Notepad"}, '
         '{"screen_stable":true}, '
         '{"file_exists":"C:\\\\path\\\\file.txt"}, '
+        '{"file_format":{"path":"C:\\\\path\\\\image.png","format":"png"}}, '
         '{"process_running":"notepad"}, '
         '{"shell_true":"Test-Path C:\\\\x"}'
     ),
@@ -78,8 +79,7 @@ _LEAN_GUI_TOOLS = {
     "list_windows",
     "scan_windows",
     "focus_window",
-    "find_app",
-    "find_program",
+    "open_app",
     "launch",
     "observe",
     "screen_watch",
@@ -100,7 +100,9 @@ _LEAN_GUI_TOOLS = {
     "coordinate_click_test",
     "revise_plan",
     "complete_subgoal",
+    "record_facts",
     "vlm_describe",
+    "vlm_verify",
     "done",
     "fail",
 }
@@ -120,6 +122,7 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "list_windows": "List visible windows.",
     "scan_windows": "Focus/observe matching windows.",
     "focus_window": "Bring hwnd to foreground.",
+    "open_app": "Resolve, open, focus, and bind an app in one local routine.",
     "find_app": "Find a running app/process.",
     "find_program": "Find an installed program.",
     "launch": "Launch an app/program/URL.",
@@ -145,7 +148,9 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "coordinate_click_test": "Click physical screen x/y once and report coordinate evidence.",
     "revise_plan": "Create/replace todo plan.",
     "complete_subgoal": "Mark a todo item complete.",
+    "record_facts": "Bind visible facts to one subject and source in the per-run working set.",
     "vlm_describe": "Ask VLM about a screen/window region.",
+    "vlm_verify": "Strictly verify visible pixels against completion criteria.",
     "done": "Finish only after verified evidence.",
     "fail": "Finish with an honest failure reason.",
 }
@@ -310,10 +315,28 @@ def tool_schemas(
                 "title": _prop("string", "Visible title substring when hwnd is not known."),
             },
         ),
+        _tool(
+            "open_app",
+            "Open a desktop app in one local routine: reuse/focus an existing visible window, or resolve and launch a background/not-running app, wait for its visible window, and establish target_hwnd. Prefer this over find_app/tray/Shell/launch loops when the task simply says to open an app.",
+            {
+                "name": _prop("string", "Human app/display name, for example Paint, QQ, or Calculator."),
+            },
+            ["name"],
+        ),
         _tool("find_app", "Check whether an app/process is running, including hidden/tray windows.",
               {"name": _prop("string", "Process/app name substring.")}, ["name"]),
         _tool("find_program", "Find locally installed programs by display name or partial name.",
               {"name": _prop("string", "Program display name or substring.")}, ["name"]),
+        _tool(
+            "web_search",
+            "Search the public web and return compact titles, URLs, and snippets. Use this when the user expects you to discover an unknown URL or current external information; use github_search for repository-specific lookup.",
+            {
+                "query": _prop("string", "Focused search query."),
+                "max_results": _prop("integer", "1-10 results; default 5."),
+                "timeout_s": _prop("number", "Network timeout, default 10 seconds."),
+            },
+            ["query"],
+        ),
         _tool(
             "tray_click",
             "Click a system tray icon by name; useful for apps minimized to tray.",
@@ -390,7 +413,7 @@ def tool_schemas(
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
         _tool(
             "execute_subgoal",
-            "Controller-first GUI routine: locate/type/click/draw/wait/verify inside local controller. Must include a concrete routine field: input, click/clicks, draw/draws, or verify_texts; subgoal alone is only a label and is invalid. Use for clear input+button, labeled click, ordered visible button clicks, or simple canvas drawing routines. For printable keyboard sequences such as 12*34=, prefer input.text or type_text; if short printable labels are supplied in clicks, the controller may normalize them into keyboard typing. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd; use launch/find_app/focus_window first when opening or discovering an app.",
+            "Controller-first GUI routine: locate/type/click/format/draw/wait/verify inside the local controller. Must include input, click/clicks, draw/draws, or verify_texts; format/formats is also supported for rich text. The subgoal alone is only a label and is invalid. Use formats instead of one hotkey per LLM round. For printable keyboard sequences such as 12*34=, prefer input.text or type_text. If ambiguous or needs_llm_reason, use normal tools. Verify-only execute_subgoal requires an existing target window/session hwnd.",
             {
                 "subgoal": _prop("string", "Short label for the routine; this is not executable by itself."),
                 "target_window": {
@@ -447,13 +470,50 @@ def tool_schemas(
                         },
                     },
                 },
+                "format": {
+                    "type": "object",
+                    "description": "Optional rich-text formatting routine executed locally.",
+                    "properties": {
+                        "range": _prop("string", "first_line, body_after_first_line, current_line, or all.", enum=["first_line", "body_after_first_line", "current_line", "all"]),
+                        "bold": _prop("boolean", "Apply bold to the selected range when true."),
+                        "italic": _prop("boolean", "Apply italic to the selected range when true."),
+                        "alignment": _prop("string", "Paragraph alignment.", enum=["left", "center", "right", "justify"]),
+                    },
+                },
+                "formats": {
+                    "type": "array",
+                    "description": "Ordered rich-text formatting operations; combine heading and body formatting in one controller call.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "range": _prop("string", "first_line, body_after_first_line, current_line, or all.", enum=["first_line", "body_after_first_line", "current_line", "all"]),
+                            "bold": _prop("boolean"),
+                            "italic": _prop("boolean"),
+                            "alignment": _prop("string", enum=["left", "center", "right", "justify"]),
+                        },
+                    },
+                },
                 "draw": {
                     "type": "object",
-                    "description": "Optional single canvas drawing routine.",
+                    "description": "Optional canvas primitive. For detailed scenes, use draws[] with normalized boxes/strokes instead of an unsupported semantic object name.",
                     "properties": {
-                        "shape": _prop("string", "triangle/rectangle/circle/line/check/freeform."),
+                        "shape": _prop("string", "triangle/rectangle/circle/ellipse/line/check. Unknown object names are rejected."),
                         "color": _prop("string", "Requested visible color."),
+                        "part": _prop("string", "Semantic scene part, for example head, body, left eye, tail, window, roof. Required on detailed scenes."),
                         "expected_region": _prop("string", "Rough canvas region."),
+                        "box": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 4,
+                            "maxItems": 4,
+                            "description": "For line: [x1,y1,x2,y2] endpoints by default. For other shapes: [x,y,width,height]. All values are 0..1000 relative to the detected canvas.",
+                        },
+                        "box_mode": _prop("string", "Optional line box interpretation.", enum=["endpoints", "xywh"]),
+                        "normalized_strokes": {
+                            "type": "array",
+                            "description": "Custom strokes in canvas-relative 0..1000 coordinates; each stroke is [[x,y],...].",
+                            "items": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                        },
                         "duration": _prop("number", "Seconds per stroke; default 0.28."),
                         "strokes": {
                             "type": "array",
@@ -464,13 +524,27 @@ def tool_schemas(
                 },
                 "draws": {
                     "type": "array",
-                    "description": "Optional ordered drawing routines.",
+                    "description": "Ordered primitives for a detailed scene. Prefer one routine with multiple colors and 8-30 primitives over repeated LLM drawing turns.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "shape": _prop("string", "triangle/rectangle/circle/line/check/freeform."),
+                            "shape": _prop("string", "triangle/rectangle/circle/ellipse/line/check."),
                             "color": _prop("string", "Requested visible color."),
+                            "part": _prop("string", "Semantic scene part. Label every primitive in a detailed scene."),
                             "expected_region": _prop("string", "Rough canvas region."),
+                            "box": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 4,
+                                "maxItems": 4,
+                                "description": "For line: [x1,y1,x2,y2] endpoints by default. For other shapes: [x,y,width,height], all relative to the 0..1000 detected canvas.",
+                            },
+                            "box_mode": _prop("string", "Optional line box interpretation.", enum=["endpoints", "xywh"]),
+                            "normalized_strokes": {
+                                "type": "array",
+                                "description": "Custom canvas-relative strokes in 0..1000 coordinates.",
+                                "items": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                            },
                             "duration": _prop("number", "Seconds per stroke; default 0.28."),
                             "strokes": {
                                 "type": "array",
@@ -511,6 +585,8 @@ def tool_schemas(
                             "label/expected_region/visual_anchor/fallback_text/role "
                             "and may do one targeted observe(query=label) retry. "
                             "Use type_into_element for locate+click+optional clear+type."
+                            " For draw_strokes, strokes are physical screen pixels. Use normalized_strokes "
+                            "for 0..1000 canvas-relative points; the controller maps them through the latest canvas."
                         ),
                     },
                 },
@@ -534,8 +610,12 @@ def tool_schemas(
             },
             ["action"],
         ),
-        _tool("read_text", "Read visible text from a window using fused perception/OCR.",
-              {"hwnd": _prop("integer", "Window handle. Omit for current target.")}),
+        _tool("read_text", "Read visible text from a window. With query, use a fast UIA text index before fused/OCR fallback.",
+              {
+                  "hwnd": _prop("integer", "Window handle. Omit for current target."),
+                  "query": _prop("string", "Optional exact visible text/substring to find."),
+                  "require_non_input": _prop("boolean", "Exclude edit/search/input controls so a result cannot pass only because the typed text remains in its input field."),
+              }),
         _tool("find_image", "Find an image template on screen and return matching coordinates.",
               {"template": _prop("string", "Template name.")}, ["template"]),
         _tool(
@@ -582,6 +662,7 @@ def tool_schemas(
             },
             ["query"],
         ))
+    _promote_tools(tools, ["open_app"], before="find_app")
     _promote_tools(tools, ["execute_subgoal"], before="click")
 
     if planning:
@@ -591,6 +672,33 @@ def tool_schemas(
             _tool("complete_subgoal", "Mark a todo item complete by 1-based index.",
                   {"index": _prop("integer", "1-based plan index.")}, ["index"]),
         ])
+
+    tools.append(_tool(
+        "record_facts",
+        (
+            "Record facts from the current visible source in a per-run working set. "
+            "For multi-page research, call this before leaving each source page; bind every field "
+            "to its subject and source URL. This is scratch state, not long-term memory."
+        ),
+        {
+            "subject": _prop("string", "Entity/item these facts belong to."),
+            "facts": {
+                "type": "object",
+                "description": "Visible field-value pairs. Use an explicit not-visible value instead of guessing.",
+                "additionalProperties": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                    ],
+                },
+            },
+            "source_url": _prop("string", "URL copied/read from the current page address bar."),
+            "source_title": _prop("string", "Current visible page/window title."),
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+        ["subject", "facts"],
+    ))
 
     if experience.enabled():
         tools.extend([
@@ -658,6 +766,16 @@ def tool_schemas(
                 "width": _prop("integer"), "height": _prop("integer"),
             },
             ["question"],
+        ))
+        tools.append(_tool(
+            "vlm_verify",
+            "Strictly judge whether visible pixels satisfy explicit completion criteria. Use for object, quality, or detail claims; a failed verdict means continue or fail honestly.",
+            {
+                "criteria": _prop("string", "Concrete visible success criteria."),
+                "left": _prop("integer"), "top": _prop("integer"),
+                "width": _prop("integer"), "height": _prop("integer"),
+            },
+            ["criteria"],
         ))
 
 
@@ -752,7 +870,14 @@ def tool_schemas(
                "width": _prop("integer"), "height": _prop("integer"),
                "quality": _prop("integer", "JPEG quality 1-100.")},
               ["x", "y", "width", "height"]),
-        _tool("list_installed_apps", "List installed applications from the Windows registry."),
+        _tool(
+            "list_installed_apps",
+            "List installed applications from the Windows registry with stable pagination. Follow next_offset until complete=true when the user asks for every application.",
+            {
+                "offset": _prop("integer", "Zero-based page offset; default 0."),
+                "limit": _prop("integer", "Page size 1-200; default 80."),
+            },
+        ),
     ])
     if include_file_tools:
         tools.extend([

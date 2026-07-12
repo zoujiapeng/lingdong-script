@@ -359,7 +359,7 @@ class DesktopToolMixin:
         self._fold_base64(result)
         return ToolResult(self._fmt(result))
 
-    def _t_list_installed_apps(self, _args: dict) -> ToolResult:
+    def _t_list_installed_apps(self, args: dict) -> ToolResult:
         try:
             import winreg
             results: dict[str, dict] = {}
@@ -419,12 +419,23 @@ class DesktopToolMixin:
                 finally:
                     winreg.CloseKey(key)
             apps = sorted(results.values(), key=lambda item: item["displayName"].lower())
+            offset = max(0, int(args.get("offset") or 0))
+            limit = max(1, min(200, int(args.get("limit") or 80)))
+            page = apps[offset:offset + limit]
+            next_offset = offset + len(page) if offset + len(page) < len(apps) else None
             lines = [
                 f'{i}. "{a["displayName"]}" [{a["bundleId"]}] {a["path"]}'
-                for i, a in enumerate(apps[:80], 1)
+                for i, a in enumerate(page, offset + 1)
             ]
+            range_text = (
+                f"{offset + 1}-{offset + len(page)}" if page else "empty"
+            )
+            pagination = (
+                f" next_offset={next_offset}; call again with offset={next_offset} to continue."
+                if next_offset is not None else " complete=true."
+            )
             return ToolResult(
-                f"已安装应用 ({len(apps)} 个，显示前 {min(len(apps), 80)} 个):\n" + "\n".join(lines)
+                f"已安装应用 total={len(apps)} range={range_text};{pagination}\n" + "\n".join(lines)
                 or "未找到已安装应用",
                 summary=f"[已折叠] list_installed_apps {len(apps)}个应用",
             )

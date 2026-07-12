@@ -15,6 +15,7 @@ Sources (merged, deduped, scored):
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -28,11 +29,17 @@ _cache: tuple[float, list[dict]] | None = None
 
 _SYSTEM_TOOL_TARGETS = [
     ("notepad", "notepad.exe"),
+    ("记事本", "notepad.exe"),
     ("calculator", "calc.exe"),
+    ("计算器", "calc.exe"),
     ("paint", "mspaint.exe"),
+    ("画图", "mspaint.exe"),
+    ("画板", "mspaint.exe"),
     ("command prompt", "cmd.exe"),
+    ("命令提示符", "cmd.exe"),
     ("powershell", "powershell.exe"),
     ("terminal", "wt.exe"),
+    ("终端", "wt.exe"),
 ]
 
 _START_MENU_DIRS = [
@@ -121,8 +128,57 @@ def _system_tool_entries() -> list[dict]:
     entries: list[dict] = []
     for name, exe in _SYSTEM_TOOL_TARGETS:
         path = system32 / exe
-        if path.exists():
-            entries.append({"name": name, "target": str(path), "kind": "exe"})
+        target = str(path) if path.exists() else shutil.which(exe)
+        if target:
+            entries.append({"name": name, "target": str(target), "kind": "exe"})
+    return entries
+
+
+def _wps_suite_entries() -> list[dict]:
+    """Discover separately launchable WPS suite components.
+
+    StartApps often exposes only the umbrella "WPS Office" entry, which makes
+    Writer, Spreadsheets, and Presentation indistinguishable. Resolve the real
+    installed component executables without pinning a WPS version directory.
+    """
+    roots = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Kingsoft/WPS Office",
+        Path(os.environ.get("ProgramFiles", "")) / "Kingsoft/WPS Office",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Kingsoft/WPS Office",
+    ]
+    components = (
+        ("wps.exe", ("/prometheus", "/wps"), ("WPS Writer", "WPS文字")),
+        ("et.exe", ("/prometheus", "/et"), ("WPS Spreadsheets", "WPS表格")),
+        ("wpp.exe", ("/prometheus", "/wpp"), ("WPS Presentation", "WPS演示")),
+    )
+    entries: list[dict] = []
+    for executable, arguments, names in components:
+        candidates: list[Path] = []
+        for root in roots:
+            if not root.exists():
+                continue
+            candidates.extend(
+                path for path in root.glob(f"*/office6/{executable}")
+                if "utility" not in {part.casefold() for part in path.parts}
+            )
+            direct = root / "office6" / executable
+            if direct.is_file():
+                candidates.append(direct)
+        if not candidates:
+            continue
+        target = max(
+            dict.fromkeys(candidates),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        )
+        entries.extend(
+            {
+                "name": name,
+                "target": str(target),
+                "kind": "exe",
+                "arguments": list(arguments),
+            }
+            for name in names
+        )
     return entries
 
 
@@ -135,6 +191,7 @@ def _index() -> list[dict]:
         _start_menu_entries()
         + _uwp_entries()
         + _app_paths_entries()
+        + _wps_suite_entries()
         + _system_tool_entries()
     )
     # Dedupe by (lowered name, kind) keeping first occurrence.
@@ -166,9 +223,29 @@ def resolve(query: str, max_results: int = 5) -> list[dict]:
     q = (query or "").strip().lower()
     if not q:
         return []
+    from .app_aliases import expand as expand_app_aliases
+
+    query_variants = list(dict.fromkeys(expand_app_aliases(q) or [q]))
+    # Inbox tools have stable launch targets. Resolve them before the slower
+    # StartApps/shortcut index so a cold desktop task does not pay that scan.
+    fast_scored = [
+        (
+            max(_score(entry["name"].lower(), variant) for variant in query_variants),
+            _score(entry["name"].lower(), q),
+            entry,
+        )
+        for entry in (_system_tool_entries() + _wps_suite_entries())
+    ]
+    fast_scored = [item for item in fast_scored if item[0]]
+    if fast_scored:
+        # Preserve the user's localized/literal name when an alias has the
+        # same launch target and score.  The returned name is also evidence
+        # and a later title hint, so turning 画图 into "paint" is observable.
+        fast_scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [entry for _score_value, _literal_score, entry in fast_scored[:max_results]]
     scored = []
     for e in _index():
-        s = _score(e["name"].lower(), q)
+        s = max(_score(e["name"].lower(), variant) for variant in query_variants)
         if s:
             # shortcuts are the most reliable launch targets; appid next
             s += {"lnk": 2, "appid": 1}.get(e["kind"], 0)
@@ -192,11 +269,23 @@ def resolve(query: str, max_results: int = 5) -> list[dict]:
 def launch_target(entry: dict) -> dict:
     """Launch a resolved candidate. Returns {ok, via, target}."""
     kind, target = entry.get("kind"), entry.get("target", "")
+    arguments = [str(item) for item in (entry.get("arguments") or []) if str(item).strip()]
     try:
         if kind == "appid":
             subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{target}"])
+        elif kind == "exe" and arguments:
+            subprocess.Popen(
+                [target, *arguments],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         else:  # lnk / exe — startfile resolves shortcuts natively
             os.startfile(target)  # noqa: S606
-        return {"ok": True, "via": kind, "target": target, "name": entry.get("name")}
+        return {
+            "ok": True,
+            "via": kind,
+            "target": target,
+            "arguments": arguments,
+            "name": entry.get("name"),
+        }
     except OSError as exc:
         return {"ok": False, "error": str(exc), "target": target}

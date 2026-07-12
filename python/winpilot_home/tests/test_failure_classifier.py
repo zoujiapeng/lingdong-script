@@ -53,6 +53,22 @@ def test_execute_subgoal_needs_target_window_is_window_recovery_failure():
     assert cls.llm_required is False
 
 
+def test_focus_window_missing_live_hwnd_is_window_not_found():
+    from winpilot.agent.failure_classifier import FailureType
+
+    cls = _classify(
+        "focus_window",
+        {
+            "ok": False,
+            "error": "focus_window requires a live hwnd or matching title/query/name",
+            "query": "Missing Target",
+        },
+    )
+
+    assert cls is not None
+    assert cls.failure_type == FailureType.WINDOW_NOT_FOUND
+
+
 def test_click_element_anchor_missing_with_candidates_is_control_not_found():
     from winpilot.agent.failure_classifier import FailureType
 
@@ -71,6 +87,97 @@ def test_click_element_anchor_missing_with_candidates_is_control_not_found():
     assert cls.llm_required is False
     assert cls.evidence["candidate_click_labels"] == ["Apply", "Search locally"]
     assert "candidate" in cls.strategy
+
+
+def test_successful_pending_mutation_is_not_reclassified_as_failure():
+    cls = _classify(
+        "run_action_batch",
+        {
+            "ok": True,
+            "verified": False,
+            "mutation_applied": True,
+            "postcondition_pending": True,
+            "needs_llm_reason": False,
+            "controller_state": {"phase": "executed", "verified": False},
+            "evidence_packet": {
+                "matched_texts": ["Name"],
+                "missing_texts": [],
+                "candidate_click_labels": ["Save", "Name"],
+            },
+        },
+    )
+
+    assert cls is None
+
+
+def test_candidate_labels_do_not_mean_control_not_found_when_root_action_succeeded():
+    cls = _classify(
+        "execute_subgoal",
+        {
+            "ok": True,
+            "verified": False,
+            "needs_llm_reason": False,
+            "controller_state": {"phase": "executed", "verified": False},
+            "evidence_packet": {
+                "candidate_click_labels": ["Save", "Name"],
+                "missing_texts": [],
+            },
+        },
+    )
+
+    assert cls is None
+
+
+def test_located_visual_servo_needing_observe_is_not_control_not_found():
+    cls = _classify(
+        "run_action_batch",
+        {
+            "ok": True,
+            "verified": False,
+            "needs_observe": True,
+            "results": [{
+                "action": "click_element",
+                "ok": True,
+                "verified": False,
+                "data": {"visual_change_detected": True},
+            }],
+            "controller_state": {
+                "phase": "needs_observe",
+                "verified": False,
+                "failed_at": None,
+            },
+            "anchor_locator": {
+                "found": True,
+                "reason": "located_from_snapshot",
+                "element": {"role": "button", "text": "Moving target"},
+            },
+            "metrics": {
+                "visual_servo_count": 1,
+                "visual_servo_correction_count": 3,
+                "visual_servo_failure_count": 0,
+            },
+        },
+    )
+
+    assert cls is None
+
+
+def test_format_postcondition_handoff_is_not_a_recovery_failure():
+    cls = _classify(
+        "execute_subgoal",
+        {
+            "ok": True,
+            "verified": False,
+            "format_applied": True,
+            "save_dispatched": True,
+            "postcondition_pending": True,
+            "needs_llm_reason": False,
+            "controller_state": {"phase": "needs_observe", "verified": False},
+            "results": [{"action": "hotkey", "ok": True, "verified": False}],
+        },
+    )
+
+    assert cls is None
 
 
 def test_ocr_missing_text_verify_detail_is_ocr_or_verify_failed():
@@ -139,6 +246,23 @@ def test_wait_change_or_wait_stable_unmet_is_wait_timeout():
     assert "bare sleep" in cls.patch_hint
 
 
+def test_successful_wait_stable_timeout_setting_is_not_wait_timeout():
+    cls = _classify(
+        "run_action_batch",
+        {
+            "ok": True,
+            "results": [{
+                "index": 1,
+                "action": "wait_stable",
+                "ok": True,
+                "data": {"ok": True, "stable": True, "timeout_s": 2.0},
+            }],
+        },
+    )
+
+    assert cls is None
+
+
 def test_ok_true_verified_false_missing_texts_is_action_succeeded_verify_failed():
     from winpilot.agent.failure_classifier import FailureType
 
@@ -179,6 +303,40 @@ def test_required_task_literal_missing_is_task_constraint_lost():
     assert cls.failure_type == FailureType.TASK_CONSTRAINT_LOST
     assert cls.llm_required is False
     assert cls.evidence["missing_literals"] == ["SECRET_TOKEN_42"]
+
+
+def test_successful_intermediate_batch_does_not_require_final_task_literal():
+    cls = _classify(
+        "run_action_batch",
+        {
+            "ok": True,
+            "verified": False,
+            "needs_observe": True,
+            "controller_state": {"phase": "needs_observe"},
+            "results": [
+                {
+                    "index": 0,
+                    "action": "click",
+                    "ok": True,
+                    "verified": True,
+                    "data": {"ok": True, "verified": True},
+                },
+                {
+                    "index": 1,
+                    "action": "click",
+                    "ok": True,
+                    "verified": True,
+                    "data": {"ok": True, "verified": True},
+                },
+            ],
+        },
+        task="Answer the questions and finish only after EXAM_PASS is visible",
+        recent_results=[],
+        visible_evidence_ledger=[],
+        tool_history=[],
+    )
+
+    assert cls is None
 
 
 def test_runner_injects_failure_metadata_without_replacing_tool_result():
@@ -371,6 +529,35 @@ def test_read_only_tool_missing_task_literal_is_not_constraint_lost():
         "coordinate_diagnostics",
         {"ok": True, "screen_size": {"width": 1920, "height": 1080}},
         task="verify CALIBRATION_OK appears",
+    )
+
+    assert cls is None
+
+
+def test_successful_focus_before_literal_entry_is_not_constraint_lost():
+    cls = _classify(
+        "focus_window",
+        {
+            "ok": True,
+            "wrapped_by_fast_controller": True,
+            "source_batch_ok": True,
+            "needs_observe": True,
+            "results": [{"action": "focus_window", "ok": True}],
+        },
+        task="Type DAQ_PERCEPTION_E2E_811 into the field and verify it",
+        recent_results=[],
+        visible_evidence_ledger=[],
+        tool_history=[],
+    )
+
+    assert cls is None
+
+
+def test_successful_unverified_click_before_literal_entry_is_not_constraint_lost():
+    cls = _classify(
+        "click",
+        {"ok": True, "verified": False, "needs_observe": True},
+        task="Type SECRET_TOKEN_42 and click Apply",
     )
 
     assert cls is None

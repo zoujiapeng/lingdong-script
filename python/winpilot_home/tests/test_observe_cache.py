@@ -71,6 +71,68 @@ def test_observe_includes_fast_screen_bulletin_when_available(monkeypatch):
     assert "roi=5,6,7x8" in result.text
 
 
+def test_repeated_full_observe_is_downgraded_but_raw_trace_remains_available(monkeypatch):
+    from winpilot.agent import perception_tools
+
+    session = ToolSession(task="inspect a custom app")
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "normal")
+    monkeypatch.setattr(perception_tools.fusion, "observe", lambda *_args, **_kwargs: _snapshot())
+
+    def config_get(section, key=None, default=None):
+        values = {
+            "observe_cache_ttl_s": 10.0,
+            "full_observe_repeat_limit": 2,
+            "perception_reducer": True,
+            "perception_reducer_max_candidates": 6,
+            "perception_reducer_raw_sample": 6,
+        }
+        return values.get(key, default)
+
+    monkeypatch.setattr(perception_tools.CONFIG, "get", config_get)
+
+    first = session._t_observe({"full": True})
+    second = session._t_observe({"full": True})
+    third = session._t_observe({"full": True})
+
+    assert "Repeated full observe was downgraded" not in first.text
+    assert "Repeated full observe was downgraded" not in second.text
+    assert "Repeated full observe was downgraded" in third.text
+    assert "Perception reducer:" in third.text
+
+
+def test_read_text_query_uses_uia_index_and_requires_non_input(monkeypatch):
+    from winpilot.agent import perception_tools
+
+    session = ToolSession(task="type marker and apply")
+    session.run_id = "read-text-query"
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(perception_tools.CONFIG, "enabled_dimensions", lambda: ["uia", "ocr"])
+    monkeypatch.setattr(perception_tools.uia, "find_text", lambda hwnd, query: [
+        UIElement(source="uia", role="edit", text="RUNTIME_MARKER_811", cx=100, cy=40, left=20, top=20, width=160, height=30),
+        UIElement(source="uia", role="text", text="APPLIED: RUNTIME_MARKER_811", cx=160, cy=100, left=20, top=85, width=280, height=30),
+    ])
+    monkeypatch.setattr(
+        perception_tools.fusion,
+        "observe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("UIA query hit should skip full fusion/OCR")
+        ),
+    )
+
+    result = session._t_read_text({
+        "query": "RUNTIME_MARKER_811",
+        "require_non_input": True,
+    })
+
+    assert result.text == "APPLIED: RUNTIME_MARKER_811"
+    assert result.replay["source"] == "uia-query"
+
+
 def test_full_observe_query_runs_targeted_ocr_when_uia_misses_content(monkeypatch):
     from winpilot.agent import perception_tools, tools
 
@@ -348,7 +410,7 @@ def test_observe_changed_only_query_miss_falls_back_to_full_observe(monkeypatch)
 
     full_observe_calls = []
 
-    def fake_full_observe(hwnd, include_icons=True, perception_mode="normal"):
+    def fake_full_observe(hwnd, include_icons=True, perception_mode="normal", **_kwargs):
         full_observe_calls.append((hwnd, include_icons, perception_mode))
         return Snapshot(
             hwnd=hwnd,

@@ -6,6 +6,7 @@ automations and skills use this validated envelope as their runtime boundary.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import time
 import uuid
@@ -262,6 +263,23 @@ def automation_projection_fingerprint(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_projection_fingerprint(
+    steps: list[dict[str, Any]],
+    variables: dict[str, Any],
+    graph: dict[str, Any] | None = None,
+) -> str:
+    content: dict[str, Any] = {"steps": steps, "variables": variables}
+    if graph is not None:
+        content["graph"] = graph
+    payload = json.dumps(
+        content,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     value = 0x811C9DC5
     for byte in payload:
         value = ((value ^ byte) * 0x01000193) & 0xFFFFFFFF
@@ -289,10 +307,15 @@ def arp_graph_from_automation_ir(
     expected = _nonempty_str(runtime.get("projection_fingerprint"))
     if not expected:
         raise ValueError("Automation IR arp_graph runtime requires projection_fingerprint")
-    actual = automation_projection_fingerprint(
+    fingerprint_args = (
         ir.get("steps") or [],
         ir.get("variables") or {},
         raw_graph,
+    )
+    actual = (
+        _legacy_projection_fingerprint(*fingerprint_args)
+        if expected.startswith("fnv1a32:")
+        else automation_projection_fingerprint(*fingerprint_args)
     )
     if expected != actual:
         raise ValueError(

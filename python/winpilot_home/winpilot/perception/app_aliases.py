@@ -33,6 +33,10 @@ _ALIAS_GROUPS: list[tuple[str, ...]] = [
     ("注册表编辑器", "registry editor", "regedit"),
     ("画图3d", "paint 3d"),
     ("媒体播放器", "media player"),
+    ("wps文字", "wps writer", "wps word processor"),
+    ("wps表格", "wps 表格", "wps spreadsheets", "wps spreadsheet"),
+    ("wps演示", "wps 演示", "wps presentation", "wps slides"),
+    ("wps office", "wps"),
 ]
 
 # name(lower) -> set of all equivalents(lower)

@@ -25,6 +25,28 @@ class NodeResult:
 NodeHandler = Callable[[ArpNode, dict[str, Any], threading.Event], NodeResult]
 
 
+class _CombinedStopEvent:
+    """Event-like view that stops for either run cancellation or node timeout."""
+
+    def __init__(self, parent: threading.Event, local: threading.Event) -> None:
+        self.parent = parent
+        self.local = local
+
+    def is_set(self) -> bool:
+        return self.parent.is_set() or self.local.is_set()
+
+    def set(self) -> None:
+        self.local.set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while not self.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            self.parent.wait(0.05)
+        return True
+
+
 def _json_preview(
     value: Any,
     limit: int = 500,
@@ -331,7 +353,54 @@ class ArpExecution:
         handler = self.handlers.get(node.kind)
         if handler is None:
             return NodeResult(ok=False, error=f"no handler registered for {node.kind.value}")
-        return handler(node, self._context(last), self.stop_event)
+        raw_timeout = node.timeout_s or node.config.get("timeout_s")
+        if not raw_timeout:
+            return handler(node, self._context(last), self.stop_event)
+
+        timeout_s = max(0.05, float(raw_timeout))
+        local_stop = threading.Event()
+        combined_stop = _CombinedStopEvent(self.stop_event, local_stop)
+        box: dict[str, Any] = {}
+
+        def worker() -> None:
+            try:
+                box["result"] = handler(node, self._context(last), combined_stop)  # type: ignore[arg-type]
+            except Exception as exc:
+                box["error"] = exc
+
+        thread = threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"arp-node-{node.id[-12:]}",
+        )
+        thread.start()
+        deadline = time.monotonic() + timeout_s
+        while thread.is_alive() and not self.stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                local_stop.set()
+                BUS.publish(
+                    "arp_node_timeout",
+                    run_id=self.run_id,
+                    node_id=node.id,
+                    timeout_s=timeout_s,
+                )
+                return NodeResult(
+                    ok=False,
+                    branch="timeout",
+                    error=f"node {node.id!r} timed out after {timeout_s:g}s",
+                )
+            thread.join(timeout=min(0.05, remaining))
+        if self.stop_event.is_set():
+            local_stop.set()
+            return NodeResult(ok=False, branch="canceled", error="run canceled")
+        if "error" in box:
+            raise box["error"]
+        result = box.get("result")
+        return result if isinstance(result, NodeResult) else NodeResult(
+            ok=False,
+            error=f"node handler returned invalid result: {type(result).__name__}",
+        )
 
     def _next_node(self, node_id: str, branch: str, *, ok: bool) -> str | None:
         outgoing = [edge for edge in self.graph.edges if edge.source == node_id]
@@ -484,11 +553,28 @@ class ArpExecution:
 
 
 class ArpRunManager:
-    def __init__(self) -> None:
+    def __init__(self, max_runs: int = 100) -> None:
         self._lock = threading.RLock()
         self._runs: dict[str, ArpExecution] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._current_id: str | None = None
+        self._max_runs = max(20, int(max_runs))
+
+    def _prune_locked(self) -> None:
+        if len(self._runs) <= self._max_runs:
+            return
+        terminal = sorted(
+            (
+                run for run in self._runs.values()
+                if run.status not in {ArpRunStatus.QUEUED, ArpRunStatus.RUNNING, ArpRunStatus.PAUSED}
+            ),
+            key=lambda run: run.finished_at or run.created_at,
+        )
+        for run in terminal[:max(0, len(self._runs) - self._max_runs)]:
+            self._runs.pop(run.run_id, None)
+            self._threads.pop(run.run_id, None)
+            if self._current_id == run.run_id:
+                self._current_id = None
 
     def start(
         self,
@@ -550,6 +636,9 @@ class ArpRunManager:
                     on_finish(execution)
                 except Exception:
                     logger.exception("ARP on_finish callback failed")
+            with self._lock:
+                self._threads.pop(execution.run_id, None)
+                self._prune_locked()
 
     def busy(self) -> bool:
         with self._lock:

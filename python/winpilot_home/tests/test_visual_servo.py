@@ -164,3 +164,9 @@ def test_visual_servo_does_not_converge_before_hover_guard_expires():
     assert trace["confirmed"] is True
     assert trace["iterations"][0]["hover_guard_complete"] is False
     assert any(item["corrected"] for item in trace["iterations"])
+
+
+def test_servo_config_can_force_semantic_ocr_cross_check():
+    config = ServoConfig.from_action({"servo_always_ocr": True})
+
+    assert config.always_ocr is True

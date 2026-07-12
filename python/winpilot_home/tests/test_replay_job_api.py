@@ -68,6 +68,29 @@ def test_replay_returns_queryable_job(client, tmp_path, monkeypatch):
     assert done["finished_at"] is not None
 
 
+def test_replay_failure_preserves_failed_terminal_status(client, tmp_path, monkeypatch):
+    from winpilot import server
+
+    _write_script(tmp_path)
+    monkeypatch.setattr(
+        server.trace_mod,
+        "replay",
+        lambda path, stop_event=None: {
+            "ok": False,
+            "error": "click verification failed",
+            "results": [{"index": "1", "tool": "click", "ok": False}],
+        },
+    )
+
+    created = client.post("/api/replay", json={"script": "demo.wps.json"})
+    failed = _wait_for(client, created.json()["replay_id"], {"failed"})
+
+    assert failed["status"] == "failed"
+    assert failed["runtime_status"] == "failed"
+    assert failed["ok"] is False
+    assert failed["result"]["error"] == "click verification failed"
+
+
 def test_replay_cancel_sets_job_stop_event(client, tmp_path, monkeypatch):
     from winpilot import server
 

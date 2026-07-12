@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -332,9 +333,17 @@ DEFAULT_GUI_FORBIDDEN_SHELL_PATTERNS = (
 )
 
 
-def _request_json(method: str, url: str, payload: dict[str, Any] | None = None) -> Any:
+def _request_json(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+) -> Any:
     data = None
     headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -522,29 +531,30 @@ def run_eval(
     case_id: str = "",
     budgets: dict[str, float] | None = None,
     max_steps: int | None = None,
+    token: str = "",
 ) -> Path:
     started_at = time.time()
     payload: dict[str, Any] = {"task": task}
     if max_steps:
         payload["max_steps"] = int(max_steps)
-    started = _request_json("POST", f"{base_url}/api/chat", payload)
+    started = _request_json("POST", f"{base_url}/api/chat", payload, token=token)
     run_id = str(started["run_id"])
     deadline = time.time() + timeout_s
     last_status: dict[str, Any] = {}
     timed_out = False
     while time.time() < deadline:
-        last_status = _request_json("GET", f"{base_url}/api/status")
+        last_status = _request_json("GET", f"{base_url}/api/status", token=token)
         if not last_status.get("running"):
             break
         time.sleep(1.0)
     else:
-        _request_json("POST", f"{base_url}/api/stop")
+        _request_json("POST", f"{base_url}/api/stop", token=token)
         timed_out = True
         time.sleep(0.5)
-        last_status = _request_json("GET", f"{base_url}/api/status")
+        last_status = _request_json("GET", f"{base_url}/api/status", token=token)
 
     time.sleep(0.5)
-    events = _request_json("GET", f"{base_url}/api/trace/{run_id}")
+    events = _request_json("GET", f"{base_url}/api/trace/{run_id}", token=token)
     if not isinstance(events, list):
         raise RuntimeError(f"Trace response for {run_id} was not a list")
     summary = _summarize_trace(events)
@@ -577,7 +587,8 @@ def run_eval(
 
 
 def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
-              budgets: dict[str, float], case_ids: set[str] | None = None) -> Path:
+              budgets: dict[str, float], case_ids: set[str] | None = None,
+              token: str = "") -> Path:
     cases = SUITES.get(suite_name)
     if not cases:
         raise SystemExit(f"Unknown suite {suite_name!r}. Available: {', '.join(sorted(SUITES))}")
@@ -599,6 +610,7 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 case_id=str(case.get("id") or ""),
                 budgets=budgets,
                 max_steps=int(case.get("max_steps") or 0) or None,
+                token=token,
             )
             report = json.loads(path.read_text(encoding="utf-8"))
             trace_path = REPO_ROOT / str(report.get("trace_file", ""))
@@ -643,6 +655,11 @@ def main() -> int:
     parser.add_argument("task", nargs="?", help="Task text to submit through /api/chat.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help=f"WinPilot server URL. Default: {DEFAULT_BASE_URL}")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("WINPILOT_CONTROL_TOKEN", ""),
+        help="Bearer token. Defaults to WINPILOT_CONTROL_TOKEN; never written to reports.",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
                         help=f"Report output directory. Default: {DEFAULT_OUT_DIR}")
     parser.add_argument("--timeout", type=float, default=300.0,
@@ -671,12 +688,13 @@ def main() -> int:
     try:
         if args.suite:
             path = run_suite(args.base_url.rstrip("/"), args.suite, args.out_dir,
-                             args.timeout, budgets, case_ids=set(args.case) or None)
+                             args.timeout, budgets, case_ids=set(args.case) or None,
+                             token=args.token)
         else:
             if not args.task:
                 raise SystemExit("task is required unless --suite is used")
             path = run_eval(args.base_url.rstrip("/"), args.task, args.out_dir,
-                            args.timeout, budgets=budgets)
+                            args.timeout, budgets=budgets, token=args.token)
     except urllib.error.URLError as exc:
         raise SystemExit(f"WinPilot server request failed: {exc}") from exc
     print(path)

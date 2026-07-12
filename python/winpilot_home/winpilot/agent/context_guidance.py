@@ -49,6 +49,9 @@ class ContextGuidanceMixin:
         note = self.session.world.advisory()
         if note:
             self.messages.append({"role": "user", "content": f"[系统观察] {note}"})
+        working_set = self.session.world.working_set_advisory()
+        if working_set:
+            self.messages.append({"role": "user", "content": f"[working set] {working_set}"})
         self._maybe_structured_replan()
 
     def _maybe_structured_replan(self) -> None:

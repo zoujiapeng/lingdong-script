@@ -7,11 +7,12 @@ import time
 
 from ..config import CONFIG, TRACES_DIR
 from ..perception.model import UIElement
-from ..perception import fusion, intent, ocr, reducer, vision_cv, vlm, win32
+from ..perception import fusion, intent, ocr, reducer, uia, vision_cv, vlm, win32
 from ..perception.ocr_lines import merge_line_elements
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
+from .task_rules import _communication_mode, _is_communication_task, _quoted_payloads
 from .tool_result import ToolResult
 
 
@@ -21,7 +22,92 @@ def _tools_attr(name: str, default):
     return getattr(tools_mod, name, default) if tools_mod is not None else default
 
 
+def _suppress_nonblocking_notice_lines(text: str, notice: dict) -> str:
+    """Hide grounded non-modal status noise from the model-facing view."""
+    if not isinstance(notice, dict) or notice.get("blocking") is not False:
+        return text
+    labels = [
+        str(value or "").strip().casefold()
+        for value in (notice.get("suppressed_texts") or [])
+        if str(value or "").strip()
+    ]
+    if not labels:
+        return text
+    kept: list[str] = []
+    hidden = 0
+    for line in str(text or "").splitlines():
+        folded = line.casefold()
+        if any(label in folded for label in labels):
+            hidden += 1
+            continue
+        kept.append(line)
+    if hidden:
+        kept.append(
+            f"Perception note: suppressed {hidden} grounded non-blocking/stale status element(s); "
+            "the complete raw elements remain in the perception trace."
+        )
+    return "\n".join(kept)
+
+
 class PerceptionToolMixin:
+    def _maybe_auto_execute_grounded_communication(
+        self,
+        reduction: dict,
+    ) -> ToolResult | None:
+        """Run an explicit one-shot send once the conversation is grounded."""
+        if getattr(self, "_auto_communication_attempted", False):
+            return None
+        if not _is_communication_task(self.task) or _communication_mode(self.task) != "send":
+            return None
+        payloads = _quoted_payloads(self.task)
+        if not payloads:
+            return None
+        chat_context = reduction.get("chat_context") if isinstance(reduction, dict) else None
+        if not isinstance(chat_context, dict) or not chat_context.get("center"):
+            return None
+        payload = str(payloads[0] or "").strip()
+        if not payload:
+            return None
+        self._auto_communication_attempted = True
+        routine_args = {
+            "subgoal": "send the user's explicit message in the grounded conversation",
+            "target_window": {"hwnd": int(getattr(self, "hwnd", 0) or 0)},
+            "input": {
+                "label": "message",
+                "fallback_text": ["输入消息", "消息", "message"],
+                "expected_region": "bottom-right",
+                "text": payload,
+                "clear": True,
+                "expect_text": True,
+            },
+            "click": {
+                "label": "发送",
+                "fallback_text": ["Send", "send"],
+                "expected_region": "bottom-right",
+            },
+            "verify_texts": [payload],
+            "constraints": {"wait": True},
+        }
+        result = self.dispatch("execute_subgoal", routine_args)
+        events = getattr(self, "_pending_controller_events", None)
+        if not isinstance(events, list):
+            events = []
+            self._pending_controller_events = events
+        events.append({
+            "tool": "execute_subgoal",
+            "args": routine_args,
+            "result_text": result.text or "",
+            "source": "observe:grounded_communication",
+        })
+        BUS.publish(
+            "controller_routine",
+            run_id=getattr(self, "run_id", None),
+            source="observe:grounded_communication",
+            tool="execute_subgoal",
+            result_preview=(result.text or "")[:500],
+        )
+        return result
+
     def _perception_mode(self) -> str:
         """Return the perception strategy mode for the current task + window title."""
         title = self.snapshot.title if self.snapshot else ""
@@ -622,9 +708,34 @@ class PerceptionToolMixin:
         )
         trace_rel = self._write_perception_trace(snapshot, reduction, observe_profile, query, args)
         full_requested = bool(args.get("full") or args.get("force_full"))
+        full_downgraded = False
+        full_count = 0
+        full_limit = int(CONFIG.get(
+            "fusion", "full_observe_repeat_limit", default=2,
+        ) or 2)
+        if full_requested and not bool(args.get("force_full")):
+            counts = getattr(self, "_full_observe_counts", None)
+            if not isinstance(counts, dict):
+                counts = {}
+                self._full_observe_counts = counts
+            key = int(snapshot.hwnd)
+            full_count = int(counts.get(key, 0) or 0) + 1
+            counts[key] = full_count
+            if full_count > max(1, full_limit):
+                full_requested = False
+                full_downgraded = True
         reducer_enabled = bool(CONFIG.get("fusion", "perception_reducer", default=True))
         raw_text = snapshot.to_text(max_elements=max_elements, query=query)
+        notice = reduction.get("non_blocking_notice") if isinstance(reduction, dict) else {}
+        raw_text = _suppress_nonblocking_notice_lines(raw_text, notice)
         if not reducer_enabled or full_requested:
+            if isinstance(notice, dict) and notice.get("blocking") is False and notice.get("guidance"):
+                raw_text = (
+                    "Perception guardrail (grounded from the current editable surface): "
+                    + str(notice["guidance"])
+                    + "\n"
+                    + raw_text
+                )
             if trace_rel:
                 raw_text += f"\nPerception trace: {trace_rel}"
             return raw_text, reduction, trace_rel
@@ -640,8 +751,19 @@ class PerceptionToolMixin:
         text = (
             reduced_text
             + "\nRaw element sample (debug; pass full=true for all raw elements):\n"
-            + snapshot.to_text(max_elements=raw_sample_limit, query=query)
+            + _suppress_nonblocking_notice_lines(
+                snapshot.to_text(max_elements=raw_sample_limit, query=query),
+                notice,
+            )
         )
+        if full_downgraded:
+            text = (
+                "Repeated full observe was downgraded to the compact reducer "
+                f"after {full_limit} full snapshot(s) for this window "
+                f"(request #{full_count}). The complete raw snapshot remains in trace; "
+                "use force_full=true only for a specific unresolved ambiguity.\n"
+                + text
+            )
         if trace_rel:
             text += f"\nPerception trace: {trace_rel}"
         return text, reduction, trace_rel
@@ -683,8 +805,12 @@ class PerceptionToolMixin:
             elif fast_canvas:
                 self.snapshot = self._fast_canvas_snapshot(hwnd, include_icons=include_icons)
             else:
-                self.snapshot = fusion_mod.observe(hwnd, include_icons=include_icons,
-                                                   perception_mode=perception_mode)
+                self.snapshot = fusion_mod.observe(
+                    hwnd,
+                    include_icons=include_icons,
+                    perception_mode=perception_mode,
+                    stop_event=getattr(self, "stop_event", None),
+                )
             self.store_observe_cache(cache_key, self.snapshot)
         self._remember_target(hwnd, self.snapshot.title)
         query = str(args.get("query", "") or "")
@@ -714,6 +840,7 @@ class PerceptionToolMixin:
                     hwnd,
                     include_icons=include_icons,
                     perception_mode=perception_mode,
+                    stop_event=getattr(self, "stop_event", None),
                 )
                 self.store_observe_cache(full_cache_key, self.snapshot)
             self._remember_target(hwnd, self.snapshot.title)
@@ -767,13 +894,35 @@ class PerceptionToolMixin:
                 "scope": "full_query_fallback",
             }
         render_profile = "full_query_fallback" if changed_query_fallback else observe_profile
-        text, _reduction, _trace_rel = self._render_observe_text(
+        text, reduction, _trace_rel = self._render_observe_text(
             self.snapshot,
             args=args,
             observe_profile=render_profile,
             query=query,
             max_elements=max_elements,
         )
+        auto_routine = self._maybe_auto_execute_grounded_communication(reduction)
+        if auto_routine is not None:
+            try:
+                auto_data = json.loads(auto_routine.text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                auto_data = {"ok": False, "error": auto_routine.text or "invalid controller result"}
+            packet = auto_data.get("evidence_packet") if isinstance(auto_data.get("evidence_packet"), dict) else {}
+            compact_auto = {
+                "ok": bool(auto_data.get("ok")),
+                "verified": bool(auto_data.get("verified")),
+                "subgoal": auto_data.get("subgoal"),
+                "actions_executed": auto_data.get("actions_executed") or [],
+                "metrics": auto_data.get("metrics") or {},
+                "matched_texts": packet.get("matched_texts") or [],
+                "missing_texts": packet.get("missing_texts") or [],
+                "visible_text_preview": str(packet.get("visible_text_preview") or "")[:600],
+                "error": auto_data.get("error"),
+            }
+            text += (
+                "\nController auto-routine (grounded explicit communication):\n"
+                + json.dumps(compact_auto, ensure_ascii=False, default=str)
+            )
         if args.get("changed_only"):
             if changed_query_fallback:
                 rois = "; ".join(
@@ -817,6 +966,57 @@ class PerceptionToolMixin:
         hwnd = self._resolve_hwnd(args)
         if not hwnd:
             return ToolResult("无目标窗口")
+        query = str(args.get("query") or "").strip()
+        require_non_input = bool(args.get("require_non_input"))
+        if query and "uia" in CONFIG.enabled_dimensions():
+            query_started = time.monotonic()
+            try:
+                direct = _tools_attr("uia", uia).find_text(int(hwnd), query)
+                direct = self._query_grounded_elements(query, direct)
+                if require_non_input:
+                    direct = [
+                        element for element in direct
+                        if not any(
+                            token in str(getattr(element, "role", "") or "").casefold()
+                            for token in ("edit", "textbox", "input", "combobox", "searchbox")
+                        )
+                    ]
+                texts = [
+                    str(getattr(element, "text", "") or "").strip()
+                    for element in direct
+                    if str(getattr(element, "text", "") or "").strip()
+                ]
+                if texts:
+                    elapsed_ms = int((time.monotonic() - query_started) * 1000)
+                    self._remember_target(int(hwnd), "")
+                    BUS.publish(
+                        "verify",
+                        run_id=getattr(self, "run_id", None),
+                        action="read_text_query",
+                        attempt=1,
+                        verified=True,
+                        detail=f'found visible text "{query}"',
+                        method="uia-query",
+                        elapsed_ms=elapsed_ms,
+                        trace={
+                            "query": query,
+                            "match_count": len(texts),
+                            "require_non_input": require_non_input,
+                        },
+                    )
+                    body = "\n".join(dict.fromkeys(texts))
+                    return ToolResult(
+                        body,
+                        summary=f'[folded] read_text query="{query}" {len(texts)} texts source=uia-query',
+                        replay={
+                            "tool": "read_text",
+                            "query": query,
+                            "source": "uia-query",
+                            "elapsed_ms": elapsed_ms,
+                        },
+                    )
+            except Exception as exc:
+                logger.debug("read_text UIA query fast path failed: %s", exc)
         fusion_mod = _tools_attr("fusion", fusion)
         perception_mode = self._perception_mode()
         cache_keys = [
@@ -860,7 +1060,18 @@ class PerceptionToolMixin:
         self.snapshot = snapshot
         title = str(getattr(snapshot, "title", "") or "")
         self._remember_target(hwnd, title)
-        texts = [e.text for e in snapshot.elements if e.text.strip()]
+        selected = snapshot.elements
+        if query:
+            selected = self._query_grounded_elements(query, selected)
+            if require_non_input:
+                selected = [
+                    element for element in selected
+                    if not any(
+                        token in str(getattr(element, "role", "") or "").casefold()
+                        for token in ("edit", "textbox", "input", "combobox", "searchbox")
+                    )
+                ]
+        texts = [e.text for e in selected if e.text.strip()]
         body = "\n".join(dict.fromkeys(texts))
         source = "cache" if cache_hit else "fusion"
         return ToolResult(body or "（未识别到文字）",
@@ -906,3 +1117,51 @@ class PerceptionToolMixin:
             region = window_region(hwnd)
         answer = vlm.describe(region, str(args["question"]))
         return ToolResult(answer)
+
+    def _t_vlm_verify(self, args: dict) -> ToolResult:
+        if not vlm.is_configured():
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "semantic_visual_verified": False,
+                "verify_method": "semantic-vlm",
+                "error": vlm.configuration_issue() or "VLM is not configured",
+            }))
+        if all(k in args for k in ("left", "top", "width", "height")):
+            region = Region(
+                int(args["left"]), int(args["top"]),
+                int(args["width"]), int(args["height"]),
+            )
+        else:
+            hwnd = self._resolve_hwnd(args)
+            if not hwnd:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "verified": False,
+                    "semantic_visual_verified": False,
+                    "verify_method": "semantic-vlm",
+                    "error": "No target window or explicit region",
+                }))
+            region = window_region(hwnd)
+        started = time.monotonic()
+        requested_criteria = str(args.get("criteria") or "").strip()
+        full_goal = str(self.task or "").strip()
+        if requested_criteria and full_goal:
+            criteria = (
+                f"User's complete visible goal (mandatory): {full_goal}\n"
+                f"Additional checklist: {requested_criteria}"
+            )
+        else:
+            criteria = requested_criteria or full_goal
+        verdict = vlm.verify(region, criteria)
+        if isinstance(verdict, dict):
+            verdict["criteria"] = requested_criteria or full_goal
+            verdict["full_goal_included"] = bool(requested_criteria and full_goal)
+        BUS.publish(
+            "verify",
+            run_id=getattr(self, "run_id", ""),
+            method="semantic-vlm",
+            verified=verdict.get("verified") is True,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+        return ToolResult(self._fmt(verdict), is_observe=True)

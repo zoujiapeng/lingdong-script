@@ -29,6 +29,46 @@ def file_exists(path: str) -> tuple[bool, str]:
         return False, f"路径检查失败: {exc}"
 
 
+_IMAGE_SIGNATURES = {
+    "png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
+    "jpg": lambda data: data.startswith(b"\xff\xd8\xff"),
+    "jpeg": lambda data: data.startswith(b"\xff\xd8\xff"),
+    "gif": lambda data: data.startswith((b"GIF87a", b"GIF89a")),
+    "bmp": lambda data: data.startswith(b"BM"),
+    "tif": lambda data: data.startswith((b"II*\x00", b"MM\x00*")),
+    "tiff": lambda data: data.startswith((b"II*\x00", b"MM\x00*")),
+    "webp": lambda data: data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+}
+
+
+def file_format(value) -> tuple[bool, str]:
+    """Verify a saved image's bytes match its requested format."""
+    if isinstance(value, dict):
+        raw_path = value.get("path")
+        expected = str(value.get("format") or "").casefold().lstrip(".")
+    else:
+        raw_path = value
+        expected = ""
+    try:
+        path = _expand(str(raw_path or ""))
+        expected = expected or path.suffix.casefold().lstrip(".")
+        matcher = _IMAGE_SIGNATURES.get(expected)
+        if matcher is None:
+            return False, f"不支持的文件格式签名: {expected or '(empty)'}"
+        if not path.exists():
+            return False, f"文件不存在: {path}"
+        data = path.read_bytes()[:32]
+        ok = bool(matcher(data))
+        magic = data[:12].hex(" ")
+        return ok, (
+            f"文件格式为 {expected}: {path}"
+            if ok else
+            f"文件扩展名为 {expected}，但魔数不匹配 ({magic}): {path}"
+        )
+    except OSError as exc:
+        return False, f"文件格式检查失败: {exc}"
+
+
 def file_contains(path: str, text: str, encoding: str = "utf-8") -> tuple[bool, str]:
     try:
         p = _expand(path)
@@ -108,6 +148,8 @@ def shell_true(expr: str, timeout_s: float = 15.0) -> tuple[bool, str]:
 def check(key: str, value, timeout_s: float = 15.0) -> tuple[bool, str]:
     if key == "file_exists":
         return file_exists(str(value))
+    if key == "file_format":
+        return file_format(value)
     if key == "file_contains":
         if not isinstance(value, dict) or "path" not in value or "text" not in value:
             return False, "file_contains 需 {path, text}"
@@ -123,5 +165,5 @@ def check(key: str, value, timeout_s: float = 15.0) -> tuple[bool, str]:
 
 
 GROUNDTRUTH_KEYS = (
-    "file_exists", "file_contains", "process_running", "process_gone", "shell_true",
+    "file_exists", "file_format", "file_contains", "process_running", "process_gone", "shell_true",
 )

@@ -98,8 +98,10 @@ For coding/repository work, prefer deterministic repository actions over driving
 an editor through the screen:
 1. Inspect first with list_dir / read_file / search_text and identify the stack.
 2. Edit with apply_patch for small precise replacements; use write_file only for
-   new files or deliberate full rewrites. Re-read changed files before claiming
-   success.
+   new files or deliberate full rewrites. Keep one generated file/tool argument
+   comfortably below the model output limit: write a concise working skeleton,
+   then extend it with small apply_patch calls. Never emit pseudo <tool_call>
+   markup in prose. Re-read changed files before claiming success.
 3. Verify with run_shell using real exit codes and output. When a command fails,
    read the referenced file/line, patch, and rerun the smallest useful check.
 4. If the user asks to clone/run an open-source project without a URL, use

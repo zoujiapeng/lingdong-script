@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import math
 import os
 import re
 import string
@@ -36,6 +37,8 @@ user32 = ctypes.windll.user32
 # ToolSession installs this callback only around a visible action. Sampling
 # after mouse-down makes short-lived pressed states part of action evidence.
 _press_probe_local = threading.local()
+_held_mouse_lock = threading.Lock()
+_held_mouse_buttons: set[str] = set()
 
 
 def install_press_probe(callback: Callable[[], Any] | None) -> Callable[[], Any] | None:
@@ -144,6 +147,15 @@ _VK = {
 _EXTENDED_VKS = {0x2E, 0x2D, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5B, 0x5D}
 _VK_SHIFT, _VK_CTRL, _VK_ALT = 0x10, 0x11, 0x12
 _VK_TEXT_CHARS = set(string.digits + "+-*/=.,")
+_NUMERIC_OPERATOR_VKS = {
+    "*": 0x6A,  # VK_MULTIPLY
+    "+": 0x6B,  # VK_ADD
+    "-": 0x6D,  # VK_SUBTRACT
+    ".": 0x6E,  # VK_DECIMAL
+    ",": 0x6E,
+    "/": 0x6F,  # VK_DIVIDE
+    "=": 0x0D,  # Enter is the semantic equals key on calculation surfaces.
+}
 
 
 def _vk_of(key: str) -> int:
@@ -182,6 +194,14 @@ def _press_char_vk(char: str) -> bool:
     inputs.extend(_key_input(vk=m, flags=_KEYEVENTF_KEYUP) for m in reversed(modifiers))
     _send_inputs(inputs)
     return True
+
+
+def _press_vk_code(vk: int) -> None:
+    flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS or vk == 0x6F else 0
+    _send_inputs([
+        _key_input(vk=vk, flags=flags),
+        _key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP),
+    ])
 
 
 def _should_type_via_vk(text: str) -> bool:
@@ -381,22 +401,27 @@ def _stroke_path(waypoints: list[tuple[int, int]], duration_s: float) -> None:
     """Press at the first waypoint, move through the path, release at the end.
     Shared by drag() and draw_strokes() so stroke registration is identical."""
     _abs_mouse_move(*waypoints[0])  # absolute move so the press lands as real input
-    time.sleep(0.08)
+    time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
-    time.sleep(0.04)  # let the app register the press before moving
+    time.sleep(0.02)  # let the app register the press before moving
 
     seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
                 for a, b in zip(waypoints, waypoints[1:])]
     total = max(sum(seg_lens), 1.0)
     for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
-        steps = max(4, int(seg / 8))  # ~8px per move event for a smooth stroke
+        # Generated circles and ellipses are already densely sampled. A
+        # minimum of four interpolated events per segment multiplied a
+        # 40-point ellipse into ~160 SendInput calls and made one primitive
+        # take over a second. Keep at most ~8px between events, but never
+        # resample an already-short segment.
+        steps = max(1, int(math.ceil(seg / 8.0)))
         seg_dur = duration_s * (seg / total)
         for i in range(1, steps + 1):
             _emit_move(int(a[0] + (b[0] - a[0]) * i / steps),
                        int(a[1] + (b[1] - a[1]) * i / steps))
-            time.sleep(max(0.008, seg_dur / steps))
+            time.sleep(max(0.002, seg_dur / steps))
 
-    time.sleep(0.03)
+    time.sleep(0.015)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
 
 
@@ -465,7 +490,7 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
             continue
         _stroke_path(waypoints, duration_s)
         drawn += 1
-        time.sleep(0.04)  # small gap so the app finalizes each stroke
+        time.sleep(0.015)  # small gap so the app finalizes each stroke
     if saved:
         _restore_cursor(saved)
     BUS.publish("action", action="draw_strokes", strokes=drawn)
@@ -507,9 +532,48 @@ def scroll(x: int, y: int, amount: int) -> dict:
     return {"ok": True}
 
 
+@queued_desktop_action("scroll_retry")
+def scroll_sendinput_restored(x: int, y: int, amount: int) -> dict:
+    """Retry a wheel action through physical SendInput without stealing the cursor.
+
+    ``WM_MOUSEWHEEL`` is intentionally the first choice in no-mouse-steal mode,
+    but Chromium and some owner-drawn controls may accept the message without
+    scrolling.  The action-delta verifier calls this only after proving that the
+    first attempt produced no visible change.
+    """
+    if _dry_run():
+        return {"ok": True, "dry_run": True, "via": "sendinput_restored"}
+    saved = _cursor_pos()
+    try:
+        _raw_move_mouse(int(x), int(y))
+        time.sleep(0.04)
+        _send_inputs([
+            _mouse_input(
+                win32con.MOUSEEVENTF_WHEEL,
+                data=int(amount) * 120 & 0xFFFFFFFF,
+            )
+        ])
+    finally:
+        _restore_cursor(saved)
+    BUS.publish(
+        "action",
+        action="scroll_retry",
+        x=int(x),
+        y=int(y),
+        amount=int(amount),
+        via="sendinput_restored",
+    )
+    return {"ok": True, "via": "sendinput_restored"}
+
+
 # ------------------------------------------------------------- keyboard API
 @queued_desktop_action("type_text")
-def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> dict:
+def type_text(
+    text: str,
+    interval_s: float = 0.008,
+    hwnd: int | None = None,
+    numeric_keypad: bool = False,
+) -> dict:
     """Unicode injection — IME-independent, supports Chinese.
 
     hwnd: if given, re-focus the window every 8 characters so focus theft
@@ -528,13 +592,16 @@ def type_text(text: str, interval_s: float = 0.008, hwnd: int | None = None) -> 
         typed = 0
         for char in text:
             _refocus_if_needed(typed)
-            if not _press_char_vk(char):
+            if numeric_keypad and char in _NUMERIC_OPERATOR_VKS:
+                _press_vk_code(_NUMERIC_OPERATOR_VKS[char])
+            elif not _press_char_vk(char):
                 break
             typed += 1
-            time.sleep(max(interval_s, 0.03))
-        BUS.publish("action", action="type_text", length=typed, via="vk")
+            time.sleep(max(interval_s, 0.04 if numeric_keypad else 0.03))
+        via = "numeric_keypad" if numeric_keypad else "vk"
+        BUS.publish("action", action="type_text", length=typed, via=via)
         return {"ok": typed == len(text), "typed": typed,
-                "requested": len(text), "via": "vk"}
+                "requested": len(text), "via": via}
     for i, char in enumerate(text):
         _refocus_if_needed(i)
         if char == "\n":
@@ -848,8 +915,11 @@ def mouse_down(button: str = "left") -> dict:
         _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MIDDLEDOWN)])
     else:
         return {"ok": False, "error": f"未知鼠标键: {button}"}
+    with _held_mouse_lock:
+        _held_mouse_buttons.add(button)
+    press_sampled = _sample_pressed_state()
     BUS.publish("action", action="mouse_down", button=button)
-    return {"ok": True, "button": button}
+    return {"ok": True, "button": button, "press_sampled": press_sampled}
 
 
 @queued_desktop_action("mouse_up")
@@ -865,8 +935,22 @@ def mouse_up(button: str = "left") -> dict:
         _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MIDDLEUP)])
     else:
         return {"ok": False, "error": f"未知鼠标键: {button}"}
+    with _held_mouse_lock:
+        _held_mouse_buttons.discard(button)
     BUS.publish("action", action="mouse_up", button=button)
     return {"ok": True, "button": button}
+
+
+def release_held_mouse_buttons() -> list[str]:
+    """Release mouse buttons left held by an interrupted or completed run."""
+    with _held_mouse_lock:
+        buttons = sorted(_held_mouse_buttons)
+    released: list[str] = []
+    for button in buttons:
+        result = mouse_up(button)
+        if result.get("ok"):
+            released.append(button)
+    return released
 
 
 # --------------------------------------------------------------- screenshot base64

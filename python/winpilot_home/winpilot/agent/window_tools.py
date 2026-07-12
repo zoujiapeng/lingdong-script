@@ -12,6 +12,33 @@ from .tool_result import ToolResult
 
 
 class WindowToolMixin:
+    def _task_wants_app_open(self, query: str) -> bool:
+        task = str(getattr(self, "task", "") or "").casefold()
+        needle = str(query or "").strip().casefold()
+        if not needle or needle not in task:
+            return False
+        # A window/dialog/control state is not an application launch target.
+        # Treating "Save As" or "File name" as an app command can launch an
+        # unrelated executable and, worse, bind its foreground dialog as proof.
+        generic_state_queries = {
+            "save as", "open file", "file dialog", "dialog", "file name",
+            "filename", "new document", "settings", "preferences",
+            "\u53e6\u5b58\u4e3a", "\u4fdd\u5b58", "\u6253\u5f00\u6587\u4ef6", "\u6587\u4ef6\u540d", "\u5bf9\u8bdd\u6846", "\u65b0\u5efa\u6587\u6863",
+        }
+        if needle in generic_state_queries:
+            return False
+        diagnostic = (
+            "是否运行", "有没有运行", "进程", "检测", "检查运行",
+            "is running", "process", "detect", "inspect",
+        )
+        if any(marker in task for marker in diagnostic):
+            return False
+        intent = (
+            "打开", "启动", "运行", "使用", "用", "播放", "发送", "操作",
+            "open", "launch", "start", "use", "play", "send", "message",
+        )
+        return any(marker in task for marker in intent)
+
     @staticmethod
     def _activate_browser_tab(query: str, windows: list[dict]) -> tuple[int, str] | None:
         """Activate a matching Chrome/Edge tab when it is not the window title.
@@ -118,6 +145,24 @@ class WindowToolMixin:
             matches = self._hidden_window_matches(app_state, query)
             used_hidden_candidates = bool(matches)
         if not matches:
+            opener = getattr(self, "_t_open_app", None)
+            if self._task_wants_app_open(query) and callable(opener):
+                result = opener({"name": query})
+                try:
+                    import json
+
+                    payload = json.loads(result.text or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+                if isinstance(payload, dict) and payload:
+                    payload["triggered_by"] = "scan_windows:no_match"
+                    payload["fast_path_advice"] = (
+                        str(payload.get("fast_path_advice") or "").strip()
+                        + " scan_windows already upgraded the no-match state to open_app; "
+                          "do not call list_windows or launch again when target_hwnd is present."
+                    ).strip()
+                    return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+                return result
             return ToolResult(f'No visible or running windows match query "{query}".')
 
         original = win32gui.GetForegroundWindow()

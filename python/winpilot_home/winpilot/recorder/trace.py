@@ -22,8 +22,10 @@ import cv2
 from ..action import executor, verify
 from ..automation_ir import automation_ir_from_wps, validate_automation_ir, wps_from_automation_ir
 from ..config import SCRIPTS_DIR, TRACES_DIR
+from ..fast.visual_servo import ServoConfig, track_visual_target
 from ..memory import replay_anchors
 from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
+from ..perception.model import UIElement
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from . import replay_control
@@ -50,6 +52,7 @@ _BATCH_SCREENSHOT_TOOLS = {
     "clipboard_paste",
 }
 _SCREENSHOT_MAX_W = 960
+_POST_ACTION_CAPTURE_SETTLE_S = 0.035
 
 # Volatile tokens that make a text selector unstable across runs (unread
 # counts, badges) — strip them so "计技25A葛瑞念 消息: 132" → "计技25A葛瑞念".
@@ -149,12 +152,20 @@ class TraceRecorder:
                     self._step += 1
                     step = self._step
                 phase = "after"
-            elif event_type == "agent_batch_action_start" and event.get("tool") in _BATCH_SCREENSHOT_TOOLS:
+            elif (
+                event_type == "agent_batch_action_start"
+                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
+                and event.get("trace_screenshot", True) is not False
+            ):
                 self._step += 1
                 step = self._step
                 phase = "batch_before"
                 self._action_steps[action_key] = step
-            elif event_type == "agent_batch_action" and event.get("tool") in _BATCH_SCREENSHOT_TOOLS:
+            elif (
+                event_type == "agent_batch_action"
+                and event.get("tool") in _BATCH_SCREENSHOT_TOOLS
+                and event.get("trace_screenshot", True) is not False
+            ):
                 step = self._action_steps.pop(action_key, None)
                 if step is None:
                     self._step += 1
@@ -162,7 +173,7 @@ class TraceRecorder:
                 phase = "batch_after"
 
         frame = None
-        if step is not None:
+        if step is not None and phase in {"before", "batch_before"}:
             try:
                 from ..fast.perception_daemon import PERCEPTION_DAEMON
 
@@ -219,14 +230,36 @@ class TraceRecorder:
         record = dict(item.get("record") or {})
         step = item.get("step")
         if step is not None:
+            phase = str(item.get("phase") or "after")
+            if phase in {"after", "batch_after"} and item.get("frame") is None:
+                # The Level-0 daemon's latest frame at action completion can
+                # still be the pre-action sample.  Capture asynchronously after
+                # a short paint interval so trace evidence represents the
+                # resulting frame without slowing the controller hot path.
+                time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
             shot = self._save_screenshot(
                 run_id,
                 int(step),
-                str(item.get("phase") or "after"),
+                phase,
                 image=item.get("frame"),
             )
             if shot:
                 record["screenshot"] = shot
+                # Screenshot capture is asynchronous, so the original BUS
+                # event has already reached live projections without this
+                # path. Publish a small follow-up event after the file exists
+                # so the frontend can render current-run evidence immediately.
+                BUS.publish(
+                    "trace_screenshot",
+                    run_id=str(record.get("run_id") or run_id or ""),
+                    trace_run_id=str(run_id or ""),
+                    screenshot=shot,
+                    screenshot_kind=str(item.get("phase") or "after"),
+                    tool=record.get("tool"),
+                    action_id=record.get("action_id"),
+                    batch_id=record.get("batch_id"),
+                    batch_index=record.get("batch_index"),
+                )
         with self._lock:
             if self._file is None or self._run_id != run_id:
                 return
@@ -368,6 +401,34 @@ def _distill_steps(steps: list[dict]) -> list[dict]:
 def _semantic_step_key(step: dict) -> str:
     clean = {k: v for k, v in step.items() if k not in {"elapsed_ms"}}
     return json.dumps(clean, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _step_semantic_text(step: dict[str, Any]) -> str:
+    """Return the best replay-stable text selector carried by an action."""
+    for field in ("text", "element_text"):
+        value = str(step.get(field) or "").strip()
+        if value:
+            return value
+
+    anchor = step.get("anchor")
+    if isinstance(anchor, dict):
+        for field in ("label", "text_query"):
+            value = str(anchor.get(field) or "").strip()
+            if value:
+                return value
+        fallback = anchor.get("fallback_text")
+        if isinstance(fallback, str):
+            fallback = [fallback]
+        if isinstance(fallback, list):
+            for item in fallback:
+                value = str(item or "").strip()
+                if value:
+                    return value
+
+    resolved = step.get("resolved_element")
+    if isinstance(resolved, dict):
+        return str(resolved.get("text") or "").strip()
+    return ""
 
 
 def _extract_replay_steps(events: list[dict[str, Any]]) -> list[dict]:
@@ -901,7 +962,7 @@ class Replayer:
         if not self.anchor_profile or not key or not isinstance(anchor, dict) or not self.hwnd:
             return None, {}
         started = time.monotonic()
-        text = str(step.get("text") or step.get("element_text") or "").strip()
+        text = _step_semantic_text(step)
         learned_text = str(anchor.get("text") or "").strip()
         if text and learned_text and text.casefold() != learned_text.casefold():
             elapsed = self._finish_anchor_lookup(
@@ -1008,7 +1069,7 @@ class Replayer:
         surface: Region | None,
     ) -> bool:
         key = str(anchor_key or "").strip()
-        text = str(step.get("text") or step.get("element_text") or "").strip()
+        text = _step_semantic_text(step)
         resolved = self._last_relocation
         point = resolved.get("point") if isinstance(resolved, dict) else None
         if (
@@ -1224,7 +1285,7 @@ class Replayer:
         self._last_relocation = dict(cache_meta)
         if cached_point is not None:
             return cached_point
-        text = (step.get("text") or step.get("element_text") or "").strip()
+        text = _step_semantic_text(step)
         if text:
             hwnd = self._observe_hwnd()
             if not hwnd:
@@ -1371,6 +1432,103 @@ class Replayer:
             return capture(window_region(self.hwnd)) if self.hwnd else capture()
         except Exception:
             return None
+
+    @staticmethod
+    def _step_requests_visual_servo(step: dict[str, Any]) -> bool:
+        if step.get("visual_servo") is not None:
+            return bool(step.get("visual_servo"))
+        if step.get("moving_target") or step.get("track_target"):
+            return True
+        resolved = step.get("resolved_element")
+        source = str(resolved.get("source") or "") if isinstance(resolved, dict) else ""
+        return source.casefold().startswith("servo-")
+
+    def _visual_servo_replay_target(
+        self,
+        step: dict[str, Any],
+        point: tuple[int, int],
+    ) -> tuple[tuple[int, int] | None, dict[str, Any]]:
+        resolved = dict(self._last_relocation)
+        recorded = step.get("resolved_element")
+        if not isinstance(recorded, dict):
+            recorded = {}
+        raw_bbox = resolved.get("bbox") or recorded.get("bbox")
+        if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+            left, top, width, height = (int(value) for value in raw_bbox)
+        else:
+            width, height = 120, 40
+            left = int(point[0]) - width // 2
+            top = int(point[1]) - height // 2
+        anchor = step.get("anchor")
+        anchor_role = anchor.get("role") if isinstance(anchor, dict) else ""
+        text = _step_semantic_text(step)
+        initial = UIElement(
+            elem_id=int(recorded.get("elem_id") or -1),
+            source=str(resolved.get("source") or recorded.get("source") or "replay"),
+            role=str(recorded.get("role") or anchor_role or "button"),
+            text=text,
+            cx=int(point[0]),
+            cy=int(point[1]),
+            left=left,
+            top=top,
+            width=max(12, width),
+            height=max(12, height),
+            confidence=float(recorded.get("confidence") or 0.0),
+        )
+        labels = [text]
+        if isinstance(anchor, dict):
+            fallback = anchor.get("fallback_text")
+            if isinstance(fallback, str):
+                fallback = [fallback]
+            if isinstance(fallback, list):
+                labels.extend(str(item).strip() for item in fallback if str(item).strip())
+        try:
+            surface = window_region(int(self.hwnd)) if self.hwnd else None
+        except Exception:
+            surface = None
+        if surface is not None:
+            margin = 12
+            corners = [
+                (surface.left + margin, surface.top + margin),
+                (surface.right - margin, surface.top + margin),
+                (surface.left + margin, surface.bottom - margin),
+                (surface.right - margin, surface.bottom - margin),
+            ]
+            arm_point = max(
+                corners,
+                key=lambda item: (item[0] - point[0]) ** 2 + (item[1] - point[1]) ** 2,
+            )
+        else:
+            arm_point = (max(0, int(point[0]) - 240), max(0, int(point[1]) - 180))
+        executor.move_mouse(int(arm_point[0]), int(arm_point[1]))
+        time.sleep(0.03)
+        tracked, servo_trace = track_visual_target(
+            initial,
+            [label for label in labels if label],
+            capture_fn=capture,
+            move_fn=executor.move_mouse,
+            ocr_fn=ocr.recognize,
+            config=ServoConfig.from_action({
+                **step,
+                "servo_strict": True,
+                "servo_always_ocr": True,
+            }),
+        )
+        if tracked is None:
+            servo_trace["arm_point"] = {"x": int(arm_point[0]), "y": int(arm_point[1])}
+            return None, servo_trace
+        servo_trace["arm_point"] = {"x": int(arm_point[0]), "y": int(arm_point[1])}
+        self._last_relocation.update({
+            "source": tracked.source,
+            "text": tracked.text or text,
+            "point": [int(tracked.cx), int(tracked.cy)],
+            "bbox": [
+                int(tracked.left), int(tracked.top),
+                int(tracked.width), int(tracked.height),
+            ],
+            "visual_servo": servo_trace,
+        })
+        return (int(tracked.cx), int(tracked.cy)), servo_trace
 
     def _wait_for_url_launch_settle(
         self,
@@ -1751,6 +1909,18 @@ class Replayer:
             point = self._relocate(step, anchor_key)
             if point is None:
                 return {"ok": False, "error": "无法定位点击目标"}
+            servo_trace = None
+            if self._step_requests_visual_servo(step):
+                point, servo_trace = self._visual_servo_replay_target(step, point)
+                if point is None:
+                    return {
+                        "ok": False,
+                        "verified": False,
+                        "blocked": True,
+                        "error": "visual servo lost the replay target before mouse-down",
+                        "resolved": dict(self._last_relocation),
+                        "visual_servo": servo_trace,
+                    }
             x, y = point
             implicit_verify = not expect and not bool(step.get("allow_no_change"))
             needs_learning = bool(
@@ -1782,7 +1952,8 @@ class Replayer:
                 result = verify.run_with_verify(
                     "click",
                     lambda: executor.click(x, y, button=step.get("button", "left"),
-                                           double=bool(step.get("double")), hwnd=self.hwnd),
+                                           double=bool(step.get("double")), hwnd=self.hwnd,
+                                           prepositioned=bool(servo_trace)),
                     expect=expect, hwnd=self.hwnd, stop_event=self.stop_event)
             finally:
                 if probe_installed:
@@ -1791,6 +1962,8 @@ class Replayer:
                         restore_probe(previous_probe)
 
             result["resolved"] = dict(self._last_relocation)
+            if servo_trace is not None:
+                result["visual_servo"] = servo_trace
             if implicit_verify and result.get("ok"):
                 after = self._capture_action_surface()
                 post_ratio = self._screen_change_ratio(before, after)
@@ -2071,8 +2244,9 @@ class Replayer:
             self._emit_step(idx, tool, ok, result)
             if not ok:
                 return False
-            if self.step_delay:
-                time.sleep(self.step_delay)
+            if self.step_delay and self.stop_event.wait(self.step_delay):
+                BUS.publish("replay", state="stopped", at=idx, during="step_delay")
+                return False
         return True
 
     def _emit_step(self, idx: str, tool: str, ok: bool, result: dict) -> None:
@@ -2101,9 +2275,15 @@ class Replayer:
         tool = step.get("tool", "")
         if tool == "ext.delay":
             try:
-                time.sleep(max(0.0, float(step.get("seconds", 0))))
+                delay = max(0.0, float(step.get("seconds", 0)))
             except (TypeError, ValueError):
                 return {"ok": False, "error": "ext.delay seconds 非法"}
+            if self.stop_event.wait(delay):
+                return {
+                    "ok": False,
+                    "stopped": True,
+                    "error": "replay canceled during ext.delay",
+                }
             return {"ok": True}
 
         if tool == "ext.var_set":

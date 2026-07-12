@@ -27,6 +27,7 @@ class ServoConfig:
     search_radius_px: int = 180
     min_template_confidence: float = 0.74
     strict: bool = True
+    always_ocr: bool = False
 
     @classmethod
     def from_action(cls, action: dict[str, Any]) -> "ServoConfig":
@@ -45,6 +46,11 @@ class ServoConfig:
             strict = raw_strict.strip().casefold() in {"1", "true", "yes", "on"}
         else:
             strict = bool(raw_strict)
+        raw_always_ocr = action.get("servo_always_ocr", False)
+        if isinstance(raw_always_ocr, str):
+            always_ocr = raw_always_ocr.strip().casefold() in {"1", "true", "yes", "on"}
+        else:
+            always_ocr = bool(raw_always_ocr)
         return cls(
             iterations=bounded_int("servo_iterations", 4, 1, 6),
             tolerance_px=bounded_int("servo_tolerance_px", 5, 1, 30),
@@ -53,6 +59,7 @@ class ServoConfig:
             search_radius_px=bounded_int("servo_search_radius_px", 180, 60, 420),
             min_template_confidence=max(0.55, min(0.96, confidence)),
             strict=strict,
+            always_ocr=always_ocr,
         )
 
 
@@ -233,7 +240,11 @@ def _estimate(
     # the template is missing, changed by hover styling, or marginal.
     template_confidence = float(template_meta.get("confidence") or 0.0)
     ocr_threshold = min(0.94, max(0.78, config.min_template_confidence + 0.03))
-    needs_ocr = template_hit is None or template_confidence < ocr_threshold
+    needs_ocr = (
+        config.always_ocr
+        or template_hit is None
+        or template_confidence < ocr_threshold
+    )
     ocr_hit, ocr_meta = _ocr_estimate(
         frame,
         region,

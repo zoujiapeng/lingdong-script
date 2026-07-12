@@ -35,6 +35,7 @@
     "vlm_skip_when_uia_rich": true,
     "uia_rich_threshold": 20,
     "vlm_assist_threshold": 60,
+    "vlm_ocr_rich_threshold": 12,
     "screen_watch_autostart": true,
     "predictive_ocr_enabled": true,
     "predictive_ocr_prefer_cache": true,

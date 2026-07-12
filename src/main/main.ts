@@ -12,6 +12,7 @@ import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './sch
 import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
+import { resolveMacroPath } from './macroPaths';
 import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
 import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer } from './winpilotServer';
 import {
@@ -1449,24 +1450,23 @@ ipcMain.handle('macro:play', async (_, name: string) => {
 
 ipcMain.handle('macro:delete', async (_, name: string) => {
   const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-  // Try .json file
-  const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
   try {
+    const filePath = resolveMacroPath(macrosDir, name);
     fs.unlinkSync(filePath);
     return { success: true };
-  } catch {
-    return { success: false, error: '文件不存在' };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : '文件不存在' };
   }
 });
 
 ipcMain.handle('macro:get-events', async (_, name: string) => {
   const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-  const filePath = path.join(macrosDir, name.endsWith('.json') ? name : `${name}.json`);
   try {
+    const filePath = resolveMacroPath(macrosDir, name);
     const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     return { success: true, result: content };
-  } catch {
-    return { success: false, error: '读取失败' };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : '读取失败' };
   }
 });
 
@@ -1612,9 +1612,9 @@ if (!gotTheLock) {
     apiServer = startApiServer({
       mainWindow,
       getCachedRendererState: () => _cachedRendererState,
-      macroRecording: _macroRecording,
-      macroRecorderProcess,
-      macroResultResolve: _macroResultResolve,
+      getMacroRecording: () => _macroRecording,
+      setMacroRecording: (recording: boolean) => { _macroRecording = recording; },
+      getMacroRecorderProcess: () => macroRecorderProcess,
       ensureMacroRecorder: _ensureMacroRecorder,
       captureScreenshot: _captureScreenshot,
       selectRegion: _selectRegion,

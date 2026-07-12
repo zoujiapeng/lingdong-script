@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path, PureWindowsPath
 from typing import Callable, Any
 
 from ..config import CONFIG
@@ -36,6 +37,11 @@ def _valid_check(check) -> dict | None:
 
 
 _VISIBLE_CHECK_KEYS = {"text_appears", "text_contains"}
+_TEXT_ENTRY_GOAL_RE = re.compile(
+    r"\b(?:type|input|enter|write|fill|paste)\b|"
+    r"\u8f93\u5165|\u952e\u5165|\u5199\u5165|\u5f55\u5165|\u586b\u5199|\u7c98\u8d34",
+    re.IGNORECASE,
+)
 _RESULT_CONTEXT_MARKERS = (
     "appear", "appears", "appeared", "visible", "shown", "show", "shows",
     "verify", "verified", "confirm", "confirmed", "result", "state",
@@ -164,6 +170,25 @@ def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     sanitized = dict(valid)
     dropped: list[str] = []
     for key, value in list(sanitized.items()):
+        if (
+            key in _VISIBLE_CHECK_KEYS
+            and isinstance(value, str)
+            and _TEXT_ENTRY_GOAL_RE.search(goal or "")
+            and len(_compact_text(value)) > 40
+        ):
+            pieces = [
+                piece.strip()
+                for piece in re.split(r"[\r\n]+|[\u3001\uff0c\uff1b;]+", value)
+                if piece.strip()
+            ]
+            if re.search(r"[\u4e00-\u9fff]", value):
+                whitespace_pieces = [piece.strip() for piece in value.split() if piece.strip()]
+                if len(whitespace_pieces) >= 2:
+                    pieces = whitespace_pieces
+            candidate = next((piece for piece in pieces if 4 <= len(piece) <= 100), "")
+            if candidate and candidate != value:
+                sanitized[key] = candidate
+                value = candidate
         if isinstance(value, str) and _check_echoes_button_label(goal, key, value):
             dropped.append(f"{key}={value!r}")
             sanitized.pop(key, None)
@@ -250,7 +275,7 @@ def _merge_adjacent_visible_verification_steps(steps: list[dict]) -> list[dict]:
 
 
 _MAX_STEPS = 6
-_MAX_GOAL_CHARS = 60
+_MAX_GOAL_CHARS = 180
 # Sequence markers that hint at a multi-step task.
 _SEQ_MARKERS = ("然后", "再", "接着", "之后", "最后", "依次", "并", "，", ",", "、", ";", "；", "\n")
 
@@ -312,6 +337,77 @@ def _parse_steps(raw: str) -> list[dict]:
     return _merge_adjacent_visible_verification_steps(out)[:_MAX_STEPS]
 
 
+_KNOWN_FOLDER_MARKERS = (
+    (("桌面", "desktop"), "Desktop"),
+    (("文档", "documents"), "Documents"),
+    (("下载", "downloads"), "Downloads"),
+    (("图片", "pictures"), "Pictures"),
+)
+
+
+def _task_grounded_file_path(task: str, proposed: str) -> str:
+    """Replace a planner-invented known-folder parent with the real user path."""
+    value = str(proposed or "").strip()
+    if not value or value.casefold() in (task or "").casefold():
+        return value
+    try:
+        name = PureWindowsPath(value).name
+    except Exception:
+        name = Path(value).name
+    task_folded = (task or "").casefold()
+    if not name or name.casefold() not in task_folded:
+        return value
+
+    for explicit in re.findall(r"[A-Za-z]:\\[^\s\"'，。；;]+", task or ""):
+        if PureWindowsPath(explicit).name.casefold() == name.casefold():
+            return explicit
+    for markers, folder_name in _KNOWN_FOLDER_MARKERS:
+        if any(marker in task_folded for marker in markers):
+            return str(Path.home() / folder_name / name)
+    return value
+
+
+def _ground_plan_file_checks(task: str, steps: list[dict]) -> list[dict]:
+    """Ground model-generated file checks in paths actually named by the task."""
+    explicit_paths = list(dict.fromkeys(
+        re.findall(r"[A-Za-z]:\\[^\s\"'，。；;]+", task or "")
+    ))
+    grounded: list[dict] = []
+    for raw_step in steps:
+        step = dict(raw_step)
+        check = step.get("check")
+        if isinstance(check, dict):
+            check = dict(check)
+            if isinstance(check.get("file_exists"), str):
+                check["file_exists"] = _task_grounded_file_path(
+                    task,
+                    check["file_exists"],
+                )
+            contains = check.get("file_contains")
+            if isinstance(contains, dict) and isinstance(contains.get("path"), str):
+                contains = dict(contains)
+                contains["path"] = _task_grounded_file_path(task, contains["path"])
+                check["file_contains"] = contains
+        goal = str(step.get("goal") or "")
+        goal_key = _compact_text(goal)
+        is_output_step = any(marker in goal_key for marker in (
+            "save", "saveas", "export", "writeoutput",
+            "保存", "另存为", "导出", "写入文件",
+        ))
+        if explicit_paths and is_output_step:
+            matching = [
+                path for path in explicit_paths
+                if _compact_text(PureWindowsPath(path).name) in goal_key
+            ]
+            chosen = matching[0] if matching else explicit_paths[-1]
+            check = dict(check) if isinstance(check, dict) else {}
+            check["file_exists"] = chosen
+        if isinstance(check, dict) and check:
+            step["check"] = check
+        grounded.append(step)
+    return grounded
+
+
 def _parse_loose_step_list(raw: str) -> list[str]:
     """Best-effort recovery for model-emitted list strings with bad quoting."""
     text = (raw or "").strip()
@@ -363,7 +459,10 @@ def make_plan(
         )
         if on_response is not None:
             on_response(resp)
-        steps = _parse_steps(resp.choices[0].message.content or "")
+        steps = _ground_plan_file_checks(
+            task,
+            _parse_steps(resp.choices[0].message.content or ""),
+        )
         logger.info("规划生成 %d 个子目标 (%d 个带核验)",
                     len(steps), sum(1 for s in steps if s.get("check")))
         return steps

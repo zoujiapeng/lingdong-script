@@ -111,7 +111,10 @@ def _warm_perception_dimensions() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     global CHATGPT_MCP_LIFESPAN_USED
-    RUN_PROJECTIONS.hydrate_directory(TRACES_DIR)
+    RUN_PROJECTIONS.hydrate_directory(
+        TRACES_DIR,
+        mark_incomplete_interrupted=True,
+    )
     _warm_perception_dimensions()
     _start_scheduler_thread()
     try:
@@ -243,14 +246,14 @@ def _public_runtime_replay_job(job: RuntimeJob) -> dict[str, Any]:
     status = {
         "waiting_resources": "queued",
         "canceled": "stopped",
-        "failed": "error",
     }.get(job.status, job.status)
     result = job.result if isinstance(job.result, dict) else None
     return {
         "replay_id": job.id,
         "script": str(job.metadata.get("script") or ""),
         "status": status,
-        "ok": result.get("ok") if result is not None else (False if status in {"error", "stopped"} else None),
+        "runtime_status": job.status,
+        "ok": result.get("ok") if result is not None else (False if status in {"failed", "stopped"} else None),
         "error": job.error,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -323,6 +326,54 @@ def _try_start_scheduled(entry: dict[str, Any]) -> bool:
     schedule_id = str(entry.get("id") or "")
     if not task or not schedule_id:
         return False
+    reminder = agent_scheduler.reminder_message(task)
+    if reminder:
+        run_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+        job_id = f"schedule-{schedule_id}-{run_id}"
+        agent_scheduler.mark_started(schedule_id, run_id)
+        BUS.publish("schedule", action="queued", schedule_id=schedule_id, run_id=run_id)
+
+        def deliver_notification(_stop: threading.Event) -> dict[str, Any]:
+            BUS.publish(
+                "schedule",
+                action="start",
+                schedule_id=schedule_id,
+                run_id=run_id,
+                name=str(entry.get("name") or ""),
+            )
+            BUS.publish(
+                "user_notification",
+                run_id=run_id,
+                title=str(entry.get("name") or "提醒"),
+                body=reminder,
+                kind="info",
+                schedule_id=schedule_id,
+            )
+            agent_scheduler.mark_finished(schedule_id, run_id, "done")
+            result = {"ok": True, "run_id": run_id, "status": "done", "result": reminder}
+            BUS.publish(
+                "schedule",
+                action="finished",
+                schedule_id=schedule_id,
+                run_id=run_id,
+                status="done",
+                result=result,
+            )
+            return result
+
+        RUNTIME_JOBS.submit(
+            "notification",
+            deliver_notification,
+            resources=(),
+            metadata={"run_id": run_id, "task": task, "schedule_id": schedule_id},
+            job_id=job_id,
+            on_finish=lambda job: (
+                agent_scheduler.mark_finished(schedule_id, run_id, "canceled")
+                if job.status == "canceled"
+                else None
+            ),
+        )
+        return True
     max_steps = entry.get("max_steps")
     try:
         max_steps_override = int(max_steps) if max_steps else None
@@ -471,6 +522,12 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
     task = req.task.strip()
     if not task:
         raise HTTPException(400, "任务不能为空")
+    visible_chars = [char for char in task if not char.isspace()]
+    if len(visible_chars) >= 4 and visible_chars.count("?") / len(visible_chars) >= 0.5:
+        raise HTTPException(
+            400,
+            "任务文本疑似在客户端编码时损坏（大量 ?）；请使用 UTF-8 JSON 重新提交",
+        )
     with STATE.lock:
         if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行，请先停止")

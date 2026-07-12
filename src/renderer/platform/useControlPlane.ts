@@ -61,6 +61,14 @@ export function useControlPlane() {
             if (liveStartedRuns.current.size >= 200) liveStartedRuns.current.clear();
             liveStartedRuns.current.add(event.run_id);
           }
+          if (event.type === 'user_notification') {
+            void window.electronAPI?.notifyTaskbar?.(
+              String(event.title || '提醒'),
+              String(event.body || ''),
+              event.kind === 'error' || event.kind === 'success' ? event.kind : 'info',
+              String(event.run_id || ''),
+            );
+          }
           if (event.type !== 'ping') setEvents((items) => [...items.slice(-199), event]);
           if (refreshTimer.current) clearTimeout(refreshTimer.current);
           refreshTimer.current = setTimeout(refresh, 60);

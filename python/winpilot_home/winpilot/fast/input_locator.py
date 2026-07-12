@@ -27,6 +27,19 @@ _PLACEHOLDER_TERMS = (
 )
 _CARET_TEXTS = {"i", "l", "|", "丨", "︱"}
 _SEARCH_ICON_TEXTS = {"q", "o", "0", "🔍"}
+_SEARCH_SEMANTIC_TERMS = (
+    "search", "find", "query",
+    "搜索",
+    "搜素",  # common OCR substitution/transposition
+    "检索",
+    "查找",
+)
+_CHAT_TASK_RE = re.compile(
+    r"\b(?:chat|message|reply|send)\b|"
+    r"\u804a\u5929|\u53d1\u6d88\u606f|\u53d1\u4fe1\u606f|\u56de\u590d|"
+    r"\u79c1\u4fe1|\u6211\u7684\u624b\u673a|\bqq\b|\bwechat\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +99,23 @@ def _is_button_role(element: UIElement) -> bool:
     return _role_has(element, _BUTTON_ROLE_TERMS)
 
 
+def _is_compact_property_editor(element: UIElement, window: Region) -> bool:
+    """Detect inline list/detail editors that are not free-form inputs.
+
+    Windows file views expose item metadata such as ``Name=folder`` as UIA
+    Edit controls. Treating the first such control as a text box can rename
+    user data. A compact key/value editor is therefore unsafe without an exact
+    label or explicit focused state.
+    """
+    text = str(element.text or "").strip()
+    if not text or not re.match(r"^[^=\r\n]{1,32}=.+", text):
+        return False
+    states = {_norm(state) for state in element.states}
+    if "focused" in states:
+        return False
+    return int(element.width or 0) < int(window.width * 0.45)
+
+
 def _is_caret_like(element: UIElement) -> bool:
     text = _norm(element.text)
     return (
@@ -110,6 +140,58 @@ def _looks_like_field_label(text: object) -> bool:
         "\u76ee\u6807\u8f93\u5165\u6846",
     }
     return any(term in normalized for term in label_terms)
+
+
+def _looks_search_semantic(text: object) -> bool:
+    normalized = _norm(text)
+    if not normalized:
+        return False
+    # Magnifiers in owner-drawn fields are commonly OCR'd as Q/O/0 and merged
+    # into the placeholder token (for example "Q 搜素").
+    if normalized[:1] in _SEARCH_ICON_TEXTS and len(normalized) > 1:
+        normalized = normalized[1:]
+    return any(_norm(term) in normalized for term in _SEARCH_SEMANTIC_TERMS)
+
+
+def _wants_search(terms: Iterable[str]) -> bool:
+    return any(_looks_search_semantic(term) for term in terms)
+
+
+def _wants_browser_location(terms: Iterable[str]) -> bool:
+    markers = (
+        "address bar", "address and search bar", "location bar", "omnibox",
+        "url bar", "地址栏", "地址和搜索栏", "网址栏",
+    )
+    normalized = [_norm(term) for term in terms]
+    return any(
+        value and any(_norm(marker) in value or value in _norm(marker) for marker in markers)
+        for value in normalized
+    )
+
+
+def _wants_filename(terms: Iterable[str]) -> bool:
+    concrete = {
+        "filename", "file name", "filepath", "file path", "path",
+        "文件名", "文件名称", "文件路径", "路径",
+    }
+    normalized = [_norm(term) for term in terms]
+    return any(
+        value and any(_norm(item) in value or value in _norm(item) for item in concrete)
+        for value in normalized
+    )
+
+
+def _looks_like_filename_value(text: object) -> bool:
+    """Recognize field values, while excluding file-type descriptions."""
+    value = str(text or "").strip()
+    if not value or len(value) > 260 or "\n" in value:
+        return False
+    if re.fullmatch(r"\*\.[A-Za-z0-9*?_-]{1,16}", value):
+        return True
+    if any(char in value for char in "()（）") or any(char.isspace() for char in value):
+        return False
+    leaf = value.replace("/", "\\").rsplit("\\", 1)[-1]
+    return bool(re.fullmatch(r"[^<>:\"/\\|?*]{1,220}\.[A-Za-z0-9_-]{1,16}", leaf))
 
 
 def _terms(label: str = "", fallback_text: Iterable[str] = ()) -> list[str]:
@@ -138,16 +220,37 @@ def _requires_concrete_label_match(terms: list[str]) -> bool:
         "保存位置", "另存为", "saveas", "save as",
     }
     for term in terms:
+        if _looks_like_field_label(term):
+            return True
         key = _norm(term)
         if any(_norm(item) in key or key in _norm(item) for item in concrete):
             return True
     return False
 
 
+def _looks_like_browser_location_field(element: UIElement, window: Region) -> bool:
+    text = str(element.text or "").casefold()
+    normalized = _norm(text)
+    markers = (
+        "addressandsearchbar",
+        "addressbar",
+        "地址和搜索栏",
+        "地址栏",
+    )
+    urlish = "http://" in text or "https://" in text or "www." in text
+    top_wide = (
+        int(element.cy or 0) <= window.top + max(90, int(window.height * 0.14))
+        and int(element.width or 0) >= int(window.width * 0.45)
+    )
+    return top_wide and (urlish or any(_norm(marker) in normalized for marker in markers))
+
+
 def _text_score(text: str, terms: list[str]) -> tuple[float, str]:
     text_norm = _norm(text)
     if not text_norm or not terms:
         return 0.0, ""
+    if _looks_search_semantic(text) and _wants_search(terms):
+        return 0.28, "search semantic OCR match"
     for term in terms:
         term_norm = _norm(term)
         if text_norm == term_norm:
@@ -291,11 +394,14 @@ def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> 
         # Search icons are often OCR'd as Q/O. They are weak but useful when the
         # requested label itself says search/query.
         if not matched:
-            wants_search = any(_norm(t) in {"search", "搜索", "查找", "query"} for t in label_terms)
-            if wants_search and text_norm in _SEARCH_ICON_TEXTS:
+            wants_search = _wants_search(label_terms)
+            if wants_search and (
+                text_norm in _SEARCH_ICON_TEXTS
+                or _looks_search_semantic(text)
+            ):
                 matched = True
-                score = 0.42
-                reason = "possible search icon beside input"
+                score = 0.52
+                reason = "possible search icon/placeholder beside input"
         if not matched:
             continue
         h = max(26, min(54, int(element.height * 1.8) if element.height else 32))
@@ -331,15 +437,91 @@ def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> 
     return candidates
 
 
+def _chat_composer_candidate(
+    snapshot: Snapshot,
+    *,
+    task: str,
+    label_terms: list[str],
+    expected_region: str,
+) -> InputCandidate | None:
+    """Infer a custom-rendered chat composer from split-pane geometry.
+
+    This deliberately uses no application names, fixed pixels, or UIA class
+    identifiers. A target label repeated in a left list row and a right-side
+    header is strong evidence that a conversation is already open. Chat apps
+    commonly render the composer as an unlabeled custom surface below history.
+    """
+    context = " ".join([task or "", *label_terms])
+    expected = (expected_region or "").casefold().replace("_", "-")
+    if not _CHAT_TASK_RE.search(context) and expected not in {
+        "bottom", "lower", "bottom-right", "lower-right",
+    }:
+        return None
+    window = snapshot.region
+    task_norm = _norm(task)
+    by_text: dict[str, list[UIElement]] = {}
+    for element in snapshot.elements:
+        text = _norm(element.text)
+        if len(text) < 2 or int(element.width or 0) <= 0:
+            continue
+        by_text.setdefault(text, []).append(element)
+
+    matched_label = ""
+    for text, elements in by_text.items():
+        left_row = any(
+            int(element.cx) <= window.left + int(window.width * 0.17)
+            and int(element.cy) >= window.top + int(window.height * 0.10)
+            for element in elements
+        )
+        right_header = any(
+            int(element.cx) >= window.left + int(window.width * 0.15)
+            and int(element.cy) <= window.top + int(window.height * 0.16)
+            for element in elements
+        )
+        requested = text in task_norm or any(text in _norm(term) for term in label_terms)
+        if left_row and right_header and requested:
+            matched_label = text
+            break
+    if not matched_label:
+        return None
+
+    left = window.left + max(12, int(window.width * 0.18))
+    top = window.top + max(80, int(window.height * 0.82))
+    right_margin = max(12, int(window.width * 0.02))
+    bottom_margin = max(12, int(window.height * 0.025))
+    width = max(160, window.right - right_margin - left)
+    height = max(64, window.bottom - bottom_margin - top)
+    center = (left + width // 2, top + height // 2)
+    score = 0.92 + _region_match(
+        InputCandidate(None, (left, top, width, height), center, 0.0, "", ""),
+        window,
+        expected_region or "bottom-right",
+    )
+    return InputCandidate(
+        element=None,
+        bbox=(left, top, width, height),
+        center=center,
+        score=score,
+        source="synthetic_chat_composer",
+        reason=(
+            "target conversation header and list row are both visible; "
+            "synthetic message input in lower conversation pane"
+        ),
+    )
+
+
 def locate_input(
     snapshot: Snapshot,
     label: str = "",
     expected_region: str = "",
     fallback_text: Iterable[str] = (),
     min_score: float = 0.45,
+    task: str = "",
 ) -> InputLocateResult:
     terms = _terms(label, fallback_text)
     strict_label = _requires_concrete_label_match(terms)
+    wants_filename = _wants_filename(terms)
+    wants_location = _wants_browser_location(terms)
     scored: list[InputCandidate] = []
     for element in snapshot.elements:
         if _is_caret_like(element):
@@ -349,7 +531,10 @@ def locate_input(
         if _is_input_role(element):
             score += 0.70
             reason.append("input-like role")
-        elif str(element.text or "").strip() and any(_norm(p) in _norm(element.text) for p in _PLACEHOLDER_TERMS):
+        elif str(element.text or "").strip() and (
+            any(_norm(p) in _norm(element.text) for p in _PLACEHOLDER_TERMS)
+            or _looks_search_semantic(element.text)
+        ):
             if _looks_like_field_label(element.text):
                 score += 0.04
                 reason.append("field-label text; prefer nearby input box")
@@ -357,6 +542,13 @@ def locate_input(
                 score += 0.48
                 reason.append("placeholder/search-like text")
         elif "focused" in {_norm(s) for s in element.states} and not _is_button_role(element):
+            role = str(element.role or "").strip().casefold()
+            area_ratio = (
+                int(element.width or 0) * int(element.height or 0)
+                / max(1, int(snapshot.region.width) * int(snapshot.region.height))
+            )
+            if role in {"window", "pane", "document", "group"} or area_ratio >= 0.30:
+                continue
             score += 0.42
             reason.append("focused non-button element")
         else:
@@ -372,13 +564,62 @@ def locate_input(
         if element.source == "uia":
             score += 0.05
             reason.append("uia")
+        width_ratio = int(element.width or 0) / max(1, int(snapshot.region.width))
+        height_ratio = int(element.height or 0) / max(1, int(snapshot.region.height))
+        if width_ratio >= 0.40 and height_ratio <= 0.12:
+            score += 0.32
+            reason.append("wide single-line input geometry")
+        if wants_filename and _looks_like_filename_value(element.text):
+            score += 0.48
+            reason.append("filename value pattern matches requested field")
+        if "focused" in {_norm(state) for state in element.states}:
+            score += 0.20
+            reason.append("focused")
+        if _is_compact_property_editor(element, snapshot.region):
+            score -= 0.85
+            reason.append("compact key/value property editor is unsafe")
+        if (
+            int(element.width or 0) * int(element.height or 0)
+            > int(snapshot.region.width * snapshot.region.height * 0.30)
+            and "\n" in str(element.text or "")
+        ):
+            score -= 0.40
+            reason.append("large document surface, not a field")
+        is_location = _looks_like_browser_location_field(element, snapshot.region)
+        if is_location and wants_location:
+            score += 1.10
+            reason.append("explicit browser location intent")
+        elif is_location and not _wants_search(terms):
+            score -= 0.85
+            reason.append("browser location field conflicts with requested app input")
+        elif wants_location:
+            score -= 0.90
+            reason.append("not a browser location field")
         scored.append(_candidate_from_element(element, score, reason))
     scored.extend(_input_candidates_near_labels(snapshot, terms))
     scored.extend(_nearby_synthetic_candidates(snapshot, terms))
+    chat_composer = _chat_composer_candidate(
+        snapshot,
+        task=task,
+        label_terms=terms,
+        expected_region=expected_region,
+    )
+    if chat_composer is not None:
+        scored.append(chat_composer)
+    if wants_location:
+        location_candidates = [
+            candidate for candidate in scored
+            if candidate.element is not None
+            and _looks_like_browser_location_field(candidate.element, snapshot.region)
+        ]
+        if location_candidates:
+            scored = location_candidates
     if strict_label:
         label_linked = [
             cand for cand in scored
-            if "label" in cand.reason.casefold()
+            if cand.source == "synthetic_chat_composer"
+            or "label" in cand.reason.casefold()
+            or "filename value pattern" in cand.reason.casefold()
             or any(_norm(term) and _norm(term) in _norm(cand.element.text if cand.element else "") for term in terms)
         ]
         if not label_linked:
@@ -394,6 +635,12 @@ def locate_input(
     if expected_region:
         adjusted: list[InputCandidate] = []
         for cand in scored:
+            if (
+                "matches expected region" in cand.reason
+                or "outside expected region" in cand.reason
+            ):
+                adjusted.append(cand)
+                continue
             region_bonus = _region_match(cand, snapshot.region, expected_region)
             if region_bonus:
                 adjusted.append(InputCandidate(

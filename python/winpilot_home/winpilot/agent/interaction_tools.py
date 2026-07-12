@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import time
 from typing import Any
@@ -31,6 +32,18 @@ _POWER_TASK_ALLOW_TERMS = (
 )
 
 
+def _clipboard_sequence_number() -> int | None:
+    """Return the Windows clipboard generation without reading its payload."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
 def _looks_like_save_task(task: str) -> bool:
     text = (task or "").casefold()
     return any(marker in text for marker in (
@@ -48,6 +61,28 @@ def _looks_like_cancel_element(text: str, role: str) -> bool:
 def _looks_like_input_element(role: str) -> bool:
     role_text = (role or "").strip().casefold()
     return role_text in _INPUT_ROLES or "edit" in role_text or "combo" in role_text
+
+
+def _prefer_physical_text_input(element: Any, text: str, task: str) -> bool:
+    """Use real keyboard input where UIA SetValue is not a reliable commit.
+
+    Composite controls frequently expose a writable wrapper even though changing
+    that wrapper does not update the focused child editor.  Native and custom
+    file dialogs are a common example.  Treat this as a control-shape rule, not
+    an application rule: composite inputs and explicit file paths in save/open
+    workflows must go through the focused keyboard surface.
+    """
+    role = str(getattr(element, "role", "") or "").strip().casefold()
+    if "combo" in role or "\u7ec4\u5408\u6846" in role:
+        return True
+    value = str(text or "").strip().strip('"')
+    absolute_path = (
+        len(value) >= 3
+        and value[0].isalpha()
+        and value[1] == ":"
+        and value[2] in {"\\", "/"}
+    )
+    return bool(absolute_path and _looks_like_save_task(task))
 
 
 def _task_allows_power_action(task: str) -> bool:
@@ -68,6 +103,55 @@ def _looks_like_dangerous_power_element(text: str, role: str) -> bool:
         or not role_text
     )
     return clickable and any(term in label for term in _DANGEROUS_POWER_TERMS)
+
+
+def _normalize_draw_strokes(raw: object) -> list[list[list[int]]]:
+    """Normalize common model stroke encodings to ``[[[x, y], ...], ...]``.
+
+    Tool schemas describe canonical polylines, but text models frequently emit
+    either one unwrapped polyline (``[[x, y], ...]``) or line segments encoded
+    as ``[x1, y1, x2, y2]``.  Both are unambiguous and safe to normalize in the
+    controller instead of wasting LLM retries on array nesting.
+    """
+    if not isinstance(raw, list) or not raw:
+        return []
+
+    def number(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def point(value: object) -> bool:
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) >= 2
+            and number(value[0])
+            and number(value[1])
+        )
+
+    # A model often omits the outer list for a single polyline.
+    candidates: list[object]
+    if all(point(item) and len(item) == 2 for item in raw):
+        candidates = [raw]
+    else:
+        candidates = list(raw)
+
+    normalized: list[list[list[int]]] = []
+    for stroke in candidates:
+        if not isinstance(stroke, (list, tuple)) or not stroke:
+            continue
+        if all(number(value) for value in stroke):
+            values = [int(value) for value in stroke]
+            if len(values) < 4 or len(values) % 2:
+                continue
+            pts = [[values[index], values[index + 1]] for index in range(0, len(values), 2)]
+        else:
+            pts = [
+                [int(value[0]), int(value[1])]
+                for value in stroke
+                if point(value)
+            ]
+        if len(pts) >= 2:
+            normalized.append(pts)
+    return normalized
 
 
 def _tools_attr(name: str, default):
@@ -146,6 +230,23 @@ def normalize_key_sequence(raw: Any) -> list[str]:
             out.append(str(item))
         return out
     return [str(raw)]
+
+
+def canonical_hotkey_order(keys: list[str]) -> list[str]:
+    """Place chord modifiers first while preserving all relative ordering."""
+    aliases = {
+        "control": "ctrl",
+        "ctl": "ctrl",
+        "option": "alt",
+        "command": "meta",
+        "cmd": "meta",
+        "super": "meta",
+    }
+    normalized = [aliases.get(str(key).casefold(), str(key).casefold()) for key in keys]
+    modifiers = {"ctrl", "alt", "shift", "meta", "control_l", "control_r", "alt_l", "alt_r", "shift_l", "shift_r"}
+    chord_modifiers = [key for key in normalized if key in modifiers]
+    ordinary = [key for key in normalized if key not in modifiers]
+    return [*chord_modifiers, *ordinary] if chord_modifiers else normalized
 
 
 class InteractionToolMixin:
@@ -306,9 +407,12 @@ class InteractionToolMixin:
         verify_mod = _tools_attr("verify", verify)
         win32gui_mod = _tools_attr("win32gui", win32gui)
         text = str(args["text"])
+        keyboard_mode = str(args.get("keyboard_mode") or "").strip().casefold()
+        numeric_keypad = keyboard_mode in {"numeric", "numeric_keypad", "calculation"}
         element_id = args.get("element_id")
         replay: dict[str, Any] = {
             "tool": "type_text", "text_input": text, "expect": args.get("expect"),
+            "keyboard_mode": keyboard_mode,
         }
         if element_id is not None:
             element, err = self._resolve_element(int(element_id))
@@ -328,7 +432,12 @@ class InteractionToolMixin:
 
         def action() -> dict:
             if element is not None:
-                if executor_mod.uia_set_value(element, text):
+                prefer_physical = _prefer_physical_text_input(
+                    element,
+                    text,
+                    str(getattr(self, "task", "") or ""),
+                )
+                if not prefer_physical and executor_mod.uia_set_value(element, text):
                     return {"ok": True, "via": "uia_set_value"}
                 executor_mod.click(element.cx, element.cy, hwnd=self._action_hwnd())
                 time.sleep(0.15)
@@ -336,6 +445,8 @@ class InteractionToolMixin:
             if target and win32gui_mod.GetForegroundWindow() != target:
                 executor_mod.focus_window(target)
                 time.sleep(0.12)
+            if numeric_keypad:
+                return executor_mod.type_text(text, hwnd=target, numeric_keypad=True)
             return executor_mod.type_text(text, hwnd=target)
 
         result = verify_mod.run_with_verify(
@@ -352,7 +463,7 @@ class InteractionToolMixin:
         executor_mod = _tools_attr("executor", executor)
         verify_mod = _tools_attr("verify", verify)
         win32gui_mod = _tools_attr("win32gui", win32gui)
-        keys = normalize_key_sequence(args.get("keys"))
+        keys = canonical_hotkey_order(normalize_key_sequence(args.get("keys")))
         if not keys:
             return ToolResult("hotkey requires keys[]")
         printable_text = _printable_text_sequence(keys)
@@ -370,12 +481,49 @@ class InteractionToolMixin:
                 pass
             return result
 
+        key_set = {str(key).strip().casefold() for key in keys}
+        verifies_text_copy = (
+            "c" in key_set
+            and bool(key_set.intersection({"ctrl", "control", "ctl"}))
+        )
+        clipboard_sequence_before = (
+            _clipboard_sequence_number() if verifies_text_copy else None
+        )
+
         def action() -> dict:
             target = self._action_hwnd()
             if target and win32gui_mod.GetForegroundWindow() != target:
                 executor_mod.focus_window(target)
                 time.sleep(0.12)
-            return executor_mod.press_keys(keys)
+            result = executor_mod.press_keys(keys)
+            if not verifies_text_copy:
+                return result
+            time.sleep(0.08)
+            sequence_after = _clipboard_sequence_number()
+            clipboard_text = executor_mod.clipboard_read()
+            sequence_changed = (
+                clipboard_sequence_before is not None
+                and sequence_after is not None
+                and sequence_after != clipboard_sequence_before
+            )
+            copied_text = sequence_changed and bool(clipboard_text)
+            result.update({
+                "clipboard_sequence_changed": sequence_changed,
+                "clipboard_text_length": len(clipboard_text),
+                "clipboard_text_fingerprint": (
+                    hashlib.sha256(clipboard_text.encode("utf-8")).hexdigest()
+                    if clipboard_text
+                    else ""
+                ),
+                "verified": copied_text,
+                "verify_method": "clipboard_sequence_and_nonempty_text",
+                "verify_detail": (
+                    "Ctrl+C changed the Windows clipboard generation and produced non-empty text."
+                    if copied_text
+                    else "Ctrl+C was sent, but no new non-empty clipboard text was observed."
+                ),
+            })
+            return result
 
         result = verify_mod.run_with_verify(
             "hotkey", action,
@@ -589,19 +737,10 @@ class InteractionToolMixin:
         if not isinstance(raw, list) or not raw:
             return ToolResult("draw_strokes 需要 strokes: [[[x,y],...], ...]（至少一条笔画）")
         duration = float(args.get("duration", 0.4))
-        strokes: list[list[list[int]]] = []
+        strokes = _normalize_draw_strokes(raw)
         all_coords: list[tuple[int, int]] = []
-        for stroke in raw:
-            pts: list[list[int]] = []
-            for p in stroke or []:
-                try:
-                    x, y = int(p[0]), int(p[1])
-                except (TypeError, ValueError, IndexError, KeyError):
-                    continue
-                pts.append([x, y])
-                all_coords.append((x, y))
-            if len(pts) >= 2:
-                strokes.append(pts)
+        for stroke in strokes:
+            all_coords.extend((point[0], point[1]) for point in stroke)
         if not strokes:
             return ToolResult("draw_strokes 没有有效笔画（每条至少需要2个点）")
         xs = [c[0] for c in all_coords]
@@ -610,12 +749,17 @@ class InteractionToolMixin:
         region = Region(min(xs) - pad, min(ys) - pad,
                         max(1, max(xs) - min(xs) + 2 * pad),
                         max(1, max(ys) - min(ys) + 2 * pad)).clamp_to_screen()
+        deferred_verify = bool(args.get("defer_visual_verify"))
         before = None
-        try:
-            before = capture_fn(region)
-        except Exception as exc:
-            logger.debug("draw_strokes pre-capture failed: %s", exc)
+        if not deferred_verify:
+            try:
+                before = capture_fn(region)
+            except Exception as exc:
+                logger.debug("draw_strokes pre-capture failed: %s", exc)
         result = executor_mod.draw_strokes(strokes, duration_s=duration, hwnd=self.hwnd)
+        if deferred_verify:
+            result["visual_verify_deferred"] = True
+            result["verify_method"] = "batch-final-visual-verify"
         if before is not None:
             try:
                 time.sleep(0.12)

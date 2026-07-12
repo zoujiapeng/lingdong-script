@@ -35,7 +35,23 @@ GUI_SCOPE_MUTATIONS = {
     "run_action_batch",
     "execute_subgoal",
 }
-_SCOPE_RECOVERY_TOOLS = {"launch", "focus_window", "tray_click", "scan_windows", "list_windows"}
+_SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "scan_windows", "list_windows"}
+_CONTROL_PLANE_TITLES = (
+    "灵动脚本",
+    "winpilot",
+    "lingdong script",
+    "lingdong-script",
+)
+
+
+def _is_control_plane_title(title: str) -> bool:
+    folded = str(title or "").strip().casefold()
+    return any(marker.casefold() in folded for marker in _CONTROL_PLANE_TITLES)
+
+
+def _task_targets_control_plane(session) -> bool:
+    task = str(getattr(session, "task", "") or "").casefold()
+    return any(marker.casefold() in task for marker in _CONTROL_PLANE_TITLES)
 
 
 def _title(hwnd: int | None) -> str:
@@ -127,7 +143,44 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     before = _context(session)
     foreground = before.get("foreground_hwnd")
     target = before.get("target_hwnd") or target
+    if not _task_targets_control_plane(session) and (
+        _is_control_plane_title(str(before.get("foreground_title") or ""))
+        or _is_control_plane_title(str(before.get("target_title") or ""))
+    ):
+        payload = {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "error": (
+                "scope_guard blocked a desktop mutation targeting WinPilot's own "
+                "control-plane window. Launch/focus the user's target application first."
+            ),
+            "tool": tool_name,
+            "scope_guard": {
+                "before": before,
+                "after": before,
+                "recovery_attempted": False,
+                "self_control_plane": True,
+            },
+            "needs_observe": True,
+        }
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
     if _same_or_related(session, foreground, target):
+        return None
+
+    # Modern apps frequently replace their top-level hwnd during navigation,
+    # document creation, or tab/window promotion.  A visible foreground sibling
+    # from the same process is a stronger app-identity signal than a stale hwnd.
+    # Adopt it before trying to drag focus back to the obsolete window.
+    try:
+        same_process = bool(session._same_window_process(foreground, target))
+    except Exception:
+        same_process = False
+    if same_process and _window_alive(foreground):
+        try:
+            session._remember_target(foreground, str(before.get("foreground_title") or ""))
+        except Exception:
+            pass
         return None
 
     recovered = _focus(target)

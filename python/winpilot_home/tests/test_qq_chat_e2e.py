@@ -57,7 +57,7 @@ class TestVisionPrompt:
 
         assert "draw={shape,color}" in prompt
         assert "verify-only execute_subgoal" in prompt
-        assert "launch/find_app/focus_window" in prompt
+        assert "open_app/launch/focus_window" in prompt
         prompt_with_plan = system_prompt(main_model_has_vision=False, planning_enabled=True)
         assert "If a current todo plan is already shown, follow it" in prompt_with_plan
 
@@ -65,44 +65,43 @@ class TestVisionPrompt:
         from winpilot.agent.loop import _main_model_has_vision
 
         vision_models = [
-            "mimo-v2-omni", "qwen2.5-vl-72b", "gpt-4o",
+            "mimo-v2-omni", "mimo-v2.5", "qwen2.5-vl-72b", "gpt-4o",
             "gpt-4o-mini", "omni-latest", "llava-vision",
         ]
         text_models = [
             "deepseek-v4-flash", "deepseek-v4-pro",
             "deepseek-chat", "deepseek-reasoner",
-            "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro",
+            "mimo-v2.5-pro", "mimo-v2-pro",
         ]
 
         with patch("winpilot.agent.loop.CONFIG") as mock_cfg:
             for model in vision_models:
-                mock_cfg.get.return_value = model
+                mock_cfg.get.return_value = {
+                    "base_url": "https://api.xiaomimimo.com/v1",
+                    "model": model,
+                }
                 assert _main_model_has_vision() is True, f"expected vision for {model}"
             for model in text_models:
-                mock_cfg.get.return_value = model
+                mock_cfg.get.return_value = {
+                    "base_url": "https://api.xiaomimimo.com/v1",
+                    "model": model,
+                }
                 assert _main_model_has_vision() is False, f"expected no vision for {model}"
 
     def test_screenshot_injected_after_observe_for_vision_model(self):
         """_inject_observe_screenshot should append an image_url message when
-        the main model is vision-capable and an hwnd is set.
-
-        cv2/base64/capture are imported inside the function body (lazy), so we
-        patch them at their canonical module paths, not on the loop module.
+        the main model is vision-capable and an hwnd is set.  The message must
+        also describe how image-local coordinates map back to physical pixels.
         """
+        from winpilot.utils.screenshot import Region
+
         runner = _make_runner()
         runner.messages = [{"role": "system", "content": "sys"}]
 
-        import numpy as np
-        fake_img = np.zeros((200, 300, 3), dtype="uint8")
-        fake_buf = MagicMock()
-        fake_buf.tobytes.return_value = b"\xff\xd8\xff"
-
         with patch("winpilot.agent.loop._main_model_has_vision", return_value=True), \
              patch.object(runner.session, "hwnd", 12345), \
-             patch("winpilot.utils.screenshot.window_region", return_value=(0, 0, 300, 200), create=True), \
-             patch("winpilot.utils.screenshot.capture", return_value=fake_img, create=True), \
-             patch("cv2.resize", return_value=fake_img), \
-             patch("cv2.imencode", return_value=(True, fake_buf)):
+             patch("winpilot.agent.loop.window_region", return_value=Region(120, 80, 1400, 900)), \
+             patch("winpilot.agent.loop.capture_window_jpeg_b64", return_value="ZmFrZQ=="):
 
             runner._inject_observe_screenshot()
 
@@ -113,6 +112,10 @@ class TestVisionPrompt:
             and any(p.get("type") == "image_url" for p in m["content"])
         ]
         assert len(image_msgs) == 1
+        text_part = next(part for part in image_msgs[0]["content"] if part.get("type") == "text")
+        assert "left=120, top=80, width=1400, height=900" in text_part["text"]
+        assert "1120x720" in text_part["text"]
+        assert "physical" in text_part["text"].lower() or "物理" in text_part["text"]
 
     def test_no_screenshot_injected_for_text_model(self):
         """No injection when model lacks vision."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -22,6 +23,36 @@ SCHEDULES_PATH = Path(
     or ROOT_DIR / "agent_schedules.json"
 )
 _lock = threading.Lock()
+_CREATE_DEDUPE_WINDOW_S = 30.0
+
+
+def _task_key(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def reminder_message(task: str) -> str:
+    """Return a literal message for a reminder-only scheduled task.
+
+    Reminder delivery is deterministic runtime work, not an open-ended Agent
+    planning problem. Mixed tasks (open/calculate/send/etc.) deliberately do
+    not match and continue through AgentRunner.
+    """
+    text = str(task or "").strip()
+    folded = text.casefold()
+    if not ("提醒" in text or re.search(r"\bremind\b", folded)):
+        return ""
+    if any(marker in folded for marker in (
+        "打开", "启动", "运行", "计算", "发送", "搜索", "保存", "写入",
+        "open ", "launch", "start ", "calculate", "send ", "search ", "save ",
+    )):
+        return ""
+    quoted = re.findall(r'["“「]([^"”」]{1,240})["”」]', text)
+    if quoted:
+        return quoted[-1].strip()
+    chinese = re.sub(r"^.*?提醒(?:我|用户)?", "", text, count=1).strip(" ，,：:。")
+    english = re.sub(r"^.*?\bremind(?:\s+me)?\b", "", text, count=1, flags=re.IGNORECASE).strip(" ,:.")
+    message = chinese if chinese and chinese != text else english
+    return message[:240] or "提醒时间到了"
 
 
 def _now() -> datetime:
@@ -121,6 +152,22 @@ def create_task(
         entry["max_steps"] = int(max_steps)
     with _lock:
         items = _read_unlocked()
+        now = _now()
+        for existing in items:
+            existing_due = _parse_time(existing.get("next_run_at"))
+            existing_created = _parse_time(existing.get("created_at"))
+            if (
+                existing.get("enabled", True)
+                and _task_key(existing.get("task")) == _task_key(task)
+                and existing.get("interval_seconds") == interval
+                and existing_due is not None
+                and abs((existing_due - due).total_seconds()) <= _CREATE_DEDUPE_WINDOW_S
+                and existing_created is not None
+                and abs((now - existing_created).total_seconds()) <= _CREATE_DEDUPE_WINDOW_S
+            ):
+                duplicate = dict(existing)
+                duplicate["deduplicated"] = True
+                return duplicate
         items.append(entry)
         _write_unlocked(items)
     return entry

@@ -45,7 +45,24 @@ class LocateResult:
 
 
 def _region_match(element: UIElement, window: Region, expected: str) -> bool:
-    expected = (expected or "").casefold().replace("_", "-").replace(" ", "-")
+    expected = (
+        (expected or "").casefold()
+        .replace("_", "-")
+        .replace(" ", "-")
+        .replace("/", "-")
+    )
+    semantic_aliases = {
+        "会话列表": "left-list",
+        "联系人列表": "left-list",
+        "聊天列表": "left-list",
+        "左侧列表": "left-list",
+        "conversation-list": "left-list",
+        "contact-list": "left-list",
+        "chat-list": "left-list",
+        "sidebar-list": "left-list",
+        "list-pane": "left-list",
+    }
+    expected = semantic_aliases.get(expected, expected)
     if not expected:
         return True
     rel_x = (element.cx - window.left) / max(1, window.width)
@@ -56,6 +73,10 @@ def _region_match(element: UIElement, window: Region, expected: str) -> bool:
         return rel_y >= 0.65
     if expected in {"left"}:
         return rel_x <= 0.35
+    if expected == "left-list":
+        # Exclude narrow navigation rails and bottom utility/profile icons,
+        # while retaining the normal content list beside that rail.
+        return 0.035 <= rel_x <= 0.42 and 0.06 <= rel_y <= 0.90
     if expected in {"right"}:
         return rel_x >= 0.65
     if expected in {"top-right", "upper-right"}:
@@ -112,8 +133,24 @@ def _role_penalty(element: UIElement, anchor: VisualAnchor) -> float:
     if not requested:
         return 0.0
     current = _role_family(element.role)
+    if requested == "row_header":
+        # OCR-only spreadsheets expose row headers as plain numeric text. A
+        # name box such as A1 is not a row header even when label="1" is a
+        # substring match.
+        if re.fullmatch(r"\d{1,6}", str(element.text or "").strip()):
+            return 0.14
+        return -1.10
+    if requested == "column_header":
+        if re.fullmatch(r"[A-Z]{1,3}", str(element.text or "").strip(), re.IGNORECASE):
+            return 0.14
+        return -1.10
     if requested == current:
         return 0.12
+    # A model-level "button" means an actionable command, not necessarily the
+    # literal UIA Button control type. Native menus, links, and tabs should beat
+    # a wider OCR text run when their label is an exact match.
+    if {requested, current} == {"button", "command"}:
+        return 0.06
     # OCR-only custom controls often surface as text even when they are really
     # buttons. Keep them viable, but do not let native browser chrome or normal
     # text fields win just because a fallback term matched.
@@ -128,16 +165,25 @@ def _role_penalty(element: UIElement, anchor: VisualAnchor) -> float:
 
 def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
     text = (element.text or "").casefold()
-    terms = _terms(anchor)
+    primary = (anchor.label or "").casefold()
+    fallbacks = [term.casefold() for term in anchor.fallback_text if term]
+    terms = [term for term in [primary, *fallbacks] if term]
     score = 0.0
     if terms:
-        for term in terms:
+        if primary:
+            if text == primary:
+                score = 1.16
+            elif primary in text:
+                score = 0.82
+            elif text and text in primary:
+                score = 0.55
+        for term in fallbacks:
             if text == term:
                 score = max(score, 1.0)
             elif term in text:
-                score = max(score, 0.82)
+                score = max(score, 0.74)
             elif text and text in term:
-                score = max(score, 0.55)
+                score = max(score, 0.50)
         # Accessibility trees can expose hidden tabs, logs, and JSON blobs.
         # A substring inside a large body of text is not a click target.
         longest_term = max((len(term) for term in terms), default=0)

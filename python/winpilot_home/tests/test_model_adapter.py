@@ -31,6 +31,13 @@ def test_profile_infers_provider_and_vision_capability():
     assert mimo_text.provider == "mimo"
     assert mimo_text.supports_vision is False
 
+    mimo_v25 = model_profile_from_config({
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5",
+    })
+    assert mimo_v25.provider == "mimo"
+    assert mimo_v25.supports_vision is True
+
     mimo_vision = model_profile_from_config({
         "base_url": "https://api.xiaomimimo.com/v1",
         "model": "mimo-v2-omni",

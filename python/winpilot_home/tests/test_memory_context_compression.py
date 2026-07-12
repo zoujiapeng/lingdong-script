@@ -104,6 +104,40 @@ def test_fold_checkpoint_preserves_goal_screen_and_recent_evidence():
     assert "folded_item: [folded] bulky observation 0" in folded
 
 
+def test_fresh_shell_evidence_is_not_reduced_to_ok_only():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    raw = json.dumps({
+        "ok": True,
+        "exit_code": 0,
+        "stdout": "FILE_EXISTS\nLINE_COUNT=366\nREPORT_READY",
+        "stderr": "",
+    })
+
+    compact = AgentRunner._compact_tool_evidence("run_shell", raw)
+
+    assert compact == raw
+    assert "FILE_EXISTS" in compact
+    assert "LINE_COUNT=366" in compact
+
+
+def test_large_shell_output_keeps_a_bounded_stdout_prefix():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    raw = json.dumps({"ok": True, "exit_code": 0, "stdout": "MARKER\n" + "x" * 12000})
+    compact = json.loads(AgentRunner._compact_tool_evidence("run_shell", raw))
+
+    assert compact["ok"] is True
+    assert compact["exit_code"] == 0
+    assert compact["stdout"].startswith("MARKER\n")
+    assert "truncated" in compact["stdout"]
+    assert len(compact["stdout"]) < 5100
+
+
 def test_legacy_playbook_gets_conditions_and_evidence(tmp_path, monkeypatch):
     import json
 
