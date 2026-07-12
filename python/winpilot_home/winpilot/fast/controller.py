@@ -16,7 +16,7 @@ from ..agent.tool_result import ToolResult
 from ..action.desktop_queue import DESKTOP_ACTION_QUEUE
 from ..action.raw_device import RawDeviceExecutor
 from ..config import CONFIG
-from ..perception import ocr, uia, vision_cv
+from ..perception import ocr, uia, vision_cv, vlm
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .action_contract import (
@@ -847,6 +847,96 @@ class FastGuiController:
             "color_counts": counts,
         }
 
+    def _visible_color_label_point(
+        self,
+        region: Region,
+        color: str,
+    ) -> tuple[tuple[int, int] | None, dict[str, Any]]:
+        """Locate a labeled color control after a CV swatch miss.
+
+        Owner-drawn palettes often expose no accessible text.  A local visual
+        grounding pass is a robust fallback because it returns a real screen
+        bbox rather than a palette-specific hard-coded coordinate.
+        """
+        wanted = _norm_text(color)
+        aliases = {wanted}
+        aliases.update({
+            "red": "红色", "blue": "蓝色", "green": "绿色",
+            "yellow": "黄色", "orange": "橙色", "purple": "紫色",
+            "black": "黑色", "white": "白色", "pink": "粉色",
+        }.get(wanted, "").split())
+        aliases.discard("")
+        toolbar = Region(
+            region.left,
+            region.top,
+            region.width,
+            max(120, min(region.height, int(region.height * 0.48))),
+        ).clamp_to_screen()
+        candidates = list(getattr(getattr(self.session, "snapshot", None), "elements", []) or [])
+        source = "snapshot"
+        # A palette/dropdown can create fresh accessible children after the
+        # parent control was clicked.  The session snapshot intentionally
+        # stays stable during a batch, so refresh this narrow UIA surface
+        # before falling back to a costly visual grounding pass.
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        if hwnd and "uia" in CONFIG.enabled_dimensions():
+            try:
+                candidates.extend(uia.collect(hwnd))
+                source = "snapshot+uia"
+            except Exception:
+                pass
+        has_exact_structured_match = any(
+            _norm_text(getattr(element, "text", "")) == wanted
+            and str(getattr(element, "source", "") or "").casefold() in {"uia", "win32"}
+            for element in candidates
+        )
+        if not has_exact_structured_match and vlm.is_configured():
+            try:
+                candidates.extend(vlm.collect(toolbar))
+                source = f"{source}+vlm"
+            except Exception as exc:
+                return None, {"source": source, "error": str(exc)}
+        matches: list[tuple[bool, Any]] = []
+        for element in candidates:
+            raw_label = str(getattr(element, "text", "") or "").strip()
+            label = _norm_text(raw_label)
+            if not label:
+                continue
+            exact = label in aliases
+            token_match = any(
+                (alias in label if not alias.isascii() else bool(re.search(
+                    rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
+                    raw_label.casefold(),
+                )))
+                for alias in aliases
+            )
+            if not exact and not token_match:
+                continue
+            x, y = int(getattr(element, "cx", 0) or 0), int(getattr(element, "cy", 0) or 0)
+            if toolbar.left <= x <= toolbar.right and toolbar.top <= y <= toolbar.bottom:
+                matches.append((exact, element))
+        if not matches:
+            return None, {"source": source, "match_count": 0}
+        def match_priority(item: tuple[bool, Any]) -> tuple[int, int, int, float]:
+            exact, element = item
+            source = str(getattr(element, "source", "") or "").casefold()
+            role = str(getattr(element, "role", "") or "").casefold()
+            source_rank = {"uia": 0, "win32": 1, "ocr": 2, "vlm": 3}.get(source, 4)
+            role_rank = 0 if role in {"button", "menuitem", "radio", "listitem", "checkbox"} else 1
+            return (0 if exact else 1, source_rank, role_rank, -float(getattr(element, "confidence", 0.0) or 0.0))
+
+        matches.sort(key=match_priority)
+        chosen = matches[0][1]
+        return (
+            (int(getattr(chosen, "cx", 0)), int(getattr(chosen, "cy", 0))),
+            {
+                "source": source,
+                "element_source": str(getattr(chosen, "source", "")),
+                "label": str(getattr(chosen, "text", "")),
+                "match_count": len(matches),
+            },
+        )
+
     def _palette_cache_key(self, region: Region) -> tuple[int, int, int, int, int]:
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
         return (hwnd, int(region.left), int(region.top), int(region.width), int(region.height))
@@ -891,25 +981,70 @@ class FastGuiController:
                 "elapsed_ms": max(0, _now_ms() - started),
             }, ensure_ascii=False))
         label_terms = {"colors", "colour", "color", "颜色", "色彩", "顏色"}
-        candidates = []
-        for element in elements:
+        def is_color_label(element: Any) -> bool:
             text = _norm_text(getattr(element, "text", ""))
-            if not text:
-                continue
-            if text in label_terms or any(term in text for term in label_terms):
+            return bool(text) and (
+                text in label_terms or any(term in text for term in label_terms)
+            )
+
+        # Prefer the live fused snapshot when it contains an accessible
+        # control.  Its centre is an actual physical click target, unlike an
+        # OCR/VLM label baseline which may need a conservative offset.
+        candidates = [
+            element
+            for element in list(getattr(getattr(self.session, "snapshot", None), "elements", []) or [])
+            if is_color_label(element)
+            and toolbar.left <= int(getattr(element, "cx", 0) or 0) <= toolbar.right
+            and toolbar.top <= int(getattr(element, "cy", 0) or 0) <= toolbar.bottom
+        ]
+        for element in elements:
+            if is_color_label(element):
                 candidates.append(element)
+        locator_source = "snapshot" if candidates else "ocr"
+        vlm_ms = 0
+        if not candidates and vlm.is_configured():
+            # Owner-drawn ribbons commonly expose only a color icon to OCR.
+            # Escalate this one local control lookup to VLM rather than making
+            # the planner repeatedly re-observe the whole application.
+            try:
+                vlm_started = _now_ms()
+                visual_elements = vlm.collect(toolbar)
+                vlm_ms = max(0, _now_ms() - vlm_started)
+                for element in visual_elements:
+                    text = _norm_text(getattr(element, "text", ""))
+                    if text and (text in label_terms or any(term in text for term in label_terms)):
+                        candidates.append(element)
+                if candidates:
+                    locator_source = "vlm"
+            except Exception as exc:
+                logger.debug("color palette VLM locator failed: %s", exc)
         if not candidates:
             return ToolResult(json.dumps({
                 "ok": False,
                 "error": "no visible Colors/颜色 toolbar label found",
                 "elapsed_ms": max(0, _now_ms() - started),
                 "ocr_ms": ocr_ms,
+                "vlm_ms": vlm_ms,
             }, ensure_ascii=False))
-        candidates.sort(key=lambda element: int(getattr(element, "cy", 0) or 0))
+        def candidate_priority(element: Any) -> tuple[int, int, int]:
+            source = str(getattr(element, "source", "") or "").casefold()
+            role = str(getattr(element, "role", "") or "").casefold()
+            source_rank = {"uia": 0, "win32": 1, "ocr": 2, "vlm": 3}.get(source, 4)
+            role_rank = 0 if role in {"button", "menuitem", "radio", "checkbox", "combobox"} else 1
+            return source_rank, role_rank, int(getattr(element, "cy", 0) or 0)
+
+        candidates.sort(key=candidate_priority)
         label = candidates[0]
         x = int(getattr(label, "cx", 0) or 0)
         y = int(getattr(label, "cy", 0) or 0)
-        offset = max(34, min(82, int(region.height * 0.10)))
+        source = str(getattr(label, "source", "") or "").casefold()
+        role = str(getattr(label, "role", "") or "").casefold()
+        structured_control = source in {"uia", "win32"} and role in {
+            "button", "menuitem", "radio", "checkbox", "combobox",
+        }
+        # Only unstructured label detections need an upward shift to their
+        # owner-drawn button; structured controls are clicked at their centre.
+        offset = 0 if structured_control else max(34, min(82, int(region.height * 0.10)))
         click_y = max(region.top + 8, y - offset)
         if cache_key is not None:
             self._color_palette_button_cache[cache_key] = (x, click_y)
@@ -919,6 +1054,8 @@ class FastGuiController:
             "cached": False,
             "elapsed_ms": max(0, _now_ms() - started),
             "ocr_ms": ocr_ms,
+            "vlm_ms": vlm_ms,
+            "locator_source": locator_source,
             "point": {"x": x, "y": click_y},
             "click": _json_dict(click.text),
             "preview": click.text[:240],
@@ -962,7 +1099,10 @@ class FastGuiController:
             if not _failed(click):
                 return ToolResult(json.dumps({
                     "ok": True,
-                    "verified": True,
+                    "verified": False,
+                    "mutation_applied": True,
+                    "postcondition_pending": True,
+                    "needs_observe": True,
                     "color": color,
                     "point": {"x": cached_swatch[0], "y": cached_swatch[1]},
                     "verify_method": "cached-cv-color-swatch",
@@ -1058,6 +1198,14 @@ class FastGuiController:
                 if not _failed(opened):
                     scan_after_open("scan_after_uncached_open")
         if point is None:
+            point, label_meta = self._visible_color_label_point(region, color)
+            attempts.append({
+                "action": "locate_labeled_color_control",
+                "ok": point is not None,
+                "point": {"x": point[0], "y": point[1]} if point else None,
+                **label_meta,
+            })
+        if point is None:
             return ToolResult(json.dumps({
                 "ok": False,
                 "verified": False,
@@ -1078,10 +1226,13 @@ class FastGuiController:
         ok = not _failed(click)
         return ToolResult(json.dumps({
             "ok": ok,
-            "verified": ok,
+            "verified": False,
+            "mutation_applied": bool(ok),
+            "postcondition_pending": bool(ok),
+            "needs_observe": bool(ok),
             "color": color,
             "point": {"x": point[0], "y": point[1]},
-            "verify_method": "cv-color-swatch",
+            "verify_method": "candidate-color-click",
             "attempts": attempts,
         }, ensure_ascii=False, default=str))
 
@@ -2367,6 +2518,15 @@ class FastGuiController:
                 if stop_on_error:
                     break
                 continue
+            # Scope guard every mutation before any controller-local work.
+            # Some actions such as select_color perform capture/recognition
+            # before their eventual raw click; guarding only RawDeviceExecutor
+            # let those actions inspect an occluding foreground window.
+            scope_blocked = None
+            if name in BATCH_MUTATING_ACTIONS:
+                from ..agent import scope_guard
+
+                scope_blocked = scope_guard.ensure_scope(self.session, name, normalised_args)
             epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             started = _now_ms()
             self._publish_child_start(batch_id, index, name, normalised_args)
@@ -2380,7 +2540,9 @@ class FastGuiController:
                 text_appears
                 and any(text_appears in literal for literal in typed_literals)
             )
-            if self_fulfilling_wait:
+            if scope_blocked is not None:
+                result = scope_blocked
+            elif self_fulfilling_wait:
                 result = ToolResult(json.dumps({
                     "ok": False,
                     "verified": False,
@@ -2531,11 +2693,19 @@ class FastGuiController:
                 and data.get("mutation_applied") is True
                 and data.get("postcondition_pending") is True
             )
+            visual_no_progress = bool(
+                name in {"draw_strokes", "drag"}
+                and data.get("visual_change_detected") is False
+                and not data.get("visual_verify_deferred")
+            )
             failed = _failed(result) or plain_error or (
                 has_expect
                 and data.get("verified") is False
                 and not deferred_postcondition
-            ) or evidence_requirement_failed
+            ) or evidence_requirement_failed or visual_no_progress
+            if visual_no_progress and not data.get("error"):
+                data["error"] = "visual action produced no pixel change in its intended region"
+                data["failure_type"] = "DRAW_NO_VISIBLE_CHANGE"
             if failed and optional_action:
                 item["optional_failed"] = True
                 failed = False
@@ -2552,6 +2722,8 @@ class FastGuiController:
                 setattr(self.session, "_observe_cache", None)
             if evidence_requirement_failed:
                 item["error"] = "required controller evidence was not observed"
+            elif visual_no_progress:
+                item["error"] = data["error"]
             if "verified" in data:
                 item["verified"] = evidence_requirement_verified or bool(data.get("verified"))
             if data:

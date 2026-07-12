@@ -497,7 +497,14 @@ def _successful_draw_scene_specs(
         spec = draw_specs[draw_index] if draw_index < len(draw_specs) else None
         draw_index += 1
         result = results.get(action_index)
-        if spec is not None and isinstance(result, dict) and result.get("ok") is True:
+        data = result.get("data") if isinstance(result, dict) else None
+        visual_change = data.get("visual_change_detected") if isinstance(data, dict) else None
+        if (
+            spec is not None
+            and isinstance(result, dict)
+            and result.get("ok") is True
+            and visual_change is True
+        ):
             successful.append(dict(spec))
     return successful
 
@@ -1915,10 +1922,10 @@ def _normalized_line_geometry(
         use_offsets = offset_length + 1e-6 < endpoint_length
     second_x = first_x + third if use_offsets else third
     second_y = first_y + fourth if use_offsets else fourth
-    first_x = min(1000.0, max(0.0, first_x))
-    first_y = min(1000.0, max(0.0, first_y))
-    second_x = min(1000.0, max(0.0, second_x))
-    second_y = min(1000.0, max(0.0, second_y))
+    first_x = _safe_canvas_coordinate(first_x)
+    first_y = _safe_canvas_coordinate(first_y)
+    second_x = _safe_canvas_coordinate(second_x)
+    second_y = _safe_canvas_coordinate(second_y)
 
     def screen_point(x: float, y: float) -> list[int]:
         return [
@@ -1939,6 +1946,16 @@ def _normalized_line_geometry(
     return [[first, second]], region
 
 
+def _safe_canvas_coordinate(value: float) -> float:
+    """Keep normalized drawing points out of canvas borders and scrollbars."""
+    bounded = min(1000.0, max(0.0, float(value)))
+    if bounded <= 0.0:
+        return 30.0
+    if bounded >= 1000.0:
+        return 970.0
+    return bounded
+
+
 def _normalized_point_geometry(
     canvas: Region,
     raw: Any,
@@ -1954,8 +1971,8 @@ def _normalized_point_geometry(
         return None
     points = [
         [
-            canvas.left + int(round(canvas.width * min(1000.0, max(0.0, values[i])) / 1000.0)),
-            canvas.top + int(round(canvas.height * min(1000.0, max(0.0, values[i + 1])) / 1000.0)),
+            canvas.left + int(round(canvas.width * _safe_canvas_coordinate(values[i]) / 1000.0)),
+            canvas.top + int(round(canvas.height * _safe_canvas_coordinate(values[i + 1]) / 1000.0)),
         ]
         for i in range(0, len(values), 2)
     ]
@@ -1984,8 +2001,8 @@ def _normalized_strokes_to_screen(canvas: Region, raw: Any) -> list[list[list[in
             if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
                 continue
             try:
-                x = min(1000.0, max(0.0, float(raw_point[0])))
-                y = min(1000.0, max(0.0, float(raw_point[1])))
+                x = _safe_canvas_coordinate(float(raw_point[0]))
+                y = _safe_canvas_coordinate(float(raw_point[1]))
             except (TypeError, ValueError):
                 continue
             stroke.append([
@@ -2007,6 +2024,7 @@ class SubgoalExecutor:
     def _target_hwnd(self, request: SubgoalRequest, allow_foreground: bool = True) -> int | None:
         target = request.target_window or {}
         title = str(target.get("title") or "").strip()
+        process = str(target.get("process") or target.get("exe") or "").strip()
         hwnd = target.get("hwnd")
         try:
             if hwnd:
@@ -2021,6 +2039,16 @@ class SubgoalExecutor:
             pass
         except Exception:
             pass
+        if process:
+            try:
+                app = win32.find_app(process)
+                for candidate in app.get("windows") or []:
+                    candidate_hwnd = int(candidate.get("hwnd") or 0)
+                    if candidate_hwnd and candidate.get("visible"):
+                        setattr(self.session, "hwnd", candidate_hwnd)
+                        return candidate_hwnd
+            except Exception:
+                pass
         session_hwnd = getattr(self.session, "hwnd", None)
         if title and allow_foreground:
             try:
@@ -2075,7 +2103,11 @@ class SubgoalExecutor:
     def _ensure_observed(self, request: SubgoalRequest) -> tuple[Snapshot | None, list[dict[str, Any]], bool]:
         prelude: list[dict[str, Any]] = []
         skip_click_auto_observe = False
-        pure_draw = bool(_draw_specs(request) and not request.input and not request.clicks and not request.verify_texts)
+        draw_specs = _draw_specs(request)
+        pure_draw = bool(draw_specs and not request.input and not request.clicks and not request.verify_texts)
+        requires_color_selection = any(
+            str(spec.get("color") or "").strip() for spec in draw_specs
+        )
         hwnd = self._target_hwnd(request, allow_foreground=not pure_draw)
         if hwnd:
             try:
@@ -2099,14 +2131,17 @@ class SubgoalExecutor:
                     "preview": f"discarded snapshot hwnd={snapshot_hwnd}; target hwnd={int(hwnd)}",
                 })
         if getattr(self.session, "snapshot", None) is None:
-            if _draw_specs(request) and not request.input and not request.clicks and not request.verify_texts:
+            if pure_draw and not requires_color_selection:
                 prelude.append({
                     "action": "draw_direct_canvas_capture",
                     "ok": True,
-                    "preview": "pure draw routine skipped initial observe; controller will wait for a ready canvas and locate the likely drawing surface",
+                    "preview": "colorless draw routine skipped initial observe; controller will wait for a ready canvas and locate the likely drawing surface",
                 })
                 return None, prelude, skip_click_auto_observe
-            targeted = self._targeted_initial_snapshot(request)
+            # A colored drawing routine needs both the canvas and live tool
+            # state (palette, opacity, brush). A canvas-only ROI snapshot can
+            # hide those prerequisites and lead to a visually wrong stroke.
+            targeted = None if requires_color_selection else self._targeted_initial_snapshot(request)
             if targeted is not None:
                 self.session.snapshot = targeted
                 targeted_meta = targeted.dim_stats.get("targeted_initial", {})
@@ -2207,6 +2242,48 @@ class SubgoalExecutor:
             "skip_auto_observe": True,
             "context": "focus central editable document surface",
         }
+
+    def _drawing_opacity_action(self, request: SubgoalRequest) -> dict[str, Any] | None:
+        """Restore a solid drawing surface when an accessible opacity slider says otherwise.
+
+        This is intentionally based on role + visible state, not an
+        application name: an explicitly transparent request is left untouched,
+        while a color drawing request gets a high-opacity click on a live
+        slider before the local drawing routine starts.
+        """
+        requested = " ".join([
+            request.subgoal,
+            str(getattr(self.session, "task", "") or ""),
+        ]).casefold()
+        if any(term in requested for term in ("transparent", "translucent", "opacity", "半透明", "透明")):
+            return None
+        snapshot = getattr(self.session, "snapshot", None)
+        for element in list(getattr(snapshot, "elements", []) or []):
+            role = str(getattr(element, "role", "") or "").casefold()
+            label = str(getattr(element, "text", "") or "").strip()
+            if role != "slider" or "opacity" not in label.casefold():
+                continue
+            match = re.search(r"(\d{1,3})\s*%", label)
+            if not match or int(match.group(1)) >= 85:
+                continue
+            left = int(getattr(element, "left", 0) or 0)
+            top = int(getattr(element, "top", 0) or 0)
+            width = max(1, int(getattr(element, "width", 0) or 0))
+            height = max(1, int(getattr(element, "height", 0) or 0))
+            if height > width * 1.4:
+                x = left + width // 2
+                y = top + max(2, int(height * 0.04))
+            else:
+                x = left + width - max(2, int(width * 0.04))
+                y = top + height // 2
+            return {
+                "action": "click",
+                "x": x,
+                "y": y,
+                "skip_auto_observe": True,
+                "context": "raise visible drawing opacity for requested solid color",
+            }
+        return None
 
     def _spreadsheet_grid_geometry(self) -> dict[str, Any] | None:
         snapshot = getattr(self.session, "snapshot", None)
@@ -2820,6 +2897,13 @@ class SubgoalExecutor:
                 canvas, ready_attempts = self._ready_canvas_region(window)
                 if canvas is not None:
                     draw_canvas_context = (canvas, ready_attempts)
+        if draw_canvas_context is not None and any(
+            _requested_color(spec, request.subgoal, getattr(self.session, "task", ""))
+            for spec in draw_specs
+        ):
+            opacity_action = self._drawing_opacity_action(request)
+            if opacity_action is not None:
+                actions.append(opacity_action)
         last_color = ""
         first_draw_for_color = True
         for draw_spec in (draw_specs if draw_canvas_context is not None else []):

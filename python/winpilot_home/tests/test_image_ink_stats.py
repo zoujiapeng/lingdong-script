@@ -71,3 +71,15 @@ def test_likely_canvas_bbox_prefers_large_light_surface():
     cv2.rectangle(image, (230, 20), (250, 40), (0, 0, 255), -1)
 
     assert likely_canvas_bbox(image) == [40, 70, 280, 200]
+
+
+def test_likely_canvas_bbox_excludes_vertical_overlay_on_work_surface():
+    from winpilot.perception.vision_cv import likely_canvas_bbox
+
+    image = np.full((260, 420, 3), 30, dtype=np.uint8)
+    image[60:240, 35:400] = 255
+    # A dark side control sits over the document. The white component remains
+    # connected around it, but it is not a safe place for a drawing stroke.
+    image[70:230, 35:82] = 20
+
+    assert likely_canvas_bbox(image) == [82, 60, 400, 240]

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 # color_probe/find_image/vlm_describe) and ``wait`` (legitimately changes nothing).
 _ACTION_TOOLS = {
     "launch", "click", "type_text", "hotkey", "scroll", "drag",
-    "focus_window", "tray_click", "run_shell", "run_action_batch",
+    "draw_strokes", "focus_window", "tray_click", "run_shell", "run_action_batch",
 }
 _STUCK_REPEAT = 3        # same action this many times in a row -> stuck
 _STUCK_NO_CHANGE = 3     # this many post-action observes with no change -> stuck
@@ -56,6 +56,8 @@ class WorldModel:
         self._working_facts: dict[str, dict] = {}
         self._working_revision = 0
         self._working_sent_revision = 0
+        self._visual_no_progress = 0
+        self._last_visual_outcome: dict = {}
 
     # ---------------------------------------------------------------- feed
     @staticmethod
@@ -83,6 +85,36 @@ class WorldModel:
         # structural screen change (observe_snapshot), so a replan that swaps to
         # a different action but still makes no progress can't re-fire the
         # structured-replan prompt every step.
+
+    def record_action_outcome(self, name: str, payload: dict) -> None:
+        """Track visual progress reported by already-executed actions.
+
+        This intentionally consumes only controller evidence; it never captures
+        the screen itself. A no-change visual mutation is stronger evidence than
+        OCR/UIA structural sameness for canvases and owner-drawn applications.
+        """
+        entries = [payload] if isinstance(payload, dict) else []
+        entries.extend(
+            item.get("data") if isinstance(item, dict) and isinstance(item.get("data"), dict) else {}
+            for item in (payload.get("results") or [])
+            if isinstance(item, dict)
+        ) if isinstance(payload, dict) else None
+        for entry in entries:
+            if not isinstance(entry, dict) or "visual_change_detected" not in entry:
+                continue
+            changed = entry.get("visual_change_detected") is True
+            self._last_visual_outcome = {
+                "action": name,
+                "changed": changed,
+                "ratio": entry.get("visual_change_ratio"),
+                "failure_type": entry.get("failure_type") or "",
+            }
+            if changed:
+                self._visual_no_progress = 0
+                self._stuck_announced = False
+            else:
+                self._visual_no_progress += 1
+                self._last_change_line = "visual action produced no pixel change in its target region"
 
     def observe_snapshot(self, snapshot) -> None:
         fingerprint = self._fingerprint(snapshot)
@@ -226,6 +258,8 @@ class WorldModel:
         return count
 
     def is_stuck(self) -> tuple[bool, str]:
+        if self._visual_no_progress >= 2:
+            return True, f"{self._visual_no_progress} consecutive visual actions produced no pixel change"
         repeats = self.repeated_action_count()
         if repeats >= _STUCK_REPEAT:
             return True, f"连续 {repeats} 次重复同一动作，状态未推进"
@@ -249,6 +283,8 @@ class WorldModel:
         take_stuck_signal → structured replan in the loop.)"""
         if self._identical_observes >= 2 and self._last_change_line:
             return f"提示：{self._last_change_line}，请确认上一步是否点对了目标。"
+        if self._visual_no_progress:
+            return "Visual action did not change its target region. Re-observe focus/tool/canvas before retrying."
         return ""
 
     def screen_advisory(self) -> str:
@@ -285,6 +321,8 @@ class WorldModel:
             "last_change": self._last_change_line,
             "last_title": self._last_observe.title if self._last_observe else "",
             "screen_watch": dict(self._screen_bulletin),
+            "visual_no_progress": self._visual_no_progress,
+            "last_visual_outcome": dict(self._last_visual_outcome),
             "working_set_count": len(self._working_facts),
             "working_set_subjects": [
                 item.get("subject", "") for item in self.working_set()[:10]

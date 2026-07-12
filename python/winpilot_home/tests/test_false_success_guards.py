@@ -166,6 +166,14 @@ def test_visible_state_targets_ignore_descriptive_ui_nouns():
     ) == ["READY_STATE"]
 
 
+def test_visible_state_targets_ignore_english_articles_before_visual_descriptions():
+    from winpilot.agent.task_rules import _visible_state_targets
+
+    assert _visible_state_targets(
+        "Confirm the red line actually appears before finishing."
+    ) == []
+
+
 def test_required_literal_tokens_extracts_distinctive_payloads_not_urls():
     from winpilot.agent.task_rules import _required_literal_tokens
 
