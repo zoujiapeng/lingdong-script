@@ -40,6 +40,8 @@ def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch)
 
     recorder = trace_mod.TraceRecorder()
     trace_mod.BUS.remove_sink(recorder._on_event)
+    published = []
+    trace_mod.BUS.add_sink(published.append)
     image = np.full((40, 60, 3), 255, dtype=np.uint8)
     monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
     monkeypatch.setattr(trace_mod, "capture", lambda: image.copy())
@@ -59,6 +61,7 @@ def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch)
         })
     finally:
         recorder.stop()
+        trace_mod.BUS.remove_sink(published.append)
 
     events = [
         json.loads(line)
@@ -70,6 +73,14 @@ def test_trace_saves_batch_child_before_after_screenshots(tmp_path, monkeypatch)
     assert "r1/batch_after_001.jpg" in screenshots
     assert (tmp_path / "r1" / "batch_before_001.jpg").exists()
     assert (tmp_path / "r1" / "batch_after_001.jpg").exists()
+    live_screenshots = [
+        event for event in published
+        if event.get("type") == "trace_screenshot" and event.get("run_id") == "r1"
+    ]
+    assert [event["screenshot"] for event in live_screenshots] == [
+        "r1/batch_before_001.jpg",
+        "r1/batch_after_001.jpg",
+    ]
 
 
 def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkeypatch):
@@ -107,6 +118,47 @@ def test_trace_writer_is_async_and_pairs_interleaved_action_ids(tmp_path, monkey
         by_action.setdefault(event.get("action_id"), []).append(event.get("screenshot"))
     assert by_action["a"] == ["async/before_001.jpg", "async/after_001.jpg"]
     assert by_action["b"] == ["async/before_002.jpg", "async/after_002.jpg"]
+
+
+def test_trace_after_screenshot_does_not_reuse_pre_action_daemon_frame(tmp_path, monkeypatch):
+    from winpilot.fast import perception_daemon
+    from winpilot.recorder import trace as trace_mod
+
+    recorder = trace_mod.TraceRecorder()
+    trace_mod.BUS.remove_sink(recorder._on_event)
+    stale = np.zeros((30, 40, 3), dtype=np.uint8)
+    current = np.full((30, 40, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(trace_mod, "TRACES_DIR", tmp_path)
+    monkeypatch.setattr(trace_mod, "capture", lambda: current.copy())
+    monkeypatch.setattr(
+        perception_daemon.PERCEPTION_DAEMON,
+        "latest_frame",
+        lambda **_kwargs: (stale.copy(), None),
+    )
+    monkeypatch.setattr(trace_mod, "_POST_ACTION_CAPTURE_SETTLE_S", 0.0)
+
+    try:
+        recorder.start("frame-order")
+        recorder._on_event({
+            "type": "agent_batch_action_start",
+            "tool": "click",
+            "batch_id": "b",
+            "batch_index": 1,
+        })
+        recorder._on_event({
+            "type": "agent_batch_action",
+            "tool": "click",
+            "batch_id": "b",
+            "batch_index": 1,
+        })
+        recorder.stop()
+    finally:
+        trace_mod.BUS.remove_sink(recorder._on_event)
+
+    before = cv2.imread(str(tmp_path / "frame-order" / "batch_before_001.jpg"))
+    after = cv2.imread(str(tmp_path / "frame-order" / "batch_after_001.jpg"))
+    assert float(before.mean()) < 5
+    assert float(after.mean()) > 250
 
 
 def test_fold_base64_adds_likely_canvas_summary_for_mixed_zoom():

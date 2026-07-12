@@ -57,11 +57,16 @@ def _agent_handler(on_runner: RunnerCallback | None = None) -> NodeHandler:
             max_steps_override = None
         graph = context.get("graph") if isinstance(context.get("graph"), dict) else {}
         policy = graph.get("policy") if isinstance(graph.get("policy"), dict) else {}
+        profile = build_runtime_profile(goal)
         runner = build_runner(
             goal,
             stop_event=stop_event,
             max_steps_override=max_steps_override,
-            allow_shell_tools=bool(policy.get("allow_shell", False)),
+            # ARP's allow_shell flag is a replay safety boundary. It must not
+            # silently remove the Coding Runtime's own deterministic shell
+            # capability from a mixed coding+desktop goal created by the Agent
+            # frontend. Desktop-only goals still keep the conservative policy.
+            allow_shell_tools=bool(policy.get("allow_shell", False) or profile.coding),
         )
         if on_runner:
             on_runner(runner)

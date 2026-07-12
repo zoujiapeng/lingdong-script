@@ -21,6 +21,7 @@ ALLOWED_BATCH_ACTIONS = {
     "wait",
     "wait_change",
     "wait_stable",
+    "ensure_document_surface",
     "read_text",
     "zoom",
     "screenshot",
@@ -42,6 +43,7 @@ BATCH_MUTATING_ACTIONS = {
     "select_color",
     "focus_window",
     "launch",
+    "ensure_document_surface",
     "clipboard_paste",
 }
 
@@ -73,7 +75,13 @@ def batch_action_name(action: dict[str, Any]) -> str:
 
 def batch_action_args(action: dict[str, Any]) -> dict[str, Any]:
     if action.get("action") or action.get("tool"):
-        return {key: value for key, value in action.items() if key not in {"action", "tool"}}
+        explicit = {
+            key: value
+            for key, value in action.items()
+            if key not in {"action", "tool", "params"}
+        }
+        params = action.get("params")
+        return {**(params if isinstance(params, dict) else {}), **explicit}
     if len(action) == 1:
         _name, value = next(iter(action.items()))
         return dict(value) if isinstance(value, dict) else {"value": value}

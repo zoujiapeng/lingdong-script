@@ -98,3 +98,6 @@ def test_is_coding_task_detection():
     assert not _is_coding_task("打开记事本输入你好")
     assert not _is_coding_task("玩贪吃蛇游戏")
     assert not _is_coding_task("网易云音乐搜索周杰伦播放")
+    assert not _is_coding_task("inspect the current window and report its state")
+    assert not _is_coding_task("generate a concise software inventory report")
+    assert _is_coding_task("inspect this repo and report the failing tests")

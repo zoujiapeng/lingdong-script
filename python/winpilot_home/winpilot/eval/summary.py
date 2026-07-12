@@ -160,7 +160,9 @@ def _low_latency_metrics(
 
     replan_count = sum(1 for e in events if e.get("type") == "agent_recovery") \
         + sum(1 for e in tool_events if e.get("tool") == "revise_plan")
-    vlm_tool_calls = sum(1 for e in tool_events if e.get("tool") == "vlm_describe")
+    vlm_tool_calls = sum(
+        1 for e in tool_events if e.get("tool") in {"vlm_describe", "vlm_verify"}
+    )
     skill_reuse_count = sum(1 for e in tool_events if e.get("tool") == "reuse_skill")
     skill_suggestions = sum(
         1 for e in events

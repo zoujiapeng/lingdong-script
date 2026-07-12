@@ -58,6 +58,20 @@ def test_scope_guard_blocks_when_refocus_cannot_recover(monkeypatch):
     assert payload["tool"] == "type_text"
 
 
+def test_scope_guard_adopts_same_process_foreground_window(monkeypatch):
+    session = _Session()
+    session._same_window_process = lambda foreground, target: (foreground, target) == (200, 100)
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    monkeypatch.setattr(
+        scope_guard,
+        "_focus",
+        lambda _hwnd: (_ for _ in ()).throw(AssertionError("must adopt before refocus")),
+    )
+
+    assert scope_guard.ensure_scope(session, "scroll", {"x": 10, "y": 10, "amount": -3}) is None
+    assert session.hwnd == 200
+
+
 def test_scope_guard_does_not_encode_application_specific_task_order():
     session = _Session()
     session.task = "calculate a quotient, save a screenshot, then open QQ"
@@ -65,3 +79,39 @@ def test_scope_guard_does_not_encode_application_specific_task_order():
     session.saved_screenshot_paths = []
 
     assert scope_guard.ensure_scope(session, "launch", {"command": "QQ"}) is None
+
+
+def test_scope_guard_blocks_mutating_own_control_plane(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    session.task = "inventory installed applications and write a report"
+    session._action_target_context = lambda: {
+        "target_hwnd": 100,
+        "foreground_hwnd": 100,
+        "target_title": "Lingdong Script - Agent",
+        "foreground_title": "Lingdong Script - Agent",
+        "foreground_matches_target": True,
+    }
+
+    result = scope_guard.ensure_scope(session, "type_text", {"text": "unsafe"})
+
+    assert result is not None
+    payload = json.loads(result.text)
+    assert payload["blocked"] is True
+    assert payload["scope_guard"]["self_control_plane"] is True
+
+
+def test_scope_guard_allows_explicit_control_plane_test(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    session.task = "test the WinPilot control-plane input"
+    session.fg = session.hwnd
+    session._action_target_context = lambda: {
+        "target_hwnd": 100,
+        "foreground_hwnd": 100,
+        "target_title": "WinPilot",
+        "foreground_title": "WinPilot",
+        "foreground_matches_target": True,
+    }
+
+    assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None

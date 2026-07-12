@@ -6,6 +6,8 @@ inversion.
 
 Perception modes:
 - "normal"  : default; UIA-rich windows may skip OCR/VLM for speed.
+- "pixel_text": office/document surfaces; run UIA and OCR together, using a
+                 VLM only when OCR supplies no readable content.
 - "visual"  : chat/canvas/mirror tasks; OCR always runs; VLM runs as an
               assist dimension when configured (not just as rescue).
 - "vlm_first": future; VLM leads, others fill gaps. Reserved for explicit
@@ -40,11 +42,22 @@ _MEDIA_TERMS = (
     "视频", "截图", "video", "screenshot",
 )
 
+# Office editors frequently expose ribbon chrome and stale document-window
+# nodes through UIA while the actual page/sheet remains pixel-rendered.
+_PIXEL_TEXT_TERMS = (
+    "spreadsheet", "workbook", "worksheet", "excel", "wps spreadsheets",
+    "电子表格", "工作簿", "wps表格", "wps 表格",
+    "wps writer", "microsoft word", "word document", "wps文字", "wps 文字",
+    "powerpoint", "wps presentation", "幻灯片", "wps演示", "wps 演示",
+)
+
 
 def perception_mode(task: str, window_title: str = "") -> str:
     """Return the perception strategy mode for a task.
 
     "normal"  — default; skip OCR/VLM on UIA-rich windows for speed.
+    "pixel_text" — office/document UI: UIA and OCR run together; VLM is
+                   reserved for an OCR-empty fallback.
     "visual"  — chat / canvas / mirror: OCR always runs; VLM assists when
                 configured (not just as rescue ladder).
     "vlm_first" — reserved for future explicit VLM-led perception.
@@ -56,6 +69,8 @@ def perception_mode(task: str, window_title: str = "") -> str:
     text = f"{task or ''} {window_title or ''}".casefold()
     if any(term in text for term in (*_DRAWING_TERMS, *_CHAT_TERMS, *_MIRROR_TERMS)):
         return "visual"
+    if any(term in text for term in _PIXEL_TEXT_TERMS):
+        return "pixel_text"
     return "normal"
 
 

@@ -14,6 +14,7 @@ from typing import Any
 
 
 ACTION_TOOLS = {
+    "open_app",
     "launch",
     "click",
     "type_text",
@@ -49,6 +50,10 @@ OBSERVE_TOOLS = {
     "screenshot",
     "zoom",
     "coordinate_diagnostics",
+    "list_installed_apps",
+    "list_scheduled_tasks",
+    "search_files",
+    "web_search",
 }
 PASSIVE_PIXEL_OBSERVE_TOOLS = {
     "screenshot",
@@ -184,6 +189,27 @@ class RunStateMachine:
             self._transition("ready", name)
             return
 
+        if name == "run_shell":
+            # A successful read-only check is deterministic observation, not a
+            # second unverified desktop mutation. Otherwise a valid Test-Path
+            # after a GUI save makes the done gate impossible to satisfy.
+            try:
+                from .task_rules import _gui_only_shell_allowed
+
+                read_only_verify = _gui_only_shell_allowed(
+                    str(args.get("command") or "")
+                )
+            except Exception:
+                read_only_verify = False
+            if (
+                read_only_verify
+                and data.get("ok") is True
+                and int(data.get("exit_code") or 0) == 0
+            ):
+                self.unverified_actions = 0
+                self._transition("ready", name)
+                return
+
         if name == "run_action_batch":
             if _batch_has_semantic_observe(args) or data.get("ok") is True and data.get("verified") is True:
                 self.unverified_actions = 0
@@ -214,6 +240,11 @@ class RunStateMachine:
 
     def terminal_rejected(self, name: str, issue: str = "") -> None:
         self._transition("recovering", name, issue or "terminal claim rejected by done_check")
+
+    def accept_verification(self, name: str, reason: str) -> None:
+        """Reconcile a pending mutation with stronger deterministic evidence."""
+        self.unverified_actions = 0
+        self._transition("ready", name, str(reason or "deterministic verification passed")[:240])
 
     def guidance(self) -> str:
         key = (self.phase, self.last_tool, self.unverified_actions)

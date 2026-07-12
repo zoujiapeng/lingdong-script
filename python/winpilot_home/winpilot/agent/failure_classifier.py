@@ -119,6 +119,7 @@ _TEXT_NOT_FOUND_RE = re.compile(
 _WINDOW_NOT_FOUND_RE = re.compile(
     r"(no\s+visible\s+or\s+running\s+windows?\s+match|"
     r"no\s+target\s+window|unable\s+to\s+determine\s+target\s+window|"
+    r"requires\s+a\s+live\s+hwnd|matching\s+title/query/name|"
     r"requires\s+an\s+existing\s+target\s+window|"
     r"\u65e0\u6cd5\u786e\u5b9a\u76ee\u6807\u7a97\u53e3|\u65e0\u76ee\u6807\u7a97\u53e3)",
     re.IGNORECASE,
@@ -341,6 +342,25 @@ class FailureClassifier:
         data = parse_tool_json(text)
         payloads = _child_payloads(data) if data else []
 
+        # Semantic format routines deliberately return postcondition_pending
+        # until the saved document can be inspected. Reclassifying that handoff
+        # as a failed action makes recovery repeat toggle shortcuts such as
+        # Ctrl+B, undoing a successful mutation.
+        if (
+            data.get("ok") is True
+            and data.get("needs_llm_reason") is False
+            and not data.get("error")
+            and (
+                data.get("format_applied") is True
+                or data.get("mutation_skipped") is True
+                or (
+                    data.get("mutation_applied") is True
+                    and data.get("postcondition_pending") is True
+                )
+            )
+        ):
+            return None
+
         focus = self._classify_window_focus(data, text)
         if focus is not None:
             return focus
@@ -487,9 +507,18 @@ class FailureClassifier:
             ok_false = _truthy_bool(item.get("ok")) is False
             if changed_false or stable_false or ok_false:
                 wait_children.append(item)
+        structured_failure_text = " ".join(
+            str(value or "")
+            for key in ("error", "reason", "stage", "verify_detail")
+            for value in _values_for_key(data, key)
+            if not isinstance(value, (dict, list))
+        )
+        explicit_timeout = bool(_TIMEOUT_RE.search(
+            structured_failure_text if data else text
+        ))
         if wait_children or (
             tool_name in {"wait", "run_action_batch"}
-            and _TIMEOUT_RE.search(text)
+            and explicit_timeout
         ):
             return _classification(
                 FailureType.WAIT_TIMEOUT,
@@ -524,10 +553,33 @@ class FailureClassifier:
         candidates = _candidate_labels(data)
         controller_state = _first_dict(data, "controller_state")
         controller_phase = str(controller_state.get("phase") or "").casefold()
-        text_control_failure = bool(
-            re.search(r"(control|element|anchor|input).*(not\s+found|missing|failed)", text, re.IGNORECASE)
+        structured_failure_text = " ".join(
+            str(value or "")
+            for key in ("error", "reason", "stage", "verify_detail")
+            for value in _values_for_key(data, key)
+            if not isinstance(value, (dict, list))
         )
-        if not (missing_locator or candidates or "locat" in controller_phase or text_control_failure):
+        text_control_failure = bool(re.search(
+            r"(control|element|anchor|input).*(not\s+found|missing|failed)|"
+            r"(not\s+found|missing|failed).*(control|element|anchor|input)",
+            structured_failure_text,
+            re.IGNORECASE,
+        ))
+        candidate_failure = bool(
+            candidates
+            and _has_failed_signal(data, text)
+            and (
+                _truthy_bool(data.get("blocked")) is True
+                or controller_phase in {"blocked", "failed", "error", "locating"}
+                or text_control_failure
+            )
+        )
+        if not (
+            missing_locator
+            or candidate_failure
+            or "locat" in controller_phase
+            or text_control_failure
+        ):
             return None
         evidence = {
             **locator_evidence,
@@ -597,7 +649,25 @@ class FailureClassifier:
         screen_delta = _first_dict(data, "screen_delta")
         if screen_delta and _truthy_bool(screen_delta.get("changed")) is True:
             visual_change = True
-        if action_ok and verified_false and (missing or visual_change or _TEXT_NOT_FOUND_RE.search(text)):
+        controller_state = _first_dict(data, "controller_state")
+        normal_observe_handoff = bool(
+            not missing
+            and _truthy_bool(data.get("needs_observe")) is True
+            and str(controller_state.get("phase") or "").casefold() == "needs_observe"
+            and not data.get("verify_detail")
+            and not data.get("verify_method")
+        )
+        if normal_observe_handoff:
+            return None
+        structured_failure_text = " ".join(
+            str(value or "")
+            for key in ("error", "reason", "verify_detail")
+            for value in _values_for_key(data, key)
+            if not isinstance(value, (dict, list))
+        )
+        if action_ok and verified_false and (
+            missing or visual_change or _TEXT_NOT_FOUND_RE.search(structured_failure_text)
+        ):
             return _classification(
                 FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED,
                 0.86 if missing else 0.74,
@@ -673,6 +743,18 @@ class FailureClassifier:
         if not missing:
             return None
         failed = _has_failed_signal(data, text)
+        controller_state = _first_dict(data, "controller_state")
+        normal_observe_handoff = bool(
+            tool_name == "run_action_batch"
+            and _truthy_bool(data.get("ok")) is True
+            and _truthy_bool(data.get("needs_observe")) is True
+            and str(controller_state.get("phase") or "").casefold() == "needs_observe"
+            and not _missing_texts(data)
+            and not data.get("verify_detail")
+            and not data.get("verify_method")
+        )
+        if normal_observe_handoff:
+            return None
         read_only_tools = {
             "observe",
             "read_text",
@@ -687,22 +769,28 @@ class FailureClassifier:
         if tool_name in read_only_tools and not failed:
             return None
         claimed_ok = any(_truthy_bool(item.get("ok")) is True for item in _child_payloads(data))
-        claimed_verified = any(_truthy_bool(item.get("verified")) is True for item in _child_payloads(data))
-        evidence_tools = {
-            "execute_subgoal",
-            "run_action_batch",
-            "click",
-            "type_text",
-            "wait",
-            "observe",
-            "read_text",
-        }
-        if tool_name not in evidence_tools and not failed and not claimed_ok and not claimed_verified:
+        root_verified = _truthy_bool(data.get("verified")) is True
+        # Missing final-task literals are not a failure during preparatory GUI
+        # steps.  A successful focus/click/wait commonly occurs before the
+        # literal is typed, so treating any nested ``ok`` as proof that the
+        # task should already be complete creates false recovery/replan events.
+        # Only completed controller routines and verified text entry are
+        # expected to carry the final literal evidence on a successful result.
+        evidence_tools = {"execute_subgoal", "run_action_batch", "type_text"}
+        if tool_name not in evidence_tools:
+            return None
+        # A child action being verified only proves that click/type operation,
+        # not that the entire user task has reached its final visible state.
+        # Batch-level task-constraint checks therefore require root-level
+        # verification; concrete action/verify failures are classified above.
+        if tool_name == "run_action_batch" and not root_verified:
+            return None
+        if not failed and not root_verified:
             return None
         has_recovery_source = bool(task or visible_evidence_ledger or recent_results or tool_history)
         return _classification(
             FailureType.TASK_CONSTRAINT_LOST,
-            0.78 if claimed_ok or claimed_verified else 0.66,
+            0.78 if claimed_ok or root_verified else 0.66,
             {
                 "required_literals": literals,
                 "missing_literals": missing,

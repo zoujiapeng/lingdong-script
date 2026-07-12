@@ -11,13 +11,14 @@ import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
 import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { handleMCPRequest } from './mcp-handler';
+import { resolveMacroPath } from './macroPaths';
 
 export interface ApiDeps {
   mainWindow: { webContents: { send: (ch: string, ...args: any[]) => void; executeJavaScript: (script: string, hasUserGesture?: boolean) => Promise<any> } } | null;
   getCachedRendererState: () => any;
-  macroRecording: boolean;
-  macroRecorderProcess: ChildProcess | null;
-  macroResultResolve: ((v: any) => void) | null;
+  getMacroRecording: () => boolean;
+  setMacroRecording: (recording: boolean) => void;
+  getMacroRecorderProcess: () => ChildProcess | null;
   ensureMacroRecorder: () => ChildProcess | null;
   captureScreenshot: () => Promise<any>;
   selectRegion: () => Promise<any>;
@@ -350,24 +351,28 @@ export function startApiServer(deps: ApiDeps): http.Server {
             break;
 
           // ─── Macro ───
-          case '/api/macro/start-recording':
+          case '/api/macro/start-recording': {
             if (!deps.mainWindow) { send(503, { error: '窗口未就绪' }); return; }
-            deps.ensureMacroRecorder();
+            const recorder = deps.ensureMacroRecorder();
             try {
-              if (deps.macroRecorderProcess?.stdin) {
-                deps.macroRecorderProcess.stdin.write(JSON.stringify({
+              if (recorder?.stdin) {
+                recorder.stdin.write(JSON.stringify({
                   type: 'start', name: payload.name || `recording_${Date.now()}`,
                   include_mouse: payload.include_mouse ?? true, include_keys: payload.include_keys ?? true,
                 }) + '\n');
+                deps.setMacroRecording(true);
               }
             } catch (e) { console.debug('[macro] start recording error:', e); }
-            send(200, { success: true });
+            send(200, { success: Boolean(recorder?.stdin) });
             break;
+          }
 
           case '/api/macro/stop-recording':
             try {
-              if (deps.macroRecorderProcess?.stdin) {
-                deps.macroRecorderProcess.stdin.write(JSON.stringify({ type: 'stop' }) + '\n');
+              const recorder = deps.getMacroRecorderProcess();
+              if (recorder?.stdin) {
+                recorder.stdin.write(JSON.stringify({ type: 'stop' }) + '\n');
+                deps.setMacroRecording(false);
               }
             } catch (e) { console.debug('[macro] stop recording error:', e); }
             send(200, { success: true });
@@ -416,21 +421,19 @@ export function startApiServer(deps: ApiDeps): http.Server {
           case '/api/macro/delete':
             if (!payload.name) { send(400, { error: '缺少 name' }); return; }
             { const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-              const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
-              try { fs.unlinkSync(filePath); send(200, { ok: true }); }
-              catch { send(404, { error: '文件不存在' }); } }
+              try { const filePath = resolveMacroPath(macrosDir, payload.name); fs.unlinkSync(filePath); send(200, { ok: true }); }
+              catch (error) { send(404, { error: error instanceof Error ? error.message : '文件不存在' }); } }
             break;
 
           case '/api/macro/get-events':
             if (!payload.name) { send(400, { error: '缺少 name' }); return; }
             { const macrosDir = path.join(getBaseDir(), 'python', 'macros');
-              const filePath = path.join(macrosDir, payload.name.endsWith('.json') ? payload.name : `${payload.name}.json`);
-              try { const content = JSON.parse(fs.readFileSync(filePath, 'utf-8')); send(200, { ok: true, result: content }); }
-              catch { send(404, { error: '读取失败' }); } }
+              try { const filePath = resolveMacroPath(macrosDir, payload.name); const content = JSON.parse(fs.readFileSync(filePath, 'utf-8')); send(200, { ok: true, result: content }); }
+              catch (error) { send(404, { error: error instanceof Error ? error.message : '读取失败' }); } }
             break;
 
           case '/api/macro/recording-status':
-            send(200, { recording: deps.macroRecording });
+            send(200, { recording: deps.getMacroRecording() });
             break;
 
           // ─── Features (MCP) ───

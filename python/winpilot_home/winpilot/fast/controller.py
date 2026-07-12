@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+import unicodedata
 from typing import Any
 
 import cv2
 import numpy as np
+import win32gui
+import win32process
 
 from ..agent.tool_result import ToolResult
 from ..action.desktop_queue import DESKTOP_ACTION_QUEUE
 from ..action.raw_device import RawDeviceExecutor
 from ..config import CONFIG
-from ..perception import ocr, vision_cv
+from ..perception import ocr, uia, vision_cv
 from ..utils.log import BUS
 from ..utils.screenshot import Region, capture, window_region
 from .action_contract import (
@@ -21,7 +25,7 @@ from .action_contract import (
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
 )
-from .element_cache import ElementCache, anchor_from_dict
+from .element_cache import ElementCache, LocateResult, anchor_from_dict
 from .input_locator import locate_input
 from .types import BatchMetrics
 from .visual_servo import ServoConfig, track_visual_target
@@ -39,6 +43,15 @@ _ANCHOR_HINT_KEYS = {
 
 def _now_ms() -> int:
     return int(time.monotonic() * 1000)
+
+
+def _same_window_process(first_hwnd: int, second_hwnd: int) -> bool:
+    try:
+        _first_thread, first_pid = win32process.GetWindowThreadProcessId(int(first_hwnd))
+        _second_thread, second_pid = win32process.GetWindowThreadProcessId(int(second_hwnd))
+        return bool(first_pid and first_pid == second_pid)
+    except Exception:
+        return False
 
 
 def _json_dict(text: str) -> dict[str, Any]:
@@ -81,6 +94,77 @@ def _norm_text(value: Any) -> str:
     return "".join(ch for ch in str(value or "").casefold() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
+def _short_control_terms(anchor: Any) -> list[str]:
+    terms: list[str] = []
+    for value in (anchor.label, *anchor.fallback_text):
+        text = re.sub(r"\s+", "", str(value or "").strip())
+        if 1 <= len(text) <= 3 and text not in terms:
+            terms.append(text)
+    return terms
+
+
+_DIALOG_CONTEXT_MARKERS = (
+    "dialog", "popup", "modal", "prompt", "flyout",
+    "对话框", "弹窗", "弹出", "提示框", "浮层",
+)
+
+
+def _dialog_context_candidate(snapshot: Any, anchor: Any, action: dict[str, Any]) -> Any | None:
+    context = str(action.get("context") or action.get("subgoal") or "").casefold()
+    if not any(marker in context for marker in _DIALOG_CONTEXT_MARKERS):
+        return None
+    terms = [
+        _norm_text(value)
+        for value in (anchor.label, *anchor.fallback_text)
+        if _norm_text(value)
+    ]
+    if not terms:
+        return None
+    region = snapshot.region
+    expected = (
+        str(anchor.expected_region or "").casefold()
+        .replace("_", "-")
+        .replace(" ", "-")
+        .replace("/", "-")
+    )
+    titlebar_bottom = region.top + max(52, int(region.height * 0.06))
+
+    def expected_match(element: Any) -> bool:
+        rel_x = (int(element.cx) - region.left) / max(1, region.width)
+        rel_y = (int(element.cy) - region.top) / max(1, region.height)
+        if expected in {"top-right", "upper-right"}:
+            return rel_x >= 0.55 and rel_y <= 0.45
+        if expected in {"top-left", "upper-left"}:
+            return rel_x <= 0.45 and rel_y <= 0.45
+        if expected in {"bottom-right", "lower-right"}:
+            return rel_x >= 0.55 and rel_y >= 0.55
+        if expected in {"bottom-left", "lower-left"}:
+            return rel_x <= 0.45 and rel_y >= 0.55
+        return True
+
+    candidates: list[tuple[int, Any]] = []
+    for element in getattr(snapshot, "elements", []) or []:
+        text = _norm_text(getattr(element, "text", ""))
+        role = str(getattr(element, "role", "") or "").casefold()
+        if "button" not in role or not text:
+            continue
+        exact = text in terms
+        if not exact and not any(term in text or text in term for term in terms):
+            continue
+        if not (region.left <= int(element.cx) < region.right and region.top <= int(element.cy) < region.bottom):
+            continue
+        if int(element.cy) <= titlebar_bottom or not expected_match(element):
+            continue
+        candidates.append((2 if exact else 1, element))
+    if not candidates:
+        return None
+    best_quality = max(quality for quality, _element in candidates)
+    elements = [element for quality, element in candidates if quality == best_quality]
+    if expected.startswith("bottom") or expected.startswith("lower"):
+        return max(elements, key=lambda element: int(element.cy))
+    return min(elements, key=lambda element: int(element.cy))
+
+
 def _needs_replace_guard(text: str, action: dict[str, Any]) -> bool:
     """Return true for inputs where append-vs-replace mistakes are costly."""
     raw_parts = [
@@ -103,6 +187,24 @@ def _needs_replace_guard(text: str, action: dict[str, Any]) -> bool:
     if "." in stripped and len(stripped) <= 260 and not any(ch.isspace() for ch in stripped):
         return True
     return False
+
+
+def _is_input_element(element: Any, region: Region | None = None) -> bool:
+    role = str(getattr(element, "role", "") or "").casefold()
+    if not any(term in role for term in (
+        "edit", "combobox", "textbox", "text box", "searchbox", "input", "textarea",
+    )):
+        return False
+    if region is None:
+        return True
+    text = str(getattr(element, "text", "") or "").strip()
+    states = {
+        _norm_text(state)
+        for state in (getattr(element, "states", None) or [])
+    }
+    compact_property = bool(re.match(r"^[^=\r\n]{1,32}=.+", text))
+    narrow = int(getattr(element, "width", 0) or 0) < int(region.width * 0.45)
+    return not (compact_property and narrow and "focused" not in states)
 
 
 def _detect_prefixed_glob_text(visible_text: str, target_text: str) -> str:
@@ -166,21 +268,7 @@ def _should_move_to_end_before_typing(text: str, action: dict[str, Any]) -> bool
 def _color_mask(image: np.ndarray, color: str) -> np.ndarray | None:
     if image is None or getattr(image, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    chroma = (sat > 70) & (val > 50)
-    color = str(color or "").casefold()
-    masks = {
-        "red": chroma & ((hue <= 10) | (hue >= 170)),
-        "orange": chroma & (hue > 10) & (hue <= 24),
-        "yellow": chroma & (hue > 24) & (hue <= 38),
-        "green": chroma & (hue > 38) & (hue <= 88),
-        "blue": chroma & (hue >= 95) & (hue <= 135),
-        "purple": chroma & (hue > 135) & (hue < 170),
-        "black": gray < 80,
-    }
-    return masks.get(color)
+    return vision_cv.coarse_color_masks(image).get(str(color or "").casefold())
 
 
 def _small_color_components(image: np.ndarray) -> list[dict[str, Any]]:
@@ -190,7 +278,11 @@ def _small_color_components(image: np.ndarray) -> list[dict[str, Any]]:
     total = int(image.shape[0] * image.shape[1])
     min_area = max(18, int(total * 0.000015))
     max_area = max(420, int(total * 0.004))
-    for color in ("red", "orange", "yellow", "green", "blue", "purple", "black"):
+    for color in (
+        "red", "orange", "brown", "yellow", "lime", "green", "cyan", "blue",
+        "purple", "magenta", "pink",
+        "black", "gray", "white",
+    ):
         mask = _color_mask(image, color)
         if mask is None:
             continue
@@ -223,7 +315,15 @@ def _failed(result: ToolResult) -> bool:
         return True
     if data.get("ok") is False:
         return True
-    if "verified" in data and data.get("verified") is False and data.get("expect"):
+    if (
+        "verified" in data
+        and data.get("verified") is False
+        and data.get("expect")
+        and not (
+            data.get("mutation_applied") is True
+            and data.get("postcondition_pending") is True
+        )
+    ):
         return True
     return False
 
@@ -294,7 +394,11 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """
     name = str(action.get("action") or action.get("tool") or "")
     if name:
-        return name, {k: v for k, v in action.items() if k not in {"action", "tool"}}
+        args = {k: v for k, v in action.items() if k not in {"action", "tool", "params"}}
+        params = action.get("params")
+        if isinstance(params, dict):
+            args = {**params, **args}
+        return name, args
     if len(action) == 1:
         only_name, only_args = next(iter(action.items()))
         name = str(only_name)
@@ -307,6 +411,71 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             return name, {"text": str(only_args)}
         return name, {"value": only_args}
     return "", {}
+
+
+_HOTKEY_MODIFIERS = {
+    "alt", "alt_l", "alt_r", "ctrl", "control", "control_l", "control_r",
+    "shift", "shift_l", "shift_r", "meta", "super",
+}
+
+
+def _stable_batch_actions(actions: list[dict[str, Any]], subgoal: str) -> list[dict[str, Any]]:
+    """Normalize common model-generated key sequences before execution.
+
+    This remains application agnostic: it repairs invalid multi-key chords and
+    gives first-line formatting a deterministic document-start anchor.
+    """
+    expanded: list[dict[str, Any]] = []
+    for original in actions:
+        if not isinstance(original, dict):
+            expanded.append(original)
+            continue
+        name, args = _normalise_action(original)
+        keys = args.get("keys") if name == "hotkey" else None
+        if not isinstance(keys, list):
+            expanded.append(original)
+            continue
+        modifiers = [str(key) for key in keys if str(key).casefold() in _HOTKEY_MODIFIERS]
+        ordinary = [str(key) for key in keys if str(key).casefold() not in _HOTKEY_MODIFIERS]
+        if len(ordinary) <= 1:
+            if modifiers and ordinary:
+                normalized_keys = [*modifiers, *ordinary]
+                if normalized_keys != [str(key) for key in keys]:
+                    expanded.append({"action": "hotkey", "keys": normalized_keys})
+                else:
+                    expanded.append(original)
+            else:
+                expanded.append(original)
+            continue
+        # Models sometimes emit ["Down", "Home"] to mean two sequential
+        # keys.  Sending it as one chord is undefined in desktop editors.
+        for key in ordinary:
+            expanded.append({"action": "hotkey", "keys": [*modifiers, key]})
+
+    normalized_goal = _norm_text(subgoal)
+    first_line_format = (
+        any(term in normalized_goal for term in ("firstline", "firstparagraph", "heading", "title", "首行", "第一行", "标题"))
+        and any(term in normalized_goal for term in ("bold", "加粗"))
+        and any(term in normalized_goal for term in ("center", "centre", "居中"))
+    )
+    if not first_line_format:
+        return expanded
+
+    key_sets: list[set[str]] = []
+    for item in expanded:
+        name, args = _normalise_action(item) if isinstance(item, dict) else ("", {})
+        keys = args.get("keys") if name == "hotkey" else []
+        key_sets.append({str(key).casefold() for key in keys} if isinstance(keys, list) else set())
+    has_select_line = any(keys == {"shift", "end"} for keys in key_sets)
+    has_bold = any(keys in ({"ctrl", "b"}, {"control", "b"}) for keys in key_sets)
+    has_center = any(keys in ({"ctrl", "e"}, {"control", "e"}) for keys in key_sets)
+    if not (has_select_line and has_bold and has_center):
+        return expanded
+    for index, keys in enumerate(key_sets):
+        if keys == {"home"}:
+            expanded[index] = {"action": "hotkey", "keys": ["Ctrl", "Home"]}
+            break
+    return expanded
 
 
 def _anchor_payload(anchor) -> dict[str, Any]:
@@ -331,6 +500,57 @@ def _anchor_query(anchor) -> str:
     return terms[0] if terms else ""
 
 
+def _text_width_units(value: str) -> float:
+    """Approximate OCR text width without requiring per-character boxes."""
+    total = 0.0
+    for char in value:
+        total += 2.0 if unicodedata.east_asian_width(char) in {"W", "F"} else 1.0
+    return max(1.0, total)
+
+
+def _non_native_text_click_point(element: Any, anchor: Any) -> tuple[int, int, dict[str, Any] | None]:
+    """Map a label inside a merged OCR text run to physical screen pixels."""
+    source = str(getattr(element, "source", "") or "").casefold()
+    cx = int(getattr(element, "cx", 0) or 0)
+    cy = int(getattr(element, "cy", 0) or 0)
+    if not source.startswith("ocr"):
+        return cx, cy, None
+
+    text = str(getattr(element, "text", "") or "")
+    folded = text.casefold()
+    match: tuple[int, str] | None = None
+    for raw in (getattr(anchor, "label", ""), *getattr(anchor, "fallback_text", ())):
+        term = str(raw or "").strip()
+        if not term:
+            continue
+        index = folded.find(term.casefold())
+        if index >= 0 and len(term) < len(text):
+            match = (index, text[index:index + len(term)])
+            break
+    if match is None:
+        return cx, cy, None
+
+    index, matched = match
+    left = int(getattr(element, "left", 0) or 0)
+    top = int(getattr(element, "top", 0) or 0)
+    width = max(1, int(getattr(element, "width", 0) or 0))
+    height = max(1, int(getattr(element, "height", 0) or 0))
+    total_units = _text_width_units(text)
+    start_units = _text_width_units(text[:index]) if index else 0.0
+    matched_units = _text_width_units(matched)
+    ratio = min(1.0, max(0.0, (start_units + matched_units / 2.0) / total_units))
+    if width >= height * 1.4:
+        cx = left + int(round(width * ratio))
+    elif height >= width * 1.4:
+        cy = top + int(round(height * ratio))
+    return cx, cy, {
+        "source_text": text,
+        "matched_text": matched,
+        "ratio": round(ratio, 4),
+        "point": [cx, cy],
+    }
+
+
 def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name in BATCH_OBSERVE_ACTIONS:
         return args
@@ -338,7 +558,20 @@ def _with_batch_expect_defaults(name: str, args: dict[str, Any]) -> dict[str, An
     if not isinstance(expect, dict) or "timeout_s" in expect:
         return args
     updated = dict(args)
-    updated["expect"] = {**expect, "timeout_s": 2.0}
+    normalized_expect = dict(expect)
+    file_path = normalized_expect.get("file_exists")
+    if isinstance(file_path, str) and "file_format" not in normalized_expect:
+        suffix = file_path.rsplit(".", 1)[-1].casefold() if "." in file_path else ""
+        if suffix in {"png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp"}:
+            normalized_expect["file_format"] = {
+                "path": file_path,
+                "format": suffix,
+            }
+    eventual_groundtruth = {
+        "file_exists", "file_format", "file_contains", "process_running", "process_gone",
+    }
+    timeout_s = 6.0 if any(key in normalized_expect for key in eventual_groundtruth) else 2.0
+    updated["expect"] = {**normalized_expect, "timeout_s": timeout_s}
     return updated
 
 
@@ -391,6 +624,10 @@ class FastGuiController:
         self.capture_fn = capture_fn
         self.raw_device = RawDeviceExecutor(session)
         self._color_palette_button_cache: dict[tuple[int, int, int, int, int], tuple[int, int]] = {}
+        self._color_swatch_cache: dict[
+            tuple[tuple[int, int, int, int, int], str], tuple[int, int]
+        ] = {}
+        self._persistent_palette_keys: set[tuple[int, int, int, int, int]] = set()
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -416,10 +653,10 @@ class FastGuiController:
         # A real color palette normally exposes many compact color choices. This
         # prevents single colored icons, scrollbars, or accent lines from being
         # treated as selectable swatches.
-        # Palette swatches live in a dropdown/panel below the titlebar and main
-        # toolbar. Colorful app/tool icons above this line are not selectable
-        # drawing colors.
-        title_cutoff = max(96, int(arr.shape[0] * 0.24))
+        # Palette swatches may live in a dropdown or directly in a ribbon.
+        # Exclude only the actual titlebar; local color diversity below guards
+        # against treating a colorful app/tool icon as a selectable palette.
+        title_cutoff = max(48, int(arr.shape[0] * 0.055))
         compact_components = []
         for item in components:
             bbox = item.get("bbox") or [0, 0, 0, 0]
@@ -436,19 +673,156 @@ class FastGuiController:
             if str(item.get("color") or "").casefold() != str(color or "").casefold():
                 continue
             cx, cy = item.get("center") or [0, 0]
-            cluster_count = sum(
-                1 for other in compact_components
-                if abs(int((other.get("center") or [0, 0])[0]) - int(cx)) <= 260
-                and abs(int((other.get("center") or [0, 0])[1]) - int(cy)) <= 72
+            bbox = item.get("bbox") or [0, 0, 0, 0]
+            x1, y1, x2, y2 = [int(value) for value in bbox]
+            width = max(1, x2 - x1)
+            height = max(1, y2 - y1)
+            pad = max(4, int(max(width, height) * 0.35))
+            patch = arr[
+                max(0, y1 - pad):min(arr.shape[0], y2 + pad),
+                max(0, x1 - pad):min(arr.shape[1], x2 + pad),
+            ]
+            target_mask = _color_mask(patch, color)
+            color_purity = 0.0
+            if target_mask is not None and getattr(target_mask, "size", 0):
+                normalized_color = str(color or "").casefold()
+                hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+                sat, val = hsv[:, :, 1], hsv[:, :, 2]
+                if normalized_color == "black":
+                    denominator = max(1, int((val < 110).sum()))
+                elif normalized_color == "gray":
+                    denominator = max(
+                        1, int(((sat < 55) & (val >= 45) & (val < 235)).sum())
+                    )
+                elif normalized_color == "white":
+                    denominator = max(1, int(((sat < 55) & (val >= 205)).sum()))
+                else:
+                    denominator = max(1, int(((sat > 70) & (val > 50)).sum()))
+                color_purity = float(target_mask.sum()) / denominator
+            # A solid swatch remains mostly one hue when its bbox is expanded.
+            # Multihue "edit colors"/rainbow icons contain a valid target-hue
+            # component too, but their expanded neighborhood has low purity.
+            if (
+                str(color or "").casefold() not in {"black", "gray", "white"}
+                and color_purity < 0.58
+            ):
+                continue
+            core_min_area = max(36, int(arr.shape[0] * arr.shape[1] * 0.00025))
+            row_core = [
+                other
+                for other in compact_components
+                if int(other.get("area") or 0) >= core_min_area
+                and abs(int((other.get("center") or [0, 0])[1]) - int(cy)) <= 13
+            ]
+            # Collapse multiple masks around one anti-aliased swatch, then
+            # find the contiguous horizontal chain containing this candidate.
+            x_groups: list[list[dict[str, Any]]] = []
+            for other in sorted(
+                row_core,
+                key=lambda entry: int((entry.get("center") or [0, 0])[0]),
+            ):
+                ox = int((other.get("center") or [0, 0])[0])
+                if x_groups and abs(
+                    ox - int((x_groups[-1][-1].get("center") or [0, 0])[0])
+                ) <= 8:
+                    x_groups[-1].append(other)
+                else:
+                    x_groups.append([other])
+            segments: list[list[list[dict[str, Any]]]] = []
+            for group in x_groups:
+                gx = int((group[0].get("center") or [0, 0])[0])
+                if segments:
+                    previous_x = int(
+                        (segments[-1][-1][0].get("center") or [0, 0])[0]
+                    )
+                else:
+                    previous_x = gx
+                if not segments or gx - previous_x > 66:
+                    segments.append([group])
+                else:
+                    segments[-1].append(group)
+            candidate_segment = next(
+                (
+                    segment
+                    for segment in segments
+                    if any(
+                        abs(
+                            int((member.get("center") or [0, 0])[0]) - int(cx)
+                        ) <= 8
+                        for group in segment
+                        for member in group
+                    )
+                ),
+                [],
             )
-            if cluster_count >= 6:
+            if len(candidate_segment) < 6:
+                continue
+            column_support = any(
+                abs(int((other.get("center") or [0, 0])[0]) - int(cx)) <= 8
+                and 22
+                <= abs(int((other.get("center") or [0, 0])[1]) - int(cy))
+                <= 42
+                for other in compact_components
+            )
+            group_centers = [
+                int(round(sum(
+                    int((member.get("center") or [0, 0])[0])
+                    for member in group
+                ) / max(1, len(group))))
+                for group in candidate_segment
+            ]
+            candidate_index = min(
+                range(len(group_centers)),
+                key=lambda index: abs(group_centers[index] - int(cx)),
+            )
+            gaps = [
+                group_centers[index + 1] - group_centers[index]
+                for index in range(len(group_centers) - 1)
+            ]
+            median_gap = float(np.median(gaps)) if gaps else 0.0
+            adjacent_gaps = []
+            if candidate_index > 0:
+                adjacent_gaps.append(group_centers[candidate_index] - group_centers[candidate_index - 1])
+            if candidate_index + 1 < len(group_centers):
+                adjacent_gaps.append(group_centers[candidate_index + 1] - group_centers[candidate_index])
+            regular_single_row = (
+                18 <= median_gap <= 45
+                and any(
+                    18 <= gap <= 45 and abs(float(gap) - median_gap) <= 10
+                    for gap in adjacent_gaps
+                )
+            )
+            if not column_support and not regular_single_row:
+                continue
+            segment_items = [member for group in candidate_segment for member in group]
+            neutral_colors = {"black", "gray", "white"}
+            chromatic_colors = {
+                str(other.get("color") or "")
+                for other in segment_items
+                if str(other.get("color") or "") not in neutral_colors
+            }
+            neutral_ratio = (
+                sum(
+                    1
+                    for other in segment_items
+                    if str(other.get("color") or "") in neutral_colors
+                )
+                / max(1, len(segment_items))
+            )
+            if len(chromatic_colors) >= 4:
                 enriched = dict(item)
-                enriched["cluster_count"] = cluster_count
+                enriched["cluster_count"] = len(candidate_segment)
+                enriched["color_diversity"] = len(chromatic_colors)
+                enriched["neutral_ratio"] = neutral_ratio
+                enriched["color_purity"] = round(color_purity, 4)
                 wanted.append(enriched)
         if not wanted:
             return None
         wanted.sort(
             key=lambda item: (
+                float(item.get("color_purity") or 0.0),
+                int(item.get("color_diversity") or 0),
+                -float(item.get("neutral_ratio") or 0.0),
                 int(item.get("cluster_count") or 0),
                 int(item.get("area") or 0),
                 -int((item.get("center") or [0, 0])[1]),
@@ -574,10 +948,49 @@ class FastGuiController:
         cache_key = self._palette_cache_key(region)
         attempts: list[dict[str, Any]] = []
 
+        swatch_cache_key = (cache_key, color)
+        cached_swatch = self._color_swatch_cache.get(swatch_cache_key)
+        if cached_swatch is not None and cache_key in self._persistent_palette_keys:
+            click = self._dispatch(
+                "click",
+                {
+                    "x": cached_swatch[0],
+                    "y": cached_swatch[1],
+                    "skip_screen_delta": True,
+                },
+            )
+            if not _failed(click):
+                return ToolResult(json.dumps({
+                    "ok": True,
+                    "verified": True,
+                    "color": color,
+                    "point": {"x": cached_swatch[0], "y": cached_swatch[1]},
+                    "verify_method": "cached-cv-color-swatch",
+                    "attempts": [{"action": "click_cached_color_swatch", "ok": True}],
+                }, ensure_ascii=False, default=str))
+            self._color_swatch_cache.pop(swatch_cache_key, None)
+
         def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any], int]:
             started = _now_ms()
-            image = self.capture_fn(region)
-            point = self._palette_swatch_point(image, region, color)
+            toolbar_height = min(region.height, max(180, int(region.height * 0.28)))
+            scan_region = Region(
+                region.left,
+                region.top,
+                region.width,
+                toolbar_height,
+            ).clamp_to_screen()
+            image = self.capture_fn(scan_region)
+            image_arr = np.asarray(image)
+            mapped_region = scan_region
+            if (
+                image_arr.ndim < 2
+                or image_arr.shape[1] != int(scan_region.width)
+                or image_arr.shape[0] != int(scan_region.height)
+            ):
+                # Custom/test capture providers may return the full target even
+                # when asked for an ROI. Preserve their coordinate contract.
+                mapped_region = region
+            point = self._palette_swatch_point(image, mapped_region, color)
             summary = self._palette_component_summary(image)
             return point, summary, max(0, _now_ms() - started)
 
@@ -604,6 +1017,7 @@ class FastGuiController:
 
         try:
             point, summary, elapsed_ms = capture_palette_point()
+            palette_was_visible = point is not None
             attempts.append({
                 "action": "scan_color_palette",
                 "ok": point is not None,
@@ -613,6 +1027,7 @@ class FastGuiController:
         except Exception as exc:
             attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
             point = None
+            palette_was_visible = False
         if point is None:
             opened = self._open_color_palette(region, cache_key=cache_key)
             opened_data = _json_dict(opened.text)
@@ -650,6 +1065,9 @@ class FastGuiController:
                 "attempts": attempts,
                 "error": f"no compact {color} swatch found in visible palette",
             }, ensure_ascii=False, default=str))
+        if palette_was_visible:
+            self._persistent_palette_keys.add(cache_key)
+            self._color_swatch_cache[swatch_cache_key] = point
         click = self._dispatch("click", {"x": point[0], "y": point[1], "skip_screen_delta": True})
         attempts.append({
             "action": "click_color_swatch",
@@ -670,7 +1088,20 @@ class FastGuiController:
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
         if self.raw_device.supports(name):
-            result = self.raw_device.execute(name, args)
+            # The batch owns one outer ToolSession call, but foreground scope
+            # can change between child actions (launches, dialogs, user input,
+            # multi-window apps). Re-check every raw mutation before bypassing
+            # the full ToolSession dispatch path.
+            if name in BATCH_MUTATING_ACTIONS:
+                from ..agent import scope_guard
+
+                blocked = scope_guard.ensure_scope(self.session, name, args)
+                if blocked is not None:
+                    result = blocked
+                else:
+                    result = self.raw_device.execute(name, args)
+            else:
+                result = self.raw_device.execute(name, args)
         else:
             result = self.session.dispatch(name, args)
         elapsed = max(0, _now_ms() - started)
@@ -693,6 +1124,9 @@ class FastGuiController:
             batch_index=index,
             tool=name,
             args=args,
+            trace_screenshot=bool(
+                not args.get("defer_visual_verify") or args.get("trace_checkpoint")
+            ),
         )
 
     def _publish_child_done(
@@ -720,6 +1154,9 @@ class FastGuiController:
             elapsed_ms=elapsed_ms,
             terminal=result.terminal,
             replay=result.replay,
+            trace_screenshot=bool(
+                not args.get("defer_visual_verify") or args.get("trace_checkpoint")
+            ),
         )
 
     def _click_element(self, action: dict[str, Any]) -> ToolResult:
@@ -734,7 +1171,19 @@ class FastGuiController:
         anchor = anchor_from_dict(anchor_data)
         located = self.cache.locate_with_trace(snapshot, anchor)
         element = located.element
+        contextual = _dialog_context_candidate(snapshot, anchor, action)
+        if contextual is not None and (element is None or contextual.elem_id != element.elem_id):
+            element = contextual
+            self.cache.remember(snapshot, anchor, contextual)
+            located = LocateResult(
+                contextual,
+                score=max(0.8, float(located.score)),
+                cache_hit=False,
+                reason="dialog_context_disambiguated",
+                candidates=located.candidates,
+            )
         auto_observe: dict[str, Any] | None = None
+        targeted_control_ocr: dict[str, Any] | None = None
         if element is None:
             initial_locator = located
             query = _anchor_query(anchor)
@@ -765,6 +1214,44 @@ class FastGuiController:
                         element = located.element
                         auto_observe["retry_anchor_locator"] = located.to_dict()
             if element is None:
+                terms = _short_control_terms(anchor)
+                if terms and snapshot is not None:
+                    try:
+                        matches = ocr.locate_control_text(snapshot.region, terms)
+                    except Exception as exc:
+                        matches = []
+                        targeted_control_ocr = {
+                            "used": True,
+                            "terms": terms,
+                            "match_count": 0,
+                            "error": str(exc),
+                        }
+                    if targeted_control_ocr is None:
+                        targeted_control_ocr = {
+                            "used": True,
+                            "terms": terms,
+                            "match_count": len(matches),
+                            "matches": [item.to_dict() for item in matches[:8]],
+                        }
+                    if matches:
+                        next_id = max(
+                            [int(item.elem_id) for item in snapshot.elements] or [0]
+                        ) + 1
+                        for match in matches:
+                            match.elem_id = next_id
+                            next_id += 1
+                            snapshot.elements.append(match)
+                        retry = self.cache.locate_with_trace(snapshot, anchor)
+                        element = retry.element
+                        if element is not None:
+                            located = LocateResult(
+                                element,
+                                score=retry.score,
+                                cache_hit=False,
+                                reason="targeted_control_ocr",
+                                candidates=retry.candidates,
+                            )
+            if element is None:
                 payload = {
                     "ok": False,
                     "blocked": True,
@@ -786,8 +1273,11 @@ class FastGuiController:
                     payload["skipped_auto_observe"] = True
                 if auto_observe is not None:
                     payload["controller_auto_observe"] = auto_observe
+                if targeted_control_ocr is not None:
+                    payload["targeted_control_ocr"] = targeted_control_ocr
                 return ToolResult(json.dumps(payload, ensure_ascii=False))
         servo_trace = None
+        text_subregion_click = None
         servo_enabled, servo_reason = self._should_visual_servo(element, action)
         if servo_enabled:
             tracked, servo_trace = self._visual_servo_target(element, anchor, action)
@@ -814,17 +1304,37 @@ class FastGuiController:
                 "_prepositioned": True,
             }
         else:
-            args = {
-                "element_id": element.elem_id,
-                "button": action.get("button", "left"),
-                "double": bool(action.get("double", False)),
-            }
+            # Only genuine UIA elements have an invokable/stable element id.
+            # OCR/CV/synthetic ids are local to a fused snapshot and may be -1;
+            # resolving them again can click a different physical point.
+            source = str(getattr(element, "source", "") or "").casefold()
+            non_native_source = bool(source) and source not in {"uia", "win32"}
+            if int(getattr(element, "elem_id", -1) or -1) < 0 or non_native_source:
+                click_x, click_y, text_subregion_click = _non_native_text_click_point(
+                    element,
+                    anchor,
+                )
+                args = {
+                    "x": click_x,
+                    "y": click_y,
+                    "button": action.get("button", "left"),
+                    "double": bool(action.get("double", False)),
+                    "physical": True,
+                }
+            else:
+                args = {
+                    "element_id": element.elem_id,
+                    "button": action.get("button", "left"),
+                    "double": bool(action.get("double", False)),
+                }
             explicit_physical = action.get("physical")
             prefer_uia = bool(action.get("prefer_uia_invoke")) or explicit_physical is False
             default_physical = bool(
                 getattr(self.session, "physical_anchor_clicks", False)
             )
-            if not prefer_uia and (
+            if element.source == "ocr-control":
+                args["physical"] = True
+            elif not prefer_uia and (
                 explicit_physical is True
                 or action.get("force_physical")
                 or default_physical
@@ -845,6 +1355,10 @@ class FastGuiController:
             if auto_observe is not None:
                 auto_observe["found_after_retry"] = True
                 data["controller_auto_observe"] = auto_observe
+            if targeted_control_ocr is not None:
+                data["targeted_control_ocr"] = targeted_control_ocr
+            if text_subregion_click is not None:
+                data["text_subregion_click"] = text_subregion_click
             result.text = json.dumps(data, ensure_ascii=False, default=str)
             result.replay = result.replay or {}
             result.replay.setdefault("anchor", _anchor_payload(anchor))
@@ -952,6 +1466,74 @@ class FastGuiController:
             config=ServoConfig.from_action(servo_action),
         )
 
+    def _targeted_input_read(
+        self,
+        input_locator_data: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Read only the located input bbox after typing, avoiding full-window truncation."""
+        hwnd = getattr(self.session, "hwnd", None)
+        candidate = input_locator_data.get("candidate")
+        raw_bbox = candidate.get("bbox") if isinstance(candidate, dict) else None
+        if not hwnd or not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+            return "", {"ok": False, "reason": "missing target hwnd/input bbox"}
+        left, top, width, height = (int(value) for value in raw_bbox)
+        target = Region(left, top, max(1, width), max(1, height)).clamp_to_screen()
+        started = _now_ms()
+        texts: list[str] = []
+        methods: list[str] = []
+
+        if "uia" in CONFIG.enabled_dimensions():
+            try:
+                for element in uia.collect(int(hwnd)):
+                    role = str(getattr(element, "role", "") or "").casefold()
+                    if not any(term in role for term in ("edit", "combobox", "textbox", "input")):
+                        continue
+                    box = Region(
+                        int(getattr(element, "left", 0) or 0),
+                        int(getattr(element, "top", 0) or 0),
+                        max(1, int(getattr(element, "width", 0) or 0)),
+                        max(1, int(getattr(element, "height", 0) or 0)),
+                    )
+                    intersects = (
+                        target.left < box.right and target.right > box.left
+                        and target.top < box.bottom and target.bottom > box.top
+                    )
+                    value = str(getattr(element, "text", "") or "").strip()
+                    if intersects and value:
+                        texts.append(value)
+                if texts:
+                    methods.append("uia-input-bbox")
+            except Exception:
+                pass
+
+        if not texts:
+            padding_x = max(12, int(target.width * 0.04))
+            padding_y = max(8, int(target.height * 0.5))
+            roi = Region(
+                target.left - padding_x,
+                target.top - padding_y,
+                target.width + padding_x * 2,
+                target.height + padding_y * 2,
+            ).clamp_to_screen()
+            try:
+                texts.extend(
+                    str(element.text).strip()
+                    for element in ocr.collect(roi, min_conf=0.25)
+                    if str(getattr(element, "text", "") or "").strip()
+                )
+                if texts:
+                    methods.append("ocr-input-roi")
+            except Exception:
+                pass
+
+        return "\n".join(dict.fromkeys(texts)), {
+            "ok": bool(texts),
+            "methods": methods,
+            "bbox": [target.left, target.top, target.width, target.height],
+            "elapsed_ms": max(0, _now_ms() - started),
+            "text_count": len(texts),
+        }
+
     def _type_into_element(self, action: dict[str, Any]) -> ToolResult:
         text_marker = object()
         raw_text = action.get("text", action.get("text_input", action.get("value", text_marker)))
@@ -968,7 +1550,7 @@ class FastGuiController:
             if k not in {
                 "text", "text_input", "value", "clear", "replace",
                 "clear_existing", "clear_method", "expect",
-                "append", "move_to_end",
+                "append", "move_to_end", "verify_after_submit",
             }
         }
         internal: list[dict[str, Any]] = []
@@ -990,7 +1572,76 @@ class FastGuiController:
         input_locator_data: dict[str, Any] = {}
         click_data: dict[str, Any] = {}
         click_result: ToolResult | None = None
-        if snapshot is not None:
+        explicit_id = action.get("element_id")
+        if snapshot is not None and explicit_id is not None:
+            try:
+                wanted_id = int(explicit_id)
+            except (TypeError, ValueError):
+                wanted_id = -1
+            explicit_element = next(
+                (
+                    element for element in snapshot.elements
+                    if int(getattr(element, "elem_id", -1) or -1) == wanted_id
+                ),
+                None,
+            )
+            if explicit_element is None:
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "focus",
+                    "error": "type_into_element element_id is absent from the current snapshot",
+                    "element_id": wanted_id,
+                    "via": "type_into_element",
+                }, ensure_ascii=False))
+            if not _is_input_element(explicit_element, snapshot.region):
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "focus",
+                    "error": (
+                        "type_into_element refused an element_id that is not a safe "
+                        "input field; re-observe and use the actual focused/wide input"
+                    ),
+                    "element_id": wanted_id,
+                    "resolved_element": explicit_element.to_dict(),
+                    "via": "type_into_element",
+                }, ensure_ascii=False))
+            input_locator_data = {
+                "found": True,
+                "score": 1.0,
+                "reason": "explicit_current_snapshot_element_id",
+                "candidate": {
+                    **explicit_element.to_dict(),
+                    "center": [int(explicit_element.cx), int(explicit_element.cy)],
+                },
+                "candidates": [],
+            }
+            click_result = self._dispatch("click", {
+                "element_id": wanted_id,
+                "button": action.get("button", "left"),
+                "double": bool(action.get("double", False)),
+            })
+            click_data = _json_dict(click_result.text)
+            if click_data:
+                click_data.setdefault("via", "input_locator")
+                click_data["input_locator"] = input_locator_data
+                click_data["resolved_element"] = explicit_element.to_dict()
+                click_data["anchor_locator"] = {
+                    "found": True,
+                    "score": 1.0,
+                    "cache_hit": False,
+                    "reason": "explicit_current_snapshot_element_id",
+                }
+                click_result.text = json.dumps(click_data, ensure_ascii=False, default=str)
+            internal.append({
+                "action": "click_element",
+                "via": "explicit_element_id",
+                "ok": not _failed(click_result),
+                "data": click_data if click_data else {"preview": click_result.text[:240]},
+            })
+
+        if snapshot is not None and click_result is None:
             anchor_data = action.get("anchor") if isinstance(action.get("anchor"), dict) else click_args
             fallback = anchor_data.get("fallback_text") or anchor_data.get("fallback") or []
             if isinstance(fallback, str):
@@ -1000,6 +1651,7 @@ class FastGuiController:
                 label=str(anchor_data.get("label") or ""),
                 expected_region=str(anchor_data.get("expected_region") or ""),
                 fallback_text=tuple(str(item) for item in fallback if item),
+                task=str(getattr(self.session, "task", "") or ""),
             )
             input_locator_data = located_input.to_dict()
             candidate = located_input.candidate if located_input.found else None
@@ -1007,16 +1659,38 @@ class FastGuiController:
                 not located_input.found
                 and str(input_locator_data.get("reason") or "") == "concrete_label_not_found"
             ):
-                return ToolResult(json.dumps({
-                    "ok": False,
-                    "blocked": True,
-                    "stage": "focus",
-                    "error": "type_into_element concrete input label was not visible",
-                    "via": "type_into_element",
-                    "input_locator": input_locator_data,
-                    "subresults": internal,
-                    "controller_internal_action_count": len(internal),
-                }, ensure_ascii=False, default=str))
+                # Native file dialogs often expose the shell search field before
+                # the filename combobox. Refresh once locally after the dialog
+                # settles instead of paying an LLM round trip for the same input.
+                self._wait_stable({"stable_ms": 250, "timeout_s": 2.0})
+                observe = self._dispatch("observe", {"full": True, "force_full": True})
+                internal.append({
+                    "action": "observe_retry",
+                    "ok": not _failed(observe),
+                    "data": _json_dict(observe.text) or {"preview": observe.text[:240]},
+                })
+                snapshot = self.session.snapshot
+                if snapshot is not None and not _failed(observe):
+                    located_input = locate_input(
+                        snapshot,
+                        label=str(anchor_data.get("label") or ""),
+                        expected_region=str(anchor_data.get("expected_region") or ""),
+                        fallback_text=tuple(str(item) for item in fallback if item),
+                        task=str(getattr(self.session, "task", "") or ""),
+                    )
+                    input_locator_data = located_input.to_dict()
+                    candidate = located_input.candidate if located_input.found else None
+                if candidate is None:
+                    return ToolResult(json.dumps({
+                        "ok": False,
+                        "blocked": True,
+                        "stage": "focus",
+                        "error": "type_into_element concrete input label was not visible after local retry",
+                        "via": "type_into_element",
+                        "input_locator": input_locator_data,
+                        "subresults": internal,
+                        "controller_internal_action_count": len(internal),
+                    }, ensure_ascii=False, default=str))
             if candidate is not None:
                 if candidate.element is not None and candidate.element.elem_id is not None and candidate.element.elem_id >= 0:
                     click_payload = {
@@ -1087,7 +1761,9 @@ class FastGuiController:
                     payload[key] = click_data[key]
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
-        clear_requested = _truthy(action.get("clear") or action.get("replace") or action.get("clear_existing"))
+        clear_requested = _truthy(
+            action.get("clear") or action.get("replace") or action.get("clear_existing")
+        ) or _needs_replace_guard(text, action)
         if clear_requested:
             clear_result = self._dispatch("hotkey", {"keys": ["ctrl", "a"]})
             clear_data = _json_dict(clear_result.text)
@@ -1151,17 +1827,30 @@ class FastGuiController:
             type_args["expect"] = action["expect"]
         type_result = self._dispatch("type_text", type_args)
         type_data = _json_dict(type_result.text)
-        type_failed = _failed(type_result) or (
+        delivery_failed = bool(
+            type_result.terminal == "fail"
+            or type_data.get("blocked") is True
+            or type_data.get("ok") is False
+        )
+        postcondition_pending = bool(
             isinstance(action.get("expect"), dict)
             and type_data.get("verified") is False
         )
+        type_failed = delivery_failed
         internal.append({
             "action": "type_text",
-            "ok": not type_failed,
+            "ok": not delivery_failed,
+            "verified": bool(type_data.get("verified")) if "verified" in type_data else None,
             "data": type_data if type_data else {"preview": type_result.text[:240]},
         })
         replace_guard_error = ""
-        if not type_failed and clear_requested and _needs_replace_guard(text, action):
+        verify_after_submit = _truthy(action.get("verify_after_submit"))
+        if (
+            not type_failed
+            and clear_requested
+            and _needs_replace_guard(text, action)
+            and not verify_after_submit
+        ):
             read_result = self._dispatch("read_text", {})
             read_data = _json_dict(read_result.text)
             read_preview = read_result.text[:240]
@@ -1170,19 +1859,34 @@ class FastGuiController:
                 "ok": not _failed(read_result),
                 "data": read_data if read_data else {"preview": read_preview},
             })
-            if _failed(read_result):
+            verification_text = "" if _failed(read_result) else read_result.text
+            replace_guard_error = _input_presence_error(verification_text, text)
+            if replace_guard_error and getattr(self.session, "hwnd", None):
+                targeted_text, targeted_meta = self._targeted_input_read(input_locator_data)
+                internal.append({
+                    "action": "targeted_input_read",
+                    "ok": bool(targeted_meta.get("ok")),
+                    "data": {
+                        **targeted_meta,
+                        "preview": targeted_text[:500],
+                    },
+                })
+                if targeted_text:
+                    verification_text = targeted_text
+                    replace_guard_error = _input_presence_error(verification_text, text)
+            if not replace_guard_error:
+                replace_guard_error = _detect_prefixed_glob_text(verification_text, text)
+            if replace_guard_error:
                 type_failed = True
-                replace_guard_error = "type_into_element could not verify replaced input text"
-            else:
-                replace_guard_error = _input_presence_error(read_result.text, text)
-                if not replace_guard_error:
-                    replace_guard_error = _detect_prefixed_glob_text(read_result.text, text)
-                if replace_guard_error:
-                    type_failed = True
+            elif postcondition_pending:
+                postcondition_pending = False
         payload = {
             "ok": not type_failed,
             "via": "type_into_element",
             "text_length": len(text),
+            "mutation_applied": not delivery_failed,
+            "verify_after_submit": verify_after_submit,
+            "postcondition_pending": bool(postcondition_pending and not type_failed),
             "subresults": internal,
             "controller_internal_action_count": len(internal),
             "type_result": type_data,
@@ -1190,11 +1894,23 @@ class FastGuiController:
         if isinstance(action.get("expect"), dict):
             payload["expect"] = action["expect"]
         if "verified" in type_data:
-            payload["verified"] = bool(type_data.get("verified"))
+            payload["verified"] = bool(type_data.get("verified")) or bool(
+                not postcondition_pending and not type_failed
+            )
         if type_failed:
             payload["blocked"] = True
             payload["stage"] = "replace_guard" if replace_guard_error else "type_text"
             payload["error"] = replace_guard_error or "type_into_element text entry did not verify"
+        elif postcondition_pending:
+            payload["needs_observe"] = True
+            payload["verify_detail"] = (
+                "Text input was delivered, but the immediate postcondition was not visible yet. "
+                "Continue the same controller batch with wait/read_text or observe; do not type it again."
+            )
+            payload["fast_path_advice"] = (
+                "The literal was already delivered to the focused target. Do not repeat type_text; "
+                "verify the current UI with the following read_text/observe action."
+            )
         if input_locator_data:
             payload["input_locator"] = input_locator_data
         for key in (
@@ -1210,9 +1926,12 @@ class FastGuiController:
             timeout_s=float(action.get("timeout_s", 3.0)),
             min_ratio=float(action.get("min_ratio", 0.0005)),
         )
+        required = _truthy(action.get("required", True))
         return ToolResult(json.dumps({
-            "ok": bool(delta.changed),
+            "ok": bool(delta.changed) or not required,
             "changed": delta.changed,
+            "required": required,
+            "needs_observe": not delta.changed,
             "delta": delta.to_dict(),
             "screen_watch": self.watcher.status(),
         }, ensure_ascii=False))
@@ -1223,12 +1942,158 @@ class FastGuiController:
             timeout_s=float(action.get("timeout_s", 5.0)),
             max_ratio=float(action.get("max_ratio", 0.0008)),
         )
+        stable = bool(result.get("stable"))
+        required = _truthy(action.get("required"))
         return ToolResult(json.dumps({
-            "ok": bool(result.get("stable")),
-            "stable": bool(result.get("stable")),
+            "ok": stable or not required,
+            "stable": stable,
+            "required": required,
+            "needs_observe": not stable,
             "delta": result.get("delta", {}),
             "screen_watch": self.watcher.status(),
         }, ensure_ascii=False))
+
+    @staticmethod
+    def _document_editor_ready(title: str, visible_text: str) -> bool:
+        compact_title = re.sub(r"\s+", "", str(title or "").casefold())
+        if compact_title in {
+            "文档-wpsoffice",
+            "新建文档-wpsoffice",
+            "新标签页-wpsoffice",
+            "wpsoffice",
+            "wps文字-wpsoffice",
+        }:
+            return False
+        text = str(visible_text or "")
+        chrome_hits = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in (
+            r"(?:^|\n)(?:开始|home)(?:\n|$)",
+            r"(?:^|\n)(?:插入|insert)(?:\n|$)",
+            r"页面\s*[:：]?\s*\d|page\s*[:：]?\s*\d",
+            r"字数\s*[:：]?\s*\d|word\s*count\s*[:：]?\s*\d",
+        ))
+        return chrome_hits >= 2
+
+    def _ensure_document_surface(self, action: dict[str, Any]) -> ToolResult:
+        """Keep creation/navigation local until a real editor surface is visible."""
+        max_attempts = max(1, min(4, int(action.get("max_attempts") or 3)))
+        evidence: list[dict[str, Any]] = []
+        for attempt in range(1, max_attempts + 1):
+            hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+            try:
+                title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
+            except Exception:
+                title = ""
+            read_result = self._dispatch("read_text", {})
+            visible_text = str(read_result.text or "")
+            ready = self._document_editor_ready(title, visible_text)
+            evidence.append({
+                "attempt": attempt,
+                "title": title,
+                "ready": ready,
+                "text_preview": visible_text[:500],
+            })
+            if ready:
+                self.session._document_surface_ready = True
+                self.session._new_blank_applied = True
+                return ToolResult(json.dumps({
+                    "ok": True,
+                    "verified": True,
+                    "document_surface_ready": True,
+                    "attempts": attempt,
+                    "evidence": evidence,
+                }, ensure_ascii=False, default=str))
+            compact_title = re.sub(r"\s+", "", title.casefold())
+            at_application_home = compact_title in {
+                "文档-wpsoffice",
+                "wpsoffice",
+                "wps文字-wpsoffice",
+            }
+            create_result = None
+            create_via = "ctrl+n"
+            snapshot = getattr(self.session, "snapshot", None)
+            region = getattr(snapshot, "region", None)
+            creation_hub = all(
+                re.search(rf"(?:^|\n){term}(?:\n|$)", visible_text, re.IGNORECASE)
+                for term in ("文字", "演示", "表格")
+            )
+            if creation_hub:
+                text_document_candidates = [
+                    element
+                    for element in (getattr(snapshot, "elements", []) or [])
+                    if re.sub(r"\s+", "", str(getattr(element, "text", "") or "")) == "文字"
+                ] if snapshot is not None else []
+                if text_document_candidates:
+                    element = max(
+                        text_document_candidates,
+                        key=lambda item: int(getattr(item, "width", 0) or 0) * int(getattr(item, "height", 0) or 0),
+                    )
+                    create_via = "grounded-document-type"
+                    create_result = self._dispatch("click", {
+                        "x": int(getattr(element, "cx", 0) or 0),
+                        "y": int(getattr(element, "cy", 0) or 0),
+                        "button": "left",
+                        "physical": True,
+                    })
+                else:
+                    create_via = "semantic-document-type"
+                    create_result = self._click_element({
+                        "label": "文字",
+                        "fallback_text": ["Document", "Writer", "Office文档"],
+                        "expected_region": "top-left",
+                    })
+            elif at_application_home and re.search(r"(?:^|\n)(?:\+|＋|十)?\s*(?:新建|new)(?:\n|$)", visible_text, re.IGNORECASE):
+                region = getattr(snapshot, "region", None)
+                wide_left_new = []
+                if snapshot is not None and region is not None:
+                    for element in getattr(snapshot, "elements", []) or []:
+                        label = re.sub(r"\s+", "", str(getattr(element, "text", "") or "").casefold())
+                        if not re.search(r"(?:新建|new)", label, re.IGNORECASE):
+                            continue
+                        if int(getattr(element, "cx", 0) or 0) > region.left + int(region.width * 0.40):
+                            continue
+                        if int(getattr(element, "cy", 0) or 0) < region.top + int(region.height * 0.07):
+                            continue
+                        width = int(getattr(element, "width", 0) or 0)
+                        if width >= 80:
+                            wide_left_new.append((width, element))
+                if wide_left_new:
+                    _width, element = max(wide_left_new, key=lambda item: item[0])
+                    create_via = "grounded-wide-left-new"
+                    create_result = self._dispatch("click", {
+                        "x": int(getattr(element, "cx", 0) or 0),
+                        "y": int(getattr(element, "cy", 0) or 0),
+                        "button": "left",
+                        "physical": True,
+                    })
+                else:
+                    create_via = "semantic-new-button"
+                    create_result = self._click_element({
+                        "label": "新建",
+                        "fallback_text": ["+ 新建", "＋ 新建", "New"],
+                        "role": "button",
+                        "expected_region": "left-center",
+                    })
+            if create_result is None or _failed(create_result):
+                create_via = "ctrl+n"
+                create_result = self._dispatch("hotkey", {"keys": ["ctrl", "n"]})
+            evidence[-1]["create_via"] = create_via
+            if _failed(create_result):
+                break
+            self._wait_change({
+                "timeout_s": 5.0,
+                "min_ratio": 0.0002,
+                "required": False,
+            })
+            self._wait_stable({"stable_ms": 300, "timeout_s": 5.0})
+        self.session._document_surface_ready = False
+        return ToolResult(json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "document_surface_ready": False,
+            "error": "No editable document surface appeared after local creation retries.",
+            "evidence": evidence,
+        }, ensure_ascii=False, default=str))
 
     @staticmethod
     def _pause(action: dict[str, Any]) -> ToolResult:
@@ -1244,6 +2109,9 @@ class FastGuiController:
         elif isinstance(action.get("value"), (int, float)):
             # Shorthand {"wait": 500} means 500ms inside action batches.
             duration_s = float(action["value"]) / 1000.0
+        elif isinstance(action.get("time"), (int, float)):
+            # Common model shorthand: {"action":"wait", "time":1.0}.
+            duration_s = float(action["time"])
         if duration_s is None:
             return ToolResult(json.dumps({
                 "ok": False,
@@ -1283,6 +2151,57 @@ class FastGuiController:
             max(1, max(xs) - min(xs) + 2 * pad),
             max(1, max(ys) - min(ys) + 2 * pad),
         ).clamp_to_screen()
+
+    def _map_canvas_relative_draw(self, args: dict[str, Any]) -> dict[str, Any]:
+        raw = args.get("normalized_strokes")
+        if raw is None and str(args.get("coordinate_space") or "").casefold() in {
+            "canvas", "canvas_normalized", "normalized",
+        }:
+            raw = args.get("strokes")
+        if not isinstance(raw, list):
+            return args
+        region_data = args.get("canvas_region")
+        if not isinstance(region_data, dict):
+            region_data = getattr(self.session, "_last_canvas_region", None)
+        if not isinstance(region_data, dict):
+            return args
+        try:
+            region = Region(
+                int(region_data.get("x", region_data.get("left"))),
+                int(region_data.get("y", region_data.get("top"))),
+                int(region_data["width"]),
+                int(region_data["height"]),
+            ).clamp_to_screen()
+        except (TypeError, ValueError, KeyError):
+            return args
+        mapped: list[list[list[int]]] = []
+        try:
+            for stroke in raw:
+                points = []
+                for point in stroke:
+                    x = max(0.0, min(1000.0, float(point[0])))
+                    y = max(0.0, min(1000.0, float(point[1])))
+                    points.append([
+                        region.left + int(round(region.width * x / 1000.0)),
+                        region.top + int(round(region.height * y / 1000.0)),
+                    ])
+                if len(points) >= 2:
+                    mapped.append(points)
+        except (TypeError, ValueError, IndexError):
+            return args
+        if not mapped:
+            return args
+        updated = dict(args)
+        updated["strokes"] = mapped
+        updated["canvas_region"] = {
+            "x": region.left,
+            "y": region.top,
+            "width": region.width,
+            "height": region.height,
+        }
+        updated["mapped_from_coordinate_space"] = "canvas_normalized"
+        updated.pop("normalized_strokes", None)
+        return updated
 
     @staticmethod
     def _action_region(name: str, args: dict[str, Any]) -> Region | None:
@@ -1369,6 +2288,7 @@ class FastGuiController:
         sync: dict[str, Any] | bool | None = None,
         subgoal: str = "",
     ) -> dict[str, Any]:
+        actions = _stable_batch_actions(actions, subgoal)
         has_mutation = False
         has_clipboard = False
         for action in actions:
@@ -1426,6 +2346,7 @@ class FastGuiController:
         last_visual_action = ""
         last_visual_data: dict[str, Any] = {}
         semantic_observe_after_visual = False
+        typed_literals: list[str] = []
         for index, action in enumerate(actions, start=1):
             if not isinstance(action, dict):
                 metrics.failed_at = index
@@ -1433,7 +2354,10 @@ class FastGuiController:
                 break
             name, normalised_args = _normalise_action(action)
             name, normalised_args, upgraded_from = _upgrade_semantic_action(name, normalised_args)
+            if name == "draw_strokes":
+                normalised_args = self._map_canvas_relative_draw(normalised_args)
             normalised_args = _with_batch_expect_defaults(name, normalised_args)
+            optional_action = bool(normalised_args.pop("optional", False))
             last_action = name
             if name in BATCH_MUTATING_ACTIONS:
                 mutating_seen = True
@@ -1443,9 +2367,32 @@ class FastGuiController:
                 if stop_on_error:
                     break
                 continue
+            epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             started = _now_ms()
             self._publish_child_start(batch_id, index, name, normalised_args)
-            if name == "click_element":
+            condition = normalised_args.get("condition")
+            text_appears = (
+                str(condition.get("text_appears") or "").strip()
+                if name == "wait" and isinstance(condition, dict)
+                else ""
+            )
+            self_fulfilling_wait = bool(
+                text_appears
+                and any(text_appears in literal for literal in typed_literals)
+            )
+            if self_fulfilling_wait:
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "error": (
+                        "wait text_appears is self-fulfilling because the same marker "
+                        "was typed earlier in this batch. Verify a distinct result, "
+                        "state change, file/process condition, or a scoped output region."
+                    ),
+                    "text_appears": text_appears,
+                }, ensure_ascii=False))
+            elif name == "click_element":
                 result = self._click_element(normalised_args)
             elif name == "type_into_element":
                 result = self._type_into_element(normalised_args)
@@ -1457,8 +2404,14 @@ class FastGuiController:
                 result = self._wait_change(normalised_args)
             elif name == "wait_stable":
                 result = self._wait_stable(normalised_args)
+            elif name == "ensure_document_surface":
+                result = self._ensure_document_surface(normalised_args)
             else:
                 result = self._dispatch(name, normalised_args)
+            if name in {"type_text", "type_into_element"} and not _failed(result):
+                typed = str(normalised_args.get("text") or "")
+                if typed:
+                    typed_literals.append(typed)
             elapsed = max(0, _now_ms() - started)
             metrics.tool_latencies_ms.append(elapsed)
             metrics.action_count += 1
@@ -1480,6 +2433,53 @@ class FastGuiController:
             if upgraded_from:
                 item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)
+            post_state = data.get("post_state") if isinstance(data.get("post_state"), dict) else {}
+            try:
+                foreground_hwnd = int(post_state.get("foreground_hwnd") or 0)
+                prior_hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+            except (TypeError, ValueError):
+                foreground_hwnd = 0
+                prior_hwnd = 0
+            if foreground_hwnd and foreground_hwnd != prior_hwnd:
+                related = False
+                relation_check = getattr(self.session, "_window_related_to_target", None)
+                if callable(relation_check) and prior_hwnd:
+                    try:
+                        related = bool(relation_check(foreground_hwnd, prior_hwnd))
+                    except Exception:
+                        related = False
+                if not related and prior_hwnd:
+                    try:
+                        related = win32gui.GetWindow(foreground_hwnd, 4) == prior_hwnd
+                    except Exception:
+                        related = False
+                if (
+                    not related
+                    and prior_hwnd
+                    and name == "hotkey"
+                    and [str(key).casefold() for key in normalised_args.get("keys") or []] == ["ctrl", "n"]
+                ):
+                    # New-document shortcuts in shared-host Office apps create
+                    # a sibling top-level window rather than an owned modal.
+                    # Scope this exception to Ctrl+N so unrelated same-process
+                    # chat/app instances remain isolated.
+                    related = _same_window_process(foreground_hwnd, prior_hwnd)
+                if related:
+                    remember_target = getattr(self.session, "_remember_target", None)
+                    if callable(remember_target):
+                        try:
+                            remember_target(foreground_hwnd, str(post_state.get("foreground_title") or ""))
+                        except Exception:
+                            setattr(self.session, "hwnd", foreground_hwnd)
+                    else:
+                        setattr(self.session, "hwnd", foreground_hwnd)
+                    try:
+                        self.session.snapshot = None
+                    except Exception:
+                        pass
+                    data["controller_adopted_foreground_hwnd"] = foreground_hwnd
+                    data["controller_previous_hwnd"] = prior_hwnd
+                    result.text = json.dumps(data, ensure_ascii=False, default=str)
             has_expect = isinstance(normalised_args.get("expect"), dict)
             query_required = bool(normalised_args.get("require_match"))
             query_matches = []
@@ -1513,7 +2513,10 @@ class FastGuiController:
             elif data.get("verified") is False:
                 if name in BATCH_MUTATING_ACTIONS and (has_expect or not evidence_requirement_verified):
                     current_state_verified = False
-                if has_expect:
+                if has_expect and not (
+                    data.get("mutation_applied") is True
+                    and data.get("postcondition_pending") is True
+                ):
                     verified_expect_false_any = True
             elif name in BATCH_MUTATING_ACTIONS:
                 current_state_verified = False
@@ -1522,11 +2525,31 @@ class FastGuiController:
                 and not _is_json_object(result.text)
                 and name not in BATCH_OBSERVE_ACTIONS
             )
+            deferred_postcondition = bool(
+                has_expect
+                and data.get("verified") is False
+                and data.get("mutation_applied") is True
+                and data.get("postcondition_pending") is True
+            )
             failed = _failed(result) or plain_error or (
                 has_expect
                 and data.get("verified") is False
+                and not deferred_postcondition
             ) or evidence_requirement_failed
+            if failed and optional_action:
+                item["optional_failed"] = True
+                failed = False
             item["ok"] = not failed
+            if name in BATCH_MUTATING_ACTIONS and item["ok"]:
+                # Raw-device child actions intentionally bypass the outer
+                # ToolSession dispatch.  Invalidate its perception cache here
+                # so a later read/observe in the same batch cannot reuse the
+                # pre-action UIA/OCR snapshot.  Preserve session.snapshot for
+                # stable anchor coordinates between adjacent fast clicks.
+                current_epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+                if current_epoch <= epoch_before:
+                    setattr(self.session, "_screen_epoch", epoch_before + 1)
+                setattr(self.session, "_observe_cache", None)
             if evidence_requirement_failed:
                 item["error"] = "required controller evidence was not observed"
             if "verified" in data:

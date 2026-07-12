@@ -6,6 +6,8 @@ ext.delay run their REAL implementations to prove variable interpolation works
 end-to-end. The key invariant: a v1 flat script behaves exactly as before.
 """
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -114,6 +116,25 @@ def test_v2_ext_delay_records_result(tmp_path):
     assert out["results"][0]["tool"] == "ext.delay"
 
 
+def test_v2_ext_delay_cancellation_is_prompt_and_not_success(tmp_path):
+    stop_event = threading.Event()
+    script = {"format": "wps/2", "steps": [{"tool": "ext.delay", "seconds": 10}]}
+    r = trace_mod.Replayer(stop_event)
+    r.step_delay = 0
+    timer = threading.Timer(0.03, stop_event.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        out = r.run(_write(tmp_path, script))
+    finally:
+        timer.cancel()
+
+    assert time.monotonic() - started < 1.0
+    assert out["ok"] is False
+    assert out["results"][0]["ok"] is False
+    assert out["results"][0]["stopped"] is True
+
+
 def test_v2_var_set_then_used_by_later_leaf(tmp_path):
     script = {"format": "wps/2", "steps": [
         {"tool": "ext.var_set", "name": "u", "value": "Bob"},
@@ -188,6 +209,113 @@ def test_relocate_text_uses_existing_window_anchor(monkeypatch):
 
     assert point == (99, 88)
     assert r.hwnd == 123
+
+
+def test_relocate_uses_nested_visual_anchor_label_before_recorded_coords(monkeypatch):
+    queries = []
+    monkeypatch.setattr(
+        trace_mod.uia,
+        "find_by_text",
+        lambda hwnd, text: queries.append((hwnd, text)) or [
+            SimpleNamespace(
+                text=text, cx=410, cy=260, source="uia",
+                left=370, top=245, width=80, height=30,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        trace_mod,
+        "window_region",
+        lambda hwnd: trace_mod.Region(0, 0, 800, 600),
+    )
+
+    r = trace_mod.Replayer()
+    r.hwnd = 123
+    point = r._relocate({
+        "tool": "click",
+        "coords": [1, 2],
+        "anchor": {"label": "Moving target", "role": "button"},
+    })
+
+    assert point == (410, 260)
+    assert queries == [(123, "Moving target")]
+    assert r._last_relocation["source"] == "uia"
+
+
+def test_replay_preserves_recorded_visual_servo_before_physical_click(monkeypatch):
+    clicks = []
+    moves = []
+    r = trace_mod.Replayer()
+    r.hwnd = 123
+    monkeypatch.setattr(
+        trace_mod,
+        "window_region",
+        lambda hwnd: trace_mod.Region(0, 0, 800, 600),
+    )
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "move_mouse",
+        lambda x, y: moves.append((x, y)),
+    )
+    monkeypatch.setattr(
+        r,
+        "_relocate",
+        lambda step, anchor_key="": (
+            r._last_relocation.update({
+                "source": "uia",
+                "point": [100, 120],
+                "bbox": [70, 105, 60, 30],
+            })
+            or (100, 120)
+        ),
+    )
+    monkeypatch.setattr(
+        trace_mod,
+        "track_visual_target",
+        lambda initial, labels, **kwargs: (
+            trace_mod.UIElement(
+                elem_id=initial.elem_id,
+                source="servo-template",
+                role="button",
+                text="Moving target",
+                cx=180,
+                cy=140,
+                left=150,
+                top=125,
+                width=60,
+                height=30,
+                confidence=0.95,
+            ),
+            {"enabled": True, "confirmed": True, "correction_count": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        trace_mod.verify,
+        "run_with_verify",
+        lambda _name, action, **_kwargs: action() | {"verified": True},
+    )
+    monkeypatch.setattr(
+        trace_mod.executor,
+        "click",
+        lambda x, y, **kwargs: clicks.append((x, y, kwargs)) or {"ok": True},
+    )
+
+    result = r._run_step("2", {
+        "tool": "click",
+        "coords": [1, 2],
+        "anchor": {"label": "Moving target", "role": "button"},
+        "resolved_element": {"source": "servo-template", "role": "button"},
+        "expect": {"text_appears": "VISUAL_SERVO_OK"},
+    })
+
+    assert result["ok"] is True
+    assert result["visual_servo"]["confirmed"] is True
+    assert result["resolved"]["point"] == [180, 140]
+    assert moves == [(788, 588)]
+    assert result["visual_servo"]["arm_point"] == {"x": 788, "y": 588}
+    assert clicks == [(180, 140, {
+        "button": "left", "double": False, "hwnd": 123, "prepositioned": True,
+    })]
 
 
 def test_relocate_uses_fast_exact_uia_query_before_full_fusion(monkeypatch):

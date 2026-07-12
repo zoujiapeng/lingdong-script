@@ -34,6 +34,265 @@ def test_world_model_screen_bulletin_advisory_is_edge_triggered():
     assert second == ""
 
 
+def test_world_model_retains_source_bound_facts_per_run():
+    from winpilot.perception.world import WorldModel
+
+    world = WorldModel()
+    world.record_facts(
+        subject="Product A",
+        facts={"weight": "141 g", "battery": "70 days"},
+        source_url="https://example.test/a",
+        evidence=["Weight: 141 g", "Battery life: 70 days"],
+    )
+    world.record_facts(
+        subject="Product B",
+        facts={"weight": "99 g"},
+        source_url="https://example.test/b",
+    )
+
+    records = world.working_set()
+    first = world.working_set_advisory()
+    second = world.working_set_advisory()
+
+    assert [record["subject"] for record in records] == ["Product A", "Product B"]
+    assert records[0]["facts"]["weight"] == "141 g"
+    assert records[1]["source_url"] == "https://example.test/b"
+    assert "do not mix subjects" in first
+    assert "Product A" in first and "Product B" in first
+    assert second == ""
+    assert world.state()["working_set_count"] == 2
+
+
+def test_record_facts_tool_updates_run_working_set():
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="compare two visible product pages")
+    result = session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"connection": "Bluetooth"},
+        "source_url": "https://example.test/a",
+        "evidence": ["Bluetooth visible in specifications"],
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is True
+    assert payload["verified"] is True
+    assert payload["record"]["facts"] == {"connection": "Bluetooth"}
+    assert session.world.working_set()[0]["subject"] == "Product A"
+
+
+def test_record_facts_duplicate_subject_is_update_not_new_source():
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="compare two separate product pages")
+    first = json.loads(session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"weight": "100 g"},
+        "source_url": "https://example.test/a",
+    }).text)
+    update = json.loads(session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"battery": "70 days"},
+        "source_url": "https://example.test/a",
+    }).text)
+
+    assert first["created_new_source"] is True
+    assert update["created_new_source"] is False
+    assert update["updated_existing_source"] is True
+    assert update["verified"] is False
+    assert len(update["working_set"]) == 1
+
+    session._research_exploration_actions = 10
+    session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"color": "black"},
+        "source_url": "https://example.test/a",
+    })
+    assert session._research_exploration_actions == 10
+
+
+def test_record_facts_rejects_new_subject_bound_to_existing_source_url():
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="compare two separate product pages")
+    session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"weight": "100 g"},
+        "source_url": "https://example.test/a",
+    })
+    duplicate = json.loads(session.dispatch("record_facts", {
+        "subject": "Product B",
+        "facts": {"weight": "90 g"},
+        "source_url": "https://example.test/a",
+    }).text)
+
+    assert duplicate["blocked"] is True
+    assert duplicate["duplicate_source_url"] is True
+    assert len(session.world.working_set()) == 1
+
+
+def test_record_facts_uses_visible_address_bar_url_over_model_claim():
+    import json
+
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(task="compare two separate product pages")
+    session.snapshot = Snapshot(
+        hwnd=42,
+        title="Product - Google Chrome",
+        region=Region(0, 0, 1920, 1020),
+        elements=[UIElement(
+            elem_id=1, source="uia", role="edit",
+            text="地址和搜索栏=logitech.com/en-us/shop/p/mx-master-3s",
+            cx=910, cy=79, left=198, top=64, width=1427, height=31,
+        )],
+    )
+
+    payload = json.loads(session.dispatch("record_facts", {
+        "subject": "MX Master 3S",
+        "facts": {"weight": "not visible"},
+        "source_url": "https://www.logitech.com/products/mice/mx-master-3s.html",
+    }).text)
+
+    assert payload["source_url_corrected"] is True
+    assert payload["record"]["source_url"] == "https://logitech.com/en-us/shop/p/mx-master-3s"
+
+
+def test_record_facts_normalizes_source_fact_to_visible_address_bar():
+    import json
+
+    from winpilot.agent.tools import ToolSession
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    session = ToolSession(task="collect a product source")
+    session.snapshot = Snapshot(
+        hwnd=42,
+        title="Product - Google Chrome",
+        region=Region(0, 0, 1920, 1020),
+        elements=[UIElement(
+            elem_id=1, source="uia", role="edit",
+            text="地址和搜索栏=example.test/products/real",
+            cx=910, cy=79, left=198, top=64, width=1427, height=31,
+        )],
+    )
+
+    payload = json.loads(session.dispatch("record_facts", {
+        "subject": "Product",
+        "facts": {"来源": "https://invented.test/wrong", "价格": "$10"},
+        "source_url": "https://invented.test/wrong",
+    }).text)
+
+    assert payload["record"]["facts"]["来源"] == "https://example.test/products/real"
+
+
+def test_verified_subgoal_is_blocked_when_repeated_on_same_screen_epoch(monkeypatch):
+    import json
+
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="navigate and collect visible facts")
+    calls = []
+    session._t_execute_subgoal = lambda args: calls.append(args) or ToolResult(
+        '{"ok": true, "verified": true}'
+    )
+    session._t_open_app = lambda _args: ToolResult('{"ok": true, "verified": true}')
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    args = {
+        "subgoal": "Navigate to the source page",
+        "target_window": {"hwnd": 100},
+        "input": {"label": "address", "text": "https://example.test/a"},
+    }
+
+    first = json.loads(session.dispatch("execute_subgoal", args).text)
+    duplicate = json.loads(session.dispatch("execute_subgoal", args).text)
+
+    assert first["verified"] is True
+    assert duplicate["blocked"] is True
+    assert duplicate["duplicate_verified_subgoal"] is True
+    assert len(calls) == 1
+
+    session.dispatch("open_app", {"name": "Browser"})
+    after_screen_mutation = json.loads(session.dispatch("execute_subgoal", args).text)
+
+    assert after_screen_mutation["verified"] is True
+    assert len(calls) == 2
+
+
+def test_identical_no_progress_subgoal_is_blocked_after_two_attempts(monkeypatch):
+    import json
+
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="inspect a visible page")
+    calls = []
+    session._t_execute_subgoal = lambda args: calls.append(args) or ToolResult(
+        '{"ok": true, "verified": false, "results": '
+        '[{"action": "wait_stable", "data": {"delta": {"changed": false}}}]}'
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    args = {"subgoal": "Expand details", "click": {"label": "More", "role": "button"}}
+
+    assert json.loads(session.dispatch("execute_subgoal", args).text)["ok"] is True
+    assert json.loads(session.dispatch("execute_subgoal", args).text)["ok"] is True
+    blocked = json.loads(session.dispatch("execute_subgoal", args).text)
+
+    assert blocked["duplicate_no_progress_subgoal"] is True
+    assert len(calls) == 2
+
+
+def test_multi_source_research_budget_forces_record_before_more_local_actions():
+    import json
+
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Inspect two separate product pages and compare each source URL")
+    session._t_read_text = lambda _args: ToolResult("visible source text")
+    for _ in range(10):
+        session.dispatch("read_text", {})
+
+    blocked = json.loads(session.dispatch("scroll", {"x": 10, "y": 10, "amount": -3}).text)
+
+    assert blocked["research_exploration_budget_exhausted"] is True
+    session.dispatch("record_facts", {
+        "subject": "Product A",
+        "facts": {"weight": "not visible"},
+        "source_url": "https://example.test/a",
+    })
+    assert session._research_budget_blocks("scroll", {"x": 10, "y": 10, "amount": -3}) is False
+
+
+def test_multi_source_research_budget_covers_fast_wrapped_scroll_batch():
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Inspect two separate product pages and compare each source URL")
+    session._research_exploration_actions = 10
+
+    assert session._research_budget_blocks("run_action_batch", {
+        "actions": [{"action": "scroll", "x": 10, "y": 10, "amount": -5}],
+    }) is True
+    assert session._research_budget_blocks("execute_subgoal", {
+        "input": {"text": "https://example.test/next"},
+    }) is True
+    assert session._research_budget_blocks("open_app", {"name": "Browser"}) is True
+    assert session._research_budget_blocks("read_text", {}) is False
+
+
 def test_tool_session_records_fast_screen_bulletin_after_dispatch():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.agent.tools import ToolSession
@@ -175,6 +434,106 @@ def test_tool_session_action_delta_uses_independent_before_after_frames():
     assert action_region["left"] + action_region["width"] >= 136
 
 
+def test_scroll_retries_with_physical_input_when_post_message_has_no_effect(monkeypatch):
+    import json
+
+    import numpy as np
+
+    from winpilot.action import executor
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+    from winpilot.utils.screenshot import Region
+
+    before = np.zeros((40, 60, 3), dtype=np.uint8)
+    unchanged = before.copy()
+    retried = before.copy()
+    retried[8:34, 4:56] = 255
+    frames = iter([before, unchanged, retried])
+    retry_calls = []
+
+    class Watcher:
+        pixel_thresh = 12
+
+        def status(self):
+            return {"sequence": 1, "running": True}
+
+        def record_action_delta(self, delta, region, **_kwargs):
+            self.delta = delta
+
+    class Controller:
+        def __init__(self):
+            self.watcher = Watcher()
+            self.capture_fn = lambda _region: next(frames)
+
+        def _target_region(self):
+            return Region(100, 200, 60, 40)
+
+    def retry(x, y, amount):
+        retry_calls.append((x, y, amount))
+        return {"ok": True, "via": "sendinput_restored"}
+
+    monkeypatch.setattr(executor, "scroll_sendinput_restored", retry)
+    session = ToolSession(task="scroll a visible page")
+    session._fast_gui_controller = Controller()
+    session._t_scroll = lambda _args: ToolResult('{"ok": true, "via": "post_message"}')
+
+    data = json.loads(session.dispatch("scroll", {"x": 130, "y": 220, "amount": -5}).text)
+
+    assert retry_calls == [(130, 220, -5)]
+    assert data["ok"] is True
+    assert data["via"] == "sendinput_restored"
+    assert data["scroll_retry"]["changed"] is True
+    assert data["screen_delta"]["changed"] is True
+    assert data["screen_delta"]["delta_source"] == "scroll_retry"
+
+
+def test_scroll_reports_no_visible_effect_after_both_paths_fail(monkeypatch):
+    import json
+
+    import numpy as np
+
+    from winpilot.action import executor
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+    from winpilot.utils.screenshot import Region
+
+    frame = np.zeros((40, 60, 3), dtype=np.uint8)
+
+    class Watcher:
+        pixel_thresh = 12
+
+        def status(self):
+            return {"sequence": 1, "running": True}
+
+        def record_action_delta(self, delta, region, **_kwargs):
+            self.delta = delta
+
+    class Controller:
+        def __init__(self):
+            self.watcher = Watcher()
+            self.capture_fn = lambda _region: frame.copy()
+
+        def _target_region(self):
+            return Region(0, 0, 60, 40)
+
+    monkeypatch.setattr(
+        executor,
+        "scroll_sendinput_restored",
+        lambda _x, _y, _amount: {"ok": True, "via": "sendinput_restored"},
+    )
+    session = ToolSession(task="scroll a visible page")
+    session._fast_gui_controller = Controller()
+    session._t_scroll = lambda _args: ToolResult('{"ok": true, "via": "post_message"}')
+
+    data = json.loads(session.dispatch("scroll", {"x": 20, "y": 20, "amount": -3}).text)
+
+    assert data["ok"] is False
+    assert data["verified"] is False
+    assert data["no_visible_effect"] is True
+    assert data["needs_observe"] is True
+    assert data["screen_delta"]["changed"] is False
+
+
 def test_tool_session_preserves_pressed_state_when_after_frame_reverts():
     import json
 
@@ -281,6 +640,85 @@ def test_tool_session_does_not_claim_transient_when_press_frame_is_unchanged():
     assert data["screen_delta"]["changed"] is False
     assert data["screen_delta"]["delta_source"] == "press"
     assert data["screen_delta"]["transient_observed"] is False
+
+
+def test_mouse_down_records_pressed_frame_as_transient_while_still_held(monkeypatch):
+    import json
+
+    import numpy as np
+
+    from winpilot.action import executor
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+    from winpilot.utils.screenshot import Region
+
+    before = np.zeros((60, 80, 3), dtype=np.uint8)
+    pressed = before.copy()
+    pressed[18:42, 24:64] = 255
+    frames = iter([before, pressed, pressed.copy()])
+
+    class Watcher:
+        pixel_thresh = 12
+
+        def status(self):
+            return {"sequence": 1, "running": True}
+
+        def record_action_delta(self, delta, region, **_kwargs):
+            self.delta = delta
+
+    class Controller:
+        def __init__(self):
+            self.watcher = Watcher()
+            self.capture_fn = lambda _region: next(frames)
+
+        def _target_region(self):
+            return Region(100, 200, 80, 60)
+
+    session = ToolSession(task="capture a held mouse state")
+    session._fast_gui_controller = Controller()
+
+    def mouse_down_with_probe(_args):
+        assert executor._sample_pressed_state() is True
+        return ToolResult('{"ok": true, "press_sampled": true}')
+
+    session._t_mouse_down = mouse_down_with_probe
+    data = json.loads(session.dispatch("mouse_down", {"button": "left"}).text)
+
+    assert data["screen_delta"]["delta_source"] == "press"
+    assert data["screen_delta"]["press_sample_count"] == 1
+    assert data["screen_delta"]["transient_observed"] is True
+
+
+def test_executor_mouse_down_invokes_installed_press_probe(monkeypatch):
+    from winpilot.action import executor
+
+    calls = []
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: calls.append(inputs))
+    previous = executor.install_press_probe(lambda: calls.append("probe"))
+    try:
+        result = executor.mouse_down.__wrapped__("left")
+    finally:
+        executor.restore_press_probe(previous)
+    released = executor.release_held_mouse_buttons()
+
+    assert result["ok"] is True
+    assert result["press_sampled"] is True
+    assert calls[1] == "probe"
+    assert released == ["left"]
+
+
+def test_tool_session_close_releases_held_mouse_button(monkeypatch):
+    from winpilot.action import executor
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    monkeypatch.setattr(executor, "_send_inputs", lambda inputs: calls.append(inputs))
+    executor.mouse_down.__wrapped__("left")
+
+    ToolSession(task="release held input").close()
+
+    assert executor.release_held_mouse_buttons() == []
+    assert len(calls) == 2
 
 
 def test_screen_watcher_emits_change_event_with_run_context():
@@ -461,3 +899,26 @@ def test_changed_only_observe_prefers_fresh_action_roi(monkeypatch):
     assert regions[0].left <= 100
     assert regions[0].right >= 130
     assert regions[0].left < 800
+
+
+def test_duplicate_action_guard_blocks_fourth_identical_side_effect(monkeypatch):
+    import json
+
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open an application")
+    session.world_enabled = True
+    args = {"command": "calculator"}
+    for _ in range(3):
+        session.world.record_action("launch", args)
+    monkeypatch.setattr(tools.scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    session._t_launch = lambda _args: (_ for _ in ()).throw(
+        AssertionError("guard must run before the side effect")
+    )
+
+    result = json.loads(session.dispatch("launch", args).text)
+
+    assert result["blocked"] is True
+    assert result["repeat_count"] == 4
+    assert result["needs_replan"] is True

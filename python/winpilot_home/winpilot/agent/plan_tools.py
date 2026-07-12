@@ -8,7 +8,7 @@ from pathlib import Path
 from ..action import verify
 from ..utils.log import BUS
 from . import planner
-from .task_rules import _is_drawing_task, _required_image_paths
+from .task_rules import _is_drawing_task, _is_multi_source_research_task, _required_image_paths
 from .tool_result import ToolResult
 
 
@@ -29,10 +29,78 @@ _HISTORICAL_VISIBLE_SOURCES = {
     "run_action_batch:verified_expect",
 }
 _CURRENT_CONTROLLER_VISIBLE_SOURCES = {
+    "observe",
+    "read_text",
     "execute_subgoal:evidence_packet",
     "execute_subgoal:visual_color",
 }
 _FILE_CHECK_KEYS = {"file_exists"}
+_SOURCE_COLLECTION_GOAL_RE = re.compile(
+    r"\b(?:collect|extract|record|capture|gather)\b|收集|提取|记录|整理.*(?:字段|信息)",
+    re.IGNORECASE,
+)
+_SOURCE_NAVIGATION_GOAL_RE = re.compile(
+    r"\b(?:open|navigate|visit|load)\b|\u6253\u5f00|\u8fdb\u5165|\u8bbf\u95ee|\u5bfc\u822a",
+    re.IGNORECASE,
+)
+_SOURCE_TOKEN_STOP = {
+    "collect", "extract", "record", "capture", "gather", "product", "page",
+    "official", "source", "url", "name", "connection", "battery", "life",
+    "weight", "chrome", "logitech", "from", "fields", "information",
+    "open", "navigate", "visit", "load", "verify", "title", "contains",
+}
+
+
+def _research_goal_matches_record(session, goal: str) -> bool:
+    records = session.world.working_set()
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", goal or "")
+        if token.casefold() not in _SOURCE_TOKEN_STOP
+    }
+    if not records or not tokens:
+        return False
+    for record in records:
+        identity = " ".join((
+            str(record.get("subject") or ""),
+            str(record.get("source_title") or ""),
+            str(record.get("source_url") or ""),
+        )).casefold()
+        if any(token in identity for token in tokens):
+            return True
+    return False
+
+
+def _research_source_completion_error(session, goal: str) -> str:
+    if not _is_multi_source_research_task(getattr(session, "task", "")):
+        return ""
+    if not _SOURCE_COLLECTION_GOAL_RE.search(goal or ""):
+        return ""
+    if _research_goal_matches_record(session, goal):
+        return ""
+    records = session.world.working_set()
+    if not records:
+        return "No source-bound facts have been recorded for this collection step."
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", goal or "")
+        if token.casefold() not in _SOURCE_TOKEN_STOP
+    }
+    if not tokens:
+        return "" if records else "No source-bound facts have been recorded."
+    for record in records:
+        identity = " ".join((
+            str(record.get("subject") or ""),
+            str(record.get("source_title") or ""),
+            str(record.get("source_url") or ""),
+        )).casefold()
+        if any(token in identity for token in tokens):
+            return ""
+    return (
+        "The working set has no source record matching this collection step "
+        f"(distinctive tokens: {', '.join(sorted(tokens))}). Navigate to that "
+        "source and call record_facts before completing the step."
+    )
 _FORM_OR_QUIZ_CONTEXT_RE = re.compile(
     r"("
     r"answer\s+(?:the\s+)?question|question\s*\d+|\bq\s*\d+\b|"
@@ -52,6 +120,12 @@ _SUBMIT_OR_SAVE_RE = re.compile(
 )
 _COMPLETION_RATE_RE = re.compile(
     r"(?:\u5b8c\u6210\u7387|completion\s*(?:rate)?)\s*[:\uff1a]?\s*(\d{1,3})\s*%",
+    re.IGNORECASE,
+)
+_NEW_BLANK_GOAL_RE = re.compile(
+    r"(?:\b(?:new|create)\b.{0,40}\b(?:blank|document|workbook|spreadsheet|presentation)\b)|"
+    r"(?:\bblank\b.{0,30}\b(?:document|workbook|spreadsheet|presentation)\b)|"
+    r"(?:\u65b0\u5efa|\u521b\u5efa).{0,30}(?:\u7a7a\u767d|\u6587\u6863|\u5de5\u4f5c\u7c3f|\u8868\u683c|\u6f14\u793a)",
     re.IGNORECASE,
 )
 
@@ -174,6 +248,23 @@ def _spurious_agent_schedule_file_check(
         "a WinPilot internal scheduled task: " + ", ".join(invented_windows_paths),
     )
 
+def _drop_unrequested_drawing_output_steps(task: str, steps: list) -> tuple[list, list[str]]:
+    """Remove planner-invented save/export work from visual-only drawing tasks."""
+    if not _is_drawing_task(task) or _required_image_paths(task):
+        return steps, []
+    if _SUBMIT_OR_SAVE_RE.search(task or ""):
+        return steps, []
+    kept: list = []
+    dropped: list[str] = []
+    for step in steps:
+        goal = str(step.get("goal") or "") if isinstance(step, dict) else str(step or "")
+        if _SUBMIT_OR_SAVE_RE.search(goal):
+            dropped.append(goal)
+        else:
+            kept.append(step)
+    return (kept or steps), dropped
+
+
 _COLOR_ALIASES = {
     "blue": {"blue", "蓝", "蓝色"},
     "red": {"red", "红", "红色"},
@@ -229,10 +320,22 @@ class PlanToolMixin:
         if not targets:
             return False, "subgoal check has no visible text target"
         ledger = getattr(self, "visible_evidence_ledger", [])
-        recent = [
-            item for item in ledger[-8:]
-            if item.get("source") in _CURRENT_CONTROLLER_VISIBLE_SOURCES
-        ]
+        current_epoch = int(getattr(self, "_screen_epoch", 0) or 0)
+        recent = []
+        for item in ledger[-8:]:
+            source = str(item.get("source") or "")
+            if source not in _CURRENT_CONTROLLER_VISIBLE_SOURCES:
+                continue
+            if source in {"observe", "read_text"}:
+                # Raw reads are current evidence only for the exact desktop
+                # mutation epoch they observed. A later GUI action invalidates
+                # them automatically; legacy entries without an epoch remain
+                # historical-only.
+                if "screen_epoch" not in item:
+                    continue
+                if int(item.get("screen_epoch") or 0) != current_epoch:
+                    continue
+            recent.append(item)
         seen = {
             _normalize_visible_text(str(item.get("target") or ""))
             for item in recent
@@ -281,14 +384,18 @@ class PlanToolMixin:
 
     def _unchecked_subgoal_blocker(self, goal: str) -> str:
         """Return a reason when a no-check subgoal is unsafe to mark done."""
+        # Coding/file/shell work has its own deterministic final evidence gate.
+        # Its action counter includes successful run_shell/write_file calls and
+        # must not be mislabeled as pending *GUI* evidence between plan steps.
+        # Final done verification still requires real file/process/test output.
+        if _is_coding_runtime(self):
+            return ""
         pending = int(getattr(getattr(self, "run_state", None), "unverified_actions", 0) or 0)
         if pending > 0:
             return (
                 f"{pending} GUI action(s) are still unverified. Use observe/read_text "
                 "or an explicit check before marking this subgoal complete."
             )
-        if _is_coding_runtime(self):
-            return ""
         task = str(getattr(self, "task", "") or "")
         completion_rate = _latest_completion_rate(getattr(self, "visible_evidence_ledger", []))
         if _looks_like_submit_or_save_goal(goal) and completion_rate is not None and completion_rate < 100:
@@ -316,10 +423,34 @@ class PlanToolMixin:
         steps = args.get("steps") or []
         if not isinstance(steps, list) or not steps:
             return ToolResult("revise_plan 需要非空的 steps 数组")
+        steps, dropped_output_steps = _drop_unrequested_drawing_output_steps(
+            str(getattr(self, "task", "") or ""),
+            steps,
+        )
         self.plan = planner.Plan(steps)
+        restored: list[int] = []
+        if _is_multi_source_research_task(getattr(self, "task", "")):
+            for index, step in enumerate(self.plan.steps, start=1):
+                goal = str(step.get("goal") or "")
+                if (
+                    (_SOURCE_COLLECTION_GOAL_RE.search(goal) or _SOURCE_NAVIGATION_GOAL_RE.search(goal))
+                    and _research_goal_matches_record(self, goal)
+                ):
+                    self.plan.complete(index)
+                    restored.append(index)
         self._fail_softened = False
-        BUS.publish("agent_plan", action="revise", plan=self.plan.snapshot())
-        return ToolResult(f"已更新计划：\n{self.plan.render()}")
+        BUS.publish(
+            "agent_plan",
+            action="revise",
+            plan=self.plan.snapshot(),
+            restored_from_working_set=restored,
+            dropped_unrequested_output_steps=dropped_output_steps,
+        )
+        restored_text = (
+            f"\nRestored completed source steps from working set: {restored}."
+            if restored else ""
+        )
+        return ToolResult(f"已更新计划：\n{self.plan.render()}{restored_text}")
 
     def _t_complete_subgoal(self, args: dict) -> ToolResult:
         verify_mod = _tools_attr("verify", verify)
@@ -342,6 +473,37 @@ class PlanToolMixin:
             )
         check_expect = self.plan.check_for(index)
         goal = str(self.plan.steps[index - 1].get("goal") or "")
+        source_error = _research_source_completion_error(self, goal)
+        if source_error:
+            BUS.publish(
+                "agent_plan",
+                action="subgoal_check",
+                index=index,
+                verified=False,
+                detail=source_error,
+                source="working_set_source_guard",
+            )
+            return ToolResult(
+                f"Subgoal {index} is not complete: {source_error}\n{self.plan.render()}"
+            )
+        if _NEW_BLANK_GOAL_RE.search(goal) and not bool(
+            getattr(self, "_new_blank_applied", False)
+        ):
+            detail = (
+                "opening/focusing the application does not prove that the requested new blank "
+                "document or workbook was created; execute the New routine and verify its title/surface first"
+            )
+            BUS.publish(
+                "agent_plan",
+                action="subgoal_check",
+                index=index,
+                verified=False,
+                detail=detail,
+                source="compound_new_blank_guard",
+            )
+            return ToolResult(
+                f"Subgoal {index} is a compound open/create step and is not complete: {detail}."
+            )
         ignored_file_check, ignored_detail = _spurious_drawing_file_check(
             getattr(self, "task", ""),
             check_expect,

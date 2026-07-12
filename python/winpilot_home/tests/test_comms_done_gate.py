@@ -11,6 +11,52 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_communication_mode_honors_draft_only_instruction():
+    from winpilot.agent.task_rules import _communication_mode
+
+    task = (
+        "\u6253\u5f00QQ\uff0c\u5728\u8f93\u5165\u6846\u4e2d\u8f93\u5165"
+        '"HELLO_0712"\uff0c\u505c\u5728\u53d1\u9001\u524d\uff0c\u4e0d\u8981\u53d1\u9001'
+    )
+
+    assert _communication_mode(task) == "draft"
+
+
+def test_draft_communication_accepts_grounded_typed_payload_without_readback():
+    runner = _make_runner(
+        "\u6253\u5f00QQ\uff0c\u8f93\u5165\u6d88\u606f\u4f46\u4e0d\u8981\u53d1\u9001"
+    )
+    runner._tool_history = [
+        ("type_text", {"text": "HELLO_0712"}, '{"ok": true}'),
+    ]
+
+    assert runner._deterministic_communication_verdict() == (
+        True,
+        "Requested communication text was entered as a draft without a send action.",
+    )
+
+
+def test_draft_runtime_hard_blocks_send_click_and_enter():
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(
+        task='\u5728QQ\u8f93\u5165"HELLO_0712"\uff0c\u505c\u5728\u53d1\u9001\u524d\uff0c\u4e0d\u8981\u53d1\u9001'
+    )
+
+    assert session._draft_communication_block(
+        "execute_subgoal",
+        {"input": {"text": "HELLO_0712"}, "click": {"label": "Send"}},
+    )
+    assert session._draft_communication_block(
+        "run_action_batch",
+        {"actions": [{"action": "hotkey", "keys": ["Enter"]}]},
+    )
+    assert session._draft_communication_block(
+        "execute_subgoal",
+        {"input": {"text": "HELLO_0712"}},
+    ) == ""
+
+
 # ---- Helpers -----------------------------------------------------------
 
 def _make_runner(task: str):
@@ -104,6 +150,14 @@ def test_bounded_chat_requires_a_reply_turn_before_done():
     assert verdict is not None
     assert verdict[0] is False
     assert "一轮往返" in verdict[1]
+
+
+def test_chat_history_evidence_phrase_does_not_turn_one_shot_send_into_chat():
+    from winpilot.agent.task_rules import _communication_mode
+
+    task = '打开QQ给我的手机发送"HELLO_0712"并确认消息出现在聊天记录中'
+
+    assert _communication_mode(task) == "send"
 
 
 def test_bounded_chat_accepts_two_visible_outbound_turns():

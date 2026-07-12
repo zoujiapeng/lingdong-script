@@ -21,7 +21,15 @@ except ImportError:
 
 
 def _macro_path(name: str) -> Path:
-    return _MACRO_DIR / f"{name}.json"
+    raw = str(name or "").strip()
+    if raw.lower().endswith(".json"):
+        raw = raw[:-5]
+    if not raw or Path(raw).name != raw or raw in {".", ".."}:
+        raise ValueError("宏名称不能包含目录路径")
+    resolved = (_MACRO_DIR / f"{raw}.json").resolve()
+    if resolved.parent != _MACRO_DIR.resolve():
+        raise ValueError("宏文件必须位于 macros 目录")
+    return resolved
 
 
 @feature(
@@ -38,7 +46,10 @@ def _macro_path(name: str) -> Path:
     tags=["macro", "playback"],
 )
 def macro_playback(name: str, speed: float = 1.0, loop: int = 0) -> dict:
-    path = _macro_path(name)
+    try:
+        path = _macro_path(name)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     if not path.exists():
         return {"success": False, "error": f"宏 '{name}' 不存在"}
 
@@ -264,10 +275,10 @@ def macro_stop_recording() -> dict:
     tags=["macro", "management"],
 )
 def macro_delete(name: str) -> dict:
-    path = _MACRO_DIR / f"{name.strip()}.json"
-    if not path.exists():
-        # Try without .json
-        path = _MACRO_DIR / name.strip()
+    try:
+        path = _macro_path(name)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     if not path.exists():
         return {"success": False, "error": f"宏 '{name}' 不存在"}
     try:
@@ -289,7 +300,10 @@ def macro_delete(name: str) -> dict:
     tags=["macro", "management"],
 )
 def macro_get_events(name: str) -> dict:
-    path = _MACRO_DIR / f"{name.strip()}.json"
+    try:
+        path = _macro_path(name)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     if not path.exists():
         return {"success": False, "error": f"宏 '{name}' 不存在"}
     try:

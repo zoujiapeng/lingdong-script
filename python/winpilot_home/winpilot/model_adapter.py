@@ -93,6 +93,12 @@ def infer_provider(api: dict[str, Any] | Any) -> str:
 def model_supports_vision(model: str, provider: str = "") -> bool:
     """Return true only for model names that explicitly advertise vision."""
     name = _lower(model)
+    # MiMo v2.5's public OpenAI-compatible endpoint accepts image_url content
+    # even though the model name does not contain an omni/vision marker. This
+    # was verified against the live endpoint; ASR/TTS variants and v2.5-pro
+    # are intentionally not inferred from that result.
+    if name == "mimo-v2.5":
+        return True
     return any(marker in name for marker in _VISION_MODEL_MARKERS)
 
 

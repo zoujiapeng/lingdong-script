@@ -27,6 +27,12 @@ _IMPORTANT_ROLES = (
 _INPUT_ROLES = ("edit", "combobox", "textbox", "search", "input", "编辑", "组合框")
 _BUTTON_ROLES = ("button", "submit", "link", "menu", "按钮", "链接", "菜单")
 _LITERAL_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_\-]{3,80}\b|\b\d{4,18}\b")
+_CHAT_TASK_RE = re.compile(
+    r"\b(?:chat|message|reply|send)\b|"
+    r"\u804a\u5929|\u53d1\u6d88\u606f|\u53d1\u4fe1\u606f|\u56de\u590d|"
+    r"\u79c1\u4fe1|\u6211\u7684\u624b\u673a|\bqq\b|\bwechat\b",
+    re.IGNORECASE,
+)
 _QUOTED_RE = re.compile(r'"([^"]{1,120})"|“([^”]{1,120})”|「([^」]{1,120})」')
 
 
@@ -83,23 +89,146 @@ def _extract_terms(task: str = "", query: str = "") -> list[str]:
     return unique[:16]
 
 
-def _stage(snapshot: Snapshot) -> str:
+def _stage(snapshot: Snapshot, elements: list[UIElement] | None = None) -> str:
     title = _norm(snapshot.title)
-    roles = " ".join(_norm(e.role) for e in snapshot.elements[:200])
-    readable = sum(1 for e in snapshot.elements if _norm(e.text))
+    scoped = elements if elements is not None else snapshot.scoped_elements()
+    roles = " ".join(_norm(e.role) for e in scoped[:200])
+    readable = sum(1 for e in scoped if _norm(e.text))
     if not title or "program manager" in title or "desktop" in title or "workerw" in title:
         return "desktop_or_shell"
     if any(term in roles for term in ("dialog", "window", "pane", "对话")) and any(
-        _role_contains(e, _BUTTON_ROLES) for e in snapshot.elements
+        _role_contains(e, _BUTTON_ROLES) for e in scoped
     ):
         return "dialog_or_window"
-    if any(_role_contains(e, _INPUT_ROLES) for e in snapshot.elements) and any(
-        _role_contains(e, _BUTTON_ROLES) for e in snapshot.elements
+    if any(_role_contains(e, _INPUT_ROLES) for e in scoped) and any(
+        _role_contains(e, _BUTTON_ROLES) for e in scoped
     ):
         return "form_or_search_surface"
     if readable < 3 and snapshot.region.width * snapshot.region.height > 200_000:
         return "custom_canvas_or_uia_off_surface"
     return "standard_window"
+
+
+def _chat_context(
+    snapshot: Snapshot,
+    task: str,
+    elements: list[UIElement] | None = None,
+) -> dict[str, Any] | None:
+    """Detect an open split-pane conversation using generic geometry."""
+    if not _CHAT_TASK_RE.search(task or ""):
+        return None
+    window = snapshot.region
+    task_norm = re.sub(r"\s+", "", _norm(task))
+    by_text: dict[str, list[UIElement]] = {}
+    for element in (elements if elements is not None else snapshot.scoped_elements()):
+        text = re.sub(r"\s+", "", _norm(element.text))
+        if len(text) < 2 or int(element.width or 0) <= 0:
+            continue
+        by_text.setdefault(text, []).append(element)
+    target = ""
+    for text, elements in by_text.items():
+        if text not in task_norm:
+            continue
+        has_list_row = any(
+            int(element.cx) <= window.left + int(window.width * 0.17)
+            and int(element.cy) >= window.top + int(window.height * 0.10)
+            for element in elements
+        )
+        has_header = any(
+            int(element.cx) >= window.left + int(window.width * 0.15)
+            and int(element.cy) <= window.top + int(window.height * 0.16)
+            for element in elements
+        )
+        if has_list_row and has_header:
+            target = text
+            break
+    if not target:
+        return None
+    left = window.left + max(12, int(window.width * 0.18))
+    top = window.top + max(80, int(window.height * 0.82))
+    right_margin = max(12, int(window.width * 0.02))
+    bottom_margin = max(12, int(window.height * 0.025))
+    width = max(160, window.right - right_margin - left)
+    height = max(64, window.bottom - bottom_margin - top)
+    return {
+        "target": target,
+        "bbox": [left, top, width, height],
+        "center": [left + width // 2, top + height // 2],
+    }
+
+
+def _non_blocking_notice_context(
+    snapshot: Snapshot,
+    elements: list[UIElement],
+) -> dict[str, Any] | None:
+    """Recognize a notice banner above an already editable work surface."""
+    title = _norm(snapshot.title)
+    text = "\n".join(str(element.text or "") for element in elements if element.text)
+    spreadsheet_surface = bool(
+        re.search(r"workbook|spreadsheet|worksheet|工作簿|工作表|表格", title, re.IGNORECASE)
+        and any(
+            re.fullmatch(r"[A-Z]{1,3}\d+", str(element.text or "").strip(), re.IGNORECASE)
+            for element in elements
+        )
+    )
+    document_surface = bool(
+        re.search(
+            r"\b(?:document|writer|word)\b|文字文稿|文档|\.docx?\b",
+            title,
+            re.IGNORECASE,
+        )
+        and (
+            any(
+                str(getattr(element, "role", "") or "").casefold() in {"window", "pane"}
+                for element in elements
+            )
+            or (
+                bool(re.search(r"(?:^|\n)(?:开始|home)(?:\n|$)", text, re.IGNORECASE))
+                and bool(re.search(r"(?:^|\n)(?:插入|insert)(?:\n|$)", text, re.IGNORECASE))
+                and bool(re.search(r"页面\s*[:：]?\s*\d|字数\s*[:：]?\s*\d|page\s*[:：]?\s*\d", text, re.IGNORECASE))
+            )
+        )
+    )
+    notice_patterns = (
+        r"previously did not close normally|recovered to the latest|recovery report|"
+        "\u4e0a\u4e00\u6b21\u672a\u6b63\u5e38\u5173\u95ed|"
+        "\u5df2\u6062\u590d\u5230\u6700\u65b0\u7248\u672c|"
+        "\u53d1\u9001\u62a5\u544a|\u6570\u636e\u6062\u590d|"
+        "\u6b63\u5728\u65b0\u5efa\u6587\u6863|creating document"
+    )
+    notice = bool(re.search(notice_patterns, text, re.IGNORECASE))
+    if not ((spreadsheet_surface or document_surface) and notice):
+        return None
+    if document_surface:
+        surface = "document_editor"
+        guidance = (
+            "The Writer document editor is already available. The creating-document/recovery text is "
+            "a stale non-modal UIA notice; do not wait for it to disappear, click it, press Escape, or "
+            "re-plan around it. If the task requires a brand-new blank document, invoke New/Ctrl+N now; "
+            "otherwise continue the requested document input, formatting, or Save As operation."
+        )
+    else:
+        surface = "spreadsheet_grid"
+        guidance = (
+            "The spreadsheet grid and A1/name box are already editable. The recovery/notification "
+            "banner is non-modal; do not click, dismiss, wait for, or re-plan around it. Continue the "
+            "requested cell input, formatting, or Save As operation."
+        )
+    return {
+        "kind": "non_blocking_notice",
+        "surface": surface,
+        "blocking": False,
+        "suppressed_texts": [
+            "\u6b63\u5728\u65b0\u5efa\u6587\u6863",
+            "\u4e0a\u4e00\u6b21\u672a\u6b63\u5e38\u5173\u95ed",
+            "\u5df2\u6062\u590d\u5230\u6700\u65b0\u7248\u672c",
+            "\u7acb\u5373\u6062\u590d",
+            "\u53d1\u9001\u62a5\u544a",
+            "creating document",
+            "recovery report",
+        ],
+        "guidance": guidance,
+    }
 
 
 def _score_element(element: UIElement, terms: list[str], changed_regions: list[dict[str, Any]]) -> CandidateScore:
@@ -108,7 +237,13 @@ def _score_element(element: UIElement, terms: list[str], changed_regions: list[d
     text = _norm(element.text)
     role = _norm(element.role)
     source = _norm(element.source)
-    if _role_contains(element, _INPUT_ROLES):
+    file_item_name = bool(
+        _role_contains(element, ("edit", "textbox"))
+        and source == "uia"
+        and text.startswith(("name=", "名称="))
+        and int(element.width or 0) < 420
+    )
+    if _role_contains(element, _INPUT_ROLES) and not file_item_name:
         score += 0.72
         why.append("input-like role")
     elif _role_contains(element, _BUTTON_ROLES):
@@ -129,6 +264,16 @@ def _score_element(element: UIElement, terms: list[str], changed_regions: list[d
     if source == "ocr":
         score += 0.04
         why.append("ocr")
+    if file_item_name:
+        score -= 0.34
+        why.append("file-grid item label, not an input field")
+    if (
+        _role_contains(element, ("combobox", "edit", "textbox"))
+        and int(element.width or 0) >= 700
+        and ("*." in text or text.endswith((".txt", ".docx", ".xlsx", ".pptx")))
+    ):
+        score += 0.42
+        why.append("wide file-dialog input")
     for term in terms:
         term_norm = _norm(term)
         if not term_norm:
@@ -178,7 +323,11 @@ def reduce_snapshot(
             or recent_changes.get("recent_changed_regions")
             or []
         )
-    scored = [_score_element(element, terms, changed_regions) for element in snapshot.elements]
+    scoped_elements = snapshot.scoped_elements()
+    filtered_count = max(0, len(snapshot.elements) - len(scoped_elements))
+    chat_context = _chat_context(snapshot, task, scoped_elements)
+    non_blocking_notice = _non_blocking_notice_context(snapshot, scoped_elements)
+    scored = [_score_element(element, terms, changed_regions) for element in scoped_elements]
     scored.sort(key=lambda item: item.score, reverse=True)
     candidates: list[dict[str, Any]] = []
     seen_boxes: set[tuple[int, int, int, int, str]] = set()
@@ -202,20 +351,46 @@ def reduce_snapshot(
         })
         if len(candidates) >= max(1, int(max_candidates)):
             break
-    readable = sum(1 for e in snapshot.elements if _norm(e.text))
-    input_count = sum(1 for e in snapshot.elements if _role_contains(e, _INPUT_ROLES))
-    button_count = sum(1 for e in snapshot.elements if _role_contains(e, _BUTTON_ROLES))
+    if chat_context is not None:
+        candidates.insert(0, {
+            "elem_id": None,
+            "role": "synthetic_chat_composer",
+            "label": "",
+            "bbox": chat_context["bbox"],
+            "center": chat_context["center"],
+            "confidence": 0.92,
+            "source": "geometry",
+            "why_relevant": (
+                "target conversation header is open; lower-right custom composer inferred"
+            ),
+        })
+        candidates = candidates[:max(1, int(max_candidates))]
+    readable = sum(1 for e in scoped_elements if _norm(e.text))
+    input_count = sum(1 for e in scoped_elements if _role_contains(e, _INPUT_ROLES))
+    if chat_context is not None:
+        input_count += 1
+    button_count = sum(1 for e in scoped_elements if _role_contains(e, _BUTTON_ROLES))
     uncertainties: list[str] = []
     if not readable:
         uncertainties.append("no readable text from UIA/OCR; likely custom-rendered or visually sparse")
-    if len(snapshot.elements) > max_candidates:
-        uncertainties.append(f"{len(snapshot.elements) - len(candidates)} lower-ranked elements hidden from default view")
-    if query and not any(_norm(query) in _norm(e.text) for e in snapshot.elements):
+    if filtered_count:
+        uncertainties.append(f"{filtered_count} off-window/stale elements excluded from the model view")
+    if len(scoped_elements) > max_candidates:
+        uncertainties.append(f"{len(scoped_elements) - len(candidates)} lower-ranked in-window elements hidden from default view")
+    if query and not any(_norm(query) in _norm(e.text) for e in scoped_elements):
         uncertainties.append(f'query "{query}" not found in visible text')
     if changed_regions:
         uncertainties.append("summary is biased toward the most recent changed ROI")
     recommendations: list[str] = []
     task_norm = _norm(task)
+    if chat_context is not None:
+        recommendations.append(
+            "Target conversation is already open; do not click the contact row again. "
+            "Use execute_subgoal/type_into_element with expected_region=bottom-right, "
+            "send with Enter, then verify a new message bubble."
+        )
+    if non_blocking_notice is not None:
+        recommendations.insert(0, str(non_blocking_notice["guidance"]))
     if input_count and any(word in task_norm for word in ("type", "input", "fill", "search", "输入", "填写", "搜索")):
         recommendations.append("Use execute_subgoal with an input.text payload or run_action_batch/type_into_element for the input routine.")
     elif input_count:
@@ -225,14 +400,29 @@ def reduce_snapshot(
     if changed_regions:
         recommendations.append("Use observe(changed_only=true) or verify_texts against the changed ROI before a full-screen re-observe.")
     return {
-        "screen_stage": _stage(snapshot),
+        "screen_stage": (
+            "chat_conversation"
+            if chat_context is not None
+            else (
+                (
+                    "document_editor_with_nonblocking_notice"
+                    if non_blocking_notice is not None
+                    and non_blocking_notice.get("surface") == "document_editor"
+                    else "spreadsheet_grid_with_nonblocking_notice"
+                )
+                if non_blocking_notice is not None
+                else _stage(snapshot, scoped_elements)
+            )
+        ),
         "target_window": {
             "title": snapshot.title,
             "hwnd": int(snapshot.hwnd),
             "rect": _region_dict(snapshot.region),
         },
         "stats": {
-            "total_elements": len(snapshot.elements),
+            "total_elements": len(scoped_elements),
+            "raw_total_elements": len(snapshot.elements),
+            "off_window_filtered": filtered_count,
             "readable_elements": readable,
             "input_like": input_count,
             "actionable": button_count,
@@ -248,6 +438,8 @@ def reduce_snapshot(
             "last_action_change_age_ms": (recent_changes or {}).get("last_action_change_age_ms"),
         },
         "recommended_next_controller_actions": recommendations[:4],
+        "chat_context": chat_context or {},
+        "non_blocking_notice": non_blocking_notice or {},
     }
 
 
@@ -286,8 +478,9 @@ def render_reduced_snapshot(
         lines.append("top_candidates:")
         for cand in reduced["top_candidates"]:
             label = cand["label"] if len(cand["label"]) <= 70 else cand["label"][:67] + "..."
+            elem_id = cand["elem_id"] if cand["elem_id"] is not None else "synthetic"
             lines.append(
-                f"- id={cand['elem_id']} role={cand['role']} text=\"{label}\" "
+                f"- id={elem_id} role={cand['role']} text=\"{label}\" "
                 f"center=({cand['center'][0]},{cand['center'][1]}) "
                 f"bbox=({cand['bbox'][0]},{cand['bbox'][1]},{cand['bbox'][2]},{cand['bbox'][3]}) "
                 f"score={cand['confidence']} src={cand['source']} why={cand['why_relevant']}"

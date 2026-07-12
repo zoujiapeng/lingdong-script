@@ -181,7 +181,7 @@ describe('Automation IR adapters', () => {
     expect(automationProjectionFingerprint(
       [{ tool: 'start', node_id: 's', params: { x: 1, text: '你好' } }],
       { token: 'x' },
-    )).toBe('fnv1a32:f875dabb');
+    )).toBe('sha256:f6996f5a13fe5cbb9a6c41e57a3ee5feb366e844d6055b54737d6f28fafcb302');
   });
 
   it('rejects dangling editor projection edges', () => {

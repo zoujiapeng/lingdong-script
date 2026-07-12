@@ -46,6 +46,7 @@ SUPPORTED_CONDITIONS = (
 # expression cannot be proven side-effect free.
 _PARALLEL_GROUNDTRUTH_KEYS = (
     "file_exists",
+    "file_format",
     "file_contains",
     "process_running",
     "process_gone",
@@ -319,6 +320,7 @@ class _AsyncGroundTruthProbe:
         self._events = {key: threading.Event() for key in self._checks}
         self._results: dict[str, tuple[bool, str]] = {}
         self._elapsed_ms: dict[str, int] = {}
+        self._attempts: dict[str, int] = {}
         self._started = False
 
     def start(self) -> None:
@@ -338,14 +340,27 @@ class _AsyncGroundTruthProbe:
 
     def _run_one(self, key: str, value: Any) -> None:
         started = time.monotonic()
-        try:
-            result = groundtruth.check(key, value, timeout_s=self._timeout_s)
-        except Exception as exc:  # groundtruth checks should never raise
-            result = (False, f"groundtruth check failed: {exc}")
+        deadline = started + self._timeout_s
+        attempts = 0
+        result: tuple[bool, str] = (False, "groundtruth check did not run")
+        while True:
+            attempts += 1
+            try:
+                result = groundtruth.check(
+                    key,
+                    value,
+                    timeout_s=max(0.1, deadline - time.monotonic()),
+                )
+            except Exception as exc:  # groundtruth checks should never raise
+                result = (False, f"groundtruth check failed: {exc}")
+            if result[0] or time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         elapsed_ms = int((time.monotonic() - started) * 1000)
         with self._lock:
             self._results[key] = result
             self._elapsed_ms[key] = elapsed_ms
+            self._attempts[key] = attempts
             self._events[key].set()
 
     def wait_result(
@@ -377,6 +392,7 @@ class _AsyncGroundTruthProbe:
                         "ok": result[0],
                         "detail": result[1][:160],
                         "elapsed_ms": self._elapsed_ms.get(key, 0),
+                        "attempts": self._attempts.get(key, 0),
                     }
                     for key, result in self._results.items()
                 },
@@ -436,7 +452,7 @@ def _find_text(
     # Level 0a: a property-indexed UIA query avoids walking the entire tree and
     # skips all image dimensions. It covers native text plus browser DOM text
     # and input values, while the fused/OCR paths below retain broad recall.
-    if target:
+    if target and _uia_enabled():
         try:
             for element in uia.find_text(target, needle):
                 if _match_visible_text(needle, element.text):
@@ -494,6 +510,10 @@ def _find_text(
 
 def _ocr_enabled() -> bool:
     return bool(CONFIG.get("perception", "ocr", "enabled", default=False))
+
+
+def _uia_enabled() -> bool:
+    return bool(CONFIG.get("perception", "uia", "enabled", default=False))
 
 
 def _check_window(needle: str, want_present: bool) -> tuple[bool, str]:

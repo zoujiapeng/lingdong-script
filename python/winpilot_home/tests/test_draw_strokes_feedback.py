@@ -4,6 +4,27 @@ from types import SimpleNamespace
 import numpy as np
 
 
+def test_draw_stroke_normalizer_accepts_flat_segments_and_unwrapped_polyline():
+    from winpilot.agent.interaction_tools import _normalize_draw_strokes
+
+    assert _normalize_draw_strokes([
+        [10, 20, 30, 40],
+        [30, 40, 50, 60],
+    ]) == [
+        [[10, 20], [30, 40]],
+        [[30, 40], [50, 60]],
+    ]
+    assert _normalize_draw_strokes([
+        [10, 20],
+        [30, 40],
+        [50, 60],
+    ]) == [[
+        [10, 20],
+        [30, 40],
+        [50, 60],
+    ]]
+
+
 def test_draw_strokes_visual_change_marks_action_verified(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession

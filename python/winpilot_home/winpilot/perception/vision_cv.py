@@ -26,6 +26,83 @@ _ICON_MIN, _ICON_MAX = 12, 64          # icon side length range (px)
 _ICON_AR_TOL = 0.45                    # |1 - w/h| tolerance for square-ish shapes
 
 
+def _detect_control_candidates_from_image(
+    image: np.ndarray,
+    region: Region,
+    max_items: int = 120,
+) -> list[UIElement]:
+    """Find rectangular controls without assigning semantic labels.
+
+    This is intentionally separate from the default icon stream. It is used
+    on demand when a short OCR label (for example a keypad digit or operator)
+    was not detected, so a dense control grid does not pollute normal prompts.
+    """
+    if image is None or image.size == 0:
+        return []
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 20, 80)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    image_area = max(1, int(image.shape[0] * image.shape[1]))
+    candidates: list[UIElement] = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if not (24 <= width <= min(640, max(24, region.width - 4))):
+            continue
+        if not (18 <= height <= min(180, max(18, region.height - 4))):
+            continue
+        aspect = width / max(1, height)
+        if not 0.35 <= aspect <= 12.0:
+            continue
+        rect_area = width * height
+        if rect_area > image_area * 0.22:
+            continue
+        fill = float(cv2.contourArea(contour)) / max(1, rect_area)
+        if fill < 0.68:
+            continue
+        candidates.append(UIElement(
+            source="cv-control",
+            role="button",
+            text="",
+            cx=region.left + x + width // 2,
+            cy=region.top + y + height // 2,
+            left=region.left + x,
+            top=region.top + y,
+            width=width,
+            height=height,
+            confidence=min(0.9, 0.45 + fill * 0.35),
+        ))
+
+    candidates.sort(key=lambda item: (item.top, item.left, -(item.width * item.height)))
+    kept: list[UIElement] = []
+    for candidate in candidates:
+        duplicate = any(
+            candidate.iou(existing) >= 0.82
+            or (
+                abs(candidate.cx - existing.cx) <= 3
+                and abs(candidate.cy - existing.cy) <= 3
+                and abs(candidate.width - existing.width) <= 5
+                and abs(candidate.height - existing.height) <= 5
+            )
+            for existing in kept
+        )
+        if duplicate:
+            continue
+        kept.append(candidate)
+        if len(kept) >= max_items:
+            break
+    return kept
+
+
+def detect_control_candidates(region: Region, max_items: int = 120) -> list[UIElement]:
+    """Capture ``region`` and return unlabeled rectangular control candidates."""
+    try:
+        region = region.clamp_to_screen()
+        return _detect_control_candidates_from_image(capture(region), region, max_items=max_items)
+    except Exception as exc:
+        logger.warning("CV control detection failed: %s", exc)
+        return []
+
+
 def detect_icon_candidates(region: Region, max_items: int = 40) -> list[UIElement]:
     """Find small square-ish glyph regions that OCR would miss. Never raises."""
     try:
@@ -312,6 +389,36 @@ def image_ink_stats(path: str) -> dict:
     return image_ink_stats_from_array(image, str(p))
 
 
+def coarse_color_masks(image: np.ndarray) -> dict[str, np.ndarray]:
+    """Return the shared coarse UI/drawing color vocabulary.
+
+    Palette location and post-action evidence must use identical thresholds.
+    Pale pink is deliberately separated from red, while neutral colors are
+    separated by value instead of treating every dark UI pixel as black.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return {}
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    chroma = (sat > 70) & (val > 50)
+    return {
+        "red": (sat >= 145) & (val > 70) & ((hue <= 9) | (hue >= 172)),
+        "orange": chroma & (val >= 210) & (hue > 9) & (hue <= 24),
+        "brown": chroma & (val >= 70) & (val < 210) & (hue > 9) & (hue <= 24),
+        "yellow": chroma & (hue > 24) & (hue <= 38),
+        "lime": chroma & (val >= 150) & (hue > 38) & (hue <= 58),
+        "green": chroma & (hue > 38) & (hue <= 88),
+        "cyan": chroma & (hue > 82) & (hue < 105),
+        "blue": chroma & (hue >= 95) & (hue <= 135),
+        "purple": chroma & (hue > 135) & (hue < 165),
+        "magenta": (sat >= 90) & (val > 80) & (hue >= 145) & (hue < 172),
+        "pink": (sat >= 35) & (sat < 145) & (val >= 175) & ((hue >= 155) | (hue <= 8)),
+        "black": val < 65,
+        "gray": (sat < 35) & (val >= 65) & (val < 225),
+        "white": (sat < 35) & (val >= 225),
+    }
+
+
 def image_color_stats(path: str) -> dict:
     """Count coarse color evidence in a saved image.
 
@@ -325,19 +432,7 @@ def image_color_stats(path: str) -> dict:
     if image is None:
         return {"exists": True, "path": str(p), "readable": False}
     h, w = image.shape[:2]
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    chroma = (sat > 70) & (val > 50)
-    masks = {
-        "red": chroma & ((hue <= 10) | (hue >= 170)),
-        "orange": chroma & (hue > 10) & (hue <= 24),
-        "yellow": chroma & (hue > 24) & (hue <= 38),
-        "green": chroma & (hue > 38) & (hue <= 88),
-        "blue": chroma & (hue >= 95) & (hue <= 135),
-        "purple": chroma & (hue > 135) & (hue < 170),
-        "black": gray < 80,
-    }
+    masks = coarse_color_masks(image)
     total = int(h * w)
     colors: dict[str, dict[str, float | int | bool]] = {}
     for name, mask in masks.items():
@@ -367,19 +462,7 @@ def color_presence(image: np.ndarray) -> dict:
     if image is None or getattr(image, "size", 0) == 0:
         return {"readable": False, "colors": {}}
     h, w = image.shape[:2]
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    chroma = (sat > 70) & (val > 50)
-    masks = {
-        "red": chroma & ((hue <= 10) | (hue >= 170)),
-        "orange": chroma & (hue > 10) & (hue <= 24),
-        "yellow": chroma & (hue > 24) & (hue <= 38),
-        "green": chroma & (hue > 38) & (hue <= 88),
-        "blue": chroma & (hue >= 95) & (hue <= 135),
-        "purple": chroma & (hue > 135) & (hue < 170),
-        "black": gray < 80,
-    }
+    masks = coarse_color_masks(image)
     total = int(h * w)
     threshold = max(30, int(total * 0.00002))
     colors: dict[str, dict] = {}

@@ -9,7 +9,12 @@ import re
 from typing import Any
 
 from ..config import CONFIG
-from .task_rules import _is_drawing_task, _is_gui_only_task, _required_image_paths
+from .task_rules import (
+    _is_communication_task,
+    _is_drawing_task,
+    _is_gui_only_task,
+    _required_image_paths,
+)
 
 _DRAW_COLOR_TERMS = {
     "blue": ("blue", "蓝色", "蓝"),
@@ -19,6 +24,10 @@ _DRAW_COLOR_TERMS = {
     "black": ("black", "黑色", "黑"),
     "purple": ("purple", "紫色", "紫"),
     "orange": ("orange", "橙色", "橙"),
+    "brown": ("brown", "棕色", "棕", "褐色", "褐"),
+    "pink": ("pink", "粉色", "粉"),
+    "gray": ("gray", "grey", "灰色", "灰"),
+    "white": ("white", "白色", "白"),
 }
 _DRAW_SHAPE_TERMS = {
     "triangle": ("triangle", "三角形", "三角"),
@@ -61,8 +70,9 @@ _OPEN_PLAN_TERMS = (
 _OPEN_PLAN_MIXED_ACTION_TERMS = (
     "draw", "type", "input", "write", "search", "send", "click",
     "verify", "confirm", "screenshot", "save", "upload", "publish",
+    "create", "new document", "new workbook", "blank document", "blank workbook",
     "绘制", "画一个", "画一", "输入", "搜索", "发送", "点击", "确认", "核验", "验证",
-    "截图", "保存", "上传", "发布",
+    "截图", "保存", "上传", "发布", "新建", "创建", "空白文档", "空白工作簿",
 )
 
 
@@ -75,7 +85,7 @@ def _schema_profile_for_task(task: str, *, is_coding: bool) -> str:
         return "standard"
     if _is_drawing_task(task):
         return "drawing_gui"
-    if _is_gui_only_task(task):
+    if _is_gui_only_task(task) or _is_communication_task(task):
         return "lean_gui"
     return "standard"
 

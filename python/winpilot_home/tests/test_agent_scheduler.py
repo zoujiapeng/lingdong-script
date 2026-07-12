@@ -46,6 +46,63 @@ def test_agent_scheduler_accepts_iso_run_at(tmp_path, monkeypatch):
     assert scheduler.due_tasks() == []
 
 
+def test_agent_scheduler_deduplicates_immediate_model_retry(tmp_path, monkeypatch):
+    from winpilot import scheduler
+
+    monkeypatch.setattr(scheduler, "SCHEDULES_PATH", tmp_path / "agent_schedules.json")
+    first = scheduler.create_task("remind me to eat", delay_seconds=180)
+    duplicate = scheduler.create_task("  REMIND   me to eat ", delay_seconds=180)
+
+    assert duplicate["id"] == first["id"]
+    assert duplicate["deduplicated"] is True
+    assert len(scheduler.list_tasks()) == 1
+
+
+def test_reminder_classifier_separates_notification_from_mixed_work():
+    from winpilot import scheduler
+
+    assert scheduler.reminder_message("\u63d0\u9192\u6211\u5403\u996d") == "\u5403\u996d"
+    assert scheduler.reminder_message('remind me "take a break"') == "take a break"
+    assert scheduler.reminder_message(
+        "\u63d0\u9192\u6211\u5403\u996d\uff0c\u7136\u540e\u6253\u5f00\u8ba1\u7b97\u5668"
+    ) == ""
+
+
+def test_due_reminder_uses_notification_job_without_llm(monkeypatch):
+    from winpilot import server
+
+    events = []
+    finished = []
+
+    class Jobs:
+        def submit(self, kind, fn, **kwargs):
+            assert kind == "notification"
+            assert kwargs["resources"] == ()
+            result = fn(threading.Event())
+            events.append(("job_result", result))
+            return SimpleNamespace(status="done")
+
+    monkeypatch.setattr(server, "RUNTIME_JOBS", Jobs())
+    monkeypatch.setattr(server.BUS, "publish", lambda event, **payload: events.append((event, payload)))
+    monkeypatch.setattr(server.agent_scheduler, "mark_started", lambda *args: events.append(("started", args)))
+    monkeypatch.setattr(server.agent_scheduler, "mark_finished", lambda *args: finished.append(args))
+    monkeypatch.setattr(
+        server,
+        "build_runner",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reminders must not start an LLM")),
+    )
+
+    assert server._try_start_scheduled({
+        "id": "agent_sched_reminder",
+        "name": "Lunch",
+        "task": "\u63d0\u9192\u6211\u5403\u996d",
+    }) is True
+
+    notification = next(payload for event, payload in events if event == "user_notification")
+    assert notification["body"] == "\u5403\u996d"
+    assert finished[-1][2] == "done"
+
+
 def test_agent_scheduler_rejects_invalid_run_at(tmp_path, monkeypatch):
     import pytest
 

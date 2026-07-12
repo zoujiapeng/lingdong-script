@@ -102,6 +102,40 @@ def test_run_state_zoom_does_not_clear_pending_unverified_count():
     assert state.unverified_actions == 1
 
 
+def test_read_only_inventory_result_clears_pending_action_count():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool("run_shell", {}, json.dumps({"ok": True, "exit_code": 0}))
+    assert state.unverified_actions == 1
+
+    state.after_tool(
+        "list_installed_apps",
+        {"offset": 0, "limit": 200},
+        "installed applications total=363 range=1-200",
+    )
+
+    assert state.phase == "ready"
+    assert state.unverified_actions == 0
+
+
+def test_read_only_shell_verification_clears_pending_action_count():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool("click", {"x": 1, "y": 2}, json.dumps({"ok": True, "verified": False}))
+    assert state.unverified_actions == 1
+
+    state.after_tool(
+        "run_shell",
+        {"command": r"Test-Path 'C:\Users\zou\Desktop\result.txt'"},
+        json.dumps({"ok": True, "exit_code": 0, "stdout": "True"}),
+    )
+
+    assert state.phase == "ready"
+    assert state.unverified_actions == 0
+
+
 def test_run_state_done_rejection_is_not_terminal_done():
     from winpilot.agent.run_state import RunStateMachine
 
@@ -114,3 +148,30 @@ def test_run_state_done_rejection_is_not_terminal_done():
     assert state.last_tool == "done"
     assert "missing visible evidence" in state.last_issue
     assert all(item["phase"] != "terminal:done" for item in state.history)
+
+
+def test_run_state_strong_deterministic_verification_clears_pending_action():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.before_tool("execute_subgoal", {})
+    state.after_tool(
+        "execute_subgoal",
+        {},
+        json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "error": "bad model hint",
+        }),
+    )
+    assert state.unverified_actions == 1
+
+    state.accept_verification(
+        "execute_subgoal",
+        "fresh screen proves the requested result",
+    )
+
+    assert state.unverified_actions == 0
+    assert state.phase == "ready"
+    assert "fresh screen" in state.last_issue

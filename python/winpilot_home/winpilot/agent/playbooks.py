@@ -10,8 +10,9 @@ Injection has two paths (the second is the anti-regression guard):
 - runtime window-title trigger → injected mid-run by the loop the moment a
   matching dialog appears, covering tasks the keywords didn't anticipate
 
-With ``agent.playbooks_enabled=false`` ALL playbooks are injected up front,
-which is equivalent to the old monolithic prompt (safe fallback).
+With ``agent.playbooks_enabled=false`` no playbook is injected. This keeps the
+switch intuitive and prevents disabled guidance runs from silently receiving
+the old monolithic prompt.
 """
 from __future__ import annotations
 
@@ -136,12 +137,11 @@ def enabled() -> bool:
 def for_task(task: str) -> list[Playbook]:
     """Playbooks whose keywords appear in the task text.
 
-    When the playbook switch is off, return everything — equivalent to the
-    old always-in-prompt behavior.
+    When the switch is off, return no playbooks.
     """
-    books = load_all()
     if not enabled():
-        return books
+        return []
+    books = load_all()
     task_lower = (task or "").lower()
     upload_publish = any(k in task_lower for k in (
         "upload", "publish", "post", "creator", "draft",

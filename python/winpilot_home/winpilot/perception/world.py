@@ -53,6 +53,9 @@ class WorldModel:
         self._screen_bulletin: dict = {}
         self._screen_notice_seq = 0
         self._screen_notice_sent_seq = 0
+        self._working_facts: dict[str, dict] = {}
+        self._working_revision = 0
+        self._working_sent_revision = 0
 
     # ---------------------------------------------------------------- feed
     @staticmethod
@@ -127,6 +130,61 @@ class WorldModel:
         if compact["last_changed"] and sequence > 0:
             self._screen_notice_seq = sequence
 
+    def record_facts(
+        self,
+        subject: str,
+        facts: dict,
+        source_url: str = "",
+        source_title: str = "",
+        evidence: list | None = None,
+    ) -> dict:
+        """Store source-bound facts for this run without creating memory."""
+        key = " ".join(str(subject or "").split()).casefold()[:160]
+        if not key:
+            raise ValueError("subject is required")
+        clean_facts: dict[str, str] = {}
+        for raw_key, raw_value in list(facts.items())[:24]:
+            name = " ".join(str(raw_key or "").split())[:80]
+            value = " ".join(str(raw_value or "").split())[:700]
+            if name and value:
+                clean_facts[name] = value
+        if not clean_facts:
+            raise ValueError("facts must contain at least one non-empty value")
+        prior = self._working_facts.get(key, {})
+        merged = {**(prior.get("facts") or {}), **clean_facts}
+        record = {
+            "subject": " ".join(str(subject).split())[:160],
+            "source_url": str(source_url or prior.get("source_url") or "")[:1000],
+            "source_title": " ".join(str(source_title or prior.get("source_title") or "").split())[:300],
+            "facts": merged,
+            "evidence": [
+                " ".join(str(item or "").split())[:300]
+                for item in (evidence or prior.get("evidence") or [])[:12]
+                if str(item or "").strip()
+            ],
+        }
+        self._working_facts[key] = record
+        self._working_revision += 1
+        return dict(record)
+
+    def working_set(self) -> list[dict]:
+        return [dict(item) for item in self._working_facts.values()]
+
+    def working_set_advisory(self) -> str:
+        """Emit the compact research table once after each update."""
+        if self._working_revision <= self._working_sent_revision:
+            return ""
+        self._working_sent_revision = self._working_revision
+        lines = ["Per-run source-bound working set (do not mix subjects):"]
+        for record in self.working_set()[:10]:
+            fields = "; ".join(
+                f"{key}={value}"
+                for key, value in list((record.get("facts") or {}).items())[:12]
+            )
+            source = str(record.get("source_url") or record.get("source_title") or "")
+            lines.append(f"- {record['subject']} | {fields} | source={source}")
+        return "\n".join(lines)[:6000]
+
     @staticmethod
     def _describe_delta(prev: _ObserveState | None, title: str,
                         fingerprint: frozenset[str]) -> str:
@@ -155,6 +213,16 @@ class WorldModel:
                 count += 1
             else:
                 break
+        return count
+
+    def prospective_repeat_count(self, name: str, args: dict) -> int:
+        """Return the consecutive count if ``name/args`` ran next."""
+        candidate = (name, _args_hash(name, args))
+        count = 1
+        for item in reversed(self._actions):
+            if item != candidate:
+                break
+            count += 1
         return count
 
     def is_stuck(self) -> tuple[bool, str]:
@@ -217,4 +285,8 @@ class WorldModel:
             "last_change": self._last_change_line,
             "last_title": self._last_observe.title if self._last_observe else "",
             "screen_watch": dict(self._screen_bulletin),
+            "working_set_count": len(self._working_facts),
+            "working_set_subjects": [
+                item.get("subject", "") for item in self.working_set()[:10]
+            ],
         }
