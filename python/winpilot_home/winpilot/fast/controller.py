@@ -398,12 +398,12 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         params = action.get("params")
         if isinstance(params, dict):
             args = {**params, **args}
-        return name, args
+        return _normalise_wait_condition(name, args)
     if len(action) == 1:
         only_name, only_args = next(iter(action.items()))
         name = str(only_name)
         if isinstance(only_args, dict):
-            return name, dict(only_args)
+            return _normalise_wait_condition(name, dict(only_args))
         if name == "hotkey":
             keys = list(only_args) if isinstance(only_args, list) else [only_args]
             return name, {"keys": [str(key) for key in keys]}
@@ -411,6 +411,41 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             return name, {"text": str(only_args)}
         return name, {"value": only_args}
     return "", {}
+
+
+def _normalise_wait_condition(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Route the model's common stable-condition shorthand to ScreenWatcher."""
+    condition = args.get("condition")
+    if name != "wait" or not isinstance(condition, dict):
+        return name, args
+    condition_type = str(condition.get("type") or "").strip().casefold().replace("-", "_")
+    if condition_type not in {"stable", "screen_stable", "visual_stable"}:
+        return name, args
+    try:
+        stable_ms = int(
+            condition.get("duration_ms")
+            or condition.get("stable_ms")
+            or args.get("stable_ms")
+            or 300
+        )
+    except (TypeError, ValueError):
+        stable_ms = 300
+    stable_ms = max(50, min(1500, stable_ms))
+    try:
+        timeout_s = float(condition.get("timeout_s") or args.get("timeout_s") or 2.0)
+    except (TypeError, ValueError):
+        timeout_s = 2.0
+    normalised = {
+        key: value
+        for key, value in args.items()
+        if key not in {"condition", "duration_ms"}
+    }
+    normalised["stable_ms"] = stable_ms
+    normalised["timeout_s"] = max(stable_ms / 1000.0, min(2.0, timeout_s))
+    for key in ("required", "max_ratio"):
+        if key in condition and key not in normalised:
+            normalised[key] = condition[key]
+    return "wait_stable", normalised
 
 
 _HOTKEY_MODIFIERS = {
@@ -628,6 +663,7 @@ class FastGuiController:
             tuple[tuple[int, int, int, int, int], str], tuple[int, int]
         ] = {}
         self._persistent_palette_keys: set[tuple[int, int, int, int, int]] = set()
+        self._active_color = ""
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -947,6 +983,7 @@ class FastGuiController:
         *,
         cache_key: tuple[int, int, int, int, int] | None = None,
         prefer_cache: bool = True,
+        allow_vlm: bool = True,
     ) -> ToolResult:
         if prefer_cache and cache_key is not None:
             cached = self._color_palette_button_cache.get(cache_key)
@@ -970,16 +1007,6 @@ class FastGuiController:
             max(96, min(region.height, int(region.height * 0.36))),
         ).clamp_to_screen()
         started = _now_ms()
-        try:
-            ocr_started = _now_ms()
-            elements = ocr.collect(toolbar)
-            ocr_ms = max(0, _now_ms() - ocr_started)
-        except Exception as exc:
-            return ToolResult(json.dumps({
-                "ok": False,
-                "error": f"color palette OCR failed: {exc}",
-                "elapsed_ms": max(0, _now_ms() - started),
-            }, ensure_ascii=False))
         label_terms = {"colors", "colour", "color", "颜色", "色彩", "顏色"}
         def is_color_label(element: Any) -> bool:
             text = _norm_text(getattr(element, "text", ""))
@@ -997,12 +1024,26 @@ class FastGuiController:
             and toolbar.left <= int(getattr(element, "cx", 0) or 0) <= toolbar.right
             and toolbar.top <= int(getattr(element, "cy", 0) or 0) <= toolbar.bottom
         ]
-        for element in elements:
-            if is_color_label(element):
-                candidates.append(element)
-        locator_source = "snapshot" if candidates else "ocr"
+        locator_source = "snapshot" if candidates else ""
+        ocr_ms = 0
+        if not candidates:
+            try:
+                ocr_started = _now_ms()
+                elements = ocr.collect(toolbar)
+                ocr_ms = max(0, _now_ms() - ocr_started)
+            except Exception as exc:
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "error": f"color palette OCR failed: {exc}",
+                    "elapsed_ms": max(0, _now_ms() - started),
+                }, ensure_ascii=False))
+            for element in elements:
+                if is_color_label(element):
+                    candidates.append(element)
+            if candidates:
+                locator_source = "ocr"
         vlm_ms = 0
-        if not candidates and vlm.is_configured():
+        if not candidates and allow_vlm and vlm.is_configured():
             # Owner-drawn ribbons commonly expose only a color icon to OCR.
             # Escalate this one local control lookup to VLM rather than making
             # the planner repeatedly re-observe the whole application.
@@ -1084,6 +1125,36 @@ class FastGuiController:
             }, ensure_ascii=False))
         cache_key = self._palette_cache_key(region)
         attempts: list[dict[str, Any]] = []
+        raw_strict = action.get("strict")
+        strict = True if raw_strict is None else _truthy(raw_strict)
+        strict = bool(strict or _truthy(action.get("required_by_user")))
+        palette_opened = False
+
+        def optional_fallback(error: str) -> ToolResult:
+            if palette_opened:
+                close = self._dispatch(
+                    "hotkey",
+                    {"keys": ["esc"], "skip_screen_delta": True},
+                )
+                attempts.append({
+                    "action": "close_optional_palette",
+                    "ok": not _failed(close),
+                    "preview": close.text[:240],
+                })
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": False,
+                "mutation_applied": False,
+                "postcondition_pending": False,
+                "needs_observe": False,
+                "color": color,
+                "strict": False,
+                "color_selection_skipped": True,
+                "fallback_to_current_color": True,
+                "active_color": self._active_color or None,
+                "attempts": attempts,
+                "warning": error,
+            }, ensure_ascii=False, default=str))
 
         swatch_cache_key = (cache_key, color)
         cached_swatch = self._color_swatch_cache.get(swatch_cache_key)
@@ -1097,6 +1168,7 @@ class FastGuiController:
                 },
             )
             if not _failed(click):
+                self._active_color = color
                 return ToolResult(json.dumps({
                     "ok": True,
                     "verified": False,
@@ -1110,9 +1182,17 @@ class FastGuiController:
                 }, ensure_ascii=False, default=str))
             self._color_swatch_cache.pop(swatch_cache_key, None)
 
-        def capture_palette_point() -> tuple[tuple[int, int] | None, dict[str, Any], int]:
+        def capture_palette_point(
+            *,
+            expanded: bool = False,
+        ) -> tuple[tuple[int, int] | None, dict[str, Any], int]:
             started = _now_ms()
-            toolbar_height = min(region.height, max(180, int(region.height * 0.28)))
+            toolbar_height = min(
+                region.height,
+                max(320, int(region.height * 0.62))
+                if expanded else
+                max(180, int(region.height * 0.28)),
+            )
             scan_region = Region(
                 region.left,
                 region.top,
@@ -1144,7 +1224,7 @@ class FastGuiController:
                 else:
                     time.sleep(0.12)
                 try:
-                    point, summary, elapsed_ms = capture_palette_point()
+                    point, summary, elapsed_ms = capture_palette_point(expanded=True)
                     attempts.append({
                         "action": action,
                         "ok": point is not None,
@@ -1154,6 +1234,8 @@ class FastGuiController:
                 except Exception as exc:
                     attempts.append({"action": "capture_after_open", "ok": False, "error": str(exc)})
                     point = None
+                if not strict:
+                    break
 
         try:
             point, summary, elapsed_ms = capture_palette_point()
@@ -1168,8 +1250,16 @@ class FastGuiController:
             attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
             point = None
             palette_was_visible = False
+        if point is None and not strict and self._active_color:
+            return optional_fallback(
+                f"optional {color} swatch was not already visible; kept active {self._active_color}"
+            )
         if point is None:
-            opened = self._open_color_palette(region, cache_key=cache_key)
+            opened = self._open_color_palette(
+                region,
+                cache_key=cache_key,
+                allow_vlm=strict,
+            )
             opened_data = _json_dict(opened.text)
             attempts.append({
                 "action": "open_color_palette",
@@ -1178,6 +1268,8 @@ class FastGuiController:
                 "preview": opened.text[:240],
             })
             if _failed(opened):
+                if not strict:
+                    return optional_fallback("optional palette could not be opened; kept current visible color")
                 return ToolResult(json.dumps({
                     "ok": False,
                     "verified": False,
@@ -1185,9 +1277,15 @@ class FastGuiController:
                     "attempts": attempts,
                     "error": "could not open a visible color palette",
                 }, ensure_ascii=False, default=str))
+            palette_opened = True
             scan_after_open("scan_after_open")
-            if point is None and opened_data.get("cached"):
-                opened = self._open_color_palette(region, cache_key=cache_key, prefer_cache=False)
+            if point is None and opened_data.get("cached") and strict:
+                opened = self._open_color_palette(
+                    region,
+                    cache_key=cache_key,
+                    prefer_cache=False,
+                    allow_vlm=True,
+                )
                 opened_data = _json_dict(opened.text)
                 attempts.append({
                     "action": "open_color_palette_uncached",
@@ -1197,7 +1295,7 @@ class FastGuiController:
                 })
                 if not _failed(opened):
                     scan_after_open("scan_after_uncached_open")
-        if point is None:
+        if point is None and strict:
             point, label_meta = self._visible_color_label_point(region, color)
             attempts.append({
                 "action": "locate_labeled_color_control",
@@ -1206,6 +1304,10 @@ class FastGuiController:
                 **label_meta,
             })
         if point is None:
+            if not strict:
+                return optional_fallback(
+                    f"optional {color} swatch was unavailable; kept current visible color"
+                )
             return ToolResult(json.dumps({
                 "ok": False,
                 "verified": False,
@@ -1224,6 +1326,8 @@ class FastGuiController:
             "preview": click.text[:240],
         })
         ok = not _failed(click)
+        if ok:
+            self._active_color = color
         return ToolResult(json.dumps({
             "ok": ok,
             "verified": False,

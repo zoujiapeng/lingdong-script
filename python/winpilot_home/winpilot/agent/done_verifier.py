@@ -19,7 +19,7 @@ from zipfile import BadZipFile, ZipFile
 
 from ..config import CONFIG
 from ..model_adapter import model_profile_from_config, model_supports_vision
-from ..perception import fusion, intent, ocr, vision_cv
+from ..perception import fusion, intent, ocr, vision_cv, vlm as vlm_mod
 from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from .task_rules import (
@@ -55,8 +55,11 @@ _COLORFUL_DRAWING_RE = re.compile(
     re.IGNORECASE,
 )
 _DETAILED_DRAWING_RE = re.compile(
-    r"\b(?:detailed|intricate|elaborate|high[- ]?detail)\b|"
-    r"\u7ec6\u8282|\u7cbe\u7ec6|\u7cbe\u81f4|\u8be6\u7ec6",
+    r"\b(?:detailed|intricate|elaborate|high[- ]?detail|polished|beautiful|"
+    r"good[- ]?looking|not\s+(?:simple|crude)|non[- ]?(?:simple|crude))\b|"
+    r"\u7ec6\u8282|\u7cbe\u7ec6|\u7cbe\u81f4|\u8be6\u7ec6|\u597d\u770b|"
+    r"\u6f02\u4eae|\u7f8e\u89c2|\u7cbe\u7f8e|\u4e0d\u8981\u7b80\u964b|"
+    r"\u4e0d\u7b80\u964b|\u522b\u7b80\u964b|\u4e0d\u8981\u7b80\u5355|\u4e0d\u7b80\u5355",
     re.IGNORECASE,
 )
 _VISUAL_COLOR_NAMES = {
@@ -467,6 +470,25 @@ def _config():
     return _loop_attr("CONFIG", CONFIG)
 
 
+def _configured_vision_judge_model(cfg) -> str:
+    """Return the configured image-capable fallback judge, if any.
+
+    Capture eligibility and judge routing must use the same contract. A
+    text-only main model must not skip the fresh target-window capture merely
+    because the configured VLM will consume it later.
+    """
+    settings = dict(cfg.get("vlm", default={}) or {})
+    model = str(settings.get("model") or "").strip()
+    if not (
+        settings.get("enabled")
+        and settings.get("base_url")
+        and model
+        and model_supports_vision(model)
+    ):
+        return ""
+    return model
+
+
 def _explicit_saved_paths(task: str) -> list[Path]:
     text = str(task or "")
     low = text.casefold()
@@ -818,9 +840,15 @@ class DoneVerifierMixin:
             hwnd = self.session.hwnd
             title = self.session.snapshot.title if self.session.snapshot else ""
             pmode = intent_mod.perception_mode(self.task, title)
-            api = CONFIG.get("api", default={})
+            cfg = _config()
+            api = cfg.get("api", default={})
+            fallback_visual_judge = _configured_vision_judge_model(cfg)
             native_visual = bool(
-                hwnd and model_profile_from_config(api).supports_vision
+                hwnd
+                and (
+                    model_profile_from_config(api).supports_vision
+                    or (_is_drawing_task(self.task) and fallback_visual_judge)
+                )
             )
             if native_visual:
                 try:
@@ -1824,6 +1852,8 @@ class DoneVerifierMixin:
             or api.get("done_judge_model")
             or api.get("model", "deepseek-v4-flash")
         )
+        judge_client = client
+        judge_extra_body: dict | None = None
         fresh_image = str(getattr(self, "_fresh_done_image_b64", "") or "")
         pending_literals = list(
             getattr(self, "_pending_visual_literal_tokens", []) or []
@@ -1865,6 +1895,21 @@ class DoneVerifierMixin:
             main_model = str(api.get("model") or "")
             if model_supports_vision(main_model):
                 judge_model = main_model
+            else:
+                vlm_model = _configured_vision_judge_model(cfg)
+                if not vlm_model:
+                    reason = (
+                        "A fresh target-window image is required for completion, but the selected "
+                        "judge/main model is text-only and no configured vision model can inspect it."
+                    )
+                    return self._reject_done(reason, f"[done check failed] {reason}")
+                try:
+                    judge_client = vlm_mod._client()
+                    judge_extra_body = vlm_mod._extra_body()
+                except Exception as exc:
+                    reason = f"The configured visual completion judge could not be created: {exc}"
+                    return self._reject_done(reason, f"[done check failed] {reason}")
+                judge_model = vlm_model
         sys_p = (
             "你是严格、怀疑的任务完成核验员。判断用户任务是否【真正达成】，不要轻信 agent 的自述。"
             "重要：文件/文件夹/进程/命令类任务，以【确定性证据】(run_shell 输出、Test-Path/Exists 结果、"
@@ -1953,6 +1998,21 @@ class DoneVerifierMixin:
                   "not delivery evidence. If recipient/conversation context or delivery state "
                   "is ambiguous, return done=false."
             )
+        if _is_drawing_task(self.task):
+            user_p += (
+                "\n\nAUTHORITATIVE DRAWING-QUALITY CHECK:\n"
+                "Judge the actual canvas pixels in the attached fresh target-window frame, not "
+                "the plan, primitive count, action log, color statistics, or agent claim. The "
+                "original user task is the only acceptance contract: do not turn a color, style, "
+                "or detail invented only by the agent/plan into a required condition. "
+                "requested subject must be immediately recognizable and visibly complete. "
+                "Subject-defining parts, proportions, and spatial relationships must form one "
+                "coherent composition. If the user requested a good-looking, polished, detailed, "
+                "or non-crude result, a few circles/ellipses, a bare geometric outline, an "
+                "obviously partial figure, or abandoned/selected shapes are insufficient. "
+                "Require multiple meaningful details and intentional visual structure; return "
+                "done=false whenever quality or completeness is ambiguous."
+            )
         if fresh_image:
             user_p += (
                 "\n\nAUTHORITATIVE NATIVE GUI EVIDENCE ORDER:\n"
@@ -2008,12 +2068,15 @@ class DoneVerifierMixin:
             "native_visual": bool(fresh_image),
         })
         try:
-            resp = client.chat.completions.create(
-                model=judge_model,
-                messages=judge_messages,
-                temperature=0.0,
-                max_tokens=_JUDGE_MAX_TOKENS,
-            )
+            request_kwargs = {
+                "model": judge_model,
+                "messages": judge_messages,
+                "temperature": 0.0,
+                "max_tokens": _JUDGE_MAX_TOKENS,
+            }
+            if judge_extra_body:
+                request_kwargs["extra_body"] = judge_extra_body
+            resp = judge_client.chat.completions.create(**request_kwargs)
             tracker = getattr(self, "_track_aux_model_response", None)
             if callable(tracker):
                 tracker(resp, purpose="done_judge", model=judge_model)
@@ -2064,10 +2127,41 @@ class DoneVerifierMixin:
         self._last_done_reject_reason = reason
         self._last_done_reject_generation = self._done_evidence_generation()
         self._done_rejects += 1
+        if _is_drawing_task(self.task):
+            quality_rejects = int(
+                getattr(self, "_drawing_quality_rejects", 0) or 0
+            ) + 1
+            self._drawing_quality_rejects = quality_rejects
+            if quality_rejects == 1:
+                # The next canvas mutation is the only repair opportunity. Keep
+                # an exact history boundary so the runtime can distinguish the
+                # already-delivered scene from a later additive detail batch.
+                self._drawing_quality_repair_history_start = len(
+                    getattr(self, "_tool_history", []) or []
+                )
+                recovery_message = (
+                    f"[drawing quality check failed] {reason}. Preserve the current canvas: "
+                    "do not clear, restart, redraw the whole subject, or bulk-undo. Make at most "
+                    "one incremental execute_subgoal repair containing only brand-new missing "
+                    "semantic details, then call done for one fresh visual judgment. If the fresh "
+                    "judge still rejects it and no safe additive repair is clear, call blocked/fail "
+                    "honestly instead of continuing to mutate the canvas."
+                )
+            else:
+                recovery_message = (
+                    f"[drawing quality check failed again] {reason}. The single safe additive "
+                    "repair opportunity has been consumed. Do not mutate, clear, redraw, undo, "
+                    "or restart the canvas again; call blocked/fail with this exact visual "
+                    "quality blocker instead of entering another repair loop."
+                )
+        else:
+            recovery_message = (
+                f"[完成核验未通过] {reason}。任务尚未真正达成，请不要直接调 done——"
+                "先把缺的部分补完（必要时重新 observe / 用确定性 expect 验证），完成后再调 done。"
+            )
         self.messages.append({
             "role": "user",
-            "content": f"[完成核验未通过] {reason}。任务尚未真正达成，请不要直接调 done——"
-                       "先把缺的部分补完（必要时重新 observe / 用确定性 expect 验证），完成后再调 done。",
+            "content": recovery_message,
         })
         logger.info("done 被核验拦截(第%d次): %s", self._done_rejects, reason)
         return False

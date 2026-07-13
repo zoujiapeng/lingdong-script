@@ -359,6 +359,36 @@ def test_done_judge_receives_fresh_real_frame(monkeypatch):
     assert image["image_url"]["url"].endswith("fresh-frame")
 
 
+def test_drawing_done_rejection_allows_only_one_additive_quality_repair(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent import done_verifier as done_mod
+
+    monkeypatch.setattr(done_mod, "model_supports_vision", lambda _model: True)
+
+    def create(**_kwargs):
+        message = SimpleNamespace(content=(
+            '{"done": false, "reason": "the dog needs more facial detail"}'
+        ))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    runner = AgentRunner("draw a good-looking dog in Paint")
+    runner.result_text = "done"
+    runner._fresh_done_image_b64 = "fresh-frame"
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    assert runner._call_done_judge(client, "", "draw_strokes", "evidence") is False
+    recovery = runner.messages[-1]["content"]
+    assert runner._drawing_quality_repair_history_start == len(runner._tool_history)
+    assert "one incremental execute_subgoal repair" in recovery
+    assert "do not clear, restart, redraw the whole subject" in recovery
+    assert "call blocked/fail honestly" in recovery
+
+    assert runner._call_done_judge(client, "", "draw_strokes", "new evidence") is False
+    exhausted = runner.messages[-1]["content"]
+    assert "single safe additive repair opportunity has been consumed" in exhausted
+    assert "Do not mutate, clear, redraw, undo" in exhausted
+
+
 def test_normalized_frame_coordinates_map_inside_exact_window_bounds(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -884,6 +914,41 @@ def test_preflight_ignores_unrelated_animation_when_grounded_target_roi_is_stabl
     assert event["target_change_ratio"] == 0.0
     assert event["target_roi"][0] < 500 < event["target_roi"][2]
     assert event["target_roi"][1] < 500 < event["target_roi"][3]
+
+
+def test_preflight_allows_semantic_draw_to_reground_after_paint_settles(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("draw a polished dog in Paint")
+    runner.session.hwnd = 11
+    runner._last_visual_feedback_b64 = "old" * 128
+    monkeypatch.setattr(runner, "_has_fresh_visual_grounding", lambda: True)
+    monkeypatch.setattr(runner, "_visual_preflight_target_roi", lambda *_args: None)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: Region(0, 0, 800, 600))
+    monkeypatch.setattr(
+        "winpilot.agent.loop.capture_window_jpeg_b64",
+        lambda _hwnd, **_kwargs: "new" * 128,
+    )
+    monkeypatch.setattr("winpilot.agent.loop.jpeg_diff_ratio", lambda *_args: 0.54)
+    events = []
+    monkeypatch.setattr(
+        "winpilot.agent.loop.BUS.publish",
+        lambda name, **payload: events.append((name, payload)),
+    )
+
+    draw_frame, draw_ratio, draw_error, _region = runner._preflight_visual_frame(
+        "execute_subgoal",
+        {"subgoal": "draw dog", "draws": [{"shape": "ellipse", "box": [200, 200, 300, 220]}]},
+    )
+    click_frame, click_ratio, click_error, _region = runner._preflight_visual_frame(
+        "click", {"label": "Brushes"},
+    )
+
+    assert (draw_frame, draw_ratio, draw_error) == ("", 0.0, "")
+    assert events[-2][1]["decision_scope"] == "controller_regrounded_drawing"
+    assert events[-2][1]["global_change_ratio"] == 0.54
+    assert (click_frame, click_ratio, click_error) == ("new" * 128, 0.54, "")
 
 
 def test_preflight_cancels_small_global_change_when_grounded_target_roi_changed(monkeypatch):

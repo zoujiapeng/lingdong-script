@@ -119,6 +119,13 @@ _DRAWING_EXECUTE_SUBGOAL_PROPS = {
 }
 
 
+# Drawing is one visible transaction plus a grounded final verdict.  Hiding the
+# generic todo mutators prevents models from spending parallel tool calls on
+# eight plan items, then replacing that plan (and often inventing a destructive
+# clear/restart step) instead of inspecting the canvas and calling done.
+_DRAWING_GUI_TOOLS = _LEAN_GUI_TOOLS - {"revise_plan", "complete_subgoal"}
+
+
 _LEAN_TOOL_DESCRIPTIONS = {
     "list_windows": "List visible windows.",
     "scan_windows": "Focus/observe matching windows.",
@@ -160,8 +167,18 @@ _LEAN_TOOL_DESCRIPTIONS = {
 _DRAWING_TOOL_DESCRIPTIONS = {
     **_LEAN_TOOL_DESCRIPTIONS,
     "execute_subgoal": (
-        "Controller drawing routine. Use launch/focus first; then include draw/draws "
-        "or verify_texts. Do not use it to open/discover an app."
+        "Controller drawing routine. Use launch/focus first. For a detailed creature, "
+        "submit one complete 15-30 part-labelled outline-only draws[] call: head/body, "
+        "pose-visible ears/eyes, nose/mouth, at least two pose-visible limbs/haunches with "
+        "paws, tail, and at least two "
+        "decorative details. For a polished organic creature, do not stack ellipses and "
+        "rectangles: give the head, body, and visible limbs expressive custom contours as "
+        "normalized_strokes=[[[x,y],...]]] in canvas-relative 0..1000 coordinates, with "
+        "6-16 waypoints per contour (repeat the first point to close it). Reserve circles/"
+        "ellipses for small eyes, pupils, nose, paws, or decorations; never use rectangles "
+        "for natural limbs. Never put four parallel capsule legs under an oval; use a coherent "
+        "seated/side pose with attached legs and hind haunches. Closed shapes are not filled. Do not clear a draft or split "
+        "the creature across todo-plan calls. Do not use it to open/discover an app."
     ),
 }
 
@@ -217,7 +234,7 @@ def _apply_tool_profile(tools: list[dict], profile: str) -> list[dict]:
                 _DRAWING_EXECUTE_SUBGOAL_PROPS,
             )
             for tool in tools
-            if _tool_name(tool) in _LEAN_GUI_TOOLS
+            if _tool_name(tool) in _DRAWING_GUI_TOOLS
         ]
     return tools
 
@@ -669,10 +686,10 @@ def tool_schemas(
                 },
                 "draw": {
                     "type": "object",
-                    "description": "Optional canvas primitive. For detailed scenes, use draws[] with normalized boxes/strokes instead of an unsupported semantic object name.",
+                    "description": "Optional outline-only canvas primitive. For detailed scenes, use draws[] with normalized boxes/strokes instead of an unsupported semantic object name. Closed primitives are outlines, never filled layers.",
                     "properties": {
-                        "shape": _prop("string", "triangle/rectangle/circle/ellipse/line/check. Unknown object names are rejected."),
-                        "color": _prop("string", "Requested visible color."),
+                        "shape": _prop("string", "Outline-only triangle/rectangle/circle/ellipse/line/check. Unknown object names and filled shapes are unsupported."),
+                        "color": _prop("string", "Optional visible color. It is strict only when the user explicitly requested it; otherwise the controller may reuse the current color."),
                         "part": _prop("string", "Semantic scene part, for example head, body, left eye, tail, window, roof. Required on detailed scenes."),
                         "expected_region": _prop("string", "Rough canvas region."),
                         "box": {
@@ -698,13 +715,13 @@ def tool_schemas(
                 },
                 "draws": {
                     "type": "array",
-                    "description": "Ordered primitives for a detailed scene. Prefer one routine with multiple colors and 8-30 primitives over repeated LLM drawing turns.",
+                    "description": "Ordered outline-only primitives. For a detailed creature, send one complete 15-30 primitive routine: separate large head/body, pose-visible ears/eyes, nose and mouth, at least two pose-visible limbs/haunches with paws, tail, plus at least two labelled decorative details. For polished organic subjects, head/body/visible limbs should use 6-16 point normalized_strokes contours; when a small model supplies only labelled core boxes, the runtime compiles them into organic contours before execution. Never place four parallel capsule legs under an oval. Use multiple colors only when requested; otherwise keep the current/one style color. Closed shapes are outlines, never filled layers.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "shape": _prop("string", "triangle/rectangle/circle/ellipse/line/check."),
-                            "color": _prop("string", "Requested visible color."),
-                            "part": _prop("string", "Semantic scene part. Label every primitive in a detailed scene."),
+                            "shape": _prop("string", "Outline-only triangle/rectangle/circle/ellipse/line/check; filled shapes are unsupported."),
+                            "color": _prop("string", "Optional visible color; strict only when explicitly requested by the user."),
+                            "part": _prop("string", "Semantic scene part. Label every detailed primitive explicitly, including left/right and front/back distinctions."),
                             "expected_region": _prop("string", "Rough canvas region."),
                             "box": {
                                 "type": "array",
@@ -716,7 +733,7 @@ def tool_schemas(
                             "box_mode": _prop("string", "Optional line box interpretation.", enum=["endpoints", "xywh"]),
                             "normalized_strokes": {
                                 "type": "array",
-                                "description": "Custom canvas-relative strokes in 0..1000 coordinates.",
+                                "description": "Custom canvas-relative strokes in 0..1000 coordinates. Use 6-16 waypoints for an organic contour and repeat the first point to close it.",
                                 "items": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
                             },
                             "duration": _prop("number", "Seconds per stroke; default 0.28."),

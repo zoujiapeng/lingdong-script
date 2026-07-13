@@ -55,10 +55,14 @@ def test_execute_subgoal_schema_exposes_normalized_detailed_drawing_primitives()
     execute = next(tool for tool in tools if tool["function"]["name"] == "execute_subgoal")
     draw = execute["function"]["parameters"]["properties"]["draw"]
     draws = execute["function"]["parameters"]["properties"]["draws"]["items"]
+    description = execute["function"]["description"]
 
     assert {"box", "box_mode", "part", "normalized_strokes"} <= set(draw["properties"])
     assert {"box", "box_mode", "part", "normalized_strokes"} <= set(draws["properties"])
     assert draw["properties"]["box"]["maxItems"] == 4
+    assert "normalized_strokes=[[[x,y],...]]]" in description
+    assert "6-16 waypoints" in description
+    assert "never use rectangles for natural limbs" in description
 
 
 def test_schema_exposes_agent_schedules_without_shell():
@@ -223,9 +227,12 @@ def test_drawing_gui_profile_keeps_draw_subgoal_without_click_input():
         allow_files=False,
         profile="drawing_gui",
     )
+    names = set(_names(tools))
     execute = next(tool for tool in tools if tool["function"]["name"] == "execute_subgoal")
     props = set(execute["function"]["parameters"]["properties"])
 
+    assert {"revise_plan", "complete_subgoal"}.isdisjoint(names)
+    assert {"execute_subgoal", "done", "blocked"} <= names
     assert {"subgoal", "target_window", "draw", "draws", "verify_texts", "constraints"} <= props
     assert {"input", "click", "clicks"}.isdisjoint(props)
     assert "Do not use it to open/discover an app" in execute["function"]["description"]

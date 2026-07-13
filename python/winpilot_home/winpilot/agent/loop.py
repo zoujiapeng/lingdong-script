@@ -126,6 +126,90 @@ _NATIVE_BATCH_SPATIAL_MUTATIONS = {
 }
 
 
+def _drawing_batch_action_name_args(
+    action: Any,
+) -> tuple[str, dict[str, Any]]:
+    """Normalize explicit and one-key shorthand batch actions."""
+    if not isinstance(action, dict):
+        return "", {}
+    name = str(action.get("action") or action.get("tool") or "").strip().casefold()
+    payload = dict(action.get("params") or {})
+    payload.update({
+        key: value for key, value in action.items()
+        if key not in {"action", "tool", "params"}
+    })
+    if name:
+        return name, payload
+    if len(action) != 1:
+        return "", payload
+    raw_name, raw_payload = next(iter(action.items()))
+    name = str(raw_name or "").strip().casefold()
+    if isinstance(raw_payload, dict):
+        payload = dict(raw_payload)
+    else:
+        payload = {"value": raw_payload}
+    return name, payload
+
+_DRAWING_PART_POSITIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("left", ("left", "lhs", "左")),
+    ("right", ("right", "rhs", "右")),
+    ("front", ("front", "fore", "foreleg", "forelegs", "前")),
+    ("back", ("back", "rear", "hind", "hindleg", "hindlegs", "后", "後")),
+    ("upper", ("upper", "上")),
+    ("lower", ("lower", "下")),
+    ("top", ("top", "顶部", "上方")),
+    ("bottom", ("bottom", "底部", "下方")),
+    ("inner", ("inner", "inside", "内侧", "內側")),
+    ("outer", ("outer", "outside", "外侧", "外側")),
+)
+_DRAWING_CORE_PART_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("head", ("head", "face", "skull", "头", "頭", "脑袋", "腦袋", "脸", "臉", "面部")),
+    ("body", ("body", "torso", "trunk", "身体", "身體", "躯干", "軀幹", "身躯", "身軀")),
+    ("ear", ("ear", "ears", "耳", "耳朵")),
+    ("eye", ("eye", "eyes", "眼", "眼睛")),
+    ("nose", ("nose", "snout", "鼻", "鼻子")),
+    ("mouth", ("mouth", "muzzle", "smile", "lip", "嘴", "嘴巴", "口部", "吻部")),
+    (
+        "limb",
+        (
+            "leg", "legs", "foreleg", "forelegs", "hindleg", "hindlegs",
+            "haunch", "haunches", "hindquarter", "hindquarters", "thigh",
+            "arm", "arms", "limb", "limbs", "wing", "wings",
+            "腿", "前肢", "后肢", "後肢", "四肢", "胳膊", "手臂", "翅膀", "翼",
+        ),
+    ),
+    ("foot", ("paw", "paws", "foot", "feet", "hoof", "hooves", "claw", "claws", "爪", "爪子", "脚", "腳", "脚掌", "腳掌", "足", "蹄")),
+    ("tail", ("tail", "tails", "尾", "尾巴")),
+)
+_DRAWING_DETAIL_PART_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("pupil", ("pupil", "pupils", "瞳孔")),
+    ("highlight", ("highlight", "highlights", "shine", "高光")),
+    ("eyebrow", ("eyebrow", "eyebrows", "brow", "brows", "眉", "眉毛")),
+    ("eyelash", ("eyelash", "eyelashes", "睫毛")),
+    ("cheek", ("cheek", "cheeks", "blush", "脸颊", "臉頰", "腮", "腮红", "腮紅")),
+    ("belly", ("belly", "abdomen", "tummy", "肚皮", "肚子", "腹部")),
+    ("chest", ("chest", "胸", "胸口")),
+    ("tongue", ("tongue", "舌", "舌头", "舌頭")),
+    ("collar", ("collar", "neckband", "项圈", "項圈", "颈圈", "頸圈")),
+    ("tag", ("tag", "pendant", "吊牌", "挂牌", "掛牌")),
+    ("spot", ("spot", "spots", "dot", "dots", "freckle", "freckles", "斑点", "斑點")),
+    ("patch", ("patch", "patches", "pattern", "patterns", "stripe", "stripes", "texture", "斑纹", "斑紋", "花纹", "花紋")),
+    ("shadow", ("shadow", "shadows", "阴影", "陰影")),
+    ("wrinkle", ("wrinkle", "wrinkles", "crease", "creases", "皱纹", "皺紋")),
+    ("fur", ("fur", "hair", "毛发", "毛髮")),
+    ("whisker", ("whisker", "whiskers", "胡须", "鬍鬚")),
+    ("tuft", ("tuft", "tufts", "毛簇")),
+    ("toe", ("toe", "toes", "脚趾", "腳趾")),
+    ("claw", ("claw", "claws", "爪尖")),
+    ("mouth_corner", ("mouth corner", "mouth_corner", "嘴角")),
+    ("bow", ("bow", "ribbon", "蝴蝶结", "蝴蝶結", "丝带", "絲帶")),
+    ("decoration", ("decoration", "detail", "accent", "装饰", "裝飾", "细节", "細節")),
+)
+_DRAWING_DETAIL_PART_TOKENS = {
+    name for name, _terms in _DRAWING_DETAIL_PART_TERMS
+} | {"inner", "outer"}
+
+
 def _clipboard_target_tokens(task: str) -> list[str]:
     """Return placeholder tokens requested as destinations, not protected literals."""
     text = str(task or "")
@@ -237,6 +321,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._done_rejects = 0                       # done-gate bounce count
         self._done_unverified = False                # forced-accept after max rejects
         self._done_verified = False                  # done-gate judge genuinely passed
+        self._auto_drawing_done_pending = False      # controller scene awaits semantic judge
         self._fresh_done_image_b64 = ""              # authoritative frame for final judge
         self._pending_visual_literal_tokens: list[str] = []
         self._pending_visual_payloads: list[str] = []
@@ -379,6 +464,47 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._foldable.append((len(self.messages) - 1, summary))
             self._fold_old()
 
+    @staticmethod
+    def _folded_tool_evidence_preview(result_text: str, *, limit: int = 520) -> str:
+        """Keep the conclusion of an old tool result, never its coordinate bulk."""
+        try:
+            data = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return re.sub(r"\s+", " ", str(result_text or "")).strip()[:limit]
+        if not isinstance(data, dict):
+            return re.sub(r"\s+", " ", str(result_text or "")).strip()[:limit]
+        keys = (
+            "ok",
+            "verified",
+            "blocked",
+            "mutation_applied",
+            "destructive_action",
+            "drawing_scene_replacement_blocked",
+            "destructive_clear_blocked",
+            "destructive_restart_blocked",
+            "destructive_replan_blocked",
+            "destructive_bulk_undo_blocked",
+            "drawing_quality_repair_blocked",
+            "drawing_quality_repair_limit_reached",
+            "drawing_quality_repair_used",
+            "drawing_quality_rejects",
+            "structured_scene_verified",
+            "matched_visual_colors",
+            "missing_visual_colors",
+            "optional_missing_visual_colors",
+            "effective_visual_colors",
+            "visible_colors",
+            "error",
+            "warning",
+            "fast_path_advice",
+            "scene_structure",
+            "draw_actions_summary",
+        )
+        return AgentRunner._bounded_compact_json(
+            [(key, data.get(key)) for key in keys if key in data],
+            limit=limit,
+        )
+
     def _fold_checkpoint(self, folded_summary: str) -> str:
         """Compact state that survives when an old bulky tool result is folded."""
         parts = ["[folded context checkpoint]", f"goal: {self.task[:200]}"]
@@ -407,8 +533,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
         if self._recent_results:
             parts.append("recent_tool_evidence:")
-            for name, text in self._recent_results[-3:]:
-                one_line = re.sub(r"\s+", " ", str(text)).strip()[:260]
+            for name, text in reversed(self._recent_results[-3:]):
+                one_line = self._folded_tool_evidence_preview(str(text), limit=520)
                 parts.append(f"- {name}: {one_line}")
         parts.append(f"folded_item: {folded_summary}")
         return "\n".join(parts)[:1800]
@@ -949,6 +1075,24 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         decision_ratio = float(global_ratio)
         threshold = max(0.0, global_threshold)
         decision_scope = "whole_frame"
+        # A semantic drawing transaction does not act on coordinates inferred
+        # from the model's old frame.  ``execute_subgoal`` captures the target
+        # window again, rediscovers the canvas, maps normalized primitives to
+        # that fresh canvas and scope-checks every mutation locally.  Treating
+        # ordinary Paint settling (ribbon/canvas repaint) as a stale coordinate
+        # click aborted the entire routine before that re-grounding could run.
+        # Window-geometry changes above remain fail-closed, and transactions
+        # that also contain clicks/input keep the normal pixel preflight.
+        semantic_draw = bool(
+            tool_name == "execute_subgoal"
+            and (
+                isinstance((args or {}).get("draw"), dict)
+                or bool((args or {}).get("draws"))
+            )
+            and not any((args or {}).get(key) for key in (
+                "click", "clicks", "input", "inputs", "format", "formats",
+            ))
+        )
         if target_roi is not None:
             target_ratio = jpeg_diff_ratio_in_normalized_roi(
                 previous, current, target_roi,
@@ -959,6 +1103,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "controller", "visual_preflight_target_change_ratio", default=0.01,
                 )))
                 decision_scope = "action_target_roi"
+        if semantic_draw and target_roi is None:
+            decision_ratio = 0.0
+            decision_scope = "controller_regrounded_drawing"
         changed = bool(decision_ratio > threshold)
         BUS.publish(
             "visual_preflight",
@@ -1957,6 +2104,186 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         return out
 
     @staticmethod
+    def _compact_evidence_list(value: Any, *, limit: int = 12, item_limit: int = 64) -> list[Any]:
+        """Bound a diagnostic list without turning the enclosing JSON invalid."""
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        compact: list[Any] = []
+        for item in list(value)[:limit]:
+            if isinstance(item, str):
+                compact.append(item[:item_limit])
+            elif isinstance(item, (bool, int, float)) or item is None:
+                compact.append(item)
+            elif isinstance(item, dict):
+                compact.append({
+                    str(key)[:40]: (str(child)[:item_limit] if not isinstance(child, (bool, int, float)) else child)
+                    for key, child in list(item.items())[:5]
+                })
+            else:
+                compact.append(str(item)[:item_limit])
+        return compact
+
+    @staticmethod
+    def _compact_visible_colors(value: Any, *, limit: int = 8) -> dict[str, Any]:
+        """Keep actual colour evidence small enough to precede drawing geometry."""
+        if not isinstance(value, dict):
+            return {}
+        compact: dict[str, Any] = {}
+        for raw_name, raw_stats in list(value.items())[:limit]:
+            name = str(raw_name)[:32]
+            if isinstance(raw_stats, dict):
+                stats = {
+                    key: raw_stats[key]
+                    for key in ("pixels", "ratio", "largest_area")
+                    if key in raw_stats
+                }
+                compact[name] = stats or True
+            elif isinstance(raw_stats, (bool, int, float)):
+                compact[name] = raw_stats
+            else:
+                compact[name] = str(raw_stats)[:48]
+        return compact
+
+    @staticmethod
+    def _bounded_compact_json(
+        items: list[tuple[str, Any]],
+        *,
+        limit: int = 1800,
+    ) -> str:
+        """Serialize priority-ordered evidence as valid JSON within ``limit``.
+
+        Values are inserted in outcome-first order.  If a lower-priority value
+        does not fit, it is shortened structurally instead of slicing the JSON
+        text and potentially deleting a later verdict or producing malformed
+        JSON.  Callers therefore put every safety/result field before geometry,
+        controller diagnostics, and metrics.
+        """
+        payload: dict[str, Any] = {}
+
+        def encoded(candidate: dict[str, Any]) -> str:
+            return json.dumps(candidate, ensure_ascii=False, default=str)
+
+        for key, value in items:
+            if value is None or key in payload:
+                continue
+            candidate = {**payload, key: value}
+            if len(encoded(candidate)) <= limit:
+                payload[key] = value
+                continue
+
+            # Preserve the key, and as much of its value as the remaining
+            # budget permits.  This is especially important for
+            # fast_path_advice and matched/missing colour lists.
+            if isinstance(value, str):
+                low, high = 0, len(value)
+                best: str | None = None
+                while low <= high:
+                    middle = (low + high) // 2
+                    shortened = value[:middle]
+                    if middle < len(value) and middle >= 3:
+                        shortened = shortened[:-3] + "..."
+                    if len(encoded({**payload, key: shortened})) <= limit:
+                        best = shortened
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                if best is not None:
+                    payload[key] = best
+                continue
+            if isinstance(value, list):
+                shortened: list[Any] = []
+                if len(encoded({**payload, key: shortened})) > limit:
+                    continue
+                payload[key] = shortened
+                for child in value:
+                    candidate_list = [*shortened, child]
+                    if len(encoded({**payload, key: candidate_list})) > limit:
+                        break
+                    shortened = candidate_list
+                    payload[key] = shortened
+                continue
+            if isinstance(value, dict):
+                shortened_dict: dict[str, Any] = {}
+                if len(encoded({**payload, key: shortened_dict})) > limit:
+                    continue
+                payload[key] = shortened_dict
+                for child_key, child_value in value.items():
+                    candidate_dict = {**shortened_dict, child_key: child_value}
+                    if len(encoded({**payload, key: candidate_dict})) > limit:
+                        break
+                    shortened_dict = candidate_dict
+                    payload[key] = shortened_dict
+
+        return encoded(payload)
+
+    @staticmethod
+    def _compact_outcome_items(
+        data: dict[str, Any],
+        packet: dict[str, Any] | None = None,
+    ) -> list[tuple[str, Any]]:
+        """Return safety and delivery conclusions in stable priority order."""
+        packet = packet if isinstance(packet, dict) else {}
+        items: list[tuple[str, Any]] = []
+        for key in (
+            "ok",
+            "verified",
+            "blocked",
+            "mutation_applied",
+            "destructive_action",
+            "drawing_scene_replacement_blocked",
+            "destructive_clear_blocked",
+            "destructive_restart_blocked",
+            "destructive_replan_blocked",
+            "destructive_bulk_undo_blocked",
+            "drawing_quality_repair_blocked",
+            "drawing_quality_repair_limit_reached",
+            "drawing_quality_repair_used",
+            "drawing_quality_rejects",
+            "structured_scene_verified",
+            "needs_observe",
+            "needs_llm_reason",
+        ):
+            if key in data:
+                items.append((key, data.get(key)))
+
+        # These four fields answer the important drawing question directly:
+        # which requested colours really appeared, which did not, and which
+        # planner-only palette misses should not trigger a redraw.
+        for key in (
+            "matched_visual_colors",
+            "missing_visual_colors",
+            "optional_missing_visual_colors",
+        ):
+            if key in packet:
+                items.append((
+                    key,
+                    AgentRunner._compact_evidence_list(packet.get(key), limit=8, item_limit=32),
+                ))
+
+        effective = packet.get("effective_visual_colors")
+        if effective is None:
+            effective = packet.get("effective_colors")
+        if effective is None and "matched_visual_colors" in packet:
+            # A matched draw colour is the conservative subset known to have
+            # been effectively delivered.  Raw visible colours remain below as
+            # supporting pixel evidence.
+            effective = packet.get("matched_visual_colors")
+        if effective is not None:
+            items.append((
+                "effective_visual_colors",
+                AgentRunner._compact_evidence_list(effective, limit=8, item_limit=32),
+            ))
+
+        visible_colors = AgentRunner._compact_visible_colors(packet.get("visible_colors"))
+        if visible_colors:
+            items.append(("visible_colors", visible_colors))
+        for key in ("error", "warning", "fast_path_advice"):
+            if data.get(key) not in (None, ""):
+                value = str(data.get(key))
+                items.append((key, value[:600]))
+        return items
+
+    @staticmethod
     def _compact_tool_evidence(tool_name: str, result_text: str) -> str:
         if tool_name in {"complete_subgoal", "revise_plan"}:
             plan_items: list[dict[str, Any]] = []
@@ -2036,19 +2363,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         if tool_name == "execute_subgoal":
             packet = data.get("evidence_packet") if isinstance(data.get("evidence_packet"), dict) else {}
             compact_actions: list[dict[str, Any]] = []
+            draw_actions: list[dict[str, Any]] = []
             for action in data.get("actions_executed") or []:
                 if not isinstance(action, dict):
+                    continue
+                if action.get("action") == "draw_strokes":
+                    draw_actions.append(action)
                     continue
                 compact_action = {
                     key: action.get(key)
                     for key in (
                         "action",
                         "color",
-                        "shape",
-                        "semantic_part",
-                        "requested_color",
-                        "canvas_region",
-                        "draw_region",
                         "button",
                         "label",
                         "expected_region",
@@ -2059,60 +2385,140 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     compact_action["stroke_count"] = len(action.get("strokes") or [])
                 if compact_action:
                     compact_actions.append(compact_action)
-            compact = {
-                "ok": data.get("ok"),
-                "verified": data.get("verified"),
-                "structured_scene_verified": data.get("structured_scene_verified"),
-                "subgoal": data.get("subgoal"),
-                "subgoal_route": data.get("subgoal_route"),
-                "controller_state": data.get("controller_state"),
-                "needs_llm_reason": data.get("needs_llm_reason"),
-                "input_applied": data.get("input_applied"),
-                "spreadsheet_table_applied": data.get("spreadsheet_table_applied"),
-                "spreadsheet_row_format_applied": data.get("spreadsheet_row_format_applied"),
-                "exact_save_as_applied": data.get("exact_save_as_applied"),
-                "format_applied": data.get("format_applied"),
-                "format_verified": data.get("format_verified"),
-                "format_already_applied": data.get("format_already_applied"),
-                "mutation_skipped": data.get("mutation_skipped"),
-                "save_dispatched": data.get("save_dispatched"),
-                "saved_paths": data.get("saved_paths"),
-                "artifact_format_errors": data.get("artifact_format_errors"),
-                "scene_structure": {
-                    key: (packet.get("scene_structure") or {}).get(key)
-                    for key in (
-                        "required",
-                        "ok",
-                        "creature_scene",
-                        "primitive_count",
-                        "semantic_part_count",
-                        "matched_visual_color_count",
-                        "structured_scene_verified",
-                        "incremental",
-                        "prior_primitive_count",
-                        "new_primitive_count",
-                        "errors",
-                    )
-                    if isinstance(packet.get("scene_structure"), dict)
-                    and key in packet.get("scene_structure", {})
-                },
-                "actions_executed": compact_actions,
-                "matched_texts": packet.get("matched_texts"),
-                "missing_texts": packet.get("missing_texts"),
-                "matched_visual_colors": packet.get("matched_visual_colors"),
-                "missing_visual_colors": packet.get("missing_visual_colors"),
-                "visible_colors": packet.get("visible_colors"),
-                "candidate_click_labels": packet.get("candidate_click_labels"),
-                "fast_path_advice": data.get("fast_path_advice"),
-                "auto_completed_plan_items": data.get("auto_completed_plan_items"),
-                "plan_after_auto_complete": str(data.get("plan_after_auto_complete") or "")[:500],
-                "metrics": data.get("metrics"),
+            draw_parts = list(dict.fromkeys(
+                str(action.get("semantic_part") or "")[:64]
+                for action in draw_actions
+                if str(action.get("semantic_part") or "").strip()
+            ))
+            draw_canvases: list[dict[str, Any]] = []
+            seen_canvases: set[str] = set()
+            for action in draw_actions:
+                canvas = action.get("canvas_region")
+                if not isinstance(canvas, dict):
+                    continue
+                compact_canvas = {
+                    key: canvas.get(key)
+                    for key in ("x", "y", "width", "height")
+                    if key in canvas
+                }
+                signature = json.dumps(compact_canvas, sort_keys=True, default=str)
+                if signature in seen_canvases:
+                    continue
+                seen_canvases.add(signature)
+                draw_canvases.append(compact_canvas)
+            draw_summary: dict[str, Any] = {}
+            if draw_actions:
+                draw_summary = {
+                    "action": "draw_strokes",
+                    "count": len(draw_actions),
+                    "stroke_count": sum(
+                        len(action.get("strokes") or []) for action in draw_actions
+                    ),
+                    "parts": draw_parts,
+                    "canvas": draw_canvases[0] if draw_canvases else None,
+                }
+                if len(draw_canvases) > 1:
+                    draw_summary["canvas_count"] = len(draw_canvases)
+
+            raw_scene = packet.get("scene_structure")
+            raw_scene = raw_scene if isinstance(raw_scene, dict) else {}
+            scene_structure = {
+                key: raw_scene.get(key)
+                for key in (
+                    "required",
+                    "ok",
+                    "creature_scene",
+                    "primitive_count",
+                    "semantic_part_count",
+                    "executed_draw_count",
+                    "matched_visual_color_count",
+                    "structured_scene_verified",
+                    "incremental",
+                    "prior_primitive_count",
+                    "new_primitive_count",
+                    "errors",
+                )
+                if key in raw_scene
             }
-            if data.get("failure_classification"):
-                compact["failure_classification"] = data.get("failure_classification")
-            if data.get("failure_recovery"):
-                compact["failure_recovery"] = data.get("failure_recovery")
-            return json.dumps(compact, ensure_ascii=False, default=str)[:1800]
+            controller_state = data.get("controller_state")
+            controller_state = controller_state if isinstance(controller_state, dict) else {}
+            compact_controller_state = {
+                key: controller_state.get(key)
+                for key in (
+                    "phase", "verified", "needs_observe", "failed_at",
+                    "last_action", "needs_llm_reason",
+                )
+                if key in controller_state
+            }
+            auto_items = []
+            for item in (data.get("auto_completed_plan_items") or [])[:6]:
+                if not isinstance(item, dict):
+                    continue
+                auto_items.append({
+                    key: (str(item.get(key))[:140] if key == "goal" else item.get(key))
+                    for key in ("index", "goal")
+                    if key in item
+                })
+
+            ordered = AgentRunner._compact_outcome_items(data, packet)
+            for key in (
+                "matched_texts",
+                "missing_texts",
+                "requested_visual_colors",
+                "required_visual_colors",
+                "matched_required_visual_colors",
+                "missing_required_visual_colors",
+                "candidate_click_labels",
+            ):
+                if key in packet:
+                    ordered.append((
+                        key,
+                        AgentRunner._compact_evidence_list(
+                            packet.get(key), limit=8, item_limit=64,
+                        ),
+                    ))
+            if data.get("semantic_overlap") is not None:
+                ordered.append(("semantic_overlap", data.get("semantic_overlap")))
+            if scene_structure:
+                ordered.append(("scene_structure", scene_structure))
+            if draw_summary:
+                ordered.append(("draw_actions_summary", draw_summary))
+            if compact_actions:
+                ordered.append(("actions_executed", compact_actions[:8]))
+            for key in (
+                "input_applied",
+                "spreadsheet_table_applied",
+                "spreadsheet_row_format_applied",
+                "exact_save_as_applied",
+                "format_applied",
+                "format_verified",
+                "format_already_applied",
+                "mutation_skipped",
+                "save_dispatched",
+                "saved_paths",
+                "artifact_format_errors",
+            ):
+                if key in data:
+                    ordered.append((key, data.get(key)))
+            if auto_items or "auto_completed_plan_items" in data:
+                ordered.append(("auto_completed_plan_items", auto_items))
+            if "plan_after_auto_complete" in data:
+                ordered.append((
+                    "plan_after_auto_complete",
+                    str(data.get("plan_after_auto_complete") or "")[:300],
+                ))
+            if compact_controller_state:
+                ordered.append(("controller_state", compact_controller_state))
+            for key, limit in (
+                ("subgoal", 220),
+                ("subgoal_route", 80),
+            ):
+                if data.get(key) is not None:
+                    ordered.append((key, str(data.get(key))[:limit]))
+            for key in ("failure_classification", "failure_recovery", "metrics"):
+                if data.get(key):
+                    ordered.append((key, data.get(key)))
+            return AgentRunner._bounded_compact_json(ordered, limit=1800)
         if tool_name == "run_action_batch":
             compact_results: list[dict[str, Any]] = []
             for item in data.get("results") or []:
@@ -2156,26 +2562,24 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         child_data.get("nonvisual_summary")
                     )
                 compact_results.append(child)
-            compact = {
-                "ok": data.get("ok"),
-                "verified": data.get("verified"),
-                "spreadsheet_table_applied": data.get("spreadsheet_table_applied"),
-                "spreadsheet_row_format_applied": data.get("spreadsheet_row_format_applied"),
-                "exact_save_as_applied": data.get("exact_save_as_applied"),
-                "mutation_skipped": data.get("mutation_skipped"),
-                "needs_observe": data.get("needs_observe"),
-                "native_action_executed": data.get("native_action_executed"),
-                "native_post_action_frame_pending": data.get("native_post_action_frame_pending"),
-                "last_action": data.get("last_action"),
-                "fast_path_advice": data.get("fast_path_advice"),
-                "metrics": data.get("metrics"),
-                "results": compact_results,
-            }
-            if data.get("failure_classification"):
-                compact["failure_classification"] = data.get("failure_classification")
-            if data.get("failure_recovery"):
-                compact["failure_recovery"] = data.get("failure_recovery")
-            return json.dumps(compact, ensure_ascii=False, default=str)[:1600]
+            ordered = AgentRunner._compact_outcome_items(data)
+            for key in (
+                "spreadsheet_table_applied",
+                "spreadsheet_row_format_applied",
+                "exact_save_as_applied",
+                "mutation_skipped",
+                "native_action_executed",
+                "native_post_action_frame_pending",
+                "last_action",
+            ):
+                if key in data:
+                    ordered.append((key, data.get(key)))
+            if compact_results:
+                ordered.append(("results", compact_results))
+            for key in ("failure_classification", "failure_recovery", "metrics"):
+                if data.get(key):
+                    ordered.append((key, data.get(key)))
+            return AgentRunner._bounded_compact_json(ordered, limit=1800)
         if tool_name in {"draw_strokes", "drag"} and data.get("wrapped_by_fast_controller"):
             compact: dict[str, Any] = {
                 "ok": data.get("ok"),
@@ -2436,28 +2840,735 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         paths = _required_image_paths(self.task)
         return bool(paths) and any(Path(path).exists() for path in paths)
 
+    @staticmethod
+    def _drawing_canvas_mutation_requested(
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> bool:
+        """Recognise actions that could continue altering a rejected canvas."""
+        if tool_name == "execute_subgoal":
+            return bool(
+                isinstance(args.get("draw"), dict)
+                or any(isinstance(item, dict) for item in (args.get("draws") or []))
+            )
+        mutating_actions = {
+            "click",
+            "click_element",
+            "type_text",
+            "type_into_element",
+            "hotkey",
+            "scroll",
+            "drag",
+            "draw_strokes",
+            "select_color",
+            "tray_click",
+            "clipboard_paste",
+            "paste_image_file",
+            "mouse_down",
+            "mouse_up",
+            "hold_key",
+            "coordinate_click_test",
+        }
+        if tool_name == "run_action_batch":
+            return any(
+                _drawing_batch_action_name_args(action)[0] in mutating_actions
+                for action in (args.get("actions") or [])
+                if isinstance(action, dict)
+            )
+        return tool_name in mutating_actions
+
+    def _drawing_quality_repair_limit_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        """Enforce one small additive detail repair after a quality rejection."""
+        rejects = int(getattr(self, "_drawing_quality_rejects", 0) or 0)
+        if (
+            rejects < 1
+            or not _is_drawing_task(self.task)
+            or not self._drawing_canvas_mutation_requested(tool_name, args)
+        ):
+            return None
+        last_reason = str(getattr(self, "_last_done_reject_reason", "") or "").strip()
+
+        def blocked_payload(
+            error: str,
+            *,
+            exhausted: bool = False,
+            repair_used: bool = False,
+            rejected_parts: list[str] | None = None,
+        ) -> ToolResult:
+            payload = {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "mutation_applied": False,
+                "drawing_quality_repair_blocked": True,
+                "drawing_quality_repair_limit_reached": exhausted,
+                "drawing_quality_repair_used": repair_used,
+                "drawing_quality_rejects": rejects,
+                "needs_observe": False,
+                "error": error + (f" Last rejection: {last_reason[:240]}" if last_reason else ""),
+                "fast_path_advice": (
+                    "Do not click, draw, type, undo, clear, restyle, or restart the canvas again. "
+                    "Call blocked or fail now and report the visual quality rejection honestly."
+                    if exhausted else
+                    "Preserve the current canvas. After the first quality rejection, only one "
+                    "execute_subgoal repair of at most five brand-new decorative details is safe; "
+                    "core contours, repeated details, low-level drawing, undo, clear, and a second "
+                    "repair are blocked. Call done after the allowed repair, or blocked/fail when "
+                    "that opportunity is exhausted."
+                ),
+            }
+            if rejected_parts:
+                payload["rejected_semantic_parts"] = rejected_parts[:8]
+            return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
+        if rejects >= 2:
+            return blocked_payload(
+                "The fresh drawing quality judge rejected the canvas twice. The single safe "
+                "additive repair opportunity is exhausted, so this further mutation was not executed.",
+                exhausted=True,
+                repair_used=True,
+            )
+
+        history = list(getattr(self, "_tool_history", []) or [])
+        try:
+            repair_start = int(getattr(self, "_drawing_quality_repair_history_start", len(history)))
+        except (TypeError, ValueError):
+            repair_start = len(history)
+        repair_start = max(0, min(len(history), repair_start))
+        repair_used = any(
+            self._drawing_canvas_mutation_requested(previous_tool, previous_args)
+            and self._drawing_history_entry_may_change_canvas(
+                previous_tool,
+                previous_args,
+                previous_text,
+            )
+            for previous_tool, previous_args, previous_text in history[repair_start:]
+        )
+        if repair_used:
+            return blocked_payload(
+                "The one additive drawing-quality repair already changed the canvas. A second "
+                "repair was not executed before a fresh done judgment.",
+                repair_used=True,
+            )
+
+        if tool_name != "execute_subgoal":
+            return blocked_payload(
+                "A drawing-quality repair must be a semantic execute_subgoal detail batch; this "
+                "low-level canvas mutation cannot prove that it preserves the existing subject."
+            )
+
+        if any(args.get(key) for key in ("input", "click", "clicks", "formats")):
+            return blocked_payload(
+                "The additive drawing-quality repair cannot include clicks, typing, formatting, "
+                "or another mixed GUI mutation."
+            )
+        constraints = args.get("constraints")
+        constraints = constraints if isinstance(constraints, dict) else {}
+        if any(constraints.get(key) for key in (
+            "new_blank", "new_canvas", "clear", "reset", "restart", "create_new",
+        )):
+            return blocked_payload(
+                "The additive drawing-quality repair cannot create, clear, reset, or restart a canvas."
+            )
+
+        specs = self._draw_specs_from_args(args)
+        if not specs or len(specs) > 5:
+            return blocked_payload(
+                "The first quality repair must contain between one and five decorative primitives; "
+                f"this request contained {len(specs)}."
+            )
+        normalized_parts: list[str] = []
+        for spec in specs:
+            raw_part = (
+                spec.get("part")
+                or spec.get("semantic_part")
+                or spec.get("label")
+                or spec.get("name")
+            )
+            normalized_parts.append(self._drawing_normalized_semantic_part(raw_part))
+        if any(not part for part in normalized_parts):
+            return blocked_payload(
+                "Every quality-repair primitive needs an explicit recognized decorative semantic part."
+            )
+        parts = set(normalized_parts)
+        if len(parts) != len(normalized_parts):
+            return blocked_payload(
+                "The quality-repair batch repeats the same canonical semantic detail.",
+                rejected_parts=normalized_parts,
+            )
+        core_parts = self._drawing_core_semantic_parts(parts)
+        if core_parts:
+            return blocked_payload(
+                "The quality-repair batch repeats or replaces core subject contours instead of "
+                "adding decoration.",
+                rejected_parts=sorted(core_parts),
+            )
+        active_scene = self._active_verified_structured_drawing_scene()
+        existing_parts = active_scene[0] if active_scene is not None else set()
+        repeated_parts = parts.intersection(existing_parts)
+        if repeated_parts:
+            return blocked_payload(
+                "The quality-repair batch contains details already present on the verified scene.",
+                rejected_parts=sorted(repeated_parts),
+            )
+        return None
+
+    def _compile_drawing_quality_repair_args(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compile an oversized first repair into one safe additive batch.
+
+        Small GUI models often respond to a quality rejection with a useful
+        list of details but exceed the five-primitive safety budget. Rejecting
+        the whole call makes them regenerate nearly identical JSON for several
+        slow turns. Keep only supplied, explicitly decorative, new semantic
+        parts; never invent geometry or alter an existing core contour.
+        """
+        if (
+            int(getattr(self, "_drawing_quality_rejects", 0) or 0) != 1
+            or tool_name != "execute_subgoal"
+            or not _is_drawing_task(self.task)
+        ):
+            return args
+        history = list(getattr(self, "_tool_history", []) or [])
+        try:
+            repair_start = int(
+                getattr(self, "_drawing_quality_repair_history_start", len(history))
+            )
+        except (TypeError, ValueError):
+            repair_start = len(history)
+        repair_start = max(0, min(len(history), repair_start))
+        if any(
+            self._drawing_canvas_mutation_requested(previous_tool, previous_args)
+            and self._drawing_history_entry_may_change_canvas(
+                previous_tool,
+                previous_args,
+                previous_text,
+            )
+            for previous_tool, previous_args, previous_text in history[repair_start:]
+        ):
+            return args
+
+        specs = self._draw_specs_from_args(args)
+        if not specs:
+            return args
+        active_scene = self._active_verified_structured_drawing_scene()
+        existing_parts = active_scene[0] if active_scene is not None else set()
+        selected: list[dict[str, Any]] = []
+        selected_parts: list[str] = []
+        seen: set[str] = set()
+        for spec in specs:
+            raw_part = (
+                spec.get("part")
+                or spec.get("semantic_part")
+                or spec.get("label")
+                or spec.get("name")
+            )
+            part = self._drawing_normalized_semantic_part(raw_part)
+            tokens = set(part.split("_")) if part else set()
+            if (
+                not part
+                or not tokens.intersection(_DRAWING_DETAIL_PART_TOKENS)
+                or part in existing_parts
+                or part in seen
+            ):
+                continue
+            selected.append(dict(spec))
+            selected_parts.append(part)
+            seen.add(part)
+            if len(selected) == 5:
+                break
+        # Preserve an already-valid call byte-for-byte. For a mixed or
+        # oversized call, executing the safe supplied subset avoids another
+        # model round-trip without weakening the mutation guard.
+        if not selected or (
+            len(specs) <= 5
+            and len(selected) == len(specs)
+        ):
+            return args
+        compiled = dict(args)
+        compiled.pop("draw", None)
+        compiled["draws"] = selected
+        self._trace_debug("drawing_quality_repair_compiled", {
+            "run_id": self.run_id,
+            "supplied_count": len(specs),
+            "selected_count": len(selected),
+            "selected_parts": selected_parts,
+        })
+        return compiled
+
+    def _compile_drawing_quality_terminal_args(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prevent a rejected drawing's terminal message from claiming success."""
+        if (
+            tool_name not in {"blocked", "fail"}
+            or not _is_drawing_task(self.task)
+            or int(getattr(self, "_drawing_quality_rejects", 0) or 0) < 1
+        ):
+            return args
+        compiled = dict(args)
+        judge_reason = str(
+            getattr(self, "_last_done_reject_reason", "") or ""
+        ).strip()
+        honest_reason = (
+            "当前画面没有通过独立视觉质量验收，继续修改已达到安全上限；"
+            "本次任务未标记为成功。"
+        )
+        compiled["reason"] = honest_reason
+        if tool_name == "blocked" and judge_reason:
+            compiled["evidence"] = f"视觉验收结论：{judge_reason}"
+        return compiled
+
+    def _drawing_quality_exhausted_reply(self) -> str:
+        """Return an honest terminal reply after the second visual rejection."""
+        if (
+            not _is_drawing_task(self.task)
+            or int(getattr(self, "_drawing_quality_rejects", 0) or 0) < 2
+        ):
+            return ""
+        reason = str(
+            getattr(self, "_last_done_reject_reason", "") or ""
+        ).strip()
+        body = (
+            "任务已安全停止：当前画面连续两次未通过独立视觉质量验收，"
+            "唯一一次安全的增量细节修补已经用完。系统没有把这次结果标记为成功，"
+            "也不会继续清空、重画或盲目点击界面。"
+        )
+        if reason:
+            body += f"\n视觉验收结论：{reason}"
+        return body
+
+    def _drawing_structured_scene_should_auto_judge(
+        self,
+        tool_name: str,
+        result_data: dict[str, Any],
+    ) -> bool:
+        """Submit a delivered drawing straight to the semantic visual judge."""
+        return bool(
+            tool_name == "execute_subgoal"
+            and _is_drawing_task(self.task)
+            and not _drawing_task_requests_file_output(self.task)
+            and isinstance(result_data, dict)
+            and result_data.get("ok") is True
+            and result_data.get("verified") is True
+            and result_data.get("blocked") is not True
+            and (
+                result_data.get("structured_scene_verified") is True
+                or (
+                    isinstance(result_data.get("evidence_packet"), dict)
+                    and isinstance(
+                        result_data["evidence_packet"].get("scene_structure"),
+                        dict,
+                    )
+                    and result_data["evidence_packet"]["scene_structure"].get(
+                        "structured_scene_verified"
+                    ) is True
+                )
+            )
+        )
+
+    @staticmethod
+    def _drawing_task_allows_scene_restart(task: str) -> bool:
+        """Return whether the user explicitly asked to replace existing art."""
+        return bool(re.search(
+            r"\b(?:clear|reset|erase|redraw|start\s+over|new\s+canvas)\b|"
+            r"\u6e05\u7a7a|\u91cd\u7f6e|\u64e6\u9664|\u91cd\u753b|\u91cd\u65b0\u753b|\u65b0\u5efa\u753b\u5e03",
+            str(task or ""),
+            re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _drawing_normalized_semantic_part(value: Any) -> str:
+        """Canonicalise multilingual part labels into stable scene categories."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text).casefold()
+        ascii_words = re.findall(r"[a-z]+\d*", text)
+        ascii_bases = {
+            re.sub(r"\d+$", "", word)
+            for word in ascii_words
+            if re.sub(r"\d+$", "", word)
+        }
+
+        def mentions(terms: tuple[str, ...]) -> bool:
+            for raw_term in terms:
+                term = str(raw_term or "").casefold().strip()
+                if not term:
+                    continue
+                if term.isascii():
+                    term_words = re.findall(r"[a-z0-9]+", term)
+                    if len(term_words) == 1 and term_words[0] in ascii_bases:
+                        return True
+                    if len(term_words) > 1:
+                        phrase = r"[_\s-]+".join(re.escape(item) for item in term_words)
+                        if re.search(rf"(?<![a-z0-9]){phrase}(?![a-z0-9])", text):
+                            return True
+                elif term in text:
+                    return True
+            return False
+
+        positions = [
+            name for name, terms in _DRAWING_PART_POSITIONS if mentions(terms)
+        ]
+        core_categories = [
+            name for name, terms in _DRAWING_CORE_PART_TERMS if mentions(terms)
+        ]
+        detail_categories = [
+            name for name, terms in _DRAWING_DETAIL_PART_TERMS if mentions(terms)
+        ]
+        number_tokens = re.findall(r"\d+", text)
+        canonical = [
+            *positions,
+            *core_categories[:1],
+            *detail_categories,
+            # A numeric suffix disambiguates repeated *known* parts. It must
+            # not erase an otherwise unknown label (``star_1`` used to become
+            # just ``1`` and was impossible to reason about safely).
+            *(number_tokens if positions or core_categories or detail_categories else []),
+        ]
+        canonical = list(dict.fromkeys(canonical))
+        if canonical:
+            return "_".join(canonical)
+
+        raw_tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text)
+        aliases = {
+            "lhs": "left",
+            "rhs": "right",
+            "torso": "body",
+            "foreleg": "front_leg",
+            "forelegs": "front_leg",
+            "hindleg": "hind_leg",
+            "hindlegs": "hind_leg",
+            "ears": "ear",
+            "eyes": "eye",
+            "legs": "leg",
+            "arms": "arm",
+            "hands": "hand",
+            "feet": "foot",
+            "paws": "paw",
+            "wings": "wing",
+        }
+        generic = {
+            "dog", "cat", "animal", "creature", "character", "object",
+            "main", "basic", "shape", "outline", "contour", "feature",
+        }
+        tokens: list[str] = []
+        for token in raw_tokens:
+            mapped = aliases.get(token, token)
+            for item in mapped.split("_"):
+                if item and item not in generic:
+                    tokens.append(item)
+        if not tokens:
+            return ""
+        # Models interchange ``left_front_leg`` and ``front_left_leg``.
+        # Canonical ordering avoids treating that harmless wording change as a
+        # brand-new semantic part.
+        positional_order = {
+            "left": 0,
+            "right": 1,
+            "front": 2,
+            "back": 3,
+            "rear": 3,
+            "hind": 3,
+            "upper": 4,
+            "lower": 5,
+            "inner": 6,
+            "outer": 7,
+        }
+        positions = sorted(
+            (token for token in tokens if token in positional_order),
+            key=lambda token: positional_order[token],
+        )
+        nouns = [token for token in tokens if token not in positional_order]
+        return "_".join([*positions, *nouns])
+
+    @classmethod
+    def _drawing_semantic_parts_from_specs(
+        cls,
+        specs: list[dict[str, Any]],
+    ) -> set[str]:
+        parts: set[str] = set()
+        for spec in specs:
+            if not isinstance(spec, dict):
+                continue
+            raw = (
+                spec.get("part")
+                or spec.get("semantic_part")
+                or spec.get("label")
+                or spec.get("name")
+            )
+            part = cls._drawing_normalized_semantic_part(raw)
+            if part:
+                parts.add(part)
+        return parts
+
+    @staticmethod
+    def _drawing_core_semantic_parts(parts: set[str]) -> set[str]:
+        """Exclude labels that unambiguously describe optional decoration."""
+        return {
+            part for part in parts
+            if not set(part.split("_")).intersection(_DRAWING_DETAIL_PART_TOKENS)
+        }
+
+    def _active_verified_structured_drawing_scene(
+        self,
+    ) -> tuple[set[str], dict[str, Any]] | None:
+        """Find structured scene evidence that still belongs to this canvas.
+
+        A later real canvas mutation invalidates an older scene generation.
+        Blocked/rejected calls do not, so repeated replacement attempts remain
+        safely blocked without pretending that they changed the canvas.
+        """
+        recent_history = self._tool_history[-40:]
+        for history_index in range(len(recent_history) - 1, -1, -1):
+            previous_tool, previous_args, previous_text = recent_history[history_index]
+            if previous_tool != "execute_subgoal":
+                continue
+            try:
+                payload = json.loads(previous_text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("verified") is not True:
+                continue
+            packet = payload.get("evidence_packet")
+            packet = packet if isinstance(packet, dict) else {}
+            scene = packet.get("scene_structure")
+            scene = scene if isinstance(scene, dict) else {}
+            if not (
+                payload.get("structured_scene_verified") is True
+                or scene.get("structured_scene_verified") is True
+            ):
+                continue
+            if any(
+                self._drawing_history_entry_may_change_canvas(
+                    later_tool,
+                    later_args,
+                    later_text,
+                )
+                for later_tool, later_args, later_text
+                in recent_history[history_index + 1:]
+            ):
+                continue
+            parts = self._drawing_semantic_parts_from_specs(
+                self._draw_specs_from_args(previous_args),
+            )
+            for raw_part in scene.get("distinct_semantic_parts") or []:
+                part = self._drawing_normalized_semantic_part(raw_part)
+                if part:
+                    parts.add(part)
+            try:
+                primitive_count = int(scene.get("primitive_count") or 0)
+            except (TypeError, ValueError):
+                primitive_count = 0
+            if len(self._drawing_core_semantic_parts(parts)) < 6 or primitive_count < 6:
+                continue
+            return parts, scene
+        return None
+
+    def _drawing_scene_replacement_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        """Block a second whole semantic scene from being drawn over the first."""
+        if (
+            tool_name != "execute_subgoal"
+            or not _is_drawing_task(self.task)
+            or self._drawing_task_allows_scene_restart(self.task)
+        ):
+            return None
+        current_specs = self._draw_specs_from_args(args)
+        # One or a few parts are a repair/detail pass, not a scene replacement.
+        if len(current_specs) < 6:
+            return None
+        current_parts = self._drawing_semantic_parts_from_specs(current_specs)
+        current_core = self._drawing_core_semantic_parts(current_parts)
+        if len(current_core) < 6:
+            return None
+        active = self._active_verified_structured_drawing_scene()
+        if active is None:
+            return None
+        previous_parts, _previous_scene = active
+        previous_core = self._drawing_core_semantic_parts(previous_parts)
+        overlap = current_core.intersection(previous_core)
+        if (
+            len(overlap) < 6
+            or len(overlap) / max(1, len(current_core)) < 0.72
+            or len(overlap) / max(1, len(previous_core)) < 0.55
+        ):
+            return None
+        payload = {
+            "ok": True,
+            "verified": False,
+            "blocked": True,
+            "drawing_scene_replacement_blocked": True,
+            "mutation_applied": False,
+            "needs_observe": False,
+            "semantic_overlap": {
+                "overlap_count": len(overlap),
+                "current_core_count": len(current_core),
+                "existing_core_count": len(previous_core),
+                "parts": sorted(overlap),
+            },
+            "fast_path_advice": (
+                "A verified structured drawing already exists, and this batch repeats most of "
+                "its core semantic parts at new coordinates. The whole-scene redraw was blocked "
+                "to prevent duplicate/overlaid subjects. Inspect the current canvas, then submit "
+                "only brand-new missing decorative details, or one explicitly named part repair; "
+                "otherwise proceed to visual verification/done."
+            ),
+        }
+        self._trace_debug("execute_subgoal_scene_replacement_blocked", {
+            "run_id": self.run_id,
+            "current_parts": sorted(current_parts),
+            "existing_parts": sorted(previous_parts),
+            "overlap": sorted(overlap),
+        })
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
+    def _drawing_destructive_replan_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        """Keep a post-scene plan revision from scheduling an unasked restart."""
+        if (
+            tool_name != "revise_plan"
+            or not _is_drawing_task(self.task)
+            or self._drawing_task_allows_scene_restart(self.task)
+            or self._active_verified_structured_drawing_scene() is None
+        ):
+            return None
+        steps = args.get("steps") or []
+        plan_text = "\n".join(
+            str(step.get("goal") or "") if isinstance(step, dict) else str(step or "")
+            for step in steps
+        )
+        if not re.search(
+            r"\b(?:clear|reset|erase|redraw|start\s+over|new\s+canvas)\b|"
+            r"\u6e05\u7a7a|\u91cd\u7f6e|\u64e6\u9664|\u91cd\u753b|\u91cd\u65b0\u753b|\u65b0\u5efa\u753b\u5e03",
+            plan_text,
+            re.IGNORECASE,
+        ):
+            return None
+        return ToolResult(json.dumps({
+            "ok": True,
+            "verified": False,
+            "blocked": True,
+            "destructive_replan_blocked": True,
+            "mutation_applied": False,
+            "fast_path_advice": (
+                "A verified structured drawing already exists. The replacement plan was not "
+                "installed because it schedules an unrequested clear/redraw. Keep the current "
+                "plan/canvas and add only missing details, or verify and finish."
+            ),
+        }, ensure_ascii=False))
+
     def _drawing_destructive_clear_result(
         self,
         tool_name: str,
         args: dict[str, Any],
     ) -> ToolResult | None:
-        if not _is_drawing_task(self.task) or re.search(
-            r"\b(?:clear|reset|erase|redraw)\b|清空|重置|擦除|重画",
-            self.task,
-            re.IGNORECASE,
+        if (
+            not _is_drawing_task(self.task)
+            or self._drawing_task_allows_scene_restart(self.task)
         ):
             return None
-        if tool_name != "run_action_batch":
+        if tool_name == "run_action_batch":
+            actions = [
+                action for action in (args.get("actions") or [])
+                if isinstance(action, dict)
+            ]
+        elif tool_name == "hotkey":
+            actions = [{"action": tool_name, **args}]
+        elif tool_name == "execute_subgoal":
+            click_specs = [args.get("click"), *(args.get("clicks") or [])]
+            actions = [
+                {"action": "click_element", **click}
+                for click in click_specs
+                if isinstance(click, dict)
+            ]
+        else:
+            actions = []
+        if not actions:
             return None
-        actions = [action for action in (args.get("actions") or []) if isinstance(action, dict)]
         saw_select_all = False
         destructive = False
+        destructive_kind = "clear"
+        prior_undo_count = 0
+
+        # A model may split Ctrl+A and Delete across two turns.  Preserve the
+        # same guard semantics as the one-batch form.
+        if tool_name == "hotkey":
+            current_keys = {str(key).strip().casefold() for key in args.get("keys") or []}
+            if current_keys.intersection({"delete", "backspace"}):
+                for history_tool, history_args, _history_text in reversed(self._tool_history[-3:]):
+                    if history_tool != "hotkey":
+                        continue
+                    history_keys = {
+                        str(key).strip().casefold()
+                        for key in (history_args.get("keys") or [])
+                    }
+                    if "a" in history_keys and history_keys.intersection({"ctrl", "control", "ctl"}):
+                        saw_select_all = True
+                        break
+            if "z" in current_keys and current_keys.intersection({"ctrl", "control", "ctl"}):
+                for history_tool, history_args, history_text in reversed(self._tool_history[-6:]):
+                    if self._drawing_history_entry_has_progress(history_tool, history_text):
+                        break
+                    if history_tool != "hotkey":
+                        continue
+                    history_keys = {
+                        str(key).strip().casefold()
+                        for key in (history_args.get("keys") or [])
+                    }
+                    if "z" in history_keys and history_keys.intersection({"ctrl", "control", "ctl"}):
+                        prior_undo_count += 1
+        undo_count = prior_undo_count
         for action in actions:
-            if action.get("action") != "hotkey":
-                continue
+            action_name = str(action.get("action") or action.get("tool") or "").casefold()
             action_args = dict(action.get("params") or {})
-            action_args.update({key: value for key, value in action.items() if key != "params"})
+            action_args.update({
+                key: value for key, value in action.items()
+                if key not in {"action", "tool", "params"}
+            })
+            if action_name in {"click", "click_element"}:
+                label = re.sub(
+                    r"\s+", " ", str(action_args.get("label") or "").strip().casefold(),
+                )
+                if label in {
+                    "new", "new canvas", "new drawing", "blank canvas",
+                    "\u65b0\u5efa", "\u65b0\u5efa\u753b\u5e03", "\u65b0\u5efa\u56fe\u753b",
+                }:
+                    destructive = True
+                    destructive_kind = "new_canvas"
+                    break
+            if action_name != "hotkey":
+                continue
             keys = {str(key).strip().casefold() for key in action_args.get("keys") or []}
+            if "z" in keys and keys.intersection({"ctrl", "control", "ctl"}):
+                undo_count += 1
+                # One undo can repair the immediately preceding bad stroke.
+                # Multiple undos are a scene restart in disguise and destroyed
+                # complete drawings in real Paint evaluations.
+                if undo_count >= 2:
+                    destructive = True
+                    destructive_kind = "bulk_undo"
+                    break
+            if "n" in keys and keys.intersection({"ctrl", "control", "ctl"}):
+                destructive = True
+                destructive_kind = "new_canvas"
+                break
             if "a" in keys and keys.intersection({"ctrl", "control", "ctl"}):
                 saw_select_all = True
             if saw_select_all and keys.intersection({"delete", "backspace"}):
@@ -2465,31 +3576,341 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 break
         if not destructive:
             return None
-        verified_scene = False
+        partial_scene = False
         for history_tool, _history_args, history_text in reversed(self._tool_history):
-            if history_tool != "execute_subgoal":
-                continue
-            try:
-                payload = json.loads(history_text or "{}")
-            except (json.JSONDecodeError, TypeError):
-                continue
-            scene = (payload.get("evidence_packet") or {}).get("scene_structure") or {}
-            if payload.get("structured_scene_verified") or scene.get("structured_scene_verified"):
-                verified_scene = True
+            if self._drawing_history_entry_has_progress(history_tool, history_text):
+                partial_scene = True
                 break
-        if not verified_scene:
+        if not partial_scene:
             return None
         return ToolResult(json.dumps({
             "ok": True,
-            "verified": True,
+            "verified": False,
             "blocked": True,
             "destructive_clear_blocked": True,
+            "destructive_restart_blocked": destructive_kind == "new_canvas",
+            "destructive_bulk_undo_blocked": destructive_kind == "bulk_undo",
+            "destructive_action": destructive_kind,
             "mutation_applied": False,
+            "needs_observe": False,
             "fast_path_advice": (
-                "A verified drawing already exists. The requested select-all/delete clear was blocked "
-                "to preserve it. Add only missing details or finish; do not erase the canvas."
+                "Visible drawing progress already exists. The unrequested clear/new-canvas/bulk-undo restart "
+                "was blocked even though the whole scene is not verified yet. Preserve completed "
+                "strokes and add only missing details; never restart because a palette/control step failed."
             ),
         }, ensure_ascii=False))
+
+    @staticmethod
+    def _drawing_payload_has_progress(payload: dict[str, Any]) -> bool:
+        """Return true only for evidence that a canvas mutation was delivered.
+
+        Controller drawing batches deliberately defer expensive visual checks on
+        all but the final primitive.  Those earlier successful draw actions are
+        still real user-visible progress and must survive a later palette or
+        verification failure.
+        """
+        if not isinstance(payload, dict):
+            return False
+        def positive_count(value: Any) -> bool:
+            try:
+                return int(value or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+        packet = payload.get("evidence_packet")
+        packet = packet if isinstance(packet, dict) else {}
+        scene = packet.get("scene_structure")
+        scene = scene if isinstance(scene, dict) else {}
+        if positive_count(scene.get("executed_draw_count")):
+            return True
+        if payload.get("structured_scene_verified") is True or scene.get("structured_scene_verified") is True:
+            return True
+        if payload.get("visual_change_detected") is True:
+            return True
+        if positive_count(payload.get("strokes_drawn")):
+            return True
+        color_evidence = [
+            *(packet.get("per_draw_color_evidence") or []),
+            *(payload.get("per_draw_color_evidence") or []),
+        ]
+        if any(
+            isinstance(item, dict)
+            and (
+                item.get("matched") is True
+                or item.get("visual_color_matched") is True
+            )
+            for item in color_evidence
+        ):
+            return True
+        if packet.get("matched_visual_colors"):
+            return True
+        for item in payload.get("results") or []:
+            if not isinstance(item, dict) or item.get("ok") is False:
+                continue
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if item.get("action") in {"draw_strokes", "drag"} and data.get("blocked") is not True:
+                return True
+            if (
+                data.get("visual_change_detected") is True
+                or positive_count(data.get("strokes_drawn"))
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _drawing_history_entry_has_progress(cls, tool_name: str, result_text: str) -> bool:
+        try:
+            payload = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if cls._drawing_payload_has_progress(payload):
+            return True
+        return bool(
+            tool_name in {"draw_strokes", "drag"}
+            and payload.get("ok") is True
+            and payload.get("blocked") is not True
+        )
+
+    @staticmethod
+    def _drawing_click_signature(tool_name: str, args: dict[str, Any]) -> str:
+        candidates: list[dict[str, Any]] = []
+        if tool_name == "click":
+            candidates = [args]
+        elif tool_name == "run_action_batch":
+            for action in args.get("actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                name, payload = _drawing_batch_action_name_args(action)
+                if name == "click":
+                    candidates.append(payload)
+                elif name in {"drag", "draw_strokes", "type_text", "hotkey", "scroll"}:
+                    return ""
+        if len(candidates) != 1:
+            return ""
+        click = candidates[0]
+        source = click.get("source_frame_coordinates")
+        source = source if isinstance(source, dict) else click
+        if source.get("frame_x") is not None and source.get("frame_y") is not None:
+            try:
+                return f"frame:{round(float(source['frame_x']) / 4) * 4}:{round(float(source['frame_y']) / 4) * 4}"
+            except (TypeError, ValueError):
+                pass
+        label = str(click.get("label") or "").strip().casefold()
+        if label:
+            return "label:" + re.sub(r"\s+", " ", label)
+        if click.get("element_id") is not None:
+            return f"element:{click.get('element_id')}"
+        try:
+            return f"pixel:{round(float(click['x']) / 8) * 8}:{round(float(click['y']) / 8) * 8}"
+        except (KeyError, TypeError, ValueError):
+            return ""
+
+    def _drawing_repeated_click_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        """Stop a vision model before a same-target click loop can run away."""
+        if not _is_drawing_task(self.task):
+            return None
+        signature = self._drawing_click_signature(tool_name, args)
+        if not signature:
+            return None
+        repeats = 0
+        for history_tool, history_args, history_text in reversed(self._tool_history[-16:]):
+            if self._drawing_history_entry_has_progress(history_tool, history_text):
+                break
+            if self._drawing_click_signature(history_tool, history_args) == signature:
+                repeats += 1
+        if repeats < 2:
+            return None
+        return ToolResult(json.dumps({
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "duplicate_no_progress_action": True,
+            "mutation_applied": False,
+            "repeat_count": repeats + 1,
+            "error": (
+                "The same drawing-toolbar target was clicked twice without any delivered canvas "
+                "progress. A third click was blocked and the task was safely paused instead of "
+                "continuing from an ungrounded assumption."
+            ),
+        }, ensure_ascii=False), terminal="reply")
+
+    def _drawing_post_scene_manual_mutation_result(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        """Keep an accepted scene out of ungrounded toolbar/palette loops."""
+        if (
+            not _is_drawing_task(self.task)
+            or self._active_verified_structured_drawing_scene() is None
+        ):
+            return None
+        manual_tools = {
+            "click", "click_element", "select_color", "hotkey", "scroll",
+            "drag", "draw_strokes", "type_text", "type_into_element",
+            "clipboard_paste", "paste_image_file", "mouse_down", "mouse_up",
+            "move_mouse", "hold_key", "coordinate_click_test", "tray_click",
+        }
+        requested_actions: list[tuple[str, dict[str, Any]]] = []
+        if tool_name in manual_tools:
+            requested_actions = [(tool_name, args)]
+        if tool_name == "run_action_batch":
+            requested_actions = [
+                (name, payload)
+                for action in (args.get("actions") or [])
+                if isinstance(action, dict)
+                for name, payload in [_drawing_batch_action_name_args(action)]
+                if name in manual_tools
+            ]
+        if not requested_actions:
+            return None
+
+        def normalized_keys(payload: dict[str, Any]) -> set[str]:
+            raw_keys = payload.get("keys")
+            if not isinstance(raw_keys, (list, tuple, set)):
+                return set()
+            aliases = {"control": "ctrl", "ctl": "ctrl", "return": "enter"}
+            return {
+                aliases.get(key, key)
+                for raw_key in raw_keys
+                if (key := str(raw_key).strip().casefold())
+            }
+
+        def normalized_label(payload: dict[str, Any]) -> str:
+            label = re.sub(
+                r"\s+",
+                " ",
+                str(payload.get("label") or "").strip().casefold(),
+            )
+            return label.replace("&", "").strip()
+
+        def is_save_shortcut(name: str, payload: dict[str, Any]) -> bool:
+            # Exact keys only: a chord that merely contains Ctrl+S is not a
+            # save command (and must not inherit this exception).  Both common
+            # Windows variants are explicit: Ctrl+S and Save As Ctrl+Shift+S.
+            keys = normalized_keys(payload)
+            return name == "hotkey" and keys in (
+                {"ctrl", "s"},
+                {"ctrl", "shift", "s"},
+            )
+
+        def is_save_label(payload: dict[str, Any]) -> bool:
+            label = normalized_label(payload).rstrip(".\u2026:： ")
+            return bool(re.fullmatch(
+                r"save(?:\s+as)?|export|\u4fdd\u5b58|\u53e6\u5b58\u4e3a|\u5bfc\u51fa",
+                label,
+                re.IGNORECASE,
+            ))
+
+        def is_filename_input(name: str, payload: dict[str, Any]) -> bool:
+            if name != "type_into_element":
+                return False
+            label = normalized_label(payload).rstrip(":： ")
+            if not re.fullmatch(
+                r"(?:file\s*name|filename|\u6587\u4ef6\u540d(?:\u79f0)?)(?:\s*\([^)]*\))?",
+                label,
+                re.IGNORECASE,
+            ):
+                return False
+            value = payload.get("text", payload.get("value"))
+            return isinstance(value, str) and bool(value.strip())
+
+        def is_save_confirmation(name: str, payload: dict[str, Any]) -> bool:
+            if name == "hotkey":
+                return normalized_keys(payload) == {"enter"}
+            return name in {"click", "click_element"} and is_save_label(payload)
+
+        def is_standalone_file_output_action(
+            name: str,
+            payload: dict[str, Any],
+        ) -> bool:
+            # Preserve explicitly grounded one-step entry/focus actions.  A
+            # plain Enter is deliberately excluded: it is safe only as the
+            # final member of the complete Save As transaction below.
+            return bool(
+                is_save_shortcut(name, payload)
+                or (name in {"click", "click_element"} and is_save_label(payload))
+                or is_filename_input(name, payload)
+            )
+
+        def is_complete_save_as_batch(actions: Any) -> bool:
+            if not isinstance(actions, list) or len(actions) != 3:
+                return False
+            normalized = [_drawing_batch_action_name_args(action) for action in actions]
+            return bool(
+                is_save_shortcut(*normalized[0])
+                and is_filename_input(*normalized[1])
+                and is_save_confirmation(*normalized[2])
+            )
+
+        def history_action_succeeded(result_text: str) -> bool:
+            try:
+                result = json.loads(result_text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                return False
+            return bool(
+                isinstance(result, dict)
+                and result.get("ok") is True
+                and result.get("blocked") is not True
+                and result.get("mutation_applied") is not False
+            )
+
+        def is_split_save_as_confirmation(
+            name: str,
+            payload: dict[str, Any],
+        ) -> bool:
+            """Accept Enter only after two delivered, exact Save As steps."""
+            if name != "hotkey" or normalized_keys(payload) != {"enter"}:
+                return False
+            if len(self._tool_history) < 2:
+                return False
+            opener_name, opener_args, opener_result = self._tool_history[-2]
+            input_name, input_args, input_result = self._tool_history[-1]
+            return bool(
+                is_save_shortcut(opener_name, opener_args)
+                and is_filename_input(input_name, input_args)
+                and history_action_succeeded(opener_result)
+                and history_action_succeeded(input_result)
+            )
+
+        file_output_requested = _drawing_task_requests_file_output(self.task)
+        if file_output_requested:
+            if tool_name == "run_action_batch":
+                raw_actions = args.get("actions")
+                if is_complete_save_as_batch(raw_actions):
+                    return None
+                # Retain the existing one-action controller path, but require
+                # that the *entire* raw batch is exactly that action.  Unknown
+                # or non-mutating extras must not disappear during filtering.
+                if isinstance(raw_actions, list) and len(raw_actions) == 1:
+                    name, payload = _drawing_batch_action_name_args(raw_actions[0])
+                    if is_standalone_file_output_action(name, payload):
+                        return None
+            elif len(requested_actions) == 1 and is_standalone_file_output_action(
+                *requested_actions[0],
+            ):
+                return None
+            elif len(requested_actions) == 1 and is_split_save_as_confirmation(
+                *requested_actions[0],
+            ):
+                return None
+
+        self._trace_debug("post_scene_manual_mutation_auto_judge", {
+            "run_id": self.run_id,
+            "tool": tool_name,
+            "actions": [name for name, _payload in requested_actions],
+        })
+        return ToolResult(
+            "已保留当前完整画面，且没有执行无法证明会改善质量的低层点击、快捷键或绘制；"
+            "现在直接提交独立视觉验收。",
+            terminal="done",
+        )
 
     def _maybe_expand_execute_subgoal_draws_from_plan(
         self,
@@ -3360,7 +4781,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return None
         requested_region = _draw_spec_region(requested)
 
-        for previous_tool, previous_args, previous_text in reversed(self._tool_history[-12:]):
+        recent_history = self._tool_history[-12:]
+        for history_index in range(len(recent_history) - 1, -1, -1):
+            previous_tool, previous_args, previous_text = recent_history[history_index]
             if previous_tool != "execute_subgoal":
                 continue
             previous_specs = []
@@ -3385,6 +4808,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 continue
             packet = payload.get("evidence_packet")
             if not isinstance(packet, dict):
+                continue
+            if any(
+                self._drawing_history_entry_may_change_canvas(
+                    later_tool,
+                    later_args,
+                    later_text,
+                )
+                for later_tool, later_args, later_text
+                in recent_history[history_index + 1:]
+            ):
                 continue
             matched_colors = {
                 str(color).casefold()
@@ -3466,7 +4899,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         current_specs = self._draw_specs_from_args(args)
         if len(current_specs) < 2:
             return None
-        for previous_tool, previous_args, previous_text in reversed(self._tool_history[-10:]):
+        recent_history = self._tool_history[-10:]
+        for history_index in range(len(recent_history) - 1, -1, -1):
+            previous_tool, previous_args, previous_text = recent_history[history_index]
             if previous_tool != "execute_subgoal":
                 continue
             if self._draw_specs_from_args(previous_args) != current_specs:
@@ -3479,6 +4914,19 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 continue
             packet = previous_payload.get("evidence_packet")
             if not isinstance(packet, dict) or packet.get("missing_visual_colors"):
+                continue
+            if any(
+                self._drawing_history_entry_may_change_canvas(
+                    later_tool,
+                    later_args,
+                    later_text,
+                )
+                for later_tool, later_args, later_text in recent_history[history_index + 1:]
+            ):
+                # Verification belongs to the canvas generation that existed
+                # immediately after the earlier batch.  A later undo, redo, or
+                # delivered draw invalidates it even when the model submits the
+                # byte-for-byte same scene again.
                 continue
             matched_colors = list(packet.get("matched_visual_colors") or [])
             payload = {
@@ -3522,6 +4970,75 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 },
             )
         return None
+
+    @classmethod
+    def _drawing_history_entry_may_change_canvas(
+        cls,
+        tool_name: str,
+        args: dict[str, Any],
+        result_text: str,
+    ) -> bool:
+        try:
+            payload = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("blocked") is True or payload.get("mutation_applied") is False:
+            return False
+
+        delivered = payload.get("ok") is not False
+        if delivered and payload.get("visual_change_detected") is True:
+            # Even when the action is not one we can semantically classify,
+            # fresh pixel evidence means an older verified scene generation is
+            # no longer safe to reuse as an execution guard.
+            return True
+        if tool_name == "execute_subgoal":
+            return bool(cls._draw_specs_from_args(args)) and (
+                delivered or cls._drawing_payload_has_progress(payload)
+            )
+        if tool_name in {"draw_strokes", "drag"}:
+            return delivered
+
+        def action_changes_canvas(action_name: str, action_args: dict[str, Any]) -> bool:
+            if action_name in {"draw_strokes", "drag"}:
+                return True
+            if action_name in {"click", "click_element"}:
+                label = re.sub(
+                    r"\s+", " ", str(action_args.get("label") or "").strip().casefold(),
+                )
+                return label in {
+                    "new", "new canvas", "new drawing", "blank canvas",
+                    "\u65b0\u5efa", "\u65b0\u5efa\u753b\u5e03", "\u65b0\u5efa\u56fe\u753b",
+                }
+            if action_name != "hotkey":
+                return False
+            keys = {
+                str(key).strip().casefold()
+                for key in (action_args.get("keys") or [])
+            }
+            control = bool(keys.intersection({"ctrl", "control", "ctl"}))
+            return bool(
+                (control and keys.intersection({"z", "y", "n"}))
+                or keys.intersection({"delete", "backspace"})
+            )
+
+        if tool_name == "hotkey":
+            return delivered and action_changes_canvas("hotkey", args)
+        if tool_name != "run_action_batch" or not delivered:
+            return False
+        for action in args.get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            action_name = str(action.get("action") or action.get("tool") or "").casefold()
+            action_args = dict(action.get("params") or {})
+            action_args.update({
+                key: value for key, value in action.items()
+                if key not in {"action", "tool", "params"}
+            })
+            if action_changes_canvas(action_name, action_args):
+                return True
+        return False
 
     def _filter_repeated_draw_batch(
         self,
@@ -4773,6 +6290,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             args = self._maybe_upgrade_execute_subgoal_document_input(tc.function.name, args)
             args = self._maybe_upgrade_execute_subgoal_formats(tc.function.name, args)
             args = self._filter_repeated_draw_batch(tc.function.name, args)
+            args = self._compile_drawing_quality_repair_args(tc.function.name, args)
+            args = self._compile_drawing_quality_terminal_args(tc.function.name, args)
             self._track_new_document_plan_attempt(tc.function.name, args)
             self.run_state.before_tool(tc.function.name, args)
             BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
@@ -4781,6 +6300,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             started = time.monotonic()
             blocked_store_action = _blocks_store_search_action(self.task, tc.function.name, args)
             blocked_upload_action = _blocks_upload_media_analysis(self.task, tc.function.name, args)
+            drawing_quality_limit_result = self._drawing_quality_repair_limit_result(
+                tc.function.name,
+                args,
+            )
             blocked_gui_only_action = ""
             if _is_gui_only_task(self.task):
                 strict_no_shell = _gui_only_forbids_shell(self.task)
@@ -4926,6 +6449,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 result = ToolResult(json.dumps(coordinate_payload, ensure_ascii=False))
             elif blocked_store_action or blocked_upload_action:
                 result = ToolResult(blocked_store_action or blocked_upload_action)
+            elif drawing_quality_limit_result is not None:
+                result = drawing_quality_limit_result
             elif (
                 self._drawing_should_stop_mutating()
                 and tc.function.name in {"click", "drag", "draw_strokes", "type_text", "hotkey", "scroll"}
@@ -4951,6 +6476,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     self.session.snapshot = None
                 result = self._drawing_destructive_clear_result(tc.function.name, args)
                 if result is None:
+                    result = self._drawing_destructive_replan_result(tc.function.name, args)
+                if result is None:
+                    result = self._drawing_post_scene_manual_mutation_result(tc.function.name, args)
+                if result is None:
+                    result = self._drawing_repeated_click_result(tc.function.name, args)
+                if result is None:
                     result = self._duplicate_clipboard_delivery_result(tc.function.name, args)
                 if result is None:
                     result = self._duplicate_text_mutation_result(tc.function.name, args)
@@ -4960,6 +6491,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     result = self._maybe_reuse_recent_visual_color_verify(tc.function.name, args)
                 if result is None:
                     result = self._maybe_reuse_recent_draw_batch(tc.function.name, args)
+                if result is None:
+                    result = self._drawing_scene_replacement_result(tc.function.name, args)
                 if result is None:
                     result = self._maybe_reuse_recent_draw_evidence(tc.function.name, args)
                 if result is None:
@@ -5012,6 +6545,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             visual_result_data, ensure_ascii=False, default=str,
                         )
                     visual_feedback_result = result.text or ""
+            try:
+                auto_judge_result_data = json.loads(result.text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                auto_judge_result_data = {}
+            if self._drawing_structured_scene_should_auto_judge(
+                tc.function.name,
+                auto_judge_result_data,
+            ):
+                # The controller has already delivered the complete structured
+                # scene. Waiting for the action model to decide whether to call
+                # done adds a slow, failure-prone turn and lets it overdraw the
+                # canvas. Judge the fresh pixels immediately; one bounded
+                # repair remains available if the semantic judge rejects them.
+                result.terminal = "done"
+                self._auto_drawing_done_pending = True
             failure_recovery = None
             raw_result_text = result.text
             self._remember_delivered_text_mutations(
@@ -5429,18 +6977,28 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "content": (
                     "[Drawing/canvas task guidance] The goal is visible pixels. After the target app/window "
                     "is open, prefer execute_subgoal with draw={'shape':'triangle','color':'blue'} for simple work. "
-                    "For a detailed object or scene, submit one draws[] routine made from 8-30 primitives. "
+                    "For a detailed object or scene, submit one draws[] routine made from 15-30 primitives. "
                     "Each primitive supports shape triangle/rectangle/circle/ellipse/line/check, a semantic "
                     "part label, box coordinates, and normalized_strokes, where every coordinate is 0..1000 "
                     "relative to the detected canvas. For lines, box=[x1,y1,x2,y2] and box_mode='endpoints'; "
                     "for closed shapes, box=[x,y,width,height]. Label every detailed primitive with part. "
-                    "For people/animals, use separate overlapping head and body shapes, keep facial details "
-                    "inside the head, and connect limbs/tail to the body; avoid detached decoration. Use several "
-                    "requested colors and include outline, face, limbs, and small details appropriate to the user's object. Never pass an object name such "
+                    "These primitives are outline-only strokes, not filled layers: for people/animals, make the "
+                    "head/body contours touch or overlap only slightly so internal crossing lines do not spoil the "
+                    "silhouette. Keep facial details inside the head, connect limbs/tail to the body, and use "
+                    "continuous normalized_strokes for a complex outer contour when that is cleaner than stacked "
+                    "closed shapes. Never rely on a white patch to cover an earlier outline. A detailed creature "
+                    "such as a dog must include at least two pose-visible limb/haunch contours with paws, "
+                    "ears, eyes, nose, mouth, a tail, and at least two "
+                    "decorative details. Never put four parallel capsule legs below an oval; prefer a coherent "
+                    "seated/three-quarter pose with front paws and hind haunches or a side pose with only visible "
+                    "legs. These are outline-only primitives; never claim or request that they are "
+                    "filled. Only colors explicitly named by the user "
+                    "are requirements; otherwise keep the current visible color or use at most one style color. "
+                    "Never pass an object name such "
                     "as cat as shape, and never approximate a complex object with one freeform mark. The controller waits "
                     "for a ready canvas, selects requested colors when possible, draws, and returns "
                     "matched_visual_colors/visible_colors. "
-                    "If several requested shapes/colors are already known, combine them in one draws[] "
+                    "If several explicitly requested shapes/colors are already known, combine them in one draws[] "
                     "routine and then complete the affected plan items from that controller evidence. "
                     "Do not pre-explore toolbar text or add "
                     "text_appears checks for tool names like Pencil/Brush/Triangle. Use draw_strokes/"
@@ -5454,7 +7012,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "quality-sensitive result, rely on the native post-action frame and the fresh "
                     "goal-conditioned done judge (text-only models may use vlm_verify); a structured "
                     "primitive plan or pixel/color change is not semantic proof. Never add "
-                    "save/export work unless the user requested an output file. Do not redraw after a "
+                    "save/export work unless the user requested an output file. Never bulk-undo or clear a "
+                    "complete draft merely to restyle it; add only non-destructive details. Do not redraw after a "
                     "passing semantic verdict; complete the plan or done."
                 ),
             })
@@ -5657,7 +7216,25 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
                     self.run_state.terminal_rejected("done", self._last_done_reject_reason)
                     BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
+                    self._auto_drawing_done_pending = False
+                    exhausted_reply = self._drawing_quality_exhausted_reply()
+                    if exhausted_reply:
+                        self.result_text = exhausted_reply
+                        self.status = "reply"
+                        BUS.publish(
+                            "chat",
+                            run_id=self.run_id,
+                            role="assistant",
+                            content=exhausted_reply,
+                            reasoning="",
+                        )
+                        break
                     continue  # done-gate rejected the claim → keep working
+                if terminal == "done" and self._auto_drawing_done_pending:
+                    self.result_text = (
+                        "任务完成：当前画面已由独立视觉验收确认满足用户要求。"
+                    )
+                    self._auto_drawing_done_pending = False
                 if terminal:
                     self.status = terminal
                     break

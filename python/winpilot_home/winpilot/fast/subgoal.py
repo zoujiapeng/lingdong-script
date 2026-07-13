@@ -22,6 +22,7 @@ from ..action.verify import _match_visible_text
 from ..agent.task_rules import (
     _document_format_specs,
     _exact_document_text_block,
+    _required_drawing_colors,
     _required_literal_tokens,
     _required_visible_payloads,
     _visible_state_targets,
@@ -499,13 +500,54 @@ def _successful_draw_scene_specs(
         result = results.get(action_index)
         data = result.get("data") if isinstance(result, dict) else None
         visual_change = data.get("visual_change_detected") if isinstance(data, dict) else None
+        deferred_delivery = bool(
+            action.get("defer_visual_verify")
+            and isinstance(data, dict)
+            and data.get("visual_verify_deferred") is True
+        )
         if (
             spec is not None
             and isinstance(result, dict)
             and result.get("ok") is True
-            and visual_change is True
+            and (visual_change is True or deferred_delivery)
         ):
             successful.append(dict(spec))
+    return successful
+
+
+def _successful_executed_draw_actions(
+    actions: list[dict[str, Any]],
+    batch_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Align planned actions to child results and retain delivered draws only."""
+    planned_draws = [
+        action for action in actions if action.get("action") == "draw_strokes"
+    ]
+    successful: list[dict[str, Any]] = []
+    draw_index = 0
+    for result in batch_results:
+        if not isinstance(result, dict) or result.get("action") != "draw_strokes":
+            continue
+        action = planned_draws[draw_index] if draw_index < len(planned_draws) else None
+        draw_index += 1
+        if action is None:
+            continue
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        deferred_delivery = bool(
+            action.get("defer_visual_verify")
+            and data.get("visual_verify_deferred") is True
+        )
+        result_ok = result.get("ok")
+        if result_ok is None:
+            result_ok = data.get("ok")
+        result_verified = result.get("verified")
+        if result_verified is None:
+            result_verified = data.get("verified")
+        if (
+            result_ok is True
+            and (result_verified is not False or deferred_delivery)
+        ):
+            successful.append(action)
     return successful
 
 
@@ -1400,6 +1442,19 @@ def _visual_colors_from_batch(data: dict[str, Any]) -> dict[str, Any]:
     return colors
 
 
+def _matched_executed_draw_colors(
+    requested_colors: list[str],
+    per_draw_color_evidence: list[dict[str, Any]],
+) -> list[str]:
+    """Match colors only to successfully executed primitive evidence."""
+    executed_color_matches = {
+        str(item.get("requested_color") or "")
+        for item in per_draw_color_evidence
+        if isinstance(item, dict) and item.get("matched") is True
+    }
+    return [color for color in requested_colors if color in executed_color_matches]
+
+
 def _requested_draw_colors(request: SubgoalRequest, task: str) -> list[str]:
     colors: list[str] = []
     for draw_spec in _draw_specs(request):
@@ -1407,6 +1462,38 @@ def _requested_draw_colors(request: SubgoalRequest, task: str) -> list[str]:
         if color:
             colors.append(color)
     return _unique(colors)
+
+
+def _required_user_draw_colors(task: str) -> list[str]:
+    """Return only colors explicitly requested by the user-level task.
+
+    Colors introduced by the planner are aesthetic preferences, not hard
+    postconditions.  Keeping this distinction prevents an unavailable optional
+    palette shade from aborting an otherwise valid drawing routine.
+    """
+    colors = [
+        _canonical_color_name(color)
+        for color in _required_drawing_colors(task)
+    ]
+    text = str(task or "").casefold()
+    for color, terms in _DRAW_COLOR_TERMS.items():
+        if color in colors:
+            continue
+        if any(
+            (
+                term.isascii()
+                and re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", text)
+            )
+            or (
+                not term.isascii()
+                and len(term) >= 2
+                and term.endswith("色")
+                and term in text
+            )
+            for term in terms
+        ):
+            colors.append(color)
+    return _unique(color for color in colors if color)
 
 
 def _rough_region(window: Region, hint: str) -> Region | None:
@@ -1488,9 +1575,26 @@ def _draw_specs(request: SubgoalRequest) -> list[dict[str, Any]]:
     return [request.draw] if request.draw else []
 
 
-_DETAILED_SCENE_RE = re.compile(r"\b(?:detailed|intricate|fine[- ]grained)\b|细节|详细|精细", re.IGNORECASE)
+_DETAILED_SCENE_RE = re.compile(
+    r"\b(?:detailed|intricate|fine[- ]grained|polished|beautiful|good[- ]looking|not crude)\b|"
+    r"\u7ec6\u8282|\u8be6\u7ec6|\u7cbe\u7ec6|\u597d\u770b|\u6f02\u4eae|\u7f8e\u89c2|"
+    r"\u7cbe\u7f8e|\u7cbe\u81f4|\u4e0d\u8981\u7b80\u964b|\u4e0d\u7b80\u964b",
+    re.IGNORECASE,
+)
+_POLISHED_SCENE_RE = re.compile(
+    r"\b(?:polished|beautiful|good[- ]looking|attractive|not crude)\b|"
+    r"\u597d\u770b|\u6f02\u4eae|\u7f8e\u89c2|\u7cbe\u7f8e|\u7cbe\u81f4|"
+    r"\u4e0d\u8981\u7b80\u964b|\u4e0d\u7b80\u964b",
+    re.IGNORECASE,
+)
+_COLORFUL_SCENE_RE = re.compile(
+    r"\b(?:colorful|colourful|multicolou?red|many[- ]colored)\b|"
+    r"\u4e94\u989c\u516d\u8272|\u591a\u5f69|\u5f69\u8272|\u8272\u5f69\u4e30\u5bcc",
+    re.IGNORECASE,
+)
 _CREATURE_SCENE_RE = re.compile(
-    r"\b(?:cat|dog|animal|creature|person|human|bird|rabbit|horse)\b|猫|狗|动物|人物|人像|鸟|兔|马",
+    r"\b(?:cat|dog|animal|creature|person|human|bird|rabbit|horse)\b|"
+    r"\u732b|\u72d7|\u52a8\u7269|\u4eba\u7269|\u4eba\u50cf|\u9e1f|\u5154|\u9a6c",
     re.IGNORECASE,
 )
 
@@ -1507,7 +1611,419 @@ def _semantic_part(draw_spec: dict[str, Any]) -> str:
     return value
 
 
-def _scene_structure_preflight(draw_specs: list[dict[str, Any]], task: str) -> dict[str, Any]:
+def _part_has_any_term(part: str, terms: tuple[str, ...]) -> bool:
+    """Match semantic-part labels without English substring accidents.
+
+    Models commonly emit ``left_front_leg`` while Chinese labels do not use
+    separators.  Token matching handles the former (and avoids treating
+    ``heart`` as an ear), while direct containment handles Chinese labels.
+    """
+    normalized = re.sub(r"[_-]+", " ", str(part or "").casefold()).strip()
+    words = set(re.findall(r"[a-z0-9]+", normalized))
+    words.update(word[:-1] for word in list(words) if len(word) > 3 and word.endswith("s"))
+    for term in terms:
+        candidate = str(term or "").casefold().strip()
+        if not candidate:
+            continue
+        if candidate.isascii():
+            candidate_words = re.findall(r"[a-z0-9]+", candidate)
+            if len(candidate_words) == 1 and candidate_words[0] in words:
+                return True
+            if len(candidate_words) > 1 and " ".join(candidate_words) in normalized:
+                return True
+        elif candidate in normalized:
+            return True
+    return False
+
+
+_CREATURE_PART_TERMS: dict[str, tuple[str, ...]] = {
+    "head": ("head", "face", "头", "脑袋", "脸", "面部"),
+    "body": ("body", "torso", "trunk", "身体", "躯干", "身躯"),
+    "ear": ("ear", "耳朵", "耳"),
+    "eye": ("eye", "眼睛", "眼"),
+    "nose": ("nose", "snout", "beak", "鼻子", "鼻", "喙"),
+    "mouth": ("mouth", "muzzle", "smile", "beak", "嘴巴", "嘴", "口部", "吻部", "喙"),
+    "limb": (
+        "leg", "arm", "limb", "wing", "haunch", "hindquarter", "thigh",
+        "腿", "前肢", "后肢", "四肢",
+        "胳膊", "手臂", "翅膀", "翼",
+    ),
+    "foot": ("paw", "foot", "hoof", "claw", "爪子", "爪", "脚掌", "脚", "足", "蹄"),
+    "tail": ("tail", "尾巴", "尾"),
+    "detail": (
+        "pupil", "highlight", "shine", "eyebrow", "brow", "cheek",
+        "belly", "chest", "tongue", "collar", "tag", "bell", "spot", "patch", "fur",
+        "whisker", "tuft", "toe", "mouth curve", "smile", "瞳孔", "高光",
+        "眉毛", "眉", "脸颊", "腮红", "腮", "肚皮", "肚子", "腹部", "腹",
+        "胸口", "胸", "舌头", "舌", "项圈", "吊牌", "铃铛", "斑点", "斑纹", "毛发",
+        "毛簇", "胡须", "脚趾", "嘴角",
+    ),
+}
+
+
+def _creature_part_counts(parts: list[str]) -> dict[str, int]:
+    return {
+        category: sum(
+            1 for part in parts if _part_has_any_term(part, terms)
+        )
+        for category, terms in _CREATURE_PART_TERMS.items()
+    }
+
+
+def _effective_normalized_strokes(draw_spec: dict[str, Any]) -> Any:
+    """Compile supplied core geometry into an executable organic contour.
+
+    Small models alternate between short limb centrelines and box-only closed
+    primitives even after receiving the same contour guidance. Re-querying
+    them produced identical JSON for minutes. This is geometry compilation,
+    not scene inference: it only transforms an explicitly labelled head/body/
+    limb inside the exact box or path the model supplied.
+    """
+    raw_strokes = draw_spec.get("normalized_strokes")
+    part = _semantic_part(draw_spec)
+    core_category = next(
+        (
+            category
+            for category in ("head", "body", "limb")
+            if _part_has_any_term(part, _CREATURE_PART_TERMS[category])
+        ),
+        "",
+    )
+    if raw_strokes in (None, []) and core_category:
+        shape = str(draw_spec.get("shape") or "").strip().casefold()
+        raw_box = draw_spec.get("box")
+        if (
+            shape in {"circle", "ellipse", "rectangle", "square"}
+            and isinstance(raw_box, (list, tuple))
+            and len(raw_box) == 4
+        ):
+            try:
+                x, y, third, fourth = [float(value) for value in raw_box]
+            except (TypeError, ValueError):
+                return raw_strokes
+            mode = str(draw_spec.get("box_mode") or "").strip().casefold()
+            if mode in {"endpoints", "points", "xyxy"}:
+                width, height = third - x, fourth - y
+            else:
+                width, height = third, fourth
+            if (
+                width >= 25.0
+                and height >= 25.0
+                and 0.0 <= x <= 1000.0
+                and 0.0 <= y <= 1000.0
+                and x + width <= 1000.0
+                and y + height <= 1000.0
+            ):
+                def p(rx: float, ry: float) -> list[float]:
+                    return [x + width * rx, y + height * ry]
+
+                if core_category == "limb" and height >= width * 1.05:
+                    contour = [
+                        p(0.22, 0.02), p(0.72, 0.00), p(0.82, 0.34),
+                        p(0.78, 0.72), p(0.98, 0.88), p(0.84, 1.00),
+                        p(0.25, 0.98), p(0.04, 0.86), p(0.20, 0.70),
+                        p(0.16, 0.32), p(0.22, 0.02),
+                    ]
+                else:
+                    # Deliberately asymmetric control polygon: smoothing this
+                    # yields an organic silhouette rather than another perfect
+                    # ellipse or rectangle.
+                    contour = [
+                        p(0.04, 0.48), p(0.10, 0.20), p(0.31, 0.03),
+                        p(0.62, 0.00), p(0.86, 0.16), p(0.99, 0.43),
+                        p(0.93, 0.74), p(0.72, 0.96), p(0.39, 1.00),
+                        p(0.13, 0.82), p(0.04, 0.48),
+                    ]
+                return [contour]
+        return raw_strokes
+    if not isinstance(raw_strokes, list) or len(raw_strokes) != 1:
+        return raw_strokes
+    if core_category != "limb":
+        return raw_strokes
+    raw_path = raw_strokes[0]
+    if not isinstance(raw_path, list):
+        return raw_strokes
+    points: list[tuple[float, float]] = []
+    for raw_point in raw_path:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+            return raw_strokes
+        try:
+            point = (float(raw_point[0]), float(raw_point[1]))
+        except (TypeError, ValueError):
+            return raw_strokes
+        if not (0.0 <= point[0] <= 1000.0 and 0.0 <= point[1] <= 1000.0):
+            return raw_strokes
+        points.append(point)
+    distinct_points = list(dict.fromkeys(points))
+    if (
+        len(distinct_points) == 4
+        and len(points) >= 5
+        and points[0] == points[-1]
+    ):
+        left = min(point[0] for point in distinct_points)
+        top = min(point[1] for point in distinct_points)
+        right = max(point[0] for point in distinct_points)
+        bottom = max(point[1] for point in distinct_points)
+        width = right - left
+        height = bottom - top
+        if width >= 25.0 and height >= 25.0:
+            def box_point(rx: float, ry: float) -> list[float]:
+                return [left + width * rx, top + height * ry]
+
+            contour = [
+                box_point(0.22, 0.02), box_point(0.72, 0.00),
+                box_point(0.82, 0.34), box_point(0.78, 0.72),
+                box_point(0.98, 0.88), box_point(0.84, 1.00),
+                box_point(0.25, 0.98), box_point(0.04, 0.86),
+                box_point(0.20, 0.70), box_point(0.16, 0.32),
+                box_point(0.22, 0.02),
+            ]
+            return [contour]
+    if not 3 <= len(distinct_points) <= 4:
+        return raw_strokes
+    dx = points[-1][0] - points[0][0]
+    dy = points[-1][1] - points[0][1]
+    length = math.hypot(dx, dy)
+    if length < 35.0:
+        return raw_strokes
+    px, py = -dy / length, dx / length
+    ux, uy = dx / length, dy / length
+    half_width = max(10.0, min(22.0, length * 0.12))
+
+    def clipped(x: float, y: float) -> list[float]:
+        return [max(0.0, min(1000.0, x)), max(0.0, min(1000.0, y))]
+
+    left: list[list[float]] = []
+    right: list[list[float]] = []
+    for index, (x, y) in enumerate(points):
+        taper = 0.75 + 0.25 * (index / max(1, len(points) - 1))
+        width = half_width * taper
+        left.append(clipped(x + px * width, y + py * width))
+        right.append(clipped(x - px * width, y - py * width))
+    toe = clipped(
+        points[-1][0] + ux * min(14.0, half_width),
+        points[-1][1] + uy * min(14.0, half_width),
+    )
+    contour = [*left, toe, *reversed(right), left[0]]
+    return [contour]
+
+
+def _custom_contour_metrics(draw_spec: dict[str, Any]) -> dict[str, Any]:
+    """Summarise an expressive canvas-relative polyline without trusting shape.
+
+    ``normalized_strokes`` overrides the primitive shape at execution time.  A
+    non-empty field with two points is merely a straight line, though, so the
+    polished-scene gate only counts paths with at least five distinct points.
+    """
+    raw_strokes = _effective_normalized_strokes(draw_spec)
+    if not isinstance(raw_strokes, list):
+        return {"valid": False, "point_count": 0, "area": 0.0}
+    points: list[tuple[float, float]] = []
+    for raw_stroke in raw_strokes:
+        if not isinstance(raw_stroke, list):
+            continue
+        for raw_point in raw_stroke:
+            if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                continue
+            try:
+                x = float(raw_point[0])
+                y = float(raw_point[1])
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0:
+                points.append((x, y))
+    distinct = list(dict.fromkeys(points))
+    if len(distinct) < 5:
+        return {
+            "valid": False,
+            "point_count": len(points),
+            "distinct_point_count": len(distinct),
+            "area": 0.0,
+        }
+    xs = [point[0] for point in distinct]
+    ys = [point[1] for point in distinct]
+    return {
+        "valid": True,
+        "point_count": len(points),
+        "distinct_point_count": len(distinct),
+        "area": max(0.0, max(xs) - min(xs)) * max(0.0, max(ys) - min(ys)),
+        "bbox": [min(xs), min(ys), max(xs), max(ys)],
+    }
+
+
+def _line_box_coordinates(
+    raw: Any,
+    mode: str = "",
+    *,
+    semantic_part: str = "",
+) -> tuple[float, float, float, float, bool] | None:
+    """Resolve a four-value line box to endpoint coordinates.
+
+    This interpretation is shared by scene fitting, preflight bounds, and the
+    final screen mapping so an affine fit cannot turn an xywh detail into a
+    long reverse diagonal.
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        first_x, first_y, third, fourth = [float(value) for value in raw]
+    except (TypeError, ValueError):
+        return None
+    normalized_mode = str(mode or "").strip().casefold().replace("-", "_")
+    endpoint_length = math.hypot(third - first_x, fourth - first_y)
+    offset_length = math.hypot(third, fourth)
+    mislabeled_detail_endpoints = bool(
+        normalized_mode in {"endpoints", "points", "xyxy"}
+        and _DETAIL_LINE_PART_RE.search(str(semantic_part or ""))
+        and offset_length <= 180.0
+        and endpoint_length >= 240.0
+        and endpoint_length >= max(3.0 * offset_length, offset_length + 180.0)
+        and 0.0 <= first_x + third <= 1000.0
+        and 0.0 <= first_y + fourth <= 1000.0
+    )
+    if normalized_mode in {"xywh", "offset", "width_height"} or mislabeled_detail_endpoints:
+        use_offsets = True
+    elif normalized_mode in {"endpoints", "points", "xyxy"}:
+        use_offsets = False
+    else:
+        use_offsets = offset_length + 1e-6 < endpoint_length
+    second_x = first_x + third if use_offsets else third
+    second_y = first_y + fourth if use_offsets else fourth
+    return first_x, first_y, second_x, second_y, use_offsets
+
+
+def _planned_geometry_bbox(draw_spec: dict[str, Any]) -> list[float] | None:
+    metrics = _custom_contour_metrics(draw_spec)
+    if metrics.get("valid") and isinstance(metrics.get("bbox"), list):
+        return [float(value) for value in metrics["bbox"]]
+    raw_box = draw_spec.get("box")
+    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+        return None
+    try:
+        x, y, third, fourth = [float(value) for value in raw_box]
+    except (TypeError, ValueError):
+        return None
+    mode = str(draw_spec.get("box_mode") or "").strip().casefold()
+    shape = str(draw_spec.get("shape") or "").strip().casefold()
+    if shape == "line":
+        resolved = _line_box_coordinates(
+            raw_box,
+            mode,
+            semantic_part=_semantic_part(draw_spec),
+        )
+        if resolved is None:
+            return None
+        x, y, third, fourth, _use_offsets = resolved
+        left, right = sorted((x, third))
+        top, bottom = sorted((y, fourth))
+    elif mode in {"endpoints", "points", "xyxy"}:
+        left, right = sorted((x, third))
+        top, bottom = sorted((y, fourth))
+    else:
+        left, top = x, y
+        right, bottom = x + max(0.0, third), y + max(0.0, fourth)
+    return [
+        max(0.0, min(1000.0, left)),
+        max(0.0, min(1000.0, top)),
+        max(0.0, min(1000.0, right)),
+        max(0.0, min(1000.0, bottom)),
+    ]
+
+
+def _fit_polished_scene_draw_spec(
+    draw_spec: dict[str, Any],
+    scene_specs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Center and upscale a model-planned organic scene as one composition.
+
+    MiMo commonly uses only about half of the logical canvas, making pupils and
+    decorative detail two or three physical pixels wide.  Apply one uniform
+    affine transform to every planned primitive so relationships stay intact.
+    """
+    boxes = [
+        bbox for spec in scene_specs
+        if (bbox := _planned_geometry_bbox(spec)) is not None
+    ]
+    if not boxes:
+        result = dict(draw_spec)
+        result["normalized_strokes"] = _effective_normalized_strokes(draw_spec)
+        return result
+    left = min(box[0] for box in boxes)
+    top = min(box[1] for box in boxes)
+    right = max(box[2] for box in boxes)
+    bottom = max(box[3] for box in boxes)
+    width = max(1.0, right - left)
+    height = max(1.0, bottom - top)
+    scale = max(1.0, min(1.6, 780.0 / width, 780.0 / height))
+    source_cx = (left + right) / 2.0
+    source_cy = (top + bottom) / 2.0
+
+    def point(value: Any) -> list[float] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        try:
+            x, y = float(value[0]), float(value[1])
+        except (TypeError, ValueError):
+            return None
+        return [
+            max(0.0, min(1000.0, 500.0 + (x - source_cx) * scale)),
+            max(0.0, min(1000.0, 500.0 + (y - source_cy) * scale)),
+        ]
+
+    result = dict(draw_spec)
+    raw_strokes = _effective_normalized_strokes(draw_spec)
+    if isinstance(raw_strokes, list):
+        transformed_strokes: list[list[list[float]]] = []
+        for raw_stroke in raw_strokes:
+            if not isinstance(raw_stroke, list):
+                continue
+            transformed = [mapped for item in raw_stroke if (mapped := point(item)) is not None]
+            if transformed:
+                transformed_strokes.append(transformed)
+        if transformed_strokes:
+            result["normalized_strokes"] = transformed_strokes
+    raw_box = draw_spec.get("box")
+    if isinstance(raw_box, (list, tuple)) and len(raw_box) == 4:
+        try:
+            x, y, third, fourth = [float(value) for value in raw_box]
+        except (TypeError, ValueError):
+            pass
+        else:
+            shape = str(draw_spec.get("shape") or "").casefold()
+            mode = str(draw_spec.get("box_mode") or "").casefold()
+            if shape == "line":
+                resolved = _line_box_coordinates(
+                    raw_box,
+                    mode,
+                    semantic_part=_semantic_part(draw_spec),
+                )
+                if resolved is None:
+                    resolved = (x, y, third, fourth, False)
+                first_x, first_y, second_x, second_y, _use_offsets = resolved
+                first = point([first_x, first_y])
+                second = point([second_x, second_y])
+                if first is not None and second is not None:
+                    result["box"] = [*first, *second]
+                    result["box_mode"] = "endpoints"
+            elif mode in {"endpoints", "points", "xyxy"}:
+                first = point([x, y])
+                second = point([third, fourth])
+                if first is not None and second is not None:
+                    result["box"] = [*first, *second]
+            else:
+                origin = point([x, y])
+                if origin is not None:
+                    result["box"] = [origin[0], origin[1], third * scale, fourth * scale]
+    result["scene_fit_scale"] = round(scale, 4)
+    return result
+
+
+def _scene_structure_preflight(
+    draw_specs: list[dict[str, Any]],
+    task: str,
+    *,
+    enforce_primitive_ceiling: bool = True,
+) -> dict[str, Any]:
     detailed = bool(_DETAILED_SCENE_RE.search(str(task or "")))
     if not detailed:
         return {"required": False, "ok": True}
@@ -1520,54 +2036,249 @@ def _scene_structure_preflight(draw_specs: list[dict[str, Any]], task: str) -> d
     labelled = [part for part in parts if part]
     distinct_parts = sorted({part.casefold() for part in labelled})
     errors: list[str] = []
-    if len(draw_specs) < 8:
-        errors.append("detailed scene needs at least 8 primitives")
-    if len(colors) < 3:
+    colorful = bool(_COLORFUL_SCENE_RE.search(str(task or "")))
+    creature = bool(_CREATURE_SCENE_RE.search(str(task or "")))
+    polished = bool(_POLISHED_SCENE_RE.search(str(task or "")))
+    minimum_primitives = 15 if creature and polished else 16 if creature else 8
+    if len(draw_specs) < minimum_primitives:
+        errors.append(
+            f"detailed {'creature ' if creature else ''}scene needs at least "
+            f"{minimum_primitives} primitives"
+        )
+    if creature and enforce_primitive_ceiling and len(draw_specs) > 30:
+        errors.append("one detailed creature routine should use at most 30 primitives")
+    if colorful and len(colors) < 3:
         errors.append("detailed colorful scene needs at least 3 requested colors")
-    required_label_count = min(len(draw_specs), max(5, math.ceil(len(draw_specs) * 0.65)))
+    label_ratio = 0.85 if creature else 0.65
+    required_label_count = min(
+        len(draw_specs),
+        max(5, math.ceil(len(draw_specs) * label_ratio)),
+    )
     if len(labelled) < required_label_count:
         errors.append(
             f"semantic part labels are missing ({len(labelled)}/{required_label_count} required)"
         )
-    if len(distinct_parts) < 5:
-        errors.append("detailed scene needs at least 5 distinct semantic parts")
+    required_distinct_parts = 12 if creature else 5
+    if len(distinct_parts) < required_distinct_parts:
+        errors.append(
+            f"detailed scene needs at least {required_distinct_parts} distinct semantic parts"
+        )
 
-    creature = bool(_CREATURE_SCENE_RE.search(str(task or "")))
-    normalized_parts = " ".join(distinct_parts)
+    planned_boxes = [
+        (_semantic_part(spec), _planned_geometry_bbox(spec)) for spec in draw_specs
+    ]
+    geometry_groups: dict[tuple[float, ...], list[str]] = {}
+    for part, bbox in planned_boxes:
+        if bbox is None:
+            continue
+        signature = tuple(round(value, 1) for value in bbox)
+        geometry_groups.setdefault(signature, []).append(part or "unlabelled")
+    collapsed = max(geometry_groups.values(), key=len, default=[])
+    if len(collapsed) >= 3:
+        errors.append(
+            "detailed scene primitives collapse onto the same geometry "
+            f"({', '.join(collapsed[:6])})"
+        )
+    if creature and polished:
+        geometry = [bbox for _part, bbox in planned_boxes if bbox is not None]
+        if geometry:
+            scene_width = max(box[2] for box in geometry) - min(box[0] for box in geometry)
+            scene_height = max(box[3] for box in geometry) - min(box[1] for box in geometry)
+            balanced_coverage = bool(
+                (scene_width >= 350.0 and scene_height >= 400.0)
+                or (scene_width >= 500.0 and scene_height >= 300.0)
+                or (scene_height >= 500.0 and scene_width >= 300.0)
+            )
+            if not balanced_coverage:
+                errors.append(
+                    "polished creature should occupy a balanced canvas area "
+                    f"(planned span {scene_width:.0f}x{scene_height:.0f}; use at least "
+                    "350x400, or 500x300 for a coherent side pose)"
+                )
+
+    creature_counts: dict[str, int] = {}
+    expressive_contours: list[dict[str, Any]] = []
     if creature:
-        part_requirements = {
-            "head": ("head", "face", "头", "脸"),
-            "body": ("body", "torso", "trunk", "身体", "躯干"),
-            "eye": ("eye", "pupil", "眼", "瞳"),
+        normalized_labelled = [part.casefold() for part in labelled]
+        creature_counts = _creature_part_counts(normalized_labelled)
+        task_text = str(task or "")
+        person_scene = bool(re.search(
+            r"\b(?:person|human)\b|\u4eba\u7269|\u4eba\u50cf",
+            task_text,
+            re.IGNORECASE,
+        ))
+        bird_scene = bool(re.search(r"\bbird\b|\u9e1f", task_text, re.IGNORECASE))
+        contour_metrics = [_custom_contour_metrics(spec) for spec in draw_specs]
+        expressive_limb_count = sum(
+            1
+            for spec, metrics in zip(draw_specs, contour_metrics)
+            if metrics.get("valid")
+            and _part_has_any_term(
+                _semantic_part(spec), _CREATURE_PART_TERMS["limb"]
+            )
+        )
+        limb_geometry_groups: dict[tuple[float, ...], list[str]] = {}
+        for part, bbox in planned_boxes:
+            if (
+                bbox is None
+                or not _part_has_any_term(part, _CREATURE_PART_TERMS["limb"])
+            ):
+                continue
+            signature = tuple(round(value, 1) for value in bbox)
+            limb_geometry_groups.setdefault(signature, []).append(part)
+        overlapping_limbs = max(
+            limb_geometry_groups.values(),
+            key=len,
+            default=[],
+        )
+        if enforce_primitive_ceiling and len(overlapping_limbs) >= 2:
+            errors.append(
+                "pose-visible limb/haunch contours must be spatially distinct "
+                f"({', '.join(overlapping_limbs[:4])} overlap)"
+            )
+        minimum_counts = {
+            "head": 1,
+            "body": 1,
+            "eye": 1,
+            "nose": 1,
+            "mouth": 1,
+            "limb": 2,
+            "foot": 2,
+            "detail": 2,
         }
-        for label, terms in part_requirements.items():
-            if not any(term in normalized_parts for term in terms):
-                errors.append(f"creature scene is missing a labelled {label} part")
-        large_closed_parts = 0
-        for spec in draw_specs:
-            if str(spec.get("shape") or "").casefold() not in {
-                "circle", "ellipse", "rectangle", "square",
-            }:
-                continue
-            raw_box = spec.get("box")
-            if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
-                continue
-            try:
-                width, height = float(raw_box[2]), float(raw_box[3])
-            except (TypeError, ValueError):
-                continue
-            if max(0.0, width) * max(0.0, height) >= 15000:
-                large_closed_parts += 1
-        if large_closed_parts < 2:
-            errors.append("creature scene needs separate large closed head and body primitives")
+        if not bird_scene:
+            minimum_counts["ear"] = 1
+        if not person_scene:
+            minimum_counts["tail"] = 1
+        for label, minimum in minimum_counts.items():
+            found = creature_counts.get(label, 0)
+            if label == "foot" and polished and expressive_limb_count >= 2:
+                # The compiled closed limb contour includes a rounded terminal
+                # paw, so separate overlapping foot ellipses are unnecessary.
+                found = minimum
+            if found < minimum:
+                errors.append(
+                    f"creature scene needs at least {minimum} labelled {label} "
+                    f"part{'s' if minimum != 1 else ''} ({found} found)"
+                )
+
+        expressive_contours = [
+            {
+                "part": _semantic_part(spec),
+                **metrics,
+            }
+            for spec, metrics in zip(draw_specs, contour_metrics)
+            if metrics.get("valid")
+        ]
+
+        def has_large_contour_part(category: str) -> bool:
+            for spec in draw_specs:
+                if not _part_has_any_term(
+                    _semantic_part(spec),
+                    _CREATURE_PART_TERMS[category],
+                ):
+                    continue
+                metrics = _custom_contour_metrics(spec)
+                if metrics.get("valid") and float(metrics.get("area") or 0.0) >= 15000.0:
+                    return True
+                if str(spec.get("shape") or "").casefold() not in {
+                    "circle", "ellipse", "rectangle", "square",
+                }:
+                    continue
+                raw_box = spec.get("box")
+                if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+                    continue
+                try:
+                    width, height = float(raw_box[2]), float(raw_box[3])
+                except (TypeError, ValueError):
+                    continue
+                if max(0.0, width) * max(0.0, height) >= 15000:
+                    return True
+            return False
+
+        for category in ("head", "body"):
+            if not has_large_contour_part(category):
+                errors.append(
+                    f"creature scene needs a separate large {category} contour"
+                )
+
+        if polished:
+            expressive_counts = {
+                category: sum(
+                    1
+                    for spec, metrics in zip(draw_specs, contour_metrics)
+                    if metrics.get("valid")
+                    and _part_has_any_term(
+                        _semantic_part(spec), _CREATURE_PART_TERMS[category]
+                    )
+                )
+                for category in ("head", "body", "limb", "ear", "tail")
+            }
+            if len(expressive_contours) < 4:
+                errors.append(
+                    "polished creature needs at least 4 expressive normalized_strokes "
+                    "contours with 5 or more distinct points"
+                )
+            if sum(int(item.get("point_count") or 0) for item in expressive_contours) < 30:
+                errors.append(
+                    "polished creature normalized_strokes need at least 30 contour points"
+                )
+            for category, minimum in (("head", 1), ("body", 1), ("limb", 2)):
+                if expressive_counts.get(category, 0) < minimum:
+                    errors.append(
+                        f"polished creature needs {minimum} expressive {category} "
+                        f"contour{'s' if minimum != 1 else ''} using normalized_strokes"
+                    )
+            blocky_anatomy: list[str] = []
+            for spec, metrics in zip(draw_specs, contour_metrics):
+                if metrics.get("valid"):
+                    continue
+                part = _semantic_part(spec)
+                # Chinese detail labels such as "舌头" contain the one-character
+                # head alias "头".  They are small decorations, not a second
+                # blocky head contour.
+                if _part_has_any_term(part, _CREATURE_PART_TERMS["detail"]):
+                    continue
+                if not any(
+                    _part_has_any_term(part, _CREATURE_PART_TERMS[category])
+                    for category in ("head", "body", "limb")
+                ):
+                    continue
+                if str(spec.get("shape") or "").strip().casefold() in {
+                    "circle", "ellipse", "rectangle", "square",
+                }:
+                    blocky_anatomy.append(part or "unlabelled anatomy")
+            if blocky_anatomy:
+                errors.append(
+                    "polished organic head/body/limbs cannot be stacked closed-shape "
+                    f"primitives; use normalized_strokes ({', '.join(blocky_anatomy[:6])})"
+                )
+
+        filled_parts = [
+            _semantic_part(spec) or str(index + 1)
+            for index, spec in enumerate(draw_specs)
+            if spec.get("filled") is True or spec.get("fill") is True
+        ]
+        if filled_parts:
+            errors.append(
+                "drawing primitives are outline-only; filled/fill=true is unsupported "
+                f"({', '.join(filled_parts[:4])})"
+            )
     return {
         "required": True,
         "ok": not errors,
         "creature_scene": creature,
+        "polished_scene": polished,
+        "colorful_scene": colorful,
         "primitive_count": len(draw_specs),
         "requested_colors": colors,
         "semantic_part_count": len(labelled),
         "distinct_semantic_parts": distinct_parts,
+        "creature_part_counts": creature_counts,
+        "expressive_contour_count": len(expressive_contours),
+        "expressive_contour_point_count": sum(
+            int(item.get("point_count") or 0) for item in expressive_contours
+        ),
         "errors": errors,
     }
 
@@ -1646,60 +2357,84 @@ def _draw_shape_name(draw_spec: dict[str, Any], subgoal: str, task: str) -> str:
     return "freeform"
 
 
+_DRAW_COLOR_TERMS = {
+    "lime": ("lime", "lime green", "chartreuse", "\u4eae\u7eff", "\u9ec4\u7eff\u8272"),
+    "cyan": ("cyan", "aqua", "\u9752\u8272", "\u84dd\u7eff\u8272"),
+    "magenta": ("magenta", "fuchsia", "\u54c1\u7ea2", "\u6d0b\u7ea2"),
+    "blue": ("blue", "蓝", "蓝色"),
+    "red": ("red", "红", "红色"),
+    "green": ("green", "绿", "绿色"),
+    "yellow": ("yellow", "黄", "黄色"),
+    "black": ("black", "黑", "黑色"),
+    "purple": ("purple", "紫", "紫色"),
+    "orange": ("orange", "橙", "橙色"),
+    "brown": ("brown", "棕", "棕色", "褐", "褐色"),
+    "pink": ("pink", "粉", "粉色"),
+    "gray": ("gray", "grey", "灰", "灰色"),
+    "white": ("white", "白", "白色"),
+}
+
+_DRAW_COLOR_RGB = {
+    "lime": (128, 255, 0),
+    "cyan": (0, 255, 255),
+    "magenta": (255, 0, 255),
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "red": (220, 45, 45),
+    "green": (50, 180, 80),
+    "blue": (65, 105, 225),
+    "yellow": (255, 215, 0),
+    "purple": (147, 112, 219),
+    "orange": (255, 107, 53),
+    "brown": (150, 75, 0),
+    "pink": (255, 105, 180),
+    "gray": (128, 128, 128),
+}
+
+_DRAW_COLOR_HEX_ALIASES = {
+    "#ffc0cb": "pink",
+    "#ff1493": "pink",
+    "#d2691e": "orange",
+    "#8b4513": "brown",
+}
+
+
+def _canonical_color_name(value: Any) -> str:
+    """Map model color names/hex values to the controller palette vocabulary."""
+    explicit = str(value or "").strip().casefold()
+    if not explicit:
+        return ""
+    for color, terms in _DRAW_COLOR_TERMS.items():
+        if any(term in explicit for term in terms):
+            return color
+    hex_match = re.search(r"#([0-9a-f]{6})\b", explicit, re.IGNORECASE)
+    if not hex_match:
+        return ""
+    alias = _DRAW_COLOR_HEX_ALIASES.get(f"#{hex_match.group(1).casefold()}")
+    if alias:
+        return alias
+    value = hex_match.group(1)
+    rgb = tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
+    return min(
+        _DRAW_COLOR_RGB,
+        key=lambda name: sum(
+            (rgb[channel] - _DRAW_COLOR_RGB[name][channel]) ** 2
+            for channel in range(3)
+        ),
+    )
+
+
 def _requested_color(draw_spec: dict[str, Any], subgoal: str, task: str) -> str:
-    color_terms = {
-        "lime": ("lime", "lime green", "chartreuse", "\u4eae\u7eff", "\u9ec4\u7eff\u8272"),
-        "cyan": ("cyan", "aqua", "\u9752\u8272", "\u84dd\u7eff\u8272"),
-        "magenta": ("magenta", "fuchsia", "\u54c1\u7ea2", "\u6d0b\u7ea2"),
-        "blue": ("blue", "蓝", "蓝色"),
-        "red": ("red", "红", "红色"),
-        "green": ("green", "绿", "绿色"),
-        "yellow": ("yellow", "黄", "黄色"),
-        "black": ("black", "黑", "黑色"),
-        "purple": ("purple", "紫", "紫色"),
-        "orange": ("orange", "橙", "橙色"),
-        "brown": ("brown", "棕", "棕色", "褐", "褐色"),
-        "pink": ("pink", "粉", "粉色"),
-        "gray": ("gray", "grey", "灰", "灰色"),
-        "white": ("white", "白", "白色"),
-    }
     explicit = " ".join([
         str(draw_spec.get("color") or ""),
         str(draw_spec.get("colour") or ""),
-    ]).casefold()
-    if explicit:
-        for color, terms in color_terms.items():
-            if any(term in explicit for term in terms):
-                return color
-        hex_match = re.search(r"#([0-9a-f]{6})\b", explicit, re.IGNORECASE)
-        if hex_match:
-            value = hex_match.group(1)
-            rgb = tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
-            palette = {
-                "lime": (128, 255, 0),
-                "cyan": (0, 255, 255),
-                "magenta": (255, 0, 255),
-                "black": (0, 0, 0),
-                "white": (255, 255, 255),
-                "red": (220, 45, 45),
-                "green": (50, 180, 80),
-                "blue": (65, 105, 225),
-                "yellow": (255, 215, 0),
-                "purple": (147, 112, 219),
-                "orange": (255, 107, 53),
-                "brown": (150, 75, 0),
-                "pink": (255, 105, 180),
-                "gray": (128, 128, 128),
-            }
-            return min(
-                palette,
-                key=lambda name: sum(
-                    (rgb[channel] - palette[name][channel]) ** 2
-                    for channel in range(3)
-                ),
-            )
+    ])
+    if explicit.strip():
+        canonical = _canonical_color_name(explicit)
+        if canonical:
+            return canonical
     raw = " ".join([subgoal or "", task or ""]).casefold()
-    for color, terms in color_terms.items():
+    for color, terms in _DRAW_COLOR_TERMS.items():
         if any(term in raw for term in terms):
             return color
     return ""
@@ -1724,6 +2459,211 @@ def _fallback_canvas_region(window: Region) -> Region:
     width = max(120, int(window.width * 0.72))
     height = max(90, int(window.height * 0.48))
     return Region(left, top, width, height).clamp_to_screen()
+
+
+_CANVAS_TRANSFORM_CACHE_KEY = "_canvas_transform_cache"
+
+
+def _region_payload(region: Region) -> dict[str, int]:
+    return {
+        "x": int(region.left),
+        "y": int(region.top),
+        "width": int(region.width),
+        "height": int(region.height),
+    }
+
+
+def _region_from_payload(raw: Any) -> Region | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return Region(
+            int(raw["x"]),
+            int(raw["y"]),
+            int(raw["width"]),
+            int(raw["height"]),
+        ).clamp_to_screen()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _drawing_canvas_generation_token(session: Any) -> str:
+    """Return a stable document-generation token without using screen epochs.
+
+    ``_screen_epoch`` changes after every delivered stroke, so it cannot key a
+    coordinate transform.  Hosts which know that a new document/canvas was
+    created can expose one of the explicit generation counters below.  The
+    existing new-blank flag also invalidates a transform on its first change.
+    """
+    parts: list[str] = []
+    for name in (
+        "_canvas_generation",
+        "_drawing_generation",
+        "_document_generation",
+        "_new_blank_generation",
+    ):
+        if not hasattr(session, name):
+            continue
+        value = getattr(session, name, None)
+        parts.append(f"{name}={value!r}")
+    if hasattr(session, "_new_blank_applied"):
+        parts.append(
+            f"_new_blank_applied={bool(getattr(session, '_new_blank_applied', False))}"
+        )
+    return "|".join(parts) or "default"
+
+
+def _same_window_geometry(cached: Region | None, current: Region | None) -> bool:
+    if cached is None or current is None:
+        return False
+    position_tolerance = max(8, int(round(max(current.width, current.height) * 0.01)))
+    size_tolerance = max(12, int(round(max(current.width, current.height) * 0.02)))
+    return bool(
+        abs(cached.left - current.left) <= position_tolerance
+        and abs(cached.top - current.top) <= position_tolerance
+        and abs(cached.width - current.width) <= size_tolerance
+        and abs(cached.height - current.height) <= size_tolerance
+    )
+
+
+def _region_inside(container: Region, inner: Region, margin: int = 3) -> bool:
+    return bool(
+        container.left - margin <= inner.left
+        and container.top - margin <= inner.top
+        and inner.right <= container.right + margin
+        and inner.bottom <= container.bottom + margin
+    )
+
+
+def _regions_overlap(first: Region, second: Region) -> bool:
+    return bool(
+        min(first.right, second.right) > max(first.left, second.left)
+        and min(first.bottom, second.bottom) > max(first.top, second.top)
+    )
+
+
+def _cached_logical_scene_canvas(
+    previous: dict[str, Any] | None,
+    detected_canvas: Region,
+    *,
+    hwnd: int | None,
+    window: Region | None,
+    generation: str,
+) -> Region | None:
+    """Reuse the first scene transform while its real window generation lives.
+
+    Ink can split Paint's white canvas into multiple bright components.  Those
+    components are useful evidence that a canvas still exists, but they must
+    not become a new 0..1000 coordinate origin on every repair pass.
+    """
+    prior = _region_from_payload(previous)
+    if prior is None or prior.width != prior.height:
+        return None
+    metadata = previous.get(_CANVAS_TRANSFORM_CACHE_KEY) if isinstance(previous, dict) else None
+    if not isinstance(metadata, dict):
+        # Backward compatibility for sessions created before transform metadata
+        # existed: only reuse when the new detector still fully contains it.
+        return prior if _region_inside(detected_canvas, prior, margin=0) else None
+    try:
+        cached_hwnd = int(metadata.get("hwnd") or 0)
+        current_hwnd = int(hwnd or 0)
+    except (TypeError, ValueError):
+        return None
+    cached_window = _region_from_payload(metadata.get("window"))
+    original_canvas = _region_from_payload(metadata.get("detected_canvas"))
+    if (
+        not cached_hwnd
+        or cached_hwnd != current_hwnd
+        or str(metadata.get("generation") or "") != str(generation or "")
+        or not _same_window_geometry(cached_window, window)
+        or window is None
+        or original_canvas is None
+        or not _region_inside(window, prior)
+        or not _region_inside(window, original_canvas)
+        or not _region_inside(original_canvas, prior)
+        or not _region_inside(window, detected_canvas)
+        or not _regions_overlap(original_canvas, detected_canvas)
+    ):
+        return None
+    return prior
+
+
+def _canvas_transform_cache_payload(
+    logical_canvas: Region,
+    detected_canvas: Region,
+    *,
+    hwnd: int | None,
+    window: Region,
+    generation: str,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = _region_payload(logical_canvas)
+    previous_region = _region_from_payload(previous)
+    previous_metadata = (
+        previous.get(_CANVAS_TRANSFORM_CACHE_KEY)
+        if isinstance(previous, dict) else None
+    )
+    original_canvas = detected_canvas
+    reusable_previous = (
+        _cached_logical_scene_canvas(
+            previous,
+            detected_canvas,
+            hwnd=hwnd,
+            window=window,
+            generation=generation,
+        )
+        if previous_region == logical_canvas and isinstance(previous_metadata, dict)
+        else None
+    )
+    if reusable_previous == logical_canvas and isinstance(previous_metadata, dict):
+        cached_original = _region_from_payload(previous_metadata.get("detected_canvas"))
+        if cached_original is not None:
+            original_canvas = cached_original
+    payload[_CANVAS_TRANSFORM_CACHE_KEY] = {
+        "version": 1,
+        "hwnd": int(hwnd or 0),
+        "window": _region_payload(window),
+        "generation": str(generation or ""),
+        "detected_canvas": _region_payload(original_canvas),
+    }
+    return payload
+
+
+def _logical_scene_canvas(
+    canvas: Region,
+    draw_specs: list[dict[str, Any]],
+    task: str,
+    previous: dict[str, Any] | None = None,
+    *,
+    hwnd: int | None = None,
+    window: Region | None = None,
+    generation: str = "",
+) -> Region:
+    """Use one isotropic coordinate space for detailed scenes and repairs."""
+    if not _scene_structure_preflight(draw_specs, task).get("required"):
+        return canvas
+    if isinstance(previous, dict):
+        if window is not None and hwnd is not None:
+            prior = _cached_logical_scene_canvas(
+                previous,
+                canvas,
+                hwnd=hwnd,
+                window=window,
+                generation=generation,
+            )
+        else:
+            prior = _region_from_payload(previous)
+            if prior is not None and not _region_inside(canvas, prior, margin=0):
+                prior = None
+        if prior is not None and prior.width == prior.height:
+            return prior
+    side = max(2, min(int(canvas.width), int(canvas.height)))
+    return Region(
+        int(canvas.left) + (int(canvas.width) - side) // 2,
+        int(canvas.top) + (int(canvas.height) - side) // 2,
+        side,
+        side,
+    ).clamp_to_screen()
 
 
 def _looks_like_unready_window(image) -> bool:
@@ -1764,7 +2704,8 @@ def _shape_strokes(
     *,
     margin_ratio: float = 0.16,
 ) -> list[list[list[int]]]:
-    if margin_ratio <= 0:
+    explicit_bounds = margin_ratio <= 0
+    if explicit_bounds:
         left, top = canvas.left, canvas.top
         right = max(left + 1, canvas.right - 1)
         bottom = max(top + 1, canvas.bottom - 1)
@@ -1772,9 +2713,14 @@ def _shape_strokes(
         left, top, right, bottom = _inset_region(canvas, margin_ratio)
     cx = (left + right) // 2
     cy = (top + bottom) // 2
-    width = max(24, right - left)
-    height = max(24, bottom - top)
-    size = max(28, min(width, height, 360))
+    if explicit_bounds:
+        width = max(2, int(canvas.width))
+        height = max(2, int(canvas.height))
+        size = max(4, min(width, height, 360))
+    else:
+        width = max(24, right - left)
+        height = max(24, bottom - top)
+        size = max(28, min(width, height, 360))
     half = size // 2
     if shape == "triangle":
         p1 = [cx, cy - half]
@@ -1788,15 +2734,16 @@ def _shape_strokes(
         p4 = [left, bottom]
         return [[p1, p2, p3, p4, p1]]
     if shape == "circle":
-        radius = half
+        radius = max(2, min(width, height) // 2) if explicit_bounds else half
         points: list[list[int]] = []
         for i in range(33):
             angle = (math.tau * i) / 32
             points.append([int(cx + radius * math.cos(angle)), int(cy + radius * math.sin(angle))])
         return [points]
     if shape == "ellipse":
-        rx = max(12, width // 2)
-        ry = max(12, height // 2)
+        minimum_radius = 2 if explicit_bounds else 12
+        rx = max(minimum_radius, width // 2)
+        ry = max(minimum_radius, height // 2)
         points = []
         for i in range(41):
             angle = (math.tau * i) / 40
@@ -1894,10 +2841,20 @@ def _normalized_closed_shape_region(
     return _normalized_box_region(canvas, [x, y, width, height]), metadata
 
 
+_DETAIL_LINE_PART_RE = re.compile(
+    r"\b(?:mouth|muzzle|smile|lip|whisker|brow|eyebrow|eyelash|crease|wrinkle|"
+    r"toe|claw|fang|shine|highlight|detail)\b|"
+    r"嘴|口部|吻部|胡须|眉|睫毛|皱纹|爪|趾|高光",
+    re.IGNORECASE,
+)
+
+
 def _normalized_line_geometry(
     canvas: Region,
     raw: Any,
     mode: str = "",
+    *,
+    semantic_part: str = "",
 ) -> tuple[list[list[list[int]]], Region] | None:
     """Resolve a line box without assuming endpoint or width/height syntax.
 
@@ -1905,23 +2862,14 @@ def _normalized_line_geometry(
     emitted [x, y, width, height], so auto mode chooses the interpretation that
     yields the shorter segment. Explicit box_mode always wins.
     """
-    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+    resolved = _line_box_coordinates(
+        raw,
+        mode,
+        semantic_part=semantic_part,
+    )
+    if resolved is None:
         return None
-    try:
-        first_x, first_y, third, fourth = [float(value) for value in raw]
-    except (TypeError, ValueError):
-        return None
-    normalized_mode = str(mode or "").strip().casefold().replace("-", "_")
-    endpoint_length = math.hypot(third - first_x, fourth - first_y)
-    offset_length = math.hypot(third, fourth)
-    if normalized_mode in {"xywh", "offset", "width_height"}:
-        use_offsets = True
-    elif normalized_mode in {"endpoints", "points", "xyxy"}:
-        use_offsets = False
-    else:
-        use_offsets = offset_length + 1e-6 < endpoint_length
-    second_x = first_x + third if use_offsets else third
-    second_y = first_y + fourth if use_offsets else fourth
+    first_x, first_y, second_x, second_y, _use_offsets = resolved
     first_x = _safe_canvas_coordinate(first_x)
     first_y = _safe_canvas_coordinate(first_y)
     second_x = _safe_canvas_coordinate(second_x)
@@ -1989,7 +2937,44 @@ def _normalized_point_geometry(
     return [points], region
 
 
-def _normalized_strokes_to_screen(canvas: Region, raw: Any) -> list[list[list[int]]]:
+def _smooth_polyline(
+    points: list[list[int]],
+    *,
+    iterations: int = 2,
+) -> list[list[int]]:
+    """Round model waypoints with Chaikin subdivision, preserving endpoints."""
+    if len(points) < 3:
+        return points
+    closed = points[0] == points[-1]
+    working = [list(point) for point in (points[:-1] if closed else points)]
+    for _ in range(max(0, iterations)):
+        if len(working) < 3:
+            break
+        smoothed: list[list[int]] = [] if closed else [working[0]]
+        pairs = list(zip(working, working[1:] + ([working[0]] if closed else [])))
+        for first, second in pairs:
+            smoothed.append([
+                int(round(first[0] * 0.75 + second[0] * 0.25)),
+                int(round(first[1] * 0.75 + second[1] * 0.25)),
+            ])
+            smoothed.append([
+                int(round(first[0] * 0.25 + second[0] * 0.75)),
+                int(round(first[1] * 0.25 + second[1] * 0.75)),
+            ])
+        if not closed:
+            smoothed.append(working[-1])
+        working = smoothed
+    if closed and working:
+        working.append(list(working[0]))
+    return working
+
+
+def _normalized_strokes_to_screen(
+    canvas: Region,
+    raw: Any,
+    *,
+    smooth: bool = False,
+) -> list[list[list[int]]]:
     if not isinstance(raw, list):
         return []
     strokes: list[list[list[int]]] = []
@@ -2010,6 +2995,8 @@ def _normalized_strokes_to_screen(canvas: Region, raw: Any) -> list[list[list[in
                 canvas.top + int(round(canvas.height * y / 1000.0)),
             ])
         if len(stroke) >= 2:
+            if smooth:
+                stroke = _smooth_polyline(stroke)
             strokes.append(stroke)
     return strokes
 
@@ -2899,6 +3886,12 @@ class SubgoalExecutor:
         draw_specs = _draw_specs(request)
         draw_canvas_context: tuple[Region, list[dict[str, Any]]] | None = None
         if draw_specs:
+            strict_draw_canvas = bool(
+                _scene_structure_preflight(
+                    draw_specs,
+                    getattr(self.session, "task", ""),
+                ).get("required")
+            )
             hwnd = self._target_hwnd(request, allow_foreground=False)
             window = None
             if hwnd:
@@ -2908,8 +3901,31 @@ class SubgoalExecutor:
                     snapshot = getattr(self.session, "snapshot", None)
                     window = snapshot.region if snapshot is not None else None
             if window is not None:
-                canvas, ready_attempts = self._ready_canvas_region(window)
-                if canvas is not None:
+                detected_canvas, ready_attempts = self._ready_canvas_region(
+                    window,
+                    allow_fallback=not strict_draw_canvas,
+                )
+                if detected_canvas is not None:
+                    previous_canvas = getattr(self.session, "_last_canvas_region", None)
+                    generation = _drawing_canvas_generation_token(self.session)
+                    canvas = _logical_scene_canvas(
+                        detected_canvas,
+                        draw_specs,
+                        getattr(self.session, "task", ""),
+                        previous_canvas,
+                        hwnd=hwnd,
+                        window=window,
+                        generation=generation,
+                    )
+                    if strict_draw_canvas:
+                        self.session._last_canvas_region = _canvas_transform_cache_payload(
+                            canvas,
+                            detected_canvas,
+                            hwnd=hwnd,
+                            window=window,
+                            generation=generation,
+                            previous=previous_canvas,
+                        )
                     draw_canvas_context = (canvas, ready_attempts)
         if draw_canvas_context is not None and any(
             _requested_color(spec, request.subgoal, getattr(self.session, "task", ""))
@@ -2920,6 +3936,33 @@ class SubgoalExecutor:
                 actions.append(opacity_action)
         last_color = ""
         first_draw_for_color = True
+        user_required_colors = set(
+            _required_user_draw_colors(getattr(self.session, "task", ""))
+        )
+        # Treat model-suggested colors as decoration, not as a reason to open
+        # Paint's palette.  Palette interaction is relatively slow and can
+        # resize/occlude the canvas; only spend that cost when the user
+        # explicitly asks for a colorful scene.  Explicitly named user colors
+        # remain strict and are selected independently below.
+        palette_budget = 3 if _COLORFUL_SCENE_RE.search(
+            str(getattr(self.session, "task", "") or "")
+        ) else 0
+        optional_palette_colors: list[str] = []
+        for spec in draw_specs:
+            candidate = _requested_color(
+                spec,
+                request.subgoal,
+                getattr(self.session, "task", ""),
+            )
+            if (
+                candidate
+                and candidate != "white"
+                and candidate not in user_required_colors
+                and candidate not in optional_palette_colors
+                and len(optional_palette_colors) < palette_budget
+            ):
+                optional_palette_colors.append(candidate)
+        optional_selections_emitted: set[str] = set()
         for draw_spec in (draw_specs if draw_canvas_context is not None else []):
             draw_action = self._build_draw_action(
                 request,
@@ -2928,9 +3971,29 @@ class SubgoalExecutor:
             )
             if draw_action:
                 color = draw_action.get("requested_color")
-                if color and color != last_color:
-                    actions.append({"action": "select_color", "color": color})
+                required_by_user = bool(color and str(color) in user_required_colors)
+                optional_budgeted = bool(
+                    color
+                    and str(color) in optional_palette_colors
+                    and str(color) not in optional_selections_emitted
+                )
+                should_select = bool(
+                    color
+                    and (
+                        (required_by_user and str(color) != last_color)
+                        or optional_budgeted
+                    )
+                )
+                if should_select:
+                    actions.append({
+                        "action": "select_color",
+                        "color": color,
+                        "strict": required_by_user,
+                        "required_by_user": required_by_user,
+                    })
                     last_color = str(color)
+                    if optional_budgeted:
+                        optional_selections_emitted.add(str(color))
                     first_draw_for_color = True
                 draw_action["trace_checkpoint"] = bool(first_draw_for_color)
                 actions.append(draw_action)
@@ -3261,7 +4324,13 @@ class SubgoalExecutor:
             actions.append({"action": "read_text"})
         return actions
 
-    def _ready_canvas_region(self, window: Region, timeout_s: float = 3.5) -> tuple[Region | None, list[dict[str, Any]]]:
+    def _ready_canvas_region(
+        self,
+        window: Region,
+        timeout_s: float = 3.5,
+        *,
+        allow_fallback: bool = True,
+    ) -> tuple[Region | None, list[dict[str, Any]]]:
         deadline = time.monotonic() + max(0.1, timeout_s)
         attempts: list[dict[str, Any]] = []
         last_image = None
@@ -3287,7 +4356,11 @@ class SubgoalExecutor:
             if not unready or time.monotonic() >= deadline:
                 break
             time.sleep(0.25)
-        if last_image is not None and not _looks_like_unready_window(last_image):
+        if (
+            allow_fallback
+            and last_image is not None
+            and not _looks_like_unready_window(last_image)
+        ):
             return _fallback_canvas_region(window), attempts
         return None, attempts
 
@@ -3298,6 +4371,12 @@ class SubgoalExecutor:
         *,
         canvas_context: tuple[Region, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any] | None:
+        strict_draw_canvas = bool(
+            _scene_structure_preflight(
+                _draw_specs(request),
+                getattr(self.session, "task", ""),
+            ).get("required")
+        )
         if canvas_context is None:
             hwnd = self._target_hwnd(request, allow_foreground=False)
             if not hwnd:
@@ -3309,26 +4388,99 @@ class SubgoalExecutor:
                 window = snapshot.region if snapshot is not None else None
             if window is None:
                 return None
-            canvas, ready_attempts = self._ready_canvas_region(window)
-            if canvas is None:
+            detected_canvas, ready_attempts = self._ready_canvas_region(
+                window,
+                allow_fallback=not strict_draw_canvas,
+            )
+            if detected_canvas is None:
                 return None
+            previous_canvas = getattr(self.session, "_last_canvas_region", None)
+            generation = _drawing_canvas_generation_token(self.session)
+            canvas = _logical_scene_canvas(
+                detected_canvas,
+                _draw_specs(request),
+                getattr(self.session, "task", ""),
+                previous_canvas,
+                hwnd=hwnd,
+                window=window,
+                generation=generation,
+            )
+            if strict_draw_canvas:
+                self.session._last_canvas_region = _canvas_transform_cache_payload(
+                    canvas,
+                    detected_canvas,
+                    hwnd=hwnd,
+                    window=window,
+                    generation=generation,
+                    previous=previous_canvas,
+                )
         else:
             canvas, ready_attempts = canvas_context
-        shape = _draw_shape_name(draw_spec, request.subgoal, getattr(self.session, "task", ""))
+        task_text = str(getattr(self.session, "task", "") or "")
+        organic_polish = bool(
+            _POLISHED_SCENE_RE.search(task_text)
+            and _CREATURE_SCENE_RE.search(task_text)
+        )
+        source_draw_spec = draw_spec
+        if organic_polish:
+            generation = _drawing_canvas_generation_token(self.session)
+            cached_fit_basis = getattr(
+                self.session,
+                "_drawing_scene_fit_basis",
+                None,
+            )
+            fit_basis_specs: list[dict[str, Any]] = []
+            if (
+                isinstance(cached_fit_basis, dict)
+                and cached_fit_basis.get("generation") == generation
+                and isinstance(cached_fit_basis.get("scene_specs"), list)
+            ):
+                fit_basis_specs = cached_fit_basis["scene_specs"]
+            prior_scene_specs = getattr(
+                self.session,
+                "_verified_draw_scene_specs",
+                [],
+            )
+            if not isinstance(prior_scene_specs, list):
+                prior_scene_specs = []
+            if not fit_basis_specs:
+                fit_basis_specs = prior_scene_specs or _draw_specs(request)
+                self.session._drawing_scene_fit_basis = {
+                    "generation": generation,
+                    "scene_specs": [dict(spec) for spec in fit_basis_specs],
+                }
+            draw_spec = _fit_polished_scene_draw_spec(
+                draw_spec,
+                # Cache the first complete batch's basis for this canvas
+                # generation. A partially successful batch otherwise leaves a
+                # smaller ``_verified_draw_scene_specs`` subset whose recomputed
+                # affine would shift every later missing-part repair.
+                fit_basis_specs,
+            )
+        shape = _draw_shape_name(draw_spec, request.subgoal, task_text)
+        part = _semantic_part(draw_spec)
+        raw_box = draw_spec.get("box")
+        multi_point_line = bool(
+            shape == "line"
+            and isinstance(raw_box, (list, tuple))
+            and len(raw_box) >= 6
+            and len(raw_box) % 2 == 0
+        )
         point_geometry = (
             _normalized_point_geometry(
                 canvas,
-                draw_spec.get("box"),
+                raw_box,
                 close=shape == "triangle",
             )
-            if shape in {"line", "triangle"}
+            if shape == "triangle" or multi_point_line
             else None
         )
         line_geometry = (
             point_geometry or _normalized_line_geometry(
                 canvas,
-                draw_spec.get("box"),
+                raw_box,
                 str(draw_spec.get("box_mode") or ""),
+                semantic_part=part,
             )
             if shape == "line"
             else None
@@ -3338,7 +4490,6 @@ class SubgoalExecutor:
             if point_geometry is not None
             else line_geometry[1] if line_geometry is not None else canvas
         )
-        part = _semantic_part(draw_spec)
         box_metadata: dict[str, Any] = {}
         if line_geometry is None and point_geometry is None:
             boxed, box_metadata = _normalized_closed_shape_region(
@@ -3360,9 +4511,11 @@ class SubgoalExecutor:
         if hinted is not None:
             draw_region = hinted
         strokes = draw_spec.get("strokes") if isinstance(draw_spec.get("strokes"), list) else None
+        effective_normalized_strokes = _effective_normalized_strokes(draw_spec)
         normalized_strokes = _normalized_strokes_to_screen(
             canvas,
-            draw_spec.get("normalized_strokes"),
+            effective_normalized_strokes,
+            smooth=organic_polish,
         )
         if normalized_strokes:
             strokes = normalized_strokes
@@ -3397,21 +4550,40 @@ class SubgoalExecutor:
             "canvas_ready_attempts": ready_attempts[-4:],
             "shape": shape,
         }
-        self.session._last_canvas_region = {
-            "x": canvas.left,
-            "y": canvas.top,
-            "width": canvas.width,
-            "height": canvas.height,
-        }
+        canvas_payload: dict[str, Any] = _region_payload(canvas)
+        existing_canvas = getattr(self.session, "_last_canvas_region", None)
+        if (
+            strict_draw_canvas
+            and isinstance(existing_canvas, dict)
+            and _region_from_payload(existing_canvas) == canvas
+            and isinstance(existing_canvas.get(_CANVAS_TRANSFORM_CACHE_KEY), dict)
+        ):
+            canvas_payload[_CANVAS_TRANSFORM_CACHE_KEY] = dict(
+                existing_canvas[_CANVAS_TRANSFORM_CACHE_KEY]
+            )
+        self.session._last_canvas_region = canvas_payload
         action.update(box_metadata)
         if part:
             action["semantic_part"] = part
+        if organic_polish and (
+            _effective_normalized_strokes(source_draw_spec)
+            != source_draw_spec.get("normalized_strokes")
+        ):
+            action["organic_contour_expanded"] = True
+        if organic_polish and normalized_strokes:
+            action["organic_contour_smoothed"] = True
+            action["scene_fit_scale"] = draw_spec.get("scene_fit_scale", 1.0)
         color = _requested_color(draw_spec, request.subgoal, getattr(self.session, "task", ""))
         if color:
             action["requested_color"] = color
         return action
 
-    def _draw_color_evidence(self, actions: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    def _draw_color_evidence(
+        self,
+        actions: list[dict[str, Any]],
+        batch_results: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        actions = _successful_executed_draw_actions(actions, batch_results)
         merged: dict[str, Any] = {}
         per_draw: list[dict[str, Any]] = []
         canvas_region: Region | None = None
@@ -3678,11 +4850,20 @@ class SubgoalExecutor:
         scene_preflight = _scene_structure_preflight(
             [*prior_scene_specs, *draw_specs],
             getattr(self.session, "task", ""),
+            # A small non-destructive repair may legitimately bring the
+            # remembered scene above 30. Cap each new routine, not cumulative
+            # evidence retained from prior successful strokes.
+            enforce_primitive_ceiling=not bool(prior_scene_specs),
         )
         if prior_scene_specs and draw_specs:
             scene_preflight["incremental"] = True
             scene_preflight["prior_primitive_count"] = len(prior_scene_specs)
             scene_preflight["new_primitive_count"] = len(draw_specs)
+            if len(draw_specs) > 30:
+                scene_preflight["ok"] = False
+                scene_preflight.setdefault("errors", []).append(
+                    "one detailed creature repair routine should use at most 30 primitives"
+                )
         pure_verify = bool(
             request.verify_texts
             and not request.input
@@ -3872,10 +5053,17 @@ class SubgoalExecutor:
                 "error": "detailed scene structure preflight failed",
                 "needs_llm_reason": True,
                 "fast_path_advice": (
-                    "Revise the same draws[] call before touching the canvas. Give every primitive a "
-                    "semantic part label. For a person or creature, use separate large head and body "
-                    "primitives; keep eyes inside the head and attach limbs/tail to the body. Preserve "
-                    "one subject frame and avoid detached decorative components."
+                    "Revise the same draws[] call before touching the canvas. A detailed creature "
+                    "needs one complete 15-30 primitive outline plan with explicit semantic labels. "
+                    "For a dog/four-legged animal include separate large head/body, pose-visible ears/eyes, "
+                    "nose/mouth, at least two pose-visible limb/haunch contours with paws, a tail, and "
+                    "at least two labelled "
+                    "decorative details. For polished organic scenes, make head, body, and visible "
+                    "limbs expressive normalized_strokes=[[[x,y],...]]], using 6-16 canvas-relative "
+                    "waypoints per contour. Do not force four parallel capsule legs below an oval; "
+                    "use a coherent seated/side pose with attached front legs and hind haunches. Closed "
+                    "primitives are outlines, never filled layers. Keep "
+                    "eyes inside the head, attach limbs/tail to the body, and do not clear/restart."
                 ),
             }
             return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
@@ -4039,23 +5227,41 @@ class SubgoalExecutor:
         planned_draw_actions = [
             action for action in actions if action.get("action") == "draw_strokes"
         ]
-        verified_draw_actions = []
-        for result in batch_results:
-            if (
-                result.get("action") != "draw_strokes"
-                or not bool(result.get("ok", result.get("verified")))
-                or result.get("verified", True) is False
-            ):
-                continue
-            if len(verified_draw_actions) < len(planned_draw_actions):
-                verified_draw_actions.append(planned_draw_actions[len(verified_draw_actions)])
+        verified_draw_actions = _successful_executed_draw_actions(actions, batch_results)
         draw_visible_colors, per_draw_color_evidence = self._draw_color_evidence(
-            verified_draw_actions
+            actions,
+            batch_results,
         )
         visible_colors = {**visible_colors, **draw_visible_colors}
-        requested_colors = _requested_draw_colors(request, getattr(self.session, "task", ""))
-        matched_visual_colors = [color for color in requested_colors if color in visible_colors]
-        missing_visual_colors = [color for color in requested_colors if color not in visible_colors]
+        task_text = getattr(self.session, "task", "")
+        requested_colors = _requested_draw_colors(request, task_text)
+        required_visual_colors = _required_user_draw_colors(task_text)
+        # Only evidence from an executed draw can satisfy a requested color.
+        # A white canvas background, for example, must not prove that an
+        # unexecuted white primitive was delivered.
+        matched_visual_colors = _matched_executed_draw_colors(
+            requested_colors,
+            per_draw_color_evidence,
+        )
+        executed_color_matches = set(matched_visual_colors)
+        missing_planned_visual_colors = [
+            color for color in requested_colors if color not in executed_color_matches
+        ]
+        matched_required_visual_colors = [
+            color for color in required_visual_colors if color in executed_color_matches
+        ]
+        missing_required_visual_colors = [
+            color for color in required_visual_colors if color not in executed_color_matches
+        ]
+        optional_missing_visual_colors = [
+            color
+            for color in missing_planned_visual_colors
+            if color not in set(required_visual_colors)
+        ]
+        # Backward-compatible repair fields represent hard user requirements
+        # only. Planner-selected aesthetic colors are diagnostics, not a reason
+        # to retry or block the delivered geometry.
+        missing_visual_colors = list(missing_required_visual_colors)
         scene_structure = dict(scene_preflight)
         scene_structure.update({
             "executed_draw_count": len(verified_draw_actions),
@@ -4065,8 +5271,7 @@ class SubgoalExecutor:
                 and scene_preflight.get("ok")
                 and bool(batch.get("ok"))
                 and len(verified_draw_actions) == len(planned_draw_actions)
-                and len(matched_visual_colors) >= 3
-                and not missing_visual_colors
+                and not missing_required_visual_colors
             ),
         })
         partial_matched = [
@@ -4103,9 +5308,9 @@ class SubgoalExecutor:
         verified = (
             bool(batch.get("ok"))
             and not missing
-            and not missing_visual_colors
+            and not missing_required_visual_colors
             and bool(navigation.get("ok", True))
-        ) if (request.verify_texts or requested_colors) else bool(
+        ) if (request.verify_texts or required_visual_colors) else bool(
             batch.get("verified") and navigation.get("ok", True)
         )
         if scene_structure.get("required"):
@@ -4117,8 +5322,13 @@ class SubgoalExecutor:
             "verified_expect_texts": expect_matched,
             "visible_colors": visible_colors,
             "per_draw_color_evidence": per_draw_color_evidence,
+            "requested_visual_colors": requested_colors,
+            "required_visual_colors": required_visual_colors,
             "matched_visual_colors": matched_visual_colors,
             "missing_visual_colors": missing_visual_colors,
+            "optional_missing_visual_colors": optional_missing_visual_colors,
+            "matched_required_visual_colors": matched_required_visual_colors,
+            "missing_required_visual_colors": missing_required_visual_colors,
             "scene_structure": scene_structure,
             "candidate_click_labels": recovery_candidates,
             "visible_text_preview": visible_text[:1200],
@@ -4198,20 +5408,20 @@ class SubgoalExecutor:
         if partial_matched and not batch.get("ok"):
             evidence_packet["partial_matched_texts"] = partial_matched
         payload = {
-            "ok": bool(batch.get("ok")) and not missing and not missing_visual_colors,
+            "ok": bool(batch.get("ok")) and not missing and not missing_required_visual_colors,
             "verified": bool(verified),
             "subgoal": request.subgoal,
             "subgoal_route": "controller_first",
             "controller_state": {
                 **(batch.get("controller_state") or {}),
                 "verified": bool(verified),
-                "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
+                "needs_llm_reason": bool(missing or missing_required_visual_colors or not batch.get("ok")),
             },
             "actions_executed": executed_actions,
             "results": _public_batch_results(batch.get("results") or []),
             "metrics": batch.get("metrics") or {},
             "evidence_packet": evidence_packet,
-            "needs_llm_reason": bool(missing or missing_visual_colors or not batch.get("ok")),
+            "needs_llm_reason": bool(missing or missing_required_visual_colors or not batch.get("ok")),
             "input_applied": input_applied,
             "spreadsheet_table_applied": spreadsheet_table_applied,
             "spreadsheet_row_format_applied": spreadsheet_rows_applied,
@@ -4411,6 +5621,16 @@ class SubgoalExecutor:
                 + "Do not repeat the complete drawing: the existing scene and matched_visual_colors are "
                 "already visible. Retry only primitives whose draw.color is listed in "
                 "missing_visual_colors, so successful geometry is not displaced or duplicated."
+            )
+        elif optional_missing_visual_colors and draw_specs and batch.get("ok"):
+            payload["warning"] = (
+                "Optional planner-selected palette colors were unavailable: "
+                + ", ".join(optional_missing_visual_colors)
+            )
+            payload["fast_path_advice"] = (
+                "Drawing geometry was delivered using the current visible color after an optional "
+                "palette miss. Keep the existing scene; do not redraw or clear it. Let the final "
+                "semantic visual judge decide whether the completed picture satisfies the task."
             )
         elif spreadsheet_table_applied:
             payload["fast_path_advice"] = (
