@@ -405,6 +405,12 @@ class FailureRecoveryLayer:
         elif classification.failure_type == FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED:
             prefix = "[failure recovery: reverify first]"
             tail = "Re-run a targeted verification/observe or dynamic wait before choosing a new business action."
+        elif classification.failure_type == FailureType.VISUAL_GROUNDING_REQUIRED:
+            prefix = "[failure recovery: fresh frame required]"
+            tail = (
+                "The action was blocked before execution. Observe the current target, "
+                "inspect the attached real frame, then choose one grounded action."
+            )
         else:
             prefix = "[failure recovery: local strategy]"
             tail = "Retry the same local route or reverify with the listed strategy before broad observe/replan."

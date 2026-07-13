@@ -1,0 +1,234 @@
+import json
+from types import SimpleNamespace
+
+
+def _mock_vlm_response(monkeypatch, content: str) -> None:
+    from winpilot.perception import vlm
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+    )
+    completions = SimpleNamespace(create=lambda **_kwargs: response)
+    monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(vlm, "_settings", lambda: {"model": "test-vlm"})
+    monkeypatch.setattr(vlm, "_encode_region", lambda *_args, **_kwargs: ("jpeg", 1.0))
+    monkeypatch.setattr(
+        vlm,
+        "_client",
+        lambda: SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+
+
+def test_vlm_collect_keeps_only_valid_explicitly_confident_groundings(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    items = [
+        {
+            "role": "button",
+            "text": "Apply",
+            "box": [100, 200, 300, 600],
+            "confidence": 0.73,
+        },
+        {"role": "button", "text": "missing confidence", "box": [1, 1, 2, 2]},
+        {
+            "role": "made-up-role",
+            "text": "bad role",
+            "box": [1, 1, 2, 2],
+            "confidence": 0.9,
+        },
+        {
+            "role": "button",
+            "text": "inverted",
+            "box": [400, 100, 200, 300],
+            "confidence": 0.9,
+        },
+        {
+            "role": "button",
+            "text": "out of bounds",
+            "box": [-1, 0, 100, 100],
+            "confidence": 0.9,
+        },
+        {
+            "role": "button",
+            "text": "legacy point",
+            "x": 50,
+            "y": 50,
+            "confidence": 0.9,
+        },
+    ]
+    _mock_vlm_response(monkeypatch, json.dumps(items))
+
+    elements = vlm.collect(Region(100, 200, 400, 200))
+
+    assert len(elements) == 1
+    element = elements[0]
+    assert element.text == "Apply"
+    assert element.role == "button"
+    assert element.confidence == 0.73
+    assert element.bbox == (140, 240, 220, 320)
+
+
+def test_vlm_verify_rejects_low_confidence_pass(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    _mock_vlm_response(monkeypatch, json.dumps({
+        "passed": True,
+        "confidence": 0.42,
+        "subject_present": True,
+        "colorful": None,
+        "detail_level": "high",
+        "observed": ["target"],
+        "issues": [],
+    }))
+
+    result = vlm.verify(Region(0, 0, 100, 100), "the target is visible")
+
+    assert result["ok"] is True
+    assert result["verified"] is False
+    assert result["semantic_visual_verified"] is False
+    assert "confidence_below_threshold" in result["rejection_reasons"]
+
+
+def test_vlm_verify_rejects_contradictory_pass(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    _mock_vlm_response(monkeypatch, json.dumps({
+        "passed": True,
+        "confidence": 0.96,
+        "subject_present": False,
+        "colorful": True,
+        "detail_level": "low",
+        "observed": ["rough shape"],
+        "issues": ["requested subject is absent"],
+    }))
+
+    result = vlm.verify(Region(0, 0, 100, 100), "a detailed colorful cat")
+
+    assert result["verified"] is False
+    assert set(result["rejection_reasons"]) == {
+        "reported_issues",
+        "subject_not_present",
+        "detail_level_inconsistent",
+    }
+
+
+def test_vlm_verify_accepts_consistent_high_confidence_pass(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    _mock_vlm_response(monkeypatch, json.dumps({
+        "passed": True,
+        "confidence": 0.93,
+        "subject_present": True,
+        "colorful": True,
+        "detail_level": "high",
+        "observed": ["detailed cat"],
+        "issues": [],
+    }))
+
+    result = vlm.verify(Region(0, 0, 100, 100), "a detailed colorful cat")
+
+    assert result["verified"] is True
+    assert result["semantic_visual_verified"] is True
+    assert result["rejection_reasons"] == []
+
+
+def test_element_locator_uses_perception_confidence():
+    from winpilot.fast.element_cache import ElementCache
+    from winpilot.fast.types import VisualAnchor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Visual app",
+        region=Region(0, 0, 1000, 600),
+        elements=[
+            UIElement(
+                elem_id=1, source="vlm", role="button", text="Apply",
+                cx=180, cy=120, left=140, top=100, width=80, height=40,
+                confidence=0.25,
+            ),
+            UIElement(
+                elem_id=2, source="vlm", role="button", text="Apply",
+                cx=820, cy=120, left=780, top=100, width=80, height=40,
+                confidence=0.95,
+            ),
+        ],
+    )
+
+    result = ElementCache().locate_with_trace(
+        snapshot,
+        VisualAnchor(label="Apply", role="button"),
+    )
+
+    assert result.element is not None
+    assert result.element.elem_id == 2
+
+
+def test_element_locator_rejects_near_tied_distinct_candidates():
+    from winpilot.fast.element_cache import ElementCache
+    from winpilot.fast.types import VisualAnchor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Visual app",
+        region=Region(0, 0, 1000, 600),
+        elements=[
+            UIElement(
+                elem_id=1, source="vlm", role="button", text="Delete",
+                cx=180, cy=120, left=140, top=100, width=80, height=40,
+                confidence=0.9,
+            ),
+            UIElement(
+                elem_id=2, source="vlm", role="button", text="Delete",
+                cx=820, cy=120, left=780, top=100, width=80, height=40,
+                confidence=0.9,
+            ),
+        ],
+    )
+
+    result = ElementCache().locate_with_trace(
+        snapshot,
+        VisualAnchor(label="Delete", role="button"),
+    )
+
+    assert result.element is None
+    assert result.reason == "ambiguous_top_candidates"
+    assert len(result.candidates) == 2
+
+
+def test_reducer_separates_relevance_from_perception_confidence():
+    from winpilot.perception import reducer
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    snapshot = Snapshot(
+        hwnd=1,
+        title="Visual app",
+        region=Region(0, 0, 600, 400),
+        elements=[UIElement(
+            elem_id=1, source="vlm", role="button", text="Apply",
+            cx=300, cy=200, left=260, top=180, width=80, height=40,
+            confidence=0.61,
+        )],
+    )
+
+    reduced = reducer.reduce_snapshot(snapshot, task="click Apply", query="Apply")
+    candidate = reduced["top_candidates"][0]
+    rendered = reducer.render_reduced_snapshot(snapshot, task="click Apply", query="Apply")
+
+    assert "confidence" not in candidate
+    assert candidate["perception_confidence"] == 0.61
+    assert candidate["relevance_score"] != candidate["perception_confidence"]
+    assert "relevance=" in rendered
+    assert "perception_conf=0.61" in rendered
+    assert "perception_conf=0.61" in snapshot.elements[0].to_line()

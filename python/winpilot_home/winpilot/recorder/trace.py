@@ -28,6 +28,7 @@ from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
 from ..perception.model import UIElement
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
+from ..utils.trace_payload import sanitize_trace_payload
 from . import replay_control
 
 _SCREENSHOT_TOOLS = {
@@ -227,7 +228,11 @@ class TraceRecorder:
 
     def _write_event(self, item: dict[str, Any]) -> None:
         run_id = item.get("run_id")
-        record = dict(item.get("record") or {})
+        raw_record = dict(item.get("record") or {})
+        record = sanitize_trace_payload(
+            raw_record,
+            frame_id=raw_record.get("frame_id") or raw_record.get("visual_frame_id"),
+        )
         step = item.get("step")
         if step is not None:
             phase = str(item.get("phase") or "after")

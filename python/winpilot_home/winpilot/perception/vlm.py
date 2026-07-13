@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 
 import cv2
@@ -154,7 +155,8 @@ def verify(region: Region, criteria: str) -> dict:
         "detail_level (low|medium|high|unknown), observed (array of short strings), "
         "issues (array of short strings). passed must be false when any explicit "
         "criterion is missing, the subject is only vaguely recognizable, or "
-        "requested detail/quality is visibly inadequate."
+        "requested detail/quality is visibly inadequate. When passed is true, "
+        "subject_present must be true and issues must be empty."
     )
     try:
         resp = _client().chat.completions.create(
@@ -177,7 +179,57 @@ def verify(region: Region, criteria: str) -> dict:
         verdict = json.loads(raw[start : end + 1])
         if not isinstance(verdict, dict):
             raise ValueError("visual verifier returned a non-object payload")
-        passed = verdict.get("passed") is True
+        raw_passed = verdict.get("passed") is True
+        confidence = verdict.get("confidence")
+        confidence_valid = (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and math.isfinite(float(confidence))
+            and 0.0 <= float(confidence) <= 1.0
+        )
+        try:
+            min_confidence = float(CONFIG.get(
+                "vlm", "verify_min_confidence", default=0.8,
+            ) or 0.8)
+        except (TypeError, ValueError):
+            min_confidence = 0.8
+        min_confidence = max(0.0, min(1.0, min_confidence))
+        issues = verdict.get("issues")
+        issues_valid = isinstance(issues, list) and all(
+            isinstance(issue, str) for issue in issues
+        )
+        no_issues = issues_valid and not any(issue.strip() for issue in issues)
+        subject_present = verdict.get("subject_present")
+        subject_consistent = subject_present is True
+        detail_level = str(verdict.get("detail_level") or "").strip().casefold()
+        detail_valid = detail_level in {"low", "medium", "high", "unknown"}
+        detail_required = bool(re.search(
+            r"\b(?:detail(?:ed)?|intricate|high[- ]quality)\b|(?:精细|精致|细节|高质量)",
+            str(criteria or ""),
+            re.IGNORECASE,
+        ))
+        detail_consistent = detail_valid and (
+            not detail_required or detail_level == "high"
+        )
+        passed = bool(
+            raw_passed
+            and confidence_valid
+            and float(confidence) >= min_confidence
+            and no_issues
+            and subject_consistent
+            and detail_consistent
+        )
+        rejection_reasons: list[str] = []
+        if raw_passed and not confidence_valid:
+            rejection_reasons.append("invalid_confidence")
+        elif raw_passed and float(confidence) < min_confidence:
+            rejection_reasons.append("confidence_below_threshold")
+        if raw_passed and not no_issues:
+            rejection_reasons.append("reported_issues")
+        if raw_passed and not subject_consistent:
+            rejection_reasons.append("subject_not_present")
+        if raw_passed and not detail_consistent:
+            rejection_reasons.append("detail_level_inconsistent")
         return {
             "ok": True,
             "verified": passed,
@@ -185,6 +237,9 @@ def verify(region: Region, criteria: str) -> dict:
             "verify_method": "semantic-vlm",
             "criteria": str(criteria or "").strip(),
             "verdict": verdict,
+            "verify_confidence": float(confidence) if confidence_valid else None,
+            "verify_min_confidence": min_confidence,
+            "rejection_reasons": rejection_reasons,
         }
     except Exception as exc:
         logger.warning("VLM verify failed: %s", exc)
@@ -201,31 +256,62 @@ _GROUND_PROMPT = (
     "Locate every interactive UI element and text label in this screenshot. "
     "Reply ONLY with a JSON array; each item: "
     '{"role": "button|edit|text|icon|link|checkbox|image", "text": "<text>", '
-    '"box": [x1, y1, x2, y2]} '
+    '"box": [x1, y1, x2, y2], "confidence": 0.0} '
     "where coordinates are NORMALIZED to 0-1000 (top-left origin, "
-    "1000 = right/bottom edge of the image)."
+    "1000 = right/bottom edge of the image). confidence must be a JSON number "
+    "from 0 to 1 representing grounding certainty. Omit uncertain guesses."
 )
+
+_GROUND_ROLES = {"button", "edit", "text", "icon", "link", "checkbox", "image"}
+
+
+def _validated_grounding_item(item: object) -> tuple[str, str, list[float], float] | None:
+    """Validate one model-produced grounding item without repairing guesses."""
+    if not isinstance(item, dict):
+        return None
+    role = str(item.get("role") or "").strip().casefold()
+    if role not in _GROUND_ROLES:
+        return None
+    text = item.get("text", "")
+    if not isinstance(text, str):
+        return None
+    confidence = item.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not math.isfinite(float(confidence))
+        or not 0.0 < float(confidence) <= 1.0
+    ):
+        return None
+    box = item.get("box")
+    if not isinstance(box, list) or len(box) != 4:
+        return None
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        for value in box
+    ):
+        return None
+    coords = [float(value) for value in box]
+    x1, y1, x2, y2 = coords
+    if not (0.0 <= x1 < x2 <= 1000.0 and 0.0 <= y1 < y2 <= 1000.0):
+        return None
+    return role, text.strip(), coords, float(confidence)
 
 
 def _decode_box(box: list, region: Region, scale: float) -> tuple[int, int, int, int]:
     """Box -> absolute screen rect (left, top, width, height).
 
-    MiMo / Qwen2.5-VL lineage natively grounds on a 0-1000 normalized grid
-    (verified by benchmark: mean error ~6px once decoded). Normalized coords
-    map directly onto the region — independent of the JPEG downscale. Values
-    > 1000 are treated as pixels in the submitted (possibly scaled) image.
+    The grounding contract is a single 0-1000 normalized grid. ``scale`` is
+    retained for call-site compatibility but deliberately ignored; accepting a
+    second implicit pixel protocol made small-image coordinates ambiguous.
     """
     x1, y1, x2, y2 = (float(v) for v in box)
-    if max(x1, y1, x2, y2) <= 1000.0:
-        left = region.left + x1 / 1000 * region.width
-        top = region.top + y1 / 1000 * region.height
-        width = (x2 - x1) / 1000 * region.width
-        height = (y2 - y1) / 1000 * region.height
-    else:
-        left = region.left + x1 / scale
-        top = region.top + y1 / scale
-        width = (x2 - x1) / scale
-        height = (y2 - y1) / scale
+    left = region.left + x1 / 1000 * region.width
+    top = region.top + y1 / 1000 * region.height
+    width = (x2 - x1) / 1000 * region.width
+    height = (y2 - y1) / 1000 * region.height
     return int(left), int(top), max(1, int(width)), max(1, int(height))
 
 
@@ -257,26 +343,25 @@ def collect(region: Region) -> list[UIElement]:
         if start < 0 or end <= start:
             return []
         items = json.loads(raw[start : end + 1])
+        if not isinstance(items, list):
+            return []
         elements = []
         for item in items[:80]:
             try:
-                box = item.get("box") or []
-                if len(box) != 4:
-                    # Legacy single-point answers: keep a small clickable box.
-                    x = int(int(item["x"]) / scale) + region.left
-                    y = int(int(item["y"]) / scale) + region.top
-                    left, top, width, height = x - 8, y - 8, 16, 16
-                else:
-                    left, top, width, height = _decode_box(box, region, scale)
+                validated = _validated_grounding_item(item)
+                if validated is None:
+                    continue
+                role, text, box, confidence = validated
+                left, top, width, height = _decode_box(box, region, scale)
                 elements.append(
                     UIElement(
                         source="vlm",
-                        role=str(item.get("role", "elem")),
-                        text=str(item.get("text", "")),
+                        role=role,
+                        text=text,
                         cx=left + width // 2,
                         cy=top + height // 2,
                         left=left, top=top, width=width, height=height,
-                        confidence=0.8,
+                        confidence=confidence,
                     )
                 )
             except (KeyError, ValueError, TypeError):

@@ -229,3 +229,77 @@ def test_drawing_gui_profile_keeps_draw_subgoal_without_click_input():
     assert {"subgoal", "target_window", "draw", "draws", "verify_texts", "constraints"} <= props
     assert {"input", "click", "clicks"}.isdisjoint(props)
     assert "Do not use it to open/discover an app" in execute["function"]["description"]
+
+
+def test_native_vision_hides_redundant_secondary_vlm_tools(monkeypatch):
+    from winpilot.agent import tool_schemas as schemas
+
+    monkeypatch.setattr(schemas.vlm, "is_configured", lambda: True)
+    text_only = set(_names(schemas.tool_schemas(native_vision=False, allow_shell=False)))
+    native = set(_names(schemas.tool_schemas(native_vision=True, allow_shell=False)))
+
+    assert {"vlm_describe", "vlm_verify"} <= text_only
+    assert {"vlm_describe", "vlm_verify"}.isdisjoint(native)
+
+
+def test_native_vision_exposes_only_normalized_frame_coordinates():
+    from winpilot.agent import tool_schemas as schemas
+
+    def by_name(tools, name):
+        return next(tool for tool in tools if tool["function"]["name"] == name)
+
+    for profile in ("standard", "lean_gui"):
+        native = schemas.tool_schemas(
+            native_vision=True,
+            allow_shell=False,
+            allow_files=False,
+            profile=profile,
+        )
+        names = set(_names(native))
+        assert "coordinate_click_test" not in names
+        assert "blocked" in names
+
+        click = by_name(native, "click")["function"]["parameters"]
+        assert {"frame_x", "frame_y"} <= set(click["properties"])
+        assert {"x", "y"}.isdisjoint(click["properties"])
+
+        scroll = by_name(native, "scroll")["function"]["parameters"]
+        assert {"frame_x", "frame_y", "amount"} <= set(scroll["required"])
+        assert {"x", "y"}.isdisjoint(scroll["properties"])
+
+        drag = by_name(native, "drag")["function"]["parameters"]
+        assert {"frame_x1", "frame_y1", "frame_x2", "frame_y2"} <= set(drag["required"])
+        assert {"x1", "y1", "x2", "y2", "points"}.isdisjoint(drag["properties"])
+        assert "frame_points" in drag["properties"]
+
+        draw = by_name(native, "draw_strokes")["function"]["parameters"]
+        assert "frame_strokes" in draw["required"]
+        assert "strokes" not in draw["properties"]
+
+        batch = by_name(native, "run_action_batch")["function"]
+        batch_item = batch["parameters"]["properties"]["actions"]["items"]
+        batch_text = (
+            batch["description"]
+            + " "
+            + batch_item["description"]
+        )
+        assert batch_item["required"] == ["action"]
+        assert "click" in batch_item["properties"]["action"]["enum"]
+        assert "one spatial action" in batch_text
+        assert "direct click/scroll/drag/draw_strokes" in batch_text
+        assert "frame_x/frame_y" in batch_text
+        assert "frame_strokes" in batch_text
+        assert "Never send physical" in batch_text
+        assert "at most one spatial mutation" in batch_text
+        assert "element_id" in batch_text
+        assert "next real post-action frame" in batch_text
+
+    text_only = schemas.tool_schemas(
+        native_vision=False,
+        allow_shell=False,
+        allow_files=False,
+    )
+    click = by_name(text_only, "click")["function"]["parameters"]
+    assert {"x", "y"} <= set(click["properties"])
+    assert {"frame_x", "frame_y"}.isdisjoint(click["properties"])
+    assert "coordinate_click_test" in set(_names(text_only))

@@ -52,8 +52,8 @@ class UIElement:
         if self.states:
             parts.append(",".join(self.states))
         parts.append(f"src={self.source}")
-        if self.source == "ocr" and self.confidence < 1.0:
-            parts.append(f"conf={self.confidence:.2f}")
+        if self.confidence < 1.0:
+            parts.append(f"perception_conf={self.confidence:.2f}")
         return " ".join(parts)
 
     def to_dict(self) -> dict[str, Any]:

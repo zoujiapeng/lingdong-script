@@ -10,6 +10,8 @@ import traceback
 from typing import Any, Callable, Optional, List, Tuple
 from dataclasses import dataclass, field
 
+from engine.executor_types import result_error_message, result_indicates_failure
+
 
 @dataclass
 class HealResult:
@@ -33,10 +35,10 @@ class HealingPipeline:
     自愈管道: 按策略链尝试恢复
 
     默认策略链:
-    1. retry — 简单重试（+截图刷新）
-    2. a11y — 改用无障碍接口
-    3. offset — 坐标偏移试探
-    4. escalate — 上报失败（最后手段）
+    1. retry — 仅幂等/只读动作可在截图刷新后重试
+    2. escalate — 非幂等动作直接上报，不盲点、不重放
+
+    a11y/offset 仅保留为显式、幂等场景的 opt-in 策略，默认禁用。
 
     每个策略都有历史可靠性评分，影响排序
     """
@@ -69,9 +71,9 @@ class HealingPipeline:
         for strategy_name, strategy_fn in strategies:
             attempt_start = time.time()
             try:
-                result = strategy_fn(context)
+                result = strategy_fn(context, retry_action)
                 elapsed_ms = (time.time() - attempt_start) * 1000
-                if result is not None and result is not False:
+                if result is not None and not result_indicates_failure(result):
                     history.success = True
                     history.strategy = strategy_name
                     history.result = result
@@ -84,10 +86,11 @@ class HealingPipeline:
                     return history
                 else:
                     elapsed_ms = (time.time() - attempt_start) * 1000
+                    result_error = result_error_message(result, "策略返回空或失败")
                     history.details.append({
                         "strategy": strategy_name,
                         "success": False,
-                        "error": "策略返回空",
+                        "error": result_error,
                         "duration_ms": round(elapsed_ms, 1),
                     })
                     self._record_reliability(strategy_name, False)
@@ -108,12 +111,17 @@ class HealingPipeline:
 
     def _build_strategy_chain(self, action: str, context: dict) -> list:
         """按可靠性排序构建策略链"""
-        strategies = [
-            ("retry", self._strategy_retry),
-            ("a11y", self._strategy_a11y),
-            ("offset", self._strategy_offset),
-            ("escalate", self._strategy_escalate),
-        ]
+        # Recovery is fail-closed.  Passive/idempotent actions may be replayed;
+        # UI mutations are escalated without blind clicks, typing, or hotkeys.
+        strategies = []
+        retry_safe = context.get("retry_safe") is True
+        if retry_safe:
+            strategies.append(("retry", self._strategy_retry))
+        if retry_safe and context.get("allow_a11y_recovery") is True:
+            strategies.append(("a11y", self._strategy_a11y))
+        if retry_safe and context.get("allow_offset_spray") is True:
+            strategies.append(("offset", self._strategy_offset))
+        strategies.append(("escalate", self._strategy_escalate))
         # 按历史可靠性从高到低排序（escalate 始终最后）
         def sort_key(item):
             name, _ = item
@@ -126,11 +134,8 @@ class HealingPipeline:
 
     # ── 各策略实现 ──────────────────────────────────────────────
 
-    def _strategy_retry(self, context: dict) -> Any:
+    def _strategy_retry(self, context: dict, retry_action: Optional[Callable] = None) -> Any:
         """策略 1: 截图刷新后重试"""
-        target = context.get("target", "")
-        region = context.get("region")
-
         # 先刷新截图（清除 OCR 缓存）
         try:
             from perception.vision import ScreenCapture
@@ -138,34 +143,34 @@ class HealingPipeline:
         except Exception:
             pass
 
-        # 使用融合引擎重试
-        try:
-            from perception.fusion import get_fusion_engine
-            engine = get_fusion_engine()
-            result = engine.find_element(target, region=region)
-            if result.found:
-                return {"x": result.center_x, "y": result.center_y,
-                        "strategy": "retry", "confidence": result.confidence}
-        except Exception:
-            pass
-        return None
+        if context.get("retry_safe") is not True or not callable(retry_action):
+            return None
+        # Finding a target is not equivalent to performing the failed action.
+        # Replay the original safe action and validate its real return value.
+        return retry_action(dict(context.get("action_kwargs") or {}))
 
-    def _strategy_a11y(self, context: dict) -> Any:
+    def _strategy_a11y(self, context: dict, retry_action: Optional[Callable] = None) -> Any:
         """策略 2: 改用无障碍接口"""
+        if (context.get("retry_safe") is not True
+                or context.get("allow_a11y_recovery") is not True):
+            return None
         target = context.get("target", "")
         try:
             # 尝试通过无障碍树查找
             if self._action_handler:
                 # a11y_click_element 通过无障碍接口直接点击
                 result = self._action_handler("a11y_click_element", target=target)
-                if result:
+                if result is not None and not result_indicates_failure(result):
                     return {"strategy": "a11y", "result": result}
         except Exception:
             pass
         return None
 
-    def _strategy_offset(self, context: dict) -> Any:
+    def _strategy_offset(self, context: dict, retry_action: Optional[Callable] = None) -> Any:
         """策略 3: 坐标偏移试探 — 8方向 × 4半径共32点逐个尝试"""
+        if (context.get("retry_safe") is not True
+                or context.get("allow_offset_spray") is not True):
+            return None
         target = context.get("target", "")
         action = context.get("action", "click")
         try:
@@ -182,17 +187,15 @@ class HealingPipeline:
                         if self._action_handler:
                             try:
                                 hr = self._action_handler(action, target=target, x=ox, y=oy)
-                                if hr:
+                                if hr is not None and not result_indicates_failure(hr):
                                     return {"x": ox, "y": oy, "strategy": "offset", "radius": radius}
                             except Exception:
                                 continue
-                        else:
-                            return {"x": ox, "y": oy, "strategy": "offset", "radius": radius}
         except Exception:
             pass
         return None
 
-    def _strategy_escalate(self, context: dict) -> Any:
+    def _strategy_escalate(self, context: dict, retry_action: Optional[Callable] = None) -> Any:
         """策略 4: 上报失败——记录到 telemetry 供 Claude Code 分析"""
         # 记录失败上下文到 telemetry
         try:
@@ -244,4 +247,8 @@ def get_healing_pipeline(action_handler=None) -> HealingPipeline:
     global _healing_pipeline
     if _healing_pipeline is None:
         _healing_pipeline = HealingPipeline(action_handler=action_handler)
+    elif action_handler is not None:
+        # Executors can provide different handlers (tests, WITH backends, or a
+        # reinitialized real controller).  Never recover through a stale one.
+        _healing_pipeline._action_handler = action_handler
     return _healing_pipeline

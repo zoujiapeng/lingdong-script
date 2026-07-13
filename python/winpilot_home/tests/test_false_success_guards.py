@@ -1,5 +1,59 @@
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "invalid_verified",
+    ["true", "false", "1", "yes", 1, -1, 0, 1.0, [], {}],
+    ids=[
+        "string-true",
+        "string-false",
+        "string-one",
+        "string-yes",
+        "integer-one",
+        "integer-minus-one",
+        "integer-zero",
+        "float-one",
+        "list",
+        "dict",
+    ],
+)
+def test_track_verification_requires_literal_boolean_true(invalid_verified):
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._last_verify_ok = None
+    runner._had_verified_action = False
+
+    runner._track_verification(
+        "click",
+        json.dumps({"ok": True, "verified": invalid_verified}),
+    )
+
+    assert runner._last_verify_ok is False
+    assert runner._had_verified_action is False
+
+
+def test_track_verification_accepts_literal_boolean_true():
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._last_verify_ok = None
+    runner._had_verified_action = False
+
+    runner._track_verification(
+        "click",
+        json.dumps({"ok": True, "verified": True}),
+    )
+
+    assert runner._last_verify_ok is True
+    assert runner._had_verified_action is True
+
 
 def test_xlsx_artifact_verifier_checks_cells_formulas_results_and_bold_rows(tmp_path):
     from zipfile import ZipFile
@@ -195,10 +249,11 @@ def test_done_rejects_missing_distinctive_literal_even_when_other_state_changed(
         ("click", '{"ok": true, "verified": true, "verify_detail": "LOCAL_COUNTER appeared"}'),
     ]
 
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: SimpleNamespace(to_text=lambda n=50: 'Window: "Target"\n[1] text "LOCAL_COUNTER_1"'),
-    )
+    def fresh_screen_without_native_frame():
+        runner._fresh_done_image_b64 = ""
+        return 'Window: "Target"\n[1] text "LOCAL_COUNTER_1"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen_without_native_frame)
 
     class _Client:
         class chat:
@@ -209,6 +264,128 @@ def test_done_rejects_missing_distinctive_literal_even_when_other_state_changed(
 
     assert runner._verify_done(_Client()) is False
     assert "FAST_WRAP_OK_071" in runner._last_done_reject_reason
+
+
+def test_done_defers_missing_literal_to_fresh_native_judge(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "Open the target page, type FAST_WRAP_OK_071, then confirm LOCAL_COUNTER."
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._recent_results = [("click", '{"ok": true}')]
+
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-frame"
+        return 'Window: "Target"\n[1] text "LOCAL_COUNTER"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
+    monkeypatch.setattr(
+        runner,
+        "_visible_state_has_deterministic_done_evidence",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("a different visible target must not bypass the image judge")
+        ),
+    )
+    captured = {}
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "exact literal is legible in the fresh frame"}'
+                        ))
+                    )])
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+    assert runner._pending_visual_literal_tokens == [
+        "FAST_WRAP_OK_071",
+        "LOCAL_COUNTER",
+    ]
+    user_content = captured["messages"][1]["content"]
+    assert isinstance(user_content, list)
+    assert any(part.get("type") == "image_url" for part in user_content)
+    prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert "AUTHORITATIVE EXACT-LITERAL VISUAL CHECK" in prompt
+    assert "FAST_WRAP_OK_071" in prompt
+    assert "return done=false" in prompt
+
+
+def test_done_rejects_when_native_judge_cannot_see_pending_literal(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("Confirm FAST_WRAP_OK_071 is visible in the target window.")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-frame"
+        return 'Window: "Target"\n[1] text "other state"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": false, "reason": "required literal is not visible"}'
+                        ))
+                    )])
+
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_verified is False
+    assert runner._pending_visual_literal_tokens == ["FAST_WRAP_OK_071"]
+    assert "not visible" in runner._last_done_reject_reason
+
+
+def test_done_defers_missing_visible_payload_to_fresh_native_judge(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("Type the requested sentence into the visible editor.")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._recent_results = [("type_text", '{"ok": true}')]
+
+    monkeypatch.setattr(
+        "winpilot.agent.done_verifier._required_visible_payloads",
+        lambda _task: ["payload that must be visible"],
+    )
+
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-frame"
+        return 'Window: "Editor"\n[1] document ""'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
+    captured = {}
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "payload is legible in the editor"}'
+                        ))
+                    )])
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._pending_visual_payloads == ["payload that must be visible"]
+    user_content = captured["messages"][1]["content"]
+    prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert "AUTHORITATIVE VISIBLE-PAYLOAD CHECK" in prompt
+    assert "payload that must be visible" in prompt
+    assert any(part.get("type") == "image_url" for part in user_content)
 
 
 def test_done_allows_present_distinctive_literals_to_reach_judge(monkeypatch):
@@ -355,7 +532,7 @@ def test_arithmetic_controller_success_overrides_bad_model_verify_text(monkeypat
     )
 
     assert out.terminal == "done"
-    assert runner._done_verified is True
+    assert runner._done_verified is False
     assert runner.run_state.unverified_actions == 0
     payload = json.loads(out.text)
     assert payload["auto_done"]["source"] == "deterministic_fresh_arithmetic"
@@ -551,6 +728,33 @@ def test_visible_state_done_accepts_historical_evidence_for_appeared_task(monkey
     assert "historical visible evidence" in done_checks[-1]["reason"]
 
 
+def test_historical_visible_ledger_outranks_current_native_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "Confirm APPLIED_TEXT_1 and LOCAL_COUNTER_4 have appeared before finishing."
+    )
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._track_visible_evidence("observe", {}, "APPLIED_TEXT_1")
+    runner._track_visible_evidence("read_text", {}, "LOCAL_COUNTER_4")
+
+    def fresh_screen():
+        runner._fresh_done_image_b64 = "fresh-current-frame"
+        return "The historical targets are no longer on the current page."
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("historical appeared evidence should not require current visibility")
+
+    assert runner._verify_done(_Client()) is True
+
+
 def test_visible_state_done_still_requires_fresh_screen_without_appeared_word(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
@@ -708,11 +912,11 @@ def test_verified_save_auto_done_uses_deterministic_artifact_verdict(monkeypatch
     )
 
     assert out.terminal == "done"
-    assert runner._done_verified is True
+    assert runner._done_verified is False
     assert json.loads(out.text)["auto_done"]["source"] == "deterministic_saved_artifact"
 
 
-def test_done_gate_accepts_deterministic_saved_artifact_before_screen_literals(monkeypatch):
+def test_done_gate_requires_independent_judge_after_deterministic_saved_artifact(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner(
@@ -728,16 +932,25 @@ def test_done_gate_accepts_deterministic_saved_artifact_before_screen_literals(m
         "_deterministic_saved_file_verdict",
         lambda _screen, _evidence: (True, "saved XLSX structure verified"),
     )
-    monkeypatch.setattr(
-        runner,
-        "_verify_required_literal_tokens",
-        lambda _screen, _evidence: (_ for _ in ()).throw(
-            AssertionError("screen literal gate must not override deterministic artifact evidence")
-        ),
-    )
+    monkeypatch.setattr(runner, "_verify_required_literal_tokens", lambda *_args: True)
+    captured = {}
 
-    assert runner._verify_done(client=None) is True
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "artifact content and GUI state agree"}'
+                        ))
+                    )])
+
+    assert runner._verify_done(client=_Client()) is True
     assert runner._done_verified is True
+    prompt = captured["messages"][1]["content"]
+    assert "deterministic_saved_file" in prompt
 
 
 def test_auto_done_ignores_verified_expect_without_visible_tool_evidence():
@@ -1306,6 +1519,119 @@ def test_predictive_verify_ignores_roi_from_before_action(monkeypatch):
 
     assert probe.match("NEW_RESULT") is True
     assert probe.to_dict()["generation"] == 101
+
+
+def test_text_appears_does_not_pass_from_stale_uia_without_post_action_roi(monkeypatch):
+    from winpilot.action import verify
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {"last_change_ms": 100, "last_action_change_ms": 100}
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            return []
+
+        @staticmethod
+        def action_evidence(max_age_ms=1500):
+            return ([], False)
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        verify.uia,
+        "find_text",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="ALREADY HERE")],
+    )
+
+    outcome = verify.check(
+        {"text_appears": "ALREADY HERE"},
+        hwnd=123,
+        timeout_s=0.12,
+        watcher=Watcher(),
+        watcher_change_baseline=100,
+    )
+
+    assert outcome.verified is False
+    assert outcome.method == "awaiting-post-action-roi"
+    assert outcome.trace["require_changed_text_evidence"] is True
+
+
+def test_run_with_verify_zero_watcher_generation_rejects_preexisting_uia(monkeypatch):
+    from winpilot.action import verify
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {"last_change_ms": 0, "last_action_change_ms": 0}
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            return []
+
+        @staticmethod
+        def action_evidence(max_age_ms=1500):
+            return ([], False)
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        verify.uia,
+        "find_text",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="ALREADY HERE")],
+    )
+
+    result = verify.run_with_verify(
+        "click",
+        lambda: {"ok": True},
+        expect={"text_appears": "ALREADY HERE"},
+        hwnd=123,
+        retryable=False,
+        timeout_s=0.12,
+        watcher=Watcher(),
+    )
+
+    assert result["verified"] is False
+    assert result["verify_trace"]["require_changed_text_evidence"] is True
+
+
+def test_run_with_verify_watcher_status_error_rejects_preexisting_uia(monkeypatch):
+    from winpilot.action import verify
+
+    class Watcher:
+        @staticmethod
+        def status():
+            raise RuntimeError("watcher unavailable")
+
+        @staticmethod
+        def recent_evidence(max_age_ms=1500):
+            return []
+
+        @staticmethod
+        def action_evidence(max_age_ms=1500):
+            return ([], False)
+
+    monkeypatch.setattr(verify.win32gui, "GetForegroundWindow", lambda: 123)
+    monkeypatch.setattr(verify.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        verify.uia,
+        "find_text",
+        lambda *_args, **_kwargs: [SimpleNamespace(text="ALREADY HERE")],
+    )
+
+    result = verify.run_with_verify(
+        "click",
+        lambda: {"ok": True},
+        expect={"text_appears": "ALREADY HERE"},
+        hwnd=123,
+        retryable=False,
+        timeout_s=0.12,
+        watcher=Watcher(),
+    )
+
+    assert result["verified"] is False
+    assert result["verify_trace"]["require_changed_text_evidence"] is True
 
 
 def test_predictive_verify_validates_each_evidence_source_generation(monkeypatch):
@@ -2077,7 +2403,7 @@ def test_drawing_done_requires_requested_colors(monkeypatch, tmp_path):
     assert runner._done_rejects == 1
 
 
-def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
+def test_simple_drawing_done_requires_fresh_goal_conditioned_visual_judge(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("draw a house outline on the canvas")
@@ -2090,25 +2416,32 @@ def test_simple_drawing_done_uses_deterministic_visual_evidence(monkeypatch):
         ("draw_strokes", '{"ok": true, "visual_change_detected": true}'),
     ]
 
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("deterministic drawing done should not run fresh observe")
-        ),
-    )
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-drawing-frame"
+        return 'Window: "Paint"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
+    calls = []
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run with deterministic drawing evidence")
+                def create(*_a, **kwargs):
+                    calls.append(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh frame shows a house outline"}'
+                        ))
+                    )])
 
     assert runner._verify_done(_Client()) is True
     assert runner._done_verified is True
+    assert calls
+    assert isinstance(calls[0]["messages"][1]["content"], list)
 
 
-def test_simple_drawing_done_accepts_batch_draw_strokes(monkeypatch):
+def test_simple_drawing_pixel_change_does_not_bypass_visual_judge(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("draw a triangle on the canvas")
@@ -2121,25 +2454,29 @@ def test_simple_drawing_done_accepts_batch_draw_strokes(monkeypatch):
         ("run_action_batch", '{"ok": true, "verified": true, "results": [{"action": "draw_strokes", "preview": "{\\"visual_change_detected\\": true}"}]}'),
     ]
 
-    monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("deterministic batch drawing done should not run fresh observe")
-        ),
-    )
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-drawing-frame"
+        return 'Window: "Paint"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
                 def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run with batch drawing evidence")
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": false, "reason": "frame shows a line, not a triangle"}'
+                        ))
+                    )])
 
-    assert runner._verify_done(_Client()) is True
-    assert runner._done_verified is True
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_verified is False
+    assert "not a triangle" in runner._last_done_reject_reason
 
 
-def test_simple_drawing_done_accepts_compacted_late_batch_visual_evidence(monkeypatch):
+def test_simple_drawing_compacted_action_evidence_still_requires_fresh_judge(monkeypatch):
     import json
 
     from winpilot.agent.loop import AgentRunner
@@ -2176,24 +2513,98 @@ def test_simple_drawing_done_accepts_compacted_late_batch_visual_evidence(monkey
     compact = runner._compact_tool_evidence("run_action_batch", raw_result)
     runner._recent_results = [("run_action_batch", compact)]
 
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-drawing-frame"
+        return 'Window: "Paint"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
+    calls = []
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_a, **kwargs):
+                    calls.append(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh frame shows the triangle"}'
+                        ))
+                    )])
+
+    assert "visual_change_detected" in compact
+    assert len(compact) < 900
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+    assert calls
+
+
+def test_simple_drawing_without_fresh_or_semantic_frame_fails_closed(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a house outline on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = ['drag({"x1": 10, "y1": 10, "x2": 50, "y2": 50})']
+    runner._recent_results = [
+        ("drag", '{"ok": true, "visual_change_detected": true}'),
+    ]
+
+    def unavailable_native_screen():
+        runner._fresh_done_image_b64 = ""
+        return 'Window: "Paint"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", unavailable_native_screen)
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("drawing without semantic visual evidence reached judge")
+
+    assert runner._verify_done(_Client()) is False
+    assert "pixel change alone" in runner._last_done_reject_reason
+
+
+def test_saved_drawing_metadata_does_not_bypass_fresh_semantic_judge(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("draw a triangle on the canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'draw_strokes({"strokes": [[[10, 10], [50, 50]]]})'
+    ]
+    runner._recent_results = [
+        ("draw_strokes", '{"ok": true, "visual_change_detected": true}'),
+    ]
+
+    def fresh_native_screen():
+        runner._fresh_done_image_b64 = "fresh-drawing-frame"
+        return 'Window: "Paint"'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_native_screen)
     monkeypatch.setattr(
-        "winpilot.agent.loop.fusion.observe",
-        lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("deterministic compacted drawing done should not run fresh observe")
-        ),
+        runner,
+        "_deterministic_saved_file_verdict",
+        lambda *_args: (True, "saved file exists and is fresh"),
     )
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("LLM judge should not run with compacted batch evidence")
+                def create(*_args, **_kwargs):
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": false, "reason": "saved canvas does not show a triangle"}'
+                        ))
+                    )])
 
-    assert "visual_change_detected" in compact
-    assert len(compact) < 900
-    assert runner._verify_done(_Client()) is True
-    assert runner._done_verified is True
+    assert runner._verify_done(_Client()) is False
+    assert runner._done_verified is False
+    assert "does not show a triangle" in runner._last_done_reject_reason
 
 
 def test_top_level_draw_strokes_uses_fast_controller_visual_verify():
@@ -3045,7 +3456,7 @@ def test_drawing_done_requires_matched_visual_color_even_when_steps_are_low():
     assert "has not matched them yet: blue" in runner._last_done_reject_reason
 
 
-def test_drawing_done_accepts_controller_visual_color_before_step_budget_force_accept():
+def test_drawing_done_requires_goal_conditioned_visual_judge_after_color_match(monkeypatch):
     import json
 
     from winpilot.agent.loop import AgentRunner
@@ -3065,14 +3476,28 @@ def test_drawing_done_accepts_controller_visual_color_before_step_budget_force_a
         })),
     ]
 
+    runner._fresh_done_image_b64 = "fresh-frame"
+    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: "fresh visual frame")
+    calls = []
+
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("controller visual color evidence should skip LLM judge")
+                def create(*_a, **kwargs):
+                    calls.append(kwargs)
+                    from types import SimpleNamespace
+
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps({
+                            "done": True,
+                            "reason": "the fresh frame shows the requested blue triangle",
+                        }))
+                    )])
 
     assert runner._verify_done(_Client(), steps_left=0) is True
+    assert calls
+    assert isinstance(calls[0]["messages"][1]["content"], list)
     assert runner._done_verified is True
     assert runner._done_unverified is False
 
@@ -4048,6 +4473,97 @@ def test_drawing_task_does_not_force_accept_after_rejects():
     assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
+def test_done_reject_cap_reopens_after_causal_repair_and_fresh_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the repaired target window and report its state")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._done_rejects = 99
+    runner._last_done_reject_generation = runner._done_evidence_generation()
+
+    # A successful repair attempt creates a new causal generation. The cap
+    # must block repeated unsupported claims, not permanently brick completion.
+    runner._tool_history.append(("click", {"element_id": 7}, '{"ok": true}'))
+
+    def fresh_screen():
+        runner._fresh_done_image_b64 = "fresh-repaired-frame"
+        return "Fresh native-vision frame attached"
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "the repaired state is visible"}'
+                        ))
+                    )])
+
+    assert runner._verify_done(_Client()) is True
+    assert runner._done_verified is True
+    assert runner._done_rejects == 0
+
+
+def test_repeated_done_claims_do_not_reset_reject_cap():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window and report its state")
+    runner._done_rejects = 99
+    runner._tool_history = [("done", {}, "first unsupported completion claim")]
+    runner._last_done_reject_generation = runner._done_evidence_generation()
+    runner._tool_history.append(("done", {}, "same unsupported completion claim"))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("repeated done must be capped before the judge")
+            ))
+        )
+    )
+
+    assert runner._verify_done(client) is False
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
+
+
+def test_failed_plain_text_action_does_not_reset_reject_cap():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window and report its state")
+    runner._done_rejects = 99
+    runner._tool_history = [("click", {"element_id": 4}, "no current observation; element unavailable")]
+    runner._last_done_reject_generation = runner._done_evidence_generation()
+    runner._tool_history.append((
+        "click", {"element_id": 4}, "no current observation; element unavailable",
+    ))
+
+    assert runner._verify_done(client=None) is False
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
+
+
+def test_identical_reobserve_does_not_reset_reject_cap():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window and report its state")
+    runner._done_rejects = 99
+    runner._last_visual_feedback_b64 = "identical-frame"
+    runner._tool_history = [(
+        "observe", {},
+        "Window: Target\nStatus: unchanged\nPerception trace: run/perception_001_full.json",
+    )]
+    runner._last_done_reject_generation = runner._done_evidence_generation()
+    runner._visual_frame_id += 1
+    runner._tool_history.append((
+        "observe", {},
+        "Window: Target\nStatus: unchanged\nPerception trace: run/perception_002_full.json",
+    ))
+
+    assert runner._verify_done(client=None) is False
+    assert "cannot be force-accepted" in runner._last_done_reject_reason
+
+
 def test_done_judge_failure_is_not_treated_as_success():
     from winpilot.agent.loop import AgentRunner
 
@@ -4065,6 +4581,69 @@ def test_done_judge_failure_is_not_treated_as_success():
     assert runner._done_verified is False
     assert runner._done_unverified is False
     assert "remains unverified" in runner._last_done_reject_reason
+
+
+@pytest.mark.parametrize("invalid_done", ["false", "true", 1, 0, None, [], {}])
+def test_done_judge_accepts_only_literal_json_true(invalid_done):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("inspect the current window and report its state")
+    runner.result_text = "done"
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps({
+                            "done": invalid_done,
+                            "reason": "provider returned a non-boolean verdict",
+                        }))
+                    )])
+
+    assert runner._call_done_judge(_Client(), "window", "recent", "evidence") is False
+    assert runner._done_verified is False
+
+
+def test_native_done_judge_prioritizes_fresh_pixels_and_later_successful_input():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(
+        "Click the calibration button with the real GUI mouse and confirm CALIBRATION_OK."
+    )
+    runner.result_text = "CALIBRATION_OK is visibly present"
+    runner._fresh_done_image_b64 = "fresh-frame"
+    captured = {}
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh pixels show the exact result after native input"}'
+                        ))
+                    )])
+
+    evidence = (
+        '- run_action_batch: {"ok": false, "error": "old malformed attempt"}\n'
+        '- click: {"ok": true, "native_action_executed": true, '
+        '"source_batch_verified": null}'
+    )
+    assert runner._call_done_judge(_Client(), "", "run_action_batch; click", evidence) is True
+
+    system_prompt = captured["messages"][0]["content"]
+    user_content = captured["messages"][1]["content"]
+    user_prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert "AUTHORITATIVE NATIVE GUI EVIDENCE ORDER" in user_prompt
+    assert "native_action_executed=true" in user_prompt
+    assert "earlier attempt failed" in user_prompt
+    assert "source_batch_verified is null" in user_prompt
+    assert "Do not require a redundant observe/read_text" in user_prompt
+    assert "只输出 JSON" in system_prompt
 
 
 def test_generic_task_never_force_accepts_after_repeated_rejects():
@@ -4085,7 +4664,7 @@ def test_generic_task_never_force_accepts_after_repeated_rejects():
     assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
-def test_desktop_drag_done_accepts_controller_plan_evidence_without_full_ocr_name(monkeypatch):
+def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(monkeypatch):
     from winpilot.agent import planner
     from winpilot.agent.loop import AgentRunner
 
@@ -4109,18 +4688,27 @@ def test_desktop_drag_done_accepts_controller_plan_evidence_without_full_ocr_nam
             ),
         )
     ]
-    monkeypatch.setattr(
-        runner,
-        "_fresh_done_screen",
-        lambda: 'Window: "Desktop"\n[1] listitem "WinPilot.." center=(1850,92) bbox=(1805,59,94,67)',
-    )
+    def fresh_screen():
+        runner._fresh_done_image_b64 = "fresh-frame"
+        return 'Window: "Desktop"\n[1] listitem "WinPilot.." center=(1850,92) bbox=(1805,59,94,67)'
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+    captured = {}
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("deterministic desktop drag evidence should skip judge")
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "icon is visibly in the requested corner"}'
+                        ))
+                    )])
 
     assert runner._verify_done(_Client()) is True
     assert runner._done_verified is True
+    content = captured["messages"][1]["content"]
+    prompt = next(part["text"] for part in content if part.get("type") == "text")
+    assert "AUTHORITATIVE SPATIAL RESULT CHECK" in prompt

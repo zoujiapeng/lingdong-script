@@ -24,9 +24,14 @@ from ..model_adapter import (
     model_profile_from_config,
 )
 from ..perception import fusion, intent, vlm
-from ..utils.image_capture import capture_window_jpeg_b64
+from ..utils.image_capture import (
+    capture_window_jpeg_b64,
+    jpeg_diff_ratio,
+    jpeg_diff_ratio_in_normalized_roi,
+)
 from ..utils.log import BUS, logger
 from ..utils.screenshot import window_region
+from ..utils.trace_payload import sanitize_trace_payload
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
 from .done_verifier import (
@@ -81,7 +86,7 @@ from .task_rules import (
 )
 from .tools import ToolResult, ToolSession, tool_schemas
 
-_KEEP_FULL_OBSERVATIONS = 2
+_KEEP_FULL_OBSERVATIONS = 1
 _API_RETRIES = 4
 # 429/rate-limit backoff base seconds (exponential: 5, 10, 20...). Bursts of
 # rapid LLM calls (e.g. drawing many strokes) can trip provider rate limits;
@@ -92,6 +97,33 @@ _RATE_LIMIT_BACKOFF_S = 5.0
 _CONTEXT_FOLD_THRESHOLD_CHARS = 32000
 _MAX_ASSISTANT_HISTORY_CHARS = 900
 _ACTION_TOOLS = set(_RUN_ACTION_TOOLS)
+_VISUAL_MUTATION_TOOLS = {
+    "open_app", "launch", "focus_window", "click", "type_text", "hotkey",
+    "scroll", "drag", "draw_strokes", "tray_click", "clipboard_paste",
+    "paste_image_file", "mouse_down", "mouse_up", "move_mouse", "hold_key",
+    "run_action_batch", "execute_subgoal", "coordinate_click_test",
+}
+_LOW_LEVEL_VISUAL_TOOLS = {
+    "click", "type_text", "hotkey", "scroll", "drag", "draw_strokes",
+    "tray_click", "clipboard_paste", "paste_image_file", "mouse_down",
+    "mouse_up", "move_mouse", "hold_key", "coordinate_click_test",
+    "run_action_batch", "execute_subgoal",
+}
+# A native model grounds these actions in one submitted image.  Letting two of
+# them share a batch recreates an open-loop macro: the second target may no
+# longer exist after the first action.  Keyboard-only work may remain beside a
+# single spatial mutation because it does not select another pixel target.
+_NATIVE_BATCH_SPATIAL_MUTATIONS = {
+    "click",
+    "click_element",
+    "type_into_element",  # locates/focuses the field with a click before typing
+    "scroll",
+    "move_mouse",
+    "drag",
+    "draw_strokes",
+    "select_color",
+    "ensure_document_surface",  # may click through document-creation surfaces
+}
 
 
 def _clipboard_target_tokens(task: str) -> list[str]:
@@ -205,10 +237,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._done_rejects = 0                       # done-gate bounce count
         self._done_unverified = False                # forced-accept after max rejects
         self._done_verified = False                  # done-gate judge genuinely passed
+        self._fresh_done_image_b64 = ""              # authoritative frame for final judge
+        self._pending_visual_literal_tokens: list[str] = []
+        self._pending_visual_payloads: list[str] = []
+        self._pending_visual_spatial_check = ""
+        self._pending_visual_arithmetic_check = ""
+        self._pending_visual_communication_check = ""
+        self._saved_artifact_verified = False
         self._recent_results: list[tuple[str, str]] = []  # tool outputs as done-gate evidence
         self._visible_evidence_ledger: list[dict[str, Any]] = []
         self.session.visible_evidence_ledger = self._visible_evidence_ledger
         self._last_done_reject_reason = ""
+        self._last_done_reject_generation: tuple[int, int, int] | None = None
         self._escalate_next = False                  # use stronger model on next _chat
         self._consecutive_unverified = 0             # steps without a verified=true action
         self._last_reflect_step = 0                  # step number of last reflect injection
@@ -236,6 +276,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._delivered_text_mutations: list[dict[str, Any]] = []
         self._applied_format_mutations: list[dict[str, Any]] = []
         self._tool_sequence = 0
+        # Native-vision closed loop.  It is activated only by run(), so helper
+        # unit tests and direct ToolSession callers keep their existing API.
+        self._visual_closed_loop_active = False
+        self._visual_frame_id = 0
+        self._visual_frame_epoch = -1
+        self._visual_frame_hwnd = 0
+        self._visual_frame_region: tuple[int, int, int, int] | None = None
+        self._last_visual_feedback_b64 = ""
+        self._last_visual_feedback_action = ""
+        self._visual_grounding_block_count = 0
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -300,8 +350,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             run_dir.mkdir(parents=True, exist_ok=True)
             safe_kind = re.sub(r"[^a-zA-Z0-9_.-]+", "_", kind).strip("_") or "event"
             path = run_dir / f"{self._llm_trace_index:03d}_{safe_kind}.json"
+            serializable = self._jsonable(payload)
+            trace_payload = sanitize_trace_payload(
+                serializable,
+                frame_id=int(getattr(self, "_visual_frame_id", 0) or 0) or None,
+            )
             path.write_text(
-                json.dumps(self._jsonable(payload), ensure_ascii=False, indent=2, default=str),
+                json.dumps(trace_payload, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
             )
         except Exception as exc:
@@ -365,8 +420,36 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         cache from that point once. So we avoid it entirely while the context
         is small (the common case → near-100% cache hits), and only start
         folding the oldest observations once total size crosses a threshold.
-        The newest _KEEP_FULL_OBSERVATIONS are always kept full.
+        The newest _KEEP_FULL_OBSERVATIONS are always kept full. Inline visual
+        frames are stricter: the closed loop only reasons from the current
+        frame, so older image parts are folded immediately even below the text
+        threshold instead of being resent on every later model request.
         """
+        def has_inline_frame(index: int) -> bool:
+            content = self.messages[index].get("content") or ""
+            return bool(
+                isinstance(content, list)
+                and any(
+                    isinstance(part, dict)
+                    and str(part.get("type") or "") in {"image_url", "input_image"}
+                    for part in content
+                )
+            )
+
+        visual_items = [
+            (idx, summary)
+            for idx, summary in self._foldable
+            if has_inline_frame(idx)
+        ]
+        fold_visual = visual_items[:-_KEEP_FULL_OBSERVATIONS]
+        if fold_visual:
+            folded_indices = {idx for idx, _summary in fold_visual}
+            for idx, summary in fold_visual:
+                self.messages[idx]["content"] = self._fold_checkpoint(summary)
+            self._foldable = [
+                item for item in self._foldable if item[0] not in folded_indices
+            ]
+
         def total_chars() -> int:
             total = 0
             for m in self.messages:
@@ -395,40 +478,93 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if not already_folded:
                 self.messages[idx]["content"] = self._fold_checkpoint(summary)
 
-    def _inject_observe_screenshot(self) -> None:
-        """After an observe, embed the current window screenshot into history as
-        a user message so a native vision model can see the actual pixels
-        without a separate VLM grounding pass.
+    def _inject_visual_frame(
+        self,
+        *,
+        phase: str,
+        action: str = "",
+        image_b64: str = "",
+        frame_region: Any | None = None,
+        result_preview: str = "",
+    ) -> bool:
+        """Append one authoritative target-window frame to the model history.
 
-        The injected message is registered in _foldable so it gets compressed
-        alongside the paired observe tool result when history grows large.
+        The old loop only attached pixels after an explicit ``observe`` call.
+        That left the model blind after actions and allowed it to keep operating
+        from stale structured summaries.  This helper is used for the initial
+        bound window, explicit observations, and every completed visual
+        transaction.  It also records the screen epoch used by the pre-action
+        grounding gate.
         """
         if not _main_model_has_vision():
-            return
+            return False
         hwnd = self.session.hwnd
         if not hwnd:
-            return
+            return False
+        started = time.monotonic()
         try:
-            b64 = capture_window_jpeg_b64(hwnd)
+            cached = getattr(self.session, "_last_native_frame_capture", None)
+            cached_matches = bool(
+                image_b64
+                and isinstance(cached, dict)
+                and cached.get("image_b64") == image_b64
+                and int(cached.get("hwnd") or 0) == int(hwnd)
+                and cached.get("region") is not None
+            )
+            if frame_region is not None:
+                # Preflight captured these pixels from this exact rectangle.
+                # Never query a later window rectangle and pair it with an
+                # older JPEG: a move/resize between the two would corrupt all
+                # subsequent normalized coordinates.
+                region = frame_region
+            elif cached_matches:
+                # Explicit observe captured these pixels and this rectangle in
+                # one operation. Reuse the pair without a redundant screenshot.
+                region = cached["region"]
+            else:
+                # capture_window_jpeg_b64 uses screenshot.capture(), which
+                # clamps partially off-screen windows to the virtual desktop.
+                # Pass and store the same exact region so normalized clicks do
+                # not shift at monitor edges.
+                region = window_region(hwnd).clamp_to_screen()
+            if region.width < 16 or region.height < 16:
+                return False
+            b64 = image_b64 or capture_window_jpeg_b64(hwnd, region=region)
             if not b64:
-                return
-            region = window_region(hwnd)
+                return False
             max_side = 1120
             scale = min(1.0, max_side / max(1, region.width, region.height))
             submitted_width = max(1, int(region.width * scale))
             submitted_height = max(1, int(region.height * scale))
+            self._visual_frame_id += 1
+            frame_id = self._visual_frame_id
+            epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+            action_line = f" after action {action!r}" if action else ""
+            preview_line = (
+                " Tool output preview is diagnostic only: "
+                + re.sub(r"\s+", " ", result_preview).strip()[:240]
+                if result_preview else ""
+            )
             self.messages.append({
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
                         "text": (
-                            "[当前窗口截图；结合上方文字元素列表使用。截图是目标窗口裁剪，不是全屏。"
+                            f"[Visual closed-loop frame #{frame_id}; phase={phase}{action_line}. "
+                            "This real target-window image is the authoritative current state. "
+                            "Judge it as a whole before the next action; structured elements, "
+                            "rules, and controller summaries are only hints and must not "
+                            "override contradictory pixels. If the intended target/result is "
+                            "not visually clear, do not guess or continue blindly. "
+                            "The image is a target-window crop, not the full desktop. "
                             f"物理屏幕区域 left={region.left}, top={region.top}, "
                             f"width={region.width}, height={region.height}；"
                             f"提交图片约 {submitted_width}x{submitted_height}。"
-                            "若从图片估计相对坐标，必须按窗口区域缩放并加 left/top，"
-                            "最终 click 坐标始终是物理屏幕坐标。]"
+                            "直接依据此图操作时必须使用 frame_x/frame_y（0..1000，"
+                            "相对整张当前帧）；运行时会映射到物理屏幕。不要自行按图片"
+                            "像素缩放，也不要把图片坐标填进 x/y。结构化 observe 的"
+                            f"目标应使用 element_id；物理 x/y 仅供控制器内部使用。{preview_line}]"
                         ),
                     },
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
@@ -436,8 +572,668 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             })
             self._foldable.append((len(self.messages) - 1, "[已折叠 screenshot]"))
             self._fold_old()
+            self._visual_frame_epoch = epoch
+            self._visual_frame_hwnd = int(hwnd)
+            self._visual_frame_region = (
+                int(region.left), int(region.top), int(region.width), int(region.height),
+            )
+            self._last_visual_feedback_b64 = b64
+            self._last_visual_feedback_action = str(action or phase)
+            self._visual_grounding_block_count = 0
+            if phase in {"post_action", "preflight"}:
+                # Element ids/trees describe the pre-action frame.  Keeping
+                # them around lets a later execute_subgoal silently act on a
+                # stale UI.  Controller-local batches retain their snapshot
+                # only inside the transaction; the next model turn must
+                # re-ground structure if it chooses a structured action.
+                self._invalidate_structured_grounding()
+            BUS.publish(
+                "visual_feedback",
+                run_id=self.run_id,
+                frame_id=frame_id,
+                phase=phase,
+                action=action,
+                hwnd=int(hwnd),
+                screen_epoch=epoch,
+                capture_latency_ms=int((time.monotonic() - started) * 1000),
+            )
+            return True
         except Exception as exc:
-            logger.debug("observe 截图注入失败: %s", exc)
+            logger.debug("visual closed-loop frame injection failed: %s", exc)
+            return False
+
+    def _inject_observe_screenshot(self, image_b64: str = "") -> bool:
+        """Backward-compatible observe hook using the unified frame path."""
+        return self._inject_visual_frame(
+            phase="observe",
+            action="observe",
+            image_b64=image_b64,
+        )
+
+    def _invalidate_structured_grounding(self) -> None:
+        """Drop structured state that no longer belongs to the visual frame.
+
+        External UI changes do not advance ToolSession's action epoch.  When a
+        preflight capture replaces the authoritative frame, keeping the old
+        snapshot or its short-lived observe cache would let a later element_id
+        or controller refresh silently ground against the previous pixels.
+        """
+        self.session.snapshot = None
+        self.session._observe_cache = None
+        self.session._last_native_frame_capture = None
+
+    def _visual_preflight_target_roi(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> tuple[float, float, float, float] | None:
+        """Find the smallest safely grounded action ROI in frame coordinates.
+
+        Unrelated animation should not cancel a click whose target pixels are
+        unchanged.  The ROI comes only from explicit frame coordinates, a
+        current structured element, or a coarse expected-region hint.  If no
+        such grounding exists, callers retain the conservative whole-frame
+        preflight.
+        """
+        margin = float(CONFIG.get(
+            "controller", "visual_preflight_target_margin", default=60.0,
+        ) or 60.0)
+        margin = max(8.0, min(200.0, margin))
+        rois: list[tuple[float, float, float, float]] = []
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if 0.0 <= parsed <= 1000.0 else None
+
+        def add_rect(
+            left: float,
+            top: float,
+            right: float,
+            bottom: float,
+            *,
+            pad: float = margin,
+        ) -> None:
+            left = max(0.0, min(1000.0, left - pad))
+            top = max(0.0, min(1000.0, top - pad))
+            right = max(0.0, min(1000.0, right + pad))
+            bottom = max(0.0, min(1000.0, bottom + pad))
+            if right > left and bottom > top:
+                rois.append((left, top, right, bottom))
+
+        def add_points(points: list[tuple[float, float]]) -> None:
+            if points:
+                add_rect(
+                    min(point[0] for point in points),
+                    min(point[1] for point in points),
+                    max(point[0] for point in points),
+                    max(point[1] for point in points),
+                )
+
+        def add_element(element_id: Any) -> bool:
+            try:
+                wanted = int(element_id)
+            except (TypeError, ValueError):
+                return False
+            snapshot = getattr(self.session, "snapshot", None)
+            frame = self._visual_frame_region
+            if snapshot is None or frame is None:
+                return False
+            try:
+                snapshot_hwnd = int(getattr(snapshot, "hwnd", 0) or 0)
+                current_hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            if snapshot_hwnd and current_hwnd and snapshot_hwnd != current_hwnd:
+                return False
+            frame_left, frame_top, frame_width, frame_height = frame
+            if frame_width <= 0 or frame_height <= 0:
+                return False
+            for element in (getattr(snapshot, "elements", None) or []):
+                if int(getattr(element, "elem_id", -1) or -1) != wanted:
+                    continue
+                width = max(1.0, float(getattr(element, "width", 0) or 0))
+                height = max(1.0, float(getattr(element, "height", 0) or 0))
+                left = float(getattr(element, "left", 0) or 0)
+                top = float(getattr(element, "top", 0) or 0)
+                if not left and getattr(element, "cx", None) is not None:
+                    left = float(element.cx) - width / 2.0
+                if not top and getattr(element, "cy", None) is not None:
+                    top = float(element.cy) - height / 2.0
+                add_rect(
+                    (left - frame_left) / frame_width * 1000.0,
+                    (top - frame_top) / frame_height * 1000.0,
+                    (left + width - frame_left) / frame_width * 1000.0,
+                    (top + height - frame_top) / frame_height * 1000.0,
+                )
+                return True
+            return False
+
+        def add_semantic_target(payload: dict[str, Any]) -> bool:
+            snapshot = getattr(self.session, "snapshot", None)
+            if snapshot is None:
+                return False
+            labels = [
+                str(payload.get(key) or "").strip().casefold()
+                for key in ("label", "fallback_text", "text_query", "name")
+                if str(payload.get(key) or "").strip()
+            ]
+            if not labels:
+                return False
+            matches = []
+            for element in (getattr(snapshot, "elements", None) or []):
+                text = str(getattr(element, "text", "") or "").strip().casefold()
+                if text and any(label == text or label in text or text in label for label in labels):
+                    matches.append(element)
+            if not matches or len(matches) > 4:
+                return False
+            added = False
+            for element in matches:
+                added = add_element(getattr(element, "elem_id", None)) or added
+            return added
+
+        def add_expected_region(value: Any) -> bool:
+            hint = str(value or "").strip().casefold().replace("_", "-").replace(" ", "-")
+            regions = {
+                "top-left": (0.0, 0.0, 520.0, 520.0),
+                "top-right": (480.0, 0.0, 1000.0, 520.0),
+                "bottom-left": (0.0, 480.0, 520.0, 1000.0),
+                "bottom-right": (480.0, 480.0, 1000.0, 1000.0),
+                "top": (0.0, 0.0, 1000.0, 420.0),
+                "bottom": (0.0, 580.0, 1000.0, 1000.0),
+                "left": (0.0, 0.0, 520.0, 1000.0),
+                "right": (480.0, 0.0, 1000.0, 1000.0),
+                "center": (220.0, 180.0, 780.0, 820.0),
+                "middle": (220.0, 180.0, 780.0, 820.0),
+            }
+            region = regions.get(hint)
+            if region is None:
+                return False
+            add_rect(*region, pad=0.0)
+            return True
+
+        def collect(name: str, payload: dict[str, Any]) -> None:
+            if name == "run_action_batch":
+                for item in payload.get("actions") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    child_name = str(item.get("action") or item.get("tool") or "")
+                    if child_name:
+                        params = item.get("params") if isinstance(item.get("params"), dict) else {}
+                        child_args = {
+                            **params,
+                            **{
+                                key: value for key, value in item.items()
+                                if key not in {"action", "tool", "params"}
+                            },
+                        }
+                    elif len(item) == 1:
+                        child_name, raw = next(iter(item.items()))
+                        child_args = dict(raw) if isinstance(raw, dict) else {}
+                    else:
+                        continue
+                    collect(str(child_name), child_args)
+                return
+            if name == "execute_subgoal":
+                click_specs = []
+                if isinstance(payload.get("click"), dict):
+                    click_specs.append(payload["click"])
+                click_specs.extend(
+                    item for item in (payload.get("clicks") or []) if isinstance(item, dict)
+                )
+                for spec in click_specs:
+                    collect("click", spec)
+                input_spec = payload.get("input")
+                if isinstance(input_spec, dict):
+                    add_element(input_spec.get("element_id")) or add_semantic_target(input_spec)
+                    add_expected_region(input_spec.get("expected_region"))
+                return
+            if name in {"click", "scroll", "move_mouse"}:
+                x = number(payload.get("frame_x"))
+                y = number(payload.get("frame_y"))
+                if x is not None and y is not None:
+                    add_points([(x, y)])
+                    return
+            elif name == "drag":
+                points: list[tuple[float, float]] = []
+                for x_key, y_key in (("frame_x1", "frame_y1"), ("frame_x2", "frame_y2")):
+                    x = number(payload.get(x_key))
+                    y = number(payload.get(y_key))
+                    if x is not None and y is not None:
+                        points.append((x, y))
+                for raw in payload.get("frame_points") or []:
+                    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                        x, y = number(raw[0]), number(raw[1])
+                        if x is not None and y is not None:
+                            points.append((x, y))
+                if points:
+                    add_points(points)
+                    return
+            elif name == "draw_strokes":
+                points = []
+                for stroke in payload.get("frame_strokes") or []:
+                    for raw in stroke if isinstance(stroke, list) else []:
+                        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                            x, y = number(raw[0]), number(raw[1])
+                            if x is not None and y is not None:
+                                points.append((x, y))
+                if points:
+                    add_points(points)
+                    return
+            if payload.get("element_id") is not None and add_element(payload.get("element_id")):
+                return
+            if add_semantic_target(payload):
+                return
+            add_expected_region(payload.get("expected_region"))
+
+        collect(str(tool_name or ""), args if isinstance(args, dict) else {})
+        if not rois:
+            return None
+        return (
+            min(roi[0] for roi in rois),
+            min(roi[1] for roi in rois),
+            max(roi[2] for roi in rois),
+            max(roi[3] for roi in rois),
+        )
+
+    def _has_fresh_visual_grounding(self) -> bool:
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+        region_matches = False
+        if hwnd and self._visual_frame_region is not None:
+            try:
+                current = window_region(hwnd).clamp_to_screen()
+                region_matches = self._visual_frame_region == (
+                    int(current.left), int(current.top),
+                    int(current.width), int(current.height),
+                )
+            except Exception:
+                region_matches = False
+        return bool(
+            hwnd
+            and self._visual_frame_hwnd == hwnd
+            and self._visual_frame_epoch == epoch
+            and self._last_visual_feedback_b64
+            and region_matches
+        )
+
+    def _preflight_visual_frame(
+        self,
+        tool_name: str = "",
+        args: dict[str, Any] | None = None,
+    ) -> tuple[str, float | None, str, Any | None]:
+        """Detect external pixel changes that happened during model inference.
+
+        Internal screen epochs cannot see a webpage auto-refresh, popup, user
+        occlusion, or animation. A cheap fresh capture before low-level input
+        closes that gap. Meaningful changes return the new frame and cancel the
+        pending action; tiny caret/antialiasing changes stay below the threshold.
+        """
+        previous = self._last_visual_feedback_b64
+        # Unit tests and legacy synthetic callers use short placeholders, not
+        # real JPEGs. Production frames are substantially larger.
+        if len(previous) < 128 or not self._has_fresh_visual_grounding():
+            return "", 0.0, "", None
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        started = time.monotonic()
+        try:
+            region = window_region(hwnd).clamp_to_screen()
+            capture_region_tuple = (
+                int(region.left), int(region.top), int(region.width), int(region.height),
+            )
+            geometry_changed_before_capture = bool(
+                self._visual_frame_region is not None
+                and capture_region_tuple != self._visual_frame_region
+            )
+            current = capture_window_jpeg_b64(hwnd, region=region)
+            after_region = window_region(hwnd).clamp_to_screen()
+            after_region_tuple = (
+                int(after_region.left), int(after_region.top),
+                int(after_region.width), int(after_region.height),
+            )
+            geometry_changed_during_capture = after_region_tuple != capture_region_tuple
+        except Exception as exc:
+            current = ""
+            error = str(exc)
+            region = None
+            capture_region_tuple = None
+            after_region_tuple = None
+            geometry_changed_before_capture = False
+            geometry_changed_during_capture = False
+        else:
+            error = ""
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if not current:
+            BUS.publish(
+                "visual_preflight",
+                run_id=self.run_id,
+                ok=False,
+                capture_latency_ms=latency_ms,
+                error=error or "fresh target-window capture returned empty",
+            )
+            return "", None, error or "fresh target-window capture returned empty", region
+        if geometry_changed_before_capture or geometry_changed_during_capture:
+            BUS.publish(
+                "visual_preflight",
+                run_id=self.run_id,
+                ok=True,
+                changed=True,
+                geometry_changed=True,
+                capture_region=list(capture_region_tuple or ()),
+                post_capture_region=list(after_region_tuple or ()),
+                change_ratio=1.0,
+                decision_scope="window_geometry",
+                capture_latency_ms=latency_ms,
+            )
+            # ``current`` is bound to ``region`` even if the window moved
+            # immediately afterward. Injection preserves that exact pair, and
+            # the next grounding check will reject it if geometry moved again.
+            return current, 1.0, "", region
+        global_ratio = jpeg_diff_ratio(previous, current)
+        if global_ratio is None:
+            BUS.publish(
+                "visual_preflight",
+                run_id=self.run_id,
+                ok=False,
+                capture_latency_ms=latency_ms,
+                error="could not compare the current frame with its visual grounding",
+            )
+            return "", None, "could not compare the current frame with its visual grounding", region
+        global_threshold = float(CONFIG.get(
+            "controller", "visual_preflight_change_ratio", default=0.0025,
+        ))
+        target_roi = self._visual_preflight_target_roi(tool_name, args or {})
+        target_ratio: float | None = None
+        decision_ratio = float(global_ratio)
+        threshold = max(0.0, global_threshold)
+        decision_scope = "whole_frame"
+        if target_roi is not None:
+            target_ratio = jpeg_diff_ratio_in_normalized_roi(
+                previous, current, target_roi,
+            )
+            if target_ratio is not None:
+                decision_ratio = float(target_ratio)
+                threshold = max(0.0, float(CONFIG.get(
+                    "controller", "visual_preflight_target_change_ratio", default=0.01,
+                )))
+                decision_scope = "action_target_roi"
+        changed = bool(decision_ratio > threshold)
+        BUS.publish(
+            "visual_preflight",
+            run_id=self.run_id,
+            ok=True,
+            changed=changed,
+            change_ratio=round(decision_ratio, 6),
+            global_change_ratio=round(float(global_ratio), 6),
+            target_change_ratio=(
+                round(float(target_ratio), 6) if target_ratio is not None else None
+            ),
+            target_roi=(
+                [round(float(value), 2) for value in target_roi]
+                if target_roi is not None else None
+            ),
+            decision_scope=decision_scope,
+            threshold=threshold,
+            capture_latency_ms=latency_ms,
+        )
+        return (current if changed else ""), decision_ratio, "", region
+
+    def _map_normalized_frame_coordinates(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Map explicit 0..1000 frame coordinates to physical screen pixels.
+
+        Native multimodal models naturally ground within the submitted image.
+        Asking them to also infer JPEG resize and DPI/window offsets caused
+        repeatable misses.  The schema exposes unambiguous ``frame_*`` fields;
+        physical ``x/y`` remain available for structured/controller callers.
+        """
+        def contains_frame_coordinate(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(
+                    str(key).startswith("frame_") or contains_frame_coordinate(child)
+                    for key, child in value.items()
+                )
+            if isinstance(value, list):
+                return any(contains_frame_coordinate(child) for child in value)
+            return False
+
+        def batch_action_name(action: Any) -> str:
+            if not isinstance(action, dict):
+                return ""
+            name = str(action.get("action") or action.get("tool") or "").strip()
+            if name:
+                return name
+            if len(action) == 1:
+                return str(next(iter(action))).strip()
+            return ""
+
+        if tool_name == "run_action_batch":
+            # Validate before frame lookup, preflight, coordinate mapping, or
+            # dispatch.  The limit applies to semantic/element-id targets just
+            # as it does to frame_* coordinates: all of them consume the same
+            # model-visible scene and become stale after the first mutation.
+            actions = args.get("actions")
+            if isinstance(actions, list):
+                spatial = [
+                    (index, name)
+                    for index, action in enumerate(actions)
+                    if (name := batch_action_name(action)) in _NATIVE_BATCH_SPATIAL_MUTATIONS
+                ]
+                if len(spatial) > 1:
+                    locations = ", ".join(
+                        f"actions[{index}]={name}" for index, name in spatial
+                    )
+                    raise ValueError(
+                        "native run_action_batch allows at most one spatial UI mutation "
+                        f"per authoritative frame ({locations}). No batch action was executed. "
+                        "Keep keyboard-only input/waits with the first mutation if useful, then "
+                        "put each later click/element click/scroll/mouse/drag/draw action in a "
+                        "new model turn after inspecting the next real post-action frame."
+                    )
+
+        region = self._visual_frame_region
+        if not region or not self._has_fresh_visual_grounding():
+            if contains_frame_coordinate(args):
+                raise ValueError(
+                    f"{tool_name} frame coordinates require a fresh authoritative target-window frame"
+                )
+            return args
+        left, top, width, height = region
+        mapped = dict(args)
+
+        if tool_name == "run_action_batch":
+            actions = mapped.get("actions")
+            if not isinstance(actions, list):
+                return mapped
+            mapped_actions: list[Any] = []
+            coordinate_actions = {"click", "scroll", "drag", "draw_strokes", "move_mouse"}
+            for index, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    mapped_actions.append(action)
+                    continue
+                name = str(action.get("action") or action.get("tool") or "")
+                action_args: dict[str, Any]
+                if name:
+                    action_args = {
+                        key: value
+                        for key, value in action.items()
+                        if key not in {"action", "tool", "params"}
+                    }
+                    params = action.get("params")
+                    if isinstance(params, dict):
+                        action_args = {**params, **action_args}
+                elif len(action) == 1:
+                    name, raw_args = next(iter(action.items()))
+                    name = str(name)
+                    action_args = dict(raw_args) if isinstance(raw_args, dict) else {"value": raw_args}
+                else:
+                    mapped_actions.append(action)
+                    continue
+                if name not in coordinate_actions:
+                    mapped_actions.append(action)
+                    continue
+                try:
+                    action_args = self._map_normalized_frame_coordinates(name, action_args)
+                except ValueError as exc:
+                    raise ValueError(f"run_action_batch.actions[{index}]: {exc}") from None
+                mapped_actions.append({"action": name, **action_args})
+            mapped["actions"] = mapped_actions
+            return mapped
+
+        def point(x_key: str, y_key: str) -> tuple[int, int] | None:
+            present = (x_key in mapped, y_key in mapped)
+            if not any(present):
+                return None
+            if not all(present):
+                raise ValueError(
+                    f"{tool_name} requires both {x_key} and {y_key} from the current frame"
+                )
+            try:
+                nx = float(mapped[x_key])
+                ny = float(mapped[y_key])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{x_key}/{y_key} must be numeric values in 0..1000"
+                ) from None
+            if not (0.0 <= nx <= 1000.0 and 0.0 <= ny <= 1000.0):
+                raise ValueError(
+                    f"{x_key}/{y_key} must stay inside the current frame's 0..1000 bounds"
+                )
+            # Region.right/bottom are exclusive.  Mapping 1000 through width
+            # itself would click one pixel outside the captured window.
+            px = int(round(left + nx / 1000.0 * max(0, width - 1)))
+            py = int(round(top + ny / 1000.0 * max(0, height - 1)))
+            return px, py
+
+        def require_normalized_instead_of_physical(
+            physical_keys: tuple[str, ...],
+            *,
+            bypass: bool = False,
+        ) -> None:
+            if bypass:
+                return
+            if any(key in mapped for key in physical_keys):
+                joined = "/".join(physical_keys)
+                raise ValueError(
+                    f"native visual {tool_name} rejected model-supplied physical {joined}; "
+                    "use the frame_* 0..1000 fields from the current authoritative frame"
+                )
+
+        used = False
+        source: dict[str, Any] = {}
+        if tool_name in {"click", "scroll", "move_mouse"}:
+            has_frame_point = "frame_x" in mapped or "frame_y" in mapped
+            if has_frame_point and any(key in mapped for key in ("x", "y")):
+                raise ValueError(
+                    f"{tool_name} received mixed frame and physical coordinate sources"
+                )
+            if tool_name == "click" and has_frame_point and mapped.get("element_id") is not None:
+                raise ValueError("click received both element_id and frame coordinates; choose one grounded target")
+            mapped_point = point("frame_x", "frame_y")
+            if mapped_point is not None:
+                mapped["x"], mapped["y"] = mapped_point
+                source = {"frame_x": mapped.pop("frame_x"), "frame_y": mapped.pop("frame_y")}
+                used = True
+            else:
+                # This method only processes model-authored tool arguments.
+                # Semantic hints do not make raw x/y safe: direct click gives
+                # physical coordinates precedence and would silently ignore a
+                # label. Controller-generated physical coordinates are added
+                # later, after this boundary, so no model x/y needs a bypass.
+                require_normalized_instead_of_physical(("x", "y"))
+                if tool_name != "click" or not (
+                    mapped.get("element_id") is not None
+                    or any(mapped.get(key) for key in (
+                        "label", "fallback_text", "role", "expected_region", "visual_anchor",
+                    ))
+                ):
+                    raise ValueError(
+                        f"{tool_name} requires frame_x/frame_y from the current frame"
+                    )
+        elif tool_name == "drag":
+            if any(key in mapped for key in ("frame_x1", "frame_y1", "frame_x2", "frame_y2")) \
+                    and any(key in mapped for key in ("x1", "y1", "x2", "y2", "points")):
+                raise ValueError("drag received mixed frame and physical coordinate sources")
+            first = point("frame_x1", "frame_y1")
+            second = point("frame_x2", "frame_y2")
+            if (first is None) != (second is None):
+                raise ValueError("drag requires both normalized frame endpoints")
+            if first is not None and second is not None:
+                mapped["x1"], mapped["y1"] = first
+                mapped["x2"], mapped["y2"] = second
+                source = {
+                    key: mapped.pop(key)
+                    for key in ("frame_x1", "frame_y1", "frame_x2", "frame_y2")
+                }
+                if "frame_points" in mapped:
+                    raw_points = mapped.pop("frame_points")
+                    if not isinstance(raw_points, list):
+                        raise ValueError("frame_points must be an array of [x,y] points")
+                    physical_points: list[list[int]] = []
+                    for index, raw_point in enumerate(raw_points):
+                        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                            raise ValueError(f"frame_points[{index}] must be [x,y]")
+                        temp = {"frame_x": raw_point[0], "frame_y": raw_point[1]}
+                        prior = mapped
+                        mapped = temp
+                        try:
+                            physical = point("frame_x", "frame_y")
+                        finally:
+                            mapped = prior
+                        assert physical is not None
+                        physical_points.append([physical[0], physical[1]])
+                    mapped["points"] = physical_points
+                    source["frame_points"] = raw_points
+                used = True
+            else:
+                require_normalized_instead_of_physical(("x1", "y1", "x2", "y2", "points"))
+                raise ValueError("drag requires frame_x1/frame_y1 and frame_x2/frame_y2")
+        elif tool_name == "draw_strokes":
+            if "frame_strokes" in mapped:
+                if "strokes" in mapped:
+                    raise ValueError("draw_strokes received mixed frame and physical coordinate sources")
+                raw_strokes = mapped.pop("frame_strokes")
+                if not isinstance(raw_strokes, list) or not raw_strokes:
+                    raise ValueError("frame_strokes must contain at least one stroke")
+                physical_strokes: list[list[list[int]]] = []
+                for stroke_index, raw_stroke in enumerate(raw_strokes):
+                    if not isinstance(raw_stroke, list) or len(raw_stroke) < 2:
+                        raise ValueError(
+                            f"frame_strokes[{stroke_index}] must contain at least two [x,y] points"
+                        )
+                    physical_stroke: list[list[int]] = []
+                    for point_index, raw_point in enumerate(raw_stroke):
+                        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                            raise ValueError(
+                                f"frame_strokes[{stroke_index}][{point_index}] must be [x,y]"
+                            )
+                        temp = {"frame_x": raw_point[0], "frame_y": raw_point[1]}
+                        prior = mapped
+                        mapped = temp
+                        try:
+                            physical = point("frame_x", "frame_y")
+                        finally:
+                            mapped = prior
+                        assert physical is not None
+                        physical_stroke.append([physical[0], physical[1]])
+                    physical_strokes.append(physical_stroke)
+                mapped["strokes"] = physical_strokes
+                source = {"frame_strokes": raw_strokes}
+                used = True
+            else:
+                require_normalized_instead_of_physical(("strokes",))
+                if "normalized_strokes" not in mapped:
+                    raise ValueError("draw_strokes requires frame_strokes from the current frame")
+        if used:
+            mapped["coordinate_space"] = "current_frame_normalized_0_1000"
+            mapped["visual_frame_id"] = self._visual_frame_id
+            mapped["source_frame_coordinates"] = source
+        return mapped
 
     # ----------------------------------------------------------------- api
     def _chat(self, client, tools: list[dict]):
@@ -648,7 +1444,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         except (json.JSONDecodeError, TypeError):
             return
         if isinstance(data, dict) and "verified" in data:
-            ok = bool(data["verified"])
+            ok = data["verified"] is True
             self._last_verify_ok = ok
             if ok:
                 self._had_verified_action = True
@@ -982,15 +1778,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
                 if arithmetic_verdict is not None and arithmetic_verdict[0]:
                     reason = arithmetic_verdict[1]
-                    self._done_verified = True
                     self.run_state.accept_verification(tool_name, reason)
                     BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
-                    BUS.publish(
-                        "done_check",
-                        run_id=self.run_id,
-                        passed=True,
-                        reason=reason,
-                    )
                     try:
                         arithmetic_payload = json.loads(result.text or "{}")
                     except (json.JSONDecodeError, TypeError):
@@ -1005,7 +1794,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     if tool_name in {"observe", "read_text"}:
                         arithmetic_payload["fresh_evidence_preview"] = screen[:1000]
                     BUS.publish(
-                        "agent_auto_done",
+                        "agent_auto_done_candidate",
                         run_id=self.run_id,
                         tool=tool_name,
                         reason=reason,
@@ -1038,17 +1827,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
                 if artifact_verdict is not None and artifact_verdict[0]:
                     reason = artifact_verdict[1]
-                    self._done_verified = True
                     self.run_state.accept_verification(tool_name, reason)
                     BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
-                    BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
                     parsed_payload["auto_done"] = {
                         "ok": True,
                         "reason": reason,
                         "source": "deterministic_saved_artifact",
                     }
                     BUS.publish(
-                        "agent_auto_done",
+                        "agent_auto_done_candidate",
                         run_id=self.run_id,
                         tool=tool_name,
                         reason=reason,
@@ -1122,7 +1909,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         else:
             text = json.dumps(payload, ensure_ascii=False, default=str)
         BUS.publish(
-            "agent_auto_done",
+            "agent_auto_done_candidate",
             run_id=self.run_id,
             tool=tool_name,
             targets=targets,
@@ -1377,6 +2164,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "exact_save_as_applied": data.get("exact_save_as_applied"),
                 "mutation_skipped": data.get("mutation_skipped"),
                 "needs_observe": data.get("needs_observe"),
+                "native_action_executed": data.get("native_action_executed"),
+                "native_post_action_frame_pending": data.get("native_post_action_frame_pending"),
                 "last_action": data.get("last_action"),
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
@@ -1396,6 +2185,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "visual_change_ratio": data.get("visual_change_ratio"),
                 "verify_method": data.get("verify_method"),
                 "needs_observe": data.get("needs_observe"),
+                "native_action_executed": data.get("native_action_executed"),
+                "native_post_action_frame_pending": data.get("native_post_action_frame_pending"),
                 "last_action": data.get("last_action"),
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
@@ -1437,7 +2228,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "ok", "verified", "error", "blocked", "tool",
                 "wrapped_by_fast_controller", "source_action",
                 "source_action_ok", "source_action_verified",
-                "needs_observe", "last_action", "fast_path_advice", "metrics",
+                "needs_observe", "native_action_executed",
+                "native_post_action_frame_pending", "last_action",
+                "fast_path_advice", "metrics",
             )
             if data.get(key) is not None
         }
@@ -3861,6 +4654,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
         post_tool_hints: list[str] = []
+        visual_transaction_seen = False
+        visual_feedback_action = ""
+        visual_feedback_result = ""
+        deferred_observe_image = ""
+        deferred_observe_phase = "observe"
+        deferred_observe_region = None
+        deferred_terminal: str | None = None
         for tc in tool_calls:
             if self.stop_event.is_set():
                 return "stopped"
@@ -3889,6 +4689,82 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 BUS.publish("agent_tool", run_id=self.run_id, action_id=tc.id,
                             tool=tc.function.name, error=str(exc))
                 continue
+
+            tool_epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
+
+            # Function-calling APIs may return several mutations in one model
+            # message.  Executing all of them recreates an open-loop macro: the
+            # model cannot see what the first action actually did.  A
+            # run_action_batch/execute_subgoal call remains one explicitly
+            # controller-managed transaction, but every later tool call in the
+            # same model turn is acknowledged and deferred until the real
+            # post-action frame has been inspected.
+            closed_loop = bool(
+                self._visual_closed_loop_active
+                and CONFIG.get("controller", "visual_closed_loop", default=True)
+            )
+            terminal_barrier = deferred_terminal is not None
+            turn_barrier = bool(closed_loop and visual_transaction_seen)
+            needs_grounding = bool(
+                closed_loop
+                and _main_model_has_vision()
+                and tc.function.name in _LOW_LEVEL_VISUAL_TOOLS
+                and not self._has_fresh_visual_grounding()
+            )
+            preflight_changed_image = ""
+            preflight_change_ratio: float | None = 0.0
+            preflight_error = ""
+            preflight_capture_region = None
+            frame_coordinate_error = ""
+            if (
+                closed_loop
+                and _main_model_has_vision()
+                and not needs_grounding
+                and not turn_barrier
+                and not terminal_barrier
+            ):
+                try:
+                    # Validate the model-authored coordinate contract early,
+                    # but discard the physical mapping. The real mapping is
+                    # recomputed only after preflight atomically confirms the
+                    # capture geometry and pixels.
+                    self._map_normalized_frame_coordinates(
+                        tc.function.name, args,
+                    )
+                except ValueError as exc:
+                    frame_coordinate_error = str(exc)
+            if (
+                closed_loop
+                and _main_model_has_vision()
+                and tc.function.name in _LOW_LEVEL_VISUAL_TOOLS
+                and not needs_grounding
+                and not turn_barrier
+                and not terminal_barrier
+                and not frame_coordinate_error
+            ):
+                (
+                    preflight_changed_image,
+                    preflight_change_ratio,
+                    preflight_error,
+                    preflight_capture_region,
+                ) = self._preflight_visual_frame(tc.function.name, args)
+            if (
+                closed_loop
+                and _main_model_has_vision()
+                and not needs_grounding
+                and not turn_barrier
+                and not terminal_barrier
+                and not frame_coordinate_error
+                and not preflight_changed_image
+                and not preflight_error
+            ):
+                try:
+                    args = self._map_normalized_frame_coordinates(tc.function.name, args)
+                except ValueError as exc:
+                    # Geometry may have changed immediately after preflight.
+                    # Fail closed instead of executing coordinates mapped from
+                    # a frame that is no longer current.
+                    frame_coordinate_error = str(exc)
 
             args = self._maybe_expand_execute_subgoal_draws_from_plan(tc.function.name, args)
             args = self._maybe_upgrade_exact_save_as(tc.function.name, args)
@@ -3942,7 +4818,113 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         "GUI-only mode blocked wait(shell_true) because the user forbade shell. "
                         "Use observe/read_text or GUI waits instead."
                     )
-            if blocked_store_action or blocked_upload_action:
+            if terminal_barrier:
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "terminal_turn_barrier": True,
+                    "error": (
+                        "Deferred because an earlier tool call in this model turn "
+                        "already reached a terminal state. No later call was executed."
+                    ),
+                    "needs_replan": False,
+                }, ensure_ascii=False))
+            elif turn_barrier:
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "visual_turn_barrier": True,
+                    "error": (
+                        "Deferred because this model turn already attempted a visual "
+                        "transaction. Inspect the automatically attached real post-action "
+                        "frame, then decide the next action in a new turn."
+                    ),
+                    "needs_replan": False,
+                }, ensure_ascii=False))
+            elif needs_grounding:
+                self._visual_grounding_block_count += 1
+                if self._visual_grounding_block_count >= 2:
+                    result = ToolResult(
+                        "任务已安全暂停：模型连续两次试图在没有当前真实画面依据时操作界面。\n"
+                        "需要用户确认：请确认目标窗口当前可见，或提供一张当前界面截图后再继续。",
+                        terminal="reply",
+                    )
+                else:
+                    result = ToolResult(json.dumps({
+                        "ok": False,
+                        "verified": False,
+                        "blocked": True,
+                        "visual_grounding_required": True,
+                        "error": (
+                            "Low-level GUI action blocked because no fresh real frame grounds "
+                            "the current target-window epoch. Call observe first, or use "
+                            "execute_subgoal/run_action_batch when the controller can ground "
+                            "the complete transaction locally."
+                        ),
+                        "needs_replan": False,
+                    }, ensure_ascii=False))
+            elif preflight_changed_image:
+                # The replacement pixels and invalidation are one state
+                # transition. Do this before plan/evidence bookkeeping so no
+                # code later in this tool turn can consume element ids from
+                # the superseded frame.
+                self._invalidate_structured_grounding()
+                deferred_observe_image = preflight_changed_image
+                deferred_observe_phase = "preflight"
+                deferred_observe_region = preflight_capture_region
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "visual_frame_changed": True,
+                    "change_ratio": round(float(preflight_change_ratio or 0.0), 6),
+                    "error": (
+                        "The real target-window pixels changed while the model was deciding. "
+                        "The proposed action was not executed; inspect the newly attached frame."
+                    ),
+                    "needs_replan": False,
+                }, ensure_ascii=False))
+            elif preflight_error:
+                result = ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "visual_preflight_failed": True,
+                    "error": (
+                        "The runtime could not confirm that the target pixels still match the "
+                        f"authoritative frame ({preflight_error}). The action was not executed."
+                    ),
+                    "fast_path_advice": "Call observe to obtain a new real frame before retrying.",
+                    "needs_replan": False,
+                }, ensure_ascii=False))
+            elif frame_coordinate_error:
+                spatial_batch_limit = bool(
+                    tc.function.name == "run_action_batch"
+                    and "allows at most one spatial UI mutation" in frame_coordinate_error
+                )
+                coordinate_payload = {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "frame_coordinate_invalid": True,
+                    "error": frame_coordinate_error,
+                    "fast_path_advice": (
+                        "Keep at most one spatial mutation in this batch; keyboard-only input, "
+                        "wait, and verification may stay with it. Move every later spatial action "
+                        "to a new turn after inspecting the next real post-action frame, which is "
+                        "attached automatically."
+                        if spatial_batch_limit else
+                        "Inspect the attached authoritative frame and retry once with the "
+                        "tool's frame_* coordinates in 0..1000. The rejected action was not executed."
+                    ),
+                    "needs_replan": False,
+                }
+                if spatial_batch_limit:
+                    coordinate_payload["native_batch_spatial_limit"] = True
+                result = ToolResult(json.dumps(coordinate_payload, ensure_ascii=False))
+            elif blocked_store_action or blocked_upload_action:
                 result = ToolResult(blocked_store_action or blocked_upload_action)
             elif (
                 self._drawing_should_stop_mutating()
@@ -3957,6 +4939,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             elif blocked_gui_only_action:
                 result = ToolResult(blocked_gui_only_action)
             else:
+                if (
+                    closed_loop
+                    and _main_model_has_vision()
+                    and tc.function.name in {"execute_subgoal", "run_action_batch"}
+                ):
+                    # Controller transactions must not consume a same-hwnd
+                    # snapshot from before model inference. Preflight above
+                    # proves the pixels are still current; internal controller
+                    # observe then rebuilds structured grounding explicitly.
+                    self.session.snapshot = None
                 result = self._drawing_destructive_clear_result(tc.function.name, args)
                 if result is None:
                     result = self._duplicate_clipboard_delivery_result(tc.function.name, args)
@@ -3979,6 +4971,47 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             result = self._maybe_auto_complete_document_format_plan_items(tc.function.name, args, result)
             result = self._maybe_auto_complete_draw_plan_items(tc.function.name, args, result)
             result = self._maybe_auto_complete_desktop_drag_plan_item(tc.function.name, args, result)
+            if (
+                closed_loop
+                and tc.function.name in _VISUAL_MUTATION_TOOLS
+                and not turn_barrier
+                and not terminal_barrier
+            ):
+                visual_transaction_seen = True
+                try:
+                    visual_result_data = json.loads(result.text or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    visual_result_data = {}
+                if not isinstance(visual_result_data, dict):
+                    visual_result_data = {}
+                if (
+                    not needs_grounding
+                    and visual_result_data.get("blocked") is not True
+                    and result.terminal not in {"fail", "error", "stopped"}
+                ):
+                    visual_feedback_action = tc.function.name
+                    if visual_result_data:
+                        # The controller's text-mode contract asks callers to
+                        # observe after an unverified mutation. Native vision
+                        # already receives an authoritative real post-action
+                        # frame below, so preserving needs_observe=true causes
+                        # a redundant multi-second UIA/OCR pass and contradicts
+                        # the pixels attached to the very next model turn.
+                        visual_result_data["needs_observe"] = False
+                        visual_result_data["native_post_action_frame_pending"] = True
+                        if visual_result_data.get("ok") is True:
+                            # Execution provenance only: the fresh frame below
+                            # still decides whether the input achieved the goal.
+                            visual_result_data["native_action_executed"] = True
+                        visual_result_data["fast_path_advice"] = (
+                            "Inspect the automatically attached real post-action frame directly. "
+                            "Do not call observe merely to verify this action; call done when the "
+                            "requested result is visibly clear, otherwise act once on that frame."
+                        )
+                        result.text = json.dumps(
+                            visual_result_data, ensure_ascii=False, default=str,
+                        )
+                    visual_feedback_result = result.text or ""
             failure_recovery = None
             raw_result_text = result.text
             self._remember_delivered_text_mutations(
@@ -4019,6 +5052,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "args": args,
                     "error": str(exc),
                 })
+            epoch_after_tool_and_recovery = int(
+                getattr(self.session, "_screen_epoch", 0) or 0
+            )
+            if (
+                closed_loop
+                and epoch_after_tool_and_recovery != tool_epoch_before
+                and not visual_feedback_action
+            ):
+                # The recovery layer may focus/re-observe through ToolSession
+                # after the original call was blocked.  That is still a visual
+                # transaction: expose its real resulting frame instead of
+                # silently invalidating grounding and forcing an observe loop.
+                visual_transaction_seen = True
+                visual_feedback_action = f"{tc.function.name}:local_recovery"
+                visual_feedback_result = result.text or ""
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
             self.run_state.after_tool(tc.function.name, args, result.text, state_terminal)
@@ -4106,6 +5154,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 tc.function.name in evidence_tools
                 or '"verified"' in (result.text or "")
                 or "visual_change_detected" in (result.text or "")
+                or '"native_action_executed": true' in (result.text or "")
             ):
                 if tc.function.name in {"run_action_batch", "execute_subgoal", "zoom", "screenshot", "draw_strokes", "drag"}:
                     evidence_text = self._compact_tool_evidence(tc.function.name, result.text)
@@ -4157,6 +5206,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "action_target",
                     "fast_path_advice",
                     "needs_observe",
+                    "native_action_executed",
+                    "native_post_action_frame_pending",
                     "last_action",
                     "metrics",
                     "subgoal",
@@ -4211,17 +5262,39 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             )
             self._append_tool_result(tc.id, result.text, summary=result.summary, tool_name=tc.function.name)
             if result.is_observe:
-                # Inject screenshot as separate user message (mime does not support
-                # multipart tool results, so we cannot inline image_b64 in tool role).
-                self._inject_observe_screenshot()
+                # Defer the separate image message until every tool result for the
+                # assistant message has been appended.  Interleaving a user image
+                # between tool-role results violates function-calling message order.
+                deferred_observe_image = result.image_b64 or deferred_observe_image
+                if closed_loop:
+                    visual_transaction_seen = True
             if result.terminal:
                 if result.terminal == "done" and self._reject_incomplete_run_task():
                     continue
-                self.result_text = result.text
-                return result.terminal
+                if deferred_terminal is None:
+                    self.result_text = result.text
+                    deferred_terminal = result.terminal
+        if visual_feedback_action:
+            self._inject_visual_frame(
+                phase="post_action",
+                action=visual_feedback_action,
+                result_preview=visual_feedback_result,
+            )
+        elif deferred_observe_image:
+            # Tool-role messages cannot carry multipart image content, so append
+            # the authoritative frame as a user message after the tool-call group.
+            if deferred_observe_phase == "preflight":
+                self._inject_visual_frame(
+                    phase="preflight",
+                    action="visual_preflight_changed",
+                    image_b64=deferred_observe_image,
+                    frame_region=deferred_observe_region,
+                )
+            else:
+                self._inject_observe_screenshot(deferred_observe_image)
         for hint in post_tool_hints[-2:]:
             self.messages.append({"role": "user", "content": hint})
-        return None
+        return deferred_terminal
 
     # ------------------------------------------------------------------ run
     def _prebind_initial_gui_target(self) -> None:
@@ -4372,12 +5445,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "Do not pre-explore toolbar text or add "
                     "text_appears checks for tool names like Pencil/Brush/Triangle. Use draw_strokes/"
                     "run_action_batch only when coordinates are already grounded or execute_subgoal "
-                    "returns needs_llm_reason. In run_action_batch, strokes means physical screen pixels; "
-                    "for 0..1000 canvas-relative points use normalized_strokes so the controller maps them "
-                    "through the latest canvas region. Verify by pixel/color evidence, screenshot/nonvisual "
+                    "returns needs_llm_reason. For native-vision run_action_batch coordinates, use only the "
+                    "current-frame 0..1000 contract: frame_x/frame_y, frame drag endpoints, or frame_strokes; "
+                    "never emit physical screen coordinates. normalized_strokes is reserved for 0..1000 "
+                    "canvas-relative points that the controller maps through its latest detected canvas. "
+                    "Verify by pixel/color evidence, screenshot/nonvisual "
                     "summary, and requested file existence if saving is required. For a detailed or "
-                    "quality-sensitive result, call vlm_verify with the user's visible criteria; a "
-                    "structured primitive plan or pixel/color change is not semantic proof. Never add "
+                    "quality-sensitive result, rely on the native post-action frame and the fresh "
+                    "goal-conditioned done judge (text-only models may use vlm_verify); a structured "
+                    "primitive plan or pixel/color change is not semantic proof. Never add "
                     "save/export work unless the user requested an output file. Do not redraw after a "
                     "passing semantic verdict; complete the plan or done."
                 ),
@@ -4477,6 +5553,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             allow_shell=allow_shell_tools,
             allow_files=allow_file_tools,
             profile=_schema_profile_for_task(self.task, is_coding=self._is_coding),
+            native_vision=_main_model_has_vision(),
         )
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints),
@@ -4485,7 +5562,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             raw_client = _client()
             client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
             self._model_adapter = client
+            self._visual_closed_loop_active = bool(
+                CONFIG.get("controller", "visual_closed_loop", default=True)
+                and _main_model_has_vision()
+            )
             self._prebind_initial_gui_target()
+            # The first decision must start from real pixels, not just the
+            # open/focus result or a remembered element tree.
+            self._inject_visual_frame(
+                phase="initial",
+                action="target_prebind" if self.session.hwnd else "",
+            )
             self._maybe_plan_upfront(client)
             for step in range(1, max_steps + 1):
                 if self.stop_event.is_set():

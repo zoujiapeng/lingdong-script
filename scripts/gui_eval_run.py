@@ -9,8 +9,11 @@ done-gate / tool behavior.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -33,6 +36,19 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             "id": "calculator_sum",
             "task": "用计算器计算86和79的和，确认结果是165。必须通过GUI操作。",
             "timeout_s": 180,
+            "setup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
+            "cleanup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
+            "trace_checks": [
+                {
+                    "name": "calculator_real_gui_action",
+                    "event_type": "action",
+                    "where": {"action": ["click", "type_text", "hotkey"]},
+                }
+            ],
+            "uia_checks": [{
+                "name": "calculator_external_visible_result_165",
+                "contains": "165",
+            }],
         },
         {
             "id": "notepad_save",
@@ -87,7 +103,7 @@ SUITES: dict[str, list[dict[str, Any]]] = {
         {
             "id": "target_coordinate_click",
             "task": (
-                "打开 http://127.0.0.1:8877/gui_agent_target.html?v=coord2，"
+                "打开 http://127.0.0.1:8877/gui_agent_target.html?v=closedloop5-{eval_nonce}，"
                 "点击页面上的“校准点”按钮，最后确认页面出现 CALIBRATION_OK。"
                 "必须通过GUI真实鼠标点击，不要用脚本注入点击。"
             ),
@@ -101,7 +117,29 @@ SUITES: dict[str, list[dict[str, Any]]] = {
                 "-WorkingDirectory 'C:\\Users\\zou\\Desktop\\claude\\python\\winpilot_home\\eval_targets' "
                 "-WindowStyle Hidden; Start-Sleep -Seconds 2 }"
             ],
-            "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
+            "forbid_tools": [
+                "run_shell", "run_detached", "write_file", "read_file",
+                "execute_subgoal", "coordinate_click_test", "vlm_verify",
+            ],
+            "trace_checks": [
+                {
+                    "name": "calibration_used_normalized_frame_coordinates",
+                    "event_type": "agent_tool",
+                    "where": {"tool": ["click", "run_action_batch"]},
+                    "field": "args",
+                    "contains": "current_frame_normalized_0_1000",
+                },
+                {
+                    "name": "calibration_real_mouse_click",
+                    "event_type": "action",
+                    "field": "action",
+                    "equals": "click",
+                },
+            ],
+            "uia_checks": [{
+                "name": "calibration_external_visible_result",
+                "contains": "CALIBRATION_OK screen=",
+            }],
         },
         {
             "id": "target_transient_press",
@@ -151,6 +189,14 @@ SUITES: dict[str, list[dict[str, Any]]] = {
                 "-WindowStyle Hidden; Start-Sleep -Seconds 2 }"
             ],
             "forbid_tools": ["run_shell", "run_detached", "write_file", "read_file"],
+            "trace_checks": [
+                {
+                    "name": "visual_servo_visible_result",
+                    "event_type": "agent_tool",
+                    "field": "result_preview",
+                    "contains": "VISUAL_SERVO_OK",
+                }
+            ],
         },
     ],
     "gui-deep-10": [
@@ -160,6 +206,17 @@ SUITES: dict[str, list[dict[str, Any]]] = {
             "timeout_s": 240,
             "setup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
             "cleanup": ["taskkill /f /im CalculatorApp.exe 2>$null"],
+            "trace_checks": [
+                {
+                    "name": "calculator_real_gui_action",
+                    "event_type": "action",
+                    "where": {"action": ["click", "type_text", "hotkey"]},
+                }
+            ],
+            "uia_checks": [{
+                "name": "calculator_external_visible_result_501",
+                "contains": "501",
+            }],
         },
         {
             "id": "deep_notepad_save_multiline",
@@ -312,7 +369,9 @@ DEFAULT_BUDGETS = {
     "duration_s": 240.0,
     "tool_count": 45,
     "observe_avg_ms": 2500.0,
-    "cost_cny": 1.5,
+    # Cost is opt-in because some providers return tokens but no pricing
+    # metadata. An explicitly requested cost budget remains strict/fail-closed.
+    "cost_cny": None,
 }
 
 DEFAULT_GUI_FORBIDDEN_TOOLS = {"run_detached", "write_file", "read_file"}
@@ -331,6 +390,187 @@ DEFAULT_GUI_FORBIDDEN_SHELL_PATTERNS = (
     "windows.automation",
     "wscript.shell",
 )
+
+_FUSION_PROVENANCE_KEYS = (
+    "escalate_on_empty",
+    "ocr_skip_when_uia_rich",
+    "vlm_skip_when_uia_rich",
+    "uia_rich_threshold",
+    "vlm_assist_threshold",
+    "observe_cache_ttl_s",
+    "native_vision_direct",
+    "screen_watch_autostart",
+    "predictive_ocr_enabled",
+    "predictive_ocr_prefer_cache",
+    "incremental_perception_enabled",
+    "incremental_perception_debounce_ms",
+    "incremental_perception_max_crops",
+    "incremental_perception_wait_ms",
+    "incremental_perception_min_ratio",
+    "incremental_perception_max_ratio",
+    "press_probe_settle_ms",
+    "press_release_settle_ms",
+)
+_CONTROLLER_PROVENANCE_KEYS = (
+    "physical_anchor_clicks",
+    "visual_closed_loop",
+    "visual_preflight_change_ratio",
+    "visual_preflight_target_change_ratio",
+    "visual_preflight_target_margin",
+    "visual_servo_mode",
+    "visual_servo_recent_change_ms",
+    "visual_servo_strict",
+)
+_AGENT_PROVENANCE_KEYS = (
+    "max_steps",
+    "max_retries",
+    "world_model",
+    "replan_on_fail",
+    "planning_enabled",
+    "playbooks_enabled",
+    "prompt_style",
+    "tool_profile",
+    "verify_done",
+    "done_max_rejects",
+)
+
+
+def _pick(mapping: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(mapping, dict):
+        return {}
+    return {key: mapping[key] for key in keys if key in mapping}
+
+
+def _model_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    metadata = _pick(config, ("provider", "model", "temperature", "max_tokens", "thinking"))
+    try:
+        from winpilot.model_adapter import model_profile_from_config
+        profile = model_profile_from_config(config)
+        metadata["resolved_provider"] = profile.provider
+        metadata["supports_vision"] = profile.supports_vision
+    except Exception:
+        pass
+    return metadata
+
+
+def _git_metadata() -> dict[str, Any]:
+    def run(*args: str) -> str:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+        except Exception:
+            return ""
+        return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+
+    commit = run("rev-parse", "HEAD")
+    branch = run("branch", "--show-current") or run("rev-parse", "--abbrev-ref", "HEAD")
+    dirty_text = run("status", "--porcelain")
+    inside = run("rev-parse", "--is-inside-work-tree")
+    return {
+        "commit": commit,
+        "branch": branch,
+        "dirty": bool(dirty_text) if inside == "true" else None,
+    }
+
+
+def _display_metadata() -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "os": platform.platform(),
+        "python": platform.python_version(),
+    }
+    if os.name != "nt":
+        return result
+    try:
+        user32 = ctypes.windll.user32
+        result.update({
+            "primary": {
+                "width": int(user32.GetSystemMetrics(0)),
+                "height": int(user32.GetSystemMetrics(1)),
+            },
+            "virtual": {
+                "left": int(user32.GetSystemMetrics(76)),
+                "top": int(user32.GetSystemMetrics(77)),
+                "width": int(user32.GetSystemMetrics(78)),
+                "height": int(user32.GetSystemMetrics(79)),
+            },
+            "monitor_count": int(user32.GetSystemMetrics(80)),
+        })
+        try:
+            dpi = int(user32.GetDpiForSystem())
+            result["system_dpi"] = dpi
+            result["scale_from_96dpi"] = round(dpi / 96.0, 4)
+        except Exception:
+            pass
+    except Exception as exc:
+        result["display_error"] = type(exc).__name__
+    return result
+
+
+def _collect_provenance(base_url: str, token: str, status: dict[str, Any]) -> dict[str, Any]:
+    """Collect reproducibility metadata while strictly excluding credentials."""
+    try:
+        config = _request_json("GET", f"{base_url}/api/config", token=token)
+    except Exception:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+
+    api = config.get("api") if isinstance(config.get("api"), dict) else {}
+    vlm = config.get("vlm") if isinstance(config.get("vlm"), dict) else {}
+    perception_raw = config.get("perception") if isinstance(config.get("perception"), dict) else {}
+    perception = {
+        str(name): _pick(options, ("enabled", "priority"))
+        for name, options in perception_raw.items()
+        if isinstance(options, dict)
+    }
+    visual_config = {
+        "enabled_dimensions": list(status.get("enabled_dimensions") or []),
+        "perception": perception,
+        "fusion": _pick(config.get("fusion"), _FUSION_PROVENANCE_KEYS),
+        "controller": _pick(config.get("controller"), _CONTROLLER_PROVENANCE_KEYS),
+        "ocr": _pick(config.get("ocr"), ("use_gpu", "min_confidence")),
+        "agent": _pick(config.get("agent"), _AGENT_PROVENANCE_KEYS),
+        "ocr_provider": status.get("ocr_provider"),
+    }
+    visual_hash = hashlib.sha256(
+        json.dumps(visual_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    runtime = status.get("runtime") if isinstance(status.get("runtime"), dict) else {}
+    server_git = runtime.get("git") if isinstance(runtime.get("git"), dict) else {}
+    harness_git = _git_metadata()
+    git_meta = _pick(server_git, ("commit", "branch", "dirty"))
+    if not git_meta.get("commit"):
+        git_meta = harness_git
+
+    return {
+        "config_captured": bool(config),
+        "git": git_meta,
+        "eval_harness_git": harness_git,
+        "model": _model_metadata(api),
+        "vlm": {
+            **_pick(vlm, ("enabled", "model", "thinking")),
+            "configured": bool(status.get("vlm_configured")),
+        },
+        "visual_config": visual_config,
+        "visual_config_sha256": visual_hash,
+        "display": _display_metadata(),
+    }
+
+
+def _record_ground_truth(report: dict[str, Any], checks: list[dict[str, Any]]) -> None:
+    report["ground_truth_checks"] = checks
+    if checks:
+        report["ground_truth_status"] = "grounded"
+        report["ground_truth_passed"] = all(bool(item.get("passed")) for item in checks)
+    else:
+        report["ground_truth_status"] = "ungrounded"
+        report.pop("ground_truth_passed", None)
 
 
 def _request_json(
@@ -387,28 +627,124 @@ def _run_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return results
 
 
+def _trace_value(event: dict[str, Any], field: str) -> Any:
+    value: Any = event
+    for part in (part for part in str(field or "").split(".") if part):
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, list) and part.isdigit():
+            index = int(part)
+            value = value[index] if 0 <= index < len(value) else None
+        else:
+            return None
+    return value
+
+
+def _trace_event_matches(event: dict[str, Any], spec: dict[str, Any]) -> bool:
+    event_type = str(spec.get("event_type") or "")
+    if event_type and event.get("type") != event_type:
+        return False
+    for field, expected in (spec.get("where") or {}).items():
+        value = _trace_value(event, str(field))
+        if isinstance(expected, list):
+            if value not in expected:
+                return False
+        elif value != expected:
+            return False
+    field = str(spec.get("field") or "")
+    value = _trace_value(event, field)
+    if "contains" in spec:
+        searchable = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, ensure_ascii=False, default=str)
+        )
+        return str(spec.get("contains")) in searchable
+    if "equals" in spec:
+        return value == spec.get("equals")
+    # Some trace requirements are predicates over the event envelope only,
+    # for example ``event_type=action`` plus ``where.action in [...]``.  Once
+    # those constraints match there is no implicit field whose value must also
+    # equal True; comparing the whole event dictionary to True made every such
+    # ground-truth check fail regardless of the real GUI trace.
+    if not field:
+        return True
+    return value is True
+
+
 def _run_trace_checks(events: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for check in checks:
         event_type = str(check.get("event_type") or "")
         field_path = [part for part in str(check.get("field") or "").split(".") if part]
         expected = check.get("equals", True)
+        contains = check.get("contains") if "contains" in check else None
         matches = []
-        for event in events:
-            if event_type and event.get("type") != event_type:
+        requires_prior = check.get("requires_prior")
+        for index, event in enumerate(events):
+            if not _trace_event_matches(event, check):
                 continue
-            value: Any = event
-            for part in field_path:
-                value = value.get(part) if isinstance(value, dict) else None
-            if value == expected:
+            if isinstance(requires_prior, dict) and not any(
+                _trace_event_matches(prior, requires_prior)
+                for prior in events[:index]
+            ):
+                continue
+            if event:
                 matches.append(event)
         results.append({
             "name": str(check.get("name") or "trace_check"),
             "passed": bool(matches),
             "event_type": event_type,
             "field": ".".join(field_path),
-            "expected": expected,
+            "expected": {"contains": contains} if contains is not None else expected,
+            "where": check.get("where") or {},
+            "requires_prior": requires_prior if isinstance(requires_prior, dict) else None,
             "match_count": len(matches),
+        })
+    return results
+
+
+def _run_uia_checks(events: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read final target-window UIA from the eval harness, outside the agent."""
+    if not checks:
+        return []
+    hwnd = 0
+    for event in reversed(events):
+        if event.get("type") != "visual_feedback":
+            continue
+        try:
+            hwnd = int(event.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        if hwnd:
+            break
+    elements = []
+    error = ""
+    if hwnd:
+        try:
+            from winpilot.perception import uia
+
+            elements = uia.collect(hwnd)
+        except Exception as exc:
+            error = str(exc)
+    else:
+        error = "no target hwnd in visual feedback trace"
+    visible_text = "\n".join(
+        str(getattr(element, "text", "") or "")
+        for element in elements
+        if str(getattr(element, "text", "") or "").strip()
+    )
+    results = []
+    for check in checks:
+        contains = str(check.get("contains") or "")
+        results.append({
+            "name": str(check.get("name") or "external_uia_check"),
+            "source": "external_uia",
+            "passed": bool(hwnd and contains and contains in visible_text),
+            "hwnd": hwnd,
+            "expected": {"contains": contains},
+            "visible_text_preview": visible_text[:1000],
+            "error": error,
         })
     return results
 
@@ -510,17 +846,42 @@ def _summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _budget_result(report: dict[str, Any], budgets: dict[str, float]) -> dict[str, Any]:
+def _budget_result(report: dict[str, Any], budgets: dict[str, float | None]) -> dict[str, Any]:
     summary = report.get("summary") or report.get("trace_summary") or {}
     usage = report.get("usage") or report.get("status_endpoint", {}).get("usage") or {}
     observe = (summary.get("tool_latency") or {}).get("observe") or {}
-    checks = {
+    observe_count = int((summary.get("tool_counts") or {}).get("observe") or 0)
+    observe_available = observe_count == 0 or "avg_ms" in observe
+    cost_available = bool(usage.get("cost_estimated"))
+    checks: dict[str, bool | None] = {
         "duration_s": float(report.get("duration_s") or 0) <= float(budgets["duration_s"]),
         "tool_count": int(report.get("tool_count") or 0) <= int(budgets["tool_count"]),
-        "observe_avg_ms": float(observe.get("avg_ms") or 0) <= float(budgets["observe_avg_ms"]),
-        "cost_cny": float(usage.get("cost_cny") or 0) <= float(budgets["cost_cny"]),
+        "observe_avg_ms": (
+            (float(observe.get("avg_ms") or 0) <= float(budgets["observe_avg_ms"]))
+            if observe_available else False
+        ),
     }
-    return {"passed": all(checks.values()), "checks": checks, "budgets": budgets}
+    if budgets.get("cost_cny") is not None:
+        # Some providers report tokens but no price table. When the caller
+        # explicitly asks for a cost SLA, unknown cost is unevaluated and can
+        # never be silently promoted to a passing/free result.
+        checks["cost_cny"] = (
+            float(usage.get("cost_cny") or 0) <= float(budgets["cost_cny"])
+            if cost_available else None
+        )
+    return {
+        # A strict performance pass requires every budget dimension to be
+        # measured and within bounds.  ``None`` means unevaluated (for example
+        # a provider without pricing metadata), so it must not be promoted into
+        # a passing budget or a verified-success aggregate.
+        "passed": all(value is True for value in checks.values()),
+        "checks": checks,
+        "availability": {
+            "observe_avg_ms": observe_available,
+            "cost_cny": cost_available,
+        },
+        "budgets": budgets,
+    }
 
 
 def run_eval(
@@ -577,7 +938,9 @@ def run_eval(
         "trace_file": f"python/winpilot_home/traces/{run_id}.jsonl",
         "screenshot_dir": f"python/winpilot_home/traces/{run_id}/",
         "summary": summary,
+        "provenance": _collect_provenance(base_url, token, last_status),
     }
+    _record_ground_truth(report, [])
     if budgets:
         report["performance_budget"] = _budget_result(report, budgets)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -602,9 +965,13 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
         for command in case.get("setup", []):
             _run_powershell(command)
         try:
+            task = str(case["task"]).replace(
+                "{eval_nonce}",
+                f"{int(time.time() * 1000)}",
+            )
             path = run_eval(
                 base_url,
-                str(case["task"]),
+                task,
                 out_dir,
                 float(case.get("timeout_s") or timeout_s),
                 case_id=str(case.get("id") or ""),
@@ -623,10 +990,9 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 ]
             checks = _run_checks(list(case.get("checks", [])))
             trace_checks = _run_trace_checks(events, list(case.get("trace_checks", [])))
-            all_checks = [*checks, *trace_checks]
-            if all_checks:
-                report["ground_truth_checks"] = all_checks
-                report["ground_truth_passed"] = all(item["passed"] for item in all_checks)
+            uia_checks = _run_uia_checks(events, list(case.get("uia_checks", [])))
+            all_checks = [*checks, *trace_checks, *uia_checks]
+            _record_ground_truth(report, all_checks)
             policy = _run_policy_checks(events, case)
             report["policy_checks"] = policy
             report["policy_passed"] = bool(policy.get("passed"))
@@ -673,7 +1039,13 @@ def main() -> int:
     parser.add_argument("--budget-duration", type=float, default=DEFAULT_BUDGETS["duration_s"])
     parser.add_argument("--budget-tools", type=int, default=DEFAULT_BUDGETS["tool_count"])
     parser.add_argument("--budget-observe-avg-ms", type=float, default=DEFAULT_BUDGETS["observe_avg_ms"])
-    parser.add_argument("--budget-cost", type=float, default=DEFAULT_BUDGETS["cost_cny"])
+    parser.add_argument(
+        "--budget-cost", type=float, default=DEFAULT_BUDGETS["cost_cny"],
+        help=(
+            "Optional CNY cost ceiling. Omitted by default because providers without "
+            "pricing metadata cannot be evaluated; an explicit ceiling fails closed."
+        ),
+    )
     args = parser.parse_args()
     if args.list_suites:
         for name, cases in SUITES.items():
@@ -683,8 +1055,9 @@ def main() -> int:
         "duration_s": args.budget_duration,
         "tool_count": args.budget_tools,
         "observe_avg_ms": args.budget_observe_avg_ms,
-        "cost_cny": args.budget_cost,
     }
+    if args.budget_cost is not None:
+        budgets["cost_cny"] = args.budget_cost
     try:
         if args.suite:
             path = run_suite(args.base_url.rstrip("/"), args.suite, args.out_dir,

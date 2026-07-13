@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -23,6 +24,27 @@ def _compact(value: Any, limit: int = 600) -> Any:
         return value
     text = str(value)
     return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _nonnegative_latency_ms(value: Any) -> int | None:
+    """Parse an optional latency sample without letting telemetry break a run."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0:
+        return None
+    return int(numeric)
+
+
+def _percentile(values: list[int], pct: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * pct)))
+    return int(ordered[idx])
 
 
 class RunProjectionStore:
@@ -71,6 +93,8 @@ class RunProjectionStore:
                 "semantic_verify_latency_ms": [],
                 "screen_delta_latency_ms": [],
                 "screen_capture_latency_ms": [],
+                "visual_feedback_frame_count": 0,
+                "visual_feedback_capture_latency_ms": [],
                 "semantic_verify_count": 0,
                 "semantic_verify_passed_count": 0,
                 "semantic_verify_uia_query_count": 0,
@@ -222,6 +246,23 @@ class RunProjectionStore:
                 capture_ms = int(event.get("capture_latency_ms") or 0)
                 run["metrics"]["screen_capture_latency_ms"].append(capture_ms)
                 run["metrics"]["screen_capture_latency_ms"] = run["metrics"]["screen_capture_latency_ms"][-200:]
+            if event_type == "visual_feedback":
+                metrics = run["metrics"]
+                metrics["visual_feedback_frame_count"] = (
+                    max(0, int(metrics.get("visual_feedback_frame_count") or 0)) + 1
+                )
+                capture_ms = _nonnegative_latency_ms(event.get("capture_latency_ms"))
+                if capture_ms is not None:
+                    visual_samples = metrics.setdefault(
+                        "visual_feedback_capture_latency_ms", [],
+                    )
+                    visual_samples.append(capture_ms)
+                    metrics["visual_feedback_capture_latency_ms"] = visual_samples[-200:]
+                    # Preserve the existing aggregate capture metric so current
+                    # dashboards see native-vision frame costs without an update.
+                    capture_samples = metrics.setdefault("screen_capture_latency_ms", [])
+                    capture_samples.append(capture_ms)
+                    metrics["screen_capture_latency_ms"] = capture_samples[-200:]
             if event_type == "verify":
                 elapsed = max(0, int(event.get("elapsed_ms") or 0))
                 method = str(event.get("method") or "").casefold()
@@ -453,6 +494,7 @@ class RunProjectionStore:
         semantic_verify_samples = metrics.pop("semantic_verify_latency_ms", [])
         screen_delta_samples = metrics.pop("screen_delta_latency_ms", [])
         capture_samples = metrics.pop("screen_capture_latency_ms", [])
+        visual_feedback_samples = metrics.pop("visual_feedback_capture_latency_ms", [])
         servo_samples = metrics.pop("visual_servo_latency_ms", [])
         metrics["tool_latency_avg_ms"] = round(sum(tool_samples) / len(tool_samples), 1) if tool_samples else 0
         metrics["tool_latency_max_ms"] = max(tool_samples) if tool_samples else 0
@@ -460,6 +502,15 @@ class RunProjectionStore:
         metrics["perception_latency_max_ms"] = max(perception_samples) if perception_samples else 0
         metrics["screen_capture_latency_avg_ms"] = round(sum(capture_samples) / len(capture_samples), 1) if capture_samples else 0
         metrics["screen_capture_latency_max_ms"] = max(capture_samples) if capture_samples else 0
+        metrics["visual_feedback_capture_latency_latest_ms"] = (
+            visual_feedback_samples[-1] if visual_feedback_samples else 0
+        )
+        metrics["visual_feedback_capture_latency_avg_ms"] = round(
+            sum(visual_feedback_samples) / len(visual_feedback_samples), 1,
+        ) if visual_feedback_samples else 0
+        metrics["visual_feedback_capture_latency_p95_ms"] = _percentile(
+            visual_feedback_samples, 0.95,
+        )
         metrics["action_decision_latency_avg_ms"] = round(sum(decision_samples) / len(decision_samples), 1) if decision_samples else 0
         metrics["action_decision_latency_max_ms"] = max(decision_samples) if decision_samples else 0
         metrics["action_execution_latency_avg_ms"] = round(sum(action_samples) / len(action_samples), 1) if action_samples else 0

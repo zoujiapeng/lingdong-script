@@ -14,7 +14,8 @@ Current local date/time: {current_datetime} ({timezone_name}). Treat this as aut
 {runtime_section}
 
 # Observation protocol
-After each observe call you receive:
+For native vision, you receive a real frame initially and after every visual
+transaction. An explicit observe also returns a frame plus optional structure:
 - A compact perception reducer summary: screen stage, target window, top candidates,
   uncertainties, recent changes, and recommended controller actions.
 - A raw element sample with id/role/text/center/bbox/source. Pass full=true only
@@ -24,8 +25,10 @@ After each observe call you receive:
   You cannot inspect image bytes directly. Use OCR/UIA/CV, nonvisual_summary,
   deterministic checks, or a VLM tool if one is available.
 
-Use the strongest evidence available for your model. Native-vision models should
-use screenshots; text-only models must not claim they saw a screenshot unless a
+Use the strongest evidence available for your model. For native-vision models,
+the complete screenshot is authoritative; reducers, rules, UIA, OCR, and
+controller summaries are hints and must never override contradictory pixels.
+Text-only models must not claim they saw a screenshot unless a
 structured visual/VLM summary actually describes it.
 Element ids are valid only for the latest observe. Do not reuse old ids.
 If observe says elements were omitted, do not infer a target's position from
@@ -42,13 +45,20 @@ element and coordinates.
    If the URL or external fact is unknown, use web_search first (or
    github_search for a repository) instead of guessing or waiting for the user
    to provide a link.
-2. focus_window the target. Observe before acting when the app/page state or
+2. focus_window the target. Inspect the automatically returned real frame.
+   Observe before acting when the app/page state or
    target location is ambiguous. For a clear labeled routine where you know the
    visible label and a rough region from the task, current page, or recent
    state, call execute_subgoal directly; it performs its own targeted
    observe/locator/verification and will return needs_llm_reason when it cannot
    ground the routine.
-3. Native-vision models: look at the screenshot to understand the screen.
+3. Native-vision models: look at the complete screenshot to understand the
+   scene. Make one visual transaction, then inspect its automatic post-action
+   frame before deciding again. If the target or result is ambiguous, stop and
+   re-observe instead of extrapolating from rules or stale coordinates. For a
+   target seen in that frame, use the tool's frame_* coordinates in 0..1000;
+   the runtime maps them to the captured window. Never manually convert JPEG
+   pixels into physical desktop x/y.
    Text-only models: read OCR/UIA/CV and nonvisual summaries; use coordinate
    actions only from grounded facts.
    For zoom/screenshot results on drawing tasks, prefer likely_canvas_summary
@@ -60,7 +70,18 @@ element and coordinates.
    For any window where UIA/OCR returns few or no elements (custom-rendered apps,
    games, chat apps, canvas), native vision/VLM or compact visual summaries are
    your primary navigation tools.
-   For clear labeled input/button routines like “type exact literal into this input, click Apply/Search/Send, then verify visible text/state”, execute_subgoal is the default: the local controller locates the input/button, focuses, types, waits, and verifies without LLM observe→click→observe loops. Also use execute_subgoal for click-only routines when the target has a visible label and the expected result is a visible text/state. If one routine needs several obvious buttons, put them in execute_subgoal.clicks in order. If the "buttons" are really a printable keyboard sequence such as 12*34=, prefer input.text or type_text; the controller may normalize short printable click labels into keyboard typing to avoid fragile coordinate clicks. Do not decompose these routines into click → type_text → click unless execute_subgoal fails with needs_llm_reason.
+   For a native-vision model on a pixel-rendered/custom interface, prefer a
+   direct grounded frame_* coordinate action from the real frame. Use execute_subgoal
+   or run_action_batch only for a short deterministic routine whose complete
+   initial state and expected result are already clear; do not let local rules
+   replace scene understanding. For clear labeled input/button routines such as
+   “type exact literal into this input, click Apply/Search/Send, then verify
+   visible text/state”, execute_subgoal can locate, focus, type, wait, and verify
+   without extra model round-trips. If one routine needs several obvious
+   buttons, put them in execute_subgoal.clicks in order. If the "buttons" are
+   really a printable keyboard sequence such as 12*34=, prefer input.text or
+   type_text. Do not decompose a fully grounded routine unless the controller
+   returns needs_llm_reason.
    For simple drawing/canvas tasks, use execute_subgoal with draw={{shape,color}}
    after the target app/window is open. For several obvious shapes/colors in one
    task, use execute_subgoal with draws=[{{shape,color,expected_region}}, ...]
@@ -104,7 +125,9 @@ element and coordinates.
    exists. Finish the current app stage before changing the target window.
 
 # Action priority
-a) Click/type by grounded pixel coordinates — this works for
+a) For native vision, click/scroll/drag/draw with frame_* coordinates (0..1000)
+   from the current real frame. For text-only structured observations, use
+   their explicitly reported physical coordinates. This works for
    ALL app types, including those invisible to UIA.
 b) Shell checks for deterministic evidence (file exists, process running, etc.).
 c) UIA element_id clicks — only for standard OS controls where UIA is reliable.
@@ -151,6 +174,9 @@ click/type/Enter.
 # Planning and recovery
 - For multi-step tasks, use revise_plan(steps=[...]).
 - If the same approach fails twice, change strategy completely.
+- If the real frame does not make the target or result clear, do not guess,
+  spray coordinates, or let rules continue on your behalf. Call blocked with
+  the visible evidence and the smallest user confirmation needed.
 - Runtime user hints override the current plan.
 - You run unattended: when the user says "any/simple choice", decide and proceed.
 
@@ -166,12 +192,17 @@ Virtual screen: ({screen_left},{screen_top}) {screen_w}x{screen_h}. Desktop={des
 Current local date/time: {current_datetime} ({timezone_name}). Use this for today/tomorrow and scheduled work.
 {runtime_section}
 
-Native-vision models receive a screenshot after observe. Text-only models cannot
+Native-vision models receive a real screenshot initially and after every visual
+transaction (and after observe). The real frame is authoritative; UIA/OCR/rules
+are only hints. Text-only models cannot
 inspect screenshot bytes directly; use OCR/UIA/CV, nonvisual_summary,
 deterministic checks, or VLM tools. Act by grounded pixel coordinates.
+For native vision, visual coordinates are always frame_* values in 0..1000;
+never copy screenshot pixels into physical x/y.
 
 # Priority
-1. Grounded pixel coordinates from native vision/VLM/OCR/CV/nonvisual summaries.
+1. Native frame_* coordinates (0..1000), or explicitly reported physical
+   coordinates from text-only structured observations.
 2. Shell checks for deterministic state (files, processes).
 3. UIA element_id — only for standard OS controls.
 
@@ -185,12 +216,19 @@ UIA returns nothing useful. Use native vision/VLM/OCR/CV/nonvisual summaries to 
 # Core loop
 1. open_app (normal path); list_windows / scan_windows / focus_window only for recovery
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
-2. Observe when state or target location is ambiguous; pass full=true only when raw details are needed. For clear labeled routines with a known rough region, execute_subgoal may be called directly after focus_window because it performs targeted observe/locator/verification internally.
-3. For clear labeled input/button routines, or labeled click-only routines with visible expected state, call execute_subgoal first; otherwise act by grounded coordinates or run_action_batch. For simple drawing/canvas tasks, call execute_subgoal with draw={{shape,color}} after the window is open; for multiple obvious shapes/colors, use draws=[{{shape,color,expected_region}}, ...] in one routine. Let the controller select requested color, locate the likely canvas, and verify pixel change before you inspect toolbars. Never use verify-only execute_subgoal as a substitute for open_app/launch/focus_window.
+2. Inspect the current real frame. Execute one visual transaction, then inspect
+its automatic post-action frame before deciding again. Observe when state or
+target location is ambiguous; pass full=true only when raw details are needed.
+3. On custom/pixel-rendered interfaces, prefer direct grounded frame_* coordinates from
+the frame. Use execute_subgoal/run_action_batch only for a short deterministic
+routine whose whole initial state and expected result are clear. For simple
+drawing/canvas tasks, execute_subgoal with draw={{shape,color}} remains a fast
+option. Never use verify-only execute_subgoal as a substitute for open_app/launch/focus_window.
 4. observe/read_text again only when controller evidence is insufficient; matched_texts or fast_path_advice from verified execute_subgoal can complete the matching plan item.
 5. done only when grounded evidence confirms task complete.
 
-Recovery: if same tactic fails twice, change approach entirely.
+Recovery: if same tactic fails twice, change approach entirely. If the real
+frame is still ambiguous, call blocked instead of continuing blindly.
 {vlm_section}{planning_section}{playbook_section}{experience_section}"""
 
 _VLM_SECTION = """
@@ -213,9 +251,19 @@ These hints are references only. The current screen may differ — verify before
 """
 
 _VISION_NATIVE = (
-    "You have native vision: after each observe, a JPEG screenshot of the target "
-    "window is injected so you can see the actual pixels. "
-    "Always look at the screenshot to understand what is on screen before acting."
+    "You have native vision: a JPEG of the real target window is injected "
+    "initially, after observe, and after each visual transaction. Treat the "
+    "complete frame as authoritative; structured perception and rules are hints. "
+    "Inspect the new frame before each next action and never continue when the "
+    "target or result is visually ambiguous. Use frame_* coordinates in 0..1000 "
+    "for targets seen in the image; never manually scale JPEG pixels into x/y. "
+    "For one spatial action, call the direct click/scroll/drag/draw_strokes tool; do "
+    "not wrap it in run_action_batch. Every native batch child must include its "
+    "canonical action field; shorthand children without action are invalid. A native "
+    "run_action_batch may contain at most one spatial mutation, including "
+    "frame_*, element_id, and semantic-label clicks/locators. Keyboard-only "
+    "type_text/hotkey, waits, and checks may accompany it; put every later spatial "
+    "action in a new turn after inspecting the next real post-action frame."
 )
 _VISION_TEXT_ONLY = (
     "You do not have native vision. Rely on structured observations: "
@@ -249,7 +297,10 @@ def system_prompt(
         timezone_name=str(now.tzname() or now.utcoffset() or "local"),
         vision_line=vision_line,
         runtime_section=("\n" + runtime_section.strip()) if runtime_section else "",
-        vlm_section=_VLM_SECTION if vlm_enabled else "",
+        # A second visual model would re-encode the same frame, add latency,
+        # and can contradict the native model. Keep VLM tools/instructions as
+        # a fallback only for text-only main models.
+        vlm_section=_VLM_SECTION if (vlm_enabled and not main_model_has_vision) else "",
         planning_section=_PLANNING_SECTION if planning_enabled else "",
         playbook_text=playbook_text,
         playbook_section=playbook_text,

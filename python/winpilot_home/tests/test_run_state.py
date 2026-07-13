@@ -34,7 +34,7 @@ def test_run_state_expected_action_failure_recovers():
     assert "text not visible" in state.guidance()
 
 
-def test_run_state_batch_with_final_observe_is_ready():
+def test_run_state_batch_with_final_plain_observe_keeps_action_debt():
     from winpilot.agent.run_state import RunStateMachine
 
     state = RunStateMachine()
@@ -44,8 +44,37 @@ def test_run_state_batch_with_final_observe_is_ready():
         json.dumps({"ok": True, "metrics": {"action_count": 2}}),
     )
 
+    assert state.phase == "visually_grounded"
+    assert state.unverified_actions == 1
+    assert "not completion evidence" in state.guidance()
+
+
+def test_run_state_batch_with_explicit_matches_result_is_ready():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool(
+        "run_action_batch",
+        {"actions": [{"click": {"x": 1, "y": 2}}, {"observe": {}}]},
+        json.dumps({"ok": True, "matches": True, "metrics": {"action_count": 2}}),
+    )
+
     assert state.phase == "ready"
-    assert state.guidance() == ""
+    assert state.unverified_actions == 0
+
+
+def test_run_state_observe_only_batch_preserves_existing_action_debt():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine(unverified_actions=1)
+    state.after_tool(
+        "run_action_batch",
+        {"actions": [{"observe": {}}]},
+        json.dumps({"ok": True, "metrics": {"action_count": 1}}),
+    )
+
+    assert state.phase == "visually_grounded"
+    assert state.unverified_actions == 1
 
 
 def test_run_state_batch_with_final_zoom_still_needs_semantic_verify():
@@ -76,7 +105,7 @@ def test_run_state_batch_verified_result_is_ready():
     assert state.unverified_actions == 0
 
 
-def test_run_state_semantic_observe_resets_pending_unverified_count():
+def test_run_state_generic_observe_keeps_pending_causal_debt():
     from winpilot.agent.run_state import RunStateMachine
 
     state = RunStateMachine()
@@ -85,8 +114,8 @@ def test_run_state_semantic_observe_resets_pending_unverified_count():
 
     state.after_tool("observe", {}, json.dumps({"ok": True, "text": "real semantic state"}))
 
-    assert state.phase == "ready"
-    assert state.unverified_actions == 0
+    assert state.phase == "visually_grounded"
+    assert state.unverified_actions == 1
 
 
 def test_run_state_zoom_does_not_clear_pending_unverified_count():
@@ -98,11 +127,11 @@ def test_run_state_zoom_does_not_clear_pending_unverified_count():
 
     state.after_tool("zoom", {"x": 1, "y": 2, "width": 10, "height": 10}, json.dumps({"ok": True}))
 
-    assert state.phase == "need_observe"
+    assert state.phase == "visually_grounded"
     assert state.unverified_actions == 1
 
 
-def test_read_only_inventory_result_clears_pending_action_count():
+def test_unrelated_inventory_does_not_clear_pending_action_count():
     from winpilot.agent.run_state import RunStateMachine
 
     state = RunStateMachine()
@@ -115,8 +144,24 @@ def test_read_only_inventory_result_clears_pending_action_count():
         "installed applications total=363 range=1-200",
     )
 
-    assert state.phase == "ready"
-    assert state.unverified_actions == 0
+    assert state.phase == "visually_grounded"
+    assert state.unverified_actions == 1
+
+
+def test_targeted_read_text_does_not_clear_pending_action_without_transition():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool("click", {"x": 1, "y": 2}, json.dumps({"ok": True, "verified": False}))
+
+    state.after_tool(
+        "read_text",
+        {"query": "saved successfully"},
+        "Saved successfully",
+    )
+
+    assert state.phase == "visually_grounded"
+    assert state.unverified_actions == 1
 
 
 def test_read_only_shell_verification_clears_pending_action_count():

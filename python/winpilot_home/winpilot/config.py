@@ -51,13 +51,21 @@ _DEFAULTS: dict[str, Any] = {
     "fusion": {"escalate_on_empty": True, "ocr_skip_when_uia_rich": True,
                "vlm_skip_when_uia_rich": True, "uia_rich_threshold": 20,
                "vlm_assist_threshold": 60, "observe_cache_ttl_s": 2.0,
+               # When the main model can consume images, the screenshot is the
+               # authoritative observation for pixel-rendered interfaces.  Do
+               # not spend seconds serialising the same frame through
+               # UIA/OCR/VLM unless a query explicitly asks for text grounding.
+               "native_vision_direct": True,
                "screen_watch_autostart": True,
                "predictive_ocr_enabled": True,
                "predictive_ocr_prefer_cache": True,
                "incremental_perception_enabled": True,
                "incremental_perception_debounce_ms": 80,
                "incremental_perception_max_crops": 4,
-               "incremental_perception_wait_ms": 1200,
+               # Prefetch is opportunistic.  The foreground visual loop must
+               # never wait seconds for background OCR; late results are
+               # dropped and an explicit query can take the full path.
+               "incremental_perception_wait_ms": 250,
                "incremental_perception_min_ratio": 0.00015,
                "incremental_perception_max_ratio": 0.35,
                "press_probe_settle_ms": 18,
@@ -85,6 +93,16 @@ _DEFAULTS: dict[str, Any] = {
     },
     "controller": {
         "physical_anchor_clicks": True,
+        # A model turn may commit one visual transaction.  The resulting real
+        # frame is returned before another transaction is accepted.
+        "visual_closed_loop": True,
+        # Cancel low-level input when target-window pixels changed materially
+        # while the model was deciding from the prior frame.
+        "visual_preflight_change_ratio": 0.0025,
+        # Prefer stability at the grounded action target so unrelated animated
+        # pixels cannot livelock an otherwise safe visual transaction.
+        "visual_preflight_target_change_ratio": 0.01,
+        "visual_preflight_target_margin": 60,
         "visual_servo_mode": "adaptive",
         "visual_servo_recent_change_ms": 900,
         "visual_servo_strict": True,

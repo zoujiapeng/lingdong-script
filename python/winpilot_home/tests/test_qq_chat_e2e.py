@@ -224,6 +224,17 @@ class TestDoneGate:
 
     def test_done_accepted_with_read_text_evidence(self):
         runner = _make_runner()
+        chat_readout = (
+            "妈妈\nHELLO_FROM_AGENT\n好的，我看到了\nTHANKS_FOR_CONFIRMING"
+        )
+        runner._tool_history = [
+            ("type_text", {"text": "HELLO_FROM_AGENT"}, '{"ok": true}'),
+            ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+            ("read_text", {}, chat_readout),
+            ("type_text", {"text": "THANKS_FOR_CONFIRMING"}, '{"ok": true}'),
+            ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+            ("read_text", {}, chat_readout),
+        ]
         # Simulate a real chat window: multiple long lines resembling message bubbles.
         runner._recent_results = [
             ("read_text",

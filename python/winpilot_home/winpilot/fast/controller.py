@@ -1312,7 +1312,7 @@ class FastGuiController:
 
     def _click_element(self, action: dict[str, Any]) -> ToolResult:
         if self.session.snapshot is None:
-            observe = self._dispatch("observe", {})
+            observe = self._dispatch("observe", {"full": True, "force_full": True})
             if _failed(observe):
                 return observe
         snapshot = self.session.snapshot
@@ -1710,7 +1710,7 @@ class FastGuiController:
         # text-anchor ElementCache, try an input-specific locator that can use
         # edit roles, focused state, OCR labels, and synthetic nearby boxes.
         if self.session.snapshot is None:
-            observe = self._dispatch("observe", {})
+            observe = self._dispatch("observe", {"full": True, "force_full": True})
             internal.append({
                 "action": "observe",
                 "ok": not _failed(observe),
@@ -2402,6 +2402,13 @@ class FastGuiController:
         source_action: str,
         source_data: dict[str, Any],
     ) -> ToolResult:
+        """Summarise local pixel effects; never infer semantic completion.
+
+        The historical action name is kept in traces for compatibility, but an
+        after-frame ink/color summary is not a goal-conditioned verifier.  It
+        may confirm that an already verified source action had an effect; it
+        cannot turn arbitrary pixel change into a satisfied postcondition.
+        """
         started = _now_ms()
         payload: dict[str, Any] = {
             "ok": True,
@@ -2422,7 +2429,18 @@ class FastGuiController:
                 payload["visual_change_ratio"] = source_data.get("visual_change_ratio")
             if source_data.get("verified") is True:
                 payload["verified"] = True
-                payload["verify_method"] = "auto-region-summary"
+                payload["verify_method"] = "source-verification+pixel-effect-summary"
+            else:
+                payload["verified"] = False
+            payload["effect_observed"] = bool(
+                source_data.get("visual_change_detected") is True
+            )
+            payload["postcondition_satisfied"] = bool(
+                source_data.get("verified") is True
+            )
+            payload["semantic_verified"] = False
+            payload["completion_evidence"] = False
+            payload["summary_kind"] = "pixel_effect_only"
         except Exception as exc:
             payload = {
                 "ok": False,

@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..fast.action_contract import BATCH_MUTATING_ACTIONS, batch_action_name
+
 
 ACTION_TOOLS = {
     "open_app",
@@ -93,6 +95,17 @@ def _batch_has_semantic_observe(args: dict) -> bool:
     return last in {"observe", "read_text", "vlm_describe"}
 
 
+def _batch_has_mutation(args: dict) -> bool:
+    actions = args.get("actions")
+    if not isinstance(actions, list):
+        return False
+    return any(
+        isinstance(action, dict)
+        and batch_action_name(action) in BATCH_MUTATING_ACTIONS
+        for action in actions
+    )
+
+
 def _batch_has_expect(args: dict) -> bool:
     actions = args.get("actions")
     if not isinstance(actions, list):
@@ -171,16 +184,24 @@ class RunStateMachine:
             return
 
         if name in OBSERVE_TOOLS:
-            if (
-                self.unverified_actions > 0
-                and name in PASSIVE_PIXEL_OBSERVE_TOOLS
-                and not _passive_observe_verifies_pending_actions(data)
-            ):
+            if self.unverified_actions > 0:
+                # A queried label may have existed before the action (for
+                # example the clicked button's own text). Only an observation
+                # carrying an explicit verified/matches transition may clear
+                # causal action debt; plain read_text merely regrounds vision.
+                verified_observation = _passive_observe_verifies_pending_actions(data)
+                if verified_observation:
+                    self.unverified_actions = 0
+                    self._transition("ready", name)
+                    return
+                # A fresh frame/element inventory restores visual grounding for
+                # the next decision but does not prove the previous action's
+                # postcondition.  Keep the debt visible for the done gate.
                 self._transition(
-                    "need_observe",
+                    "visually_grounded",
                     name,
                     (
-                        f"{name} captured pixels but did not prove "
+                        f"{name} refreshed state but did not causally prove "
                         f"{self.unverified_actions} pending action(s)"
                     ),
                 )
@@ -211,9 +232,21 @@ class RunStateMachine:
                 return
 
         if name == "run_action_batch":
-            if _batch_has_semantic_observe(args) or data.get("ok") is True and data.get("verified") is True:
+            if _passive_observe_verifies_pending_actions(data):
                 self.unverified_actions = 0
                 self._transition("ready", name)
+            elif _batch_has_semantic_observe(args):
+                # A trailing observe/read_text refreshes the real scene, but a
+                # plain snapshot is not a causal postcondition. Count a new
+                # batch mutation if present while preserving any prior debt;
+                # an observe-only batch must not manufacture another mutation.
+                if _batch_has_mutation(args):
+                    self.unverified_actions += 1
+                self._transition(
+                    "visually_grounded",
+                    name,
+                    "batch refreshed state but did not explicitly verify its action",
+                )
             else:
                 self.unverified_actions += 1
                 self._transition(
@@ -260,6 +293,12 @@ class RunStateMachine:
             return (
                 f"phase=recovering after {self.last_tool}: {self.last_issue}. "
                 "Do not repeat the same action blindly; re-observe or choose a different route."
+            )
+        if self.phase == "visually_grounded":
+            return (
+                f"phase=visually_grounded after {self.last_tool}: {self.last_issue}. "
+                "The frame may guide the next decision, but it is not completion evidence; "
+                "use a targeted predicate or the independent visual done judge."
             )
         return ""
 

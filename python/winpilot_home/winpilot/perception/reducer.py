@@ -345,7 +345,8 @@ def reduce_snapshot(
             "label": element.text or "",
             "bbox": [int(element.left), int(element.top), int(element.width), int(element.height)],
             "center": [int(element.cx), int(element.cy)],
-            "confidence": round(float(item.score), 3),
+            "relevance_score": round(float(item.score), 3),
+            "perception_confidence": round(float(element.confidence), 3),
             "source": element.source or "unknown",
             "why_relevant": "; ".join(dict.fromkeys(item.why))[:180],
         })
@@ -358,7 +359,8 @@ def reduce_snapshot(
             "label": "",
             "bbox": chat_context["bbox"],
             "center": chat_context["center"],
-            "confidence": 0.92,
+            "relevance_score": 0.92,
+            "perception_confidence": None,
             "source": "geometry",
             "why_relevant": (
                 "target conversation header is open; lower-right custom composer inferred"
@@ -483,7 +485,9 @@ def render_reduced_snapshot(
                 f"- id={elem_id} role={cand['role']} text=\"{label}\" "
                 f"center=({cand['center'][0]},{cand['center'][1]}) "
                 f"bbox=({cand['bbox'][0]},{cand['bbox'][1]},{cand['bbox'][2]},{cand['bbox'][3]}) "
-                f"score={cand['confidence']} src={cand['source']} why={cand['why_relevant']}"
+                f"relevance={cand['relevance_score']} "
+                f"perception_conf={cand['perception_confidence']} "
+                f"src={cand['source']} why={cand['why_relevant']}"
             )
     if reduced["uncertainties"]:
         lines.append("uncertainties: " + " | ".join(reduced["uncertainties"]))

@@ -277,7 +277,17 @@ def _merge_adjacent_visible_verification_steps(steps: list[dict]) -> list[dict]:
 _MAX_STEPS = 6
 _MAX_GOAL_CHARS = 180
 # Sequence markers that hint at a multi-step task.
-_SEQ_MARKERS = ("然后", "再", "接着", "之后", "最后", "依次", "并", "，", ",", "、", ";", "；", "\n")
+_SEQ_MARKERS = (
+    "然后", "再", "接着", "随后", "之后", "最后", "依次",
+    " then ", " next ", " after that ", " finally ", "\n",
+)
+_STEP_VERB_RE = re.compile(
+    r"\b(?:open|launch|focus|click|press|type|enter|fill|paste|save|export|"
+    r"verify|confirm|search|send|reply|drag|draw|close)\b|"
+    r"打开|启动|聚焦|点击|按下|输入|粘贴|保存|另存为|导出|确认|验证|"
+    r"搜索|发送|回复|拖动|绘制|关闭",
+    re.IGNORECASE,
+)
 
 _PLAN_SYSTEM = (
     "你是任务规划助手。把用户的 Windows 操作任务拆解为 2-6 个有序、可独立验证的子目标。"
@@ -301,12 +311,21 @@ def should_plan_upfront(task: str) -> bool:
     if not planning_enabled():
         return False
     text = (task or "").strip()
-    if len(text) >= 45:
+    # Count semantic sequence markers, not commas: policy/constraint prose often
+    # contains long comma-separated forbidden-tool lists that are not steps.
+    folded = f" {text.casefold()} "
+    segments = sum(folded.count(marker) for marker in _SEQ_MARKERS)
+    if segments >= 4:
         return True
-    # Count total occurrences (not mere presence) so "a,b,c,d"-style short
-    # enumerations don't trigger an unnecessary planning call.
-    segments = sum(text.count(marker) for marker in _SEQ_MARKERS)
-    return segments >= 4
+    # Length and policy prose are not task complexity.  A verbose two-action
+    # GUI instruction (open URL, click, confirm; no shell/DOM) used to pay for
+    # an upfront planner, then spend more turns maintaining a needless plan.
+    # Require at least four explicit action verbs when sequence markers alone
+    # do not prove a long horizon.
+    explicit_verbs = {
+        str(match).casefold() for match in _STEP_VERB_RE.findall(text)
+    }
+    return len(explicit_verbs) >= 4
 
 
 def _parse_steps(raw: str) -> list[dict]:

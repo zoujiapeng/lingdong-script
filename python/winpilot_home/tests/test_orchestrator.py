@@ -734,6 +734,60 @@ def test_run_projection_preserves_transient_roi_evidence():
     }
 
 
+def test_run_projection_tracks_native_visual_feedback_frames_and_latency():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({
+        "type": "agent_start", "ts": 1.0, "run_id": "native-vision",
+        "task": "Operate from real frames",
+    })
+    for index, latency_ms in enumerate((5, 10, 25), start=1):
+        store.on_event({
+            "type": "visual_feedback",
+            "ts": 1.0 + index,
+            "run_id": "native-vision",
+            "frame_id": index,
+            "phase": "post_action",
+            "capture_latency_ms": latency_ms,
+        })
+
+    run = store.get("native-vision")
+
+    assert run is not None
+    assert run["metrics"]["visual_feedback_frame_count"] == 3
+    assert run["metrics"]["visual_feedback_capture_latency_latest_ms"] == 25
+    assert run["metrics"]["visual_feedback_capture_latency_avg_ms"] == 13.3
+    assert run["metrics"]["visual_feedback_capture_latency_p95_ms"] == 25
+    assert run["metrics"]["screen_capture_latency_avg_ms"] == 13.3
+
+
+def test_run_projection_visual_feedback_latency_is_fail_safe():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    store.on_event({"type": "agent_start", "ts": 1.0, "run_id": "safe-frame"})
+    for index, latency_ms in enumerate((None, "unknown", -4, float("nan"), 8), start=1):
+        event = {
+            "type": "visual_feedback",
+            "ts": 1.0 + index,
+            "run_id": "safe-frame",
+            "frame_id": index,
+        }
+        if latency_ms is not None:
+            event["capture_latency_ms"] = latency_ms
+        store.on_event(event)
+
+    run = store.get("safe-frame")
+
+    assert run is not None
+    assert run["metrics"]["visual_feedback_frame_count"] == 5
+    assert run["metrics"]["visual_feedback_capture_latency_latest_ms"] == 8
+    assert run["metrics"]["visual_feedback_capture_latency_avg_ms"] == 8
+    assert run["metrics"]["visual_feedback_capture_latency_p95_ms"] == 8
+    assert run["metrics"]["screen_capture_latency_avg_ms"] == 8
+
+
 def test_run_projection_tracks_semantic_verify_method_and_true_latency():
     from winpilot.orchestrator.projection import RunProjectionStore
 

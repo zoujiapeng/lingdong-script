@@ -2103,6 +2103,7 @@ class SubgoalExecutor:
     def _ensure_observed(self, request: SubgoalRequest) -> tuple[Snapshot | None, list[dict[str, Any]], bool]:
         prelude: list[dict[str, Any]] = []
         skip_click_auto_observe = False
+        entry_snapshot = getattr(self.session, "snapshot", None)
         draw_specs = _draw_specs(request)
         pure_draw = bool(draw_specs and not request.input and not request.clicks and not request.verify_texts)
         requires_color_selection = any(
@@ -2120,7 +2121,15 @@ class SubgoalExecutor:
                 snapshot_hwnd = int(getattr(snapshot, "hwnd", 0) or 0) if snapshot is not None else 0
             except Exception:
                 snapshot_hwnd = 0
-            if snapshot is not None and snapshot_hwnd and snapshot_hwnd != int(hwnd):
+            real_session_same_hwnd_snapshot = bool(
+                snapshot is not None
+                and snapshot is entry_snapshot
+                and hasattr(self.session, "_screen_epoch")
+            )
+            if snapshot is not None and (
+                (snapshot_hwnd and snapshot_hwnd != int(hwnd))
+                or real_session_same_hwnd_snapshot
+            ):
                 try:
                     self.session.snapshot = None
                 except Exception:
@@ -2128,7 +2137,10 @@ class SubgoalExecutor:
                 prelude.append({
                     "action": "discard_stale_snapshot",
                     "ok": True,
-                    "preview": f"discarded snapshot hwnd={snapshot_hwnd}; target hwnd={int(hwnd)}",
+                    "preview": (
+                        f"discarded snapshot hwnd={snapshot_hwnd}; target hwnd={int(hwnd)}; "
+                        "new controller transaction will refresh structured grounding"
+                    ),
                 })
         if getattr(self.session, "snapshot", None) is None:
             if pure_draw and not requires_color_selection:
@@ -2153,7 +2165,9 @@ class SubgoalExecutor:
                     "dim_stats": targeted.dim_stats,
                 })
             else:
-                observe = self.session.dispatch("observe", {})
+                observe = self.session.dispatch(
+                    "observe", {"full": True, "force_full": True},
+                )
                 prelude.append({"action": "observe", "ok": not bool(observe.terminal), "preview": observe.text[:320]})
         snapshot = getattr(self.session, "snapshot", None)
         return snapshot, prelude, skip_click_auto_observe

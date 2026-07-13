@@ -37,6 +37,7 @@ class FailureType(str, Enum):
     WAIT_TIMEOUT = "WAIT_TIMEOUT"
     WINDOW_FOCUS_ERROR = "WINDOW_FOCUS_ERROR"
     TASK_CONSTRAINT_LOST = "TASK_CONSTRAINT_LOST"
+    VISUAL_GROUNDING_REQUIRED = "VISUAL_GROUNDING_REQUIRED"
     ACTION_SUCCEEDED_VERIFICATION_FAILED = "ACTION_SUCCEEDED_VERIFICATION_FAILED"
     DRAW_NO_VISIBLE_CHANGE = "DRAW_NO_VISIBLE_CHANGE"
 
@@ -106,6 +107,11 @@ _STRATEGIES: dict[FailureType, tuple[str, str, int]] = {
     FailureType.ACTION_SUCCEEDED_VERIFICATION_FAILED: (
         "reverify_perception_wait_or_adjust_overstrict_expect",
         "Treat the action as possibly successful. First check perception miss, insufficient wait, or overly strict verify condition; continue planning only when business evidence is truly absent.",
+        1,
+    ),
+    FailureType.VISUAL_GROUNDING_REQUIRED: (
+        "capture_fresh_target_frame_before_action",
+        "The action did not run. Capture a fresh real frame for the current target hwnd/screen epoch, inspect it, then choose one action.",
         1,
     ),
     FailureType.DRAW_NO_VISIBLE_CHANGE: (
@@ -414,6 +420,22 @@ class FailureClassifier:
         if data and not _has_failed_signal(data, text):
             return None
         if payloads:
+            grounding_payload = next(
+                (item for item in payloads if item.get("visual_grounding_required") is True),
+                None,
+            )
+            if grounding_payload is not None:
+                return _classification(
+                    FailureType.VISUAL_GROUNDING_REQUIRED,
+                    0.99,
+                    {
+                        "blocked": True,
+                        "visual_grounding_required": True,
+                    },
+                    str(grounding_payload.get("error") or "fresh real frame required"),
+                    retryable=True,
+                    retry_budget=1,
+                )
             errors = [item.get("error") for item in payloads if item.get("error")]
             if errors:
                 return _classification(
