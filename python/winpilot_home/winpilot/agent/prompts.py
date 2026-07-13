@@ -91,6 +91,35 @@ element and coordinates.
    when possible, draws simple shapes, and verifies pixel/color change. Put
    requested colors in the draw/draws payload; do not spend early rounds
    selecting toolbar items before trying this direct draw routine.
+   For a recognizable object or a quality request such as detailed, polished,
+   good-looking, or not crude, compose one complete draws[] transaction. A detailed
+   creature needs roughly 15-30 meaningfully placed, explicitly part-labelled
+   primitives/strokes; a dog or other four-legged animal must include separate
+   large head/body contours, pose-visible ears and eyes, nose and mouth, at least two
+   pose-visible limb/haunch contours with paws, a tail, and at least two decorative details such as pupils,
+   cheeks, belly, tongue, collar, spots, or whiskers. Give every primitive an
+   explicit canvas-relative box or strokes; a head/body plus two stick legs is not
+   a complete scene. For polished/good-looking organic creatures, geometry boxes
+   are not the visual vocabulary: use normalized_strokes=[[[x,y],...]]] with 6-16
+   canvas-relative 0..1000 waypoints for the head, body, and visible limb contours
+   (repeat the first point to close a contour). Use several additional custom
+   contours for ears/tail/fluff when useful. Never use rectangles for natural
+   limbs; reserve circles/ellipses for small eyes, pupils, nose, paws, and
+   decorations. Keep attachments connected and use most of the canvas. Never
+   force four parallel capsule legs below an oval: that reads as a table or
+   caterpillar. Prefer a coherent seated/three-quarter pose with front paws and
+   curved hind haunches, or a side pose with only the actually visible legs.
+   Every supported primitive is outline-only, including closed
+   circles/ellipses/rectangles: never describe or treat it as filled, and do not
+   simulate fill with dense scribbles. Colors explicitly named by the user are constraints;
+   colors you invent for styling are optional and may fall back to a nearby/current
+   visible swatch. In later reasoning and the final summary, report only colors
+   confirmed by matched_visual_colors; never claim an invented planner color was
+   applied after an optional fallback. If a palette/control step fails after any strokes were delivered,
+   preserve the partial drawing and continue only missing parts. Never select-all,
+   delete, issue repeated Ctrl+Z, or restart merely because a color failed or the
+   first complete draft could use polish. Add non-destructive details instead. Do not click the same toolbar
+   target a third time without canvas progress; pause with the exact visible blocker.
    For rich-text document formatting, use one execute_subgoal formats[] routine
    (for example first_line bold+center plus body_after_first_line left). Do not
    spend one LLM round per Home/selection/formatting hotkey.
@@ -100,7 +129,7 @@ element and coordinates.
    first use open_app/launch/focus_window, then verify against that target.
    If execute_subgoal returns verified=true and evidence_packet.matched_texts
    contains the text/state required by your current plan item, call
-   complete_subgoal/done directly; do not repeat observe/read_text for the same
+   complete_subgoal when that tool is exposed, otherwise call done directly; do not repeat observe/read_text for the same
    evidence unless the result says needs_llm_reason or missing_texts is non-empty.
    For a clear input target inside a batch, use type_into_element to locate,
    focus, optionally clear, and type in one controller step.
@@ -172,7 +201,7 @@ screenshot/VLM summary or equivalent grounded evidence, not just a successful
 click/type/Enter.
 
 # Planning and recovery
-- For multi-step tasks, use revise_plan(steps=[...]).
+- For multi-step tasks, use revise_plan(steps=[...]) when that tool is exposed.
 - If the same approach fails twice, change strategy completely.
 - If the real frame does not make the target or result clear, do not guess,
   spray coordinates, or let rules continue on your behalf. Call blocked with
@@ -220,10 +249,24 @@ Use type_text for keyboard-first focused printable sequences such as 6+7=; hotke
 its automatic post-action frame before deciding again. Observe when state or
 target location is ambiguous; pass full=true only when raw details are needed.
 3. On custom/pixel-rendered interfaces, prefer direct grounded frame_* coordinates from
-the frame. Use execute_subgoal/run_action_batch only for a short deterministic
-routine whose whole initial state and expected result are clear. For simple
-drawing/canvas tasks, execute_subgoal with draw={{shape,color}} remains a fast
-option. Never use verify-only execute_subgoal as a substitute for open_app/launch/focus_window.
+   the frame. Use execute_subgoal/run_action_batch only for a short deterministic
+   routine whose whole initial state and expected result are clear. For simple
+   drawing/canvas tasks, execute_subgoal with draw={{shape,color}} remains a fast
+   option. For a detailed/polished/non-crude creature, use one complete draws[]
+   routine with roughly 15-30 explicit part-labelled outline strokes. For a dog,
+   include large head/body, pose-visible ears/eyes, nose/mouth, pose-visible limbs/haunches with paws,
+   tail, and at least two decorative details. Closed primitives are outlines, not
+   filled shapes; two stick legs or a few face circles are incomplete. For a
+   polished organic creature, head/body/visible limbs must be expressive 6-16 point
+   normalized_strokes contours, not stacked ellipses or rectangular legs. Never
+   put four parallel capsule legs under an oval; use a coherent seated/side pose. Keep
+   circles/ellipses for small facial details and decorations. Treat
+   matched_visual_colors as the effective palette and never claim an invented
+   color that the controller did not match. Preserve delivered strokes after any
+   palette failure and continue missing parts with a nearby/current color; never
+   clear/restart/bulk-undo partial work or click the same toolbar target a third time without
+   canvas progress. Never use verify-only execute_subgoal as a substitute for
+   open_app/launch/focus_window.
 4. observe/read_text again only when controller evidence is insufficient; matched_texts or fast_path_advice from verified execute_subgoal can complete the matching plan item.
 5. done only when grounded evidence confirms task complete.
 
@@ -239,9 +282,12 @@ screens that OCR/CV cannot describe.
 
 _PLANNING_SECTION = """
 # Todo planning
-If no current todo plan is shown, call revise_plan(steps=[...]) for dependent tasks.
+When revise_plan/complete_subgoal are exposed, use them only for genuinely dependent tasks.
+Some single-transaction profiles intentionally omit them; in that case execute the visible
+task and call done after grounded verification instead of inventing a todo plan.
+If no current todo plan is shown and revise_plan is available, call revise_plan(steps=[...]) for dependent tasks.
 If a current todo plan is already shown, follow it; do not revise just to rephrase.
-Mark each completed subgoal with complete_subgoal(index=...). Revise only when wrong.
+Mark each completed subgoal with complete_subgoal(index=...) when available. Revise only when wrong.
 """
 
 _EXPERIENCE_HEADER = """

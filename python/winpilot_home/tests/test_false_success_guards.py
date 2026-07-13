@@ -4606,8 +4606,11 @@ def test_done_judge_accepts_only_literal_json_true(invalid_done):
     assert runner._done_verified is False
 
 
-def test_native_done_judge_prioritizes_fresh_pixels_and_later_successful_input():
+def test_native_done_judge_prioritizes_fresh_pixels_and_later_successful_input(monkeypatch):
     from winpilot.agent.loop import AgentRunner
+    from winpilot.agent import done_verifier as done_mod
+
+    monkeypatch.setattr(done_mod, "model_supports_vision", lambda _model: True)
 
     runner = AgentRunner(
         "Click the calibration button with the real GUI mouse and confirm CALIBRATION_OK."
@@ -4712,3 +4715,290 @@ def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(mo
     content = captured["messages"][1]["content"]
     prompt = next(part["text"] for part in content if part.get("type") == "text")
     assert "AUTHORITATIVE SPATIAL RESULT CHECK" in prompt
+
+
+def test_text_only_pro_routes_fresh_drawing_judge_to_configured_vision_model(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent import done_verifier as done_mod
+
+    class _Config:
+        values = {
+            "api": {"model": "mimo-v2.5-pro"},
+            "vlm": {
+                "enabled": True,
+                "base_url": "https://vision.invalid/v1",
+                "model": "mimo-v2.5",
+            },
+            "agent": {},
+        }
+
+        def get(self, *keys, default=None):
+            value = self.values
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+    captured = {}
+
+    class _VisionClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh frame shows a complete polished dog"}'
+                        ))
+                    )])
+
+    class _TextClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("text-only Pro client must not receive image content")
+
+    monkeypatch.setattr(done_mod, "_config", lambda: _Config())
+    monkeypatch.setattr(done_mod.vlm_mod, "_client", lambda: _VisionClient())
+    monkeypatch.setattr(
+        done_mod.vlm_mod,
+        "_extra_body",
+        lambda: {"thinking": {"type": "disabled"}},
+    )
+
+    runner = AgentRunner("draw a good-looking dog in Paint")
+    runner.result_text = "done"
+    runner._fresh_done_image_b64 = "fresh-dog-frame"
+
+    assert runner._call_done_judge(_TextClient(), "", "draw_strokes", "evidence") is True
+    assert captured["model"] == "mimo-v2.5"
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    user_content = captured["messages"][1]["content"]
+    assert any(part.get("type") == "image_url" for part in user_content)
+    user_prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert "original user task is the only acceptance contract" in user_prompt
+    assert "invented only by the agent/plan" in user_prompt
+
+
+def test_text_only_pro_verify_done_captures_fresh_drawing_frame_for_vision_judge(monkeypatch):
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent import done_verifier as done_mod
+
+    class _Config:
+        values = {
+            "api": {"model": "mimo-v2.5-pro"},
+            "vlm": {
+                "enabled": True,
+                "base_url": "https://vision.invalid/v1",
+                "model": "mimo-v2.5",
+            },
+            "agent": {},
+        }
+
+        def get(self, *keys, default=None):
+            value = self.values
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    return default
+                value = value[key]
+            return value
+
+    captured = {}
+    capture_calls = []
+
+    class _VisionClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **kwargs):
+                    captured.update(kwargs)
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content=(
+                            '{"done": true, "reason": "fresh frame shows a complete polished dog"}'
+                        ))
+                    )])
+
+    class _TextClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("text-only Pro client must not receive image content")
+
+    monkeypatch.setattr(done_mod, "_config", lambda: _Config())
+    monkeypatch.setattr(
+        done_mod,
+        "capture_window_jpeg_b64",
+        lambda hwnd: capture_calls.append(hwnd) or "fresh-dog-frame",
+    )
+    monkeypatch.setattr(done_mod.vlm_mod, "_client", lambda: _VisionClient())
+    monkeypatch.setattr(
+        done_mod.vlm_mod,
+        "_extra_body",
+        lambda: {"thinking": {"type": "disabled"}},
+    )
+
+    runner = AgentRunner("draw a good-looking dog in Paint")
+    runner.session.hwnd = 321
+    runner.result_text = "done"
+    runner._steps_log = ['execute_subgoal({"draws": [...]})']
+    draw_result = json.dumps({
+        "ok": True,
+        "verified": True,
+        "visual_change_detected": True,
+        "actions_executed": [{"action": "draw_strokes"}],
+        "evidence_packet": {
+            "matched_visual_colors": [],
+            "missing_visual_colors": [],
+        },
+    })
+    runner._recent_results = [("execute_subgoal", draw_result)]
+    runner._tool_history = [
+        ("execute_subgoal", {"draws": [{"shape": "ellipse", "part": "body"}]}, draw_result),
+    ]
+
+    assert runner._verify_done(_TextClient()) is True
+    assert capture_calls == [321]
+    assert runner._fresh_done_image_b64 == "fresh-dog-frame"
+    assert captured["model"] == "mimo-v2.5"
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert any(
+        part.get("type") == "image_url"
+        for part in captured["messages"][1]["content"]
+    )
+
+
+def _runner_with_verified_scene_for_post_scene_save(task):
+    import json
+
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner(task)
+    parts = [
+        "head", "body", "left_ear", "right_eye",
+        "nose", "mouth", "front_leg", "tail",
+    ]
+    result = json.dumps({
+        "ok": True,
+        "verified": True,
+        "structured_scene_verified": True,
+        "evidence_packet": {
+            "scene_structure": {
+                "structured_scene_verified": True,
+                "primitive_count": len(parts),
+                "distinct_semantic_parts": parts,
+            },
+        },
+    })
+    runner._tool_history = [(
+        "execute_subgoal",
+        {"draws": [{"part": part} for part in parts]},
+        result,
+    )]
+    assert runner._active_verified_structured_drawing_scene() is not None
+    return runner
+
+
+def _standard_post_scene_save_as_batch(shortcut=None):
+    return {
+        "actions": [
+            {"action": "hotkey", "keys": shortcut or ["Ctrl", "S"]},
+            {
+                "action": "type_into_element",
+                "label": "File name",
+                "text": r"C:\Users\zou\Desktop\dog.png",
+                "clear": True,
+            },
+            {"action": "hotkey", "keys": ["Enter"]},
+        ],
+    }
+
+
+@pytest.mark.parametrize("shortcut", [
+    ["Ctrl", "S"],
+    ["Ctrl", "Shift", "S"],
+])
+def test_post_scene_file_output_guard_allows_complete_save_as_batch(shortcut):
+    runner = _runner_with_verified_scene_for_post_scene_save(
+        "draw a polished dog and save it as dog.png"
+    )
+
+    assert runner._drawing_post_scene_manual_mutation_result(
+        "run_action_batch",
+        _standard_post_scene_save_as_batch(shortcut),
+    ) is None
+
+
+@pytest.mark.parametrize("extra_action", [
+    {"action": "click", "x": 922, "y": 298},
+    {"action": "hotkey", "keys": ["ctrl", "z"]},
+    {"action": "draw_strokes", "strokes": [[[1, 1], [2, 2]]]},
+    {"action": "drag", "x1": 1, "y1": 1, "x2": 10, "y2": 10},
+    {"action": "select_color", "color": "red"},
+])
+def test_post_scene_file_output_guard_blocks_save_batch_with_extra_mutation(extra_action):
+    runner = _runner_with_verified_scene_for_post_scene_save(
+        "draw a polished dog and save it as dog.png"
+    )
+    batch = _standard_post_scene_save_as_batch()
+    batch["actions"].append(extra_action)
+
+    blocked = runner._drawing_post_scene_manual_mutation_result(
+        "run_action_batch",
+        batch,
+    )
+
+    assert blocked is not None
+    assert blocked.terminal == "done"
+
+
+def test_post_scene_file_output_guard_does_not_allow_plain_enter():
+    runner = _runner_with_verified_scene_for_post_scene_save(
+        "draw a polished dog and save it as dog.png"
+    )
+
+    blocked = runner._drawing_post_scene_manual_mutation_result(
+        "hotkey", {"keys": ["Enter"]},
+    )
+
+    assert blocked is not None
+    assert blocked.terminal == "done"
+
+
+def test_post_scene_file_output_guard_allows_enter_after_exact_split_save_as_steps():
+    import json
+
+    runner = _runner_with_verified_scene_for_post_scene_save(
+        "draw a polished dog and save it as dog.png"
+    )
+    runner._tool_history.extend([
+        ("hotkey", {"keys": ["Ctrl", "Shift", "S"]}, json.dumps({"ok": True})),
+        (
+            "type_into_element",
+            {"label": "File name", "text": "dog.png", "clear": True},
+            json.dumps({"ok": True}),
+        ),
+    ])
+
+    assert runner._drawing_post_scene_manual_mutation_result(
+        "hotkey", {"keys": ["Enter"]},
+    ) is None
+
+
+def test_post_scene_non_file_task_blocks_standard_save_as_batch():
+    runner = _runner_with_verified_scene_for_post_scene_save(
+        "draw a polished dog in Paint"
+    )
+
+    blocked = runner._drawing_post_scene_manual_mutation_result(
+        "run_action_batch",
+        _standard_post_scene_save_as_batch(),
+    )
+
+    assert blocked is not None
+    assert blocked.terminal == "done"

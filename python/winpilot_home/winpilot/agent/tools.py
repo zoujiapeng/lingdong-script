@@ -31,6 +31,7 @@ from . import planner, scope_guard
 from .task_rules import (
     _communication_mode,
     _gui_only_blocked_hotkey,
+    _is_drawing_task,
     _is_multi_source_research_task,
 )
 
@@ -135,6 +136,10 @@ class ToolSession(
         self._screen_epoch = 0
         self._verified_subgoal_at_epoch: tuple[str, int] | None = None
         self._subgoal_no_progress_counts: dict[str, int] = {}
+        # Bind failure debt to the window/canvas generation that produced it.
+        # Otherwise two failures before a real focus/canvas correction become a
+        # permanent latch and prevent the corrected plan from ever executing.
+        self._subgoal_no_progress_contexts: dict[str, str] = {}
         self._research_exploration_actions = 0
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
@@ -192,18 +197,37 @@ class ToolSession(
                     "needs_replan": False,
                 }))
             if self._subgoal_no_progress_counts.get(signature, 0) >= 2:
-                return ToolResult(self._fmt({
-                    "ok": False,
-                    "verified": False,
-                    "blocked": True,
-                    "duplicate_no_progress_subgoal": True,
-                    "error": (
-                        "The same GUI subgoal produced no verified visual progress twice. "
-                        "Do not click it again; use the visible evidence already collected, "
-                        "choose a different control/strategy, or record unavailable fields."
-                    ),
-                    "needs_replan": True,
-                }))
+                drawing_recovery_context = self._subgoal_recovery_context()
+                previous_failure_context = self._subgoal_no_progress_contexts.get(signature)
+                drawing_recovery_retry = bool(
+                    _is_drawing_task(self.task)
+                    and previous_failure_context
+                    and previous_failure_context != drawing_recovery_context
+                )
+                if drawing_recovery_retry:
+                    # Consume exactly one retry for this corrected environment.
+                    # A handler/scope failure before normal result accounting must
+                    # not leave the same recovery transition reusable forever.
+                    self._subgoal_no_progress_contexts[signature] = drawing_recovery_context
+                elif _is_drawing_task(self.task):
+                    return ToolResult(
+                        "任务已安全停止：同一个绘图子目标已经连续两次没有产生可验证的画布进展。"
+                        "系统不会继续每轮重发相同坐标计划，也没有把本次任务标记为成功。",
+                        terminal="reply",
+                    )
+                else:
+                    return ToolResult(self._fmt({
+                        "ok": False,
+                        "verified": False,
+                        "blocked": True,
+                        "duplicate_no_progress_subgoal": True,
+                        "error": (
+                            "The same GUI subgoal produced no verified visual progress twice. "
+                            "Do not click it again; use the visible evidence already collected, "
+                            "choose a different control/strategy, or record unavailable fields."
+                        ),
+                        "needs_replan": True,
+                    }))
         if self._research_budget_blocks(name, args):
             return ToolResult(self._fmt({
                 "ok": False,
@@ -291,11 +315,23 @@ class ToolSession(
                     self._screen_epoch,
                 )
                 self._subgoal_no_progress_counts.pop(self._subgoal_signature(args), None)
-            elif isinstance(payload, dict) and not self._subgoal_has_visual_progress(payload):
+                self._subgoal_no_progress_contexts.pop(self._subgoal_signature(args), None)
+            elif isinstance(payload, dict):
                 signature = self._subgoal_signature(args)
-                self._subgoal_no_progress_counts[signature] = (
-                    self._subgoal_no_progress_counts.get(signature, 0) + 1
-                )
+                if self._subgoal_has_visual_progress(payload):
+                    # A failed final palette/verification step does not erase
+                    # primitives that the same controller transaction already
+                    # delivered.  Clear stale failure debt so a missing-part
+                    # repair is not permanently locked out.
+                    self._subgoal_no_progress_counts.pop(signature, None)
+                    self._subgoal_no_progress_contexts.pop(signature, None)
+                else:
+                    self._subgoal_no_progress_counts[signature] = (
+                        self._subgoal_no_progress_counts.get(signature, 0) + 1
+                    )
+                    self._subgoal_no_progress_contexts[signature] = (
+                        self._subgoal_recovery_context()
+                    )
         if _is_multi_source_research_task(self.task):
             if name == "record_facts":
                 try:
@@ -377,12 +413,90 @@ class ToolSession(
         }
         return json.dumps(semantic, ensure_ascii=False, sort_keys=True, default=str)
 
+    def _subgoal_recovery_context(self) -> str:
+        """Stable evidence that a failed GUI subgoal's environment changed.
+
+        The action epoch is recorded *after* each failed execute_subgoal, so an
+        immediate identical retry sees the same value.  Window/canvas metadata,
+        explicit document generations, and the world's structural observation
+        allow a genuine recovery to earn one retry without treating a newly
+        captured but otherwise identical frame as progress.
+        """
+        snapshot = self.snapshot
+        snapshot_region = getattr(snapshot, "region", None)
+        snapshot_elements = sorted({
+            f"{getattr(element, 'role', '')}:{(getattr(element, 'text', '') or '').strip()}"
+            for element in (getattr(snapshot, "elements", None) or [])
+            if (getattr(element, "text", "") or "").strip()
+        })
+        world_observe = getattr(self.world, "_last_observe", None)
+        generations = {
+            name: getattr(self, name)
+            for name in (
+                "_canvas_generation",
+                "_drawing_generation",
+                "_document_generation",
+                "_new_blank_generation",
+                "_new_blank_applied",
+            )
+            if hasattr(self, name)
+        }
+        context = {
+            "screen_epoch": int(self._screen_epoch),
+            "target_hwnd": int(self.hwnd or 0),
+            "snapshot": {
+                "hwnd": int(getattr(snapshot, "hwnd", 0) or 0),
+                "title": str(getattr(snapshot, "title", "") or ""),
+                "region": (
+                    {
+                        "x": int(getattr(snapshot_region, "left", 0)),
+                        "y": int(getattr(snapshot_region, "top", 0)),
+                        "width": int(getattr(snapshot_region, "width", 0)),
+                        "height": int(getattr(snapshot_region, "height", 0)),
+                    }
+                    if snapshot_region is not None
+                    else None
+                ),
+                "elements": snapshot_elements,
+            },
+            "canvas": getattr(self, "_last_canvas_region", None),
+            "generations": generations,
+            "world": {
+                "title": str(getattr(world_observe, "title", "") or ""),
+                "fingerprint": sorted(getattr(world_observe, "fingerprint", ()) or ()),
+                "element_count": int(getattr(world_observe, "count", 0) or 0),
+                # This sequence advances only when the watcher reports a real
+                # changed-screen bulletin, not on every sample/observe.
+                "screen_change_sequence": int(
+                    getattr(self.world, "_screen_notice_seq", 0) or 0
+                ),
+            },
+        }
+        return json.dumps(context, ensure_ascii=False, sort_keys=True, default=str)
+
     @staticmethod
     def _subgoal_has_visual_progress(payload: dict[str, Any]) -> bool:
         if payload.get("verified") is True:
             return True
-        navigation = (payload.get("evidence_packet") or {}).get("navigation") or {}
+        packet = payload.get("evidence_packet") or {}
+        navigation = packet.get("navigation") or {}
         if navigation.get("ok") is True and navigation.get("required") is True:
+            return True
+        scene = packet.get("scene_structure") or {}
+        try:
+            if int(scene.get("executed_draw_count") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        per_draw = [
+            *(packet.get("per_draw_color_evidence") or []),
+            *(payload.get("per_draw_color_evidence") or []),
+        ]
+        if any(
+            isinstance(item, dict)
+            and (item.get("matched") is True or item.get("visual_color_matched") is True)
+            for item in per_draw
+        ):
             return True
         for item in payload.get("results") or []:
             if not isinstance(item, dict):
@@ -395,6 +509,11 @@ class ToolSession(
                 or delta.get("changed") is True
                 or wait_delta.get("changed") is True
                 or (item.get("action") == "wait_change" and data.get("changed") is True)
+                or (
+                    item.get("ok") is not False
+                    and item.get("action") in {"draw_strokes", "drag"}
+                    and data.get("blocked") is not True
+                )
             ):
                 return True
         return False

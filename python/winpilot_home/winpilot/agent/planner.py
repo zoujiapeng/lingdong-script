@@ -537,11 +537,15 @@ class Plan:
             tag = " (含核验)" if step.get("check") else ""
             lines.append(f"[{mark}] {i}. {step['goal']}{tag}")
         lines.append(
-            "完成一项就调用 complete_subgoal(index=序号)；计划不合适就调用 revise_plan 重列。"
+            "若 complete_subgoal/revise_plan 工具可用，完成一项就标记，计划不合适再重列；"
+            "若当前任务配置未提供这些工具，直接执行并依据真实核验调用 done。"
         )
         lines.append(
             "Plan hint: this todo is already active; do not call revise_plan just "
-            "to restate it. Execute the next unfinished item, then complete_subgoal."
+            "to restate it. When plan "
+            "tools are exposed, execute the next unfinished item and mark it complete. "
+            "When they are omitted, verified controller evidence advances the work; "
+            "finish with done instead of inventing unavailable tool calls."
         )
         lines.append(
             "GUI routine hint: when an item has a visible text/state check, prefer "
