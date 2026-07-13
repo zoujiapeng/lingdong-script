@@ -7,6 +7,7 @@ read while preserving the same guard behavior.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import sys
@@ -17,7 +18,9 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 from ..config import CONFIG
+from ..model_adapter import model_profile_from_config, model_supports_vision
 from ..perception import fusion, intent, ocr, vision_cv
+from ..utils.image_capture import capture_window_jpeg_b64
 from ..utils.log import BUS, logger
 from .task_rules import (
     _communication_mode,
@@ -720,25 +723,132 @@ class DoneVerifierMixin:
     def _reject_done(self, reason: str, content: str) -> bool:
         """Record a failed done-gate check and nudge the model to continue."""
         self._last_done_reject_reason = reason
+        self._last_done_reject_generation = self._done_evidence_generation()
         BUS.publish("done_check", run_id=self.run_id, passed=False, reason=reason)
         self._done_rejects += 1
         self.messages.append({"role": "user", "content": content})
         return False
 
+    def _done_evidence_generation(self) -> tuple[int, int, int]:
+        """Identify whether repair work or a new grounded frame happened.
+
+        Repeated identical completion claims are capped, but the cap must not
+        become a permanent latch after the agent repairs the UI. Terminal
+        self-claims are deliberately excluded: another identical ``done`` is
+        not new evidence. Successful tool evidence and authoritative native
+        frames are monotonic causal signals that earn a fresh attempt.
+        """
+        causal_records: set[str] = set()
+        deterministic_text_tools = {
+            "file_exists", "read_file", "run_shell", "process_exists",
+            "list_windows", "scan_windows", "vlm_verify",
+        }
+        for name, _args, output in getattr(self, "_tool_history", []) or []:
+            tool_name = str(name or "")
+            if tool_name in {"done", "fail", "reply"}:
+                continue
+            raw = str(output or "").strip()
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                if payload.get("error") or payload.get("blocked") is True:
+                    continue
+                if any(payload.get(key) is True for key in (
+                    "ok", "success", "verified", "matches", "found", "exists",
+                )):
+                    causal_records.add(tool_name + "\0" + raw)
+                continue
+            if tool_name == "observe":
+                # Native observation freshness is represented by the actual
+                # frame digest below. Structured observe text carries volatile
+                # trace ids/request counters, so hashing it would let an
+                # identical re-observe masquerade as repaired evidence.
+                continue
+            if tool_name == "read_text":
+                lowered = raw.casefold()
+                if (
+                    not raw
+                    or "no elements matched" in lowered
+                    or "not found" in lowered
+                    or "error" in lowered
+                ):
+                    continue
+                causal_records.add(tool_name + "\0" + raw)
+                continue
+            if tool_name in deterministic_text_tools and raw:
+                lowered = raw.casefold()
+                if not any(marker in lowered for marker in (
+                    "error", "failed", "failure", "not found", "blocked",
+                )):
+                    causal_records.add(tool_name + "\0" + raw)
+
+        def digest(parts: set[str] | list[str]) -> int:
+            if not parts:
+                return 0
+            payload = "\n".join(sorted(set(parts))).encode("utf-8", errors="replace")
+            return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+        visual_b64 = str(getattr(self, "_last_visual_feedback_b64", "") or "")
+        visual_digest = (
+            int.from_bytes(hashlib.sha256(visual_b64.encode("ascii", errors="ignore")).digest()[:8], "big")
+            if visual_b64 else 0
+        )
+        ledger_records = [
+            json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            for item in (getattr(self, "_visible_evidence_ledger", []) or [])
+            if isinstance(item, dict)
+        ]
+        return (
+            digest(causal_records),
+            visual_digest,
+            digest(ledger_records),
+        )
+
     def _fresh_done_screen(self) -> str:
         """Capture fresh perception for the skeptical final-state check."""
+        # Never let a frame from an earlier done attempt survive a failed
+        # capture. Literal checks may defer to the image judge only when this
+        # invocation produced a real, fresh target-window frame.
+        self._fresh_done_image_b64 = ""
         try:
             fusion_mod = _loop_attr("fusion", fusion)
             intent_mod = _loop_attr("intent", intent)
             hwnd = self.session.hwnd
             title = self.session.snapshot.title if self.session.snapshot else ""
             pmode = intent_mod.perception_mode(self.task, title)
-            snap = (
-                fusion_mod.observe(hwnd, include_icons=False, perception_mode=pmode)
-                if hwnd else self.session.snapshot
+            api = CONFIG.get("api", default={})
+            native_visual = bool(
+                hwnd and model_profile_from_config(api).supports_vision
             )
+            if native_visual:
+                try:
+                    self._fresh_done_image_b64 = capture_window_jpeg_b64(hwnd)
+                except Exception as exc:
+                    logger.debug("fresh done visual capture failed: %s", exc)
+                # Do not decompose a successfully captured real frame through a
+                # slow and lossy UIA/OCR/VLM pipeline.  Keep the latest
+                # structured state only as optional context for deterministic
+                # checks; the independent judge receives the fresh image below.
+                # Never label the pre-action/session snapshot as fresh when a
+                # new image is authoritative. Native visible predicates must
+                # be checked on that image by the independent judge.
+                snap = None if self._fresh_done_image_b64 else fusion_mod.observe(
+                    hwnd, include_icons=False, perception_mode=pmode,
+                )
+            else:
+                snap = (
+                    fusion_mod.observe(hwnd, include_icons=False, perception_mode=pmode)
+                    if hwnd else self.session.snapshot
+                )
             limit = 220 if _is_desktop_icon_drag_task(self.task) else 50
             text = snap.to_text(limit) if snap else ""
+            if self._fresh_done_image_b64:
+                text += (
+                    "\nFresh native-vision frame attached to the independent done judge; "
+                    "it is authoritative over stale structured elements."
+                )
             if hwnd and _is_arithmetic_task(self.task):
                 try:
                     region = window_region(hwnd).clamp_to_screen()
@@ -860,7 +970,13 @@ class DoneVerifierMixin:
                 artifact_errors[:4]
             )
 
-        combined = "\n".join([screen, evidence, *file_texts])
+        parsed_content_suffixes = {".txt", ".md", ".csv", ".docx", ".xlsx"}
+        content_is_directly_parsed = bool(paths) and all(
+            path.suffix.casefold() in parsed_content_suffixes for path in paths
+        )
+        combined = "\n".join(
+            file_texts if content_is_directly_parsed else [screen, evidence, *file_texts]
+        )
         missing_payloads = [
             value
             for value in _required_visible_payloads(self.task)
@@ -903,8 +1019,26 @@ class DoneVerifierMixin:
         )
 
     def _verify_visible_payloads(self, screen: str, evidence: str) -> bool:
+        self._pending_visual_payloads = []
         required_payloads = _required_visible_payloads(self.task)
         if not required_payloads:
+            return True
+        if (
+            self._task_accepts_historical_visible_state(self.task)
+            and self._visible_state_has_deterministic_done_evidence(screen, evidence)
+        ):
+            return True
+        if bool(getattr(self, "_saved_artifact_verified", False)):
+            # The artifact verifier parsed the newly written file and checked
+            # requested payloads. File-internal content need not all remain
+            # simultaneously visible in the editor after a successful save.
+            return True
+        if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+            # Once a fresh native frame exists, current-state claims must be
+            # decided from that frame.  Tool arguments and older structured
+            # observations can establish what was attempted, but cannot prove
+            # that the requested payload is still visible now.
+            self._pending_visual_payloads = list(required_payloads)
             return True
         missing = [
             payload for payload in required_payloads
@@ -925,8 +1059,22 @@ class DoneVerifierMixin:
         )
 
     def _verify_required_literal_tokens(self, screen: str, evidence: str) -> bool:
+        self._pending_visual_literal_tokens = []
         tokens = _required_literal_tokens(self.task)
         if not tokens:
+            return True
+        if (
+            self._task_accepts_historical_visible_state(self.task)
+            and self._visible_state_has_deterministic_done_evidence(screen, evidence)
+        ):
+            return True
+        if bool(getattr(self, "_saved_artifact_verified", False)):
+            return True
+        if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+            # A fresh frame outranks every pre-action/current-state string in
+            # the ledger.  Always make the image judge confirm exact literals
+            # so stale UIA/OCR or action payloads cannot produce early success.
+            self._pending_visual_literal_tokens = list(tokens)
             return True
         missing = [
             token for token in tokens
@@ -1063,7 +1211,11 @@ class DoneVerifierMixin:
             self._latest_semantic_visual_drawing_verdict(evidence)
             if detailed_requested else None
         )
-        if detailed_requested and not (semantic_verdict and semantic_verdict[0]):
+        if (
+            detailed_requested
+            and not str(getattr(self, "_fresh_done_image_b64", "") or "")
+            and not (semantic_verdict and semantic_verdict[0])
+        ):
             reason = (
                 semantic_verdict[1]
                 if semantic_verdict is not None
@@ -1074,10 +1226,9 @@ class DoneVerifierMixin:
             )
             return self._reject_done(
                 reason,
-                f"[done check failed] {reason} Obtain a fresh VLM/object-level verification "
-                "after the final canvas mutation. Only call done when that single visual "
-                "verdict confirms the requested subject and detail level; otherwise repair "
-                "the drawing or call fail with the remaining issues.",
+                f"[done check failed] {reason} Obtain a fresh full-frame visual verdict "
+                "after the final canvas mutation. Only call done when it confirms the "
+                "requested subject and detail level; otherwise repair or call fail.",
             )
         if not saw_drag:
             reason = (
@@ -1136,27 +1287,35 @@ class DoneVerifierMixin:
             })
         return True
 
-    def _drawing_has_deterministic_done_evidence(self, evidence: str) -> bool:
-        """Accept simple canvas drawing tasks without an expensive LLM judge.
+    def _verify_drawing_semantic_evidence(self, evidence: str) -> bool:
+        """Require one goal-conditioned visual view of the final drawing.
 
-        The LLM judge can spend its entire budget in provider-side reasoning and
-        return no parseable JSON. For drawing tasks that only require visible
-        strokes on the current canvas, the action log and visual summaries are
-        stronger evidence than another model's prose.
+        A drag and a pixel delta are necessary action evidence, but they cannot
+        establish that the requested subject, shape, or level of detail exists.
+        Native visual runs use the fresh final frame. Text-only runs must supply
+        one current semantic visual verdict from an explicit verifier.
         """
         if not _is_drawing_task(self.task):
-            return False
-        if (
-            _COLORFUL_DRAWING_RE.search(self.task or "")
-            or _DETAILED_DRAWING_RE.search(self.task or "")
-        ):
-            return False
-        if _required_image_paths(self.task) or _required_drawing_colors(self.task):
-            return False
-        saw_stroke = self._history_mentions_action("drag", "draw_strokes")
-        normalized = evidence.lower()
-        saw_visual_change = self._evidence_has_true_flag(normalized, "visual_change_detected")
-        return saw_stroke and saw_visual_change
+            return True
+        if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+            return True
+        semantic_verdict = self._latest_semantic_visual_drawing_verdict(evidence)
+        if semantic_verdict and semantic_verdict[0]:
+            return True
+        reason = (
+            semantic_verdict[1]
+            if semantic_verdict is not None
+            else (
+                "Drawing completion cannot be inferred from drag execution or pixel change "
+                "alone; no fresh goal-conditioned visual evidence is available."
+            )
+        )
+        return self._reject_done(
+            reason,
+            f"[done check failed] {reason} Obtain a fresh full-frame visual verdict after "
+            "the final canvas mutation. Only call done when it confirms the requested "
+            "subject, shape, colors, and detail; otherwise repair the drawing or call fail.",
+        )
 
     def _desktop_drag_has_deterministic_done_evidence(self, screen: str, evidence: str) -> bool:
         if not _is_desktop_icon_drag_task(self.task):
@@ -1169,14 +1328,6 @@ class DoneVerifierMixin:
         saw_visual_change = self._evidence_has_true_flag(normalized, "visual_change_detected")
         if not (saw_drag and saw_visual_change):
             return False
-        plan = getattr(getattr(self, "session", None), "plan", None)
-        plan_done = bool(plan is not None and plan.all_done())
-        controller_done = (
-            "auto-completed desktop drag plan item" in normalized
-            or "adjusted_drop_target" in normalized
-        )
-        if plan_done or controller_done:
-            return True
         wants_top_right = any(term in (self.task or "").casefold() for term in ("top-right", "top right")) \
             or "\u53f3\u4e0a" in (self.task or "")
         desktop = virtual_screen_region()
@@ -1208,6 +1359,10 @@ class DoneVerifierMixin:
         ]
         if not missing:
             return True
+        if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+            pending = list(getattr(self, "_pending_visual_payloads", []) or [])
+            self._pending_visual_payloads = list(dict.fromkeys([*pending, *missing]))
+            return True
         reason = (
             "GUI search/navigation task lacks final on-screen evidence. "
             "The target search text/page is not visible in the current app window: "
@@ -1227,6 +1382,11 @@ class DoneVerifierMixin:
             return True
         payloads = _quoted_payloads(self.task)
         if payloads and not any(payload in screen for payload in payloads):
+            if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+                pending = list(getattr(self, "_pending_visual_payloads", []) or [])
+                self._pending_visual_payloads = list(dict.fromkeys([*pending, *payloads]))
+                self._pending_visual_communication_check = _communication_mode(self.task)
+                return True
             reason = (
                 "通信任务缺少最终可见证据：目标窗口当前画面没有出现要发送的消息文本，"
                 "不能把 click/type_text/hotkey 的 ok 当成发送成功"
@@ -1238,6 +1398,10 @@ class DoneVerifierMixin:
                 "发送后重新 observe 或 read_text，确认消息出现在目标会话中再 done。",
             )
         if payloads:
+            return True
+
+        if str(getattr(self, "_fresh_done_image_b64", "") or ""):
+            self._pending_visual_communication_check = _communication_mode(self.task)
             return True
 
         has_chat_evidence = any(
@@ -1260,24 +1424,221 @@ class DoneVerifierMixin:
         text_norm = re.sub(r"\s+", "", str(text or "").casefold())
         return bool(needle_norm and len(needle_norm) >= 2 and needle_norm in text_norm)
 
+    @staticmethod
+    def _communication_mutation_succeeded(output: str) -> bool:
+        try:
+            payload = json.loads(str(output or ""))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if not isinstance(payload, dict) or payload.get("error"):
+            return False
+        if "blocked" in payload and payload.get("blocked") is not False:
+            return False
+        execution_keys = [key for key in ("ok", "success") if key in payload]
+        if execution_keys:
+            return all(payload.get(key) is True for key in execution_keys)
+        return payload.get("verified") is True
+
+    @staticmethod
+    def _communication_normalize_action(action: object) -> tuple[str, dict]:
+        """Normalize a controller child action without inventing execution."""
+        if not isinstance(action, dict):
+            return "", {}
+        name = str(action.get("action") or action.get("tool") or "")
+        if name:
+            child_args = {
+                key: value
+                for key, value in action.items()
+                if key not in {"action", "tool", "params"}
+            }
+            params = action.get("params")
+            if isinstance(params, dict):
+                child_args = {**params, **child_args}
+            return name, child_args
+        if len(action) != 1:
+            return "", {}
+        name, raw_args = next(iter(action.items()))
+        if isinstance(raw_args, dict):
+            return str(name), dict(raw_args)
+        if str(name) == "hotkey":
+            keys = list(raw_args) if isinstance(raw_args, list) else [raw_args]
+            return str(name), {"keys": [str(key) for key in keys]}
+        if str(name) in {"type_text", "type_into_element"}:
+            return str(name), {"text": str(raw_args)}
+        return str(name), {"value": raw_args}
+
+    @staticmethod
+    def _communication_exact_enter(args: dict) -> bool:
+        """Accept only a bare Enter/Return key, never a newline shortcut."""
+        keys = args.get("keys") or []
+        if isinstance(keys, str):
+            keys = [keys]
+        if not isinstance(keys, (list, tuple)):
+            return False
+        normalized = [str(key).strip().casefold() for key in keys]
+        return len(normalized) == 1 and normalized[0] in {"enter", "return"}
+
+    @staticmethod
+    def _communication_send_click(args: dict) -> bool:
+        label = str(
+            args.get("label")
+            or args.get("fallback_text")
+            or args.get("text")
+            or ""
+        ).strip().casefold()
+        return any(marker in label for marker in ("send", "发送", "發送"))
+
+    @staticmethod
+    def _communication_action_family(name: str) -> str:
+        folded = str(name or "").casefold()
+        if folded in {"type_text", "type_into_element"}:
+            return "type"
+        if folded in {"click", "click_element"}:
+            return "click"
+        return folded
+
+    @classmethod
+    def _communication_child_succeeded(cls, item: object) -> bool:
+        """Require the concrete nested action result to report literal success."""
+        if not isinstance(item, dict) or item.get("ok") is not True:
+            return False
+        if item.get("error") or item.get("optional_failed") is True:
+            return False
+        if str(item.get("terminal") or "").casefold() in {
+            "fail", "error", "stopped", "reply",
+        }:
+            return False
+        data = item.get("data")
+        if isinstance(data, dict):
+            if data.get("error"):
+                return False
+            if "blocked" in data and data.get("blocked") is not False:
+                return False
+            for key in ("ok", "success"):
+                if key in data and data.get(key) is not True:
+                    return False
+        return True
+
+    @classmethod
+    def _communication_successful_nested_actions(
+        cls,
+        name: str,
+        args: dict,
+        output: str,
+    ) -> list[tuple[str, dict]]:
+        """Recover only controller children proven to have actually executed."""
+        if name not in {"run_action_batch", "execute_subgoal"}:
+            return []
+        try:
+            payload = json.loads(str(output or ""))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        actions = (
+            payload.get("actions_executed")
+            if name == "execute_subgoal"
+            else args.get("actions")
+        )
+        results = payload.get("results")
+        if not isinstance(actions, list) or not isinstance(results, list):
+            return []
+
+        by_index: dict[int, dict] = {}
+        for fallback_index, item in enumerate(results, start=1):
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index") or fallback_index)
+            except (TypeError, ValueError):
+                continue
+            by_index.setdefault(index, item)
+
+        successful: list[tuple[str, dict]] = []
+        for index, raw_action in enumerate(actions, start=1):
+            action_name, action_args = cls._communication_normalize_action(raw_action)
+            item = by_index.get(index)
+            if not action_name or not cls._communication_child_succeeded(item):
+                continue
+            result_name = str(item.get("action") or "") if isinstance(item, dict) else ""
+            if (
+                result_name
+                and cls._communication_action_family(result_name)
+                != cls._communication_action_family(action_name)
+            ):
+                continue
+            successful.append((action_name, action_args))
+        return successful
+
+    @classmethod
+    def _communication_action_events(cls, name: str, args: dict) -> list[tuple[str, str]]:
+        folded = str(name or "").casefold()
+        if folded in {"type_text", "type_into_element"}:
+            value = str(args.get("text") or args.get("value") or "").strip()
+            return [("typed", value)] if value else []
+        if folded == "hotkey" and cls._communication_exact_enter(args):
+            return [("send", "")]
+        if folded in {"click", "click_element"} and cls._communication_send_click(args):
+            return [("send", "")]
+        return []
+
+    @classmethod
+    def _communication_entry_events(
+        cls,
+        name: str,
+        args: dict,
+        output: str,
+    ) -> list[tuple[str, str]]:
+        """Return ordered, proven typed/send events for one history entry."""
+        if name in {"run_action_batch", "execute_subgoal"}:
+            events: list[tuple[str, str]] = []
+            for action_name, action_args in cls._communication_successful_nested_actions(
+                name, args, output,
+            ):
+                events.extend(cls._communication_action_events(action_name, action_args))
+            return events
+        if not cls._communication_mutation_succeeded(output):
+            return []
+        return cls._communication_action_events(name, args)
+
+    @classmethod
+    def _communication_entry_sends(cls, name: str, args: dict, output: str) -> bool:
+        return any(
+            kind == "send"
+            for kind, _value in cls._communication_entry_events(name, args, output)
+        )
+
+    @classmethod
+    def _communication_sent_turns(
+        cls,
+        history: list[tuple[str, dict, str]],
+    ) -> list[tuple[int, str]]:
+        """Pair each real send with at most one latest unsent typed turn."""
+        pending: list[str] = []
+        sent: list[tuple[int, str]] = []
+        for index, (name, args, output) in enumerate(history):
+            for kind, value in cls._communication_entry_events(
+                str(name or ""), args or {}, str(output or ""),
+            ):
+                if kind == "typed":
+                    pending.append(value)
+                elif kind == "send":
+                    if pending:
+                        sent.append((index, pending[-1]))
+                    # Older fragments belonged to the same composer turn and
+                    # must never be recycled as another outbound message.
+                    pending.clear()
+        return sent
+
     def _communication_outbound_payloads(self) -> list[str]:
         """Recover text the controller really typed from structured history."""
         values: list[str] = []
-        for name, args, _output in getattr(self, "_tool_history", []):
-            candidates: list[object] = []
-            if name == "type_text":
-                candidates.append(args.get("text"))
-            elif name == "execute_subgoal":
-                input_spec = args.get("input")
-                if isinstance(input_spec, dict):
-                    candidates.append(input_spec.get("text") or input_spec.get("value"))
-            elif name == "run_action_batch":
-                for action in args.get("actions") or []:
-                    if not isinstance(action, dict):
-                        continue
-                    if action.get("action") in {"type_text", "type_into_element"}:
-                        candidates.append(action.get("text") or action.get("value"))
-            for candidate in candidates:
+        for name, args, output in getattr(self, "_tool_history", []):
+            for kind, candidate in self._communication_entry_events(
+                str(name or ""), args or {}, str(output or ""),
+            ):
+                if kind != "typed":
+                    continue
                 value = str(candidate or "").strip()
                 if 2 <= len(value) <= 240 and value not in values:
                     values.append(value)
@@ -1289,6 +1650,65 @@ class DoneVerifierMixin:
             for name, _args, output in getattr(self, "_tool_history", [])
             if name == "read_text" and str(output or "").strip()
         ]
+
+    def _causally_visible_outbound_payloads(self) -> list[str]:
+        """Return successful typed payloads seen only after a real send action."""
+        history = list(getattr(self, "_tool_history", []) or [])
+        sent_turns = self._communication_sent_turns(history)
+        readout_records = [
+            (index, str(output or ""))
+            for index, (name, _args, output) in enumerate(history)
+            if name == "read_text" and str(output or "").strip()
+        ]
+        visible: list[str] = []
+        for send_index, value in sent_turns:
+            if any(
+                send_index < read_index
+                and self._communication_text_visible(value, readout)
+                for read_index, readout in readout_records
+            ):
+                visible.append(value)
+        return visible
+
+    def _communication_native_mutation_ready(self) -> bool:
+        """Require successful, ordered outbound mutations before visual delivery judgment."""
+        history = list(getattr(self, "_tool_history", []) or [])
+        typed = [
+            value
+            for name, args, output in history
+            for kind, value in self._communication_entry_events(
+                str(name or ""), args or {}, str(output or ""),
+            )
+            if kind == "typed" and str(value or "").strip()
+        ]
+        sent_turns = self._communication_sent_turns(history)
+        mode = _communication_mode(self.task)
+        if mode == "draft":
+            return bool(typed) and not any(
+                self._communication_entry_sends(name, args or {}, output)
+                for name, args, output in history
+            )
+        if mode == "bounded_chat":
+            return len(sent_turns) >= 2
+        return bool(sent_turns)
+
+    def _image_send_native_mutation_ready(self) -> bool:
+        history = list(getattr(self, "_tool_history", []) or [])
+        paste_indices = [
+            index
+            for index, (name, _args, output) in enumerate(history)
+            if name == "paste_image_file" and self._communication_mutation_succeeded(output)
+        ]
+        send_indices = [
+            index
+            for index, (name, args, output) in enumerate(history)
+            if self._communication_entry_sends(name, args or {}, output)
+        ]
+        return any(
+            send_index >= paste_index
+            for paste_index in paste_indices
+            for send_index in send_indices
+        )
 
     def _deterministic_communication_verdict(self) -> tuple[bool, str] | None:
         """Return a local done verdict when real send/read evidence is enough."""
@@ -1302,6 +1722,15 @@ class DoneVerifierMixin:
             )
 
         if mode == "draft":
+            history = list(getattr(self, "_tool_history", []) or [])
+            if any(
+                self._communication_entry_sends(name, args or {}, output)
+                for name, args, output in history
+            ):
+                return False, (
+                    "Draft-only communication task contains a successful send action; "
+                    "the requested unsent state was not preserved."
+                )
             outbound = self._communication_outbound_payloads()
             declared = _quoted_payloads(self.task)
             drafted = [
@@ -1319,16 +1748,11 @@ class DoneVerifierMixin:
         readouts = self._communication_readouts()
         if not readouts:
             return None
-        visible_text = "\n".join(readouts[-4:])
         declared = _quoted_payloads(self.task)
-        outbound = self._communication_outbound_payloads()
+        visible_outbound = self._causally_visible_outbound_payloads()
         visible_declared = [
             value for value in declared
-            if self._communication_text_visible(value, visible_text)
-        ]
-        visible_outbound = [
-            value for value in outbound
-            if self._communication_text_visible(value, visible_text)
+            if any(self._communication_text_visible(value, sent) for sent in visible_outbound)
         ]
 
         if declared and visible_declared:
@@ -1357,13 +1781,32 @@ class DoneVerifierMixin:
             (
                 index for index in range(len(history) - 1, -1, -1)
                 if history[index][0] == "paste_image_file"
-                and '"ok": true' in str(history[index][2] or "").casefold()
+                and self._communication_mutation_succeeded(history[index][2])
             ),
             None,
         )
         if paste_index is None:
             return False, "图片发送任务尚未成功执行 paste_image_file。"
-        after_paste = "\n".join(str(item[2] or "") for item in history[paste_index + 1:])
+        send_index = next(
+            (
+                index
+                for index in range(paste_index + 1, len(history))
+                if self._communication_entry_sends(
+                    history[index][0], history[index][1] or {}, history[index][2],
+                )
+            ),
+            None,
+        )
+        if send_index is None:
+            return False, (
+                "Image was pasted into the composer, but no successful Send/Enter action "
+                "occurred afterward; a preview is not delivery evidence."
+            )
+        after_paste = "\n".join(
+            str(output or "")
+            for index, (name, _args, output) in enumerate(history)
+            if index > send_index and name in {"observe", "read_text"}
+        )
         has_sent_marker = any(marker in after_paste.casefold() for marker in ("已发送", "发送成功", " sent"))
         has_attachment_size = bool(re.search(r"\d+(?:\.\d+)?\s*(?:kb|mb)", after_paste, re.IGNORECASE))
         target_match = re.search(r"(?:给|to)\s*(我的手机|[^，。,.\s]{2,20})", str(self.task or ""), re.IGNORECASE)
@@ -1381,6 +1824,47 @@ class DoneVerifierMixin:
             or api.get("done_judge_model")
             or api.get("model", "deepseek-v4-flash")
         )
+        fresh_image = str(getattr(self, "_fresh_done_image_b64", "") or "")
+        pending_literals = list(
+            getattr(self, "_pending_visual_literal_tokens", []) or []
+        )
+        pending_payloads = list(
+            getattr(self, "_pending_visual_payloads", []) or []
+        )
+        pending_spatial_check = str(
+            getattr(self, "_pending_visual_spatial_check", "") or ""
+        )
+        pending_arithmetic_check = str(
+            getattr(self, "_pending_visual_arithmetic_check", "") or ""
+        )
+        pending_communication_check = str(
+            getattr(self, "_pending_visual_communication_check", "") or ""
+        )
+        pending_visual_text = list(dict.fromkeys([
+            *pending_literals,
+            *pending_payloads,
+        ]))
+        pending_visual_checks = [
+            *pending_visual_text,
+            *([pending_spatial_check] if pending_spatial_check else []),
+            *([pending_arithmetic_check] if pending_arithmetic_check else []),
+            *([pending_communication_check] if pending_communication_check else []),
+        ]
+        if pending_visual_checks and not fresh_image:
+            reason = (
+                "A required task condition needs a fresh visual check, but the "
+                "authoritative target-window frame is unavailable: "
+                + ", ".join(pending_visual_checks[:5])
+            )
+            return self._reject_done(
+                reason,
+                f"[done check failed] {reason}. Capture fresh target-window evidence "
+                "before calling done again.",
+            )
+        if fresh_image and not model_supports_vision(judge_model):
+            main_model = str(api.get("model") or "")
+            if model_supports_vision(main_model):
+                judge_model = main_model
         sys_p = (
             "你是严格、怀疑的任务完成核验员。判断用户任务是否【真正达成】，不要轻信 agent 的自述。"
             "重要：文件/文件夹/进程/命令类任务，以【确定性证据】(run_shell 输出、Test-Path/Exists 结果、"
@@ -1404,21 +1888,129 @@ class DoneVerifierMixin:
             f"确定性证据(工具真实输出/验证结果)：\n{evidence}\n\n"
             f"当前前台界面元素(仅供参考,文件/进程类勿据此判负)：\n{screen[:1000]}"
         )
+        if pending_literals:
+            literal_checklist = json.dumps(pending_literals, ensure_ascii=False)
+            user_p += (
+                "\n\nAUTHORITATIVE EXACT-LITERAL VISUAL CHECK:\n"
+                f"Required literals: {literal_checklist}\n"
+                "Inspect only the attached fresh target-window frame for these literals. "
+                "Every literal must be fully and legibly visible, character for character. "
+                "Its presence in the task text, agent claim, action log, tool evidence, or "
+                "an equivalent/different UI state is not evidence. If any literal is "
+                "missing, ambiguous, clipped, or unreadable, return done=false."
+            )
+        if pending_payloads:
+            payload_checklist = json.dumps(pending_payloads, ensure_ascii=False)
+            user_p += (
+                "\n\nAUTHORITATIVE VISIBLE-PAYLOAD CHECK:\n"
+                f"Required visible content: {payload_checklist}\n"
+                "Inspect only the attached fresh target-window frame. Every requested "
+                "payload must be fully and legibly visible in the correct GUI content area. "
+                "Task text, action logs, tool arguments, stale structure, and agent claims "
+                "are not evidence. If any payload is absent, clipped, unreadable, or only "
+                "appears outside the target content area, return done=false."
+            )
+        if pending_spatial_check:
+            user_p += (
+                "\n\nAUTHORITATIVE SPATIAL RESULT CHECK:\n"
+                + pending_spatial_check
+                + "\nInspect the attached fresh frame itself. Controller plan state, drag "
+                  "execution, pixel change, and adjusted coordinates are not proof of the "
+                  "final location. Return done=false unless the requested object is clearly "
+                  "visible in the requested region."
+            )
+        if pending_arithmetic_check:
+            user_p += (
+                "\n\nAUTHORITATIVE ARITHMETIC DISPLAY CHECK:\n"
+                + pending_arithmetic_check
+                + "\nRead the current calculator display only from the attached fresh frame. "
+                  "The task text, typed keys, logs, stale structure, and equivalent values "
+                  "elsewhere are not evidence. If the display is unreadable or differs, "
+                  "return done=false."
+            )
+        if pending_communication_check:
+            mode_instruction = {
+                "draft": (
+                    "The requested content must be visibly present in the composer/input area "
+                    "and must not appear as a sent transcript item."
+                ),
+                "send": (
+                    "The requested content must appear as a sent message/transcript item in the "
+                    "target conversation, not merely remain in the composer/input area."
+                ),
+                "bounded_chat": (
+                    "The fresh transcript must visibly show the completed bounded exchange, "
+                    "including the causal outbound turns required by the task."
+                ),
+            }.get(
+                pending_communication_check,
+                "The fresh target conversation must visibly show the requested delivered result.",
+            )
+            user_p += (
+                "\n\nAUTHORITATIVE COMMUNICATION STATE CHECK:\n"
+                + mode_instruction
+                + " Successful typing/click tool results and text elsewhere in the window are "
+                  "not delivery evidence. If recipient/conversation context or delivery state "
+                  "is ambiguous, return done=false."
+            )
+        if fresh_image:
+            user_p += (
+                "\n\nAUTHORITATIVE NATIVE GUI EVIDENCE ORDER:\n"
+                "The attached fresh whole-window frame is the authoritative current GUI state. "
+                "A recent tool result with ok=true and native_action_executed=true proves that "
+                "the low-level native mouse/keyboard path actually dispatched; it does not by "
+                "itself prove the goal, so inspect the fresh pixels for the requested result. "
+                "If those current pixels clearly show the exact requested result, accept it even "
+                "when an earlier attempt failed, source_batch_verified is null, verified is absent, "
+                "or a stale controller state says needs_observe. Those are historical or missing "
+                "semantic metadata, not evidence that the later successful native action did not "
+                "execute. Do not require a redundant observe/read_text call when the fresh frame "
+                "is already clear. Reject when the latest native action failed, the current frame "
+                "contradicts the claim, or the visual result remains ambiguous."
+            )
+            user_content: object = [
+                {
+                    "type": "text",
+                    "text": (
+                        user_p
+                        + "\n\n下面附有刚刚重新捕获的真实目标窗口。对 GUI 任务，必须直接检查整张图："
+                          "目标对象、当前页面、动作结果和完成条件有任何看不清或歧义，都判 done=false。"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{fresh_image}"},
+                },
+            ]
+        else:
+            user_content = user_p
+        judge_messages = [
+            {"role": "system", "content": sys_p},
+            {"role": "user", "content": user_content},
+        ]
         self._trace_debug("done_check_request", {
             "run_id": self.run_id,
             "model": judge_model,
+            # Never copy the base64 frame into the debug trace.  It multiplies
+            # trace size and can stall the final gate; the frame id/presence is
+            # enough to diagnose routing while the actual request still gets
+            # the image in ``judge_messages`` above.
             "messages": [
                 {"role": "system", "content": sys_p},
-                {"role": "user", "content": user_p},
+                {
+                    "role": "user",
+                    "content": user_p + (
+                        "\n[authoritative native-vision frame attached; bytes omitted]"
+                        if fresh_image else ""
+                    ),
+                },
             ],
+            "native_visual": bool(fresh_image),
         })
         try:
             resp = client.chat.completions.create(
                 model=judge_model,
-                messages=[
-                    {"role": "system", "content": sys_p},
-                    {"role": "user", "content": user_p},
-                ],
+                messages=judge_messages,
                 temperature=0.0,
                 max_tokens=_JUDGE_MAX_TOKENS,
             )
@@ -1444,7 +2036,9 @@ class DoneVerifierMixin:
             else:
                 try:
                     verdict = json.loads(m.group(0))
-                    is_done = bool(verdict.get("done", False))
+                    # JSON booleans only. Strings such as "false", numbers,
+                    # null, or any truthy surrogate must fail closed.
+                    is_done = verdict.get("done") is True
                     reason = str(verdict.get("reason", ""))[:200]
                 except json.JSONDecodeError:
                     is_done = False
@@ -1468,6 +2062,7 @@ class DoneVerifierMixin:
             self._done_verified = True
             return True
         self._last_done_reject_reason = reason
+        self._last_done_reject_generation = self._done_evidence_generation()
         self._done_rejects += 1
         self.messages.append({
             "role": "user",
@@ -1479,6 +2074,12 @@ class DoneVerifierMixin:
 
     def _verify_done(self, client, steps_left: int = 99) -> bool:
         """Independently verify a ``done`` claim before accepting it."""
+        self._pending_visual_literal_tokens = []
+        self._pending_visual_payloads = []
+        self._pending_visual_spatial_check = ""
+        self._pending_visual_arithmetic_check = ""
+        self._pending_visual_communication_check = ""
+        self._saved_artifact_verified = False
         cfg = _config()
         if not cfg.get("agent", "verify_done", default=True):
             return True
@@ -1488,7 +2089,22 @@ class DoneVerifierMixin:
         # independent judge. Their RunState counter also includes successful
         # run_shell/write_file actions, so treating it as pending *desktop*
         # evidence creates an impossible loop after a valid file check.
-        if pending_actions > 0 and not bool(getattr(self, "_is_coding", False)):
+        session_epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+        visual_feedback_fresh = bool(
+            getattr(self, "_last_visual_feedback_b64", "")
+            and int(getattr(self, "_visual_frame_epoch", -1)) == session_epoch
+            and int(getattr(self, "_visual_frame_hwnd", 0) or 0)
+            == int(getattr(self.session, "hwnd", 0) or 0)
+        )
+        independent_visual_check_possible = bool(
+            visual_feedback_fresh
+            or str(getattr(run_state, "phase", "") or "") == "visually_grounded"
+        )
+        if (
+            pending_actions > 0
+            and not bool(getattr(self, "_is_coding", False))
+            and not independent_visual_check_possible
+        ):
             last_tool = str(getattr(run_state, "last_tool", "") or "")
             last_issue = str(getattr(run_state, "last_issue", "") or "")
             for item in reversed(getattr(run_state, "history", []) or []):
@@ -1511,64 +2127,126 @@ class DoneVerifierMixin:
             )
         max_rejects = int(cfg.get("agent", "done_max_rejects", default=2))
         if self._done_rejects >= max_rejects:
-            reason = (
-                "Done was rejected repeatedly and cannot be force-accepted. "
-                "Continue only if new deterministic evidence can be collected; "
-                "otherwise call fail with the exact blocker."
-            )
-            return self._reject_done(reason, f"[done check failed] {reason}")
+            reject_generation = getattr(self, "_last_done_reject_generation", None)
+            current_generation = self._done_evidence_generation()
+            if reject_generation is not None and current_generation != reject_generation:
+                # New causal evidence means this is not the same repeated
+                # unsupported claim. Let the skeptical gate inspect it once.
+                self._done_rejects = 0
+            else:
+                reason = (
+                    "Done was rejected repeatedly and cannot be force-accepted. "
+                    "Continue only if new deterministic evidence can be collected; "
+                    "otherwise call fail with the exact blocker."
+                )
+                return self._reject_done(reason, f"[done check failed] {reason}")
 
         recent, evidence = self._done_evidence()
+        screen: str | None = None
+        if _is_communication_task(self.task):
+            screen = self._fresh_done_screen()
+        communication_evidence_passed = False
         image_send_verdict = self._deterministic_image_send_verdict()
         if image_send_verdict is not None:
             passed, reason = image_send_verdict
-            if passed:
-                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-                self._done_verified = True
-                return True
-            return self._reject_done(reason, f"[完成核验未通过] {reason}")
-        communication_verdict = self._deterministic_communication_verdict()
-        if communication_verdict is not None:
-            passed, reason = communication_verdict
-            if passed:
-                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-                self._done_verified = True
-                return True
-            return self._reject_done(reason, f"[完成核验未通过] {reason}")
+            if not passed:
+                if (
+                    str(getattr(self, "_fresh_done_image_b64", "") or "")
+                    and self._image_send_native_mutation_ready()
+                ):
+                    communication_evidence_passed = True
+                    evidence += (
+                        "\n- causal_image_delivery_mutation: paste and send succeeded; "
+                        "fresh frame must prove delivery"
+                    )
+                else:
+                    return self._reject_done(reason, f"[done check failed] {reason}")
+            else:
+                communication_evidence_passed = True
+                evidence += "\n- deterministic_image_delivery: " + reason
+        if _is_communication_task(self.task) and not communication_evidence_passed:
+            communication_verdict = self._deterministic_communication_verdict()
+            if communication_verdict is None:
+                if (
+                    str(getattr(self, "_fresh_done_image_b64", "") or "")
+                    and self._communication_native_mutation_ready()
+                ):
+                    evidence += (
+                        "\n- causal_communication_mutation: outbound action succeeded; "
+                        "fresh frame must prove draft/delivery state"
+                    )
+                else:
+                    reason = (
+                        "Communication completion lacks causal evidence: a successful outbound "
+                        "mutation followed by a later target-conversation readout is required "
+                        "when no fresh visual frame can prove delivery."
+                    )
+                    return self._reject_done(reason, f"[done check failed] {reason}")
+            else:
+                passed, reason = communication_verdict
+                if not passed:
+                    return self._reject_done(reason, f"[done check failed] {reason}")
+                evidence += "\n- causal_communication_evidence: " + reason
         if _is_drawing_task(self.task):
+            # Capture before the drawing gates so a native visual model can
+            # satisfy semantic/detail verification directly, without first
+            # calling a secondary VLM tool.
+            screen = self._fresh_done_screen()
             if not self._verify_drawing_done(evidence):
                 return False
-            required_colors = _required_drawing_colors(self.task)
-            if required_colors and not _required_image_paths(self.task):
-                reason = (
-                    "Drawing task accepted from controller visual color evidence: "
-                    + ", ".join(required_colors[:4])
-                    + "."
-                )
-                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-                self._done_verified = True
-                return True
-            if self._drawing_has_deterministic_done_evidence(evidence):
-                reason = (
-                    "Drawing task accepted from deterministic evidence: recorded "
-                    "strokes and visual_change_detected=true."
-                )
-                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-                self._done_verified = True
-                return True
+            # Color presence and pixel deltas prove that paint changed, not that
+            # the requested object/shape is actually present.  Keep them as a
+            # necessary gate above, then let the fresh goal-conditioned visual
+            # judge inspect the complete result instead of upgrading a local
+            # color statistic into task success.
 
-        screen = self._fresh_done_screen()
+        if screen is None:
+            screen = self._fresh_done_screen()
+        if not self._verify_drawing_semantic_evidence(evidence):
+            return False
         arithmetic_verdict = _deterministic_arithmetic_verdict(self.task, screen)
         if arithmetic_verdict is not None:
             passed, reason = arithmetic_verdict
-            if passed:
+            fresh_native_image = bool(
+                str(getattr(self, "_fresh_done_image_b64", "") or "")
+            )
+            fresh_ocr_positive = bool(
+                passed and "Fresh visual OCR:" in screen
+            )
+            if passed and (not fresh_native_image or fresh_ocr_positive):
                 BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
                 self._done_verified = True
                 return True
-            return self._reject_done(reason, f"[done check failed] {reason}")
+            if fresh_native_image:
+                # OCR is allowed to prove a positive exact display match, but
+                # an OCR miss/contradiction cannot overrule the authoritative
+                # fresh frame. Let the independent visual judge read it.
+                self._pending_visual_arithmetic_check = reason
+            else:
+                return self._reject_done(reason, f"[done check failed] {reason}")
+        saved_file_verdict = self._deterministic_saved_file_verdict(screen, evidence)
+        if saved_file_verdict is not None:
+            passed, reason = saved_file_verdict
+            if not passed:
+                return self._reject_done(reason, f"[done check failed] {reason}")
+            # Parsed file content/format and current title are necessary
+            # artifact evidence. Overall task completion still reaches the
+            # independent judge below.
+            artifact_paths = _explicit_saved_paths(self.task)
+            self._saved_artifact_verified = bool(artifact_paths) and all(
+                path.suffix.casefold() in {".txt", ".md", ".csv", ".docx", ".xlsx"}
+                for path in artifact_paths
+            )
+            evidence += "\n- deterministic_saved_file: " + reason
         if not self._verify_visible_payloads(screen, evidence):
             return False
-        if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
+        fresh_native_image = bool(
+            str(getattr(self, "_fresh_done_image_b64", "") or "")
+        )
+        if (
+            not fresh_native_image
+            and self._desktop_drag_has_deterministic_done_evidence(screen, evidence)
+        ):
             reason = (
                 "Desktop icon drag accepted from deterministic evidence: target "
                 "listitem at requested area plus drag visual_change_detected=true."
@@ -1576,17 +2254,30 @@ class DoneVerifierMixin:
             BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
             self._done_verified = True
             return True
-        saved_file_verdict = self._deterministic_saved_file_verdict(screen, evidence)
-        if saved_file_verdict is not None:
-            passed, reason = saved_file_verdict
-            if passed:
-                BUS.publish("done_check", run_id=self.run_id, passed=True, reason=reason)
-                self._done_verified = True
-                return True
-            return self._reject_done(reason, f"[done check failed] {reason}")
+        if _is_desktop_icon_drag_task(self.task):
+            if fresh_native_image:
+                self._pending_visual_spatial_check = (
+                    "Verify that the requested desktop icon/folder is now visibly located "
+                    "in the exact destination region described by the user."
+                )
+            else:
+                reason = (
+                    "Desktop drag has action/pixel evidence, but neither fresh target "
+                    "geometry nor a fresh visual frame proves the requested final location."
+                )
+                return self._reject_done(reason, f"[done check failed] {reason}")
         if not self._verify_required_literal_tokens(screen, evidence):
             return False
-        if self._visible_state_has_deterministic_done_evidence(screen, evidence):
+        if (
+            not self._pending_visual_literal_tokens
+            and not self._pending_visual_payloads
+            and not _is_drawing_task(self.task)
+            and (
+                not fresh_native_image
+                or self._task_accepts_historical_visible_state(self.task)
+            )
+            and self._visible_state_has_deterministic_done_evidence(screen, evidence)
+        ):
             return True
         if not self._verify_gui_search_done(screen):
             return False

@@ -1,6 +1,7 @@
 """Visual anchor cache and locator for fast repeated GUI actions."""
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -199,6 +200,15 @@ def _score(element: UIElement, anchor: VisualAnchor, window: Region) -> float:
         score += 0.08
     elif anchor.expected_region:
         score -= 0.25
+    try:
+        confidence = float(element.confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    if score > 0.0:
+        score *= confidence
     return score
 
 
@@ -237,11 +247,44 @@ def _candidate_trace(element: UIElement, score: float) -> dict:
     return data
 
 
+def _same_physical_target(first: UIElement, second: UIElement) -> bool:
+    """Treat overlapping cross-source observations as one candidate."""
+    if first is second:
+        return True
+    if first.iou(second) >= 0.55:
+        return True
+    distance = ((int(first.cx) - int(second.cx)) ** 2 + (
+        int(first.cy) - int(second.cy)
+    ) ** 2) ** 0.5
+    return bool(
+        distance <= 6
+        and _text_compatible(first.text, second.text)
+        and _role_compatible(first.role, second.role)
+    )
+
+
+def _ambiguous_runner_up(
+    scored: list[tuple[UIElement, float]],
+    min_margin: float,
+) -> tuple[UIElement, float] | None:
+    if len(scored) < 2:
+        return None
+    best, best_score = scored[0]
+    for candidate, candidate_score in scored[1:]:
+        if _same_physical_target(best, candidate):
+            continue
+        if best_score - candidate_score < min_margin:
+            return candidate, candidate_score
+        return None
+    return None
+
+
 class ElementCache:
     """Cache stable semantic anchors for a single run."""
 
-    def __init__(self, ttl_s: float = 180.0) -> None:
+    def __init__(self, ttl_s: float = 180.0, min_score_margin: float = 0.12) -> None:
         self.ttl_s = float(ttl_s)
+        self.min_score_margin = max(0.0, float(min_score_margin))
         self._items: dict[str, ElementCacheEntry] = {}
         self._hits = 0
         self._misses = 0
@@ -306,6 +349,15 @@ class ElementCache:
                 reason="cache_revalidation_failed",
                 candidates=[_candidate_trace(e, s) for e, s in scored[:3]],
             )
+        runner_up = _ambiguous_runner_up(scored, self.min_score_margin)
+        if runner_up is not None:
+            self._misses += 1
+            return LocateResult(
+                None,
+                score=score,
+                reason="ambiguous_top_candidates",
+                candidates=[_candidate_trace(e, s) for e, s in scored[:5]],
+            )
         entry.hits += 1
         self._hits += 1
         return LocateResult(
@@ -338,6 +390,14 @@ class ElementCache:
                 None,
                 score=candidates[0][1] if candidates else 0.0,
                 reason="best_score_below_threshold",
+                candidates=[_candidate_trace(e, s) for e, s in candidates[:5]],
+            )
+        runner_up = _ambiguous_runner_up(candidates, self.min_score_margin)
+        if runner_up is not None:
+            return LocateResult(
+                None,
+                score=candidates[0][1],
+                reason="ambiguous_top_candidates",
                 candidates=[_candidate_trace(e, s) for e, s in candidates[:5]],
             )
         element = candidates[0][0]

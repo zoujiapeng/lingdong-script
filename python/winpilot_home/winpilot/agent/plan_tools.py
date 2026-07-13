@@ -579,6 +579,25 @@ class PlanToolMixin:
         summary = str(args.get("summary", ""))
         return ToolResult(f"任务完成: {summary}", terminal="done")
 
+    def _t_blocked(self, args: dict) -> ToolResult:
+        """Pause honestly when the real UI cannot be grounded safely."""
+        reason = str(args.get("reason", "") or "当前真实界面无法可靠判断").strip()
+        evidence = str(args.get("evidence", "") or "").strip()
+        question = str(args.get("question", "") or "请确认界面状态或告诉我下一步。").strip()
+        BUS.publish(
+            "agent_blocked",
+            run_id=getattr(self, "run_id", None),
+            reason=reason[:300],
+            evidence=evidence[:600],
+            question=question[:300],
+        )
+        body = f"任务已安全暂停：{reason}"
+        if evidence:
+            body += f"\n当前证据：{evidence}"
+        if question:
+            body += f"\n需要用户确认：{question}"
+        return ToolResult(body, terminal="reply")
+
     def _t_fail(self, args: dict) -> ToolResult:
         reason = str(args.get("reason", ""))
         if self.replan_on_fail and not self._fail_softened:

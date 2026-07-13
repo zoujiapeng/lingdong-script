@@ -36,9 +36,17 @@ GUI_SCOPE_MUTATIONS = {
     "execute_subgoal",
 }
 _SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "scan_windows", "list_windows"}
-_CONTROL_PLANE_TITLES = (
+_STRONG_CONTROL_PLANE_TITLES = (
     "灵动脚本",
-    "winpilot",
+    "lingdong script",
+    "lingdong-script",
+)
+_EXPLICIT_CONTROL_PLANE_TASK_MARKERS = (
+    "winpilot control-plane",
+    "winpilot control plane",
+    "winpilot 控制面",
+    "winpilot控制面",
+    "灵动脚本",
     "lingdong script",
     "lingdong-script",
 )
@@ -46,12 +54,19 @@ _CONTROL_PLANE_TITLES = (
 
 def _is_control_plane_title(title: str) -> bool:
     folded = str(title or "").strip().casefold()
-    return any(marker.casefold() in folded for marker in _CONTROL_PLANE_TITLES)
+    # ``WinPilot`` occurs legitimately in page titles, document names, eval
+    # targets, and user content.  A substring match therefore blocks the very
+    # target window the agent was asked to operate.  Keep branded Lingdong
+    # titles as strong markers and accept WinPilot only as the complete title.
+    return bool(
+        any(marker.casefold() in folded for marker in _STRONG_CONTROL_PLANE_TITLES)
+        or folded in {"winpilot", "winpilot agent"}
+    )
 
 
 def _task_targets_control_plane(session) -> bool:
     task = str(getattr(session, "task", "") or "").casefold()
-    return any(marker.casefold() in task for marker in _CONTROL_PLANE_TITLES)
+    return any(marker.casefold() in task for marker in _EXPLICIT_CONTROL_PLANE_TASK_MARKERS)
 
 
 def _title(hwnd: int | None) -> str:

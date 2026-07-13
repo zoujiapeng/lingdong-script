@@ -33,6 +33,25 @@ def test_scope_guard_foreground_mismatch_is_window_focus_without_llm():
     assert "focus_window" in cls.patch_hint
 
 
+def test_visual_grounding_block_is_not_misreported_as_action_success():
+    from winpilot.agent.failure_classifier import FailureType
+
+    cls = _classify(
+        "click",
+        {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "visual_grounding_required": True,
+            "error": "Low-level GUI action blocked because no fresh real frame grounds the current target-window epoch.",
+        },
+    )
+
+    assert cls is not None
+    assert cls.failure_type == FailureType.VISUAL_GROUNDING_REQUIRED
+    assert "did not run" in cls.patch_hint
+
+
 def test_execute_subgoal_needs_target_window_is_window_recovery_failure():
     from winpilot.agent.failure_classifier import FailureType
 

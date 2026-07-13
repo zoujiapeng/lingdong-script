@@ -8,6 +8,7 @@ spots. The output is JSON-serializable and small enough for the frontend.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -139,6 +140,23 @@ def _low_latency_metrics(
         if status.get("capture_latency_ms") is not None:
             screen_capture_ms.append(int(status.get("capture_latency_ms") or 0))
 
+    visual_feedback_events = [
+        event for event in events if event.get("type") == "visual_feedback"
+    ]
+    visual_feedback_capture_ms: list[int] = []
+    for event in visual_feedback_events:
+        value = event.get("capture_latency_ms")
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric) or numeric < 0:
+            continue
+        visual_feedback_capture_ms.append(int(numeric))
+    screen_capture_ms.extend(visual_feedback_capture_ms)
+
     perception_total_ms: list[int] = []
     vlm_perception_calls = 0
     for event in perception_stats:
@@ -236,6 +254,10 @@ def _low_latency_metrics(
     minutes = max(duration_s / 60.0, 1 / 60.0)
     return {
         "screen_capture_latency": _latency_summary(screen_capture_ms),
+        "native_visual_feedback": {
+            "frames": len(visual_feedback_events),
+            "capture_latency": _latency_summary(visual_feedback_capture_ms),
+        },
         "perception_latency": _latency_summary(perception_total_ms),
         "action_decision_latency": _latency_summary(decision_ms),
         "action_execution_latency": _latency_summary(action_ms),
@@ -590,6 +612,11 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "total": 0,
             "passed_or_done": 0,
+            "verified_successes": 0,
+            "verified_success_rate": 0,
+            "grounded_total": 0,
+            "ungrounded_count": 0,
+            "performance_budget_failed_count": 0,
             "unverified_done_count": 0,
             "total_duration_s": 0,
             "total_cost_cny": 0,
@@ -629,17 +656,39 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     def passed(report: dict[str, Any]) -> bool:
         if report.get("timed_out"):
             return False
-        if report.get("policy_passed") is False:
+        if report.get("status") != "done":
+            return False
+        if report.get("policy_passed") is not True:
+            return False
+        budget = report.get("performance_budget")
+        if not isinstance(budget, dict) or budget.get("passed") is not True:
             return False
         if unverified_done(report):
             return False
-        if "ground_truth_passed" in report:
-            return bool(report.get("ground_truth_passed"))
-        return report.get("status") == "done"
+        if report.get("ground_truth_status") == "ungrounded":
+            return False
+        return report.get("ground_truth_passed") is True
+
+    grounded_total = sum(
+        1 for report in reports
+        if report.get("ground_truth_status") != "ungrounded"
+        and "ground_truth_passed" in report
+    )
+    ungrounded_count = len(reports) - grounded_total
+    verified_successes = sum(1 for report in reports if passed(report))
 
     return {
         "total": len(reports),
-        "passed_or_done": sum(1 for r in reports if passed(r)),
+        "passed_or_done": verified_successes,
+        "verified_successes": verified_successes,
+        "verified_success_rate": round(verified_successes / len(reports), 4),
+        "grounded_total": grounded_total,
+        "ungrounded_count": ungrounded_count,
+        "performance_budget_failed_count": sum(
+            1 for report in reports
+            if not isinstance(report.get("performance_budget"), dict)
+            or report["performance_budget"].get("passed") is not True
+        ),
         "unverified_done_count": sum(1 for r in reports if unverified_done(r)),
         "total_duration_s": round(sum(float(r.get("duration_s") or 0) for r in reports), 2),
         "total_cost_cny": round(sum(float(u.get("cost_cny") or 0) for u in usage_items), 4),

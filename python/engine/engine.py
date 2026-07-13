@@ -70,7 +70,7 @@ def execute_flow(script: dict) -> dict:
 
     try:
         result = executor.run_dsl_sync(dsl_text)
-        if result.get("success"):
+        if result.get("success") is True:
             # 结晶化：将成功执行的流程保存为模板
             try:
                 crystallize(script, dsl_text)
@@ -118,12 +118,16 @@ def main():
                     executor.on("state_change", lambda **kw: emit({"type": "state_change", **kw}))
                     executor.on("log", lambda **kw: emit({"type": "log", **kw}))
                     try:
-                        executor.run_dsl_sync(dsl_text)
-                        try:
-                            crystallize(None, dsl_text)
-                        except Exception as ce:
-                            emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
-                        emit({"type": "execution_done", "status": "completed"})
+                        result = executor.run_dsl_sync(dsl_text)
+                        if result.get("success") is True:
+                            try:
+                                crystallize(None, dsl_text)
+                            except Exception as ce:
+                                emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
+                            emit({"type": "execution_done", "status": "completed"})
+                        else:
+                            emit({"type": "execution_done", "status": "error",
+                                  "error": result.get("error", "DSL 执行失败")})
                     except Exception as e:
                         emit({"type": "execution_done", "status": "error", "error": str(e)})
                 else:
@@ -138,12 +142,16 @@ def main():
         executor.on("state_change", lambda **kw: emit({"type": "state_change", **kw}))
         executor.on("log", lambda **kw: emit({"type": "log", **kw}))
         try:
-            executor.run_dsl_sync(line)
-            try:
-                crystallize(None, line)
-            except Exception as ce:
-                emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
-            emit({"type": "execution_done", "status": "completed"})
+            result = executor.run_dsl_sync(line)
+            if result.get("success") is True:
+                try:
+                    crystallize(None, line)
+                except Exception as ce:
+                    emit({"type": "log", "message": f"[crystallizer] 结晶失败: {ce}"})
+                emit({"type": "execution_done", "status": "completed"})
+            else:
+                emit({"type": "execution_done", "status": "error",
+                      "error": result.get("error", "DSL 执行失败")})
         except Exception as e:
             emit({"type": "execution_done", "status": "error", "error": str(e)})
 

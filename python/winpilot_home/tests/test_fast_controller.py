@@ -8093,3 +8093,59 @@ def test_batch_rejects_self_fulfilling_text_wait(monkeypatch):
     assert out["controller_state"]["failed_at"] == 2
     assert "self-fulfilling" in out["results"][1]["preview"]
     assert [name for name, _args in calls] == ["type_text"]
+def test_direct_subgoal_refreshes_same_hwnd_snapshot_before_grounding():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+
+    class Session:
+        task = "Click Fresh Target"
+        hwnd = 71
+        run_id = "same-hwnd-stale-snapshot"
+        _screen_epoch = 4
+        snapshot = Snapshot(
+            hwnd=71,
+            title="Target",
+            region=Region(0, 0, 800, 500),
+            elements=[UIElement(
+                elem_id=1, source="uia", role="button", text="Stale Target",
+                cx=120, cy=100, left=80, top=80, width=80, height=40,
+            )],
+        )
+
+        def dispatch(self, name, args):
+            calls.append((name, dict(args)))
+            if name == "observe":
+                assert args == {"full": True, "force_full": True}
+                self.snapshot = Snapshot(
+                    hwnd=71,
+                    title="Target",
+                    region=Region(0, 0, 800, 500),
+                    elements=[UIElement(
+                        elem_id=2, source="uia", role="button", text="Fresh Target",
+                        cx=320, cy=100, left=280, top=80, width=80, height=40,
+                    )],
+                )
+                return ToolResult("fresh target observed")
+            if name == "click":
+                return ToolResult('{"ok": true, "verified": true}')
+            return ToolResult('{"ok": true}')
+
+    session = Session()
+    result = SubgoalExecutor(session, FastGuiController(session)).execute({
+        "subgoal": "click the current Fresh Target button",
+        "click": {"label": "Fresh Target"},
+        "constraints": {"wait": False},
+    })
+
+    payload = json.loads(result.text)
+    assert any(name == "observe" for name, _args in calls)
+    click_args = next(args for name, args in calls if name == "click")
+    assert click_args.get("element_id") == 2
+    assert click_args.get("element_id") != 1
+    assert payload["ok"] is True

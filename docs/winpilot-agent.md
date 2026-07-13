@@ -61,7 +61,7 @@
 | `interaction_tools.py` | `click`、`type_text`、`hotkey`、`scroll`、`drag`、`draw_strokes`、`wait` |
 | `system_tools.py` | `launch`、`run_shell`、`run_detached`、`tray_click`、`search_files`、`undo_last`、agent schedule tools |
 | `fast_tools.py` | `execute_subgoal`、`run_action_batch`、`screen_watch` |
-| `plan_tools.py` | `revise_plan`、`complete_subgoal`、`done`、`fail` |
+| `plan_tools.py` | `revise_plan`、`complete_subgoal`、`done`、`fail`、`blocked` |
 | `file_tools.py` | `list_dir`、`read_file`、`write_file`、`search_text` |
 | `memory_tools.py` | `remember`、`forget`、`reuse_skill` |
 | `desktop_tools.py` | clipboard、mouse low-level、screenshot、displays、installed apps、coordinate diagnostics/click test |
@@ -86,6 +86,26 @@ Profile：
 - `drawing_gui`：严格 GUI-only 绘图/画布任务；隐藏无关工具，并把 `execute_subgoal` 参数裁剪到绘图/验证相关字段。
 
 排查 GUI-only 绕路时，直接打开 `traces/<run_id>/NNN_llm_request.json` 看 tools 列表，不要只看 agent 说了什么。
+
+## 原生视觉闭环
+
+主模型显式支持图片且 `controller.visual_closed_loop=true` 时，`AgentRunner` 使用以下闭环：
+
+```text
+目标窗口预绑定
+  -> 初始目标窗口真实帧
+  -> 模型只决定一笔视觉事务
+  -> ToolSession / Controller 执行动作
+  -> 动作后目标窗口真实帧
+  -> 下一轮决策
+  -> done 时重新捕获真实帧并按用户目标核验
+```
+
+- 一笔视觉事务可以是一个低层 GUI mutation，或一次 Controller 管理的 `run_action_batch` / `execute_subgoal`。同一模型回复中的后续调用返回 `visual_turn_barrier`，等待模型检查动作后帧。
+- `click`、`scroll`、`drag`、`draw_strokes` 等视觉位置使用当前整帧 0..1000 的 `frame_*` 坐标，由运行时映射到同一次截图的物理区域；原生视觉 schema 隐藏物理 `x/y`。低层动作必须有与当前 hwnd、screen epoch 和窗口区域一致的新鲜帧。动作前重截图能可靠定位目标时，检查外扩 `controller.visual_preflight_target_margin`（默认 60/1000）的 ROI，并使用 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）；无法可靠定位目标时退回整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）。超过对应阈值会取消动作并返回新帧；缺少新鲜画面则返回 `visual_grounding_required`。连续两次试图无画面依据操作会安全暂停。
+- 原生视觉模型的普通无 query `observe` 使用 `fusion.native_vision_direct`：只建立窗口几何快照，把 JPEG 直接交给主模型，跳过 UIA/OCR/VLM 的同帧拆解；二次 VLM 工具也只对 text-only 主模型开放。query、`full`、`changed_only`、结构化锚定、非视觉模型和 fallback 仍使用融合感知。
+- 真实帧是当前像素界面的权威状态；结构化元素、规则和 Controller 摘要只是提示。动作后的旧 element tree 会失效，不能压过相反的画面。
+- `observe` 只读。通信场景即使识别出会话和输入框，也只返回 `execute_subgoal` 提案，实际输入/发送必须在下一笔显式事务中发生。
 
 ## 低延迟 GUI Controller
 
@@ -144,11 +164,11 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 - `auto_visual_verify`
 - `visual_change_detected`
 
-`screen_delta.changed=true` 只说明像素变化，不是业务成功证据。要结合 target window、expected evidence 和截图。
+`screen_delta.changed=true`、颜色存在和 `auto_visual_verify.summary_kind=pixel_effect_only` 只说明发生了像素效果，不是业务成功或完成证据。必须结合 target window、任务目标、expected evidence 和新鲜截图。
 
 ### 坐标诊断
 
-真实鼠标坐标排查用：
+真实鼠标坐标排查用（原生视觉模型的普通动作不直接暴露物理坐标工具）：
 
 - `coordinate_diagnostics`
 - `coordinate_click_test`
@@ -166,13 +186,15 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 
 直接 Agent 评测走 `scripts/gui_eval_run.py` 的公开 `/api/chat`；前端目标页走 `/api/v2/arp/runs`。两者不是同一个 HTTP 入口，但共享 RuntimeJob、AgentRunner、ToolSession、Controller、trace 和 done gate；内部 runner/CLI 仍不能替代前端路径。
 
+汇总只把严格核验的 run 计入 `verified_success`：必须未超时、`status=done`、policy 和性能预算通过、外部 ground truth 存在且通过，并且没有 unverified done。没有检查项的报告标记为 `ungrounded`，不计成功；报告的 Git、模型、视觉配置 hash、display/DPI provenance 用来保证不同运行可比。
+
 ## Done Gate
 
 `done` 必须有证据。常见拒绝原因：
 
 - 用户要求的 literal 没出现在当前屏幕/工具证据中。
 - 通信任务没有看到消息出现在目标会话。
-- 绘图任务没有可见颜色或像素变化证据。
+- 绘图任务的新鲜整图没有满足目标语义；可见颜色或像素变化本身不足以完成。
 - 文件/保存任务没有 `file_exists` 或等价确定性证据。
 - 只看到模型总结，没有 observe/read_text/expect/VLM/deterministic evidence。
 
@@ -184,7 +206,7 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 - `agent/failure_classifier.py`
 - `agent/failure_recovery.py`
 
-模型 judge 异常或达到 `done_max_rejects` 都 fail-closed；未验证结果不会因重试次数耗尽被强制升级为成功。
+原生视觉 GUI 任务在 `done` 时会重新捕获目标窗口，独立 judge 直接检查整张图与用户目标；缺少 UIA/OCR 文本但新鲜画面存在时，精确 literal 由该 judge 逐字检查，不会触发一次反向结构化 observe，更不会因“有截图”自动通过。对象、页面、文本或结果有矛盾、含糊、裁切或看不清都判 false。模型 judge 异常或达到 `done_max_rejects` 也 fail-closed；未验证结果不会因重试次数耗尽被强制升级为成功。文件/进程等不可见任务仍以确定性证据为准。
 
 ### 验证并发边界
 

@@ -98,7 +98,7 @@ class ScreenWatcher:
         self,
         region_provider: RegionProvider | None = None,
         capture_fn: CaptureFn = capture,
-        fps: float = 8.0,
+        fps: float = 3.0,
         pixel_thresh: int = 12,
         event_context_provider: EventContextProvider | None = None,
     ) -> None:

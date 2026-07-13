@@ -104,6 +104,7 @@ _LEAN_GUI_TOOLS = {
     "vlm_describe",
     "vlm_verify",
     "done",
+    "blocked",
     "fail",
 }
 
@@ -152,6 +153,7 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "vlm_describe": "Ask VLM about a screen/window region.",
     "vlm_verify": "Strictly verify visible pixels against completion criteria.",
     "done": "Finish only after verified evidence.",
+    "blocked": "Pause safely when the real UI cannot be grounded without guessing.",
     "fail": "Finish with an honest failure reason.",
 }
 
@@ -220,12 +222,184 @@ def _apply_tool_profile(tools: list[dict], profile: str) -> list[dict]:
     return tools
 
 
+def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
+    """Expose image-relative coordinates to native-vision models.
+
+    The runtime maps these fields through the exact authoritative window frame.
+    Hiding physical x/y prevents a multimodal model from copying coordinates
+    from a resized JPEG into desktop space.
+    """
+    # coordinate_click_test accepts raw physical x/y and is intentionally not
+    # exposed to a model that can see the frame. The normal click tool now
+    # performs the same real device action after a deterministic frame mapping.
+    adapted = [
+        deepcopy(tool)
+        for tool in tools
+        if _tool_name(tool) != "coordinate_click_test"
+    ]
+
+    def coord(description: str) -> dict:
+        return _prop("number", description, minimum=0, maximum=1000)
+
+    def point_schema(description: str) -> dict:
+        return {
+            "type": "array",
+            "description": description,
+            "items": coord("Normalized frame coordinate, 0..1000."),
+            "minItems": 2,
+            "maxItems": 2,
+        }
+
+    for tool in adapted:
+        fn = tool.get("function") or {}
+        name = str(fn.get("name") or "")
+        parameters = fn.get("parameters") or {}
+        props = parameters.get("properties")
+        required = list(parameters.get("required") or [])
+        if not isinstance(props, dict):
+            continue
+
+        if name == "click":
+            props.pop("x", None)
+            props.pop("y", None)
+            props["frame_x"] = coord("Horizontal position in the current whole frame: 0=left, 1000=right edge.")
+            props["frame_y"] = coord("Vertical position in the current whole frame: 0=top, 1000=bottom edge.")
+            parameters["required"] = [item for item in required if item not in {"x", "y"}]
+            fn["description"] = (
+                "Click an observed element_id or a point in the current authoritative frame using "
+                "frame_x/frame_y in 0..1000. For visual targets prefer frame coordinates; do not "
+                "manually scale image pixels into physical screen x/y."
+            )
+        elif name in {"scroll", "move_mouse"}:
+            props.pop("x", None)
+            props.pop("y", None)
+            props["frame_x"] = coord("Horizontal position in the current whole frame, 0..1000.")
+            props["frame_y"] = coord("Vertical position in the current whole frame, 0..1000.")
+            parameters["required"] = [
+                *(item for item in required if item not in {"x", "y"}),
+                "frame_x",
+                "frame_y",
+            ]
+            fn["description"] = (
+                ("Scroll at" if name == "scroll" else "Move the mouse to")
+                + " frame_x/frame_y in the current authoritative frame (0..1000)."
+            )
+        elif name == "drag":
+            for key in ("x1", "y1", "x2", "y2", "points"):
+                props.pop(key, None)
+            props.update({
+                "frame_x1": coord("Drag start x in the current whole frame, 0..1000."),
+                "frame_y1": coord("Drag start y in the current whole frame, 0..1000."),
+                "frame_x2": coord("Drag end x in the current whole frame, 0..1000."),
+                "frame_y2": coord("Drag end y in the current whole frame, 0..1000."),
+                "frame_points": {
+                    "type": "array",
+                    "description": "Optional intermediate [x,y] points, each relative to the current whole frame in 0..1000.",
+                    "items": point_schema("One normalized intermediate point."),
+                },
+            })
+            parameters["required"] = [
+                *(item for item in required if item not in {"x1", "y1", "x2", "y2"}),
+                "frame_x1", "frame_y1", "frame_x2", "frame_y2",
+            ]
+            fn["description"] = (
+                "Drag between frame_x1/frame_y1 and frame_x2/frame_y2 in the current "
+                "authoritative frame (0..1000), optionally through frame_points."
+            )
+        elif name == "draw_strokes":
+            props.pop("strokes", None)
+            props["frame_strokes"] = {
+                "type": "array",
+                "description": (
+                    "Strokes relative to the current whole frame in 0..1000. Each stroke needs "
+                    "at least two [x,y] points."
+                ),
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "items": point_schema("One normalized stroke point."),
+                },
+            }
+            parameters["required"] = [
+                *(item for item in required if item != "strokes"),
+                "frame_strokes",
+            ]
+            fn["description"] = (
+                "Draw frame_strokes in the current authoritative frame using 0..1000 "
+                "coordinates; the runtime maps every point to physical screen pixels."
+            )
+        elif name == "run_action_batch":
+            actions = props.get("actions")
+            items = actions.get("items") if isinstance(actions, dict) else None
+            if isinstance(items, dict):
+                items["properties"] = {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "observe",
+                            "click",
+                            "click_element",
+                            "type_into_element",
+                            "type_text",
+                            "hotkey",
+                            "scroll",
+                            "move_mouse",
+                            "drag",
+                            "draw_strokes",
+                            "select_color",
+                            "focus_window",
+                            "wait",
+                            "wait_change",
+                            "wait_stable",
+                            "read_text",
+                            "zoom",
+                            "clipboard_write",
+                            "clipboard_paste",
+                        ],
+                        "description": (
+                            "Required canonical controller action name. Native-vision batches "
+                            "never accept shorthand objects with the action field omitted."
+                        ),
+                    },
+                }
+                items["required"] = ["action"]
+                items["description"] = (
+                    "One canonical {'action': '<name>', ...} entry in a native-vision grounded "
+                    "batch; every entry must include action. Never use shorthand. For one spatial "
+                    "action, call click/scroll/drag/draw_strokes directly instead of creating a "
+                    "one-item batch. The whole batch may contain "
+                    "at most one spatial mutation; click/click_element/type_into_element/scroll/"
+                    "move_mouse/drag/draw_strokes/select_color count whether grounded by frame_*, "
+                    "element_id, or semantic labels/anchors. Keyboard-only type_text/hotkey, waits, "
+                    "and verification may accompany that one mutation. Put the next spatial action "
+                    "in a new turn after the next real post-action frame. Coordinate actions must use "
+                    "the current whole-frame 0..1000 contract: click/scroll/move_mouse use "
+                    "frame_x/frame_y; drag uses frame_x1/frame_y1/frame_x2/frame_y2 and optional "
+                    "frame_points; draw_strokes uses frame_strokes. Never send physical x/y, "
+                    "x1/y1/x2/y2, points, or strokes. normalized_strokes is allowed only for "
+                    "controller canvas-relative 0..1000 points that will be mapped through the "
+                    "latest detected canvas. Non-coordinate actions keep their normal fields."
+                )
+            fn["description"] = (
+                "Execute a short controller-managed multi-step transaction grounded in the current "
+                "authoritative frame. Every child must include its canonical action field. For a "
+                "single spatial action use the direct click/scroll/drag/draw_strokes tool, not this "
+                "batch. A batch may contain at most one spatial mutation; keyboard-only input, waits, "
+                "and checks may share that transaction; defer every later spatial action until the next real "
+                "post-action frame. Every nested coordinate action must use frame_* values in "
+                "0..1000; the runtime maps them through that exact frame and rejects mixed/physical "
+                "coordinates."
+            )
+    return adapted
+
+
 def tool_schemas(
     planning: bool = False,
     coding_runtime: bool = False,
     allow_shell: bool = True,
     allow_files: bool = True,
     profile: str = "standard",
+    native_vision: bool = False,
 ) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
@@ -568,7 +742,7 @@ def tool_schemas(
         ),
         _tool(
             "run_action_batch",
-            "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default. The controller may append an internal auto_visual_verify result after visual mutations.",
+            "Execute a short low-latency GUI action batch without an LLM round-trip between each action. Use only for obvious grounded sequences; it stops on the first failed/blocked action by default. The controller may append a compatibility-named auto_visual_verify item, but that item is only a pixel-effect summary and is never semantic completion evidence.",
             {
                 "subgoal": _prop("string", "Optional short label for what this batch should accomplish."),
                 "actions": {
@@ -633,6 +807,16 @@ def tool_schemas(
         _tool("undo_last", "Undo or clean up the most recent reversible action from this run."),
         _tool("done", "Finish only after verified evidence shows the task is complete.",
               {"summary": _prop("string", "Completion summary.")}, ["summary"]),
+        _tool(
+            "blocked",
+            "Safely pause and ask the user when the real UI, target, or result cannot be grounded without guessing. This bypasses automatic retry.",
+            {
+                "reason": _prop("string", "Exact visual ambiguity or external blocker."),
+                "evidence": _prop("string", "What is actually visible/known, without guesses."),
+                "question": _prop("string", "The smallest user confirmation needed to continue safely."),
+            },
+            ["reason", "question"],
+        ),
         _tool("fail", "Finish with an honest failure reason when the task cannot be completed.",
               {"reason": _prop("string", "Failure reason.")}, ["reason"]),
     ])
@@ -756,7 +940,7 @@ def tool_schemas(
                   {"memory_id": _prop("string")}, ["memory_id"]),
         ])
 
-    if vlm.is_configured():
+    if vlm.is_configured() and not native_vision:
         tools.append(_tool(
             "vlm_describe",
             "Ask the visual model to describe a screen/window region.",
@@ -891,4 +1075,7 @@ def tool_schemas(
                   {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
                    "regex": _prop("boolean")}, ["query"]),
         ])
-    return _apply_tool_profile(tools, profile)
+    profiled = _apply_tool_profile(tools, profile)
+    if native_vision:
+        return _native_frame_coordinate_tools(profiled)
+    return profiled

@@ -42,3 +42,43 @@ class BreakLoop(Exception):
 
     def __str__(self):
         return "BREAK 只能在 LOOP 内部使用"
+
+
+def result_indicates_failure(result: Any) -> bool:
+    """Return whether an action result explicitly reports failure.
+
+    Legacy handlers use a mixture of booleans and ``success``/``ok``
+    dictionaries.  A non-empty failure dictionary is truthy, so callers must
+    not use ordinary truth testing to decide whether an action succeeded.
+    """
+    if result is None or result is False:
+        return True
+    if not isinstance(result, dict):
+        return False
+    if result.get("error") not in (None, "", False):
+        return True
+    # Status envelopes are contracts, not values to coerce by truthiness.
+    # Anything except the literal JSON/Python boolean True is unknown or
+    # negative and therefore cannot authorize the next action.
+    for key in ("success", "ok", "found", "valid", "verified", "passed"):
+        if key in result and result.get(key) is not True:
+            return True
+    if "result" not in result:
+        return False
+    nested = result.get("result")
+    if nested is None or nested is False:
+        return True
+    return isinstance(nested, dict) and result_indicates_failure(nested)
+
+
+def result_error_message(result: Any, default: str = "action reported failure") -> str:
+    """Extract a useful error from a result rejected by the guard above."""
+    if isinstance(result, dict):
+        for key in ("error", "message", "detail", "reason"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            return result_error_message(nested, default)
+    return default

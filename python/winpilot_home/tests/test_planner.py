@@ -98,3 +98,32 @@ def test_plan_keeps_state_token_check_for_visual_confirmation():
     )
 
     assert plan.steps[0]["check"] == {"text_appears": "DRAW_DONE_42"}
+
+
+def test_verbose_two_action_gui_task_skips_upfront_plan(monkeypatch):
+    monkeypatch.setattr(planner, "planning_enabled", lambda: True)
+    task = (
+        "Open http://127.0.0.1/gui_agent_target.html, click the Calibration "
+        "button, and confirm CALIBRATION_OK. Use real GUI input and do not use "
+        "JavaScript, DOM, DevTools, shell, or script injection."
+    )
+
+    assert planner.should_plan_upfront(task) is False
+
+
+def test_repeated_click_policy_word_does_not_create_extra_plan_step(monkeypatch):
+    monkeypatch.setattr(planner, "planning_enabled", lambda: True)
+    task = (
+        "打开 http://127.0.0.1/gui_agent_target.html，点击页面上的校准点按钮，"
+        "最后确认页面出现 CALIBRATION_OK。必须通过GUI真实鼠标点击，不要用脚本注入点击。"
+    )
+
+    assert planner.should_plan_upfront(task) is False
+
+
+def test_four_explicit_gui_actions_still_use_upfront_plan(monkeypatch):
+    monkeypatch.setattr(planner, "planning_enabled", lambda: True)
+
+    assert planner.should_plan_upfront(
+        "Open Notepad type the note save it and confirm the saved file"
+    ) is True

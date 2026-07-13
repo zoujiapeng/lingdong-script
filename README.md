@@ -17,9 +17,12 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；两者除公开 ping 外都使用进程随机 bearer token。不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
-- 感知默认组合 UIA、Win32、OCR、CV；VLM 默认关闭，只有在 `vlm` 配置有效时才作为辅助感知。
-- 低延迟 GUI 已落地 batch/subgoal、5-15 FPS watcher、变化 ROI 的增量 OCR/Win32 预取、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
-- 强 VLM 是未知界面/失败恢复 fallback，不在常规感知循环；当前尚未内置带正式权重的常驻学习型 UI detector。
+- 主模型明确支持图片时默认走真实画面闭环：初始目标窗口帧 → 每个模型回合至多一笔视觉事务 → 动作后真实帧 → 下一步决策；最终 GUI 完成还要用新鲜帧做目标条件视觉核验。
+- 原生视觉模型的普通无查询 `observe` 默认直接接收目标窗口 JPEG，不先支付 UIA/OCR/VLM 的同帧拆解。UIA、Win32、OCR、CV 与独立 VLM fallback 只用于文本查询、结构化定位、changed-only、非视觉模型和失败恢复；原生视觉主模型不会再看到重复的二次 VLM 工具。
+- `observe` 是只读操作；即使识别出聊天输入区也只返回 Controller 提案，不会暗中发送。原生视觉的点击、滚动、拖拽和笔画统一使用当前整帧的 `frame_*` 归一化坐标（0..1000），运行时映射到同一次截图的物理窗口区域；模型不能把缩放后的 JPEG 像素冒充物理 `x/y`。
+- 没有匹配当前 hwnd/screen epoch/窗口区域的新鲜画面时动作会被拦截。动作落下前会再次截图：能从当前帧可靠定位动作目标时，只检查目标外扩 `controller.visual_preflight_target_margin`（默认 60/1000）后的 ROI，变化比例超过 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）才取消；无法可靠定位目标时退回整窗检查，阈值为 `controller.visual_preflight_change_ratio`（默认 `0.0025`）。取消后会返回新帧。目标含糊或结果看不清时应 `blocked`/安全暂停，不会猜坐标继续执行。
+- 低延迟 GUI 已落地 batch/subgoal、默认 3 FPS 的变化触发 watcher、变化 ROI 增量 OCR/Win32 预取、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。
+- 像素变化、颜色存在和 Controller 的 `auto_visual_verify` 只说明发生了视觉效果，不是任务完成证据；当前尚未内置带正式权重的常驻学习型 UI detector。
 - `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json` 是本机运行数据，不提交。
 
 ## 成熟度快照
@@ -28,6 +31,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 
 | 方向 | 当前状态 |
 | --- | --- |
+| 原生视觉闭环 | `AgentRunner` 在首轮和每笔视觉事务后附加目标窗口真实帧；同一模型回合的后续工具调用被延后。低层动作使用 0..1000 帧坐标，并必须匹配当前 hwnd、screen epoch、窗口区域及动作前像素新鲜度；`done` 再由新鲜真实帧和任务目标独立核验，画面可直接证明的精确文本不会反向强制一次 UIA/OCR observe。 |
 | Raw Device Executor | `action/raw_device.py` 让 Controller batch 的常见 click/type/key/drag/focus/launch 子动作直接调用已授权 handler，不再递归支付完整 `ToolSession.dispatch()`；少数复杂动作仍走外层工具生命周期。 |
 | Action Queue | `action/desktop_queue.py` 是公平资源队列：真实鼠标/键盘仍按 `physical` 全局单写；明确使用 PostMessage、不会移动鼠标的后台窗口动作可按 `window:<hwnd>` 在不同窗口并发，同一 hwnd 串行；剪贴板另有独占资源。 |
 | Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，并在有意义的 ROI 变化后合并调度轻量 OCR/Win32；changed-only observe 可消费热缓存，UIA/VLM 不进入 daemon 内环。它还不是常驻学习型 YOLO/UI detector。 |
@@ -69,7 +73,7 @@ npm run clean
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
 ```
 
-报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。
+报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。汇总中的 `verified_success` 只统计同时满足未超时、`status=done`、有外部 ground truth 且通过、policy 通过、性能预算通过并且没有 unverified done 标记的 run；没有检查项的报告记为 `ungrounded`，不再把 agent 自报 done 算成功。
 
 网页靶场用于复现输入、按钮、局部变化、弹窗、拖拽和画布任务：
 
@@ -108,7 +112,7 @@ python -m http.server 8877 --bind 127.0.0.1
 
 - 不为单个软件硬编码专属规则；优先增强通用感知、窗口限定、验证和恢复。
 - 用户始终面对一个 Agent。新能力优先作为 Runtime/Capability/Skill 接入同一 runner；只有明确隔离、安全或生命周期边界时才引入独立 runner。
-- GUI 成功不能只看 agent 总结，必须用截图、文件、进程、窗口、trace 或工具证据验证。
+- GUI 成功不能只看 agent 总结，也不能只看像素发生变化；必须用与任务目标匹配的新鲜截图，或文件、进程、窗口、trace 等确定性工具证据验证。
 - 验证可做有限并发：文件/进程只读检查会与 UIA/OCR 重叠；`shell_true` 不并发。真实物理输入保持全局 single-writer，只有明确证明为后台安全的窗口消息动作才允许跨 hwnd 并发。
 - 不继续把大块新逻辑塞进 `agent/loop.py`、`agent/tools.py`、`python/engine/executor.py`；新增能力优先拆模块。
 - 文档写当前事实，不堆历史 run 日志。历史 trace 留在本机忽略目录或 eval 报告里。

@@ -5,6 +5,7 @@ Covers:
 2. With-payload tasks still check the payload is visible.
 3. Communication prompt hint is injected regardless of payload presence.
 """
+import json
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,23 @@ def test_draft_communication_accepts_grounded_typed_payload_without_readback():
         True,
         "Requested communication text was entered as a draft without a send action.",
     )
+
+
+def test_draft_communication_rejects_any_successful_send_action():
+    runner = _make_runner(
+        'Open QQ, type "HELLO_0712", but leave it as a draft and do not send'
+    )
+    runner._tool_history = [
+        ("type_text", {"text": "HELLO_0712"}, '{"ok": true}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+    ]
+
+    verdict = runner._deterministic_communication_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is False
+    assert "successful send action" in verdict[1]
+    assert runner._communication_native_mutation_ready() is False
 
 
 def test_draft_runtime_hard_blocks_send_click_and_enter():
@@ -128,6 +146,7 @@ def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
     runner._tool_history = [
         ("screenshot", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true}'),
         ("paste_image_file", {"path": r"C:\\Users\\zou\\Desktop\\calculator_result.png"}, '{"ok": true, "via": "clipboard_dib"}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
         ("observe", {"query": "已发送"}, '我的手机\n28.58KB已发送'),
     ]
 
@@ -138,10 +157,157 @@ def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
     assert "图片附件" in verdict[1]
 
 
+def test_image_send_done_gate_rejects_paste_without_send_action():
+    runner = _make_runner("Open QQ and send an image to my phone")
+    runner._tool_history = [
+        ("paste_image_file", {"path": r"C:\\tmp\\result.png"}, '{"ok": true}'),
+        ("read_text", {}, "my phone\n28.58KB sent"),
+    ]
+
+    verdict = runner._deterministic_image_send_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is False
+    assert "no successful Send/Enter" in verdict[1]
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        ["SHIFT", "ENTER"],
+        ["CTRL", "ENTER"],
+        ["ALT", "RETURN"],
+        ["ENTER", "SHIFT"],
+    ],
+)
+def test_communication_send_requires_bare_enter_or_return(keys):
+    runner = _make_runner('Open QQ and send "HELLO" to my phone')
+
+    assert runner._communication_entry_sends(
+        "hotkey", {"keys": keys}, '{"ok": true}',
+    ) is False
+
+
+@pytest.mark.parametrize("key", ["ENTER", "return"])
+def test_communication_send_accepts_successful_bare_enter_or_return(key):
+    runner = _make_runner('Open QQ and send "HELLO" to my phone')
+
+    assert runner._communication_entry_sends(
+        "hotkey", {"keys": [key]}, '{"ok": true}',
+    ) is True
+
+
+def test_unconsumed_press_enter_fields_do_not_count_as_send_actions():
+    runner = _make_runner('Open QQ and send "HELLO" to my phone')
+    runner._tool_history = [
+        (
+            "type_text",
+            {"text": "HELLO", "press_enter": True},
+            '{"ok": true}',
+        ),
+        (
+            "execute_subgoal",
+            {"input": {"text": "SECOND", "press_enter": True}},
+            json.dumps({
+                "ok": True,
+                "actions_executed": [
+                    {"action": "type_into_element", "text": "SECOND"},
+                ],
+                "results": [
+                    {"index": 1, "action": "type_into_element", "ok": True},
+                ],
+            }),
+        ),
+        ("read_text", {}, "composer: HELLO SECOND"),
+    ]
+
+    assert runner._communication_native_mutation_ready() is False
+    assert runner._causally_visible_outbound_payloads() == []
+
+
+def test_one_enter_consumes_at_most_one_recent_typed_turn():
+    runner = _make_runner("用QQ和我的手机聊天")
+    runner._tool_history = [
+        ("type_text", {"text": "FIRST_MESSAGE"}, '{"ok": true}'),
+        ("type_text", {"text": "SECOND_MESSAGE"}, '{"ok": true}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+        ("read_text", {}, "FIRST_MESSAGE SECOND_MESSAGE"),
+    ]
+
+    assert runner._communication_native_mutation_ready() is False
+    assert runner._causally_visible_outbound_payloads() == ["SECOND_MESSAGE"]
+    verdict = runner._deterministic_communication_verdict()
+    assert verdict is not None
+    assert verdict[0] is False
+
+
+@pytest.mark.parametrize(
+    ("type_ok", "send_ok", "send_data", "expected"),
+    [
+        (True, True, {"ok": True}, True),
+        (False, True, {"ok": True}, False),
+        ("true", True, {"ok": True}, False),
+        (True, False, {"ok": False}, False),
+        (True, "true", {"ok": True}, False),
+        (True, True, {"ok": False}, False),
+    ],
+)
+def test_batch_communication_requires_literal_success_for_each_nested_action(
+    type_ok, send_ok, send_data, expected,
+):
+    runner = _make_runner('Open QQ and send "BATCH_MESSAGE" to my phone')
+    runner._tool_history = [(
+        "run_action_batch",
+        {"actions": [
+            {"action": "type_text", "text": "BATCH_MESSAGE"},
+            {"action": "hotkey", "keys": ["ENTER"]},
+        ]},
+        json.dumps({
+            "ok": True,
+            "results": [
+                {"index": 1, "action": "type_text", "ok": type_ok},
+                {
+                    "index": 2,
+                    "action": "hotkey",
+                    "ok": send_ok,
+                    "data": send_data,
+                },
+            ],
+        }),
+    )]
+
+    assert runner._communication_native_mutation_ready() is expected
+
+
+def test_execute_subgoal_counts_only_successful_executed_send_child():
+    runner = _make_runner('Open QQ and send "SUBGOAL_MESSAGE" to my phone')
+    runner._tool_history = [(
+        "execute_subgoal",
+        {
+            "input": {"text": "SUBGOAL_MESSAGE"},
+            "click": {"label": "Send"},
+        },
+        json.dumps({
+            "ok": True,
+            "actions_executed": [
+                {"action": "type_into_element", "text": "SUBGOAL_MESSAGE"},
+                {"action": "click_element", "label": "Send"},
+            ],
+            "results": [
+                {"index": 1, "action": "type_into_element", "ok": True},
+                {"index": 2, "action": "click_element", "ok": True},
+            ],
+        }),
+    )]
+
+    assert runner._communication_native_mutation_ready() is True
+
+
 def test_bounded_chat_requires_a_reply_turn_before_done():
     runner = _make_runner("用QQ和我的手机聊天")
     runner._tool_history = [
         ("type_text", {"text": "你好，这是一条测试消息"}, "{\"ok\": true}"),
+        ("hotkey", {"keys": ["ENTER"]}, "{\"ok\": true}"),
         ("read_text", {}, "我的手机\n17:20\n你好，这是一条测试消息\n好的"),
     ]
 
@@ -168,13 +334,16 @@ def test_bounded_chat_accepts_two_visible_outbound_turns():
     )
     runner._tool_history = [
         ("type_text", {"text": "你好，这是一条测试消息"}, "{\"ok\": true}"),
+        ("hotkey", {"keys": ["ENTER"]}, "{\"ok\": true}"),
         ("read_text", {}, chat),
         ("type_text", {"text": "收到，那我们稍后再聊"}, "{\"ok\": true}"),
+        ("hotkey", {"keys": ["ENTER"]}, "{\"ok\": true}"),
         ("read_text", {}, chat),
     ]
 
     verdict = runner._deterministic_communication_verdict()
 
+    assert runner._communication_native_mutation_ready() is True
     assert verdict == (True, "普通聊天已完成一轮往返，且两条实际发送内容均在聊天记录中可见。")
 
 
@@ -213,6 +382,59 @@ def test_comms_done_gate_with_payload_rejects_when_not_on_screen():
 
     assert result is False
     assert runner._done_rejects == 1
+
+
+def test_native_send_uses_fresh_frame_without_forcing_read_text(monkeypatch):
+    runner = _make_runner('Open QQ and send "HELLO_NATIVE_42" to my phone.')
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._tool_history = [
+        ("type_text", {"text": "HELLO_NATIVE_42"}, '{"ok": true}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+    ]
+
+    def fresh_screen():
+        runner._fresh_done_image_b64 = "fresh-chat-frame"
+        return "Fresh native-vision frame attached"
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+    client = MagicMock()
+    client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content=(
+                '{"done": true, "reason": "message is visibly in the target transcript"}'
+            ))
+        )]
+    )
+
+    assert runner._verify_done(client) is True
+    request = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert isinstance(request, list)
+    prompt = next(part["text"] for part in request if part.get("type") == "text")
+    assert "AUTHORITATIVE COMMUNICATION STATE CHECK" in prompt
+    assert "sent message/transcript" in prompt
+    assert any(part.get("type") == "image_url" for part in request)
+
+
+def test_native_send_rejects_failed_type_even_when_enter_succeeded(monkeypatch):
+    runner = _make_runner('Open QQ and send "HELLO_NATIVE_42" to my phone.')
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._tool_history = [
+        ("type_text", {"text": "HELLO_NATIVE_42"}, '{"ok": false, "error": "not focused"}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+    ]
+
+    def fresh_screen():
+        runner._fresh_done_image_b64 = "fresh-chat-frame"
+        return "Fresh native-vision frame attached"
+
+    monkeypatch.setattr(runner, "_fresh_done_screen", fresh_screen)
+    client = MagicMock()
+
+    assert runner._verify_done(client) is False
+    client.chat.completions.create.assert_not_called()
+    assert "lacks causal evidence" in runner._last_done_reject_reason
 
 
 # ---- prompt hint injection: must fire even without payload -------------

@@ -1,6 +1,6 @@
 # GUI Agent + ARP 架构
 
-项目对用户呈现为一个原生 Agent Runtime Platform。主模型负责目标、异常和策略；ARP 图负责编排；Fast GUI Controller 负责动作内环；World Model、分层感知、trace 和 Run Projection 共同维护可验证状态。
+项目对用户呈现为一个原生 Agent Runtime Platform。主模型负责目标、异常和策略；ARP 图负责编排；Fast GUI Controller 负责动作内环；真实帧闭环、按需结构化感知、World Model、trace 和 Run Projection 共同维护可验证状态。
 
 ## 总览
 
@@ -13,9 +13,11 @@ flowchart LR
   ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
   ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
   ARP --> Skills["Automation IR Skill Replay\n0-token fast path"]
+  Runner <--> Frame["Authoritative target-window frame\ninitial / post-action / observe"]
   Runner --> Tools["ToolSession + World Model"]
-  Tools --> Perception["L0 delta -> L1 OCR/CV -> UIA -> VLM fallback"]
-  Controller --> Watcher["5-15 FPS watcher\nchange-triggered ROI"]
+  Tools --> Perception["On-demand structured grounding\nUIA / Win32 / OCR / CV / VLM"]
+  Controller --> Frame
+  Controller --> Watcher["default 3 FPS watcher\nchange-triggered ROI"]
   Watcher --> Prefetch["Incremental ROI OCR + Win32\ncoalesced in background"]
   Tools --> Trace["Trace + exact transient evidence"]
   Controller --> Trace
@@ -76,7 +78,9 @@ flowchart TD
   Router --> Runner["AgentRunner"]
   Runner --> Profile["RuntimeProfile"]
   Runner --> Schema["tool_schemas(profile, allow flags)"]
+  Runner --> Frame["Initial / post-action real frame"]
   Runner --> LLM["OpenAI-compatible LLM"]
+  Frame --> LLM
   LLM --> Calls["tool calls"]
   Calls --> Dispatch["ToolSession.dispatch"]
   Dispatch --> Mixins["window/perception/interaction/system/plan/file/memory tools"]
@@ -84,9 +88,11 @@ flowchart TD
   Dispatch --> Coding["CodingSession when RuntimeProfile.coding=true"]
   Mixins --> Trace["BUS + trace + screenshots"]
   Fast --> Trace
+  Fast --> Frame
   Coding --> Trace
   Trace --> Projection["Run Projection"]
   Trace --> Done["done_verifier.py"]
+  Done --> Judge["Fresh goal-conditioned visual judge"]
 ```
 
 关键文件：
@@ -152,6 +158,10 @@ queued
 
 当前已落地：
 
+- 原生视觉闭环的主路径是 `目标窗口预绑定 → 初始真实帧 → 模型决策 → 一笔视觉事务 → 动作后真实帧 → 下一轮`。一笔事务可以是一个低层 GUI mutation，也可以是一次由 Controller 在本地管理的 `run_action_batch` / `execute_subgoal`；同一模型回复里的后续调用会被 `visual_turn_barrier` 延后，避免在看不到第一步结果时继续跑开环宏。
+- 低层视觉动作只能使用匹配当前 hwnd、screen epoch 和窗口区域的新鲜帧。视觉位置以整帧 0..1000 的 `frame_*` 字段提交，由运行时映射到截图对应的物理区域；native schema 不暴露物理 `x/y`。动作前会重新截图：若能从 frame 坐标或当前结构化目标可靠得到动作 ROI，则在目标四周外扩 `controller.visual_preflight_target_margin`（默认 60/1000），按 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）判断；无法可靠定位目标时才按整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）判断。超过对应阈值会取消旧动作并把新帧交回模型。缺帧时返回 `visual_grounding_required`；重复无依据操作会安全暂停。
+- 原生视觉模型处理普通、无 query `observe` 时，目标窗口 JPEG 是权威观测，`native_vision_direct` 跳过 UIA/OCR/VLM 的同帧拆解，且不会暴露重复的二次 VLM 工具。query、`full`、`changed_only`、结构化定位、非视觉模型和 fallback 仍走融合感知；结构化元素与规则不能覆盖相反的真实画面。
+- `observe` 严格只读。它可以返回一个已落地的 Controller 提案，但不能从感知路径直接点击、输入或发送；任何桌面 mutation 都必须是下一笔显式事务。
 - LLM 可下达 `execute_subgoal` 或 ARP `agent_goal`；本地 controller 完成输入、点击、等待和验证 routine。
 - `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
 - 满足 `require_transient` 的 press 证据会覆盖底层“未提供 expect”的普通未验证状态并提升为节点级 evidence；捕获成功但证据没有上卷不允许到达 `end`。
@@ -162,7 +172,7 @@ queued
 - verify engine 只并行文件/进程等确定性只读检查与 UIA/OCR；`shell_true` 和所有桌面 mutation 不并发，最终证据仍是 AND 语义。
 - `ElementCache` 使用语义、角色、相对位置和当前快照复验；长日志、隐藏标签文本、地址栏不能冒充按钮。
 - `click_element` 支持 `visual_anchor`、fallback text、expected region、物理点击和点击前局部视觉伺服修正。
-- 分层感知已覆盖 UIA、Win32、OCR、传统 CV 和强 VLM fallback；UIA 丰富时跳过昂贵维度，查询不可靠时定向 OCR。
+- 按需结构化感知覆盖 UIA、Win32、OCR、传统 CV 和独立 VLM fallback；UIA 丰富时跳过昂贵维度，查询不可靠时定向 OCR。它是原生真实帧的补充，不是纯视觉主路径的前置关卡。
 - Perception reducer 只给 LLM compact state，完整元素写入 trace。
 - `scope_guard` 在 GUI mutation 前检查前台/目标窗口。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
@@ -173,6 +183,8 @@ queued
 - `fast/perception_daemon.py` 按 hwnd 复用 watcher + ElementCache，并维护变化 ROI 的短历史；它过滤光标噪声/大面积视频变化、合并同 ROI 普通更新、保留显式瞬态动作证据。daemon 内环不调用 UIA/VLM，完整融合仍是请求/fallback 路径。
 - `recorder/trace.py` 把截图编码/写盘放到有界异步队列，并以 `action_id` 配对 before/after。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
+
+`screen_delta.changed=true`、颜色存在或 `auto_visual_verify.summary_kind=pixel_effect_only` 只说明像素效果发生，不是业务成功或完成证据。原生视觉 GUI 的 `done` 会重新捕获目标窗口，并用用户目标做整图核验；若精确文本只缺少结构化证据，则交给这张新鲜画面的独立 judge 逐字核验，不会为此强制 UIA/OCR observe，也不会直接放行。目标对象、页面、文本或结果看不清时判 false。文件、进程等不可见任务仍以确定性证据为准。
 
 成熟度判断：
 
@@ -189,6 +201,10 @@ queued
 - Raw Device adapter 尚未覆盖少数复杂工具；后台并发只开放给已证明不会移动真实鼠标/键盘的动作，不能把任意带 hwnd 的动作误当成可并发。
 - 跨软件高成功率 skill 参数化、版本迁移和失效检测。
 - 历史分位数 dashboard（当前为每 run avg/max 和频率指标）。
+
+## 评测口径
+
+Eval 汇总按闭环结果 fail-closed：`verified_success` 必须同时满足未超时、`status=done`、policy 通过、性能预算通过、有外部 ground truth 且通过，并且不存在 unverified done。没有 ground-truth 检查项的报告标记为 `ungrounded`，不能进入成功率；报告同时记录 Git、模型、视觉配置 hash 与 display/DPI provenance，便于比较真实回归。
 
 ## Replay / Skill
 

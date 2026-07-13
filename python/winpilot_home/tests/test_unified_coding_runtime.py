@@ -10,7 +10,10 @@ from winpilot.agent.coding_tools import CodingSession
 from winpilot.agent.tool_schemas import tool_schemas
 
 
-def test_tool_schemas_add_coding_runtime_tools_only_when_enabled():
+def test_tool_schemas_add_coding_runtime_tools_only_when_enabled(monkeypatch):
+    # The developer's ignored config may disable shell globally.  This test is
+    # about Coding Runtime composition, not that machine-local policy.
+    monkeypatch.setattr("winpilot.agent.tool_schemas.shell.shell_enabled", lambda: True)
     base = {t["function"]["name"] for t in tool_schemas(coding_runtime=False)}
     coding = {t["function"]["name"] for t in tool_schemas(coding_runtime=True)}
 

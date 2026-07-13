@@ -101,6 +101,43 @@ def test_scope_guard_blocks_mutating_own_control_plane(monkeypatch):
     assert payload["scope_guard"]["self_control_plane"] is True
 
 
+def test_scope_guard_does_not_mistake_winpilot_named_browser_target_for_control_plane(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    session.task = (
+        "Open http://127.0.0.1/gui_agent_target.html and click the WinPilot target"
+    )
+    session.fg = session.hwnd
+    session._action_target_context = lambda: {
+        "target_hwnd": 100,
+        "foreground_hwnd": 100,
+        "target_title": "WinPilot GUI Agent Target - Google Chrome",
+        "foreground_title": "WinPilot GUI Agent Target - Google Chrome",
+        "foreground_matches_target": True,
+    }
+
+    assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
+
+
+def test_winpilot_payload_name_does_not_disable_control_plane_guard(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    session.task = "save a note as WinPilotE2E_note.txt"
+    session.fg = session.hwnd
+    session._action_target_context = lambda: {
+        "target_hwnd": 100,
+        "foreground_hwnd": 100,
+        "target_title": "WinPilot",
+        "foreground_title": "WinPilot",
+        "foreground_matches_target": True,
+    }
+
+    result = scope_guard.ensure_scope(session, "type_text", {"text": "unsafe"})
+
+    assert result is not None
+    assert json.loads(result.text)["scope_guard"]["self_control_plane"] is True
+
+
 def test_scope_guard_allows_explicit_control_plane_test(monkeypatch):
     session = _Session()
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))

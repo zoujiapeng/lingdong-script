@@ -33,6 +33,10 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
         {
             "run_id": "r1",
             "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
             "duration_s": 2,
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost_cny": 0.1},
             "slow_tools": [{"tool": "observe", "elapsed_ms": 50}],
@@ -50,6 +54,10 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
         {
             "run_id": "r2",
             "status": "fail",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
             "duration_s": 3,
             "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost_cny": 0.2},
             "slow_tools": [{"tool": "click", "elapsed_ms": 80}],
@@ -61,6 +69,10 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
 
     assert out["total"] == 2
     assert out["passed_or_done"] == 1
+    assert out["verified_successes"] == 1
+    assert out["verified_success_rate"] == 0.5
+    assert out["grounded_total"] == 2
+    assert out["ungrounded_count"] == 0
     assert out["total_duration_s"] == 5
     assert out["total_cost_cny"] == 0.3
     assert out["total_prompt_tokens"] == 30
@@ -141,6 +153,42 @@ def test_summarize_events_extracts_fast_gui_metrics():
     assert out["low_latency"]["action_execution_latency"]["avg_ms"] == 30
     assert out["low_latency"]["post_action_verify_latency"]["avg_ms"] == 9
     assert out["low_latency"]["screen_capture_latency"]["avg_ms"] == 4
+
+
+def test_summarize_events_includes_native_visual_frame_latency():
+    from winpilot.eval import summary
+
+    events = [
+        {"type": "agent_start", "run_id": "vision", "task": "demo", "ts": 1.0},
+        {
+            "type": "visual_feedback",
+            "run_id": "vision",
+            "frame_id": 1,
+            "capture_latency_ms": 6,
+            "ts": 1.1,
+        },
+        {
+            "type": "visual_feedback",
+            "run_id": "vision",
+            "frame_id": 2,
+            "capture_latency_ms": 10,
+            "ts": 1.2,
+        },
+        {
+            "type": "visual_feedback",
+            "run_id": "vision",
+            "frame_id": 3,
+            "capture_latency_ms": "invalid",
+            "ts": 1.3,
+        },
+        {"type": "agent_done", "run_id": "vision", "status": "done", "ts": 1.4},
+    ]
+
+    metrics = summary.summarize_events(events)["low_latency"]
+
+    assert metrics["native_visual_feedback"]["frames"] == 3
+    assert metrics["native_visual_feedback"]["capture_latency"]["avg_ms"] == 8
+    assert metrics["screen_capture_latency"]["avg_ms"] == 8
 
 
 def test_summarize_events_extracts_execute_subgoal_metrics():
@@ -395,13 +443,17 @@ def test_aggregate_reports_treats_policy_failure_as_not_passed():
             "run_id": "r1",
             "status": "done",
             "ground_truth_passed": True,
+            "ground_truth_status": "grounded",
             "policy_passed": False,
+            "performance_budget": {"passed": True},
         },
         {
             "run_id": "r2",
             "status": "done",
             "ground_truth_passed": True,
+            "ground_truth_status": "grounded",
             "policy_passed": True,
+            "performance_budget": {"passed": True},
         },
     ]
 
@@ -415,6 +467,10 @@ def test_aggregate_reports_treats_unverified_done_as_not_passed():
         {
             "run_id": "r1",
             "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
             "done_checks": [
                 {
                     "passed": True,
@@ -426,6 +482,10 @@ def test_aggregate_reports_treats_unverified_done_as_not_passed():
         {
             "run_id": "r2",
             "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
             "done_checks": [{"passed": True, "reason": "fresh visible evidence"}],
         },
     ]
@@ -434,3 +494,385 @@ def test_aggregate_reports_treats_unverified_done_as_not_passed():
 
     assert out["passed_or_done"] == 1
     assert out["unverified_done_count"] == 1
+
+
+def test_aggregate_reports_requires_passing_performance_budget():
+    reports = [
+        {
+            "run_id": "fast",
+            "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
+        },
+        {
+            "run_id": "slow",
+            "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": False},
+        },
+        {
+            "run_id": "missing-budget",
+            "status": "done",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+        },
+    ]
+
+    out = summary.aggregate_reports(reports)
+
+    assert out["verified_successes"] == 1
+    assert out["performance_budget_failed_count"] == 2
+
+
+def test_aggregate_reports_never_counts_ungrounded_or_stopped_runs():
+    reports = [
+        {
+            "run_id": "self-reported",
+            "status": "done",
+            "ground_truth_status": "ungrounded",
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
+        },
+        {
+            "run_id": "legacy-missing-ground-truth",
+            "status": "done",
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
+        },
+        {
+            "run_id": "stopped-after-check",
+            "status": "stopped",
+            "ground_truth_status": "grounded",
+            "ground_truth_passed": True,
+            "policy_passed": True,
+            "performance_budget": {"passed": True},
+        },
+    ]
+
+    out = summary.aggregate_reports(reports)
+
+    assert out["verified_successes"] == 0
+    assert out["grounded_total"] == 1
+    assert out["ungrounded_count"] == 2
+
+
+def test_gui_eval_provenance_is_reproducible_and_excludes_secrets(monkeypatch):
+    import json
+
+    from scripts import gui_eval_run
+
+    config = {
+        "api": {
+            "provider": "example-provider",
+            "model": "vision-model",
+            "temperature": 0.2,
+            "max_tokens": 2048,
+            "thinking": False,
+            "api_key": "top-secret-api-key",
+            "base_url": "https://secret-endpoint.invalid",
+        },
+        "vlm": {
+            "enabled": True,
+            "model": "vlm-model",
+            "thinking": True,
+            "api_key": "top-secret-vlm-key",
+            "base_url": "https://secret-vlm.invalid",
+        },
+        "perception": {
+            "uia": {"enabled": False, "priority": 5, "secret": "do-not-copy"},
+            "vlm": {"enabled": True, "priority": 1},
+        },
+        "fusion": {"native_vision_direct": True, "unknown_secret": "do-not-copy"},
+        "controller": {
+            "visual_closed_loop": True,
+            "visual_preflight_change_ratio": 0.0025,
+            "visual_preflight_target_change_ratio": 0.01,
+            "visual_preflight_target_margin": 60,
+        },
+        "ocr": {"use_gpu": True, "min_confidence": 0.6},
+    }
+    monkeypatch.setattr(gui_eval_run, "_request_json", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(
+        gui_eval_run,
+        "_git_metadata",
+        lambda: {"commit": "harness-commit", "branch": "harness", "dirty": False},
+    )
+    monkeypatch.setattr(gui_eval_run, "_display_metadata", lambda: {"system_dpi": 144})
+    status = {
+        "runtime": {"git": {"commit": "server-commit", "branch": "master", "dirty": False}},
+        "enabled_dimensions": ["vlm"],
+        "ocr_provider": "DirectML",
+        "vlm_configured": True,
+    }
+
+    out = gui_eval_run._collect_provenance("http://127.0.0.1:8765", "control-secret", status)
+    serialized = json.dumps(out, ensure_ascii=False)
+
+    assert out["git"] == {"commit": "server-commit", "branch": "master", "dirty": False}
+    assert out["config_captured"] is True
+    assert out["eval_harness_git"]["commit"] == "harness-commit"
+    assert out["model"]["model"] == "vision-model"
+    assert out["model"]["resolved_provider"] == "example-provider"
+    assert out["model"]["supports_vision"] is True
+    assert out["visual_config"]["perception"]["uia"] == {"enabled": False, "priority": 5}
+    assert out["visual_config"]["fusion"]["native_vision_direct"] is True
+    assert out["visual_config"]["controller"] == {
+        "visual_closed_loop": True,
+        "visual_preflight_change_ratio": 0.0025,
+        "visual_preflight_target_change_ratio": 0.01,
+        "visual_preflight_target_margin": 60,
+    }
+    assert out["display"]["system_dpi"] == 144
+    assert len(out["visual_config_sha256"]) == 64
+    for secret in (
+        "top-secret-api-key",
+        "top-secret-vlm-key",
+        "control-secret",
+        "secret-endpoint",
+        "do-not-copy",
+    ):
+        assert secret not in serialized
+
+
+def test_gui_eval_marks_missing_checks_as_ungrounded():
+    from scripts.gui_eval_run import _record_ground_truth
+
+    report = {"status": "done", "ground_truth_passed": True}
+    _record_ground_truth(report, [])
+    assert report["ground_truth_status"] == "ungrounded"
+    assert "ground_truth_passed" not in report
+
+    _record_ground_truth(report, [{"name": "external", "passed": True}])
+    assert report["ground_truth_status"] == "grounded"
+    assert report["ground_truth_passed"] is True
+
+
+def test_gui_eval_trace_check_can_require_visible_literal():
+    from scripts.gui_eval_run import _run_trace_checks
+
+    events = [
+        {
+            "type": "agent_tool",
+            "tool": "observe",
+            "result_preview": '{"visible":"CALIBRATION_OK screen=71,324"}',
+        }
+    ]
+    checks = _run_trace_checks(events, [{
+        "name": "visible_result",
+        "event_type": "agent_tool",
+        "field": "result_preview",
+        "contains": "CALIBRATION_OK",
+    }])
+
+    assert checks[0]["passed"] is True
+    assert checks[0]["expected"] == {"contains": "CALIBRATION_OK"}
+
+
+def test_gui_eval_trace_check_can_match_event_type_and_where_only():
+    from scripts.gui_eval_run import _run_trace_checks
+
+    events = [
+        {"type": "action", "action": "observe"},
+        {"type": "action", "action": "click"},
+    ]
+    checks = _run_trace_checks(events, [{
+        "name": "real_gui_action",
+        "event_type": "action",
+        "where": {"action": ["click", "type_text", "hotkey"]},
+    }])
+
+    assert checks[0]["passed"] is True
+    assert checks[0]["match_count"] == 1
+
+
+def test_gui_eval_trace_check_rejects_task_echo_and_requires_prior_action():
+    from scripts.gui_eval_run import _run_trace_checks
+
+    echo = {
+        "type": "agent_tool",
+        "tool": "revise_plan",
+        "result_preview": "Verify CALIBRATION_OK after clicking",
+    }
+    normalized = {
+        "type": "agent_tool",
+        "tool": "click",
+        "args": {
+            "coordinate_space": "current_frame_normalized_0_1000",
+            "source_frame_coordinates": {"frame_x": 42, "frame_y": 300},
+        },
+    }
+    visible = {
+        "type": "agent_tool",
+        "tool": "observe",
+        "result_preview": "CALIBRATION_OK screen=123,456 client=20,30",
+    }
+    spec = [{
+        "name": "causal_visible_result",
+        "event_type": "agent_tool",
+        "where": {"tool": ["observe", "read_text"]},
+        "contains": "CALIBRATION_OK screen=",
+        "requires_prior": {
+            "event_type": "agent_tool",
+            "where": {"tool": ["click", "run_action_batch"]},
+            "field": "args",
+            "contains": "current_frame_normalized_0_1000",
+        },
+    }]
+
+    assert _run_trace_checks([echo, visible], spec)[0]["passed"] is False
+    result = _run_trace_checks([echo, normalized, visible], spec)[0]
+    assert result["passed"] is True
+    assert result["match_count"] == 1
+    assert result["where"] == {"tool": ["observe", "read_text"]}
+
+
+def test_gui_eval_external_uia_check_reads_final_target_window(monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.gui_eval_run import _run_uia_checks
+    from winpilot.perception import uia
+
+    monkeypatch.setattr(uia, "collect", lambda hwnd: [
+        SimpleNamespace(text=f"CALIBRATION_OK screen={hwnd},456 client=20,30"),
+    ])
+    events = [
+        {"type": "visual_feedback", "hwnd": 77, "phase": "initial"},
+        {"type": "visual_feedback", "hwnd": 88, "phase": "post_action"},
+    ]
+
+    checks = _run_uia_checks(events, [{
+        "name": "external_visible_result",
+        "contains": "CALIBRATION_OK screen=",
+    }])
+
+    assert checks[0]["passed"] is True
+    assert checks[0]["source"] == "external_uia"
+    assert checks[0]["hwnd"] == 88
+
+
+def test_calculator_suites_require_real_action_and_external_visible_result():
+    from scripts.gui_eval_run import SUITES
+
+    cases = {
+        case["id"]: case
+        for suite in SUITES.values()
+        for case in suite
+        if case["id"] in {"calculator_sum", "deep_calc_chain"}
+    }
+
+    assert set(cases) == {"calculator_sum", "deep_calc_chain"}
+    for case in cases.values():
+        assert case["uia_checks"]
+        assert all(
+            check.get("event_type") == "action"
+            and check.get("where", {}).get("action") == ["click", "type_text", "hotkey"]
+            for check in case["trace_checks"]
+        )
+        assert all(check.get("field") != "result_preview" for check in case["trace_checks"])
+
+    smoke = cases["calculator_sum"]
+    assert any("CalculatorApp.exe" in command for command in smoke.get("setup", []))
+    assert any("CalculatorApp.exe" in command for command in smoke.get("cleanup", []))
+
+
+def test_gui_eval_budget_does_not_treat_missing_metrics_as_zero():
+    from scripts.gui_eval_run import _budget_result
+
+    budgets = {
+        "duration_s": 45.0,
+        "tool_count": 6,
+        "observe_avg_ms": 500.0,
+        "cost_cny": 1.5,
+    }
+    report = {
+        "duration_s": 10.0,
+        "tool_count": 2,
+        "summary": {
+            "tool_counts": {"observe": 1},
+            "tool_latency": {},
+        },
+        "status_endpoint": {
+            "usage": {
+                "prompt_tokens": 100,
+                "cost_cny": 0.0,
+                "cost_estimated": False,
+            },
+        },
+    }
+
+    result = _budget_result(report, budgets)
+
+    assert result["checks"]["observe_avg_ms"] is False
+    assert result["checks"]["cost_cny"] is None
+    assert result["availability"] == {"observe_avg_ms": False, "cost_cny": False}
+    assert result["passed"] is False
+
+
+def test_gui_eval_budget_does_not_pass_when_only_cost_is_unknown():
+    from scripts.gui_eval_run import _budget_result
+
+    budgets = {
+        "duration_s": 45.0,
+        "tool_count": 6,
+        "observe_avg_ms": 500.0,
+        "cost_cny": 1.5,
+    }
+    report = {
+        "duration_s": 10.0,
+        "tool_count": 2,
+        "summary": {
+            "tool_counts": {"observe": 1},
+            "tool_latency": {"observe": {"avg_ms": 120}},
+        },
+        "status_endpoint": {
+            "usage": {
+                "prompt_tokens": 100,
+                "cost_cny": 0.0,
+                "cost_estimated": False,
+            },
+        },
+    }
+
+    result = _budget_result(report, budgets)
+
+    assert result["checks"] == {
+        "duration_s": True,
+        "tool_count": True,
+        "observe_avg_ms": True,
+        "cost_cny": None,
+    }
+    assert result["availability"] == {"observe_avg_ms": True, "cost_cny": False}
+    assert result["passed"] is False
+
+
+def test_gui_eval_budget_can_omit_unavailable_cost_dimension():
+    from scripts.gui_eval_run import _budget_result
+
+    report = {
+        "duration_s": 10.0,
+        "tool_count": 2,
+        "summary": {"tool_counts": {"observe": 0}, "tool_latency": {}},
+        "status_endpoint": {
+            "usage": {"cost_cny": 0.0, "cost_estimated": False},
+        },
+    }
+    budgets = {
+        "duration_s": 45.0,
+        "tool_count": 6,
+        "observe_avg_ms": 500.0,
+    }
+
+    result = _budget_result(report, budgets)
+
+    assert result["checks"] == {
+        "duration_s": True,
+        "tool_count": True,
+        "observe_avg_ms": True,
+    }
+    assert result["availability"]["cost_cny"] is False
+    assert result["passed"] is True

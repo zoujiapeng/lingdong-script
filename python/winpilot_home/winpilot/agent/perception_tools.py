@@ -54,9 +54,14 @@ class PerceptionToolMixin:
         self,
         reduction: dict,
     ) -> ToolResult | None:
-        """Run an explicit one-shot send once the conversation is grounded."""
-        if getattr(self, "_auto_communication_attempted", False):
-            return None
+        """Return a grounded proposal without mutating the desktop.
+
+        ``observe`` used to send a message from inside this read path.  That
+        violated the most important controller invariant: perception must not
+        have side effects, and the visual model never got a chance to inspect
+        the proposed composer/send target.  Keep the generic proposal for the
+        next decision turn, but execution now requires an explicit tool call.
+        """
         if not _is_communication_task(self.task) or _communication_mode(self.task) != "send":
             return None
         payloads = _quoted_payloads(self.task)
@@ -68,7 +73,6 @@ class PerceptionToolMixin:
         payload = str(payloads[0] or "").strip()
         if not payload:
             return None
-        self._auto_communication_attempted = True
         routine_args = {
             "subgoal": "send the user's explicit message in the grounded conversation",
             "target_window": {"hwnd": int(getattr(self, "hwnd", 0) or 0)},
@@ -88,25 +92,25 @@ class PerceptionToolMixin:
             "verify_texts": [payload],
             "constraints": {"wait": True},
         }
-        result = self.dispatch("execute_subgoal", routine_args)
-        events = getattr(self, "_pending_controller_events", None)
-        if not isinstance(events, list):
-            events = []
-            self._pending_controller_events = events
-        events.append({
-            "tool": "execute_subgoal",
-            "args": routine_args,
-            "result_text": result.text or "",
-            "source": "observe:grounded_communication",
-        })
         BUS.publish(
-            "controller_routine",
+            "controller_proposal",
             run_id=getattr(self, "run_id", None),
-            source="observe:grounded_communication",
+            source="observe:grounded_communication_proposal",
             tool="execute_subgoal",
-            result_preview=(result.text or "")[:500],
+            args=routine_args,
         )
-        return result
+        return ToolResult(json.dumps({
+            "ok": True,
+            "executed": False,
+            "proposal_only": True,
+            "recommended_tool": "execute_subgoal",
+            "arguments": routine_args,
+            "reason": (
+                "A possible conversation/composer geometry was inferred, but observe is "
+                "read-only. Inspect the current real frame and explicitly approve or "
+                "replace this proposal in the next visual transaction."
+            ),
+        }, ensure_ascii=False))
 
     def _perception_mode(self) -> str:
         """Return the perception strategy mode for the current task + window title."""
@@ -131,9 +135,22 @@ class PerceptionToolMixin:
         from ..agent.loop import _main_model_has_vision
         if not _main_model_has_vision():
             return ""
-        image_b64 = capture_window_jpeg_b64(hwnd)
+        try:
+            region = _tools_attr("window_region", window_region)(hwnd).clamp_to_screen()
+        except Exception:
+            region = None
+        image_b64 = capture_window_jpeg_b64(hwnd, region=region)
         if not image_b64:
             logger.debug("窗口截图捕获失败或返回空图像")
+        elif region is not None:
+            # The agent loop consumes this exact metadata when it attaches the
+            # observe image.  Never pair an older JPEG with a later window
+            # rectangle: window moves/resizes would corrupt normalized clicks.
+            self._last_native_frame_capture = {
+                "image_b64": image_b64,
+                "hwnd": int(hwnd),
+                "region": region,
+            }
         return image_b64
 
     def _visual_state_summary(self, hwnd: int) -> str:
@@ -410,7 +427,7 @@ class PerceptionToolMixin:
                 wait_ms = int(CONFIG.get(
                     "fusion",
                     "incremental_perception_wait_ms",
-                    default=1200,
+                    default=250,
                 ))
                 daemon_elements, daemon_meta = PERCEPTION_DAEMON.incremental_elements(
                     int(hwnd),
@@ -595,6 +612,55 @@ class PerceptionToolMixin:
         # for UIA-off testing/custom surfaces where OCR is the dominant cost.
         return "uia" not in set(CONFIG.enabled_dimensions())
 
+    def _native_visual_direct_enabled(self, args: dict) -> bool:
+        """Return whether the main VLM can consume the real frame directly.
+
+        A native multimodal model does not need the same screenshot decomposed
+        into several lossy, sometimes contradictory UIA/OCR/VLM summaries.  A
+        text query still opts into the structured grounding path; the direct
+        path is for scene understanding and coordinate decisions.
+        """
+        if not bool(CONFIG.get("fusion", "native_vision_direct", default=True)):
+            return False
+        if str(args.get("query", "") or "").strip():
+            return False
+        if bool(args.get("full") or args.get("force_full") or args.get("changed_only")):
+            return False
+        try:
+            from .loop import _main_model_has_vision
+
+            return bool(_main_model_has_vision())
+        except Exception:
+            return False
+
+    def _fast_native_visual_snapshot(self, hwnd: int) -> fusion.Snapshot:
+        """Build only window geometry; the paired JPEG is the observation."""
+        started = time.monotonic()
+        region = _tools_attr("window_region", window_region)(hwnd)
+        title = _tools_attr("win32", win32)._window_text(hwnd)
+        snapshot = fusion.Snapshot(hwnd=hwnd, title=title, region=region)
+        for dim in CONFIG.enabled_dimensions():
+            snapshot.dim_stats[dim] = {
+                "count": 0,
+                "ms": 0,
+                "skipped": "native_vision_direct",
+            }
+        snapshot.dim_stats["native_frame"] = {
+            "count": 1,
+            "ms": int((time.monotonic() - started) * 1000),
+            "authoritative": True,
+        }
+        BUS.publish(
+            "perception",
+            run_id=getattr(self, "run_id", None),
+            hwnd=hwnd,
+            title=title,
+            dims=snapshot.dim_stats,
+            total=0,
+            mode="native_vision_direct",
+        )
+        return snapshot
+
     def _fast_canvas_snapshot(self, hwnd: int, include_icons: bool) -> fusion.Snapshot:
         region = _tools_attr("window_region", window_region)(hwnd)
         title = _tools_attr("win32", win32)._window_text(hwnd)
@@ -776,8 +842,17 @@ class PerceptionToolMixin:
         fusion_mod = _tools_attr("fusion", fusion)
         perception_mode = self._perception_mode()
         changed_regions = self._recent_changed_regions(hwnd) if bool(args.get("changed_only")) else []
+        native_visual = self._native_visual_direct_enabled(args)
         fast_canvas = self._canvas_fast_observe_enabled(args, perception_mode)
-        observe_profile = "changed_roi" if changed_regions else ("canvas_fast" if fast_canvas else "full")
+        observe_profile = (
+            "changed_roi"
+            if changed_regions
+            else "native_visual"
+            if native_visual
+            else "canvas_fast"
+            if fast_canvas
+            else "full"
+        )
         roi_signature = tuple(
             (region.left, region.top, region.width, region.height)
             for region in changed_regions
@@ -802,6 +877,8 @@ class PerceptionToolMixin:
                     include_icons=include_icons,
                     regions=changed_regions,
                 )
+            elif native_visual:
+                self.snapshot = self._fast_native_visual_snapshot(hwnd)
             elif fast_canvas:
                 self.snapshot = self._fast_canvas_snapshot(hwnd, include_icons=include_icons)
             else:
@@ -901,27 +978,22 @@ class PerceptionToolMixin:
             query=query,
             max_elements=max_elements,
         )
-        auto_routine = self._maybe_auto_execute_grounded_communication(reduction)
-        if auto_routine is not None:
+        if native_visual:
+            text = (
+                "Native visual direct observation: the attached real window frame is "
+                "authoritative. Structured UIA/OCR/VLM decomposition was intentionally "
+                "skipped to preserve scene context and latency. Use a query only when "
+                "exact text grounding is genuinely needed.\n" + text
+            )
+        action_proposal = self._maybe_auto_execute_grounded_communication(reduction)
+        if action_proposal is not None:
             try:
-                auto_data = json.loads(auto_routine.text or "{}")
+                proposal_data = json.loads(action_proposal.text or "{}")
             except (json.JSONDecodeError, TypeError):
-                auto_data = {"ok": False, "error": auto_routine.text or "invalid controller result"}
-            packet = auto_data.get("evidence_packet") if isinstance(auto_data.get("evidence_packet"), dict) else {}
-            compact_auto = {
-                "ok": bool(auto_data.get("ok")),
-                "verified": bool(auto_data.get("verified")),
-                "subgoal": auto_data.get("subgoal"),
-                "actions_executed": auto_data.get("actions_executed") or [],
-                "metrics": auto_data.get("metrics") or {},
-                "matched_texts": packet.get("matched_texts") or [],
-                "missing_texts": packet.get("missing_texts") or [],
-                "visible_text_preview": str(packet.get("visible_text_preview") or "")[:600],
-                "error": auto_data.get("error"),
-            }
+                proposal_data = {"ok": False, "error": action_proposal.text or "invalid proposal"}
             text += (
-                "\nController auto-routine (grounded explicit communication):\n"
-                + json.dumps(compact_auto, ensure_ascii=False, default=str)
+                "\nNon-mutating visual action proposal (nothing was executed):\n"
+                + json.dumps(proposal_data, ensure_ascii=False, default=str)[:1600]
             )
         if args.get("changed_only"):
             if changed_query_fallback:

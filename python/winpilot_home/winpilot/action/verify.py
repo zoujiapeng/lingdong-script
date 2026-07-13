@@ -440,6 +440,7 @@ def _find_text(
     hwnd: int | None,
     level: int,
     text_probe: _AsyncTextProbe | None = None,
+    require_changed_evidence: bool = False,
 ) -> tuple[bool, str]:
     """Search for text with escalating perception. Returns (found, method)."""
     target = _target_hwnd(hwnd)
@@ -448,6 +449,14 @@ def _find_text(
         text_probe.maybe_start()
         if text_probe.match(needle):
             return True, "predictive-ocr"
+        if require_changed_evidence:
+            # ``text_appears`` is a transition predicate after an action.  A
+            # matching UIA node that existed before the action is not evidence
+            # of the action's effect; only OCR from a watcher ROI newer than
+            # the action baseline may satisfy it.
+            if text_probe.wait_match(needle, timeout_s=0.08):
+                return True, "predictive-ocr"
+            return False, "awaiting-post-action-roi"
 
     # Level 0a: a property-indexed UIA query avoids walking the entire tree and
     # skips all image dimensions. It covers native text plus browser DOM text
@@ -564,7 +573,8 @@ def _check_screen_stable(spec: Any, hwnd: int | None,
 def _eval_once(expect: dict, hwnd: int | None, level: int,
                deadline: float | None = None,
                text_probe: _AsyncTextProbe | None = None,
-               groundtruth_probe: _AsyncGroundTruthProbe | None = None) -> VerifyOutcome:
+               groundtruth_probe: _AsyncGroundTruthProbe | None = None,
+               require_changed_text_evidence: bool = False) -> VerifyOutcome:
     """Evaluate every condition in the expect dict once (AND semantics)."""
     methods: list[str] = []
     # Deterministic checks may already be running in the background. Evaluate
@@ -579,9 +589,12 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
     for key, value in items:
         if key == "timeout_s":
             continue
+        if key == "allow_preexisting":
+            continue
         if key == "text_appears":
             ok, method = _find_text(
                 str(value), hwnd, level, text_probe=text_probe,
+                require_changed_evidence=require_changed_text_evidence,
             )
             if not ok:
                 return VerifyOutcome(False, f'未找到文字 "{value}"', method)
@@ -674,6 +687,11 @@ def check(expect: dict, hwnd: int | None = None,
         if watcher is not None and "text_appears" in expect
         else None
     )
+    require_changed_text_evidence = bool(
+        text_probe is not None
+        and watcher_change_baseline > 0
+        and not bool(expect.get("allow_preexisting"))
+    )
     has_perception_condition = any(
         key not in groundtruth.GROUNDTRUTH_KEYS and key != "timeout_s"
         for key in expect
@@ -693,6 +711,7 @@ def check(expect: dict, hwnd: int | None = None,
             "poll_count": polls,
             "final_level": level,
             "predictive_ocr": text_probe.to_dict() if text_probe is not None else {},
+            "require_changed_text_evidence": require_changed_text_evidence,
             "parallel_groundtruth": (
                 groundtruth_probe.to_dict() if groundtruth_probe is not None else {}
             ),
@@ -708,6 +727,7 @@ def check(expect: dict, hwnd: int | None = None,
             deadline=deadline,
             text_probe=text_probe,
             groundtruth_probe=groundtruth_probe,
+            require_changed_text_evidence=require_changed_text_evidence,
         )
         elapsed = time.monotonic() - started
         last.elapsed_ms = int(elapsed * 1000)
@@ -771,18 +791,26 @@ def run_with_verify(
 
     while True:
         attempts += 1
-        watcher_change_baseline = 0
+        # Use the action-start generation even when the watcher has never seen
+        # a change. Otherwise a static pre-existing UIA label can satisfy a
+        # post-action text_appears check before any causal frame arrives.
+        watcher_change_baseline = max(1, int(time.monotonic() * 1000) - 1) \
+            if watcher is not None else 0
         if watcher is not None:
             status_reader = getattr(watcher, "status", None)
             if callable(status_reader):
                 try:
                     status = status_reader() or {}
                     watcher_change_baseline = max(
+                        watcher_change_baseline,
                         int(status.get("last_change_ms") or 0),
                         int(status.get("last_action_change_ms") or 0),
                     )
                 except Exception:
-                    watcher_change_baseline = 0
+                    # Keep the action-start monotonic baseline.  A broken
+                    # watcher status read must not disable causal text checks
+                    # and let pre-existing UIA content verify the action.
+                    pass
         try:
             result = action() or {}
         except Exception as exc:

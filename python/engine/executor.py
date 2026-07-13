@@ -20,6 +20,8 @@ from engine.executor_types import (
     ExecutionError,
     ExecutorState,
     ReturnSignal,
+    result_error_message,
+    result_indicates_failure,
 )
 
 
@@ -28,6 +30,23 @@ class DSLExecutor:
     状态机执行器
     事件系统: on_node_start, on_node_done, on_error, on_state_change
     """
+
+    # Only passive/read-only operations may be retried automatically.  For a
+    # click, type, hotkey, launch, macro, drag, etc. an exception or ambiguous
+    # response may happen *after* the side effect, so replaying it is unsafe.
+    _RETRY_SAFE_ACTIONS = frozenset({
+        "check_condition",
+        "color_check",
+        "find_canvas",
+        "image_find",
+        "ocr_extract",
+        "ocr_find",
+        "region_wait",
+        "screenshot",
+        "wait",
+        "wait_screen_change",
+        "wait_screen_stable",
+    })
 
     def __init__(self, action_handler=None):
         self._state = ExecutorState.IDLE
@@ -1527,6 +1546,7 @@ class DSLExecutor:
 
         if errors:
             self._log(f"PARALLEL 完成，{len(errors)} 个分支有错误")
+            raise ExecutionError("PARALLEL 分支失败: " + "; ".join(errors))
 
     def _execute_branch(self, node: ASTNode, ctx: ExecutionContext, branch_idx: int):
         """在线程池中执行一个并行分支"""
@@ -1625,7 +1645,12 @@ class DSLExecutor:
 
         # 前缀条件直接委托给 action_handler
         if any(c.startswith(p) for p in ("text:", "img:", "color:", "var:")):
-            return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
+            return bool(self._call_action(
+                "check_condition",
+                condition=condition,
+                ctx=ctx,
+                allow_negative_result=True,
+            ))
 
         # vlm:"描述" — 内联 VLM 条件判断
         if c.startswith("vlm:"):
@@ -1641,11 +1666,22 @@ class DSLExecutor:
                 x, y, w, h = parts[1:]
                 if x != "0" or y != "0" or w != "0" or h != "0":
                     region = f"{x},{y},{w},{h}"
-            result = self._call_action("wait_screen_change", timeout=timeout, region=region, ctx=ctx)
+            result = self._call_action(
+                "wait_screen_change",
+                timeout=timeout,
+                region=region,
+                ctx=ctx,
+                allow_negative_result=True,
+            )
             return bool(result)
 
         # 委托给 action_handler
-        return bool(self._call_action("check_condition", condition=condition, ctx=ctx))
+        return bool(self._call_action(
+            "check_condition",
+            condition=condition,
+            ctx=ctx,
+            allow_negative_result=True,
+        ))
 
     def _eval_vlm_condition(self, description: str) -> bool:
         """截图 + VLM 判断画面是否符合描述，返回布尔值"""
@@ -1739,7 +1775,7 @@ class DSLExecutor:
             if not spec:
                 self._log(f"  DSL 关键字 '{keyword}' 未匹配到功能", level="warn")
                 self._emit("node_done", node_type=keyword, error="not_found", line=node.line)
-                return
+                raise ExecutionError(f"未知 DSL 关键字: {keyword}")
 
             # 解析 key=value 参数
             kwargs = {}
@@ -1753,12 +1789,18 @@ class DSLExecutor:
 
             result = registry.execute_with_typed_params(spec.name, **kwargs)
             status = "ok" if result.get("success") else "error"
-            if not result.get("success"):
-                self._log(f"  {keyword} 执行失败: {result.get('error', '')}", level="error")
+            if result_indicates_failure(result):
+                error = result_error_message(result, f"{keyword} 执行失败")
+                self._log(f"  {keyword} 执行失败: {error}", level="error")
+                self._emit("node_done", node_type=keyword, status="error", error=error, line=node.line)
+                raise ExecutionError(error)
             self._emit("node_done", node_type=keyword, status=status, result=result.get("result"), line=node.line)
+        except ExecutionError:
+            raise
         except Exception as e:
             self._log(f"  {keyword} 异常: {e}", level="error")
             self._emit("node_done", node_type=keyword, error=str(e), line=node.line)
+            raise ExecutionError(f"{keyword} 执行异常: {e}") from e
 
     # ── 动作调用 ─────────────────────────────────────────────────
     def _call_action(self, action: str, **kwargs) -> Any:
@@ -1768,20 +1810,65 @@ class DSLExecutor:
                 return True
             retry_limit = kwargs.pop("retry_limit", 3)
             ctx = kwargs.pop("ctx", None)
+            allow_negative_result = bool(kwargs.pop("allow_negative_result", False))
             retry_limit = ctx.retry_limit if ctx else retry_limit
+            try:
+                retry_limit = max(1, int(retry_limit))
+            except (TypeError, ValueError):
+                retry_limit = 1
+            retry_safe = action in self._RETRY_SAFE_ACTIONS
+            attempts = retry_limit if retry_safe else 1
             last_err = None
-            for attempt in range(1, retry_limit + 1):
+            for attempt in range(1, attempts + 1):
                 try:
                     result = self._action_handler(action, **kwargs)
+                    if result_indicates_failure(result):
+                        if allow_negative_result and self._is_clean_negative_result(result):
+                            return False
+                        raise ExecutionError(result_error_message(
+                            result, f"动作 '{action}' 返回失败"
+                        ))
                     # Action 成功后自动检测对话框
                     self._try_handle_dialog()
                     return result
                 except Exception as e:
                     last_err = e
-                    self._log(f"  [重试 {attempt}/{retry_limit}] {action} 失败: {e}")
-                    time.sleep(0.5 * attempt)
+                    if retry_safe:
+                        self._log(f"  [重试 {attempt}/{attempts}] {action} 失败: {e}")
+                    else:
+                        self._log(f"  {action} 失败（非幂等动作，已禁用自动重试）: {e}")
+                    if attempt < attempts:
+                        time.sleep(0.5 * attempt)
+            if not retry_safe:
+                raise ExecutionError(
+                    f"动作 '{action}' 失败；为避免重复副作用，未自动重试: {last_err}"
+                ) from last_err
             # 所有重试失败 → 启动自愈管道
             return self._heal_action(action, kwargs, last_err, ctx)
+
+    @staticmethod
+    def _is_clean_negative_result(result: Any) -> bool:
+        """Recognize a predicate's ordinary ``False`` without hiding errors.
+
+        Registry calls may wrap a boolean in one or more successful ``result``
+        envelopes. Only that exact shape is a legal negative condition. An
+        error field or an explicit failed ``success``/``ok`` envelope remains
+        an execution failure even when the caller allows negative results.
+        """
+        if result is False:
+            return True
+        if not isinstance(result, dict):
+            return False
+        if result.get("error") not in (None, "", False):
+            return False
+        if any(
+            key in result and result.get(key) is not True
+            for key in ("success", "ok")
+        ):
+            return False
+        if "result" not in result:
+            return False
+        return DSLExecutor._is_clean_negative_result(result.get("result"))
 
     def _heal_action(self, action: str, context: dict, error: Exception,
                      ctx: Optional[ExecutionContext]) -> Any:
@@ -1795,6 +1882,8 @@ class DSLExecutor:
                 "target": context.get("target", ""),
                 "region": context.get("region"),
                 "error": str(error),
+                "action_kwargs": dict(context),
+                "retry_safe": action in self._RETRY_SAFE_ACTIONS,
             }
             result = pipeline.heal(action, str(error), heal_context,
                                    retry_action=lambda c: self._action_handler(action, **c))
@@ -1810,5 +1899,8 @@ class DSLExecutor:
         self._state = state
         self._emit("state_change", state=state.value)
 
-    def _log(self, msg: str):
-        self._emit("log", message=msg)
+    def _log(self, msg: str, level: Optional[str] = None):
+        payload = {"message": msg}
+        if level:
+            payload["level"] = level
+        self._emit("log", **payload)

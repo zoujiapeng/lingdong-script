@@ -76,7 +76,7 @@ def test_perception_reducer_marks_open_chat_and_stops_contact_reclick_loop():
     assert "do not click the contact row again" in reduced["recommended_next_controller_actions"][0]
 
 
-def test_grounded_explicit_send_compiles_one_local_controller_routine():
+def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
     from winpilot.agent.perception_tools import PerceptionToolMixin
     from winpilot.agent.tool_result import ToolResult
 
@@ -107,12 +107,15 @@ def test_grounded_explicit_send_compiles_one_local_controller_routine():
     repeated = PerceptionToolMixin._maybe_auto_execute_grounded_communication(session, reduction)
 
     assert result is not None
-    assert repeated is None
-    assert len(calls) == 1
-    assert calls[0][0] == "execute_subgoal"
-    assert calls[0][1]["input"]["text"] == "AUTO_SEND_0712"
-    assert calls[0][1]["click"]["expected_region"] == "bottom-right"
-    assert session._pending_controller_events[0]["source"] == "observe:grounded_communication"
+    assert repeated is not None
+    assert calls == []
+    proposal = json.loads(result.text)
+    assert proposal["executed"] is False
+    assert proposal["proposal_only"] is True
+    assert proposal["recommended_tool"] == "execute_subgoal"
+    assert proposal["arguments"]["input"]["text"] == "AUTO_SEND_0712"
+    assert proposal["arguments"]["click"]["expected_region"] == "bottom-right"
+    assert session._pending_controller_events == []
 
 
 def test_grounded_chat_does_not_autogenerate_content_for_open_ended_chat():
