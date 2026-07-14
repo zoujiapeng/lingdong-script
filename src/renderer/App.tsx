@@ -27,10 +27,10 @@ export default function App() {
   const openAutomation = useCallback(async () => {
     const api = window.electronAPI;
     if (!api?.openFileDialog || !api.readFile) return;
-    const selected = await api.openFileDialog([{ name: 'Automation', extensions: ['json'] }]);
+    const selected = await api.openFileDialog([{ name: '自动化流程', extensions: ['json'] }]);
     if (selected.canceled || !selected.filePaths[0]) return;
     const loaded = await api.readFile(selected.filePaths[0]);
-    if (loaded.error || !loaded.content) throw new Error(loaded.error || 'Automation file is empty');
+    if (loaded.error || !loaded.content) throw new Error(loaded.error || '自动化文件为空');
     useStore.getState().loadScript(automationDocumentToFlowScript(JSON.parse(loaded.content)));
   }, []);
 

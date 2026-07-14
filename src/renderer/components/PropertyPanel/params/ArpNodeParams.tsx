@@ -170,7 +170,7 @@ export function ArpNodeParams({ type, params, onChange }: Props) {
       )}
 
       <div className="arp-policy-block">
-        <div className="arp-policy-title">Failure policy</div>
+        <div className="arp-policy-title">失败策略</div>
         <div className="arp-policy-grid">
           <Field label="Attempts">
             <input className="form-input" type="number" min={1} max={10} value={params.retry_max_attempts ?? 1} onChange={(event) => patch({ retry_max_attempts: Number(event.target.value) || 1 })} />
