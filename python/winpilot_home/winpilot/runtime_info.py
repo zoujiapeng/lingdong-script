@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import os
 import subprocess
 import sys
@@ -46,9 +47,36 @@ def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def _source_stamp() -> str:
+    """Fingerprint Python sources that are already loaded by this service."""
+    roots = [ROOT_DIR / "winpilot", ROOT_DIR / "serve.py"]
+    records: list[str] = []
+    for root in roots:
+        paths = root.rglob("*.py") if root.is_dir() else [root]
+        for path in paths:
+            try:
+                stat = path.stat()
+                relative = path.relative_to(ROOT_DIR)
+            except (OSError, ValueError):
+                continue
+            records.append(f"{relative.as_posix()}\0{stat.st_size}\0{stat.st_mtime_ns}")
+    payload = "\n".join(sorted(records)).encode("utf-8", errors="replace")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+_LOADED_COMMIT = _git(["rev-parse", "--short=12", "HEAD"])
+_LOADED_SOURCE_STAMP = _source_stamp()
+
+
+def runtime_source_drifted() -> bool:
+    """Return True when files changed after this Python process imported them."""
+    return _source_stamp() != _LOADED_SOURCE_STAMP
+
+
 def runtime_fingerprint() -> dict[str, Any]:
     """Return non-secret identity data for the currently running service."""
-    commit = _git(["rev-parse", "--short=12", "HEAD"])
+    current_commit = _git(["rev-parse", "--short=12", "HEAD"])
+    current_source_stamp = _source_stamp()
     branch = _git(["branch", "--show-current"])
     if not branch:
         branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -63,8 +91,18 @@ def runtime_fingerprint() -> dict[str, Any]:
         "port": os.environ.get("WINPILOT_SERVE_PORT") or "",
         "git": {
             "branch": branch,
-            "commit": commit,
+            # ``commit`` remains the process-loaded revision for compatibility.
+            # Previously it was recomputed and could falsely make a stale
+            # long-lived service look current after a checkout or update.
+            "commit": _LOADED_COMMIT,
+            "loaded_commit": _LOADED_COMMIT,
+            "current_commit": current_commit,
             "dirty": _git_dirty(),
+        },
+        "source": {
+            "loaded_stamp": _LOADED_SOURCE_STAMP,
+            "current_stamp": current_source_stamp,
+            "drifted": current_source_stamp != _LOADED_SOURCE_STAMP,
         },
         "capabilities": {
             "runtime_profile": _has_module("winpilot.agent.runtime_profile"),

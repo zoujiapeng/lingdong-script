@@ -87,6 +87,32 @@ def test_validate_and_run_arp_graph_through_api(client):
     assert job["status"] == "done"
 
 
+def test_frontend_run_fails_closed_when_loaded_python_is_stale(client, monkeypatch):
+    from winpilot import server
+
+    monkeypatch.setattr(server, "runtime_source_drifted", lambda: True)
+    response = client.post(
+        "/api/v2/arp/runs",
+        json={"graph": _graph_payload(), "inputs": {}},
+    )
+
+    assert response.status_code == 409
+    assert "Restart the runtime" in response.json()["detail"]
+
+
+def test_common_mimo_pro_alias_is_canonicalized():
+    from winpilot.server import _canonicalize_model_aliases
+
+    patch = {
+        "api": {"model": "mimo-v2.5pro"},
+        "vlm": {"model": "MiMo-V2.5Pro"},
+    }
+    _canonicalize_model_aliases(patch)
+
+    assert patch["api"]["model"] == "mimo-v2.5-pro"
+    assert patch["vlm"]["model"] == "mimo-v2.5-pro"
+
+
 def test_chatgpt_desktop_integration_exposes_real_mcp_handshake(monkeypatch):
     pytest.importorskip("mcp")
     from fastapi.testclient import TestClient

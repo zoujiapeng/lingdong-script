@@ -25,6 +25,7 @@ from ..model_adapter import (
     model_profile_from_config,
 )
 from ..perception import fusion, intent, vlm
+from ..runtime_info import runtime_fingerprint
 from ..fast.action_contract import build_action_envelope
 from ..utils.image_capture import (
     capture_window_jpeg_b64,
@@ -774,6 +775,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._had_verified_action = False           # any action passed external verify
         self._last_verify_ok: bool | None = None    # most recent verify outcome
         self._done_rejects = 0                       # done-gate bounce count
+        self._done_reject_terminal = False           # repeated claim with no new evidence
         self._done_unverified = False                # forced-accept after max rejects
         self._done_verified = False                  # done-gate judge genuinely passed
         self._fresh_done_image_b64 = ""              # authoritative frame for final judge
@@ -836,6 +838,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._visual_work_surface_frame_id = 0
         self._last_visual_feedback_b64 = ""
         self._last_visual_feedback_action = ""
+        # Bounded, immutable post-action frames retained across app switches.
+        # A multi-window task cannot be verified from the final foreground
+        # window alone (for example, type in Notepad and then draw in Paint).
+        self._historical_visual_checkpoints: list[dict[str, Any]] = []
         self._visual_grounding_block_count = 0
         self._native_visual_static_messages: list[dict[str, Any]] = []
         self._native_visual_user_directives: list[str] = []
@@ -6419,6 +6425,72 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         return True
 
+    def _checkpoint_visual_frame_before_window_switch(self, tool_name: str) -> None:
+        """Retain a real post-action frame before another app takes focus.
+
+        The final foreground frame is insufficient evidence for a task that
+        mutates several windows.  Keep only a few JPEGs, replace older frames
+        for the same hwnd, and never checkpoint an initial/observe-only frame
+        as proof of a mutation.
+        """
+        if str(tool_name or "") not in {
+            "open_app", "launch", "focus_window", "focus_app",
+        }:
+            return
+        b64 = str(getattr(self, "_last_visual_feedback_b64", "") or "")
+        action = str(getattr(self, "_last_visual_feedback_action", "") or "")
+        hwnd = int(getattr(self, "_visual_frame_hwnd", 0) or 0)
+        if not b64 or not hwnd or action in {"", "initial", "observe", "preflight"}:
+            return
+        if int(getattr(self, "_visual_frame_epoch", -1)) != int(
+            getattr(self.session, "_screen_epoch", 0) or 0
+        ):
+            return
+        snapshot = getattr(self.session, "snapshot", None)
+        title = str(getattr(snapshot, "title", "") or "")
+        record = {
+            "image_b64": b64,
+            "hwnd": hwnd,
+            "title": title,
+            "action": action,
+            "frame_id": int(getattr(self, "_visual_frame_id", 0) or 0),
+            "screen_epoch": int(getattr(self.session, "_screen_epoch", 0) or 0),
+        }
+        checkpoints = [
+            item for item in getattr(self, "_historical_visual_checkpoints", [])
+            if int(item.get("hwnd", 0) or 0) != hwnd
+        ]
+        checkpoints.append(record)
+        self._historical_visual_checkpoints = checkpoints[-3:]
+        BUS.publish(
+            "visual_checkpoint",
+            run_id=self.run_id,
+            hwnd=hwnd,
+            title=title,
+            action=action,
+            frame_id=record["frame_id"],
+        )
+
+    def _safe_stop_after_repeated_done_rejection(self) -> bool:
+        """Fail honestly when another identical completion claim cannot help."""
+        if not bool(getattr(self, "_done_reject_terminal", False)):
+            return False
+        reason = str(getattr(self, "_last_done_reject_reason", "") or "").strip()
+        self.status = "fail"
+        self.result_text = (
+            "任务未能通过最终视觉验收，且在没有新证据的情况下重复声称完成。"
+            + (f" 原因：{reason}" if reason else "")
+        )
+        self.run_state.terminal_rejected("done", reason)
+        BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
+        BUS.publish(
+            "agent_safe_stop",
+            run_id=self.run_id,
+            reason=reason,
+            done_rejects=int(getattr(self, "_done_rejects", 0) or 0),
+        )
+        return True
+
     def _handle_tool_calls(self, tool_calls) -> str | None:
         """Dispatch each tool call; returns terminal status if any."""
         post_tool_hints: list[str] = []
@@ -6458,6 +6530,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 BUS.publish("agent_tool", run_id=self.run_id, action_id=tc.id,
                             tool=tc.function.name, error=str(exc))
                 continue
+
+            self._checkpoint_visual_frame_before_window_switch(tc.function.name)
 
             tool_epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             tool_dispatched = False
@@ -7114,7 +7188,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         limit = 2400
                     evidence_text = (result.text or "")[:limit]
                 self._recent_results.append((tc.function.name, evidence_text))
-                self._recent_results = self._recent_results[-6:]
+                # Multi-window tasks routinely need more than six actions
+                # between an earlier visible result and final completion.
+                self._recent_results = self._recent_results[-20:]
             result_meta: dict[str, Any] = {}
             try:
                 parsed_result = json.loads(result.text or "{}")
@@ -7483,21 +7559,31 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # GUI-only runs may keep a tightly checked read-only shell verifier, but
         # file/search tools invite non-GUI shortcuts and hide fake success.
         allow_file_tools = (not is_gui_only_task) and allow_shell_tools
+        schema_profile = _schema_profile_for_task(
+            self.task,
+            is_coding=self._is_coding,
+            native_vision=_main_model_has_vision(),
+        )
         tools = tool_schemas(
             planning=plan_on,
             coding_runtime=self._is_coding,
             allow_shell=allow_shell_tools,
             allow_files=allow_file_tools,
-            profile=_schema_profile_for_task(
-                self.task,
-                is_coding=self._is_coding,
-                native_vision=_main_model_has_vision(),
-            ),
+            profile=schema_profile,
             native_vision=_main_model_has_vision(),
         )
+        model_tool_names = [
+            str(item.get("function", {}).get("name") or "")
+            for item in tools
+            if isinstance(item, dict)
+        ]
         BUS.publish("agent_start", run_id=self.run_id, task=self.task,
                     max_steps=max_steps, has_experience=bool(hints),
-                    agent="unified", runtime=self.runtime_profile.to_dict())
+                    agent="unified", runtime=self.runtime_profile.to_dict(),
+                    schema_profile=schema_profile,
+                    model_tool_count=len(model_tool_names),
+                    model_tool_names=model_tool_names,
+                    service_runtime=runtime_fingerprint())
         try:
             raw_client = _client()
             client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
@@ -7574,6 +7660,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         continue
                     if self._recent_results:
                         if not self._verify_done(client, steps_left=max_steps - step):
+                            if self._safe_stop_after_repeated_done_rejection():
+                                break
                             continue
                         self.status = "done"
                     else:
@@ -7608,6 +7696,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     if action_names & _ACTION_TOOLS:
                         self._consecutive_unverified += 1
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
+                    if self._safe_stop_after_repeated_done_rejection():
+                        break
                     self.run_state.terminal_rejected("done", self._last_done_reject_reason)
                     BUS.publish("run_state", run_id=self.run_id, **self.run_state.to_dict())
                     continue  # done-gate rejected the claim → keep working

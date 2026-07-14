@@ -182,6 +182,9 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const [actionError, setActionError] = useState('');
   const run = plane.currentRun;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
+  const runtimeInfo = (plane.overview?.status as any)?.runtime;
+  const runtimeSourceDrift = Boolean(runtimeInfo?.source?.drifted);
+  const modelProfile = (plane.overview?.status as any)?.model_profile;
   const metrics = run?.metrics;
   const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
     || [...(run?.timeline || [])].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type));
@@ -194,6 +197,10 @@ function AgentCockpit({ plane }: { plane: Plane }) {
 
   const execute = async () => {
     if (!goal.trim() || submitting) return;
+    if (runtimeSourceDrift) {
+      setActionError('Python runtime sources changed after startup. Restart WinPilot before running this goal.');
+      return;
+    }
     setSubmitting(true);
     setActionError('');
     try {
@@ -231,12 +238,14 @@ function AgentCockpit({ plane }: { plane: Plane }) {
           {active ? (
             <button className="arp-button arp-button-danger" onClick={stop}><CircleStop size={15} />Stop</button>
           ) : (
-            <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting}>
+            <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting || runtimeSourceDrift}>
               {submitting ? <Loader2 size={15} className="arp-spin" /> : <Play size={15} fill="currentColor" />}Run goal
             </button>
           )}
         </div>
         {actionError && <div className="arp-inline-error"><XCircle size={14} />{actionError}</div>}
+        {runtimeSourceDrift && !actionError && <div className="arp-inline-error"><XCircle size={14} />Loaded Python code is stale. Restart WinPilot before testing; hot-reloaded UI code does not restart the controller.</div>}
+        {modelProfile?.model && modelProfile?.supports_vision === false && <div className="arp-inline-error"><Eye size={14} />{String(modelProfile.model)} does not accept image input. Pixel-heavy GUI tasks will use the slower perception/controller fallback; choose a vision-capable main model for real-time control.</div>}
       </section>
 
       {run?.phase === 'awaiting_human' && (
@@ -740,6 +749,10 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>API contract</dt><dd>{plane.overview?.contracts?.arp || '-'}</dd></div>
             <div><dt>Capabilities</dt><dd>{plane.capabilities.length}</dd></div>
             <div><dt>Current run</dt><dd>{plane.currentRun?.run_id || 'idle'}</dd></div>
+            <div><dt>Loaded commit</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.loaded_commit || '-')}</dd></div>
+            <div><dt>Working commit</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.current_commit || '-')}</dd></div>
+            <div><dt>Source state</dt><dd>{(plane.overview?.status as any)?.runtime?.source?.drifted ? 'stale — restart required' : 'loaded/current match'}</dd></div>
+            <div><dt>Main model vision</dt><dd>{String((plane.overview?.status as any)?.model_profile?.supports_vision ?? '-')}</dd></div>
             <div><dt>World model</dt><dd>{String((plane.overview?.status as any)?.world_model ?? config?.agent?.world_model ?? '-')}</dd></div>
             <div><dt>VLM configured</dt><dd>{String((plane.overview?.status as any)?.vlm_configured ?? '-')}</dd></div>
           </dl>

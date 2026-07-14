@@ -45,11 +45,12 @@ from .agent.router import build_runner
 from .agent.session import SESSION
 from .config import CONFIG, ROOT_DIR, SCRIPTS_DIR, TRACES_DIR
 from .eval import summary as eval_summary
+from .model_adapter import model_profile_from_config
 from .perception import ocr, search, vlm
 from .recorder import human as human_mod
 from .recorder import apprentice as apprentice_mod
 from .recorder import trace as trace_mod
-from .runtime_info import runtime_fingerprint
+from .runtime_info import runtime_fingerprint, runtime_source_drifted
 from .runtime_jobs import RUNTIME_JOBS, RuntimeJob
 from .fast.perception_daemon import PERCEPTION_DAEMON
 from .utils.log import BUS, logger
@@ -585,6 +586,7 @@ def status() -> dict[str, Any]:
     runner = STATE.runner
     busy = STATE.busy_breakdown()
     arp_running = ARP_RUNS.busy()
+    model_profile = model_profile_from_config(CONFIG.get("api", default={}))
     return {
         "running": any(busy.values()) or arp_running,
         "busy": busy,
@@ -602,6 +604,11 @@ def status() -> dict[str, Any]:
         "is_admin": _is_admin(),
         "shell_enabled": bool(CONFIG.get("agent", "shell_enabled", default=True)),
         "runtime": runtime_fingerprint(),
+        "model_profile": {
+            "provider": model_profile.provider,
+            "model": model_profile.model,
+            "supports_vision": model_profile.supports_vision,
+        },
         "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
         "runtime_jobs": RUNTIME_JOBS.list(20),
         "perception_daemon": PERCEPTION_DAEMON.status(),
@@ -767,6 +774,12 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
 
 @app.post("/api/v2/arp/runs")
 def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
+    if runtime_source_drifted():
+        raise HTTPException(
+            409,
+            "WinPilot Python sources changed after this service started. "
+            "Restart the runtime before starting another frontend task.",
+        )
     try:
         execution = _start_arp_execution(req.graph, req.inputs)
     except ValueError as exc:
@@ -1069,6 +1082,17 @@ def get_config() -> dict[str, Any]:
     return snapshot
 
 
+def _canonicalize_model_aliases(patch: dict[str, Any]) -> None:
+    """Normalize common UI spellings before persisting provider model IDs."""
+    for section in ("api", "vlm"):
+        sec = patch.get(section)
+        if not isinstance(sec, dict):
+            continue
+        model = str(sec.get("model") or "").strip()
+        if model.casefold() == "mimo-v2.5pro":
+            sec["model"] = "mimo-v2.5-pro"
+
+
 @app.patch("/api/config")
 def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
     # Don't let the masked placeholder overwrite the real key.
@@ -1076,6 +1100,7 @@ def patch_config(patch: dict[str, Any]) -> dict[str, Any]:
         sec = patch.get(section)
         if isinstance(sec, dict) and str(sec.get("api_key", "")).startswith("***"):
             sec.pop("api_key")
+    _canonicalize_model_aliases(patch)
     CONFIG.update(patch)
     BUS.publish("config", changed=list(patch.keys()))
     return get_config()

@@ -3790,6 +3790,10 @@ def test_repeated_done_claims_do_not_reset_reject_cap():
 
     assert runner._verify_done(client) is False
     assert "cannot be force-accepted" in runner._last_done_reject_reason
+    assert runner._done_reject_terminal is True
+    assert runner._safe_stop_after_repeated_done_rejection() is True
+    assert runner.status == "fail"
+    assert "最终视觉验收" in runner.result_text
 
 
 def test_failed_plain_text_action_does_not_reset_reject_cap():
