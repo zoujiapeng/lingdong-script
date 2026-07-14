@@ -31,7 +31,6 @@ from . import planner, scope_guard
 from .task_rules import (
     _communication_mode,
     _gui_only_blocked_hotkey,
-    _is_drawing_task,
     _is_multi_source_research_task,
 )
 
@@ -42,7 +41,11 @@ from .coding_tools import CodingSession
 from .desktop_tools import DesktopToolMixin
 from .file_tools import FileToolMixin
 from .fast_tools import FastToolMixin
-from .interaction_tools import InteractionToolMixin, normalize_key_sequence
+from .interaction_tools import (
+    InteractionToolMixin,
+    _call_with_optional_hwnd,
+    normalize_key_sequence,
+)
 from .memory_tools import MemoryToolMixin
 from .perception_tools import PerceptionToolMixin
 from .plan_tools import PlanToolMixin
@@ -128,6 +131,9 @@ class ToolSession(
         # Individual actions may opt back into UIA Invoke.
         self.physical_anchor_clicks: bool = bool(
             CONFIG.get("controller", "physical_anchor_clicks", default=True)
+            and not CONFIG.get(
+                "controller", "multi_input_cooperation", default=False,
+            )
         )
         self._fail_softened = False
         self.plan: planner.Plan | None = None
@@ -197,24 +203,20 @@ class ToolSession(
                     "needs_replan": False,
                 }))
             if self._subgoal_no_progress_counts.get(signature, 0) >= 2:
-                drawing_recovery_context = self._subgoal_recovery_context()
+                recovery_context = self._subgoal_recovery_context()
                 previous_failure_context = self._subgoal_no_progress_contexts.get(signature)
-                drawing_recovery_retry = bool(
-                    _is_drawing_task(self.task)
-                    and previous_failure_context
-                    and previous_failure_context != drawing_recovery_context
+                environment_changed = bool(
+                    previous_failure_context
+                    and previous_failure_context != recovery_context
                 )
-                if drawing_recovery_retry:
-                    # Consume exactly one retry for this corrected environment.
+                if environment_changed:
+                    # The same semantic request may be reasonable after a real
+                    # target/epoch/foreground transition. Apply this uniformly
+                    # to GUI work instead of giving one test domain a private
+                    # recovery lane.
                     # A handler/scope failure before normal result accounting must
                     # not leave the same recovery transition reusable forever.
-                    self._subgoal_no_progress_contexts[signature] = drawing_recovery_context
-                elif _is_drawing_task(self.task):
-                    return ToolResult(
-                        "任务已安全停止：同一个绘图子目标已经连续两次没有产生可验证的画布进展。"
-                        "系统不会继续每轮重发相同坐标计划，也没有把本次任务标记为成功。",
-                        terminal="reply",
-                    )
+                    self._subgoal_no_progress_contexts[signature] = recovery_context
                 else:
                     return ToolResult(self._fmt({
                         "ok": False,
@@ -661,42 +663,72 @@ class ToolSession(
                     action_args = before_context.get("_screen_delta_args") or {}
                     retry = getattr(executor, "scroll_sendinput_restored", None)
                     if callable(retry):
-                        retry_result = retry(
+                        retry_result = _call_with_optional_hwnd(
+                            retry,
                             int(action_args.get("x", 0)),
                             int(action_args.get("y", 0)),
                             int(action_args.get("amount", 0)),
+                            hwnd=self.hwnd,
                         )
-                        time.sleep(0.08)
-                        retry_started = time.monotonic()
-                        retry_frame = controller.capture_fn(region)
-                        retry_capture_ms = int((time.monotonic() - retry_started) * 1000)
-                        retry_delta = changed_regions(
-                            before_frame,
-                            retry_frame,
-                            root_region=region,
-                            pixel_thresh=getattr(watcher, "pixel_thresh", 12),
+                        retry_ok = bool(
+                            isinstance(retry_result, dict)
+                            and retry_result.get("ok") is True
+                            and retry_result.get("blocked") is not True
                         )
-                        source = "scroll_retry"
-                        delta = retry_delta
-                        selected_capture_ms = retry_capture_ms
-                        selected_frame = retry_frame
                         data["scroll_retry"] = {
                             "attempted": True,
                             "via": "sendinput_restored",
-                            "ok": bool(retry_result.get("ok", False)),
-                            "changed": bool(retry_delta.changed),
+                            "ok": retry_ok,
+                            "blocked": bool(
+                                isinstance(retry_result, dict)
+                                and retry_result.get("blocked")
+                            ),
+                            "changed": False,
                         }
-                        if retry_delta.changed:
-                            data["via"] = "sendinput_restored"
-                        else:
+                        if not retry_ok:
+                            # A failed ownership check means no physical wheel
+                            # action occurred.  Pixel noise after that refusal
+                            # must never turn the transaction back into success.
                             data["ok"] = False
                             data["verified"] = False
-                            data["no_visible_effect"] = True
-                            data["needs_observe"] = True
-                            data["error"] = (
-                                "scroll produced no visible screen change after both "
-                                "window-message and physical-input attempts"
+                            data["blocked"] = bool(
+                                isinstance(retry_result, dict)
+                                and retry_result.get("blocked")
                             )
+                            if isinstance(retry_result, dict):
+                                for key in (
+                                    "cooperative_input", "target_hwnd",
+                                    "foreground_hwnd", "error",
+                                ):
+                                    if key in retry_result:
+                                        data[key] = retry_result[key]
+                        else:
+                            time.sleep(0.08)
+                            retry_started = time.monotonic()
+                            retry_frame = controller.capture_fn(region)
+                            retry_capture_ms = int((time.monotonic() - retry_started) * 1000)
+                            retry_delta = changed_regions(
+                                before_frame,
+                                retry_frame,
+                                root_region=region,
+                                pixel_thresh=getattr(watcher, "pixel_thresh", 12),
+                            )
+                            source = "scroll_retry"
+                            delta = retry_delta
+                            selected_capture_ms = retry_capture_ms
+                            selected_frame = retry_frame
+                            data["scroll_retry"]["changed"] = bool(retry_delta.changed)
+                            if retry_delta.changed:
+                                data["via"] = "sendinput_restored"
+                            else:
+                                data["ok"] = False
+                                data["verified"] = False
+                                data["no_visible_effect"] = True
+                                data["needs_observe"] = True
+                                data["error"] = (
+                                    "scroll produced no visible screen change after both "
+                                    "window-message and physical-input attempts"
+                                )
                 if hasattr(watcher, "record_action_delta"):
                     try:
                         watcher.record_action_delta(
@@ -1029,7 +1061,30 @@ class ToolSession(
 
     def _remember_target(self, hwnd: int | None = None, hint: str = "") -> None:
         if hwnd and self._window_alive(hwnd):
+            target_changed = int(self.hwnd or 0) != int(hwnd)
             self.hwnd = int(hwnd)
+            if target_changed:
+                # Element ids and input anchors are scoped to one observed
+                # window. Carrying them across a target transition can act on
+                # a stale control from the previous app.
+                self._last_input_element = None
+                try:
+                    snapshot_hwnd = int(getattr(self.snapshot, "hwnd", 0) or 0)
+                except (TypeError, ValueError):
+                    snapshot_hwnd = 0
+                if self.snapshot is not None and snapshot_hwnd != int(hwnd):
+                    self.snapshot = None
+                cached_snapshot = (
+                    self._observe_cache.get("snapshot")
+                    if isinstance(self._observe_cache, dict)
+                    else None
+                )
+                try:
+                    cached_hwnd = int(getattr(cached_snapshot, "hwnd", 0) or 0)
+                except (TypeError, ValueError):
+                    cached_hwnd = 0
+                if self._observe_cache is not None and cached_hwnd != int(hwnd):
+                    self._observe_cache = None
         hint = (hint or "").strip()
         if hint:
             self.target_hint = hint
@@ -1155,6 +1210,21 @@ class ToolSession(
         return None
 
     def _resolve_hwnd(self, args: dict) -> int | None:
+        if CONFIG.get("controller", "multi_input_cooperation", default=False):
+            # Read-only calls must not launder the human's foreground window
+            # into an authorised mutation target.  Cooperative target binding
+            # is established only by an explicit launch/focus workflow.
+            current = self.hwnd if self._window_alive(self.hwnd) else None
+            if not current:
+                return None
+            requested_raw = args.get("hwnd")
+            if requested_raw not in (None, ""):
+                try:
+                    if int(requested_raw) != int(current):
+                        return None
+                except (TypeError, ValueError):
+                    return None
+            return int(current)
         if args.get("hwnd"):
             requested = int(args["hwnd"])
             if self._window_alive(requested):
@@ -1210,6 +1280,16 @@ class ToolSession(
     def _resolve_element(self, elem_id: int):
         if self.snapshot is None:
             return None, "尚未 observe，无元素可用"
+        live_target = self.hwnd if self._window_alive(self.hwnd) else None
+        try:
+            snapshot_hwnd = int(getattr(self.snapshot, "hwnd", 0) or 0)
+        except (TypeError, ValueError):
+            snapshot_hwnd = 0
+        if live_target and snapshot_hwnd != int(live_target):
+            return None, (
+                f"element id={elem_id} belongs to stale snapshot hwnd={snapshot_hwnd}; "
+                f"live target hwnd={int(live_target)}. Observe the live target again."
+            )
         element = self.snapshot.by_id(elem_id)
         if element is None:
             return None, f"元素 id={elem_id} 不存在于最近一次 observe（请重新 observe）"

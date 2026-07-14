@@ -50,16 +50,32 @@ class TestVisionPrompt:
         assert _VISION_TEXT_ONLY in prompt_without_vision
         assert _VISION_NATIVE not in prompt_without_vision
 
-    def test_system_prompt_allows_literal_braces_in_tool_examples(self):
+    def test_text_only_prompt_keeps_controller_recovery_contract(self):
         from winpilot.agent.prompts import system_prompt
 
         prompt = system_prompt(main_model_has_vision=False)
 
-        assert "draw={shape,color}" in prompt
         assert "verify-only execute_subgoal" in prompt
         assert "open_app/launch/focus_window" in prompt
         prompt_with_plan = system_prompt(main_model_has_vision=False, planning_enabled=True)
-        assert "If a current todo plan is already shown, follow it" in prompt_with_plan
+        assert "add/update/remove/move" in prompt_with_plan
+        assert "do not keep a stale plan" in prompt_with_plan
+
+    def test_compact_prompt_is_domain_neutral_and_fail_closed(self):
+        from winpilot.agent.prompts import system_prompt
+
+        prompt = system_prompt(
+            main_model_has_vision=True,
+            planning_enabled=True,
+            style="compact",
+        )
+
+        assert len(prompt) < 6000
+        assert "execution is not semantic" in prompt
+        assert "fresh pixels against the user's criteria" in prompt
+        assert "detailed creature" not in prompt
+        assert "For a dog" not in prompt
+        assert "15-30" not in prompt
 
     def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision
@@ -93,6 +109,7 @@ class TestVisionPrompt:
         the main model is vision-capable and an hwnd is set.  The message must
         also describe how image-local coordinates map back to physical pixels.
         """
+        from winpilot.utils.image_capture import VisualCaptureScope
         from winpilot.utils.screenshot import Region
 
         runner = _make_runner()
@@ -100,7 +117,16 @@ class TestVisionPrompt:
 
         with patch("winpilot.agent.loop._main_model_has_vision", return_value=True), \
              patch.object(runner.session, "hwnd", 12345), \
-             patch("winpilot.agent.loop.window_region", return_value=Region(120, 80, 1400, 900)), \
+             patch(
+                 "winpilot.agent.loop.select_visual_capture_scope",
+                 return_value=VisualCaptureScope(
+                     Region(120, 80, 1400, 900),
+                     "target_window",
+                     "verified_foreground_target",
+                     target_hwnd=12345,
+                     target_verified=True,
+                 ),
+             ), \
              patch("winpilot.agent.loop.capture_window_jpeg_b64", return_value="ZmFrZQ=="):
 
             runner._inject_observe_screenshot()

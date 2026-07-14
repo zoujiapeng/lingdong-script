@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from ..action import shell
+from ..fast.action_contract import supported_actions
 from ..memory import experience
 from ..perception import vlm
 
@@ -26,23 +27,30 @@ _EXPECT_SCHEMA = {
     ),
 }
 
+_SUPPORTED_CONTROLLER_ACTIONS = list(supported_actions())
+
 
 def _tool(
     name: str,
     description: str,
     properties: dict | None = None,
     required: list[str] | None = None,
+    *,
+    parameter_schema: dict | None = None,
 ) -> dict:
+    parameters = {
+        "type": "object",
+        "properties": properties or {},
+        "required": required or [],
+    }
+    if parameter_schema:
+        parameters.update(deepcopy(parameter_schema))
     return {
         "type": "function",
         "function": {
             "name": name,
             "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties or {},
-                "required": required or [],
-            },
+            "parameters": parameters,
         },
     }
 
@@ -109,21 +117,30 @@ _LEAN_GUI_TOOLS = {
 }
 
 
-_DRAWING_EXECUTE_SUBGOAL_PROPS = {
-    "subgoal",
-    "target_window",
-    "draw",
-    "draws",
-    "verify_texts",
-    "constraints",
+# Native-vision models already receive the authoritative frame after each
+# transaction.  Keep their operator close to screenshot -> one typed action ->
+# fresh screenshot.  The larger deterministic controller remains available to
+# text-only models, where it compensates for weaker direct pixel grounding.
+_NATIVE_VISION_LEAN_TOOLS = {
+    "list_windows",
+    "focus_window",
+    "open_app",
+    "launch",
+    "observe",
+    "click",
+    "type_text",
+    "hotkey",
+    "scroll",
+    "drag",
+    "draw_strokes",
+    "wait",
+    "revise_plan",
+    "complete_subgoal",
+    "record_facts",
+    "done",
+    "blocked",
+    "fail",
 }
-
-
-# Drawing is one visible transaction plus a grounded final verdict.  Hiding the
-# generic todo mutators prevents models from spending parallel tool calls on
-# eight plan items, then replacing that plan (and often inventing a destructive
-# clear/restart step) instead of inspecting the canvas and calling done.
-_DRAWING_GUI_TOOLS = _LEAN_GUI_TOOLS - {"revise_plan", "complete_subgoal"}
 
 
 _LEAN_TOOL_DESCRIPTIONS = {
@@ -147,14 +164,24 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "hotkey": "Press shortcut keys.",
     "scroll": "Scroll at x/y.",
     "drag": "Drag from x1/y1 to x2/y2.",
-    "draw_strokes": "Draw screen-coordinate strokes.",
+    "draw_strokes": (
+        "Draw exactly one of strokes (grounded physical px) or normalized_strokes "
+        "(0..1000 on one light work surface detected from current target pixels). "
+        "Give only key vertices/curve anchors, normally 4-16 points per path; the executor "
+        "connects them continuously, so never enumerate pixel-sized or equal-step points."
+    ),
     "wait": "Wait for a condition.",
     "screenshot": "Capture screen with compact nonvisual summary.",
     "paste_image_file": "Paste a PNG/JPEG into the focused app as an image.",
     "zoom": "Capture a screen rectangle with compact nonvisual summary.",
     "coordinate_diagnostics": "Report physical screen/capture/window/DPI geometry.",
     "coordinate_click_test": "Click physical screen x/y once and report coordinate evidence.",
-    "revise_plan": "Create/replace todo plan.",
+    "revise_plan": (
+        "Change the live todo at any time: steps replaces it; operations accepts "
+        "{op:add,goal,index?}, {op:update,index,goal}, {op:remove,index}, or "
+        "{op:move,index,to_index}, {op:reopen,index,reason?}. Indices are "
+        "current and 1-based; steps may be [] to clear the list."
+    ),
     "complete_subgoal": "Mark a todo item complete.",
     "record_facts": "Bind visible facts to one subject and source in the per-run working set.",
     "vlm_describe": "Ask VLM about a screen/window region.",
@@ -163,25 +190,6 @@ _LEAN_TOOL_DESCRIPTIONS = {
     "blocked": "Pause safely when the real UI cannot be grounded without guessing.",
     "fail": "Finish with an honest failure reason.",
 }
-
-_DRAWING_TOOL_DESCRIPTIONS = {
-    **_LEAN_TOOL_DESCRIPTIONS,
-    "execute_subgoal": (
-        "Controller drawing routine. Use launch/focus first. For a detailed creature, "
-        "submit one complete 15-30 part-labelled outline-only draws[] call: head/body, "
-        "pose-visible ears/eyes, nose/mouth, at least two pose-visible limbs/haunches with "
-        "paws, tail, and at least two "
-        "decorative details. For a polished organic creature, do not stack ellipses and "
-        "rectangles: give the head, body, and visible limbs expressive custom contours as "
-        "normalized_strokes=[[[x,y],...]]] in canvas-relative 0..1000 coordinates, with "
-        "6-16 waypoints per contour (repeat the first point to close it). Reserve circles/"
-        "ellipses for small eyes, pupils, nose, paws, or decorations; never use rectangles "
-        "for natural limbs. Never put four parallel capsule legs under an oval; use a coherent "
-        "seated/side pose with attached legs and hind haunches. Closed shapes are not filled. Do not clear a draft or split "
-        "the creature across todo-plan calls. Do not use it to open/discover an app."
-    ),
-}
-
 
 def _strip_nested_descriptions(node: object) -> None:
     if isinstance(node, dict):
@@ -206,35 +214,15 @@ def _compact_tool_descriptions(tool: dict, descriptions: dict[str, str] | None =
     return compact
 
 
-def _prune_execute_subgoal_properties(tool: dict, allowed: set[str]) -> dict:
-    if _tool_name(tool) != "execute_subgoal":
-        return tool
-    fn = tool.get("function") or {}
-    params = fn.get("parameters") or {}
-    props = params.get("properties")
-    if isinstance(props, dict):
-        params["properties"] = {key: value for key, value in props.items() if key in allowed}
-    return tool
-
-
 def _apply_tool_profile(tools: list[dict], profile: str) -> list[dict]:
     """Return a task-profiled schema list without changing dispatch capability."""
     if profile in {"", "standard", "full"}:
         return tools
-    if profile == "lean_gui":
+    if profile in {"lean_gui", "drawing_gui"}:
         return [
             _compact_tool_descriptions(tool)
             for tool in tools
             if _tool_name(tool) in _LEAN_GUI_TOOLS
-        ]
-    if profile == "drawing_gui":
-        return [
-            _prune_execute_subgoal_properties(
-                _compact_tool_descriptions(tool, _DRAWING_TOOL_DESCRIPTIONS),
-                _DRAWING_EXECUTE_SUBGOAL_PROPS,
-            )
-            for tool in tools
-            if _tool_name(tool) in _DRAWING_GUI_TOOLS
         ]
     return tools
 
@@ -325,15 +313,23 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
             )
         elif name == "draw_strokes":
             props.pop("strokes", None)
+            props.pop("normalized_strokes", None)
+            parameters.pop("oneOf", None)
             props["frame_strokes"] = {
                 "type": "array",
+                "maxItems": 16,
                 "description": (
                     "Strokes relative to the current whole frame in 0..1000. Each stroke needs "
-                    "at least two [x,y] points."
+                    "at least two [x,y] points. Send at most 16 independent paths in one turn; "
+                    "add later detail after the fresh frame. Give only key vertices or curve "
+                    "anchors, normally 4-16 points per path; the executor connects anchors "
+                    "continuously. Never enumerate pixel-sized or equal-step points along a line "
+                    "or curve."
                 ),
                 "items": {
                     "type": "array",
                     "minItems": 2,
+                    "maxItems": 16,
                     "items": point_schema("One normalized stroke point."),
                 },
             }
@@ -342,8 +338,15 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 "frame_strokes",
             ]
             fn["description"] = (
-                "Draw frame_strokes in the current authoritative frame using 0..1000 "
-                "coordinates; the runtime maps every point to physical screen pixels."
+                "Create continuous input paths in the current authoritative frame. Use this "
+                "instead of repeated click calls for freehand marks, handwriting, signatures, "
+                "or canvas paths. Put all independent paths already grounded in this frame into "
+                "one frame_strokes array using 0..1000 coordinates; the runtime maps every point "
+                "to physical screen pixels. Use only key vertices/curve anchors, normally 4-16 "
+                "points per path; do not emit dense equal-step samples because the executor connects "
+                "successive anchors continuously. If the current frame reports work_surface_frame_bounds, "
+                "each stroke must start inside those whole-frame bounds and at least 90% of its "
+                "points must remain inside. The bounds do not create another coordinate space."
             )
         elif name == "run_action_batch":
             actions = props.get("actions")
@@ -352,27 +355,7 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 items["properties"] = {
                     "action": {
                         "type": "string",
-                        "enum": [
-                            "observe",
-                            "click",
-                            "click_element",
-                            "type_into_element",
-                            "type_text",
-                            "hotkey",
-                            "scroll",
-                            "move_mouse",
-                            "drag",
-                            "draw_strokes",
-                            "select_color",
-                            "focus_window",
-                            "wait",
-                            "wait_change",
-                            "wait_stable",
-                            "read_text",
-                            "zoom",
-                            "clipboard_write",
-                            "clipboard_paste",
-                        ],
+                        "enum": _SUPPORTED_CONTROLLER_ACTIONS,
                         "description": (
                             "Required canonical controller action name. Native-vision batches "
                             "never accept shorthand objects with the action field omitted."
@@ -393,9 +376,8 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                     "the current whole-frame 0..1000 contract: click/scroll/move_mouse use "
                     "frame_x/frame_y; drag uses frame_x1/frame_y1/frame_x2/frame_y2 and optional "
                     "frame_points; draw_strokes uses frame_strokes. Never send physical x/y, "
-                    "x1/y1/x2/y2, points, or strokes. normalized_strokes is allowed only for "
-                    "controller canvas-relative 0..1000 points that will be mapped through the "
-                    "latest detected canvas. Non-coordinate actions keep their normal fields."
+                    "x1/y1/x2/y2, points, strokes, or normalized_strokes. Non-coordinate "
+                    "actions keep their normal fields."
                 )
             fn["description"] = (
                 "Execute a short controller-managed multi-step transaction grounded in the current "
@@ -408,6 +390,15 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 "coordinates."
             )
     return adapted
+
+
+def _native_vision_lean_tools(tools: list[dict], profile: str) -> list[dict]:
+    if profile not in {"lean_gui", "drawing_gui"}:
+        return tools
+    return [
+        tool for tool in tools
+        if _tool_name(tool) in _NATIVE_VISION_LEAN_TOOLS
+    ]
 
 
 def tool_schemas(
@@ -590,15 +581,61 @@ def tool_schemas(
         ),
         _tool(
             "draw_strokes",
-            "Draw multiple independent strokes. Each stroke is [[x,y], ...].",
+            "Create one or more continuous input paths in a single call. Use this instead "
+            "of repeated clicks or one model round-trip per path when the same target surface "
+            "and coordinates are already grounded. Provide exactly one coordinate source: "
+            "strokes for already-grounded physical screen pixels, or normalized_strokes for "
+            "0..1000 paths mapped through one work surface detected from current target-window pixels. "
+            "Give key vertices/curve anchors only, normally 4-16 points per path; the executor "
+            "connects anchors continuously, so do not enumerate equal-step/pixel-sized points.",
             {
                 "strokes": {
                     "type": "array",
-                    "items": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "description": "Already-grounded physical screen-pixel paths.",
+                    "items": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 16,
+                        "items": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": {"type": "integer"},
+                        },
+                    },
+                },
+                "normalized_strokes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "description": (
+                        "Paths relative to a runtime-detected light work surface: 0=left/top, "
+                        "1000=right/bottom. Every coordinate must be within 0..1000; invalid "
+                        "or ambiguous surface grounding rejects the whole action. Use only key "
+                        "vertices/curve anchors, normally 4-16 points per path."
+                    ),
+                    "items": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 16,
+                        "items": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "items": {"type": "number", "minimum": 0, "maximum": 1000},
+                        },
+                    },
                 },
                 "duration": _prop("number", "Duration per stroke in seconds."),
             },
-            ["strokes"],
+            parameter_schema={
+                "oneOf": [
+                    {"required": ["strokes"]},
+                    {"required": ["normalized_strokes"]},
+                ],
+            },
         ),
         _tool("wait", "Wait until a condition is true.",
               {"condition": _EXPECT_SCHEMA, "timeout_s": _prop("number", "Default 10 seconds.")}, ["condition"]),
@@ -686,11 +723,11 @@ def tool_schemas(
                 },
                 "draw": {
                     "type": "object",
-                    "description": "Optional outline-only canvas primitive. For detailed scenes, use draws[] with normalized boxes/strokes instead of an unsupported semantic object name. Closed primitives are outlines, never filled layers.",
+                    "description": "Optional outline-only canvas primitive with explicit geometry. Visual quality is verified from the rendered frame.",
                     "properties": {
                         "shape": _prop("string", "Outline-only triangle/rectangle/circle/ellipse/line/check. Unknown object names and filled shapes are unsupported."),
                         "color": _prop("string", "Optional visible color. It is strict only when the user explicitly requested it; otherwise the controller may reuse the current color."),
-                        "part": _prop("string", "Semantic scene part, for example head, body, left eye, tail, window, roof. Required on detailed scenes."),
+                        "part": _prop("string", "Optional semantic label used for trace evidence and bounded repairs."),
                         "expected_region": _prop("string", "Rough canvas region."),
                         "box": {
                             "type": "array",
@@ -715,13 +752,13 @@ def tool_schemas(
                 },
                 "draws": {
                     "type": "array",
-                    "description": "Ordered outline-only primitives. For a detailed creature, send one complete 15-30 primitive routine: separate large head/body, pose-visible ears/eyes, nose and mouth, at least two pose-visible limbs/haunches with paws, tail, plus at least two labelled decorative details. For polished organic subjects, head/body/visible limbs should use 6-16 point normalized_strokes contours; when a small model supplies only labelled core boxes, the runtime compiles them into organic contours before execution. Never place four parallel capsule legs under an oval. Use multiple colors only when requested; otherwise keep the current/one style color. Closed shapes are outlines, never filled layers.",
+                    "description": "Ordered outline-only primitives with explicit canvas-relative geometry. The controller maps and executes them; the fresh post-action frame judges semantic quality.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "shape": _prop("string", "Outline-only triangle/rectangle/circle/ellipse/line/check; filled shapes are unsupported."),
                             "color": _prop("string", "Optional visible color; strict only when explicitly requested by the user."),
-                            "part": _prop("string", "Semantic scene part. Label every detailed primitive explicitly, including left/right and front/back distinctions."),
+                            "part": _prop("string", "Optional semantic label for trace evidence and targeted repair."),
                             "expected_region": _prop("string", "Rough canvas region."),
                             "box": {
                                 "type": "array",
@@ -733,7 +770,7 @@ def tool_schemas(
                             "box_mode": _prop("string", "Optional line box interpretation.", enum=["endpoints", "xywh"]),
                             "normalized_strokes": {
                                 "type": "array",
-                                "description": "Custom canvas-relative strokes in 0..1000 coordinates. Use 6-16 waypoints for an organic contour and repeat the first point to close it.",
+                                "description": "Explicit canvas-relative strokes in 0..1000 coordinates; repeat the first point only when the intended path is closed.",
                                 "items": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
                             },
                             "duration": _prop("number", "Seconds per stroke; default 0.28."),
@@ -766,18 +803,33 @@ def tool_schemas(
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "properties": {
+                            "action": _prop(
+                                "string",
+                                "Canonical controller action type.",
+                                enum=_SUPPORTED_CONTROLLER_ACTIONS,
+                            ),
+                            "tool": _prop(
+                                "string",
+                                "Compatibility alias for action.",
+                                enum=_SUPPORTED_CONTROLLER_ACTIONS,
+                            ),
+                            "params": {
+                                "type": "object",
+                                "description": "Optional nested action inputs.",
+                            },
+                        },
                         "description": (
-                            "Allowed action values: observe, click, click_element, "
-                            "type_into_element, type_text, hotkey, scroll, drag, draw_strokes, select_color, "
-                            "focus_window, wait, wait_change, wait_stable, "
-                            "read_text, zoom, clipboard_write, clipboard_paste. "
+                            "Allowed canonical action values are projected from the runtime "
+                            "operator contract. "
                             "Use either {'action':'click','element_id':1} or shorthand "
                             "{'click': {'element_id':1}}; {'hotkey':['enter']} is OK. click_element accepts "
                             "label/expected_region/visual_anchor/fallback_text/role "
                             "and may do one targeted observe(query=label) retry. "
                             "Use type_into_element for locate+click+optional clear+type."
-                            " For draw_strokes, strokes are physical screen pixels. Use normalized_strokes "
-                            "for 0..1000 canvas-relative points; the controller maps them through the latest canvas."
+                            " For draw_strokes, provide exactly one of already-grounded physical-pixel "
+                            "strokes or normalized_strokes in 0..1000. Normalized paths are mapped only "
+                            "after current target-window pixels reveal one credible light work surface."
                         ),
                     },
                 },
@@ -868,8 +920,80 @@ def tool_schemas(
 
     if planning:
         tools.extend([
-            _tool("revise_plan", "Create or replace a short ordered todo plan.",
-                  {"steps": {"type": "array", "items": {"type": "string"}}}, ["steps"]),
+            _tool(
+                "revise_plan",
+                (
+                    "Change the live ordered todo plan at any time. Provide exactly "
+                    "one of: steps to replace the list, or operations to add, update, "
+                    "remove, move, or reopen items without discarding unrelated progress."
+                ),
+                {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Complete replacement ordered list; [] explicitly clears it.",
+                    },
+                    "operations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Atomic mutations applied in order using current 1-based indices.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "enum": ["add", "update", "remove", "move", "reopen"],
+                                },
+                                "index": {
+                                    "type": "integer",
+                                    "description": "Source/edit/remove index; add insertion index, or omit to append.",
+                                },
+                                "to_index": {
+                                    "type": "integer",
+                                    "description": "Destination index for move.",
+                                },
+                                "goal": {
+                                    "type": "string",
+                                    "description": "New item text for add/update.",
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Why prior completion evidence is invalid for reopen.",
+                                },
+                            },
+                            "required": ["op"],
+                            "oneOf": [
+                                {
+                                    "properties": {"op": {"enum": ["add"]}},
+                                    "required": ["op", "goal"],
+                                },
+                                {
+                                    "properties": {"op": {"enum": ["update"]}},
+                                    "required": ["op", "index", "goal"],
+                                },
+                                {
+                                    "properties": {"op": {"enum": ["remove"]}},
+                                    "required": ["op", "index"],
+                                },
+                                {
+                                    "properties": {"op": {"enum": ["move"]}},
+                                    "required": ["op", "index", "to_index"],
+                                },
+                                {
+                                    "properties": {"op": {"enum": ["reopen"]}},
+                                    "required": ["op", "index"],
+                                },
+                            ],
+                        },
+                    },
+                },
+                parameter_schema={
+                    "oneOf": [
+                        {"required": ["steps"]},
+                        {"required": ["operations"]},
+                    ],
+                },
+            ),
             _tool("complete_subgoal", "Mark a todo item complete by 1-based index.",
                   {"index": _prop("integer", "1-based plan index.")}, ["index"]),
         ])
@@ -1094,5 +1218,7 @@ def tool_schemas(
         ])
     profiled = _apply_tool_profile(tools, profile)
     if native_vision:
-        return _native_frame_coordinate_tools(profiled)
+        return _native_frame_coordinate_tools(
+            _native_vision_lean_tools(profiled, profile)
+        )
     return profiled

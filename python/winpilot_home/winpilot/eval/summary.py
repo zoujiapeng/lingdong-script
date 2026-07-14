@@ -249,6 +249,59 @@ def _low_latency_metrics(
         for event in desktop_job_terminal
         if event.get("elapsed_ms") is not None
     ]
+    visual_preflight_events = [
+        event for event in events if event.get("type") == "visual_preflight"
+    ]
+    visual_feedback_scopes = Counter(
+        str(event.get("capture_scope") or "unspecified")
+        for event in visual_feedback_events
+    )
+    visual_feedback_scope_reasons = Counter(
+        str(event.get("capture_scope_reason") or "unspecified")
+        for event in visual_feedback_events
+    )
+    action_lifecycle_events = [
+        event for event in events
+        if event.get("event_name") in {"action.started", "action.finished"}
+        and isinstance(event.get("action_envelope"), dict)
+        and str(event.get("action_id") or "")
+        and str(event["action_envelope"].get("action_id") or "")
+        == str(event.get("action_id") or "")
+    ]
+    cooperative_input_events = [
+        event for event in events if event.get("type") == "cooperative_input"
+    ]
+
+    def cooperative_block(event: dict[str, Any]) -> bool:
+        meta = event.get("result_meta")
+        if (
+            isinstance(meta, dict)
+            and meta.get("cooperative_input") is True
+            and meta.get("blocked") is True
+        ):
+            return True
+        preview = str(event.get("result_preview") or "")
+        folded = preview.casefold()
+        return (
+            '"cooperative_input": true' in folded
+            and '"blocked": true' in folded
+        )
+
+    cooperative_blocks = sum(
+        1 for event in action_event_stream if cooperative_block(event)
+    )
+    user_interventions = sum(
+        1 for event in events
+        if event.get("type") == "chat" and event.get("interject") is True
+    )
+    lifecycle_started_ids = {
+        str(event.get("action_id")) for event in action_lifecycle_events
+        if event.get("event_name") == "action.started"
+    }
+    lifecycle_finished_ids = {
+        str(event.get("action_id")) for event in action_lifecycle_events
+        if event.get("event_name") == "action.finished"
+    }
 
     steps = max(step_count, 1)
     minutes = max(duration_s / 60.0, 1 / 60.0)
@@ -257,6 +310,8 @@ def _low_latency_metrics(
         "native_visual_feedback": {
             "frames": len(visual_feedback_events),
             "capture_latency": _latency_summary(visual_feedback_capture_ms),
+            "capture_scopes": dict(visual_feedback_scopes),
+            "capture_scope_reasons": dict(visual_feedback_scope_reasons),
         },
         "perception_latency": _latency_summary(perception_total_ms),
         "action_decision_latency": _latency_summary(decision_ms),
@@ -304,6 +359,30 @@ def _low_latency_metrics(
                 "wait_latency": _latency_summary(desktop_job_wait_ms),
                 "execution_latency": _latency_summary(desktop_job_elapsed_ms),
             },
+        },
+        "runtime_proof": {
+            "visual_preflight_checks": len(visual_preflight_events),
+            "stale_frame_blocks": sum(
+                1 for event in visual_preflight_events
+                if event.get("changed") is True
+            ),
+            "user_interventions": user_interventions,
+            "cooperative_input_blocks": cooperative_blocks,
+            "human_cursor_wins": sum(
+                1 for event in cooperative_input_events
+                if event.get("state") == "human_cursor_won"
+            ),
+            "action_lifecycle_started": sum(
+                1 for event in action_lifecycle_events
+                if event.get("event_name") == "action.started"
+            ),
+            "action_lifecycle_finished": sum(
+                1 for event in action_lifecycle_events
+                if event.get("event_name") == "action.finished"
+            ),
+            "action_lifecycle_paired": len(
+                lifecycle_started_ids.intersection(lifecycle_finished_ids)
+            ),
         },
     }
 
@@ -623,6 +702,9 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "total_prompt_tokens": 0,
             "total_completion_tokens": 0,
             "slow_tools": [],
+            "native_visual_feedback": {"frames": 0, "capture_scopes": {}},
+            "runtime_proof": {},
+            "models": {},
             "reports": [],
         }
     slow: list[dict[str, Any]] = []
@@ -637,6 +719,13 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         r.get("fast_gui")
         or r.get("summary", {}).get("fast_gui")
         or r.get("trace_summary", {}).get("fast_gui")
+        or {}
+        for r in reports
+    ]
+    low_latency_items = [
+        r.get("low_latency")
+        or r.get("summary", {}).get("low_latency")
+        or r.get("trace_summary", {}).get("low_latency")
         or {}
         for r in reports
     ]
@@ -676,6 +765,37 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     )
     ungrounded_count = len(reports) - grounded_total
     verified_successes = sum(1 for report in reports if passed(report))
+    capture_scopes: Counter[str] = Counter()
+    runtime_proof: Counter[str] = Counter()
+    for item in low_latency_items:
+        feedback = item.get("native_visual_feedback") if isinstance(item, dict) else {}
+        scopes = feedback.get("capture_scopes") if isinstance(feedback, dict) else {}
+        if isinstance(scopes, dict):
+            for scope, count in scopes.items():
+                capture_scopes[str(scope)] += int(count or 0)
+        proof = item.get("runtime_proof") if isinstance(item, dict) else {}
+        if isinstance(proof, dict):
+            for key, count in proof.items():
+                runtime_proof[str(key)] += int(count or 0)
+
+    models: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        provenance = report.get("provenance") if isinstance(report.get("provenance"), dict) else {}
+        model_meta = provenance.get("model") if isinstance(provenance.get("model"), dict) else {}
+        model = str(model_meta.get("model") or "unknown")
+        item = models.setdefault(model, {
+            "runs": 0,
+            "verified_successes": 0,
+            "total_duration_s": 0.0,
+        })
+        item["runs"] += 1
+        item["verified_successes"] += int(passed(report))
+        item["total_duration_s"] += float(report.get("duration_s") or 0)
+    for item in models.values():
+        runs = max(1, int(item["runs"]))
+        item["verified_success_rate"] = round(item["verified_successes"] / runs, 4)
+        item["avg_duration_s"] = round(float(item["total_duration_s"]) / runs, 2)
+        item["total_duration_s"] = round(float(item["total_duration_s"]), 2)
 
     return {
         "total": len(reports),
@@ -716,6 +836,15 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "anchor_failures": sum(int(f.get("anchor_failures") or 0) for f in fast_items),
             "run_state_events": sum(int(f.get("run_state_events") or 0) for f in fast_items),
         },
+        "native_visual_feedback": {
+            "frames": sum(
+                int((item.get("native_visual_feedback") or {}).get("frames") or 0)
+                for item in low_latency_items if isinstance(item, dict)
+            ),
+            "capture_scopes": dict(capture_scopes),
+        },
+        "runtime_proof": dict(runtime_proof),
+        "models": models,
         "slow_tools": slow,
         "reports": reports,
     }

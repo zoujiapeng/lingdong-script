@@ -55,8 +55,8 @@
     "world_model": true,
     "replan_on_fail": true,
     "planning_enabled": true,
-    "playbooks_enabled": true,
-    "prompt_style": "full",
+    "playbooks_enabled": false,
+    "prompt_style": "compact",
     "tool_profile": "auto",
     "session_memory": true,
     "verify_done": true,
@@ -66,6 +66,11 @@
     "no_mouse_steal": false,
     "llm_trace": true,
     "reflect_interval": 8
+  },
+  "controller": {
+    "target_window_capture_enabled": true,
+    "multi_input_cooperation": false,
+    "cooperative_cursor_tolerance_px": 12
   },
   "ocr": {
     "use_gpu": true,

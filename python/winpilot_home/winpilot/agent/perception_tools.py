@@ -9,7 +9,7 @@ from ..config import CONFIG, TRACES_DIR
 from ..perception.model import UIElement
 from ..perception import fusion, intent, ocr, reducer, uia, vision_cv, vlm, win32
 from ..perception.ocr_lines import merge_line_elements
-from ..utils.image_capture import capture_window_jpeg_b64
+from ..utils.image_capture import capture_window_jpeg_b64, select_visual_capture_scope
 from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, window_region
 from .task_rules import _communication_mode, _is_communication_task, _quoted_payloads
@@ -121,24 +121,17 @@ class PerceptionToolMixin:
         """Legacy accessor - True when perception mode is 'visual'."""
         return self._perception_mode() != "normal"
 
-    def _needs_visual_state_summary(self) -> bool:
-        text = f"{self.task} {self.snapshot.title if self.snapshot else ''}".casefold()
-        needles = (
-            "draw", "drawing", "paint", "sketch", "canvas", "whiteboard",
-            "\u753b", "\u753b\u56fe", "\u7ed8\u56fe", "\u6d82\u9e26",
-            "\u753b\u677f", "\u767d\u677f", "\u989c\u8272", "color",
-        )
-        return any(needle in text for needle in needles)
-
     def _capture_window_b64(self, hwnd: int) -> str:
-        """Capture the target window as a JPEG when the main model has vision."""
+        """Capture the configured visual scope when the main model has vision."""
         from ..agent.loop import _main_model_has_vision
         if not _main_model_has_vision():
             return ""
-        try:
-            region = _tools_attr("window_region", window_region)(hwnd).clamp_to_screen()
-        except Exception:
-            region = None
+        decision = select_visual_capture_scope(
+            hwnd,
+            task=self.task,
+            related_window=getattr(self, "_window_related_to_target", None),
+        )
+        region = decision.region
         image_b64 = capture_window_jpeg_b64(hwnd, region=region)
         if not image_b64:
             logger.debug("窗口截图捕获失败或返回空图像")
@@ -150,86 +143,20 @@ class PerceptionToolMixin:
                 "image_b64": image_b64,
                 "hwnd": int(hwnd),
                 "region": region,
+                "scope": decision.scope,
+                "scope_reason": decision.reason,
             }
         return image_b64
 
     def _visual_state_summary(self, hwnd: int) -> str:
-        if not self._needs_visual_state_summary():
-            return ""
-        try:
-            region = _tools_attr("window_region", window_region)(hwnd)
-            image = _tools_attr("capture", capture)(region)
-            canvas_bbox = vision_cv.likely_canvas_bbox(image)
-            offset_x = 0
-            offset_y = 0
-            scope = "current window"
-            if canvas_bbox:
-                x1, y1, x2, y2 = canvas_bbox
-                image = image[y1:y2, x1:x2]
-                offset_x = x1
-                offset_y = y1
-                scope = f"likely_canvas@({region.left + x1},{region.top + y1},{region.left + x2},{region.top + y2})"
-            stats = vision_cv.color_presence(image)
-        except Exception as exc:
-            logger.debug("visual state summary failed: %s", exc)
-            return ""
-        colors = stats.get("colors", {}) if isinstance(stats, dict) else {}
-        visible_parts: list[str] = []
-        for name in ("red", "orange", "yellow", "green", "blue", "purple", "black"):
-            item = colors.get(name, {})
-            if not item.get("visible"):
-                continue
-            bbox = item.get("largest_bbox") or item.get("bbox")
-            if isinstance(bbox, list) and len(bbox) == 4:
-                sx1, sy1, sx2, sy2 = (
-                    int(bbox[0]) + region.left + offset_x,
-                    int(bbox[1]) + region.top + offset_y,
-                    int(bbox[2]) + region.left + offset_x,
-                    int(bbox[3]) + region.top + offset_y,
-                )
-                visible_parts.append(f"{name}@({sx1},{sy1},{sx2},{sy2})")
-            else:
-                visible_parts.append(name)
-        modal_terms = (
-            "PopupHost", "Edit colors", "OK", "Cancel", "RGB",
-            "\u786e\u5b9a", "\u53d6\u6d88",
-        )
-        popup_roles = ("popup", "dialog", "menu", "popover", "\u5bf9\u8bdd", "\u83dc\u5355")
-        popup_open = False
-        if self.snapshot is not None:
-            popup_open = any(
-                any(term in (element.text or "") for term in modal_terms)
-                or any(role in (element.role or "").casefold() for role in popup_roles)
-                for element in self.snapshot.elements[:80]
-            )
-        colors_text = ", ".join(visible_parts) if visible_parts else "none"
-        popup_text = ""
-        advisory = ""
-        if popup_open and scope == "current window":
-            popup_text = (
-                "; popup/tool panel appears open; these colors may belong to "
-                "the tool panel, not the canvas"
-            )
-            advisory = (
-                "A tool/color modal is foreground. Its visible colors are controls, "
-                "not proof of canvas content. Finish with OK/Cancel/Escape or close "
-                "the modal, then observe the canvas before drawing or claiming color evidence."
-            )
-        elif popup_open:
-            popup_text = "; popup/tool panel appears open"
-            advisory = (
-                "A popup/tool panel is open over the canvas. If tool/color selection is done, "
-                "close it with OK/Escape or click back on the canvas before drawing. Do not keep "
-                "probing the same panel."
-            )
-        if advisory and advisory != self._last_visual_advisory:
-            self._pending_visual_advisory = advisory
-            self._last_visual_advisory = advisory
-        return (
-            f"Visual state summary ({scope}): visible coarse colors: "
-            f"{colors_text}{popup_text}. If this contradicts the plan, correct "
-            "the next action before continuing."
-        )
+        """Compatibility hook; visual state is carried by the real frame/fusion.
+
+        Do not derive a second task-keyword-specific view of the screenshot.
+        Native vision consumes the authoritative pixels directly, while
+        text-only models receive the normal OCR/CV/VLM fusion result.
+        """
+        del hwnd
+        return ""
 
     def take_visual_advisory(self) -> str:
         note = self._pending_visual_advisory
@@ -591,27 +518,6 @@ class PerceptionToolMixin:
         )
         return snapshot
 
-    def _canvas_fast_observe_enabled(self, args: dict, perception_mode: str) -> bool:
-        """Use a light visual snapshot for UIA-off canvas/drawing tasks.
-
-        Canvas tasks usually need the work-area bbox and coarse visual state,
-        not a full-window OCR pass over every toolbar label. Query/full observe
-        still forces the complete path when text grounding is actually needed.
-        """
-        if perception_mode != "visual":
-            return False
-        if not self._needs_visual_state_summary():
-            return False
-        if str(args.get("query", "") or "").strip():
-            return False
-        if bool(args.get("full") or args.get("force_full")):
-            return False
-        if not bool(CONFIG.get("fusion", "canvas_fast_observe", default=True)):
-            return False
-        # Keep UIA-enabled behaviour conservative; the fast path is primarily
-        # for UIA-off testing/custom surfaces where OCR is the dominant cost.
-        return "uia" not in set(CONFIG.enabled_dimensions())
-
     def _native_visual_direct_enabled(self, args: dict) -> bool:
         """Return whether the main VLM can consume the real frame directly.
 
@@ -658,46 +564,6 @@ class PerceptionToolMixin:
             dims=snapshot.dim_stats,
             total=0,
             mode="native_vision_direct",
-        )
-        return snapshot
-
-    def _fast_canvas_snapshot(self, hwnd: int, include_icons: bool) -> fusion.Snapshot:
-        region = _tools_attr("window_region", window_region)(hwnd)
-        title = _tools_attr("win32", win32)._window_text(hwnd)
-        snapshot = fusion.Snapshot(hwnd=hwnd, title=title, region=region)
-        order = CONFIG.enabled_dimensions()
-        fused = []
-        for dim in order:
-            if dim not in {"win32", "cv"}:
-                snapshot.dim_stats[dim] = {
-                    "count": 0,
-                    "ms": 0,
-                    "skipped": "canvas_fast_observe",
-                }
-                continue
-            started = time.monotonic()
-            collected = []
-            try:
-                if dim == "win32":
-                    win32_mod = _tools_attr("win32", win32)
-                    collected = win32_mod.collect(hwnd)
-                    collected.extend(win32_mod.explorer_items(hwnd))
-                elif dim == "cv":
-                    collected = vision_cv.detect_icon_candidates(region) if include_icons else []
-            except Exception as exc:
-                logger.warning("fast canvas observe %s failed: %s", dim, exc)
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            snapshot.dim_stats[dim] = {"count": len(collected), "ms": elapsed_ms}
-            fused.extend(collected)
-        for idx, element in enumerate(fused, start=1):
-            element.elem_id = idx
-        snapshot.elements = fused
-        BUS.publish(
-            "perception",
-            hwnd=hwnd,
-            title=title,
-            dims=snapshot.dim_stats,
-            total=len(fused),
         )
         return snapshot
 
@@ -843,14 +709,11 @@ class PerceptionToolMixin:
         perception_mode = self._perception_mode()
         changed_regions = self._recent_changed_regions(hwnd) if bool(args.get("changed_only")) else []
         native_visual = self._native_visual_direct_enabled(args)
-        fast_canvas = self._canvas_fast_observe_enabled(args, perception_mode)
         observe_profile = (
             "changed_roi"
             if changed_regions
             else "native_visual"
             if native_visual
-            else "canvas_fast"
-            if fast_canvas
             else "full"
         )
         roi_signature = tuple(
@@ -879,8 +742,6 @@ class PerceptionToolMixin:
                 )
             elif native_visual:
                 self.snapshot = self._fast_native_visual_snapshot(hwnd)
-            elif fast_canvas:
-                self.snapshot = self._fast_canvas_snapshot(hwnd, include_icons=include_icons)
             else:
                 self.snapshot = fusion_mod.observe(
                     hwnd,
@@ -980,7 +841,7 @@ class PerceptionToolMixin:
         )
         if native_visual:
             text = (
-                "Native visual direct observation: the attached real window frame is "
+                "Native visual direct observation: the attached real GUI frame is "
                 "authoritative. Structured UIA/OCR/VLM decomposition was intentionally "
                 "skipped to preserve scene context and latency. Use a query only when "
                 "exact text grounding is genuinely needed.\n" + text
@@ -1020,9 +881,6 @@ class PerceptionToolMixin:
                     "Changed-only observe requested but no recent changed ROI was "
                     "available; returned the normal observe snapshot.\n" + text
                 )
-        visual_summary = self._visual_state_summary(hwnd)
-        if visual_summary:
-            text = text + "\n" + visual_summary
         screen_summary = self._screen_bulletin_summary()
         if screen_summary:
             text = text + "\n" + screen_summary
@@ -1176,19 +1034,93 @@ class PerceptionToolMixin:
         probe = vision_cv.color_probe(int(args["x"]), int(args["y"]))
         return ToolResult(self._fmt(probe))
 
+    def _vlm_capture_region(
+        self,
+        args: dict,
+    ) -> tuple[Region, dict[str, object], int | None] | None:
+        """Resolve the exact pixels a text-only + VLM tool may inspect.
+
+        An explicit ROI is an intentional caller constraint and therefore is
+        never widened or replaced. Otherwise VLM tools share the same safe
+        selector as native visual frames: the setting may disable cropping,
+        and ambiguous, background, cross-application, or multi-window cases
+        fall back to the full virtual desktop.
+        """
+        if all(k in args for k in ("left", "top", "width", "height")):
+            region = Region(
+                int(args["left"]),
+                int(args["top"]),
+                int(args["width"]),
+                int(args["height"]),
+            )
+            return region, {
+                "capture_scope": "explicit_roi",
+                "capture_scope_reason": "caller_explicit_region",
+                "capture_region": [
+                    region.left,
+                    region.top,
+                    region.width,
+                    region.height,
+                ],
+                "target_verified": False,
+            }, None
+
+        hwnd = self._resolve_hwnd(args)
+        if not hwnd:
+            return None
+        decision = select_visual_capture_scope(
+            hwnd,
+            task=self.task,
+            related_window=getattr(self, "_window_related_to_target", None),
+        )
+        return decision.region, {
+            "capture_scope": decision.scope,
+            "capture_scope_reason": decision.reason,
+            "capture_region": [
+                decision.region.left,
+                decision.region.top,
+                decision.region.width,
+                decision.region.height,
+            ],
+            "target_hwnd": decision.target_hwnd,
+            "target_verified": decision.target_verified,
+        }, int(hwnd)
+
+    def _record_vlm_capture_scope(
+        self,
+        tool: str,
+        metadata: dict[str, object],
+        hwnd: int | None,
+    ) -> None:
+        BUS.publish(
+            "perception",
+            run_id=getattr(self, "run_id", None),
+            mode=tool,
+            hwnd=int(hwnd or 0) or None,
+            capture_scope=metadata["capture_scope"],
+            capture_scope_reason=metadata["capture_scope_reason"],
+            capture_region=metadata["capture_region"],
+            target_verified=bool(metadata.get("target_verified")),
+        )
+
     def _t_vlm_describe(self, args: dict) -> ToolResult:
         if not vlm.is_configured():
             return ToolResult("VLM 未配置")
-        if all(k in args for k in ("left", "top", "width", "height")):
-            region = Region(int(args["left"]), int(args["top"]),
-                            int(args["width"]), int(args["height"]))
-        else:
-            hwnd = self._resolve_hwnd(args)
-            if not hwnd:
-                return ToolResult("无目标窗口且未指定区域")
-            region = window_region(hwnd)
+        capture_scope = self._vlm_capture_region(args)
+        if capture_scope is None:
+            return ToolResult("无目标窗口且未指定区域")
+        region, metadata, hwnd = capture_scope
+        self._record_vlm_capture_scope("vlm_describe", metadata, hwnd)
         answer = vlm.describe(region, str(args["question"]))
-        return ToolResult(answer)
+        scope_note = (
+            f"[capture_scope={metadata['capture_scope']}; "
+            f"reason={metadata['capture_scope_reason']}; "
+            f"region={metadata['capture_region']}]"
+        )
+        return ToolResult(
+            f"{scope_note}\n{answer}",
+            replay={"tool": "vlm_describe", **metadata},
+        )
 
     def _t_vlm_verify(self, args: dict) -> ToolResult:
         if not vlm.is_configured():
@@ -1199,22 +1131,17 @@ class PerceptionToolMixin:
                 "verify_method": "semantic-vlm",
                 "error": vlm.configuration_issue() or "VLM is not configured",
             }))
-        if all(k in args for k in ("left", "top", "width", "height")):
-            region = Region(
-                int(args["left"]), int(args["top"]),
-                int(args["width"]), int(args["height"]),
-            )
-        else:
-            hwnd = self._resolve_hwnd(args)
-            if not hwnd:
-                return ToolResult(self._fmt({
-                    "ok": False,
-                    "verified": False,
-                    "semantic_visual_verified": False,
-                    "verify_method": "semantic-vlm",
-                    "error": "No target window or explicit region",
-                }))
-            region = window_region(hwnd)
+        capture_scope = self._vlm_capture_region(args)
+        if capture_scope is None:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "semantic_visual_verified": False,
+                "verify_method": "semantic-vlm",
+                "error": "No target window or explicit region",
+            }))
+        region, metadata, hwnd = capture_scope
+        self._record_vlm_capture_scope("vlm_verify", metadata, hwnd)
         started = time.monotonic()
         requested_criteria = str(args.get("criteria") or "").strip()
         full_goal = str(self.task or "").strip()
@@ -1229,11 +1156,19 @@ class PerceptionToolMixin:
         if isinstance(verdict, dict):
             verdict["criteria"] = requested_criteria or full_goal
             verdict["full_goal_included"] = bool(requested_criteria and full_goal)
+            verdict.update(metadata)
         BUS.publish(
             "verify",
             run_id=getattr(self, "run_id", ""),
             method="semantic-vlm",
             verified=verdict.get("verified") is True,
             elapsed_ms=int((time.monotonic() - started) * 1000),
+            capture_scope=metadata["capture_scope"],
+            capture_scope_reason=metadata["capture_scope_reason"],
+            capture_region=metadata["capture_region"],
         )
-        return ToolResult(self._fmt(verdict), is_observe=True)
+        return ToolResult(
+            self._fmt(verdict),
+            is_observe=True,
+            replay={"tool": "vlm_verify", **metadata},
+        )

@@ -24,6 +24,7 @@ from .action_contract import (
     BATCH_CLIPBOARD_ACTIONS,
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
+    build_action_envelope,
 )
 from .element_cache import ElementCache, LocateResult, anchor_from_dict
 from .input_locator import locate_input
@@ -349,6 +350,9 @@ def _result_meta(result: ToolResult, data: dict[str, Any] | None = None) -> dict
         "element_cache",
         "controller_auto_observe",
         "controller_internal_action_count",
+        "cooperative_input",
+        "blocked",
+        "error",
     ):
         if key in data:
             meta[key] = data[key]
@@ -1364,16 +1368,56 @@ class FastGuiController:
         result.replay.setdefault("elapsed_ms", elapsed)
         return result
 
+    def _action_event_envelope(
+        self,
+        batch_id: str,
+        index: int,
+        name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = getattr(self.session, "snapshot", None)
+        region = (
+            args.get("region")
+            or getattr(self.session, "_visual_frame_region", None)
+            or getattr(snapshot, "region", None)
+        )
+        frame_id = (
+            args.get("visual_frame_id")
+            or args.get("frame_id")
+            or getattr(self.session, "_visual_frame_id", None)
+        )
+        envelope = build_action_envelope(
+            name,
+            args,
+            action_id=f"{batch_id}:{index}",
+            hwnd=getattr(self.session, "hwnd", None),
+            frame_id=frame_id,
+            epoch=(
+                getattr(self.session, "_visual_frame_epoch", None)
+                if getattr(self.session, "_visual_frame_epoch", None) is not None
+                else getattr(self.session, "_screen_epoch", None)
+            ),
+            region=region,
+            retry_budget=0,
+        )
+        return envelope.to_dict()
+
     def _publish_child_start(
         self,
         batch_id: str,
         index: int,
         name: str,
         args: dict[str, Any],
-    ) -> None:
+    ) -> dict[str, Any]:
+        envelope = self._action_event_envelope(
+            batch_id, index, name, args,
+        )
         BUS.publish(
             "agent_batch_action_start",
             run_id=getattr(self.session, "run_id", None),
+            event_name="action.started",
+            action_id=envelope["action_id"],
+            action_envelope=envelope,
             parent_tool="run_action_batch",
             batch_id=batch_id,
             batch_index=index,
@@ -1383,6 +1427,7 @@ class FastGuiController:
                 not args.get("defer_visual_verify") or args.get("trace_checkpoint")
             ),
         )
+        return envelope
 
     def _publish_child_done(
         self,
@@ -1394,10 +1439,20 @@ class FastGuiController:
         elapsed_ms: int,
         ok: bool,
         data: dict[str, Any],
+        action_envelope: dict[str, Any] | None = None,
     ) -> None:
+        # Start and finish must describe the same immutable target snapshot.
+        # Rebuilding after execution can accidentally bind the finished event
+        # to a newer screenshot/epoch.
+        envelope = action_envelope or self._action_event_envelope(
+            batch_id, index, name, args,
+        )
         BUS.publish(
             "agent_batch_action",
             run_id=getattr(self.session, "run_id", None),
+            event_name="action.finished",
+            action_id=envelope["action_id"],
+            action_envelope=envelope,
             parent_tool="run_action_batch",
             batch_id=batch_id,
             batch_index=index,
@@ -1625,6 +1680,13 @@ class FastGuiController:
         element,
         action: dict[str, Any],
     ) -> tuple[bool, str]:
+        if bool(CONFIG.get(
+            "controller", "multi_input_cooperation", default=False,
+        )):
+            # Servo owns the one physical cursor between move and mouse-down.
+            # Cooperative mode instead prefers UIA/window-message clicks and
+            # must not silently turn into a second cursor that Windows lacks.
+            return False, "cooperative_input"
         if "visual_servo" in action:
             return _truthy(action.get("visual_servo")), "explicit"
         if _truthy(action.get("moving_target") or action.get("track_target")):
@@ -2408,55 +2470,15 @@ class FastGuiController:
         ).clamp_to_screen()
 
     def _map_canvas_relative_draw(self, args: dict[str, Any]) -> dict[str, Any]:
-        raw = args.get("normalized_strokes")
-        if raw is None and str(args.get("coordinate_space") or "").casefold() in {
-            "canvas", "canvas_normalized", "normalized",
-        }:
-            raw = args.get("strokes")
-        if not isinstance(raw, list):
+        # Resolve at the concrete input boundary so direct tools and controller
+        # batches share the same strict contract. In particular, never trust a
+        # model-provided canvas_region or the controller's historical
+        # _last_canvas_region: the interaction resolver captures current target
+        # pixels before the first path and binds its cache to hwnd + geometry.
+        resolver = getattr(self.session, "_prepare_draw_strokes_args", None)
+        if not callable(resolver):
             return args
-        region_data = args.get("canvas_region")
-        if not isinstance(region_data, dict):
-            region_data = getattr(self.session, "_last_canvas_region", None)
-        if not isinstance(region_data, dict):
-            return args
-        try:
-            region = Region(
-                int(region_data.get("x", region_data.get("left"))),
-                int(region_data.get("y", region_data.get("top"))),
-                int(region_data["width"]),
-                int(region_data["height"]),
-            ).clamp_to_screen()
-        except (TypeError, ValueError, KeyError):
-            return args
-        mapped: list[list[list[int]]] = []
-        try:
-            for stroke in raw:
-                points = []
-                for point in stroke:
-                    x = max(0.0, min(1000.0, float(point[0])))
-                    y = max(0.0, min(1000.0, float(point[1])))
-                    points.append([
-                        region.left + int(round(region.width * x / 1000.0)),
-                        region.top + int(round(region.height * y / 1000.0)),
-                    ])
-                if len(points) >= 2:
-                    mapped.append(points)
-        except (TypeError, ValueError, IndexError):
-            return args
-        if not mapped:
-            return args
-        updated = dict(args)
-        updated["strokes"] = mapped
-        updated["canvas_region"] = {
-            "x": region.left,
-            "y": region.top,
-            "width": region.width,
-            "height": region.height,
-        }
-        updated["mapped_from_coordinate_space"] = "canvas_normalized"
-        updated.pop("normalized_strokes", None)
-        return updated
+        return resolver(dict(args), capture_fn=self.capture_fn)
 
     @staticmethod
     def _action_region(name: str, args: dict[str, Any]) -> Region | None:
@@ -2651,7 +2673,9 @@ class FastGuiController:
                 scope_blocked = scope_guard.ensure_scope(self.session, name, normalised_args)
             epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             started = _now_ms()
-            self._publish_child_start(batch_id, index, name, normalised_args)
+            action_envelope = self._publish_child_start(
+                batch_id, index, name, normalised_args,
+            )
             condition = normalised_args.get("condition")
             text_appears = (
                 str(condition.get("text_appears") or "").strip()
@@ -2742,6 +2766,9 @@ class FastGuiController:
                     and prior_hwnd
                     and name == "hotkey"
                     and [str(key).casefold() for key in normalised_args.get("keys") or []] == ["ctrl", "n"]
+                    and not bool(CONFIG.get(
+                        "controller", "multi_input_cooperation", default=False,
+                    ))
                 ):
                     # New-document shortcuts in shared-host Office apps create
                     # a sibling top-level window rather than an owned modal.
@@ -2896,6 +2923,7 @@ class FastGuiController:
                 elapsed,
                 item["ok"],
                 data,
+                action_envelope,
             )
             if failed and stop_on_error:
                 metrics.failed_at = index
@@ -2917,7 +2945,7 @@ class FastGuiController:
                     "height": last_visual_region.height,
                 },
             }
-            self._publish_child_start(batch_id, index, name, args)
+            action_envelope = self._publish_child_start(batch_id, index, name, args)
             result = self._auto_visual_verify(last_visual_region, last_visual_action, last_visual_data)
             elapsed = max(0, _now_ms() - started)
             data = _json_dict(result.text)
@@ -2935,7 +2963,10 @@ class FastGuiController:
                 "verified": bool(data.get("verified")) if "verified" in data else False,
                 "data": data,
             })
-            self._publish_child_done(batch_id, index, name, args, result, elapsed, ok, data)
+            self._publish_child_done(
+                batch_id, index, name, args, result, elapsed, ok, data,
+                action_envelope,
+            )
             if data.get("verified") is True:
                 verified_any = True
                 current_state_verified = True

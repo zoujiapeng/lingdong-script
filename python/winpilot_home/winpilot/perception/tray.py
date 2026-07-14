@@ -20,6 +20,23 @@ _CHEVRON_NAMES = ("显示隐藏的图标", "Show Hidden Icons", "通知 V 形", 
 _MAX_DEPTH = 8
 
 
+def _window_at_point(x: int, y: int) -> int | None:
+    """Return the actual root window receiving a tray click.
+
+    Cooperative input intentionally refuses targetless background messages.
+    Tray controls are outside the agent's bound app, so bind these clicks to
+    the taskbar/flyout window under the discovered UIA point instead of using a
+    global targetless click.
+    """
+    try:
+        hwnd = int(win32gui.WindowFromPoint((int(x), int(y))) or 0)
+        if hwnd:
+            hwnd = int(win32gui.GetAncestor(hwnd, 2) or hwnd)  # GA_ROOT
+        return hwnd or None
+    except Exception:
+        return None
+
+
 def _walk_buttons(root: auto.Control, source_tag: str) -> list[UIElement]:
     """Collect every named button under a UIA root (bounded depth)."""
     found: list[UIElement] = []
@@ -103,7 +120,11 @@ def _open_overflow(taskbar_icons: list[UIElement]) -> int:
     if chevron is None:
         return 0
     from ..action import executor
-    executor.click(chevron.cx, chevron.cy)
+    executor.click(
+        chevron.cx,
+        chevron.cy,
+        hwnd=_window_at_point(chevron.cx, chevron.cy),
+    )
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         hwnd = _find_overflow_window()
@@ -150,7 +171,13 @@ def click_tray_icon(name_substr: str, double: bool = False,
         return {"ok": False, "error": f'托盘中未找到 "{name_substr}"',
                 "available": names}
     from ..action import executor
-    result = executor.click(hit.cx, hit.cy, button=button, double=double)
+    result = executor.click(
+        hit.cx,
+        hit.cy,
+        button=button,
+        double=double,
+        hwnd=_window_at_point(hit.cx, hit.cy),
+    )
     result["icon"] = hit.text
     result["area"] = hit.extra.get("area", "")
     return result

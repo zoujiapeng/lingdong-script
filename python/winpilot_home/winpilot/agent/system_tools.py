@@ -12,8 +12,10 @@ import win32gui
 
 from ..action import executor, shell, verify
 from .. import scheduler as agent_scheduler
+from ..config import CONFIG
 from ..perception import apps, search, tray, web_search, win32
 from ..utils.log import BUS
+from .interaction_tools import _call_with_optional_hwnd
 from .tool_result import ToolResult
 
 
@@ -481,7 +483,13 @@ class SystemToolMixin:
                 if res.get("ok"):
                     BUS.publish("action", action="undo", what=f"关闭窗口 {title}")
                     return ToolResult(f'已关闭最近打开的程序窗口 "{title}"。')
-        executor_mod.press_keys(["ctrl", "z"])
+        result = _call_with_optional_hwnd(
+            executor_mod.press_keys,
+            ["ctrl", "z"],
+            hwnd=self._action_hwnd(),
+        )
+        if not result.get("ok"):
+            return ToolResult(self._fmt(result))
         return ToolResult("无可回收的启动记录；已对当前窗口执行撤销 (Ctrl+Z)。")
 
     def _t_search_files(self, args: dict) -> ToolResult:
@@ -626,6 +634,9 @@ class SystemToolMixin:
         command = str(args["command"]).strip()
         resolved = self._resolve_launch_target(command)
         prior_hwnd = self.hwnd
+        cooperative = bool(CONFIG.get(
+            "controller", "multi_input_cooperation", default=False,
+        ))
 
         def do_launch() -> dict:
             if resolved is not None:
@@ -713,15 +724,21 @@ class SystemToolMixin:
                     )
             elif resolved is not None and component_requested is None:
                 self.target_hint = str(resolved.get("name") or command)
-                target = self._find_target_window()
-                if target:
-                    self._remember_target(target)
-                elif launched_hwnd and launched_hwnd != prior_hwnd:
-                    self._remember_target(
-                        launched_hwnd,
-                        str(resolved.get("name") or command),
-                    )
-            elif component_requested is None and launched_hwnd and launched_hwnd != prior_hwnd:
+                if not cooperative:
+                    target = self._find_target_window()
+                    if target:
+                        self._remember_target(target)
+                    elif launched_hwnd and launched_hwnd != prior_hwnd:
+                        self._remember_target(
+                            launched_hwnd,
+                            str(resolved.get("name") or command),
+                        )
+            elif (
+                not cooperative
+                and component_requested is None
+                and launched_hwnd
+                and launched_hwnd != prior_hwnd
+            ):
                 self._remember_target(launched_hwnd)
             target_hwnd = self.hwnd if self._window_alive(self.hwnd) else None
             target_belongs_to_launch = bool(
@@ -752,7 +769,11 @@ class SystemToolMixin:
                     result["foreground_matches_target"] = False
                 if target_hwnd != prior_hwnd or result.get("target_hwnd"):
                     self._undo_stack.append(("app", target_hwnd))
-            elif launched_hwnd and launched_hwnd != prior_hwnd:
+            elif (
+                not cooperative
+                and launched_hwnd
+                and launched_hwnd != prior_hwnd
+            ):
                 self._undo_stack.append(("app", launched_hwnd))
             else:
                 # ShellExecute can report ok while doing nothing. The previous

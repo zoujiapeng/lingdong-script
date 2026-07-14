@@ -7,6 +7,7 @@ import win32con
 import win32gui
 
 from ..action import executor
+from ..config import CONFIG
 from ..perception import apps, fusion, uia, win32
 from .tool_result import ToolResult
 
@@ -173,6 +174,14 @@ class WindowToolMixin:
             hwnd = int(window["hwnd"])
             try:
                 if not win32gui.IsWindowVisible(hwnd):
+                    if CONFIG.get(
+                        "controller", "multi_input_cooperation", default=False,
+                    ):
+                        rows.append(
+                            f'hwnd={hwnd} title="{window.get("title", "")}" '
+                            "skipped=hidden_candidate_in_cooperative_mode"
+                        )
+                        continue
                     win32gui.ShowWindow(hwnd, win32con.SW_SHOWNORMAL)
                     time.sleep(0.25)
                 executor.focus_window(hwnd)
@@ -197,7 +206,13 @@ class WindowToolMixin:
                     f'hwnd={hwnd} title="{window.get("title", "")}" '
                     f'error={type(exc).__name__}: {exc}'
                 )
-        if original and win32gui.IsWindow(original):
+        if (
+            original
+            and win32gui.IsWindow(original)
+            and not CONFIG.get(
+                "controller", "multi_input_cooperation", default=False,
+            )
+        ):
             try:
                 executor.focus_window(original)
             except Exception:

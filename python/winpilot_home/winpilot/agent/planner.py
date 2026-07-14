@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Any
 
@@ -49,20 +50,6 @@ _RESULT_CONTEXT_MARKERS = (
 )
 _BUTTON_NOUN_PATTERN = r"(?:button|btn|menu|link|按钮|按键|菜单|链接)"
 _CLICK_VERB_PATTERN = r"(?:click|press|tap|select|点击|按下|按|选择)"
-_DRAWING_GOAL_RE = re.compile(
-    r"(draw|paint|sketch|canvas|whiteboard|shape|triangle|rectangle|circle|"
-    r"绘制|画|画布|白板|图形|三角|三角形|矩形|方形|圆形)",
-    re.IGNORECASE,
-)
-_VISUAL_DRAWING_WORDS = {
-    "blue", "red", "green", "yellow", "black", "purple", "orange",
-    "蓝", "蓝色", "红", "红色", "绿", "绿色", "黄", "黄色", "黑", "黑色",
-    "紫", "紫色", "橙", "橙色",
-    "triangle", "rectangle", "square", "circle", "line", "shape",
-    "三角", "三角形", "矩形", "方形", "正方形", "圆", "圆形", "线", "直线", "图形",
-}
-
-
 def _compact_text(text: str) -> str:
     return re.sub(r"[\s_\-:/\\|()（）\[\]【】\"'“”‘’<>]+", "", text or "").casefold()
 
@@ -136,33 +123,6 @@ def _check_echoes_button_label(goal: str, key: str, value: str) -> bool:
     return any(re.search(pattern, goal, re.IGNORECASE) for pattern in patterns)
 
 
-def _check_is_visual_drawing_word(goal: str, key: str, value: str) -> bool:
-    if key not in _VISIBLE_CHECK_KEYS:
-        return False
-    if not _DRAWING_GOAL_RE.search(goal or ""):
-        return False
-    compact = _compact_text(value)
-    if not compact:
-        return False
-    return any(_compact_text(word) == compact for word in _VISUAL_DRAWING_WORDS)
-
-
-def _check_is_weak_visual_confirmation_text(goal: str, key: str, value: str) -> bool:
-    if key not in _VISIBLE_CHECK_KEYS:
-        return False
-    if not (_DRAWING_GOAL_RE.search(goal or "") and _VERIFY_GOAL_RE.search(goal or "")):
-        return False
-    if _looks_like_state_token(value):
-        return False
-    compact_value = _compact_text(value)
-    if not compact_value:
-        return False
-    # Visual drawing checks should be proven by pixel/color/controller evidence.
-    # A text check that is not named in the visual goal is usually just an app
-    # title or stale OCR label, and can turn a successful drawing into a blocker.
-    return compact_value not in _compact_text(goal)
-
-
 def _sanitize_check_for_goal(goal: str, check) -> dict | None:
     valid = _valid_check(check)
     if not valid:
@@ -190,12 +150,6 @@ def _sanitize_check_for_goal(goal: str, check) -> dict | None:
                 sanitized[key] = candidate
                 value = candidate
         if isinstance(value, str) and _check_echoes_button_label(goal, key, value):
-            dropped.append(f"{key}={value!r}")
-            sanitized.pop(key, None)
-        elif isinstance(value, str) and _check_is_visual_drawing_word(goal, key, value):
-            dropped.append(f"{key}={value!r}")
-            sanitized.pop(key, None)
-        elif isinstance(value, str) and _check_is_weak_visual_confirmation_text(goal, key, value):
             dropped.append(f"{key}={value!r}")
             sanitized.pop(key, None)
     if dropped:
@@ -530,6 +484,91 @@ class Plan:
             return True
         return False
 
+    def apply_operations(self, operations: list[dict]) -> list[str]:
+        """Atomically add, edit, remove, or reorder todo items.
+
+        Indices are 1-based and are evaluated against the list produced by the
+        preceding operation. Existing completion state moves with an item. An
+        edited item becomes pending because its acceptance contract changed.
+        A reopen operation explicitly invalidates prior completion evidence.
+        """
+        if not isinstance(operations, list) or not operations:
+            raise ValueError("operations must be a non-empty array")
+        candidate = deepcopy(self.steps)
+        changes: list[str] = []
+
+        def _index(raw: object, *, upper: int, field: str) -> int:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise ValueError(f"{field} must be a 1-based integer")
+            value = raw
+            if not 1 <= value <= upper:
+                raise ValueError(f"{field}={value} is outside 1..{upper}")
+            return value
+
+        def _new_step(goal: object) -> dict:
+            value = str(goal or "").strip()[:_MAX_GOAL_CHARS]
+            if not value:
+                raise ValueError("add/update requires a non-empty goal")
+            parsed = Plan([value]).steps
+            if not parsed:
+                raise ValueError("goal produced no valid todo item")
+            return parsed[0]
+
+        for position, operation in enumerate(operations, start=1):
+            if not isinstance(operation, dict):
+                raise ValueError(f"operation {position} must be an object")
+            op = str(operation.get("op") or "").strip().casefold()
+            if op == "add":
+                step = _new_step(operation.get("goal"))
+                raw_index = operation.get("index")
+                if raw_index is None:
+                    insert_at = len(candidate) + 1
+                else:
+                    insert_at = _index(
+                        raw_index,
+                        upper=len(candidate) + 1,
+                        field="index",
+                    )
+                candidate.insert(insert_at - 1, step)
+                changes.append(f"added item {insert_at}")
+                continue
+            if op in {"update", "remove", "move", "reopen"}:
+                if not candidate:
+                    raise ValueError(f"operation {position} cannot {op} an empty plan")
+                source = _index(
+                    operation.get("index"), upper=len(candidate), field="index"
+                )
+                if op == "update":
+                    candidate[source - 1] = _new_step(operation.get("goal"))
+                    changes.append(f"updated item {source}; it is pending again")
+                elif op == "remove":
+                    candidate.pop(source - 1)
+                    changes.append(f"removed item {source}")
+                elif op == "move":
+                    destination = _index(
+                        operation.get("to_index"),
+                        upper=len(candidate),
+                        field="to_index",
+                    )
+                    step = candidate.pop(source - 1)
+                    candidate.insert(destination - 1, step)
+                    changes.append(f"moved item {source} to {destination}")
+                else:
+                    candidate[source - 1]["done"] = False
+                    reason = str(operation.get("reason") or "").strip()
+                    changes.append(
+                        f"reopened item {source}"
+                        + (f" ({reason[:120]})" if reason else "")
+                    )
+                continue
+            raise ValueError(
+                f"operation {position} has unsupported op={op!r}; "
+                "use add, update, remove, move, or reopen"
+            )
+
+        self.steps = candidate
+        return changes
+
     def render(self) -> str:
         lines = ["当前计划(todo)："]
         for i, step in enumerate(self.steps, start=1):
@@ -537,28 +576,12 @@ class Plan:
             tag = " (含核验)" if step.get("check") else ""
             lines.append(f"[{mark}] {i}. {step['goal']}{tag}")
         lines.append(
-            "若 complete_subgoal/revise_plan 工具可用，完成一项就标记，计划不合适再重列；"
-            "若当前任务配置未提供这些工具，直接执行并依据真实核验调用 done。"
+            "Plan controls (when exposed): complete grounded items; add/update/remove/"
+            "move/reopen items whenever evidence changes the route. Avoid a no-op restatement."
         )
         lines.append(
-            "Plan hint: this todo is already active; do not call revise_plan just "
-            "to restate it. When plan "
-            "tools are exposed, execute the next unfinished item and mark it complete. "
-            "When they are omitted, verified controller evidence advances the work; "
-            "finish with done instead of inventing unavailable tool calls."
-        )
-        lines.append(
-            "GUI routine hint: when an item has a visible text/state check, prefer "
-            "execute_subgoal(..., verify_texts=[...]) so the controller handles "
-            "locate/click/wait/verify. If the requested label is not visible but "
-            "a semantically related localized control is visible, use that visible "
-            "label/fallback_text instead of scrolling for an exact wording match."
-        )
-        lines.append(
-            "Drawing evidence hint: if recent execute_subgoal.draw returned "
-            "matched_visual_colors for the requested colors, complete the matching "
-            "drawing/verification item or call done; do not add a weak text-only "
-            "verify_texts check such as an app title just to confirm visible pixels."
+            "Plan state is guidance, not completion evidence. Without plan tools, "
+            "continue from grounded evidence and finish with done."
         )
         return "\n".join(lines)
 

@@ -40,6 +40,14 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 2,
             "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost_cny": 0.1},
             "slow_tools": [{"tool": "observe", "elapsed_ms": 50}],
+            "provenance": {"model": {"model": "mimo-v2.5"}},
+            "low_latency": {
+                "native_visual_feedback": {
+                    "frames": 3,
+                    "capture_scopes": {"target_window": 2, "full_desktop": 1},
+                },
+                "runtime_proof": {"visual_preflight_checks": 2, "stale_frame_blocks": 1},
+            },
             "fast_gui": {
                 "batch_calls": 1,
                 "batch_actions": 3,
@@ -61,7 +69,17 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
             "duration_s": 3,
             "usage": {"prompt_tokens": 20, "completion_tokens": 2, "cost_cny": 0.2},
             "slow_tools": [{"tool": "click", "elapsed_ms": 80}],
-            "summary": {"fast_gui": {"batch_calls": 2, "batch_actions": 4, "round_trips_saved": 2}},
+            "provenance": {"model": {"model": "mimo-v2.5-pro"}},
+            "summary": {
+                "fast_gui": {"batch_calls": 2, "batch_actions": 4, "round_trips_saved": 2},
+                "low_latency": {
+                    "native_visual_feedback": {
+                        "frames": 2,
+                        "capture_scopes": {"full_desktop": 2},
+                    },
+                    "runtime_proof": {"visual_preflight_checks": 1},
+                },
+            },
         },
     ]
 
@@ -85,6 +103,14 @@ def test_aggregate_reports_totals_usage_and_slow_tools():
     assert out["fast_gui"]["subgoal_controller_elapsed_ms"] == 90
     assert out["fast_gui"]["subgoal_overhead_ms"] == 30
     assert out["fast_gui"]["round_trips_saved"] == 4
+    assert out["native_visual_feedback"] == {
+        "frames": 5,
+        "capture_scopes": {"target_window": 2, "full_desktop": 3},
+    }
+    assert out["runtime_proof"]["visual_preflight_checks"] == 3
+    assert out["runtime_proof"]["stale_frame_blocks"] == 1
+    assert out["models"]["mimo-v2.5"]["verified_success_rate"] == 1.0
+    assert out["models"]["mimo-v2.5-pro"]["verified_success_rate"] == 0.0
 
 
 def test_summarize_events_extracts_fast_gui_metrics():
@@ -165,6 +191,8 @@ def test_summarize_events_includes_native_visual_frame_latency():
             "run_id": "vision",
             "frame_id": 1,
             "capture_latency_ms": 6,
+            "capture_scope": "target_window",
+            "capture_scope_reason": "verified_foreground_target",
             "ts": 1.1,
         },
         {
@@ -172,6 +200,8 @@ def test_summarize_events_includes_native_visual_frame_latency():
             "run_id": "vision",
             "frame_id": 2,
             "capture_latency_ms": 10,
+            "capture_scope": "full_desktop",
+            "capture_scope_reason": "foreground_target_mismatch",
             "ts": 1.2,
         },
         {
@@ -188,6 +218,16 @@ def test_summarize_events_includes_native_visual_frame_latency():
 
     assert metrics["native_visual_feedback"]["frames"] == 3
     assert metrics["native_visual_feedback"]["capture_latency"]["avg_ms"] == 8
+    assert metrics["native_visual_feedback"]["capture_scopes"] == {
+        "target_window": 1,
+        "full_desktop": 1,
+        "unspecified": 1,
+    }
+    assert metrics["native_visual_feedback"]["capture_scope_reasons"] == {
+        "verified_foreground_target": 1,
+        "foreground_target_mismatch": 1,
+        "unspecified": 1,
+    }
     assert metrics["screen_capture_latency"]["avg_ms"] == 8
 
 
@@ -589,6 +629,9 @@ def test_gui_eval_provenance_is_reproducible_and_excludes_secrets(monkeypatch):
         },
         "fusion": {"native_vision_direct": True, "unknown_secret": "do-not-copy"},
         "controller": {
+            "target_window_capture_enabled": True,
+            "multi_input_cooperation": False,
+            "cooperative_cursor_tolerance_px": 12,
             "visual_closed_loop": True,
             "visual_preflight_change_ratio": 0.0025,
             "visual_preflight_target_change_ratio": 0.01,
@@ -619,9 +662,18 @@ def test_gui_eval_provenance_is_reproducible_and_excludes_secrets(monkeypatch):
     assert out["model"]["model"] == "vision-model"
     assert out["model"]["resolved_provider"] == "example-provider"
     assert out["model"]["supports_vision"] is True
+    assert out["model"]["endpoint_sha256"] == gui_eval_run._endpoint_fingerprint(
+        "https://secret-endpoint.invalid"
+    )
+    assert out["vlm"]["endpoint_sha256"] == gui_eval_run._endpoint_fingerprint(
+        "https://secret-vlm.invalid"
+    )
     assert out["visual_config"]["perception"]["uia"] == {"enabled": False, "priority": 5}
     assert out["visual_config"]["fusion"]["native_vision_direct"] is True
     assert out["visual_config"]["controller"] == {
+        "target_window_capture_enabled": True,
+        "multi_input_cooperation": False,
+        "cooperative_cursor_tolerance_px": 12,
         "visual_closed_loop": True,
         "visual_preflight_change_ratio": 0.0025,
         "visual_preflight_target_change_ratio": 0.01,
@@ -634,6 +686,7 @@ def test_gui_eval_provenance_is_reproducible_and_excludes_secrets(monkeypatch):
         "top-secret-vlm-key",
         "control-secret",
         "secret-endpoint",
+        "secret-vlm",
         "do-not-copy",
     ):
         assert secret not in serialized
@@ -876,3 +929,798 @@ def test_gui_eval_budget_can_omit_unavailable_cost_dimension():
     }
     assert result["availability"]["cost_cny"] is False
     assert result["passed"] is True
+
+
+def test_runtime_proof_metrics_cover_stale_frames_interventions_and_input_arbitration():
+    from winpilot.eval import summary
+
+    events = [
+        {"type": "agent_start", "run_id": "proof-1", "ts": 1.0},
+        {
+            "type": "visual_preflight",
+            "changed": True,
+            "capture_latency_ms": 4,
+            "ts": 1.1,
+        },
+        {"type": "chat", "interject": True, "ts": 1.2},
+        {
+            "type": "agent_batch_action_start",
+            "event_name": "action.started",
+            "action_id": "batch-1:1",
+            "action_envelope": {"action_id": "batch-1:1"},
+            "ts": 1.3,
+        },
+        {
+            "type": "agent_batch_action",
+            "event_name": "action.finished",
+            "action_id": "batch-1:1",
+            "action_envelope": {"action_id": "batch-1:1"},
+            "tool": "type_text",
+            "result_meta": {"cooperative_input": True, "blocked": True},
+            "elapsed_ms": 1,
+            "ts": 1.4,
+        },
+        {
+            "type": "cooperative_input",
+            "state": "human_cursor_won",
+            "ts": 1.5,
+        },
+        {"type": "agent_done", "status": "reply", "ts": 1.6},
+    ]
+
+    proof = summary.summarize_events(events)["low_latency"]["runtime_proof"]
+
+    assert proof == {
+        "visual_preflight_checks": 1,
+        "stale_frame_blocks": 1,
+        "user_interventions": 1,
+        "cooperative_input_blocks": 1,
+        "human_cursor_wins": 1,
+        "action_lifecycle_started": 1,
+        "action_lifecycle_finished": 1,
+        "action_lifecycle_paired": 1,
+    }
+
+
+def test_runtime_proof_consumes_real_controller_result_metadata():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.eval import summary
+    from winpilot.fast.controller import _result_meta
+
+    result = ToolResult(
+        '{"ok": false, "verified": false, "blocked": true, '
+        '"cooperative_input": true, "error": "user owns another window"}'
+    )
+    meta = _result_meta(result)
+    proof = summary.summarize_events([{
+        "type": "agent_batch_action",
+        "event_name": "action.finished",
+        "action_id": "batch-1:1",
+        "tool": "type_text",
+        "result_meta": meta,
+        "ts": 1.0,
+    }])["low_latency"]["runtime_proof"]
+
+    assert meta["blocked"] is True
+    assert meta["cooperative_input"] is True
+    assert "user owns" in meta["error"]
+    assert proof["cooperative_input_blocks"] == 1
+
+
+def test_visual_judge_network_call_is_fresh_and_mockable(monkeypatch):
+    import json
+
+    from scripts import gui_eval_run
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            content = json.dumps({
+                "passed": True,
+                "confidence": 0.97,
+                "reason": "The requested state is visibly present.",
+                "observed": ["Visible result"],
+                "issues": [],
+            })
+            return json.dumps({
+                "choices": [{"message": {"content": content}}],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(gui_eval_run.urllib.request, "urlopen", fake_urlopen)
+    verdict = gui_eval_run._request_visual_judge(
+        {
+            "base_url": "https://judge.invalid/v1",
+            "api_key": "judge-secret",
+            "model": "independent-vlm",
+            "thinking": False,
+        },
+        "The visible result says OK.",
+        "YWJj",
+    )
+
+    assert verdict["passed"] is True
+    assert captured["url"] == "https://judge.invalid/v1/chat/completions"
+    assert captured["timeout"] == 120
+    assert captured["payload"]["model"] == "independent-vlm"
+    assert captured["payload"]["thinking"] == {"type": "disabled"}
+    assert captured["payload"]["messages"][0]["content"][0]["image_url"]["url"].endswith("YWJj")
+    assert captured["headers"]["Authorization"] == "Bearer judge-secret"
+
+
+def test_visual_ground_truth_persists_exact_judge_frame(monkeypatch, tmp_path):
+    import hashlib
+    from pathlib import Path
+
+    import numpy as np
+
+    from scripts import gui_eval_run
+    from winpilot.utils import screenshot
+    from winpilot.utils.screenshot import Region
+
+    seen = {}
+    monkeypatch.setattr(screenshot, "virtual_screen_region", lambda: Region(0, 0, 100, 80))
+
+    def fake_capture(region):
+        seen["region"] = region
+        return np.zeros((16, 16, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(screenshot, "capture", fake_capture)
+    evidence = gui_eval_run._capture_visual_judge_frame(
+        {"criteria": "visible state", "region": [10, 12, 16, 16]},
+        [],
+        tmp_path,
+        "run-1",
+        "region-case",
+    )
+
+    path = Path(evidence["screenshot_path"])
+    payload = path.read_bytes()
+    assert seen["region"] == Region(10, 12, 16, 16)
+    assert evidence["scope"] == "region"
+    assert evidence["capture_dimensions"] == {"width": 16, "height": 16}
+    assert evidence["judge_dimensions"] == {"width": 16, "height": 16}
+    assert evidence["frame_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert evidence["image_b64"]
+
+
+def test_visual_ground_truth_verified_and_failed_are_strict(monkeypatch, tmp_path):
+    from scripts import gui_eval_run
+
+    execution_events = [{"type": "agent_decision", "model": "executor-model"}]
+
+    def fake_frame(*_args, **_kwargs):
+        return {
+            "scope": "target_window",
+            "target_hwnd": 55,
+            "region": {"left": 1, "top": 2, "width": 3, "height": 4},
+            "frame_sha256": "a" * 64,
+            "screenshot_path": "evidence.jpg",
+            "image_b64": "YWJj",
+        }
+
+    monkeypatch.setattr(gui_eval_run, "_capture_visual_judge_frame", fake_frame)
+    monkeypatch.setattr(gui_eval_run, "_visual_judge_settings", lambda: {
+        "enabled": True,
+        "base_url": "https://judge.invalid/v1",
+        "api_key": "secret",
+        "model": "judge-vlm",
+        "thinking": False,
+        "verify_min_confidence": 0.8,
+        "configuration_issue": "",
+    })
+    monkeypatch.setattr(gui_eval_run, "_request_visual_judge", lambda *_args: {
+        "passed": True,
+        "confidence": 0.95,
+        "reason": "All requested pixels are visibly present.",
+        "observed": ["Visible state"],
+        "issues": [],
+    })
+
+    verified = gui_eval_run._run_visual_check(
+        {"criteria": "The state is visible."},
+        execution_events,
+        tmp_path,
+        "run-verified",
+        "case",
+        execution_model="executor-model",
+    )
+    assert verified["status"] == "verified"
+    assert verified["passed"] is True
+    assert verified["judge_model"] == "judge-vlm"
+    assert verified["same_as_execution_model"] is False
+    assert verified["frame_sha256"] == "a" * 64
+    assert verified["verdict"]["passed"] is True
+
+    monkeypatch.setattr(gui_eval_run, "_request_visual_judge", lambda *_args: {
+        "passed": False,
+        "confidence": 0.99,
+        "reason": "The required visible state is missing.",
+        "observed": ["Blank area"],
+        "issues": ["Missing result"],
+    })
+    failed = gui_eval_run._run_visual_check(
+        "The state is visible.",
+        execution_events,
+        tmp_path,
+        "run-failed",
+        "case",
+        execution_model="executor-model",
+    )
+    assert failed["status"] == "failed"
+    assert failed["passed"] is False
+    assert failed["reason"] == "The required visible state is missing."
+
+
+def test_visual_judge_error_keeps_whole_report_ungrounded(monkeypatch, tmp_path):
+    from scripts import gui_eval_run
+
+    execution_events = [{"type": "agent_decision", "model": "executor-model"}]
+
+    monkeypatch.setattr(gui_eval_run, "_capture_visual_judge_frame", lambda *_args, **_kwargs: {
+        "scope": "full_desktop",
+        "target_hwnd": None,
+        "region": {"left": 0, "top": 0, "width": 10, "height": 10},
+        "frame_sha256": "b" * 64,
+        "screenshot_path": "terminal.jpg",
+        "image_b64": "YWJj",
+    })
+    monkeypatch.setattr(gui_eval_run, "_visual_judge_settings", lambda: {
+        "enabled": True,
+        "base_url": "https://judge.invalid/v1",
+        "model": "judge-vlm",
+        "verify_min_confidence": 0.8,
+        "configuration_issue": "",
+    })
+
+    def fail_network(*_args):
+        raise TimeoutError("judge timed out")
+
+    monkeypatch.setattr(gui_eval_run, "_request_visual_judge", fail_network)
+    visual = gui_eval_run._run_visual_check(
+        {"criteria": "Visible success", "scope": "full_desktop"},
+        execution_events,
+        tmp_path,
+        "run-timeout",
+        "case",
+        execution_model="executor-model",
+    )
+    report = {}
+    gui_eval_run._record_ground_truth(
+        report,
+        [{"name": "deterministic", "passed": True}, visual],
+    )
+
+    assert visual["status"] == "ungrounded"
+    assert "passed" not in visual
+    assert visual["judge_model"] == "judge-vlm"
+    assert visual["frame_sha256"] == "b" * 64
+    assert "TimeoutError" in visual["reason"]
+    assert report["ground_truth_status"] == "ungrounded"
+    assert "ground_truth_passed" not in report
+
+
+def test_latest_target_hwnd_uses_newest_authoritative_event():
+    from scripts.gui_eval_run import _latest_target_hwnd
+
+    events = [
+        {"type": "visual_feedback", "hwnd": 11},
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_envelope": {"target": {"hwnd": 22}},
+        },
+    ]
+
+    assert _latest_target_hwnd(events) == 22
+
+
+def test_visual_evidence_path_sanitizes_run_id(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    import numpy as np
+
+    from scripts import gui_eval_run
+    from winpilot.utils import screenshot
+    from winpilot.utils.screenshot import Region
+
+    monkeypatch.setattr(screenshot, "virtual_screen_region", lambda: Region(0, 0, 100, 100))
+    monkeypatch.setattr(
+        screenshot,
+        "capture",
+        lambda _region: np.zeros((16, 16, 3), dtype=np.uint8),
+    )
+
+    evidence = gui_eval_run._capture_visual_judge_frame(
+        {"criteria": "visible", "region": [1, 1, 16, 16]},
+        [],
+        tmp_path,
+        "../../outside",
+        "case",
+    )
+
+    path = Path(evidence["screenshot_path"]).resolve()
+    assert path.parent == (tmp_path / "visual_ground_truth").resolve()
+    assert ".." not in path.name
+
+
+def test_execution_model_cannot_judge_itself(monkeypatch, tmp_path):
+    from scripts import gui_eval_run
+
+    monkeypatch.setattr(gui_eval_run, "_capture_visual_judge_frame", lambda *_args, **_kwargs: {
+        "scope": "full_desktop",
+        "target_hwnd": None,
+        "region": {"left": 0, "top": 0, "width": 20, "height": 20},
+        "frame_sha256": "c" * 64,
+        "screenshot_path": "terminal.jpg",
+        "image_b64": "YWJj",
+    })
+    monkeypatch.setattr(gui_eval_run, "_visual_judge_settings", lambda: {
+        "enabled": True,
+        "base_url": "https://judge.invalid/v1",
+        "model": "vendor/same-model:latest",
+        "verify_min_confidence": 0.8,
+        "configuration_issue": "",
+    })
+    called = {"judge": False}
+
+    def should_not_run(*_args):
+        called["judge"] = True
+        raise AssertionError("self judge must not run")
+
+    monkeypatch.setattr(gui_eval_run, "_request_visual_judge", should_not_run)
+    visual = gui_eval_run._run_visual_check(
+        {"criteria": "visible", "scope": "full_desktop"},
+        [{"type": "agent_decision", "model": "same-model"}],
+        tmp_path,
+        "run-self",
+        "case",
+        execution_model="same-model",
+    )
+
+    assert visual["status"] == "ungrounded"
+    assert visual["same_as_execution_model"] is True
+    assert visual["judge_identity"]["canonical_model"] == "same-model"
+    assert called["judge"] is False
+
+
+def test_visual_judge_requires_trace_model_to_match_provenance(monkeypatch, tmp_path):
+    from scripts import gui_eval_run
+
+    called = {"capture": False}
+
+    def should_not_capture(*_args, **_kwargs):
+        called["capture"] = True
+        raise AssertionError("a mismatched execution trace must fail before capture")
+
+    monkeypatch.setattr(gui_eval_run, "_capture_visual_judge_frame", should_not_capture)
+    visual = gui_eval_run._run_visual_check(
+        {"criteria": "visible", "scope": "full_desktop"},
+        [{"type": "agent_decision", "model": "mimo-v2.5-pro"}],
+        tmp_path,
+        "run-model-mismatch",
+        "case",
+        execution_model="mimo-v2.5",
+        execution_identity={
+            "resolved_provider": "openai_compatible",
+            "endpoint_sha256": "d" * 64,
+        },
+    )
+
+    assert visual["status"] == "ungrounded"
+    assert visual["trace_execution_models"] == ["mimo-v2.5-pro"]
+    assert visual["execution_identity"] == {
+        "provider": "openai_compatible",
+        "canonical_model": "mimo-v2.5",
+        "endpoint_sha256": "d" * 64,
+    }
+    assert "stable configured execution model" in visual["reason"]
+    assert called["capture"] is False
+
+
+def test_visual_action_causality_requires_successful_changed_screenshot_pair(monkeypatch):
+    import cv2
+    import numpy as np
+
+    from scripts import gui_eval_run
+
+    before = np.full((80, 100, 3), 255, dtype=np.uint8)
+    after = before.copy()
+    cv2.line(after, (10, 10), (80, 60), (0, 0, 0), 4)
+    ok_before, before_buf = cv2.imencode(".jpg", before)
+    ok_after, after_buf = cv2.imencode(".jpg", after)
+    assert ok_before and ok_after
+    payloads = {
+        "before.jpg": before_buf.tobytes(),
+        "after.jpg": after_buf.tobytes(),
+    }
+    monkeypatch.setattr(
+        gui_eval_run,
+        "_request_trace_screenshot",
+        lambda _base, _token, _run, name: payloads[name],
+    )
+    region = {"left": 10, "top": 20, "width": 100, "height": 80}
+    envelope = {
+        "action_id": "a1",
+        "type": "draw_strokes",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": region},
+        "policy": {"requires_post_frame": True},
+    }
+    events = [
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "screenshot": "run-1/before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": True},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "verified"
+    assert evidence["passed"] is True
+    assert evidence["action_id"] == "a1"
+    assert evidence["changed_pixel_ratio"] > 0.0005
+
+
+def test_visual_action_causality_rejects_async_post_action_capture():
+    from scripts import gui_eval_run
+
+    region = {"left": 10, "top": 20, "width": 100, "height": 80}
+    envelope = {
+        "action_id": "a1",
+        "type": "draw_strokes",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": region},
+        "policy": {"requires_post_frame": True},
+    }
+    events = [
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "screenshot": "run-1/before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "perception_daemon",
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": False},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "ungrounded"
+    assert evidence["successful_action_count"] == 1
+    assert evidence["valid_lifecycle_pair_count"] == 0
+    assert evidence["validation_errors"] == [
+        "a1: result was not synchronously post-captured"
+    ]
+
+
+def test_visual_action_causality_handles_missing_target_region_fail_closed():
+    from scripts import gui_eval_run
+
+    envelope = {
+        "action_id": "a1",
+        "type": "draw_strokes",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": None},
+        "policy": {"requires_post_frame": True},
+    }
+    events = [
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "a1",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "result_meta": {"ok": True, "blocked": False},
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": True},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "ungrounded"
+    assert evidence["successful_action_count"] == 1
+    assert evidence["valid_lifecycle_pair_count"] == 0
+    assert evidence["validation_errors"] == [
+        "a1: immutable target hwnd/region is missing"
+    ]
+
+
+def test_visual_action_causality_does_not_skip_malformed_first_required_action():
+    from scripts import gui_eval_run
+
+    region = {"left": 10, "top": 20, "width": 100, "height": 80}
+    malformed = {
+        "action_id": "bad",
+        "type": "run_action_batch",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": region},
+        "policy": {"requires_post_frame": True},
+    }
+    valid = {
+        "action_id": "good",
+        "type": "draw_strokes",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": region},
+        "policy": {"requires_post_frame": True},
+    }
+    events = [
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "bad",
+            "tool": "draw_strokes",
+            "action_envelope": malformed,
+            "screenshot": "run-1/bad-before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "bad",
+            "tool": "run_action_batch",
+            "action_envelope": malformed,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/bad-after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "good",
+            "tool": "draw_strokes",
+            "action_envelope": valid,
+            "screenshot": "run-1/good-before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "good",
+            "tool": "draw_strokes",
+            "action_envelope": valid,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/good-after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": False},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "ungrounded"
+    assert evidence["successful_action_count"] == 1
+    assert evidence["valid_lifecycle_pair_count"] == 0
+    assert evidence["validation_errors"] == [
+        "bad: tool and envelope type do not match"
+    ]
+
+
+def test_visual_action_causality_rejects_duplicate_action_ids():
+    from scripts import gui_eval_run
+
+    region = {"left": 10, "top": 20, "width": 100, "height": 80}
+    envelope = {
+        "action_id": "duplicate",
+        "type": "draw_strokes",
+        "inputs": {},
+        "target": {"hwnd": 55, "region": region},
+        "policy": {"requires_post_frame": True},
+    }
+    start = {
+        "type": "agent_tool_start",
+        "event_name": "action.started",
+        "action_id": "duplicate",
+        "tool": "draw_strokes",
+        "action_envelope": envelope,
+        "screenshot": "run-1/before.jpg",
+        "screenshot_region": region,
+        "baseline_capture_source": "sync_pre_action",
+    }
+    events = [
+        start,
+        {**start, "screenshot": "run-1/other-before.jpg"},
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "duplicate",
+            "tool": "draw_strokes",
+            "action_envelope": envelope,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": False},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "ungrounded"
+    assert evidence["validation_errors"] == [
+        "duplicate: duplicate action.started events"
+    ]
+
+
+def test_visual_action_causality_uses_nested_batch_child_as_first_finished_pair(monkeypatch):
+    import cv2
+    import numpy as np
+
+    from scripts import gui_eval_run
+
+    before = np.full((80, 100, 3), 255, dtype=np.uint8)
+    after = before.copy()
+    cv2.line(after, (10, 10), (80, 60), (0, 0, 0), 4)
+    ok_before, before_buf = cv2.imencode(".jpg", before)
+    ok_after, after_buf = cv2.imencode(".jpg", after)
+    assert ok_before and ok_after
+    requested = []
+    payloads = {
+        "child-before.jpg": before_buf.tobytes(),
+        "child-after.jpg": after_buf.tobytes(),
+    }
+
+    def screenshot(_base, _token, _run, name):
+        requested.append(name)
+        return payloads[name]
+
+    monkeypatch.setattr(gui_eval_run, "_request_trace_screenshot", screenshot)
+    region = {"left": 10, "top": 20, "width": 100, "height": 80}
+
+    def envelope(action_id):
+        return {
+            "action_id": action_id,
+            "type": "draw_strokes",
+            "inputs": {},
+            "target": {"hwnd": 55, "region": region},
+            "policy": {"requires_post_frame": True},
+        }
+
+    outer = envelope("outer")
+    child = envelope("batch:1")
+    events = [
+        {
+            "type": "agent_tool_start",
+            "event_name": "action.started",
+            "action_id": "outer",
+            "tool": "draw_strokes",
+            "action_envelope": outer,
+            "screenshot": "run-1/outer-before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_batch_action_start",
+            "event_name": "action.started",
+            "action_id": "batch:1",
+            "tool": "draw_strokes",
+            "action_envelope": child,
+            "screenshot": "run-1/child-before.jpg",
+            "screenshot_region": region,
+            "baseline_capture_source": "sync_pre_action",
+        },
+        {
+            "type": "agent_batch_action",
+            "event_name": "action.finished",
+            "action_id": "batch:1",
+            "tool": "draw_strokes",
+            "action_envelope": child,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/child-after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+        {
+            "type": "agent_tool",
+            "event_name": "action.finished",
+            "action_id": "outer",
+            "tool": "draw_strokes",
+            "action_envelope": outer,
+            "result_meta": {"ok": True, "blocked": False},
+            "screenshot": "run-1/outer-after.jpg",
+            "screenshot_region": region,
+            "post_capture_source": "sync_post_action",
+        },
+    ]
+
+    evidence = gui_eval_run._visual_action_causality(
+        events,
+        {"required_actions": ["draw_strokes"], "require_visual_change": True},
+        base_url="http://server.invalid",
+        token="secret",
+        run_id="run-1",
+    )
+
+    assert evidence["status"] == "verified"
+    assert evidence["action_id"] == "batch:1"
+    assert requested == ["child-before.jpg", "child-after.jpg"]
+
+
+def test_visual_action_success_rejects_conflicting_or_terminal_metadata():
+    from scripts.gui_eval_run import _successful_action
+
+    assert _successful_action({"ok": True, "result_meta": {"ok": True}}) is True
+    assert _successful_action({"ok": True, "result_meta": {"ok": False}}) is False
+    assert _successful_action({"result_meta": {"ok": True, "blocked": True}}) is False
+    assert _successful_action({"result_meta": {"ok": True}, "terminal": "fail"}) is False

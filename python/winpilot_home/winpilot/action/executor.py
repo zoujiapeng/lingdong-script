@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import inspect
 import math
 import os
 import re
@@ -214,7 +215,60 @@ def _dry_run() -> bool:
 
 def _no_mouse_steal() -> bool:
     """Experimental: act without hijacking the user's physical cursor."""
-    return bool(CONFIG.get("agent", "no_mouse_steal", default=False))
+    return bool(
+        CONFIG.get("agent", "no_mouse_steal", default=False)
+        or multi_input_cooperation_enabled()
+    )
+
+
+def multi_input_cooperation_enabled() -> bool:
+    """Whether the experimental human/agent input arbitration is enabled.
+
+    Windows exposes one system cursor and one foreground keyboard focus, so
+    this mode cannot create a literal second pointer.  It instead prefers
+    window-message input and refuses to steal keyboard focus from a different
+    foreground window.  The legacy ``no_mouse_steal`` flag remains supported.
+    """
+    return bool(CONFIG.get(
+        "controller", "multi_input_cooperation", default=False,
+    ))
+
+
+def cooperative_input_guard(
+    action: str,
+    hwnd: int | None,
+    *,
+    foreground_hwnd: int | None = None,
+) -> dict[str, Any] | None:
+    """Fail closed before a physical keyboard/focus action can disturb a user."""
+    if not multi_input_cooperation_enabled():
+        return None
+    target = int(hwnd or 0)
+    try:
+        foreground = int(
+            foreground_hwnd
+            if foreground_hwnd is not None
+            else (win32gui.GetForegroundWindow() or 0)
+        )
+    except Exception:
+        foreground = 0
+    if target and foreground == target:
+        return None
+    return {
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "cooperative_input": True,
+        "action": str(action),
+        "target_hwnd": target,
+        "foreground_hwnd": foreground,
+        "error": (
+            "cooperative input blocked a physical focus/keyboard action because "
+            "the target is not the current foreground window; background-safe "
+            "UIA/window-message actions may continue without taking over the "
+            "user's mouse or keyboard"
+        ),
+    }
 
 
 # ---- no-steal helpers: background message clicks + cursor save/restore ----
@@ -226,20 +280,43 @@ _WM = {  # button -> (down, up, mk_flag)
     "right": (win32con.WM_RBUTTONDOWN, win32con.WM_RBUTTONUP, win32con.MK_RBUTTON),
     "middle": (win32con.WM_MBUTTONDOWN, win32con.WM_MBUTTONUP, win32con.MK_MBUTTON),
 }
+_WM_DOUBLE = {
+    "left": win32con.WM_LBUTTONDBLCLK,
+    "right": win32con.WM_RBUTTONDBLCLK,
+    "middle": win32con.WM_MBUTTONDBLCLK,
+}
 
 
-def _post_click(x: int, y: int, button: str, double: bool) -> bool:
+def _same_window_root(candidate: int, expected: int | None) -> bool:
+    if not expected:
+        return True
+    try:
+        candidate_root = int(win32gui.GetAncestor(int(candidate), 2) or candidate)
+        expected_root = int(win32gui.GetAncestor(int(expected), 2) or expected)
+        return candidate_root == expected_root
+    except Exception:
+        return int(candidate or 0) == int(expected or 0)
+
+
+def _post_click(
+    x: int,
+    y: int,
+    button: str,
+    double: bool,
+    expected_hwnd: int | None = None,
+) -> bool:
     """Background click at screen (x,y) via window messages — no cursor move.
     Returns False if no target window resolved (caller falls back)."""
     try:
         target = win32gui.WindowFromPoint((int(x), int(y)))
-        if not target:
+        if not target or not _same_window_root(int(target), expected_hwnd):
             return False
         cx, cy = win32gui.ScreenToClient(target, (int(x), int(y)))
         lparam = (cy << 16) | (cx & 0xFFFF)
         down, up, mk = _WM.get(button, _WM["left"])
-        for _ in range(2 if double else 1):
-            win32gui.PostMessage(target, down, mk, lparam)
+        for index in range(2 if double else 1):
+            down_message = _WM_DOUBLE.get(button, down) if index == 1 else down
+            win32gui.PostMessage(target, down_message, mk, lparam)
             sampled = False
             try:
                 sampled = _sample_pressed_state()
@@ -266,14 +343,100 @@ def _restore_cursor(pos: tuple[int, int]) -> None:
         pass
 
 
+def _restore_cursor_after_agent_input(
+    saved: tuple[int, int],
+    expected_agent_pos: tuple[int, int] | None,
+    hwnd: int | None = None,
+) -> bool:
+    """Restore only if a human did not move the shared cursor mid-action."""
+    if multi_input_cooperation_enabled() and expected_agent_pos is not None:
+        if hwnd is not None and not _cooperative_action_still_owned(
+            hwnd, expected_cursor=expected_agent_pos,
+        ):
+            return False
+        try:
+            current = _cursor_pos()
+            tolerance = max(2, min(80, int(CONFIG.get(
+                "controller",
+                "cooperative_cursor_tolerance_px",
+                default=12,
+            ))))
+            if (
+                abs(int(current[0]) - int(expected_agent_pos[0])) > tolerance
+                or abs(int(current[1]) - int(expected_agent_pos[1])) > tolerance
+            ):
+                BUS.publish(
+                    "cooperative_input",
+                    state="human_cursor_won",
+                    current=list(current),
+                    expected_agent_pos=list(expected_agent_pos),
+                    saved=list(saved),
+                )
+                return False
+        except Exception:
+            return False
+    _restore_cursor(saved)
+    return True
+
+
+def _cooperative_action_still_owned(
+    hwnd: int | None,
+    *,
+    expected_cursor: tuple[int, int] | None = None,
+) -> bool:
+    """Recheck foreground/cursor ownership during a long physical action."""
+    if not multi_input_cooperation_enabled():
+        return True
+    if cooperative_input_guard("in_progress_physical_input", hwnd) is not None:
+        return False
+    if expected_cursor is None:
+        return True
+    try:
+        current = _cursor_pos()
+        tolerance = max(2, min(80, int(CONFIG.get(
+            "controller", "cooperative_cursor_tolerance_px", default=12,
+        ))))
+        if (
+            abs(int(current[0]) - int(expected_cursor[0])) <= tolerance
+            and abs(int(current[1]) - int(expected_cursor[1])) <= tolerance
+        ):
+            return True
+        BUS.publish(
+            "cooperative_input",
+            state="human_cursor_won",
+            phase="physical_action",
+            current=list(current),
+            expected_agent_pos=list(expected_cursor),
+        )
+    except Exception:
+        pass
+    return False
+
+
 # ---------------------------------------------------------------- mouse API
 def _raw_move_mouse(x: int, y: int) -> None:
     user32.SetCursorPos(int(x), int(y))
 
 
 @queued_desktop_action("move_mouse")
-def move_mouse(x: int, y: int) -> None:
+def move_mouse(x: int, y: int, hwnd: int | None = None) -> dict:
+    if multi_input_cooperation_enabled():
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "action": "move_mouse",
+            "error": (
+                "cooperative input does not expose standalone movement of the shared "
+                "system cursor; use a background-safe click or one atomic guarded action"
+            ),
+        }
+    cooperative_block = cooperative_input_guard("move_mouse", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     _raw_move_mouse(x, y)
+    return {"ok": True, "x": int(x), "y": int(y)}
 
 
 @queued_desktop_action("click")
@@ -298,26 +461,58 @@ def click(
     # Replacing that mouse-down with a background window message would break
     # the move -> confirm -> click atomicity and can target a stale child HWND.
     if _no_mouse_steal() and not prepositioned:
-        if _post_click(x, y, button, double):
+        if multi_input_cooperation_enabled() and not hwnd:
+            return cooperative_input_guard("click", hwnd) or {
+                "ok": False,
+                "blocked": True,
+                "cooperative_input": True,
+            }
+        if _post_click(x, y, button, double, expected_hwnd=hwnd):
             BUS.publish("action", action="click", x=x, y=y, button=button,
                         double=double, via="post_message")
             return {"ok": True, "x": x, "y": y, "via": "post_message"}
         # fallback: must use SendInput, but restore the user's cursor afterwards
+        cooperative_block = cooperative_input_guard("click", hwnd)
+        if cooperative_block is not None:
+            return cooperative_block
         saved = _cursor_pos()
         try:
-            _raw_click(x, y, button, double, hwnd)
+            completed = _raw_click(x, y, button, double, hwnd)
         finally:
-            _restore_cursor(saved)
+            cursor_restored = _restore_cursor_after_agent_input(
+                saved, (int(x), int(y)), hwnd,
+            )
+        if completed is False:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "cursor_restored": cursor_restored,
+                "error": "click stopped because the user took foreground/cursor ownership",
+            }
         BUS.publish("action", action="click", x=x, y=y, button=button,
                     double=double, via="sendinput_restored")
         return {
             "ok": True, "x": x, "y": y, "via": "sendinput_restored",
             "prepositioned": bool(prepositioned),
+            "cursor_restored": cursor_restored,
         }
     if prepositioned:
-        _raw_click(x, y, button, double, hwnd, prepositioned=True)
+        cooperative_block = cooperative_input_guard("visual_servo_click", hwnd)
+        if cooperative_block is not None:
+            return cooperative_block
+        completed = _raw_click(x, y, button, double, hwnd, prepositioned=True)
     else:
-        _raw_click(x, y, button, double, hwnd)
+        completed = _raw_click(x, y, button, double, hwnd)
+    if completed is False:
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "error": "click stopped because the user took foreground/cursor ownership",
+        }
     BUS.publish("action", action="click", x=x, y=y, button=button, double=double)
     return {"ok": True, "x": x, "y": y, "prepositioned": bool(prepositioned)}
 
@@ -329,8 +524,9 @@ def _raw_click(
     double: bool,
     hwnd: int | None,
     prepositioned: bool = False,
-) -> None:
-    if hwnd and not prepositioned:
+) -> bool:
+    cooperative_mode = multi_input_cooperation_enabled()
+    if hwnd and not prepositioned and not cooperative_mode:
         _raw_focus_window(hwnd)
     if prepositioned:
         current_x, current_y = _cursor_pos()
@@ -340,6 +536,10 @@ def _raw_click(
     else:
         _raw_move_mouse(x, y)
         time.sleep(0.05)
+    if cooperative_mode and not _cooperative_action_still_owned(
+        hwnd, expected_cursor=(int(x), int(y)),
+    ):
+        return False
     if button == "left":
         down, up = win32con.MOUSEEVENTF_LEFTDOWN, win32con.MOUSEEVENTF_LEFTUP
     elif button == "right":
@@ -349,16 +549,33 @@ def _raw_click(
     else:
         raise ValueError(f"未知鼠标键: {button}")
     for _ in range(2 if double else 1):
+        if cooperative_mode and not _cooperative_action_still_owned(
+            hwnd, expected_cursor=(int(x), int(y)),
+        ):
+            return False
         _send_inputs([_mouse_input(down)])
         sampled = False
+        still_owned = True
         try:
             sampled = _sample_pressed_state()
+            if cooperative_mode:
+                still_owned = _cooperative_action_still_owned(
+                    hwnd, expected_cursor=(int(x), int(y)),
+                )
         finally:
             _send_inputs([_mouse_input(up)])
+        if cooperative_mode and (
+            not still_owned
+            or not _cooperative_action_still_owned(
+                hwnd, expected_cursor=(int(x), int(y)),
+            )
+        ):
+            return False
         if sampled:
             _settle_after_release()
         if double:
             time.sleep(0.06)
+    return True
 
 
 def _abs_mouse_move(x: int, y: int) -> None:
@@ -397,32 +614,54 @@ def _emit_move(x: int, y: int) -> None:
     _abs_mouse_move(x, y)
 
 
-def _stroke_path(waypoints: list[tuple[int, int]], duration_s: float) -> None:
+def _stroke_path(
+    waypoints: list[tuple[int, int]],
+    duration_s: float,
+    *,
+    hwnd: int | None = None,
+) -> bool:
     """Press at the first waypoint, move through the path, release at the end.
     Shared by drag() and draw_strokes() so stroke registration is identical."""
+    if not _cooperative_action_still_owned(hwnd):
+        return False
     _abs_mouse_move(*waypoints[0])  # absolute move so the press lands as real input
     time.sleep(0.04)
+    expected_cursor = waypoints[0]
+    if not _cooperative_action_still_owned(
+        hwnd, expected_cursor=expected_cursor,
+    ):
+        return False
+    pressed = False
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
+    pressed = True
     time.sleep(0.02)  # let the app register the press before moving
 
-    seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
-                for a, b in zip(waypoints, waypoints[1:])]
-    total = max(sum(seg_lens), 1.0)
-    for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
-        # Generated circles and ellipses are already densely sampled. A
-        # minimum of four interpolated events per segment multiplied a
-        # 40-point ellipse into ~160 SendInput calls and made one primitive
-        # take over a second. Keep at most ~8px between events, but never
-        # resample an already-short segment.
-        steps = max(1, int(math.ceil(seg / 8.0)))
-        seg_dur = duration_s * (seg / total)
-        for i in range(1, steps + 1):
-            _emit_move(int(a[0] + (b[0] - a[0]) * i / steps),
-                       int(a[1] + (b[1] - a[1]) * i / steps))
-            time.sleep(max(0.002, seg_dur / steps))
-
-    time.sleep(0.015)
-    _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
+    try:
+        seg_lens = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+                    for a, b in zip(waypoints, waypoints[1:])]
+        total = max(sum(seg_lens), 1.0)
+        for (a, b), seg in zip(zip(waypoints, waypoints[1:]), seg_lens):
+            # Keep at most ~8px between events without resampling short paths.
+            steps = max(1, int(math.ceil(seg / 8.0)))
+            seg_dur = duration_s * (seg / total)
+            for i in range(1, steps + 1):
+                if not _cooperative_action_still_owned(
+                    hwnd, expected_cursor=expected_cursor,
+                ):
+                    return False
+                expected_cursor = (
+                    int(a[0] + (b[0] - a[0]) * i / steps),
+                    int(a[1] + (b[1] - a[1]) * i / steps),
+                )
+                _emit_move(*expected_cursor)
+                time.sleep(max(0.002, seg_dur / steps))
+        time.sleep(0.015)
+        return _cooperative_action_still_owned(
+            hwnd, expected_cursor=expected_cursor,
+        )
+    finally:
+        if pressed:
+            _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
 
 
 @queued_desktop_action("drag")
@@ -437,7 +676,11 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    if hwnd:
+    cooperative_block = cooperative_input_guard("drag", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+    cooperative_mode = multi_input_cooperation_enabled()
+    if hwnd and not cooperative_mode:
         _raw_focus_window(hwnd)
         time.sleep(0.05)
     # drag inherently needs a moving cursor; in no-steal mode we still snap the
@@ -454,12 +697,27 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
                 continue
     waypoints.append((int(x2), int(y2)))
 
-    _stroke_path(waypoints, duration_s)
+    completed = (
+        _stroke_path(waypoints, duration_s, hwnd=hwnd)
+        if cooperative_mode
+        else (_stroke_path(waypoints, duration_s) is not False)
+    )
     if saved:
-        _restore_cursor(saved)
+        cursor_restored = _restore_cursor_after_agent_input(
+            saved, waypoints[-1], hwnd,
+        )
     BUS.publish("action", action="drag", frm=[x1, y1], to=[x2, y2],
                 waypoints=len(waypoints))
-    return {"ok": True}
+    result = {"ok": bool(completed)}
+    if not completed:
+        result.update({
+            "blocked": True,
+            "cooperative_input": True,
+            "error": "drag stopped because the user took foreground/cursor ownership",
+        })
+    if saved:
+        result["cursor_restored"] = cursor_restored
+    return result
 
 
 @queued_desktop_action("draw_strokes")
@@ -468,17 +726,23 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
     """Draw multiple SEPARATE strokes in one call, lifting the pen between them.
 
     Each stroke is a polyline [[x,y],...]; the pen presses at its first point,
-    moves through the rest, and releases — so strokes don't connect. This lets
-    the agent commit a whole figure (face + ears + eyes + whiskers) from a
-    single observation instead of one LLM round-trip per stroke. Returns the
+    moves through the rest, and releases — so strokes don't connect. Multiple
+    explicitly grounded paths can be committed in one transaction. Returns the
     count of strokes actually drawn (those with >= 2 valid points)."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    if hwnd:
+    cooperative_block = cooperative_input_guard("draw_strokes", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+    cooperative_mode = multi_input_cooperation_enabled()
+    if hwnd and not cooperative_mode:
         _raw_focus_window(hwnd)
         time.sleep(0.05)
     saved = _cursor_pos() if _no_mouse_steal() else None
     drawn = 0
+    attempted = 0
+    interrupted = False
+    last_point: tuple[int, int] | None = None
     for stroke in strokes or []:
         waypoints: list[tuple[int, int]] = []
         for p in stroke or []:
@@ -488,25 +752,76 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
                 continue
         if len(waypoints) < 2:
             continue
-        _stroke_path(waypoints, duration_s)
+        if (
+            cooperative_mode
+            and last_point is not None
+            and not _cooperative_action_still_owned(
+                hwnd, expected_cursor=last_point,
+            )
+        ):
+            interrupted = True
+            break
+        attempted += 1
+        completed = (
+            _stroke_path(waypoints, duration_s, hwnd=hwnd)
+            if cooperative_mode
+            else (_stroke_path(waypoints, duration_s) is not False)
+        )
+        if not completed:
+            interrupted = True
+            break
         drawn += 1
+        last_point = waypoints[-1]
         time.sleep(0.015)  # small gap so the app finalizes each stroke
+    all_completed = attempted > 0 and not interrupted and drawn == attempted
     if saved:
-        _restore_cursor(saved)
+        # An interrupted cooperative stroke means the user took ownership.
+        # Never snap the shared cursor back in that case, even when interruption
+        # happened before the first completed path and last_point is still None.
+        cursor_restored = (
+            _restore_cursor_after_agent_input(saved, last_point, hwnd)
+            if all_completed else False
+        )
     BUS.publish("action", action="draw_strokes", strokes=drawn)
-    return {"ok": True, "strokes_drawn": drawn}
+    result = {"ok": all_completed, "strokes_drawn": drawn}
+    if not all_completed:
+        result.update({"verified": False, "blocked": True})
+        if attempted == 0:
+            result.update({
+                "invalid_geometry": True,
+                "error": "draw_strokes contained no executable stroke with at least two valid points",
+            })
+        else:
+            result.update({
+                "cooperative_input": True,
+                "error": "drawing stopped because the user took foreground/cursor ownership",
+            })
+    if saved:
+        result["cursor_restored"] = cursor_restored
+    return result
 
 
 @queued_desktop_action("scroll")
-def scroll(x: int, y: int, amount: int) -> dict:
+def scroll(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+) -> dict:
     """amount: positive=up, negative=down; in notches."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
     if _no_mouse_steal():
+        if multi_input_cooperation_enabled() and not hwnd:
+            return cooperative_input_guard("scroll", hwnd) or {
+                "ok": False,
+                "blocked": True,
+                "cooperative_input": True,
+            }
         # WM_MOUSEWHEEL to the window under the point — no cursor move.
         try:
             target = win32gui.WindowFromPoint((int(x), int(y)))
-            if target:
+            if target and _same_window_root(int(target), hwnd):
                 wparam = (int(amount) * 120) << 16
                 lparam = (int(y) << 16) | (int(x) & 0xFFFF)  # screen coords for wheel
                 win32gui.PostMessage(target, win32con.WM_MOUSEWHEEL, wparam, lparam)
@@ -515,16 +830,44 @@ def scroll(x: int, y: int, amount: int) -> dict:
                 return {"ok": True, "via": "post_message"}
         except Exception as exc:
             logger.debug("post scroll 失败: %s", exc)
+        cooperative_block = cooperative_input_guard("scroll", hwnd)
+        if cooperative_block is not None:
+            return cooperative_block
         saved = _cursor_pos()
+        completed = True
         try:
             _raw_move_mouse(x, y)
             time.sleep(0.04)
-            _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
+            if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
+                hwnd, expected_cursor=(int(x), int(y)),
+            ):
+                completed = False
+            else:
+                _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
+                if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
+                    hwnd, expected_cursor=(int(x), int(y)),
+                ):
+                    completed = False
         finally:
-            _restore_cursor(saved)
+            cursor_restored = _restore_cursor_after_agent_input(
+                saved, (int(x), int(y)), hwnd,
+            )
+        if not completed:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "cursor_restored": cursor_restored,
+                "error": "scroll stopped because the user took foreground/cursor ownership",
+            }
         BUS.publish("action", action="scroll", x=x, y=y, amount=amount,
                     via="sendinput_restored")
-        return {"ok": True, "via": "sendinput_restored"}
+        return {
+            "ok": True,
+            "via": "sendinput_restored",
+            "cursor_restored": cursor_restored,
+        }
     _raw_move_mouse(x, y)
     time.sleep(0.04)
     _send_inputs([_mouse_input(win32con.MOUSEEVENTF_WHEEL, data=amount * 120 & 0xFFFFFFFF)])
@@ -533,7 +876,12 @@ def scroll(x: int, y: int, amount: int) -> dict:
 
 
 @queued_desktop_action("scroll_retry")
-def scroll_sendinput_restored(x: int, y: int, amount: int) -> dict:
+def scroll_sendinput_restored(
+    x: int,
+    y: int,
+    amount: int,
+    hwnd: int | None = None,
+) -> dict:
     """Retry a wheel action through physical SendInput without stealing the cursor.
 
     ``WM_MOUSEWHEEL`` is intentionally the first choice in no-mouse-steal mode,
@@ -543,18 +891,42 @@ def scroll_sendinput_restored(x: int, y: int, amount: int) -> dict:
     """
     if _dry_run():
         return {"ok": True, "dry_run": True, "via": "sendinput_restored"}
+    cooperative_block = cooperative_input_guard("scroll_retry", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     saved = _cursor_pos()
+    completed = True
     try:
         _raw_move_mouse(int(x), int(y))
         time.sleep(0.04)
-        _send_inputs([
-            _mouse_input(
-                win32con.MOUSEEVENTF_WHEEL,
-                data=int(amount) * 120 & 0xFFFFFFFF,
-            )
-        ])
+        if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
+            hwnd, expected_cursor=(int(x), int(y)),
+        ):
+            completed = False
+        else:
+            _send_inputs([
+                _mouse_input(
+                    win32con.MOUSEEVENTF_WHEEL,
+                    data=int(amount) * 120 & 0xFFFFFFFF,
+                )
+            ])
+            if multi_input_cooperation_enabled() and not _cooperative_action_still_owned(
+                hwnd, expected_cursor=(int(x), int(y)),
+            ):
+                completed = False
     finally:
-        _restore_cursor(saved)
+        cursor_restored = _restore_cursor_after_agent_input(
+            saved, (int(x), int(y)), hwnd,
+        )
+    if not completed:
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "cursor_restored": cursor_restored,
+            "error": "scroll retry stopped because the user took foreground/cursor ownership",
+        }
     BUS.publish(
         "action",
         action="scroll_retry",
@@ -563,7 +935,11 @@ def scroll_sendinput_restored(x: int, y: int, amount: int) -> dict:
         amount=int(amount),
         via="sendinput_restored",
     )
-    return {"ok": True, "via": "sendinput_restored"}
+    return {
+        "ok": True,
+        "via": "sendinput_restored",
+        "cursor_restored": cursor_restored,
+    }
 
 
 # ------------------------------------------------------------- keyboard API
@@ -582,30 +958,80 @@ def type_text(
     if _dry_run():
         return {"ok": True, "dry_run": True}
 
-    def _refocus_if_needed(i: int) -> None:
+    cooperative_block = cooperative_input_guard("type_text", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+
+    def _refocus_if_needed(i: int) -> bool:
+        if hwnd and multi_input_cooperation_enabled():
+            try:
+                return int(win32gui.GetForegroundWindow() or 0) == int(hwnd)
+            except Exception:
+                return False
         if hwnd and i > 0 and i % 8 == 0:
             if win32gui.GetForegroundWindow() != hwnd:
                 _raw_focus_window(hwnd)
                 time.sleep(0.08)
+        return True
 
     if _should_type_via_vk(text):
         typed = 0
         for char in text:
-            _refocus_if_needed(typed)
+            if not _refocus_if_needed(typed):
+                return {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "cooperative_input": True,
+                    "typed": typed,
+                    "requested": len(text),
+                    "error": "foreground changed while typing; stopped instead of stealing keyboard focus",
+                }
             if numeric_keypad and char in _NUMERIC_OPERATOR_VKS:
                 _press_vk_code(_NUMERIC_OPERATOR_VKS[char])
             elif not _press_char_vk(char):
                 break
             typed += 1
+            if (
+                multi_input_cooperation_enabled()
+                and not _cooperative_action_still_owned(hwnd)
+            ):
+                return {
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "cooperative_input": True,
+                    "typed": typed,
+                    "requested": len(text),
+                    "error": (
+                        "foreground changed immediately after a typed key; "
+                        "stopped without sending further input"
+                    ),
+                }
             time.sleep(max(interval_s, 0.04 if numeric_keypad else 0.03))
         via = "numeric_keypad" if numeric_keypad else "vk"
         BUS.publish("action", action="type_text", length=typed, via=via)
         return {"ok": typed == len(text), "typed": typed,
                 "requested": len(text), "via": via}
-    for i, char in enumerate(text):
-        _refocus_if_needed(i)
+    typed = 0
+    for char in text:
+        if not _refocus_if_needed(typed):
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "typed": typed,
+                "requested": len(text),
+                "error": "foreground changed while typing; stopped instead of stealing keyboard focus",
+            }
         if char == "\n":
-            _raw_press_keys(["enter"])
+            key_result = _raw_press_keys_for_target(["enter"], hwnd)
+            if key_result.get("ok") is not True:
+                key_result.setdefault("typed", typed)
+                key_result.setdefault("requested", len(text))
+                return key_result
+            typed += 1
             continue
         code = ord(char)
         if code > 0xFFFF:  # surrogate pair for emoji etc.
@@ -618,30 +1044,107 @@ def type_text(
                 _key_input(scan=unit, flags=_KEYEVENTF_UNICODE),
                 _key_input(scan=unit, flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
             ])
+        typed += 1
+        if (
+            multi_input_cooperation_enabled()
+            and not _cooperative_action_still_owned(hwnd)
+        ):
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "typed": typed,
+                "requested": len(text),
+                "error": (
+                    "foreground changed immediately after a typed character; "
+                    "stopped without sending further input"
+                ),
+            }
         time.sleep(interval_s)
-    BUS.publish("action", action="type_text", length=len(text))
-    return {"ok": True, "typed": len(text)}
+    BUS.publish("action", action="type_text", length=typed)
+    return {"ok": True, "typed": typed}
 
 
-def _raw_press_keys(keys: list[str]) -> dict:
+def _raw_press_keys(keys: list[str], hwnd: int | None = None) -> dict:
     vks = [_vk_of(k) for k in keys]
     downs, ups = [], []
     for vk in vks:
         flags = _KEYEVENTF_EXTENDEDKEY if vk in _EXTENDED_VKS else 0
         downs.append(_key_input(vk=vk, flags=flags))
         ups.append(_key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP))
-    _send_inputs(downs)
-    time.sleep(0.03)
-    _send_inputs(list(reversed(ups)))
+    if multi_input_cooperation_enabled():
+        if not _cooperative_action_still_owned(hwnd):
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "keys": keys,
+                "error": "foreground ownership changed before the key chord",
+            }
+        pressed = False
+        still_owned = True
+        try:
+            _send_inputs(downs)
+            pressed = True
+            time.sleep(0.03)
+            still_owned = _cooperative_action_still_owned(hwnd)
+        finally:
+            if pressed:
+                _send_inputs(list(reversed(ups)))
+        still_owned = bool(
+            still_owned and _cooperative_action_still_owned(hwnd)
+        )
+        if not still_owned:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "cooperative_input": True,
+                "keys": keys,
+                "error": (
+                    "foreground ownership changed during the key chord; "
+                    "the agent released its keys and stopped"
+                ),
+            }
+    else:
+        _send_inputs(downs)
+        time.sleep(0.03)
+        _send_inputs(list(reversed(ups)))
     return {"ok": True, "keys": keys}
 
 
+def _raw_press_keys_for_target(keys: list[str], hwnd: int | None) -> dict:
+    """Pass target ownership to modern executors while preserving adapters."""
+    try:
+        parameters = inspect.signature(_raw_press_keys).parameters.values()
+        accepts_hwnd = any(
+            parameter.name == "hwnd"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_hwnd = True
+    result = (
+        _raw_press_keys(keys, hwnd=hwnd)
+        if accepts_hwnd
+        else _raw_press_keys(keys)
+    )
+    return result if isinstance(result, dict) else {"ok": True, "keys": keys}
+
+
 @queued_desktop_action("press_keys")
-def press_keys(keys: list[str]) -> dict:
+def press_keys(keys: list[str], hwnd: int | None = None) -> dict:
     """Press a chord, e.g. ["ctrl","s"] or single ["enter"]."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    _raw_press_keys(keys)
+    cooperative_block = cooperative_input_guard("hotkey", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+    result = _raw_press_keys_for_target(keys, hwnd)
+    if result.get("ok") is not True:
+        return result
     BUS.publish("action", action="hotkey", keys=keys)
     return {"ok": True, "keys": keys}
 
@@ -674,6 +1177,9 @@ def _raw_focus_window(hwnd: int) -> dict:
 
 @queued_desktop_action("focus_window")
 def focus_window(hwnd: int) -> dict:
+    cooperative_block = cooperative_input_guard("focus_window", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     return _raw_focus_window(hwnd)
 
 
@@ -835,11 +1341,14 @@ def paste_image_file(path: str, hwnd: int | None = None) -> dict:
         return {"ok": False, "error": f"image file not found: {image_path}"}
     if image_path.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
         return {"ok": False, "error": "paste_image_file requires a PNG, JPEG, BMP, or WebP file"}
+    cooperative_block = cooperative_input_guard("paste_image_file", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     try:
         import win32clipboard
 
         dib, width, height = _image_file_to_dib(image_path)
-        if hwnd:
+        if hwnd and not multi_input_cooperation_enabled():
             focused = _raw_focus_window(int(hwnd))
             if not focused.get("ok"):
                 return {"ok": False, "error": focused.get("error", "failed to focus target window")}
@@ -860,7 +1369,12 @@ def paste_image_file(path: str, hwnd: int | None = None) -> dict:
             win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
         finally:
             win32clipboard.CloseClipboard()
-        _raw_press_keys(["ctrl", "v"])
+        cooperative_block = cooperative_input_guard("paste_image_file", hwnd)
+        if cooperative_block is not None:
+            return cooperative_block
+        chord_result = _raw_press_keys_for_target(["ctrl", "v"], hwnd)
+        if chord_result.get("ok") is not True:
+            return chord_result
         BUS.publish(
             "action",
             action="paste_image_file",
@@ -881,11 +1395,16 @@ def paste_image_file(path: str, hwnd: int | None = None) -> dict:
 
 
 @queued_desktop_action("clipboard_paste", scope="physical_clipboard")
-def clipboard_paste() -> dict:
+def clipboard_paste(hwnd: int | None = None) -> dict:
     """Paste from clipboard via Ctrl+V."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
-    _raw_press_keys(["ctrl", "v"])
+    cooperative_block = cooperative_input_guard("clipboard_paste", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
+    chord_result = _raw_press_keys_for_target(["ctrl", "v"], hwnd)
+    if chord_result.get("ok") is not True:
+        return chord_result
     BUS.publish("action", action="clipboard_paste")
     return {"ok": True}
 
@@ -903,10 +1422,25 @@ def cursor_position() -> dict:
 
 
 @queued_desktop_action("mouse_down")
-def mouse_down(button: str = "left") -> dict:
+def mouse_down(button: str = "left", hwnd: int | None = None) -> dict:
     """Press and hold a mouse button at the current cursor position."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    if multi_input_cooperation_enabled():
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "action": "mouse_down",
+            "error": (
+                "cooperative input forbids a mouse button remaining globally held across "
+                "tool/model turns; use atomic drag or draw_strokes instead"
+            ),
+        }
+    cooperative_block = cooperative_input_guard("mouse_down", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     if button == "left":
         _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
     elif button == "right":
@@ -927,6 +1461,20 @@ def mouse_up(button: str = "left") -> dict:
     """Release a mouse button at the current cursor position."""
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    with _held_mouse_lock:
+        owned_by_agent = button in _held_mouse_buttons
+    if multi_input_cooperation_enabled() and not owned_by_agent:
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "action": "mouse_up",
+            "error": (
+                "cooperative input will not release a globally held mouse button "
+                "unless this agent previously pressed that button"
+            ),
+        }
     if button == "left":
         _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTUP)])
     elif button == "right":
@@ -1019,7 +1567,11 @@ def screenshot_base64(display_id: int | None = None,
 # Ported from cc-haha runtime/win_helper.py hold_keys()
 
 @queued_desktop_action("hold_keys")
-def hold_keys(keys: list[str], duration_ms: int) -> dict:
+def hold_keys(
+    keys: list[str],
+    duration_ms: int,
+    hwnd: int | None = None,
+) -> dict:
     """Press and hold a chord for ``duration_ms`` then release.
 
     Useful for games / accelerated UI where a key must stay down (e.g. hold
@@ -1027,6 +1579,9 @@ def hold_keys(keys: list[str], duration_ms: int) -> dict:
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    cooperative_block = cooperative_input_guard("hold_keys", hwnd)
+    if cooperative_block is not None:
+        return cooperative_block
     try:
         vks = [_vk_of(k) for k in keys]
     except ValueError as exc:
@@ -1037,10 +1592,28 @@ def hold_keys(keys: list[str], duration_ms: int) -> dict:
         downs.append(_key_input(vk=vk, flags=flags))
         ups.append(_key_input(vk=vk, flags=flags | _KEYEVENTF_KEYUP))
     _send_inputs(downs)
+    interrupted = False
     try:
-        time.sleep(max(int(duration_ms), 0) / 1000.0)
+        remaining_s = max(int(duration_ms), 0) / 1000.0
+        while remaining_s > 0:
+            interval = min(0.025, remaining_s)
+            time.sleep(interval)
+            remaining_s -= interval
+            if not _cooperative_action_still_owned(hwnd):
+                interrupted = True
+                break
     finally:
         _send_inputs(list(reversed(ups)))
+    if interrupted:
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "keys": keys,
+            "duration_ms": duration_ms,
+            "error": "key hold stopped because foreground ownership changed",
+        }
     BUS.publish("action", action="hold_keys", keys=keys, duration_ms=duration_ms)
     return {"ok": True, "keys": keys, "duration_ms": duration_ms}
 

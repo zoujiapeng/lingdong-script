@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 
-def test_revise_plan_drops_unrequested_drawing_save_step():
+def test_revise_plan_preserves_model_steps_without_drawing_keyword_filtering():
     from winpilot.agent.tools import ToolSession
 
     session = ToolSession(task="\u5728\u753b\u677f\u4e0a\u753b\u4e00\u53ea\u5f88\u7ec6\u8282\u7684\u732b")
@@ -12,7 +12,11 @@ def test_revise_plan_drops_unrequested_drawing_save_step():
     ]})
 
     goals = [str(step.get("goal") or "") for step in session.plan.steps]
-    assert goals == ["draw the cat", "verify the visible details"]
+    assert goals == [
+        "draw the cat",
+        "save the drawing as a PNG",
+        "verify the visible details",
+    ]
 
 
 def test_revise_plan_keeps_requested_drawing_save_step():
@@ -324,7 +328,13 @@ def test_revise_plan_restores_source_progress_from_working_set():
         "Save the WPS Writer document",
     ]})
 
-    assert [step["done"] for step in session.plan.steps] == [True, True, True, True, False, False]
+    assert [step["done"] for step in session.plan.steps] == [
+        True, True, True, True, False, False
+    ]
+    assert [step["goal"] for step in session.plan.steps][-2:] == [
+        "Create a WPS Writer document",
+        "Save the WPS Writer document",
+    ]
     assert "[1, 2, 3, 4]" in result.text
 
 
@@ -428,7 +438,7 @@ def test_complete_subgoal_rejects_pending_unverified_action_without_check():
     assert "2 GUI action" in result.text
 
 
-def test_complete_subgoal_ignores_invented_drawing_file_check_without_requested_path(monkeypatch):
+def test_complete_subgoal_keeps_valid_file_check_without_keyword_filtering(monkeypatch):
     import winpilot.agent.tools as tools_mod
     from winpilot.agent import planner
     from winpilot.agent.tools import ToolSession
@@ -447,8 +457,8 @@ def test_complete_subgoal_ignores_invented_drawing_file_check_without_requested_
 
     result = session._t_complete_subgoal({"index": 1})
 
-    assert session.plan.steps[0]["done"] is True
-    assert result.terminal == "done"
+    assert session.plan.steps[0]["done"] is False
+    assert result.terminal is None
 
 
 def test_complete_subgoal_keeps_requested_drawing_file_check(monkeypatch):
@@ -504,4 +514,165 @@ def test_complete_subgoal_ignores_winpilot_schedule_windows_task_file_check(monk
 
     assert session.plan.steps[0]["done"] is True
     assert result.terminal == "done"
+
+
+def test_revise_plan_mutates_live_list_and_preserves_unrelated_completion():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Research sources and write a concise answer")
+    session.plan = planner.Plan(["open source", "collect facts", "write answer"])
+    session.plan.complete(1)
+
+    result = session._t_revise_plan({"operations": [
+        {"op": "update", "index": 2, "goal": "collect cited facts"},
+        {"op": "add", "index": 3, "goal": "cross-check facts"},
+        {"op": "move", "index": 4, "to_index": 3},
+        {"op": "remove", "index": 4},
+    ]})
+
+    assert [step["goal"] for step in session.plan.steps] == [
+        "open source", "collect cited facts", "write answer"
+    ]
+    assert [step["done"] for step in session.plan.steps] == [True, False, False]
+    assert "Plan updated" in result.text
+
+
+def test_revise_plan_replacement_keeps_exact_completed_items():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Research and summarize")
+    session.plan = planner.Plan(["collect facts", "write summary"])
+    session.plan.complete(1)
+
+    session._t_revise_plan({"steps": [
+        "collect facts", "cross-check facts", "write summary"
+    ]})
+
+    assert [step["done"] for step in session.plan.steps] == [True, False, False]
+
+
+def test_revise_plan_replacement_preserves_only_completed_duplicate_occurrences():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Collect repeated samples and summarize")
+    session.plan = planner.Plan(["collect sample", "collect sample", "summarize"])
+    session.plan.complete(1)
+
+    session._t_revise_plan({"steps": [
+        "collect sample", "collect sample", "summarize"
+    ]})
+
+    assert [step["done"] for step in session.plan.steps] == [True, False, False]
+
+
+def test_revise_plan_replacement_does_not_inherit_done_when_check_changes():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Verify the requested output")
+    session.plan = planner.Plan([{
+        "goal": "verify result",
+        "check": {"file_exists": r"C:\Users\Public\old.txt"},
+    }])
+    session.plan.complete(1)
+
+    session._t_revise_plan({"steps": [{
+        "goal": "verify result",
+        "check": {"file_exists": r"C:\Users\Public\new.txt"},
+    }]})
+
+    assert session.plan.steps == [{
+        "goal": "verify result",
+        "done": False,
+        "check": {"file_exists": r"C:\Users\Public\new.txt"},
+    }]
+
+
+def test_revise_plan_steps_empty_explicitly_clears_live_plan():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Adapt the todo list to current evidence")
+    session.plan = planner.Plan(["obsolete step", "another obsolete step"])
+
+    result = session._t_revise_plan({"steps": []})
+
+    assert session.plan.steps == []
+    assert session.plan.active() is False
+    assert "Plan updated" in result.text
+
+
+def test_revise_plan_reopen_invalidates_only_selected_completed_item():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Recheck evidence after the UI changes")
+    session.plan = planner.Plan(["verify first state", "verify second state"])
+    session.plan.complete(1)
+    session.plan.complete(2)
+
+    result = session._t_revise_plan({"operations": [
+        {"op": "reopen", "index": 1, "reason": "the visible state changed"},
+    ]})
+
+    assert [step["done"] for step in session.plan.steps] == [False, True]
+    assert "reopened item 1" in result.text
+    assert "the visible state changed" in result.text
+
+
+def test_revise_plan_operation_indices_reject_bool_and_string_atomically():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Keep mutations type-safe")
+    session.plan = planner.Plan(["first", "second"])
+
+    bool_result = session._t_revise_plan({"operations": [
+        {"op": "remove", "index": True},
+    ]})
+    string_result = session._t_revise_plan({"operations": [
+        {"op": "move", "index": 1, "to_index": "2"},
+    ]})
+
+    assert "1-based integer" in bool_result.text
+    assert "1-based integer" in string_result.text
+    assert [step["goal"] for step in session.plan.steps] == ["first", "second"]
+
+
+def test_revise_plan_rejects_mixed_or_invalid_mutations_atomically():
+    from winpilot.agent import planner
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Do two steps")
+    session.plan = planner.Plan(["first", "second"])
+
+    mixed = session._t_revise_plan({
+        "steps": ["replacement"],
+        "operations": [{"op": "add", "goal": "third"}],
+    })
+    invalid = session._t_revise_plan({"operations": [
+        {"op": "add", "goal": "temporary"},
+        {"op": "remove", "index": 99},
+    ]})
+
+    assert "exactly one" in mixed.text
+    assert "rejected atomically" in invalid.text
+    assert [step["goal"] for step in session.plan.steps] == ["first", "second"]
+
+
+def test_revise_plan_invalid_operations_preserve_absent_plan_atomically():
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="Do one step")
+    assert session.plan is None
+
+    result = session._t_revise_plan({"operations": [
+        {"op": "remove", "index": 1},
+    ]})
+
+    assert "rejected atomically" in result.text
+    assert session.plan is None
 

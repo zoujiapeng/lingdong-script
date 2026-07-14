@@ -8,9 +8,10 @@ from pathlib import Path
 
 from ..action import executor
 from ..action.verify import _match_visible_text
+from ..config import CONFIG
 from ..perception import vision_cv
 from ..utils.screenshot import Region, capture, desktop_geometry, screen_size, window_region
-from .interaction_tools import normalize_key_sequence
+from .interaction_tools import _call_with_optional_hwnd, normalize_key_sequence
 from .tool_result import ToolResult
 
 
@@ -26,7 +27,10 @@ class DesktopToolMixin:
         return ToolResult(self._fmt(result))
 
     def _t_clipboard_paste(self, _args: dict) -> ToolResult:
-        result = executor.clipboard_paste()
+        target = getattr(self, "_action_hwnd", lambda: None)()
+        result = _call_with_optional_hwnd(
+            executor.clipboard_paste, hwnd=target,
+        )
         return ToolResult(self._fmt(result))
 
     def _t_cursor_position(self, _args: dict) -> ToolResult:
@@ -35,7 +39,10 @@ class DesktopToolMixin:
 
     def _t_mouse_down(self, args: dict) -> ToolResult:
         button = str(args.get("button", "left"))
-        result = executor.mouse_down(button=button)
+        target = getattr(self, "_action_hwnd", lambda: None)()
+        result = _call_with_optional_hwnd(
+            executor.mouse_down, button, hwnd=target,
+        )
         return ToolResult(self._fmt(result))
 
     def _t_mouse_up(self, args: dict) -> ToolResult:
@@ -45,8 +52,11 @@ class DesktopToolMixin:
 
     def _t_move_mouse(self, args: dict) -> ToolResult:
         x, y = int(args["x"]), int(args["y"])
-        executor.move_mouse(x, y)
-        return ToolResult(self._fmt({"ok": True, "x": x, "y": y}))
+        target = getattr(self, "_action_hwnd", lambda: None)()
+        result = _call_with_optional_hwnd(
+            executor.move_mouse, x, y, hwnd=target,
+        )
+        return ToolResult(self._fmt(result))
 
     def _t_screenshot(self, args: dict) -> ToolResult:
         quality = int(args.get("quality", 75))
@@ -127,7 +137,13 @@ class DesktopToolMixin:
 
     def _t_hold_key(self, args: dict) -> ToolResult:
         keys = normalize_key_sequence(args.get("keys") or [])
-        result = executor.hold_keys(keys, int(args.get("duration_ms", 0)))
+        target = getattr(self, "_action_hwnd", lambda: None)()
+        result = _call_with_optional_hwnd(
+            executor.hold_keys,
+            keys,
+            int(args.get("duration_ms", 0)),
+            hwnd=target,
+        )
         return ToolResult(self._fmt(result))
 
     def _t_list_displays(self, _args: dict) -> ToolResult:
@@ -247,7 +263,31 @@ class DesktopToolMixin:
     def _t_coordinate_click_test(self, args: dict) -> ToolResult:
         """Perform one real mouse click and return coordinate evidence."""
         x, y = int(args["x"]), int(args["y"])
-        hwnd = args.get("hwnd") or getattr(self, "hwnd", None)
+        remembered_hwnd = getattr(self, "hwnd", None)
+        requested_hwnd = args.get("hwnd")
+        if CONFIG.get("controller", "multi_input_cooperation", default=False):
+            try:
+                mismatched_target = bool(
+                    requested_hwnd
+                    and int(requested_hwnd) != int(remembered_hwnd or 0)
+                )
+            except (TypeError, ValueError):
+                mismatched_target = True
+            if mismatched_target:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "cooperative_input": True,
+                    "error": (
+                        "coordinate_click_test cannot override the remembered "
+                        "cooperative target hwnd"
+                    ),
+                    "target_hwnd": int(remembered_hwnd or 0),
+                }))
+            hwnd = remembered_hwnd
+        else:
+            hwnd = requested_hwnd or remembered_hwnd
         try:
             hwnd = int(hwnd) if hwnd else None
         except (TypeError, ValueError):

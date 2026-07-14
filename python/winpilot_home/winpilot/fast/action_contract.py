@@ -1,6 +1,7 @@
 """Shared contract for actions accepted by the low-latency controller."""
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -61,6 +62,156 @@ BATCH_CLIPBOARD_ACTIONS = {
     "clipboard_write",
     "clipboard_paste",
 }
+
+VISUAL_TRANSACTION_ACTIONS = BATCH_MUTATING_ACTIONS | {
+    "run_action_batch",
+    "execute_subgoal",
+    "open_app",
+    "paste_image_file",
+    "mouse_down",
+    "mouse_up",
+    "hold_key",
+}
+
+
+@dataclass(frozen=True)
+class ActionTarget:
+    """The exact visual/window coordinate frame an action is bound to."""
+
+    hwnd: int | None = None
+    reference_system: str = "semantic"
+    source_reference_system: str | None = None
+    frame_id: str | int | None = None
+    epoch: int | None = None
+    region: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class ActionPolicy:
+    """Execution semantics kept out of model-generated action arguments."""
+
+    requires_post_frame: bool = False
+    interruptible: bool = True
+    retry_budget: int = 0
+
+
+@dataclass(frozen=True)
+class ActionEnvelope:
+    """Thin operator-style contract between parsing, control, and tracing."""
+
+    action_id: str
+    type: str
+    inputs: dict[str, Any] = field(default_factory=dict)
+    target: ActionTarget = field(default_factory=ActionTarget)
+    policy: ActionPolicy = field(default_factory=ActionPolicy)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _region_dict(value: Any) -> dict[str, int] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        aliases = dict(zip(("left", "top", "width", "height"), value))
+    elif isinstance(value, dict):
+        aliases = {
+            "left": value.get("left", value.get("x")),
+            "top": value.get("top", value.get("y")),
+            "width": value.get("width"),
+            "height": value.get("height"),
+        }
+    else:
+        aliases = {
+            "left": getattr(value, "left", None),
+            "top": getattr(value, "top", None),
+            "width": getattr(value, "width", None),
+            "height": getattr(value, "height", None),
+        }
+    if any(item is None for item in aliases.values()):
+        return None
+    try:
+        return {key: int(item) for key, item in aliases.items()}
+    except (TypeError, ValueError):
+        return None
+
+
+def action_reference_system(name: str, args: dict[str, Any]) -> str:
+    # AgentRunner maps model-authored frame coordinates to physical screen
+    # coordinates before dispatch.  ``coordinate_space`` deliberately records
+    # their provenance, not the units of the executable x/y values.  Keep the
+    # operator boundary honest about both rather than labelling physical input
+    # as normalized.
+    if args.get("source_frame_coordinates") is not None:
+        return "screen_physical_px"
+    explicit = str(
+        args.get("reference_system")
+        or args.get("coordinate_space")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    if any(key in args for key in {
+        "frame_x", "frame_y", "frame_x1", "frame_y1",
+        "frame_x2", "frame_y2", "frame_strokes",
+    }):
+        return "frame_normalized_0_1000"
+    if args.get("normalized_strokes") is not None:
+        return "canvas_normalized_0_1000"
+    if name in {
+        "click", "scroll", "move_mouse", "drag", "draw_strokes", "zoom",
+    }:
+        return "screen_physical_px"
+    return "semantic"
+
+
+def action_source_reference_system(args: dict[str, Any]) -> str | None:
+    if args.get("source_frame_coordinates") is not None:
+        return "frame_normalized_0_1000"
+    return None
+
+
+def build_action_envelope(
+    name: str,
+    args: dict[str, Any],
+    *,
+    action_id: str,
+    hwnd: int | None = None,
+    frame_id: str | int | None = None,
+    epoch: int | None = None,
+    region: Any = None,
+    retry_budget: int = 0,
+) -> ActionEnvelope:
+    """Create a canonical action record without changing controller behavior."""
+    action_name = str(name or "").strip()
+    if not action_name:
+        raise ValueError("action envelope requires a non-empty type")
+    return ActionEnvelope(
+        action_id=str(action_id),
+        type=action_name,
+        inputs=dict(args or {}),
+        target=ActionTarget(
+            hwnd=int(hwnd) if hwnd else None,
+            reference_system=action_reference_system(action_name, args or {}),
+            source_reference_system=action_source_reference_system(args or {}),
+            frame_id=frame_id,
+            epoch=int(epoch) if epoch is not None else None,
+            region=_region_dict(region),
+        ),
+        policy=ActionPolicy(
+            requires_post_frame=action_name in VISUAL_TRANSACTION_ACTIONS,
+            interruptible=action_name in {
+                "observe", "read_text", "wait", "wait_change",
+                "wait_stable", "screenshot", "zoom", "clipboard_read",
+                "drag", "draw_strokes", "type_text", "type_into_element",
+                "run_action_batch", "execute_subgoal",
+            },
+            retry_budget=max(0, int(retry_budget)),
+        ),
+    )
+
+
+def supported_actions() -> tuple[str, ...]:
+    """Stable runtime action list for prompt/operator capability projection."""
+    return tuple(sorted(ALLOWED_BATCH_ACTIONS))
 
 
 def batch_action_name(action: dict[str, Any]) -> str:
