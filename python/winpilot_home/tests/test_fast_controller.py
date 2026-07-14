@@ -2923,6 +2923,38 @@ def test_runner_prebinds_leading_implicit_gui_application(monkeypatch):
     assert "controller target prebind" in runner.messages[-1]["content"]
 
 
+def test_native_prebind_hides_text_controller_observe_request(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tools import ToolResult
+
+    runner = AgentRunner("open Paint and operate the visible canvas")
+    runner.messages = [{"role": "system", "content": "system"}]
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(
+        runner.session,
+        "dispatch",
+        lambda _tool, _args: ToolResult(json.dumps({
+            "ok": True,
+            "verified": True,
+            "route": "existing_visible_window",
+            "target_hwnd": 42,
+            "needs_observe": True,
+            "fast_path_advice": "Observe it once, then continue.",
+        })),
+    )
+
+    runner._prebind_initial_gui_target()
+
+    model_message = runner.messages[-1]["content"]
+    history_result = runner._tool_history[-1][2]
+    assert "fresh_authoritative_frame_pending" in model_message
+    assert "needs_observe" not in model_message
+    assert "Observe it once" not in model_message
+    assert "needs_observe" not in history_result
+    assert "Observe it once" not in history_result
+    assert "do not call observe merely to reconfirm" in model_message
+
+
 def test_run_action_batch_open_app_recovers_hallucinated_preobserve_element_id():
     from winpilot.agent.fast_tools import FastToolMixin
     from winpilot.agent.tool_result import ToolResult

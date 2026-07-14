@@ -507,7 +507,7 @@ def test_native_vision_exposes_only_normalized_frame_coordinates():
         assert "oneOf" not in draw
         assert "work_surface_frame_bounds" in draw_tool["description"]
         assert "whole-frame bounds" in draw_tool["description"]
-        assert "at least 90%" in draw_tool["description"]
+        assert "every authored point" in draw_tool["description"]
         compact_path_contract = (
             draw_tool["description"]
             + " "

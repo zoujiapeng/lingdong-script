@@ -33,9 +33,7 @@ that structure misses. Do not assume a focused input's hidden content is
 available to OCR; verify the observable result after acting.
 
 # Core loop
-1. If a controller target prebind + initial frame is present, use it directly.
-Otherwise call open_app; use list_windows / scan_windows / focus_window only
-for recovery. Do not reopen/refocus an already bound target.
+1. {target_grounding_guidance}
 Use type_text for keyboard-first focused printable sequences such as 6+7=; hotkey is only for shortcuts.
 2. Inspect the current real frame. Execute one visual transaction, then inspect
 its automatic post-action frame before deciding again. Observe when state or
@@ -96,34 +94,49 @@ _VISION_TEXT_ONLY = (
 
 _NATIVE_OPERATOR_GUIDANCE = (
     "On custom/pixel-rendered interfaces, use direct grounded frame_* coordinates "
-    "with click/scroll/drag/draw_strokes. Match the input gesture to the visible task: "
-    "click selects or activates one point, while drag/draw_strokes creates continuous "
-    "motion. For freehand surface output such as drawing, sketching, handwriting, signing, "
-    "or tracing, clicks are setup only and never output evidence; use drag/draw_strokes for "
-    "the output itself. Never approximate a continuous path with repeated clicks. One "
-    "draw_strokes call may contain every independent path already grounded in the current frame. "
-    "For any requested visual composition, plan the whole layout from the pixels first: keep the "
-    "subject centered, proportionate, spatially connected, and readable as one coherent object. "
-    "Use a compact base pass containing the main silhouette plus key landmarks, with smooth curve "
-    "anchors rather than disconnected placeholder primitives. Validate that frame_strokes is "
-    "non-empty and every path has at least two points before calling it. After the fresh frame, "
-    "make at most one additive detail/correction pass when it clearly improves the visible result; "
-    "do not erase and restart merely because the rendering is imperfect. "
+    "with the exposed click/scroll/drag/draw_strokes tools. Match the input gesture to the "
+    "visible affordance: click selects or activates one point, while drag/draw_strokes creates "
+    "continuous motion. Emit actions only through real function calls; never print XML, pseudo-tool "
+    "markup, or prose coordinate dumps. Keep the decision concise enough to leave room for complete "
+    "tool arguments. Do not open menus or save/export unless the user asked for that outcome. "
+    "Preserve useful visible "
+    "state; erase, restart, or undo only when fresh pixels show that repair is unsafe or slower. "
+    "A low-level semantic_verified=false/pixel_effect_only result means goal semantics were not "
+    "assessed by the controller, not that the visible result failed; judge the fresh image yourself. "
     "Do one spatial mutation, then inspect its fresh frame; never infer success from the "
     "tool call alone."
+)
+_NATIVE_CONTINUOUS_POINTER_GUIDANCE = (
+    " The requested output requires continuous pointer geometry (for example handwriting, "
+    "signing, tracing, or freehand paths). Clicks are setup only and never output evidence; use "
+    "drag/draw_strokes for the output itself, never repeated clicks. Keep each transaction "
+    "compact: at most 12 independent paths and at most 12 meaningful anchor points per path; "
+    "use endpoints and turns instead of regularly spaced samples. Before the first multi-path "
+    "mutation, choose one coherent overall layout and include its known major parts. "
+    "Keep all geometry comfortably inside the reported safe surface, away from scrollbars and "
+    "window edges. After each fresh frame, call done if the requested result is visibly clear; "
+    "otherwise apply only forward, local corrections justified by the current pixels and "
+    "measurable progress. Once a continuous transaction visibly changed the surface, do not "
+    "undo, reset, or clear merely to redraw it more attractively; if one rollback produces no "
+    "visible change, never repeat it. "
+    "Do not overlay an alternative whole layout or accumulate guide/scaffold strokes unless the "
+    "user requested them. Validate that frame_strokes is non-empty and every path has at least "
+    "two points before calling it."
 )
 _TEXT_OPERATOR_GUIDANCE = (
     "Use structured observations and the deterministic controller for short, "
     "fully grounded routines. When several same-surface mutations are all known and do "
     "not depend on intermediate pixels, bundle them into one controller transaction "
-    "instead of paying one model round-trip per primitive. Continuous freehand output "
-    "must include drag/draw_strokes; clicks may select tools but do not create or verify "
-    "the requested output. On an ungrounded physical work surface, prefer direct "
-    "draw_strokes with normalized_strokes in 0..1000 and submit all currently known "
-    "independent paths together. Unless the user requires a color or style, do not spend "
-    "several model turns selecting tools before making the continuous output. Do not use verify-only "
+    "instead of paying one model round-trip per primitive. Do not use verify-only "
     "execute_subgoal as a substitute for open_app/launch/focus_window, and do not "
     "continue when the target is ambiguous."
+)
+_TEXT_CONTINUOUS_POINTER_GUIDANCE = (
+    " The requested continuous freehand output must include drag/draw_strokes; clicks may "
+    "select tools but do not create or verify the output. On an ungrounded physical work "
+    "surface, prefer direct draw_strokes with normalized_strokes in 0..1000 and submit all "
+    "currently known independent paths together. Unless the user requires a color or style, "
+    "do not spend several model turns selecting tools before making the continuous output."
 )
 
 
@@ -134,6 +147,7 @@ def system_prompt(
     playbook_text: str = "",
     style: str = "compact",
     main_model_has_vision: bool = False,
+    continuous_pointer_output: bool = False,
     runtime_section: str = "",
 ) -> str:
     screen = virtual_screen_region()
@@ -157,11 +171,34 @@ def system_prompt(
         timezone_name=str(now.tzname() or now.utcoffset() or "local"),
         vision_line=vision_line,
         operator_guidance=(
-            _NATIVE_OPERATOR_GUIDANCE
+            (
+                _NATIVE_OPERATOR_GUIDANCE
+                + (
+                    _NATIVE_CONTINUOUS_POINTER_GUIDANCE
+                    if continuous_pointer_output else ""
+                )
+            )
             if main_model_has_vision
-            else _TEXT_OPERATOR_GUIDANCE
+            else (
+                _TEXT_OPERATOR_GUIDANCE
+                + (
+                    _TEXT_CONTINUOUS_POINTER_GUIDANCE
+                    if continuous_pointer_output else ""
+                )
+            )
         ),
         runtime_section=("\n" + runtime_section.strip()) if runtime_section else "",
+        target_grounding_guidance=(
+            "If a controller target prebind plus initial authoritative frame is present, "
+            "use that frame directly and do not call observe just to confirm the prebind. "
+            "Otherwise call open_app; for recovery use only the exposed list_windows, "
+            "focus_window, launch, or observe tools. Do not reopen/refocus an already bound target."
+            if main_model_has_vision
+            else
+            "If a controller target prebind is present, ground it with one structured observe. "
+            "Otherwise call open_app; use exposed window discovery/focus tools only for recovery. "
+            "Do not reopen/refocus an already bound target."
+        ),
         # A second visual model would re-encode the same frame, add latency,
         # and can contradict the native model. Keep VLM tools/instructions as
         # a fallback only for text-only main models.

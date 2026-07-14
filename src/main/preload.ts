@@ -53,6 +53,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ensureWinpilot: () =>
     ipcRenderer.invoke('winpilot:ensure'),
 
+  restartWinpilot: () =>
+    ipcRenderer.invoke('winpilot:restart'),
+
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg);

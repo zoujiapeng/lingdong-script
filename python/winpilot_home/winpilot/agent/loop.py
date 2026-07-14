@@ -94,7 +94,11 @@ _API_RETRIES = 4
 # rapid LLM calls (e.g. drawing many strokes) can trip provider rate limits;
 # a short retry isn't enough, so wait progressively longer.
 _RATE_LIMIT_BACKOFF_S = 5.0
-_GUI_TOOL_RECOVERY_MAX_TOKENS = 1024
+# Keep recovery bounded, but leave enough room for one complete structured GUI
+# call. A 1024-token cap made the correction itself truncate on ordinary
+# multi-path gestures, turning a recoverable provider formatting miss into a
+# guaranteed second failure.
+_GUI_TOOL_RECOVERY_MAX_TOKENS = 4096
 # Fold old observations only past this size (~12K tokens × ~4 chars/token).
 # Below it, history stays append-only so the DeepSeek prefix cache hits ~100%.
 _CONTEXT_FOLD_THRESHOLD_CHARS = 32000
@@ -147,15 +151,28 @@ _CONTINUOUS_POINTER_SETUP_CLICKS = 3
 _CONTINUOUS_POINTER_LOW_CHANGE_CLICKS = 2
 _CONTINUOUS_POINTER_MAX_BLOCKS = 2
 _TEXT_CONTINUOUS_POINTER_SETUP_MUTATIONS = 2
-_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO = 0.90
+_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO = 1.0
+_NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO = 0.80
+_NATIVE_DRAW_SURFACE_SOFT_MARGIN = 8.0
+_NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS = 12
+_NATIVE_DRAW_MAX_STROKES = 24
 _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_RATIO = 0.20
 _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS = 3
+_NATIVE_DRAW_COMPOSITION_FIT_MIN_BOUNDED_OUTSIDE_RATIO = 0.05
+_NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_STROKES = 2
+_NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO = 0.20
 _NATIVE_DRAW_COMPOSITION_FIT_MIN_STROKES = 2
 _NATIVE_DRAW_COMPOSITION_FIT_MIN_POINTS = 8
 _NATIVE_DRAW_COMPOSITION_FIT_INSET = 8.0
+_NATIVE_DRAW_COMPOSITION_TRANSLATE_MAX_OVERFLOW = 16.0
 _NATIVE_DRAW_DENSE_PATH_MIN_POINTS = 24
 _NATIVE_DRAW_SIMPLIFY_TOLERANCE = 1.5
 _UNEXECUTED_CONSTRAINT_MAX_REJECTIONS = 3
+_INITIAL_FRAME_SETTLE_INTERVAL_S = 0.12
+_INITIAL_FRAME_SETTLE_MIN_S = 0.48
+_INITIAL_FRAME_SETTLE_MAX_S = 1.20
+_INITIAL_FRAME_SETTLE_MAX_CAPTURES = 10
+_INITIAL_FRAME_SETTLE_STABLE_PAIRS = 2
 
 
 class NativeFrameCoordinateError(ValueError):
@@ -173,6 +190,215 @@ def _frame_strokes_bbox(
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _normalize_stringified_frame_strokes(
+    raw: str,
+) -> tuple[list[list[list[float]]], dict[str, Any]]:
+    """Recover only unambiguous numeric polylines from a stringified array.
+
+    Some function-calling providers serialize an array-valued argument a
+    second time and occasionally omit or append redundant trailing closing
+    brackets. We accept only bracket/comma/numeric text, balance missing
+    closings or remove count-proven trailing extras, then
+    require every numeric leaf to belong to a complete ``[x,y]`` point in a
+    2-24 point polyline.  Nothing is clamped or invented; ambiguous text stays
+    fail-closed and never reaches the desktop executor.
+    """
+    text = str(raw or "").strip()
+    if not text or len(text) > 50_000:
+        raise ValueError("stringified frame_strokes is empty or too large")
+    if re.fullmatch(r"[\s\[\],+\-.0-9eE]+", text) is None:
+        raise ValueError("stringified frame_strokes contains non-numeric content")
+    open_count = text.count("[")
+    close_count = text.count("]")
+    missing_closures = open_count - close_count
+    extra_closures_removed = 0
+    if missing_closures < 0:
+        extra_closures_removed = -missing_closures
+        if (
+            extra_closures_removed > 32
+            or not text.endswith("]" * extra_closures_removed)
+        ):
+            raise ValueError("stringified frame_strokes has ambiguous bracket structure")
+        text = text[:-extra_closures_removed]
+        missing_closures = 0
+    if missing_closures > 32:
+        raise ValueError("stringified frame_strokes has ambiguous bracket structure")
+    try:
+        parsed = json.loads(text + ("]" * missing_closures))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("stringified frame_strokes is not a recoverable numeric array") from exc
+
+    def is_number(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def is_point(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(is_number(item) for item in value)
+        )
+
+    def is_flat_stroke(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and 4 <= len(value) <= 2 * _NATIVE_DRAW_MAX_STROKES
+            and len(value) % 2 == 0
+            and all(is_number(item) for item in value)
+        )
+
+    def pair_flat_stroke(value: list[Any]) -> list[list[Any]]:
+        return [list(value[index:index + 2]) for index in range(0, len(value), 2)]
+
+    strokes: list[list[list[float]]] = []
+    flat_numeric_paths_normalized = 0
+
+    def collect(value: Any) -> None:
+        nonlocal flat_numeric_paths_normalized
+        if (
+            isinstance(value, list)
+            and 2 <= len(value) <= _NATIVE_DRAW_MAX_STROKES
+            and all(is_point(item) for item in value)
+        ):
+            strokes.append(value)
+            return
+        if is_flat_stroke(value):
+            strokes.append(pair_flat_stroke(value))
+            flat_numeric_paths_normalized += 1
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    def numeric_leaf_count(value: Any) -> int:
+        if isinstance(value, list):
+            return sum(numeric_leaf_count(item) for item in value)
+        return int(is_number(value))
+
+    collect(parsed)
+    covered_numeric_leaves = 2 * sum(len(stroke) for stroke in strokes)
+    if (
+        not strokes
+        or covered_numeric_leaves != numeric_leaf_count(parsed)
+    ):
+        raise ValueError(
+            "stringified frame_strokes does not contain only complete 2-24 point polylines"
+        )
+    if len(strokes) > _NATIVE_DRAW_MAX_STROKES:
+        raise ValueError(
+            "frame_strokes contains too many independent paths: "
+            f"count={len(strokes)}, limit={_NATIVE_DRAW_MAX_STROKES}"
+        )
+    return strokes, {
+        "stringified_array_normalized": True,
+        "missing_closing_brackets_repaired": missing_closures,
+        "extra_closing_brackets_removed": extra_closures_removed,
+        "stroke_count_recovered": len(strokes),
+        "point_count_recovered": sum(len(stroke) for stroke in strokes),
+        "flat_numeric_paths_normalized": flat_numeric_paths_normalized,
+    }
+
+
+def _normalize_frame_stroke_list_structure(
+    raw: list[Any],
+) -> tuple[list[list[Any]], dict[str, Any]]:
+    """Flatten only redundant list nesting around complete numeric paths."""
+    def is_number(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def is_point(value: Any) -> bool:
+        return (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(is_number(item) for item in value)
+        )
+
+    def is_stroke(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and len(value) >= 2
+            and all(is_point(item) for item in value)
+        )
+
+    def is_flat_stroke(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and len(value) >= 4
+            and len(value) % 2 == 0
+            and all(is_number(item) for item in value)
+        )
+
+    def pair_flat_stroke(value: list[Any]) -> list[list[Any]]:
+        return [list(value[index:index + 2]) for index in range(0, len(value), 2)]
+
+    if raw and all(is_point(item) for item in raw):
+        return [raw], {"unwrapped_single_polyline": True}
+    if is_flat_stroke(raw):
+        return [pair_flat_stroke(raw)], {
+            "unwrapped_single_polyline": True,
+            "flat_numeric_paths_normalized": 1,
+        }
+    if raw and all(is_stroke(item) or is_flat_stroke(item) for item in raw):
+        if len(raw) > _NATIVE_DRAW_MAX_STROKES:
+            raise ValueError(
+                "frame_strokes contains too many independent paths: "
+                f"count={len(raw)}, limit={_NATIVE_DRAW_MAX_STROKES}"
+            )
+        flat_count = sum(1 for item in raw if is_flat_stroke(item))
+        return [
+            pair_flat_stroke(item) if is_flat_stroke(item) else item
+            for item in raw
+        ], {
+            "unwrapped_single_polyline": False,
+            "flat_numeric_paths_normalized": flat_count,
+        }
+
+    strokes: list[list[Any]] = []
+    flat_numeric_paths_normalized = 0
+
+    def collect(value: Any) -> None:
+        nonlocal flat_numeric_paths_normalized
+        if is_stroke(value):
+            strokes.append(value)
+            return
+        if is_flat_stroke(value):
+            strokes.append(pair_flat_stroke(value))
+            flat_numeric_paths_normalized += 1
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    def leaf_counts(value: Any) -> tuple[int, int]:
+        if isinstance(value, list):
+            counts = [leaf_counts(item) for item in value]
+            return sum(item[0] for item in counts), sum(item[1] for item in counts)
+        return 1, int(is_number(value))
+
+    collect(raw)
+    total_leaves, numeric_leaves = leaf_counts(raw)
+    covered_numeric_leaves = 2 * sum(len(stroke) for stroke in strokes)
+    if (
+        not strokes
+        or total_leaves != numeric_leaves
+        or covered_numeric_leaves != numeric_leaves
+    ):
+        raise ValueError(
+            "frame_strokes has ambiguous nesting; provide only complete numeric [x,y] paths"
+        )
+    if len(strokes) > _NATIVE_DRAW_MAX_STROKES:
+        raise ValueError(
+            "frame_strokes contains too many independent paths: "
+            f"count={len(strokes)}, limit={_NATIVE_DRAW_MAX_STROKES}"
+        )
+    return strokes, {
+        "unwrapped_single_polyline": False,
+        "redundant_list_nesting_normalized": True,
+        "stroke_count_recovered": len(strokes),
+        "point_count_recovered": sum(len(stroke) for stroke in strokes),
+        "flat_numeric_paths_normalized": flat_numeric_paths_normalized,
+    }
 
 
 def _simplify_dense_frame_stroke(
@@ -239,11 +465,11 @@ def _fit_frame_stroke_composition_to_surface(
 ) -> tuple[list[list[tuple[float, float]]] | None, dict[str, Any]]:
     """Conservatively fit one misframed multi-path composition to one surface.
 
-    This is deliberately not a generic clamp.  It is available only when a
-    substantial fraction of a multi-path composition misses the sole work
-    surface grounded in the current authoritative frame.  One uniform affine
-    transform is applied to every point, preserving relative geometry; sparse
-    or slightly overflowing paths remain fail-closed for model correction.
+    This is deliberately not a generic clamp.  A small edge miss may receive
+    one rigid translation when the complete multi-path bounding box still fits
+    the sole grounded work surface.  A substantially misframed composition may
+    receive one uniform scale/translation.  Every point moves together, so the
+    authored geometry is preserved and no individual coordinate is clipped.
     """
     left, top, right, bottom = [float(value) for value in surface_bounds]
     points = [point for stroke in strokes for point in stroke]
@@ -256,20 +482,67 @@ def _fit_frame_stroke_composition_to_surface(
     inside_count = sum(1 for point in points if inside(point))
     outside_count = len(points) - inside_count
     outside_ratio = outside_count / max(1, len(points))
+    outside_stroke_count = sum(
+        1 for stroke in strokes if any(not inside(point) for point in stroke)
+    )
     source_left, source_top, source_right, source_bottom = source_bbox
+    source_width = source_right - source_left
+    source_height = source_bottom - source_top
     intersects_surface = not (
         source_right < left
         or source_left > right
         or source_bottom < top
         or source_top > bottom
     )
+    edge_overflow = {
+        "left": max(0.0, left - source_left),
+        "top": max(0.0, top - source_top),
+        "right": max(0.0, source_right - right),
+        "bottom": max(0.0, source_bottom - bottom),
+    }
+    max_edge_overflow = max(edge_overflow.values())
+    substantial_outside = (
+        outside_count >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS
+        and outside_ratio >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_RATIO
+    )
+    surface_width = right - left
+    surface_height = bottom - top
+    bounded_axis_overflow = bool(
+        edge_overflow["left"]
+        <= surface_width * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
+        and edge_overflow["right"]
+        <= surface_width * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
+        and edge_overflow["top"]
+        <= surface_height * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
+        and edge_overflow["bottom"]
+        <= surface_height * _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
+    )
+    bounded_multi_stroke_overflow = bool(
+        outside_count >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS
+        and outside_ratio
+        >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_BOUNDED_OUTSIDE_RATIO
+        and outside_stroke_count
+        >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_STROKES
+        and bounded_axis_overflow
+    )
+    small_rigid_translation = bool(
+        outside_count > 0
+        and max_edge_overflow <= _NATIVE_DRAW_COMPOSITION_TRANSLATE_MAX_OVERFLOW
+        and source_width <= right - left
+        and source_height <= bottom - top
+    )
     eligibility = {
         "unique_current_work_surface": True,
         "multi_path_composition": len(strokes) >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_STROKES,
         "minimum_total_points": len(points) >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_POINTS,
-        "substantial_outside_points": (
-            outside_count >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_POINTS
-            and outside_ratio >= _NATIVE_DRAW_COMPOSITION_FIT_MIN_OUTSIDE_RATIO
+        "substantial_outside_points": substantial_outside,
+        "bounded_multi_stroke_overflow": bounded_multi_stroke_overflow,
+        "bounded_axis_overflow": bounded_axis_overflow,
+        "small_rigid_translation": small_rigid_translation,
+        "repairable_overflow": (
+            substantial_outside
+            or bounded_multi_stroke_overflow
+            or small_rigid_translation
         ),
         "has_surface_grounded_point": inside_count > 0,
         "composition_bbox_intersects_surface": intersects_surface,
@@ -286,21 +559,43 @@ def _fit_frame_stroke_composition_to_surface(
         "inside_point_count": inside_count,
         "outside_point_count": outside_count,
         "outside_point_ratio": round(outside_ratio, 6),
+        "outside_stroke_count": outside_stroke_count,
+        "edge_overflow": {
+            key: round(value, 3) for key, value in edge_overflow.items()
+        },
+        "maximum_edge_overflow": round(max_edge_overflow, 3),
+        "maximum_axis_overflow_ratio": (
+            _NATIVE_DRAW_COMPOSITION_FIT_MAX_AXIS_OVERFLOW_RATIO
+        ),
         "eligibility": eligibility,
         "shape_preserving": True,
         "point_clipping_used": False,
     }
-    failed_conditions = [name for name, met in eligibility.items() if not met]
+    required_conditions = (
+        "unique_current_work_surface",
+        "multi_path_composition",
+        "minimum_total_points",
+        "repairable_overflow",
+        "has_surface_grounded_point",
+        "composition_bbox_intersects_surface",
+    )
+    failed_conditions = [
+        name for name in required_conditions if not eligibility[name]
+    ]
     if failed_conditions:
         evidence["rejected_reason"] = "failed_conditions: " + ", ".join(failed_conditions)
         return None, evidence
 
     max_inset_x = max(0.0, (right - left - 2.0) / 4.0)
     max_inset_y = max(0.0, (bottom - top - 2.0) / 4.0)
-    inset = min(
-        _NATIVE_DRAW_COMPOSITION_FIT_INSET,
-        max_inset_x,
-        max_inset_y,
+    inset = (
+        0.0
+        if small_rigid_translation
+        else min(
+            _NATIVE_DRAW_COMPOSITION_FIT_INSET,
+            max_inset_x,
+            max_inset_y,
+        )
     )
     destination_left = left + inset
     destination_top = top + inset
@@ -308,8 +603,6 @@ def _fit_frame_stroke_composition_to_surface(
     destination_bottom = bottom - inset
     destination_width = destination_right - destination_left
     destination_height = destination_bottom - destination_top
-    source_width = source_right - source_left
-    source_height = source_bottom - source_top
     if destination_width <= 0.0 or destination_height <= 0.0:
         evidence["rejected_reason"] = "the inset work surface had no usable area"
         return None, evidence
@@ -317,12 +610,15 @@ def _fit_frame_stroke_composition_to_surface(
         evidence["rejected_reason"] = "the composition had no spatial extent"
         return None, evidence
 
-    scales = [1.0]
-    if source_width > 0.0:
-        scales.append(destination_width / source_width)
-    if source_height > 0.0:
-        scales.append(destination_height / source_height)
-    scale = min(scales)
+    if small_rigid_translation:
+        scale = 1.0
+    else:
+        scales = [1.0]
+        if source_width > 0.0:
+            scales.append(destination_width / source_width)
+        if source_height > 0.0:
+            scales.append(destination_height / source_height)
+        scale = min(scales)
     center_x = (source_left + source_right) / 2.0
     center_y = (source_top + source_bottom) / 2.0
     scaled_left = center_x + (source_left - center_x) * scale
@@ -355,8 +651,21 @@ def _fit_frame_stroke_composition_to_surface(
         evidence["rejected_reason"] = "the computed affine fit did not remain inside the work surface"
         return None, evidence
     evidence.update({
+        "policy": (
+            "whole_composition_rigid_translation"
+            if small_rigid_translation
+            else "whole_composition_uniform_affine_fit"
+        ),
         "applied": True,
-        "reason": "substantial multi-path composition overflow on one grounded work surface",
+        "reason": (
+            "small multi-path edge overflow translated into one grounded work surface"
+            if small_rigid_translation
+            else (
+                "substantial multi-path composition overflow on one grounded work surface"
+                if substantial_outside
+                else "bounded multi-stroke composition overflow on one grounded work surface"
+            )
+        ),
         "surface_inset_bounds": [
             round(destination_left, 3), round(destination_top, 3),
             round(destination_right, 3), round(destination_bottom, 3),
@@ -726,8 +1035,26 @@ def _main_model_has_vision() -> bool:
     return model_profile_from_config(api).supports_vision
 
 
-def _sanitize_assistant(msg) -> dict[str, Any]:
-    """Assistant message for history — WITHOUT reasoning_content."""
+def _main_agent_api_settings() -> dict[str, Any]:
+    """Return an isolated API config for the main loop adapter.
+
+    Spatial reasoning is selected per decision in ``AgentRunner._chat``. It
+    must not be baked into the adapter, otherwise planners, ordinary clicks,
+    completion checks, and every post-action turn inherit the latency cost.
+    """
+    return dict(CONFIG.get("api", default={}) or {})
+
+
+def _sanitize_assistant(
+    msg,
+    *,
+    preserve_reasoning: bool = False,
+) -> dict[str, Any]:
+    """Convert an SDK assistant message into stable request history.
+
+    Complete reasoning is retained only when the next request keeps the
+    corresponding thinking/tool-call transcript.
+    """
     content = msg.content or ""
     if len(content) > _MAX_ASSISTANT_HISTORY_CHARS:
         content = (
@@ -744,6 +1071,9 @@ def _sanitize_assistant(msg) -> dict[str, Any]:
             }
             for tc in msg.tool_calls
         ]
+    reasoning = getattr(msg, "reasoning_content", None)
+    if preserve_reasoning and isinstance(reasoning, str) and reasoning:
+        out["reasoning_content"] = reasoning
     return out
 
 
@@ -804,6 +1134,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.usage_total = empty_usage_total()
         self._model_adapter = None
         self._last_llm_model = ""
+        self._last_llm_thinking_enabled = False
         self._interjections: list[str] = []          # mid-run user hints
         self._interject_lock = threading.Lock()
         self._llm_trace_index = 0                    # local forensic trace files
@@ -836,6 +1167,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._visual_frame_scope_reason = ""
         self._visual_work_surface_frame_bounds: tuple[int, int, int, int] | None = None
         self._visual_work_surface_frame_id = 0
+        self._visual_work_surface_anchor_bounds: tuple[int, int, int, int] | None = None
+        self._visual_work_surface_anchor_hwnd = 0
+        self._visual_work_surface_anchor_region: tuple[int, int, int, int] | None = None
+        self._visual_work_surface_anchor_scope = ""
+        self._visual_work_surface_pending_bounds: tuple[int, int, int, int] | None = None
+        self._visual_work_surface_pending_count = 0
+        self._visual_work_surface_blocked_reason = ""
+        self._visual_work_surface_blocked_frame_id = 0
         self._last_visual_feedback_b64 = ""
         self._last_visual_feedback_action = ""
         # Bounded, immutable post-action frames retained across app switches.
@@ -855,6 +1194,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._continuous_pointer_guard_blocks = 0
         self._continuous_pointer_gesture_progress = False
         self._continuous_pointer_last_change_ratio: float | None = None
+        self._continuous_pointer_forward_only_correction = False
+        self._continuous_pointer_done_repair_required = False
         self._continuous_pointer_text_setup_mutations = 0
         self._continuous_semantic_progress = ContinuousSemanticProgress()
         self._continuous_semantic_surface_region: tuple[float, float, float, float] | None = None
@@ -880,6 +1221,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             # It may authorize a different route, so old controller-constraint
             # debt must not force-stop the newly directed attempt.
             self._reset_constraint_rejection_guard()
+            self._continuous_pointer_forward_only_correction = False
+            self._continuous_pointer_done_repair_required = False
         for text in pending:
             self._native_visual_user_directives.append(text)
             while (
@@ -994,8 +1337,24 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if len(text) > 80:
                 compact["text_chars"] = len(text)
         if name == "draw_strokes":
-            strokes = args.get("frame_strokes") or args.get("normalized_strokes") or []
+            source = args.get("source_frame_coordinates")
+            strokes = (
+                args.get("frame_strokes")
+                or args.get("normalized_strokes")
+                or (
+                    source.get("frame_strokes")
+                    if isinstance(source, dict)
+                    else None
+                )
+                or args.get("strokes")
+                or []
+            )
             compact["stroke_count"] = len(strokes) if isinstance(strokes, list) else 0
+            compact["point_count"] = (
+                sum(len(stroke) for stroke in strokes if isinstance(stroke, list))
+                if isinstance(strokes, list)
+                else 0
+            )
         if name == "run_action_batch":
             actions = args.get("actions") or []
             compact["actions"] = [
@@ -1021,8 +1380,53 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "error", "fast_path_advice",
         )
         compact = {key: payload[key] for key in keys if key in payload}
+        auto = payload.get("auto_visual_verify")
+        if (
+            isinstance(auto, dict)
+            and auto.get("summary_kind") == "pixel_effect_only"
+            and auto.get("semantic_verified") is False
+            and auto.get("completion_evidence") is False
+        ):
+            compact.pop("verified", None)
+            compact.update({
+                "action_verified": payload.get("verified"),
+                "semantic_verified": False,
+                "completion_evidence": False,
+                "summary_kind": "pixel_effect_only",
+            })
         try:
             return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))[:420]
+        except (TypeError, ValueError):
+            return "{}"
+
+    @staticmethod
+    def _prebind_result_for_model(result_text: str, *, native_vision: bool) -> str:
+        """Return the target-binding facts without a contradictory observe request.
+
+        ``open_app`` is shared with the text controller, where ``needs_observe``
+        remains a useful state-machine signal.  Native prebind immediately adds
+        a fresh authoritative frame, so forwarding that historical signal (or
+        its ``Observe it once`` advice) only induces a redundant perception
+        turn.  Keep the original ToolResult for runtime bookkeeping and remove
+        the conflict only from model-visible prebind/history text.
+        """
+        if not native_vision:
+            return str(result_text or "")[:800]
+        try:
+            payload = json.loads(result_text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return re.sub(r"\s+", " ", str(result_text or "")).strip()[:800]
+        if not isinstance(payload, dict):
+            return str(payload)[:800]
+        keys = (
+            "ok", "verified", "route", "app", "target_hwnd", "title",
+            "blank_document_ready", "document_surface_ready", "workspace_stage",
+            "needs_llm_reason", "error",
+        )
+        compact = {key: payload[key] for key in keys if key in payload}
+        compact["fresh_authoritative_frame_pending"] = True
+        try:
+            return json.dumps(compact, ensure_ascii=False, default=str)[:800]
         except (TypeError, ValueError):
             return "{}"
 
@@ -1040,6 +1444,51 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 rendered = ""
             if rendered:
                 lines.append(f"Current mutable plan: {rendered[:1200]}")
+        # Count only the latest uninterrupted draw sequence. A later click,
+        # hotkey, app switch, or other visual mutation may have opened a new
+        # document/surface even when the HWND stayed the same; older drawings
+        # must not constrain the current pixels.
+        committed_compositions = 0
+        for name, _args, result_text in reversed(self._tool_history):
+            if name != "draw_strokes":
+                if name in _VISUAL_MUTATION_TOOLS:
+                    break
+                continue
+            try:
+                payload = json.loads(result_text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("ok") is True
+                and payload.get("native_action_executed") is True
+                and payload.get("visual_change_detected") is True
+            ):
+                committed_compositions += 1
+        if committed_compositions:
+            lines.append(
+                "Continuous-output state: "
+                f"{committed_compositions} pixel-changing draw transaction(s) are already "
+                "committed in the latest uninterrupted surface sequence. Judge the whole visible "
+                "result now. If it satisfies the request, call done; otherwise change only what "
+                "the current pixels justify and require measurable progress after each mutation. "
+                "Do not add an alternative whole layout, unsolicited scaffolding, edge-reaching "
+                "strokes, or unrelated menu actions."
+            )
+        if self._continuous_pointer_forward_only_correction:
+            lines.append(
+                "Forward-correction mode: an autonomous destructive rollback was already "
+                "blocked after visible output. Do not request another undo/reset/clear. "
+                "Use a compact local draw/drag correction grounded in the newest frame, or "
+                "call done if the visible result now meets the task."
+            )
+        if self._continuous_pointer_done_repair_required:
+            lines.append(
+                "Completion repair required: the visual done gate rejected the current "
+                "result. Do not repeat done or spend turns on setup clicks/undo. Make one "
+                "measurable forward draw/drag correction grounded in the newest frame; "
+                "done becomes available again after its pixels visibly change."
+            )
         recent = self._tool_history[-_NATIVE_CONTEXT_RECENT_ACTIONS:]
         if recent:
             lines.append("Recent transactions (oldest to newest):")
@@ -1066,6 +1515,74 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "grounded strategy instead of changing only the rejected arguments."
             )
         return "\n".join(lines)[:_NATIVE_CONTEXT_MAX_SUMMARY_CHARS]
+
+    def _capture_settled_initial_frame(self, hwnd: int, region: Any) -> str:
+        """Take the newest of a short, stability-bounded startup sample.
+
+        A newly focused application can still be painting its toolbar or
+        resizing its client area when ``open_app`` returns.  Giving the model
+        that transient image makes the later preflight correctly cancel its
+        first action, but wastes a whole model turn.  Sample only after an
+        internal target prebind, stop on the first stable pair, and cap both
+        time and capture count so ordinary launches pay about one interval.
+        """
+        current = capture_window_jpeg_b64(hwnd, region=region)
+        if not current:
+            return ""
+        captures = 1
+        stable = False
+        stable_pairs = 0
+        last_ratio: float | None = None
+        settle_started = time.monotonic()
+        deadline = settle_started + _INITIAL_FRAME_SETTLE_MAX_S
+        threshold = max(0.0, float(CONFIG.get(
+            "controller", "visual_preflight_change_ratio", default=0.0025,
+        )))
+        while captures < _INITIAL_FRAME_SETTLE_MAX_CAPTURES:
+            if self.stop_event.is_set():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining < _INITIAL_FRAME_SETTLE_INTERVAL_S:
+                break
+            time.sleep(_INITIAL_FRAME_SETTLE_INTERVAL_S)
+            try:
+                candidate = capture_window_jpeg_b64(hwnd, region=region)
+            except Exception:
+                break
+            if not candidate:
+                break
+            captures += 1
+            try:
+                ratio = jpeg_diff_ratio(current, candidate)
+            except Exception:
+                ratio = None
+            current = candidate
+            if ratio is None:
+                continue
+            last_ratio = float(ratio)
+            if last_ratio <= threshold:
+                stable_pairs += 1
+            else:
+                stable_pairs = 0
+            if (
+                stable_pairs >= _INITIAL_FRAME_SETTLE_STABLE_PAIRS
+                and (captures - 1) * _INITIAL_FRAME_SETTLE_INTERVAL_S
+                >= _INITIAL_FRAME_SETTLE_MIN_S
+            ):
+                stable = True
+                break
+        BUS.publish(
+            "initial_visual_settle",
+            run_id=self.run_id,
+            captures=captures,
+            stable=stable,
+            stable_pairs=stable_pairs,
+            last_change_ratio=(round(last_ratio, 6) if last_ratio is not None else None),
+            threshold=threshold,
+            min_wait_ms=int(_INITIAL_FRAME_SETTLE_MIN_S * 1000),
+            max_wait_ms=int(_INITIAL_FRAME_SETTLE_MAX_S * 1000),
+        )
+        return current
 
     def _roll_native_visual_context(self) -> None:
         """Replace transcript history with a bounded, valid visual transaction.
@@ -1140,6 +1657,44 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             [(len(self.messages) - 1, "[folded screenshot]")]
             if latest_frame is not None else []
         )
+
+    def _model_tools_for_step(
+        self,
+        tools: list[dict[str, Any]],
+        step: int,
+    ) -> list[dict[str, Any]]:
+        """Avoid a duplicate structured observe on the first native frame."""
+        selected = tools
+        if (
+            step == 1
+            and self._native_visual_context_enabled()
+            and self._has_fresh_visual_grounding()
+        ):
+            selected = [
+                item for item in selected
+                if str(item.get("function", {}).get("name") or "") != "observe"
+            ]
+        if (
+            self._continuous_pointer_forward_only_correction
+            and self._continuous_pointer_output_requested()
+        ):
+            selected = [
+                item for item in selected
+                if str(item.get("function", {}).get("name") or "") != "hotkey"
+            ]
+        if (
+            self._continuous_pointer_done_repair_required
+            and self._continuous_pointer_output_requested()
+        ):
+            forward_names = {
+                "draw_strokes", "drag", "observe", "focus_window", "list_windows",
+                "blocked", "revise_plan", "complete_subgoal",
+            }
+            selected = [
+                item for item in selected
+                if str(item.get("function", {}).get("name") or "") in forward_names
+            ]
+        return selected
 
     def _append_tool_result(self, tool_call_id: str, result_text: str,
                             summary: str = "",
@@ -1383,6 +1938,39 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         directives = "\n".join(self._native_visual_user_directives[-4:])
         return _requests_continuous_pointer_output(
             f"{self.task}\n{directives}" if directives else self.task
+        )
+
+    def _native_visual_thinking_mode_for_decision(
+        self,
+        model: str,
+    ) -> str | None:
+        """Select MiMo reasoning only for unresolved continuous geometry.
+
+        This is task-shape routing, not an application or drawing special case:
+        freehand writing, signatures, tracing, canvas paths, and similar
+        continuous pointer output all use the same gate. A rejected proposal
+        keeps reasoning enabled because no gesture progress was recorded. Once
+        a real drag/stroke changes comparable pixels, later inspection and
+        completion turns switch it off.
+        """
+        if not bool(CONFIG.get(
+            "controller", "native_visual_thinking", default=False,
+        )):
+            return None
+        api = dict(CONFIG.get("api", default={}) or {})
+        api["model"] = str(model or api.get("model") or "")
+        profile = model_profile_from_config(api)
+        if not (
+            profile.provider == "mimo"
+            and profile.supports_vision
+            and self._native_visual_context_enabled()
+            and self._continuous_pointer_output_requested()
+        ):
+            return None
+        return (
+            "disabled"
+            if self._continuous_pointer_gesture_progress
+            else "enabled"
         )
 
     def _continuous_semantic_progress_active(self) -> bool:
@@ -1737,6 +2325,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 and float(change_ratio) > self._native_no_progress_threshold()
             ):
                 self._continuous_pointer_gesture_progress = True
+                self._continuous_pointer_forward_only_correction = False
+                self._continuous_pointer_done_repair_required = False
                 self._continuous_pointer_setup_clicks = 0
                 self._continuous_pointer_low_change_clicks = 0
                 self._continuous_pointer_guard_blocks = 0
@@ -2182,6 +2772,100 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "repeated_guard_blocks": self._native_no_progress_block_count,
         }
 
+    def _stable_visual_work_surface(
+        self,
+        candidate: tuple[int, int, int, int] | None,
+        *,
+        hwnd: int,
+        frame_region: tuple[int, int, int, int],
+        capture_scope: str = "",
+        initial: bool = False,
+    ) -> tuple[tuple[int, int, int, int] | None, str]:
+        """Keep document-surface geometry stable as ink changes its pixels.
+
+        A light-component detector naturally sees less white area after marks
+        are added.  Rebinding coordinates to that smaller component shifts all
+        later actions. Bind by target window, capture rectangle, and capture
+        scope. Retain only edge-continuous shrink/jitter, fail closed on a
+        missing or nested candidate, and require repeated evidence before a
+        same-target layout displacement can become the new binding.
+        """
+        anchor = self._visual_work_surface_anchor_bounds
+        same_target = bool(
+            anchor is not None
+            and self._visual_work_surface_anchor_hwnd == int(hwnd)
+            and self._visual_work_surface_anchor_region == frame_region
+            and self._visual_work_surface_anchor_scope == capture_scope
+        )
+        if initial or not same_target:
+            self._visual_work_surface_anchor_bounds = candidate
+            self._visual_work_surface_anchor_hwnd = int(hwnd)
+            self._visual_work_surface_anchor_region = frame_region
+            self._visual_work_surface_anchor_scope = capture_scope
+            self._visual_work_surface_pending_bounds = None
+            self._visual_work_surface_pending_count = 0
+            return candidate, "fresh_target_binding" if candidate else "not_detected"
+        assert anchor is not None
+        if candidate is None:
+            self._visual_work_surface_pending_bounds = None
+            self._visual_work_surface_pending_count = 0
+            return None, "current_detection_missing_fail_closed"
+
+        al, at, ar, ab = anchor
+        cl, ct, cr, cb = candidate
+        anchor_area = max(1, (ar - al) * (ab - at))
+        candidate_area = max(1, (cr - cl) * (cb - ct))
+        tolerance = 12
+        edge_deltas = (
+            abs(cl - al), abs(ct - at), abs(cr - ar), abs(cb - ab),
+        )
+        matching_edges = sum(delta <= tolerance for delta in edge_deltas)
+        candidate_is_subset = bool(
+            al - tolerance <= cl
+            and at - tolerance <= ct
+            and ar + tolerance >= cr
+            and ab + tolerance >= cb
+        )
+        candidate_area_ratio = candidate_area / anchor_area
+        detector_jitter = all(delta <= tolerance for delta in edge_deltas)
+        credible_component_shrink = bool(
+            candidate_is_subset
+            and matching_edges >= 3
+            and candidate_area_ratio >= 0.35
+        )
+        if detector_jitter or credible_component_shrink:
+            self._visual_work_surface_pending_bounds = None
+            self._visual_work_surface_pending_count = 0
+            return anchor, (
+                "stable_binding_retained_after_component_shrink"
+                if credible_component_shrink and candidate_area < anchor_area * 0.90
+                else "stable_binding_retained_after_detector_jitter"
+            )
+
+        # A central subset is indistinguishable from a nested panel/modal from
+        # geometry alone. Never silently promote it to the mutation surface.
+        if candidate_is_subset:
+            self._visual_work_surface_pending_bounds = None
+            self._visual_work_surface_pending_count = 0
+            return None, "possible_nested_surface_fail_closed"
+
+        pending = self._visual_work_surface_pending_bounds
+        if pending is not None and all(
+            abs(current - previous) <= tolerance
+            for current, previous in zip(candidate, pending)
+        ):
+            self._visual_work_surface_pending_count += 1
+        else:
+            self._visual_work_surface_pending_bounds = candidate
+            self._visual_work_surface_pending_count = 1
+        if self._visual_work_surface_pending_count < 2:
+            return None, "layout_displacement_pending_confirmation"
+
+        self._visual_work_surface_anchor_bounds = candidate
+        self._visual_work_surface_pending_bounds = None
+        self._visual_work_surface_pending_count = 0
+        return candidate, "rebound_after_confirmed_layout_displacement"
+
     def _inject_visual_frame(
         self,
         *,
@@ -2252,24 +2936,63 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 scope_reason = decision.reason
             if region.width < 16 or region.height < 16:
                 return False
-            b64 = image_b64 or capture_window_jpeg_b64(hwnd, region=region)
+            if image_b64:
+                b64 = image_b64
+            elif phase == "initial" and action == "target_prebind":
+                b64 = self._capture_settled_initial_frame(hwnd, region)
+            else:
+                b64 = capture_window_jpeg_b64(hwnd, region=region)
             if not b64:
                 return False
+            region_tuple = (
+                int(region.left), int(region.top), int(region.width), int(region.height),
+            )
             surface_info = credible_work_surface_frame_bounds(b64)
+            surface_failure_reason = (
+                str(surface_info.get("reason") or "")
+                if isinstance(surface_info, dict)
+                else ""
+            )
+            surface_detection_ambiguous = bool(
+                isinstance(surface_info, dict)
+                and (
+                    surface_info.get("ambiguous") is True
+                    or surface_info.get("failure_kind") == "ambiguous"
+                )
+            )
             raw_surface_bounds = (
                 surface_info.get("work_surface_frame_bounds")
                 if isinstance(surface_info, dict)
                 else None
             )
-            work_surface_bounds = (
+            detected_work_surface_bounds = (
                 tuple(int(value) for value in raw_surface_bounds)
                 if isinstance(raw_surface_bounds, (list, tuple))
                 and len(raw_surface_bounds) == 4
                 else None
             )
-            region_tuple = (
-                int(region.left), int(region.top), int(region.width), int(region.height),
+            work_surface_bounds, work_surface_policy = self._stable_visual_work_surface(
+                detected_work_surface_bounds,
+                hwnd=hwnd,
+                frame_region=region_tuple,
+                capture_scope=scope,
+                initial=(phase == "initial"),
             )
+            surface_blocked_reason = ""
+            if work_surface_bounds is None:
+                fail_closed_policies = {
+                    "current_detection_missing_fail_closed",
+                    "possible_nested_surface_fail_closed",
+                    "layout_displacement_pending_confirmation",
+                }
+                if (
+                    surface_detection_ambiguous
+                    or work_surface_policy in fail_closed_policies
+                ):
+                    surface_blocked_reason = (
+                        surface_failure_reason
+                        or work_surface_policy.replace("_", " ")
+                    )
             change_comparable = bool(
                 phase == "post_action"
                 and previous_b64
@@ -2293,6 +3016,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             frame_id = self._visual_frame_id
             self._visual_work_surface_frame_bounds = work_surface_bounds
             self._visual_work_surface_frame_id = frame_id if work_surface_bounds else 0
+            self._visual_work_surface_blocked_reason = surface_blocked_reason
+            self._visual_work_surface_blocked_frame_id = (
+                frame_id if surface_blocked_reason else 0
+            )
             epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
             action_line = f" after action {action!r}" if action else ""
             preview_line = (
@@ -2327,10 +3054,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             surface_line = (
                 "Runtime pixels uniquely ground one credible light work surface: "
                 f"work_surface_frame_bounds={list(work_surface_bounds)} in the same frame 0..1000 "
-                "coordinate system. For draw_strokes, every stroke must start inside these bounds "
-                f"and at least {int(_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO * 100)}% of its points "
-                "must remain inside; do not reinterpret the bounds as a second coordinate space. "
-                if work_surface_bounds is not None else ""
+                f"coordinate system (binding_policy={work_surface_policy}). "
+                "For draw_strokes, every stroke must start inside these bounds "
+                "and every authored point must remain inside; the runtime keeps only a tiny "
+                "internal tolerance for long paths at a detector edge. Do not reinterpret the "
+                "bounds as a second coordinate space or trace along their boundary. "
+                if work_surface_bounds is not None else
+                (
+                    "Runtime cannot uniquely ground a safe work surface in the current "
+                    "pixels, so continuous pointer mutation is fail-closed until a fresh "
+                    f"frame resolves it (reason={surface_blocked_reason[:180]}). "
+                    if surface_blocked_reason else ""
+                )
             )
             self.messages.append({
                 "role": "user",
@@ -2433,6 +3168,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 work_surface_frame_bounds=(
                     list(work_surface_bounds) if work_surface_bounds is not None else None
                 ),
+                work_surface_binding_policy=work_surface_policy,
+                work_surface_blocked_reason=surface_blocked_reason or None,
                 capture_latency_ms=int((time.monotonic() - started) * 1000),
             )
             return True
@@ -2650,8 +3387,25 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     add_points(points)
                     return
             elif name == "draw_strokes":
-                points = []
-                for stroke in payload.get("frame_strokes") or []:
+                points: list[tuple[float, float]] = []
+                raw_strokes = payload.get("frame_strokes")
+                try:
+                    if isinstance(raw_strokes, str):
+                        normalized_strokes, _ = _normalize_stringified_frame_strokes(
+                            raw_strokes,
+                        )
+                    elif isinstance(raw_strokes, list):
+                        normalized_strokes, _ = _normalize_frame_stroke_list_structure(
+                            raw_strokes,
+                        )
+                    else:
+                        normalized_strokes = []
+                except ValueError:
+                    # Malformed paths are rejected by the coordinate contract
+                    # later.  Preflight stays conservative and compares the
+                    # whole frame instead of inventing an action ROI.
+                    normalized_strokes = []
+                for stroke in normalized_strokes:
                     for raw in stroke if isinstance(stroke, list) else []:
                         if isinstance(raw, (list, tuple)) and len(raw) == 2:
                             x, y = number(raw[0]), number(raw[1])
@@ -2682,7 +3436,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         region_matches = False
         scope_matches = False
         try:
-            if not self._visual_frame_scope and hwnd:
+            if self._visual_frame_scope == "full_desktop":
+                # A full-desktop frame remains a valid (strictly richer)
+                # coordinate space when the crop optimizer later decides that
+                # a target-window crop has become worthwhile, e.g. while an
+                # app finishes its maximize/restore startup animation.
+                current = virtual_screen_region()
+                current_scope = "full_desktop"
+            elif not self._visual_frame_scope and hwnd:
                 # Compatibility for replay/tests that hydrate a legacy frame
                 # tuple directly. Newly captured frames always carry scope.
                 current = window_region(hwnd).clamp_to_screen()
@@ -2735,12 +3496,31 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         previous = self._last_visual_feedback_b64
         # Unit tests and legacy synthetic callers use short placeholders, not
         # real JPEGs. Production frames are substantially larger.
-        if len(previous) < 128 or not self._has_fresh_visual_grounding():
+        if len(previous) < 128:
             return "", 0.0, "", None
+        if not self._has_fresh_visual_grounding():
+            # Freshness is checked once before entering preflight, but the
+            # foreground window, epoch, or capture scope can change in that
+            # small interval.  A real authoritative frame becoming stale is
+            # a hard barrier for every low-level action, including keyboard
+            # input that has no coordinates to reject later.
+            return (
+                "",
+                None,
+                "authoritative visual grounding became stale before preflight",
+                None,
+            )
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
         started = time.monotonic()
         try:
-            if not self._visual_frame_scope and hwnd:
+            if self._visual_frame_scope == "full_desktop":
+                # Preflight in the exact coordinate space the model saw. A
+                # newly available crop is an optimization for the *next*
+                # frame, not permission to remap the pending action mid-turn.
+                region = virtual_screen_region()
+                capture_scope = "full_desktop"
+                capture_scope_reason = "preserve_authoritative_full_desktop_scope"
+            elif not self._visual_frame_scope and hwnd:
                 region = window_region(hwnd).clamp_to_screen()
                 capture_scope = "target_window"
                 capture_scope_reason = "legacy_grounding_region"
@@ -2769,7 +3549,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
             )
             current = capture_window_jpeg_b64(hwnd, region=region)
-            if not self._visual_frame_scope and hwnd:
+            if self._visual_frame_scope == "full_desktop":
+                after_region = virtual_screen_region()
+                after_scope = "full_desktop"
+            elif not self._visual_frame_scope and hwnd:
                 after_region = window_region(hwnd).clamp_to_screen()
                 after_scope = "target_window"
             else:
@@ -3001,13 +3784,38 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 raise ValueError(
                     f"{tool_name} requires both {x_key} and {y_key} from the current frame"
                 )
+            def numeric_frame_value(value: Any) -> tuple[float, bool]:
+                if isinstance(value, bool):
+                    raise ValueError
+                try:
+                    return float(value), False
+                except (TypeError, ValueError):
+                    pass
+                if isinstance(value, str):
+                    # Some OpenAI-compatible providers occasionally append a
+                    # single JSON closer inside an otherwise numeric string
+                    # (for example "203]"). Repair only that exact,
+                    # information-preserving form; never extract a number from
+                    # arbitrary text.
+                    match = re.fullmatch(
+                        r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*[\]\}\)]{1,3}\s*",
+                        value,
+                    )
+                    if match:
+                        return float(match.group(1)), True
+                raise ValueError
+
             try:
-                nx = float(mapped[x_key])
-                ny = float(mapped[y_key])
+                nx, repaired_x = numeric_frame_value(mapped[x_key])
+                ny, repaired_y = numeric_frame_value(mapped[y_key])
             except (TypeError, ValueError):
                 raise ValueError(
                     f"{x_key}/{y_key} must be numeric values in 0..1000"
                 ) from None
+            if repaired_x:
+                mapped[x_key] = nx
+            if repaired_y:
+                mapped[y_key] = ny
             if not (0.0 <= nx <= 1000.0 and 0.0 <= ny <= 1000.0):
                 raise ValueError(
                     f"{x_key}/{y_key} must stay inside the current frame's 0..1000 bounds"
@@ -3111,14 +3919,41 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if "strokes" in mapped:
                     raise ValueError("draw_strokes received mixed frame and physical coordinate sources")
                 raw_strokes = mapped.pop("frame_strokes")
+                stringified_repair: dict[str, Any] = {}
+                if isinstance(raw_strokes, str):
+                    raw_strokes, stringified_repair = _normalize_stringified_frame_strokes(
+                        raw_strokes,
+                    )
                 if not isinstance(raw_strokes, list) or not raw_strokes:
                     raise ValueError("frame_strokes must contain at least one stroke")
+                source_frame_strokes = raw_strokes
+                raw_strokes, structure_repair = _normalize_frame_stroke_list_structure(
+                    raw_strokes,
+                )
                 normalized_strokes: list[list[tuple[float, float]]] = []
                 surface_bounds = (
                     self._visual_work_surface_frame_bounds
                     if self._visual_work_surface_frame_id == self._visual_frame_id
                     else None
                 )
+                surface_blocked_reason = (
+                    self._visual_work_surface_blocked_reason
+                    if self._visual_work_surface_blocked_frame_id
+                    == self._visual_frame_id
+                    else ""
+                )
+                if surface_blocked_reason:
+                    raise NativeFrameCoordinateError(
+                        (
+                            "The current authoritative pixels do not uniquely ground a safe "
+                            "continuous-input work surface. The action was not executed; obtain "
+                            "a fresh frame or resolve the visible overlay/layout ambiguity "
+                            f"({surface_blocked_reason})."
+                        ),
+                        work_surface_fail_closed=True,
+                        work_surface_detection_failed=True,
+                        work_surface_blocked_reason=surface_blocked_reason,
+                    )
                 for stroke_index, raw_stroke in enumerate(raw_strokes):
                     if not isinstance(raw_stroke, list) or len(raw_stroke) < 2:
                         raise ValueError(
@@ -3147,6 +3982,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "source_coordinate_space": "current_frame_normalized_0_1000",
                     "stroke_count": len(normalized_strokes),
                     "input_point_count": sum(len(stroke) for stroke in normalized_strokes),
+                    **structure_repair,
+                    **stringified_repair,
                 }
                 if surface_bounds is not None:
                     bound_left, bound_top, bound_right, bound_bottom = surface_bounds
@@ -3162,17 +3999,55 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         return inside, inside_count, inside_ratio, bool(inside and inside[0])
 
                     failures: list[tuple[int, int, float, bool]] = []
+                    soft_edge_tolerance_strokes: list[int] = []
                     for stroke_index, normalized_stroke in enumerate(normalized_strokes):
                         _inside, inside_count, inside_ratio, start_inside = containment(
                             normalized_stroke,
                         )
+                        within_detector_margin = all(
+                            bound_left - _NATIVE_DRAW_SURFACE_SOFT_MARGIN <= x
+                            <= bound_right + _NATIVE_DRAW_SURFACE_SOFT_MARGIN
+                            and bound_top - _NATIVE_DRAW_SURFACE_SOFT_MARGIN <= y
+                            <= bound_bottom + _NATIVE_DRAW_SURFACE_SOFT_MARGIN
+                            for x, y in normalized_stroke
+                        )
+                        soft_edge_accept = bool(
+                            start_inside
+                            and len(normalized_stroke)
+                            >= _NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS
+                            and inside_ratio
+                            >= _NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO
+                            and within_detector_margin
+                        )
+                        if (
+                            inside_ratio < _NATIVE_DRAW_SURFACE_MIN_POINT_RATIO
+                            and soft_edge_accept
+                        ):
+                            soft_edge_tolerance_strokes.append(stroke_index)
                         if (
                             not start_inside
-                            or inside_ratio < _NATIVE_DRAW_SURFACE_MIN_POINT_RATIO
+                            or (
+                                inside_ratio < _NATIVE_DRAW_SURFACE_MIN_POINT_RATIO
+                                and not soft_edge_accept
+                            )
                         ):
                             failures.append(
                                 (stroke_index, inside_count, inside_ratio, start_inside),
                             )
+
+                    frame_preparation.update({
+                        "soft_edge_tolerance_applied": bool(
+                            soft_edge_tolerance_strokes
+                        ),
+                        "soft_edge_tolerance_strokes": soft_edge_tolerance_strokes,
+                        "soft_edge_minimum_inside_point_ratio": (
+                            _NATIVE_DRAW_SURFACE_SOFT_MIN_POINT_RATIO
+                        ),
+                        "soft_edge_margin": _NATIVE_DRAW_SURFACE_SOFT_MARGIN,
+                        "soft_edge_minimum_point_count": (
+                            _NATIVE_DRAW_SURFACE_SOFT_MIN_POINTS
+                        ),
+                    })
 
                     if failures:
                         fitted, fit_evidence = _fit_frame_stroke_composition_to_surface(
@@ -3181,7 +4056,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         )
                         if fitted is not None:
                             normalized_strokes = fitted
-                            frame_preparation = fit_evidence
+                            # Keep provider-normalization evidence alongside
+                            # the later shape-preserving surface fit. Otherwise
+                            # a successful fit would erase why a non-canonical
+                            # but unambiguous function argument was accepted.
+                            frame_preparation = {
+                                **frame_preparation,
+                                **fit_evidence,
+                            }
                         else:
                             (
                                 stroke_index,
@@ -3195,8 +4077,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                                     f"frame_strokes[{stroke_index}] is not contained in the "
                                     "uniquely grounded work surface: every stroke must start "
                                     f"inside work_surface_frame_bounds={list(surface_bounds)} "
-                                    f"and at least {int(_NATIVE_DRAW_SURFACE_MIN_POINT_RATIO * 100)}% "
-                                    f"of points must remain inside (start_inside={start_inside}, "
+                                    "and every point must remain inside (long paths receive only "
+                                    f"a tiny detector-edge tolerance; start_inside={start_inside}, "
                                     f"inside={inside_count}/{len(normalized_stroke)}, "
                                     f"ratio={inside_ratio:.3f}). The action was not executed."
                                 ),
@@ -3249,7 +4131,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     physical_strokes.append(physical_stroke)
                 mapped["strokes"] = physical_strokes
                 mapped["frame_stroke_preparation"] = frame_preparation
-                source = {"frame_strokes": raw_strokes}
+                source = {"frame_strokes": source_frame_strokes}
                 used = True
             else:
                 require_normalized_instead_of_physical(("strokes",))
@@ -3295,14 +4177,38 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             else:
                 logger.warning("卡住需升级模型，但 agent.escalation_model 未配置，仍用 %s", model)
 
+        thinking_mode = self._native_visual_thinking_mode_for_decision(model)
+        # A GUI truncation recovery must emit one complete real function call.
+        # Hidden reasoning competes with its structured argument budget, so
+        # recovery is explicitly non-thinking even though it keeps enough
+        # output room for a concise multi-path gesture.
+        if gui_tool_recovery_request:
+            thinking_mode = "disabled"
+        configured_thinking = api.get("thinking")
+        configured_thinking_enabled = bool(
+            configured_thinking is True
+            or (
+                isinstance(configured_thinking, dict)
+                and str(configured_thinking.get("type") or "").casefold() == "enabled"
+            )
+        )
+        thinking_enabled = bool(
+            thinking_mode == "enabled"
+            or (thinking_mode is None and configured_thinking_enabled)
+        )
         box: dict[str, Any] = {}
         self._last_llm_model = model
+        self._last_llm_thinking_enabled = thinking_enabled
         self._trace_debug("llm_request", {
             "run_id": self.run_id,
             "task": self.task,
             "model": model,
             "temperature": float(api.get("temperature", 0.3)),
             "max_tokens": request_max_tokens,
+            "max_completion_tokens": (
+                request_max_tokens if thinking_enabled else None
+            ),
+            "thinking_mode": thinking_mode,
             "gui_tool_call_recovery": gui_tool_recovery_request,
             "messages": self.messages,
             "tools": tools,
@@ -3329,13 +4235,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if self.stop_event.is_set():
                     return
                 try:
-                    box["resp"] = client.chat.completions.create(
-                        model=model,
-                        messages=self.messages,
-                        tools=tools,
-                        temperature=float(api.get("temperature", 0.3)),
-                        max_tokens=request_max_tokens,
-                    )
+                    request_params: dict[str, Any] = {
+                        "model": model,
+                        "messages": self.messages,
+                        "tools": tools,
+                    }
+                    if thinking_enabled:
+                        request_params["max_completion_tokens"] = request_max_tokens
+                    else:
+                        request_params["temperature"] = float(api.get("temperature", 0.3))
+                        request_params["max_tokens"] = request_max_tokens
+                    if thinking_mode is not None:
+                        request_params["extra_body"] = {
+                            "thinking": {"type": thinking_mode},
+                        }
+                    box["resp"] = client.chat.completions.create(**request_params)
                     return
                 except Exception as exc:
                     last_exc = exc
@@ -3425,8 +4339,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "content": (
                     "Your previous GUI response hit the output limit without issuing a real "
                     "function tool call. Reply now with exactly one real tool call and no XML, "
-                    "pseudo-tool markup, or prose coordinate dump. Keep pointer paths concise: "
-                    "use fewer control points and split later work across verified turns."
+                    "pseudo-tool markup, or prose coordinate dump. If the call uses pointer "
+                    "paths, use at most 12 independent paths and at most 12 points per path; "
+                    "include only endpoints and meaningful turns, never regularly spaced "
+                    "samples. Submit one useful coherent part now and split later work across "
+                    "fresh verified turns."
                 ),
             })
             BUS.publish(
@@ -4540,9 +5457,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     ordered.append((key, data.get(key)))
             return AgentRunner._bounded_compact_json(ordered, limit=1800)
         if tool_name in {"draw_strokes", "drag"} and data.get("wrapped_by_fast_controller"):
+            auto = data.get("auto_visual_verify")
+            auto = auto if isinstance(auto, dict) else {}
+            pixel_effect_only = bool(
+                auto.get("summary_kind") == "pixel_effect_only"
+                and auto.get("semantic_verified") is False
+                and auto.get("completion_evidence") is False
+            )
             compact: dict[str, Any] = {
                 "ok": data.get("ok"),
-                "verified": data.get("verified"),
                 "wrapped_by_fast_controller": data.get("wrapped_by_fast_controller"),
                 "visual_change_detected": data.get("visual_change_detected"),
                 "visual_change_ratio": data.get("visual_change_ratio"),
@@ -4555,19 +5478,37 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "fast_path_advice": data.get("fast_path_advice"),
                 "metrics": data.get("metrics"),
             }
+            if pixel_effect_only:
+                # ``verified`` here belongs to the low-level input/effect
+                # contract.  Presenting it without the negative semantic
+                # fields makes a pixel delta look like goal verification to
+                # the next model turn.  Keep the action fact under an explicit
+                # name and carry the verifier's actual semantic conclusion.
+                compact.update({
+                    "action_verified": data.get("verified"),
+                    "semantic_verified": False,
+                    "completion_evidence": False,
+                    "summary_kind": "pixel_effect_only",
+                })
+            else:
+                compact["verified"] = data.get("verified")
             if data.get("failure_classification"):
                 compact["failure_classification"] = data.get("failure_classification")
             if data.get("failure_recovery"):
                 compact["failure_recovery"] = data.get("failure_recovery")
-            auto = data.get("auto_visual_verify")
-            if isinstance(auto, dict):
+            if auto:
                 compact["auto_visual_verify"] = {
                     "source_action": auto.get("source_action"),
                     "region": auto.get("region"),
-                    "verified": auto.get("verified"),
+                    (
+                        "action_verified" if pixel_effect_only else "verified"
+                    ): auto.get("verified"),
                     "visual_change_detected": auto.get("visual_change_detected"),
                     "visual_change_ratio": auto.get("visual_change_ratio"),
                     "verify_method": auto.get("verify_method"),
+                    "semantic_verified": auto.get("semantic_verified"),
+                    "completion_evidence": auto.get("completion_evidence"),
+                    "summary_kind": auto.get("summary_kind"),
                     "nonvisual_summary": AgentRunner._compact_visual_summary(
                         auto.get("nonvisual_summary")
                     ),
@@ -6775,6 +7716,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "needs_replan": False,
                 }, ensure_ascii=False))
             elif partial_output_block:
+                if (
+                    self._continuous_pointer_output_requested()
+                    and str(partial_output_block.get("destructive_action") or "")
+                    in {
+                        "single_undo", "bulk_undo", "reset_or_clear",
+                        "select_all_delete", "document_surface_clear",
+                    }
+                    and partial_output_block.get("safe_stop") is not True
+                ):
+                    self._continuous_pointer_forward_only_correction = True
                 result = ToolResult(
                     json.dumps(partial_output_block, ensure_ascii=False),
                     terminal=(
@@ -6869,6 +7820,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "ok": False,
                     "verified": False,
                     "blocked": True,
+                    "action_executed": False,
                     "visual_preflight_failed": True,
                     "error": (
                         "The runtime could not confirm that the target pixels still match the "
@@ -6896,9 +7848,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         if spatial_batch_limit else
                         (
                             "Keep frame_strokes in the existing whole-frame 0..1000 coordinate "
-                            "system, but place every stroke start and at least 90% of its points "
-                            "inside the returned work_surface_frame_bounds. Do not reinterpret "
-                            "frame_strokes as surface-relative coordinates."
+                            "system, but place every stroke start and point comfortably inside "
+                            "the returned work_surface_frame_bounds. Do not trace the boundary "
+                            "or reinterpret frame_strokes as surface-relative coordinates."
                         )
                         if frame_coordinate_meta.get("work_surface_containment_failed") else
                         "Inspect the attached authoritative frame and retry once with the "
@@ -7386,13 +8338,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             internal=True,
         )
         self._record_step("open_app", args, result.replay)
-        self._tool_history.append(("open_app", args, result.text or ""))
+        native_vision = _main_model_has_vision()
+        model_result = self._prebind_result_for_model(
+            result.text or "", native_vision=native_vision,
+        )
+        self._tool_history.append(("open_app", args, model_result))
         self.messages.append({
             "role": "user",
             "content": (
                 f"[controller target prebind] Requested leading application {target!r}. "
-                f"open_app result: {(result.text or '')[:800]}. "
-                "Continue in that bound window; do not inspect or mutate unrelated foreground windows."
+                f"open_app result: {model_result}. "
+                "Continue in that bound window; do not inspect or mutate unrelated foreground windows. "
+                + (
+                    "A fresh authoritative native frame is attached immediately after this message. "
+                    "Inspect that image directly; do not call observe merely to reconfirm the prebind."
+                    if native_vision
+                    else "Use one structured observe to ground the target before acting."
+                )
             ),
         })
 
@@ -7419,6 +8381,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             playbook_text=playbooks.render_section(matched_books),
             style=str(CONFIG.get("agent", "prompt_style", default="compact")),
             main_model_has_vision=_main_model_has_vision(),
+            continuous_pointer_output=_requests_continuous_pointer_output(self.task),
             runtime_section=self.runtime_profile.prompt_section())
         self.messages = [
             {"role": "system", "content": system},
@@ -7489,8 +8452,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "[GUI-only task guidance] The user explicitly asked for visible GUI operation. "
                     "Do not use shell/search_files/run_detached/read_file/write_file to perform or "
                     "prepare the work, and do not launch PowerShell/cmd as a workaround. "
-                    "Use open_app/list_windows/find_app/find_program/launch/focus_window/"
-                    "observe/click/type_text/hotkey/drag/scroll. Shell is only for final read-only "
+                    "Use only exposed GUI tools such as open_app/list_windows/launch/focus_window/"
+                    "observe/click/type_text/hotkey/drag/draw_strokes/scroll. Shell is only for final read-only "
                     "verification such as Test-Path/Get-Content/Select-String after the GUI work."
                 ),
             })
@@ -7586,7 +8549,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     service_runtime=runtime_fingerprint())
         try:
             raw_client = _client()
-            client = build_model_adapter(raw_client, CONFIG.get("api", default={}))
+            client = build_model_adapter(raw_client, _main_agent_api_settings())
             self._model_adapter = client
             self._visual_closed_loop_active = bool(
                 CONFIG.get("controller", "visual_closed_loop", default=True)
@@ -7607,14 +8570,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     self.status = "stopped"
                     break
                 self._drain_interjections()
-                resp = self._chat(client, tools)
+                resp = self._chat(client, self._model_tools_for_step(tools, step))
                 if resp is None:        # Stop requested mid LLM-call → abandon
                     self.status = "stopped"
                     break
                 self._track_usage(resp)
                 msg = resp.choices[0].message
                 reasoning = getattr(msg, "reasoning_content", None) or ""
-                self.messages.append(_sanitize_assistant(msg))
+                self.messages.append(_sanitize_assistant(
+                    msg,
+                    preserve_reasoning=bool(
+                        self._last_llm_thinking_enabled
+                        and not self._native_visual_context_enabled()
+                    ),
+                ))
 
                 if not msg.tool_calls:
                     finish_reason = str(getattr(resp.choices[0], "finish_reason", "") or "")
@@ -7660,6 +8629,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         continue
                     if self._recent_results:
                         if not self._verify_done(client, steps_left=max_steps - step):
+                            if self._continuous_pointer_output_requested():
+                                self._continuous_pointer_done_repair_required = True
                             if self._safe_stop_after_repeated_done_rejection():
                                 break
                             continue
@@ -7696,6 +8667,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     if action_names & _ACTION_TOOLS:
                         self._consecutive_unverified += 1
                 if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
+                    if self._continuous_pointer_output_requested():
+                        self._continuous_pointer_done_repair_required = True
                     if self._safe_stop_after_repeated_done_rejection():
                         break
                     self.run_state.terminal_rejected("done", self._last_done_reject_reason)

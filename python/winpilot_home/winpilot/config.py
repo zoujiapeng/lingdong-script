@@ -95,6 +95,11 @@ _DEFAULTS: dict[str, Any] = {
     },
     "controller": {
         "physical_anchor_clicks": True,
+        # Experimental: use MiMo reasoning only while an image-capable native
+        # loop is still grounding unresolved continuous pointer geometry.
+        # Disabled by default because reasoning + function calling is less
+        # stable and substantially slower on current MiMo endpoints.
+        "native_visual_thinking": False,
         # Conservative auto mode.  A crop is used only for a validated,
         # foreground, single-window target; every ambiguous/global scene falls
         # back to the complete virtual desktop.  Disable to force full-screen

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ControlPlaneClient, createGoalGraph, resolveControlPlaneConnection } from './client';
+import {
+  ControlPlaneClient,
+  createGoalGraph,
+  resolveControlPlaneConnection,
+  runtimeCompatibilityError,
+} from './client';
 import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
@@ -11,6 +16,8 @@ export function useControlPlane() {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taskbarRunState = useRef<TaskbarRunState | null>(null);
   const liveStartedRuns = useRef(new Set<string>());
+  const overviewRef = useRef<PlatformOverview | null>(null);
+  const runtimeRestarting = useRef(false);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [baseUrl, setBaseUrl] = useState('');
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
@@ -20,6 +27,7 @@ export function useControlPlane() {
   const [runs, setRuns] = useState<RunProjection[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState('');
+  const [runtimeIssue, setRuntimeIssue] = useState('Controller runtime identity has not been loaded.');
 
   const refresh = useCallback(async () => {
     const client = clientRef.current;
@@ -30,11 +38,37 @@ export function useControlPlane() {
         client.currentRun(),
         client.runs(40),
       ]);
+      overviewRef.current = platform;
       setOverview(platform);
       setCapabilities(platform.capabilities || []);
       setCurrentRun(current.run);
       setArpSnapshot(current.arp);
       setRuns(recent);
+      const compatibilityIssue = runtimeCompatibilityError(platform);
+      setRuntimeIssue(compatibilityIssue);
+      if (compatibilityIssue) {
+        setError(compatibilityIssue);
+        setConnection('degraded');
+        const currentStatus = String(current.run?.status || '').toLowerCase();
+        const active = ['queued', 'running', 'paused'].includes(currentStatus);
+        const restart = window.electronAPI?.restartWinpilot;
+        if (!active && restart && !runtimeRestarting.current) {
+          runtimeRestarting.current = true;
+          try {
+            const restarted = await restart();
+            if (!restarted?.url || restarted.error) {
+              throw new Error(restarted?.error || 'Controller restart did not return a connection.');
+            }
+            window.location.reload();
+            return;
+          } catch (restartError) {
+            runtimeRestarting.current = false;
+            setError(restartError instanceof Error ? restartError.message : String(restartError));
+          }
+        }
+        return;
+      }
+      runtimeRestarting.current = false;
       setError('');
       setConnection((state) => state === 'online' ? state : 'degraded');
     } catch (refreshError) {
@@ -119,14 +153,22 @@ export function useControlPlane() {
     return clientRef.current;
   };
 
+  const requireCompatibleClient = () => {
+    const compatibilityIssue = runtimeCompatibilityError(overviewRef.current);
+    if (compatibilityIssue) {
+      throw new Error(`${compatibilityIssue} The task was not started.`);
+    }
+    return requireClient();
+  };
+
   const startGoal = useCallback(async (goal: string, maxSteps = 30) => {
-    const run = await requireClient().startGraph(createGoalGraph(goal, maxSteps));
+    const run = await requireCompatibleClient().startGraph(createGoalGraph(goal, maxSteps));
     await refresh();
     return run;
   }, [refresh]);
 
   const startGraph = useCallback(async (graph: ArpGraph, inputs: Record<string, unknown> = {}) => {
-    const run = await requireClient().startGraph(graph, inputs);
+    const run = await requireCompatibleClient().startGraph(graph, inputs);
     await refresh();
     return run;
   }, [refresh]);
@@ -137,7 +179,7 @@ export function useControlPlane() {
     automation: AutomationIR,
     inputs: Record<string, unknown> = {},
   ) => {
-    const run = await requireClient().startAutomation(automation, inputs);
+    const run = await requireCompatibleClient().startAutomation(automation, inputs);
     await refresh();
     return run;
   }, [refresh]);
@@ -172,6 +214,7 @@ export function useControlPlane() {
     runs,
     events,
     error,
+    runtimeIssue,
     refresh,
     startGoal,
     startGraph,

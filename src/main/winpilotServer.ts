@@ -16,10 +16,43 @@ let _proc: ChildProcess | null = null;
 let _port: number | null = null;
 let _starting: Promise<number> | null = null;
 let _lastError: string | null = null;
+let _lifecycleGeneration = 0;
 const _stderrTail: string[] = [];
 
 const HOST = '127.0.0.1';
+const RUNTIME_CONTRACT_VERSION = 2;
 const CONTROL_TOKEN = process.env.WINPILOT_CONTROL_TOKEN || randomBytes(32).toString('base64url');
+
+function runtimeCompatibilityProblem(payload: any): string {
+  const runtime = payload?.runtime;
+  if (Number(runtime?.contract_version) !== RUNTIME_CONTRACT_VERSION) {
+    return 'Managed Python runtime contract is stale.';
+  }
+  const source = runtime?.source;
+  const git = runtime?.git;
+  if (
+    !source
+    || typeof source.loaded_stamp !== 'string'
+    || !source.loaded_stamp
+    || typeof source.current_stamp !== 'string'
+    || !source.current_stamp
+    || typeof source.drifted !== 'boolean'
+    || !git
+    || !Object.prototype.hasOwnProperty.call(git, 'loaded_commit')
+    || !Object.prototype.hasOwnProperty.call(git, 'current_commit')
+  ) {
+    return 'Managed Python runtime identity is incomplete.';
+  }
+  if (source.drifted || source.loaded_stamp !== source.current_stamp) {
+    return 'Managed Python sources changed after startup.';
+  }
+  const loadedCommit = String(git.loaded_commit || '');
+  const currentCommit = String(git.current_commit || '');
+  if (loadedCommit && currentCommit && loadedCommit !== currentCommit) {
+    return 'Managed Python process is from a different repository commit.';
+  }
+  return '';
+}
 
 function pushStderr(line: string): void {
   for (const l of line.split(/\r?\n/)) {
@@ -43,7 +76,7 @@ function findFreePort(): Promise<number> {
   });
 }
 
-/** Poll the server root until it answers 200 or the deadline passes. */
+/** Poll until the managed child exposes the runtime contract this app expects. */
 function waitReady(port: number, timeoutMs = 30000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -51,13 +84,27 @@ function waitReady(port: number, timeoutMs = 30000): Promise<void> {
       const req = http.get({
         host: HOST,
         port,
-        path: '/api/ping',
+        path: '/api/status',
         timeout: 2000,
         headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
       }, (res) => {
-        res.resume();
-        if (res.statusCode && res.statusCode < 500) resolve();
-        else retry();
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          if (res.statusCode !== 200) { retry(); return; }
+          try {
+            const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            const compatibilityProblem = runtimeCompatibilityProblem(payload);
+            if (!compatibilityProblem) {
+              resolve();
+              return;
+            }
+            _lastError = `${compatibilityProblem} Restart required.`;
+          } catch {
+            _lastError = 'Managed Python runtime returned an invalid status payload.';
+          }
+          retry();
+        });
       });
       req.on('error', retry);
       req.on('timeout', () => { req.destroy(); retry(); });
@@ -76,6 +123,7 @@ export function startWinpilotServer(): Promise<number> {
   if (_starting) return _starting;
 
   _starting = (async () => {
+    const generation = _lifecycleGeneration;
     const port = await findFreePort();
     const cwd = path.join(getBaseDir(), 'python', 'winpilot_home');
     const proc = spawnPython(['-u', 'serve.py', String(port), HOST], {
@@ -102,9 +150,15 @@ export function startWinpilotServer(): Promise<number> {
 
     try {
       await waitReady(port);
+      if (generation !== _lifecycleGeneration || _proc !== proc) {
+        try { proc.kill(); } catch { /* ignore */ }
+        throw new Error('WinPilot server start was superseded by a restart.');
+      }
     } catch (e) {
       _lastError = _lastError
         || (_stderrTail.slice(-12).join('\n') || (e instanceof Error ? e.message : String(e)));
+      try { proc.kill(); } catch { /* ignore */ }
+      if (_proc === proc) { _proc = null; _port = null; }
       throw e;
     }
     _port = port;
@@ -113,7 +167,10 @@ export function startWinpilotServer(): Promise<number> {
     return port;
   })();
 
-  _starting.catch(() => { _starting = null; });
+  const starting = _starting;
+  starting.catch(() => {
+    if (_starting === starting) _starting = null;
+  });
   return _starting;
 }
 
@@ -136,8 +193,21 @@ export async function ensureWinpilotServer(): Promise<{ url: string | null; toke
   return { url: getWinpilotUrl(), token: CONTROL_TOKEN, starting: !!_starting, error: _lastError };
 }
 
+/** Replace the managed Python child and wait for a contract-compatible service. */
+export async function restartWinpilotServer(): Promise<{ url: string | null; token: string; starting: boolean; error: string | null }> {
+  stopWinpilotServer();
+  const port = await startWinpilotServer();
+  return {
+    url: `http://${HOST}:${port}/`,
+    token: CONTROL_TOKEN,
+    starting: false,
+    error: _lastError,
+  };
+}
+
 /** Stop the server (called on app quit). */
 export function stopWinpilotServer(): void {
+  _lifecycleGeneration += 1;
   if (_proc && !_proc.killed) {
     try { _proc.kill(); } catch { /* ignore */ }
   }

@@ -499,6 +499,7 @@ function fillSettings() {
   $("cfg-dry-run").checked = !!config.agent.dry_run;
   $("cfg-experience").checked = !!config.agent.experience_memory;
   if ($("cfg-no-steal")) $("cfg-no-steal").checked = !!config.agent.no_mouse_steal;
+  if ($("cfg-native-thinking")) $("cfg-native-thinking").checked = !!config.controller?.native_visual_thinking;
   if ($("cfg-window-crop")) $("cfg-window-crop").checked = config.controller?.target_window_capture_enabled !== false;
   if ($("cfg-multi-input")) $("cfg-multi-input").checked = !!config.controller?.multi_input_cooperation;
   if ($("cfg-provider")) $("cfg-provider").value = config.api.provider || "auto";
@@ -518,6 +519,9 @@ function bindSettings() {
   $("cfg-experience").onchange = (e) => patchConfig({ agent: { experience_memory: e.target.checked } });
   $("cfg-shell").onchange = (e) => patchConfig({ agent: { shell_enabled: e.target.checked } });
   $("cfg-no-steal").onchange = (e) => patchConfig({ agent: { no_mouse_steal: e.target.checked } });
+  if ($("cfg-native-thinking")) $("cfg-native-thinking").onchange = (e) => patchConfig({
+    controller: { native_visual_thinking: e.target.checked },
+  });
   if ($("cfg-window-crop")) $("cfg-window-crop").onchange = (e) => patchConfig({
     controller: { target_window_capture_enabled: e.target.checked },
   });

@@ -98,6 +98,7 @@ export interface ElectronAPI {
   getWinpilotConnection: () => Promise<{ url: string; token: string } | null>;
   // Ensure the WinPilot server is (re)starting; returns native workbench status
   ensureWinpilot: () => Promise<{ url: string | null; token?: string; starting: boolean; error: string | null }>;
+  restartWinpilot: () => Promise<{ url: string | null; token?: string; starting: boolean; error: string | null }>;
 
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;

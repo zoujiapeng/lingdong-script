@@ -508,9 +508,6 @@ class PartialOutputDestructiveGuard:
         frame_hwnd: int,
         user_directives: Iterable[str] = (),
     ) -> dict[str, Any] | None:
-        entry = self._active(hwnd)
-        if entry is None:
-            return None
         actions = _flatten_actions(tool_name, args)
         intent = self._intent(
             actions,
@@ -530,6 +527,97 @@ class PartialOutputDestructiveGuard:
             # payload in the same tool sequence. A one-shot authorization must
             # cover both inspections, then record_result consumes it.
             return None
+        entry = self._active(hwnd)
+        if entry is None:
+            debt = self._reversal_debts.get(int(hwnd)) or {}
+            if intent != "single_undo" or int(debt.get("undo_sequence") or 0) <= 0:
+                return None
+
+            # The model has already rolled back every output mutation that the
+            # current run can prove it authored. A further Ctrl+Z could reach
+            # pre-existing/user content, so it needs an explicit user reversal
+            # request rather than an autonomous retry loop.
+            fresh_user_reversal = self._fresh_user_reversal_directive(user_directives)
+            task_reversal = self._task_reversal_authorization_available
+            if task_reversal or fresh_user_reversal:
+                self._task_reversal_authorization_available = False
+                if fresh_user_reversal:
+                    self._consumed_user_reversal_directives.add(fresh_user_reversal)
+                self._blocked_destructive = None
+                self._authorized_destructive = {
+                    "hwnd": int(hwnd),
+                    "sequence": int(sequence),
+                    "intent": intent,
+                    "source": (
+                        "task_reversal"
+                        if task_reversal
+                        else "runtime_user_reversal_directive"
+                    ),
+                }
+                return None
+
+            block_signature = (
+                int(hwnd),
+                int(debt.get("reversed_mutation_sequence") or 0),
+                "undo_without_tracked_mutation",
+            )
+            previous_block = self._blocked_destructive or {}
+            guard_blocks = (
+                int(previous_block.get("guard_blocks") or 0) + 1
+                if previous_block.get("signature") == block_signature
+                else 1
+            )
+            self._blocked_destructive = {
+                "signature": block_signature,
+                "guard_blocks": guard_blocks,
+            }
+            safe_stop = guard_blocks >= 2
+            current_frame_is_fresh = bool(
+                int(frame_hwnd) == int(hwnd)
+                and int(frame_id) >= int(debt.get("confirmed_frame_id") or 0) > 0
+            )
+            error = (
+                "Every model-authored output mutation currently tracked in this window "
+                "has already been rolled back. This additional undo was not dispatched "
+                "because it could affect pre-existing or user-owned content. Stop undoing "
+                "and make a new forward correction from the current authoritative frame."
+            )
+            if safe_stop:
+                error += (
+                    " The same extra undo was proposed twice, so the run is stopping instead "
+                    "of crossing the tracked transaction boundary."
+                )
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "partial_output_destructive_guard": True,
+                "destructive_action": intent,
+                "no_tracked_mutation_available": True,
+                "protected_mutation": {
+                    "sequence": debt.get("reversed_mutation_sequence"),
+                    "invalidated_by": "single_undo",
+                    "hwnd": int(hwnd),
+                },
+                "reversal_debt": {
+                    key: debt.get(key)
+                    for key in (
+                        "undo_sequence",
+                        "reversed_mutation_sequence",
+                        "forward_mutations",
+                        "confirmed_frame_id",
+                    )
+                },
+                "fresh_pixel_evidence": current_frame_is_fresh,
+                "user_reset_requested": False,
+                "local_undo_available": False,
+                "mutation_applied": False,
+                "needs_observe": not current_frame_is_fresh,
+                "strategy_change_required": True,
+                "guard_blocks": guard_blocks,
+                "safe_stop": safe_stop,
+                "error": error,
+            }
         fresh_user_reset = self._fresh_user_reset_directive(user_directives)
         task_reset = self._task_reset_authorization_available
         if task_reset or fresh_user_reset:
@@ -544,12 +632,20 @@ class PartialOutputDestructiveGuard:
                 "source": "task" if task_reset else "runtime_user_directive",
             }
             return None
-        fresh_pixels = bool(
-            int(entry.get("pixel_frame_id") or 0) > 0
-            and int(entry.get("screen_epoch") or -1) == int(screen_epoch)
+        pixel_frame_id = int(entry.get("pixel_frame_id") or 0)
+        same_epoch_frame = bool(
+            int(entry.get("screen_epoch") or -1) == int(screen_epoch)
             and int(frame_epoch) == int(screen_epoch)
+        )
+        newer_same_window_frame = bool(
+            int(frame_hwnd) == int(hwnd)
+            and int(frame_id) > pixel_frame_id > 0
+        )
+        fresh_pixels = bool(
+            pixel_frame_id > 0
             and int(frame_hwnd) == int(hwnd)
-            and int(frame_id) >= int(entry.get("pixel_frame_id") or 0)
+            and int(frame_id) >= pixel_frame_id
+            and (same_epoch_frame or newer_same_window_frame)
         )
         debt = self._reversal_debts.get(int(hwnd)) or {}
         reversal_debt_block = bool(

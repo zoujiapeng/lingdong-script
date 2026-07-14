@@ -6,10 +6,23 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from .config import ROOT_DIR
+
+
+RUNTIME_CONTRACT_VERSION = 2
+
+# Source drift is a compatibility/safety signal, so keep its cache deliberately
+# short. Git metadata is diagnostic only and can tolerate a slightly longer
+# window. Keeping the caches independent also means an action safety check does
+# not pay for any git subprocesses.
+_SOURCE_STAMP_TTL_S = 0.25
+_GIT_STATE_TTL_S = 1.0
+_monotonic = time.monotonic
 
 
 def repo_root() -> Path:
@@ -67,20 +80,96 @@ def _source_stamp() -> str:
 _LOADED_COMMIT = _git(["rev-parse", "--short=12", "HEAD"])
 _LOADED_SOURCE_STAMP = _source_stamp()
 
+_SOURCE_CACHE_LOCK = threading.Lock()
+_GIT_CACHE_LOCK = threading.Lock()
+_source_cache_stamp = _LOADED_SOURCE_STAMP
+_source_cache_expires_at = _monotonic() + _SOURCE_STAMP_TTL_S
+_source_drift_observed = False
+_git_cache_state: tuple[str, str, bool | None] | None = None
+_git_cache_expires_at = 0.0
+
+_CAPABILITIES = {
+    "runtime_profile": _has_module("winpilot.agent.runtime_profile"),
+    "automation_ir": _has_module("winpilot.automation_ir"),
+    "replay_jobs": True,
+    "scheduler": _has_module("winpilot.scheduler"),
+    "desktop_action_queue": _has_module("winpilot.action.desktop_queue"),
+}
+
+
+def _cached_source_state() -> tuple[str, bool]:
+    """Return the current source stamp and sticky drift state.
+
+    The lock intentionally covers the filesystem scan. This avoids a request
+    burst starting the same expensive scan in several server threads. Once
+    drift has been observed it remains true for the life of the process: a
+    stale interpreter must not appear compatible merely because files were
+    changed back while it was running.
+    """
+    global _source_cache_stamp, _source_cache_expires_at, _source_drift_observed
+
+    with _SOURCE_CACHE_LOCK:
+        if _source_drift_observed:
+            return _source_cache_stamp, True
+
+        now = _monotonic()
+        if now < _source_cache_expires_at:
+            return _source_cache_stamp, False
+
+        stamp = _source_stamp()
+        _source_cache_stamp = stamp
+        _source_cache_expires_at = _monotonic() + _SOURCE_STAMP_TTL_S
+        if stamp != _LOADED_SOURCE_STAMP:
+            _source_drift_observed = True
+        return stamp, _source_drift_observed
+
+
+def _read_git_state() -> tuple[str, str, bool | None]:
+    current_commit = _git(["rev-parse", "--short=12", "HEAD"])
+    branch = _git(["branch", "--show-current"])
+    if not branch:
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    return current_commit, branch, _git_dirty()
+
+
+def _cached_git_state() -> tuple[str, str, bool | None]:
+    global _git_cache_state, _git_cache_expires_at
+
+    with _GIT_CACHE_LOCK:
+        now = _monotonic()
+        if _git_cache_state is not None and now < _git_cache_expires_at:
+            return _git_cache_state
+
+        _git_cache_state = _read_git_state()
+        _git_cache_expires_at = _monotonic() + _GIT_STATE_TTL_S
+        return _git_cache_state
+
+
+def _reset_runtime_caches_for_tests() -> None:
+    """Reset process-local caches; intended only for deterministic tests."""
+    global _source_cache_stamp, _source_cache_expires_at, _source_drift_observed
+    global _git_cache_state, _git_cache_expires_at
+
+    with _SOURCE_CACHE_LOCK:
+        _source_cache_stamp = _LOADED_SOURCE_STAMP
+        _source_cache_expires_at = 0.0
+        _source_drift_observed = False
+    with _GIT_CACHE_LOCK:
+        _git_cache_state = None
+        _git_cache_expires_at = 0.0
+
 
 def runtime_source_drifted() -> bool:
     """Return True when files changed after this Python process imported them."""
-    return _source_stamp() != _LOADED_SOURCE_STAMP
+    return _cached_source_state()[1]
 
 
 def runtime_fingerprint() -> dict[str, Any]:
     """Return non-secret identity data for the currently running service."""
-    current_commit = _git(["rev-parse", "--short=12", "HEAD"])
-    current_source_stamp = _source_stamp()
-    branch = _git(["branch", "--show-current"])
-    if not branch:
-        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    current_source_stamp, source_drifted = _cached_source_state()
+    current_commit, branch, dirty = _cached_git_state()
     return {
+        "contract_version": RUNTIME_CONTRACT_VERSION,
         "pid": os.getpid(),
         "cwd": os.getcwd(),
         "argv": list(sys.argv),
@@ -97,18 +186,12 @@ def runtime_fingerprint() -> dict[str, Any]:
             "commit": _LOADED_COMMIT,
             "loaded_commit": _LOADED_COMMIT,
             "current_commit": current_commit,
-            "dirty": _git_dirty(),
+            "dirty": dirty,
         },
         "source": {
             "loaded_stamp": _LOADED_SOURCE_STAMP,
             "current_stamp": current_source_stamp,
-            "drifted": current_source_stamp != _LOADED_SOURCE_STAMP,
+            "drifted": source_drifted,
         },
-        "capabilities": {
-            "runtime_profile": _has_module("winpilot.agent.runtime_profile"),
-            "automation_ir": _has_module("winpilot.automation_ir"),
-            "replay_jobs": True,
-            "scheduler": _has_module("winpilot.scheduler"),
-            "desktop_action_queue": _has_module("winpilot.action.desktop_queue"),
-        },
+        "capabilities": dict(_CAPABILITIES),
     }
