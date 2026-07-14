@@ -409,7 +409,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
 
   const node = state.nodeMap.get(nodeId);
   if (!node) return;
-  if (node.disabled) { emit(state, `# disabled: ${nodeId}`); return; }
+  if (node.disabled) { emit(state, `# 已禁用：${nodeId}`); return; }
 
   state.visited.add(nodeId);
   const p = node.params as any;
@@ -560,7 +560,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
         generateLinear(yesEdge.to_node, state, gens, undefined);
         state.indent--;
       } else {
-        emit(state, `# ${gens.ifKeyword} ${cond}: (no branch)`);
+        emit(state, `# ${gens.ifKeyword} ${cond}：（无分支）`);
       }
       break;
     }
@@ -862,7 +862,7 @@ function generateNode(nodeId: string, state: GenState, gens: GenFunctions, conve
       break;
     }
     default:
-      emit(state, `# UNKNOWN: ${node.type}`);
+      emit(state, `# 未知节点：${node.type}`);
       forward(nodeId, 'output', state, gens, convergence);
   }
 }
@@ -931,7 +931,7 @@ export function generateText(script: FlowScript, mode: TextMode = 'pseudocode'):
   }
 
   const startNode = script.nodes.find((n) => n.type === 'start');
-  if (!startNode) return '# ERROR: no start node';
+  if (!startNode) return '# 错误：没有开始节点';
 
   state.lines.push(gens.headerFormat(script.meta.name, script.meta.description));
   state.lines.push('');

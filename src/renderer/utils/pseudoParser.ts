@@ -1176,7 +1176,7 @@ export function parsePseudoToFlow(pseudo: string): FlowScript {
   return {
     meta: {
       id: nanoid(),
-      name: 'untitled',
+      name: '未命名流程',
       description: '从伪代码生成',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),

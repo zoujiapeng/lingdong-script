@@ -4,6 +4,7 @@ import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../uti
 import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
 import { Search, X, Check, RotateCw, Sparkles, Loader2, Tag, Database, FileType, Star } from 'lucide-react';
+import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
 
 type FilterTab = 'all' | 'template' | 'feature' | 'tested';
 
@@ -358,7 +359,7 @@ export function UnifiedSearchDialog({
                           border: '1px solid var(--border-primary)',
                         }}>
                           <Tag size={8} style={{ marginRight: 2, verticalAlign: 'middle' }} />
-                          {tag}
+                          {displaySearchToken(tag)}
                         </span>
                       ))}
                     </div>
@@ -375,7 +376,7 @@ export function UnifiedSearchDialog({
                       {r.reasons.length > 0 && (
                         <div style={{ marginBottom: 6 }}>
                           <span style={{ fontWeight: 600 }}>匹配原因: </span>
-                          {r.reasons.join('; ')}
+                          {r.reasons.map(displaySearchReason).join('；')}
                         </div>
                       )}
 

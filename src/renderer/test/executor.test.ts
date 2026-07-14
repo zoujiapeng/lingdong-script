@@ -101,7 +101,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'draw',
       'error',
-      'WinPilot-only replay step "draw_strokes" must run through the original .wps.json Replayer',
+      '仅限 WinPilot 的重放步骤“draw_strokes”必须通过原始 .wps.json 重放器运行',
     ]);
   });
 
@@ -124,7 +124,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'draw',
       'error',
-      'WinPilot-only replay step "draw_strokes" must run through the original .wps.json Replayer',
+      '仅限 WinPilot 的重放步骤“draw_strokes”必须通过原始 .wps.json 重放器运行',
     ]);
   });
 
@@ -147,7 +147,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'call',
       'error',
-      'launch_program requires electronAPI.callFeature',
+      'launch_program 需要 electronAPI.callFeature',
     ]);
   });
 
@@ -200,7 +200,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'loop',
       'error',
-      'WinPilot control-flow step "ctrl.loop:until" must run through the original .wps.json Replayer',
+      'WinPilot 控制流步骤“ctrl.loop:until”必须通过原始 .wps.json 重放器运行',
     ]);
   });
 
@@ -220,7 +220,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'click',
       'error',
-      'click_target requires electronAPI.callFeature',
+      'click_target 需要 electronAPI.callFeature',
     ]);
   });
 
@@ -270,7 +270,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'wait',
       'error',
-      'focus_window requires electronAPI.callFeature',
+      'focus_window 需要 electronAPI.callFeature',
     ]);
   });
 
@@ -341,7 +341,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'launch',
       'error',
-      'launch_program returned false',
+      'launch_program 返回了 false',
     ]);
   });
 
@@ -458,7 +458,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'color',
       'error',
-      'color_check requires real feature execution; browser simulation is disabled',
+      'color_check 需要真实功能执行；浏览器模拟已禁用',
     ]);
   });
 
@@ -479,7 +479,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'wait',
       'error',
-      'wait requires real feature execution; browser simulation is disabled',
+      'wait 需要真实功能执行；浏览器模拟已禁用',
     ]);
   });
 
@@ -500,7 +500,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'cond',
       'error',
-      'condition requires real feature execution; browser simulation is disabled',
+      'condition 需要真实功能执行；浏览器模拟已禁用',
     ]);
   });
 
@@ -521,7 +521,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'popup',
       'error',
-      'handle_dialog requires electronAPI.callFeature',
+      'handle_dialog 需要 electronAPI.callFeature',
     ]);
   });
 
@@ -564,7 +564,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'sub',
       'error',
-      'sub_script requires real feature execution; browser simulation is disabled',
+      'sub_script 需要真实功能执行；浏览器模拟已禁用',
     ]);
   });
 
@@ -585,7 +585,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'camera',
       'error',
-      'camera_capture requires electronAPI.callFeature',
+      'camera_capture 需要 electronAPI.callFeature',
     ]);
   });
 
@@ -769,7 +769,7 @@ describe('createFlowExecutor replay/DSL bridges', () => {
     expect(result.statuses).toContainEqual([
       'mystery',
       'error',
-      'Unsupported FlowScript node type: not_a_real_node',
+      '不支持的 FlowScript 节点类型：not_a_real_node',
     ]);
   });
 });

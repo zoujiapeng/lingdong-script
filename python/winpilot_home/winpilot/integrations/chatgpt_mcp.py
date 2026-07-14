@@ -474,7 +474,7 @@ def build_chatgpt_mcp(hooks: ChatGPTBridgeHooks):
         title="Capture visual fallback",
         description=(
             "Return a JPEG to ChatGPT vision for a complex or unknown state. Leave ROI fields empty for the "
-            "primary screen, or provide x/y/width/height together. Do not use this in the routine inner loop."
+            "complete virtual desktop, or provide x/y/width/height together. Do not use this in the routine inner loop."
         ),
         annotations=read_only,
         structured_output=False,

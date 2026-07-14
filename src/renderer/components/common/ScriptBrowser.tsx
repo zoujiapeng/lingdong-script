@@ -3,6 +3,7 @@ import { Search, FileCode, X, AlertTriangle, Library } from 'lucide-react';
 import { useStore } from '../../store';
 import { templateRegistry, TemplateEntry } from '../../utils/templateRegistry';
 import { unifiedSearch } from '../../utils/unifiedSearch';
+import { displaySearchToken, displaySourceLabel } from '../../utils/displayLabels';
 import { UnifiedSearchDialog } from './UnifiedSearchDialog';
 
 interface ScriptBrowserProps {
@@ -119,10 +120,10 @@ export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
                 </div>
                 <div className="script-browser-item-desc">{entry.description}</div>
                 <div className="script-browser-item-meta">
-                  <span className="tag">{entry.source}</span>
+                  <span className="tag">{displaySourceLabel(entry.source)}</span>
                   <span className="tag">{entry.nodeCount} 节点</span>
                   {entry.tags.slice(0, 3).map((t) => (
-                    <span key={t} className="tag">{t}</span>
+                    <span key={t} className="tag">{displaySearchToken(t)}</span>
                   ))}
                 </div>
               </div>

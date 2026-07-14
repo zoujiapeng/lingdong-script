@@ -294,12 +294,14 @@ def pricing_from_config(api: dict[str, Any], profile: ModelProfile) -> UsagePric
         raw = {}
 
     if not raw and profile.provider == "deepseek":
+        # DeepSeek V4-Flash public CNY rates checked 2026-07-14.
+        # https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
         raw = {
             "provider": "deepseek",
             "currency": "CNY",
-            "input_per_m": 2.0,
-            "cache_hit_input_per_m": 0.2,
-            "output_per_m": 8.0,
+            "input_per_m": 1.0,
+            "cache_hit_input_per_m": 0.02,
+            "output_per_m": 2.0,
         }
 
     provider_filter = _lower(raw.get("provider") or "")

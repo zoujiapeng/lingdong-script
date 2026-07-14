@@ -27,7 +27,7 @@ export function useControlPlane() {
   const [runs, setRuns] = useState<RunProjection[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState('');
-  const [runtimeIssue, setRuntimeIssue] = useState('Controller runtime identity has not been loaded.');
+  const [runtimeIssue, setRuntimeIssue] = useState('控制器运行时身份尚未加载。');
 
   const refresh = useCallback(async () => {
     const client = clientRef.current;
@@ -57,7 +57,7 @@ export function useControlPlane() {
           try {
             const restarted = await restart();
             if (!restarted?.url || restarted.error) {
-              throw new Error(restarted?.error || 'Controller restart did not return a connection.');
+              throw new Error(restarted?.error || '控制器重启后未返回连接信息。');
             }
             window.location.reload();
             return;
@@ -149,14 +149,14 @@ export function useControlPlane() {
   }, [currentRun]);
 
   const requireClient = () => {
-    if (!clientRef.current) throw new Error('Control plane is not connected.');
+    if (!clientRef.current) throw new Error('控制平面尚未连接。');
     return clientRef.current;
   };
 
   const requireCompatibleClient = () => {
     const compatibilityIssue = runtimeCompatibilityError(overviewRef.current);
     if (compatibilityIssue) {
-      throw new Error(`${compatibilityIssue} The task was not started.`);
+      throw new Error(`${compatibilityIssue} 任务未启动。`);
     }
     return requireClient();
   };
@@ -199,7 +199,7 @@ export function useControlPlane() {
 
   const decideGate = useCallback(async (approved: boolean, comment = '') => {
     const nodeId = String(arpSnapshot?.current_node_id || currentRun?.current_node_id || '');
-    if (!currentRun || !nodeId) throw new Error('No active human gate.');
+    if (!currentRun || !nodeId) throw new Error('当前没有等待处理的人工确认。');
     await requireClient().gate(currentRun.run_id, nodeId, approved, comment);
     await refresh();
   }, [arpSnapshot, currentRun, refresh]);

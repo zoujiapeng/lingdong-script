@@ -22,7 +22,7 @@
 | --- | --- |
 | `python/winpilot_home/winpilot/server.py` | FastAPI control plane、RuntimeJob、trace、replay、schedule 入口 |
 | `python/winpilot_home/serve.py` | 支持的 WinPilot 服务启动入口 |
-| `python/winpilot_home/winpilot/config.py` | 默认配置和本机 `config.json` 读取 |
+| `python/winpilot_home/winpilot/config.py` | 默认配置和本机 `python/winpilot_home/config.json` 读取 |
 | `python/winpilot_home/winpilot/agent/router.py` | 只构建统一 `AgentRunner` |
 | `python/winpilot_home/winpilot/agent/runtime_profile.py` | 每次 run 的 Runtime/Capability 开关 |
 | `python/winpilot_home/winpilot/agent/loop.py` | LLM 主循环、上下文折叠、工具调用、done gate 编排 |
@@ -46,8 +46,8 @@
 - 不要写计算器、QQ、网易云等单软件专属规则；要提升通用感知、窗口限定、验证和恢复。
 - 不要把 Coding 描述成用户可见的另一个 agent。它是同一 `AgentRunner` 下的 Coding Runtime。
 - 不要相信 `done` 文本等于真实成功；必须核对截图、文件、进程、窗口、trace 或工具 evidence。
-- 不要提交 `config.json`、`traces/`、`evals/`、`scripts/`、`experience_memory.json`、缓存或构建产物。
-- 排查前先看 `/api/status.runtime` 或前端 runtime badge，确认当前服务来自哪个 repo root、branch、commit、PID 和端口。
+- 不要提交 `python/winpilot_home/config.json`、`python/winpilot_home/traces/`、`python/winpilot_home/evals/`、`python/winpilot_home/scripts/`、`python/winpilot_home/experience_memory.json`、缓存或构建产物；根目录 `scripts/` 是受版本控制的开发/评测工具。
+- 排查前先看 `/api/status.runtime` 或前端 runtime badge，确认 contract v2、repo root、loaded/current commit、source loaded/current stamp、drift、PID 和端口。源码漂移后服务会粘性 fail-closed，必须重启，不能继续拿旧解释器测试新前端。
 
 ## 运行时路径
 
@@ -77,7 +77,12 @@ scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
 - `perception/reducer.py`：给 LLM 少量候选和不确定性，原始 snapshot 仍留在 trace。
 - `fast/input_locator.py`：UIA-off 输入框定位，组合 UIA、OCR label、placeholder/search-like 文本、附近矩形、focused non-button 和 synthetic candidate。
 - `agent/scope_guard.py`：GUI mutation 前检查目标窗口/前台，避免点到 Codex、日志窗口或错误窗口。
-- `drawing_gui` schema profile：绘图/画布任务只暴露必要 GUI/controller 工具，降低 prompt 成本。
+- `drawing_gui` 是内部兼容名称，本质是通用“连续指针输出”紧凑 schema：签名、手写、自由曲线、画布和路径都使用同一能力；不能添加猫、狗、画图应用等专属规则。
+- 权威帧可为 `target_window` 或 `full_desktop`。`controller.target_window_capture_enabled` 默认开启，但只在目标窗口已验证、前台、可见、几何可信且任务不需要跨窗口上下文时裁剪；所有不确定情况回退完整虚拟桌面。
+- `mimo-v2.5` 是明确支持 `image_url` 的原生视觉主模型；`mimo-v2.5-pro` 走 text-only。MiMo/Reasonix tool calling 默认关闭 provider thinking，`controller.native_visual_thinking` 只是默认关闭的连续空间实验。
+- 紧凑 system prompt 以真实帧为权威；UIA/OCR/规则只作提示。普通 native observe 不重复走二次 VLM，同一视觉回合只允许一笔 mutation。
+- `revise_plan` 可随时 replace/clear 或原子 add/update/remove/move/reopen；不要把初始 plan 当成不可变任务清单。
+- `controller.multi_input_cooperation` 默认关闭。开启后是人类优先的焦点/光标仲裁，不是第二套鼠标键盘；无法证明目标窗口或用户中途接管时必须 blocked。
 - 物理坐标排查工具：`coordinate_diagnostics` / `coordinate_click_test`。
 - `action/desktop_queue.py`：真实桌面写入动作进入全局 single-writer 队列，Controller batch 可合并嵌套动作生命周期。
 - `action/raw_device.py`：Controller 内层常见动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
@@ -89,16 +94,16 @@ scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
 - 当前只有点击前局部视觉伺服和动作后变化验证，还没有鼠标移动全过程连续闭环伺服。
 - 没有常驻轻量 UI 视觉模型/YOLO 主循环。
 - Perception daemon 已复用 watcher/cache，但还不持续运行昂贵 OCR/CV/VLM，也不是学习型 UI detector。
-- Desktop queue 仍全局串行；`target_hwnd` 用于 scope/诊断和队列元数据，不允许两个物理鼠标任务并发。
+- 物理鼠标/键盘仍全局单写；只允许已证明不改变真实光标/焦点的 PostMessage 窗口动作跨 hwnd 并发。实验协同输入也不允许两个物理鼠标任务并发。
 - 还没做到所有常规动作都不经过 LLM、LLM 只处理异常。
 - Skill 复用率、VLM 兜底调度和低延迟 dashboard 仍需继续打磨。
 
 ## 当前实力边界
 
-- 计算器、记事本、网页靶场、简单绘图/拖拽可以作为基础回归，但不能证明通用 computer use 能力。
+- 计算器、记事本、网页靶场、连续指针/拖拽可以作为基础回归，但不能证明通用 computer use 能力。2026-07-14 的空白画板前端单次闭环约 55 秒且成图粗糙；它只证明完整链路可走通，不是稳定审美质量或成功率。
 - QQ、微信、Steam、抖音、网易云等真实复杂软件需要非破坏性 E2E：打开、聚焦正确窗口、定位输入框/搜索框、输入草稿或搜索词、观察结果、清理草稿；未经用户明确允许不要真实发送消息或发布内容。
 - 通信任务的 `click/type_text/hotkey ok` 不是成功证据。必须看到目标会话、目标联系人、消息文本出现在输入框或聊天记录中；真实发送还要看到发送后的聊天记录证据。
-- 前端目前是原生 `PlatformWorkbench`：Agent cockpit 第一屏，另有 ARP Studio、Runs、Skills、System；没有 Agent iframe。改前端时必须保留真实 FlowCanvas、Run/trace、Skill/Replay、计划任务和配置入口。
+- 前端目前是中文原生 `PlatformWorkbench`：主导航为“智能代理、流程工作台、运行记录、技能与学习、系统设置”；没有 Agent iframe。API/MCP/VLM/URL/模型名等技术标识可保留原文。改前端时必须保留真实 FlowCanvas、Run/trace、Skill/Replay、计划任务和配置入口。
 
 ## Replay / FlowScript 边界
 
@@ -136,6 +141,7 @@ WinPilot Agent 内部调度不是 Windows Task Scheduler。
 
 ```bash
 python -m pytest python/winpilot_home/tests -q
+python -m pytest tests -q
 npx vitest run
 npm run build
 ```

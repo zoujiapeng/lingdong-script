@@ -14,7 +14,7 @@ function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
 function getNodeSummary(node: FlowNodeType): string {
   const p = node.params as any;
   switch (node.type) {
-    case 'replay_step': return `Offline: ${String(p.step?.tool || 'unconfigured')}`;
+    case 'replay_step': return `离线重放：${String(p.step?.tool || '未配置')}`;
     case 'click': return `坐标: (${p.x}, ${p.y})  ${p.method === 'double' ? '双击' : p.method === 'right' ? '右键' : '单击'}`;
     case 'image_click': {
       const targets = (p as any).targets || [];
@@ -37,7 +37,7 @@ function getNodeSummary(node: FlowNodeType): string {
     }
     case 'mouse_operation': {
       const sub = p.sub_operation || 'click';
-      if (sub === 'scroll') return `滚轮: ${p.scroll_direction || 'down'} ${p.scroll_amount || 3}格`;
+      if (sub === 'scroll') return `滚轮: ${p.scroll_direction === 'up' ? '向上' : '向下'} ${p.scroll_amount || 3}格`;
       if (sub === 'hover') return `悬停 (${p.hover_x},${p.hover_y}) ${p.hover_duration || 0.5}s`;
       if (sub === 'move') return `移动至 (${p.move_x},${p.move_y})`;
       // click

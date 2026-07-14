@@ -16,7 +16,7 @@ export function VariableParams({ params, onChange, mode }: Props) {
           className="form-input"
           value={params.name || ''}
           onChange={(e) => onChange({ name: e.target.value })}
-          placeholder="myVariable"
+          placeholder="变量名"
           style={{ fontFamily: "'JetBrains Mono', monospace" }}
         />
       </div>

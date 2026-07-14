@@ -13,6 +13,8 @@
 
 产品表达：用户面对的是一个 Agent；Coding、Computer Use、Terminal、Browser、Replay 是它的能力。
 
+原生 `PlatformWorkbench` 的主体导航、表单、状态、设置和运行视图使用中文；API、MCP、VLM、URL、JSON、X/Y 等不可翻译的技术标识保留。前端期望 runtime contract v2，并比较进程加载/当前 commit 与源码 stamp；不兼容或源码漂移时禁止启动新任务，空闲后自动请求替换控制器。
+
 ## 主循环
 
 直接 `/api/chat` 与原生前端 ARP 目标最终共享同一个 AgentRunner：
@@ -39,7 +41,7 @@
 - tool result 压缩写回 LLM history，同时保留完整 trace。
 - done 二次核验和假成功防护。
 
-`agent/gui_plan_helpers.py` 放置与主循环无关的纯 helper：schema profile 选择、绘图计划解析、绘图视觉确认判断、纯打开窗口计划项判断。新代码优先从 helper 模块引用。
+`agent/gui_plan_helpers.py` 放置与主循环无关的纯 helper：通用 GUI schema profile 选择和纯打开窗口计划项判断。分类器只识别动作语法与界面形态，不编码猫、狗或单一应用测试题；新代码优先从 helper 模块引用。
 
 ## ToolSession
 
@@ -83,9 +85,18 @@ Profile：
 
 - `standard`：普通 desktop/coding 默认。
 - `lean_gui`：较窄的 GUI schema。
-- `drawing_gui`：严格 GUI-only 绘图/画布任务；隐藏无关工具，并把 `execute_subgoal` 参数裁剪到绘图/验证相关字段。
+- `drawing_gui`：只保留为手工配置兼容别名，当前和 `lean_gui` 使用同一工具集合；自动路由不会创建绘图专属 Agent 或专属能力。
 
-排查 GUI-only 绕路时，直接打开 `traces/<run_id>/NNN_llm_request.json` 看 tools 列表，不要只看 agent 说了什么。
+排查 GUI-only 绕路时，直接打开 `python/winpilot_home/traces/<run_id>/NNN_llm_request.json` 看 tools 列表，不要只看 agent 说了什么。
+
+系统基础提示统一由 `agent/prompts.py` 生成 compact closed-loop contract；`prompt_style=full` 当前只是兼容输入，不会自行恢复大段领域提示。`agent.playbooks_enabled=false` 默认关闭，只有显式开启才注入匹配 playbook。主提示要求模型以真实画面为准、一次只做一笔视觉事务、从新鲜结果判断进展，目标或结果看不清时 `blocked`，而不是根据规则摘要或工具 ok 自信续跑。只有用户明确要求手写、签名、描摹、自由路径等连续指针输出时，才追加同一段通用几何约束；画图用例不会注入猫/狗模板、固定布局或应用专属提示。
+
+计划工具只在本轮 schema 暴露时可用。`revise_plan` 可在任何时刻二选一地提交：
+
+- `steps`：整体替换任务列表，`[]` 可清空；目标与 check 相同的已完成项会保留完成状态。
+- `operations`：原子执行 `add`、`update`、`remove`、`move`、`reopen`，索引按每个前序操作后的当前列表计算且从 1 开始；update/reopen 会让对应项重新 pending。
+
+列表可因用户插话、真实画面或新证据随时改变；`complete_subgoal` 仍要求当前证据，计划状态本身不能证明任务完成。
 
 ## 原生视觉闭环
 
@@ -93,19 +104,23 @@ Profile：
 
 ```text
 目标窗口预绑定
-  -> 初始目标窗口真实帧
+  -> 保守选择可信目标窗口裁剪或完整虚拟桌面
+  -> 初始 scoped 真实帧
   -> 模型只决定一笔视觉事务
   -> ToolSession / Controller 执行动作
-  -> 动作后目标窗口真实帧
+  -> 同一 scope 动作前重检 + 动作后真实帧
   -> 下一轮决策
   -> done 时重新捕获真实帧并按用户目标核验
 ```
 
 - 一笔视觉事务可以是一个低层 GUI mutation，或一次 Controller 管理的 `run_action_batch` / `execute_subgoal`。同一模型回复中的后续调用返回 `visual_turn_barrier`，等待模型检查动作后帧。
-- `click`、`scroll`、`drag`、`draw_strokes` 等视觉位置使用当前整帧 0..1000 的 `frame_*` 坐标，由运行时映射到同一次截图的物理区域；原生视觉 schema 隐藏物理 `x/y`。低层动作必须有与当前 hwnd、screen epoch 和窗口区域一致的新鲜帧。动作前重截图能可靠定位目标时，检查外扩 `controller.visual_preflight_target_margin`（默认 60/1000）的 ROI，并使用 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）；无法可靠定位目标时退回整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）。超过对应阈值会取消动作并返回新帧；缺少新鲜画面则返回 `visual_grounding_required`。连续两次试图无画面依据操作会安全暂停。
-- 原生视觉模型的普通无 query `observe` 使用 `fusion.native_vision_direct`：只建立窗口几何快照，把 JPEG 直接交给主模型，跳过 UIA/OCR/VLM 的同帧拆解；二次 VLM 工具也只对 text-only 主模型开放。query、`full`、`changed_only`、结构化锚定、非视觉模型和 fallback 仍使用融合感知。
+- `controller.target_window_capture_enabled=true` 默认开启自动裁剪，但不是强制裁窗。只有记忆 hwnd 仍有效、可见、非最小化、确实是前台操作面、至少节省约 8% 桌面面积，且任务不要求桌面/多窗口/跨应用上下文时才使用 `target_window`；其余情况全部 fail-safe 回退 `full_desktop`。关闭开关会强制完整桌面，便于做 A/B。模型消息和 trace 会记录 `capture_scope`、reason 与确切 region，完整桌面帧不会在同一回合中途被重映射成新裁窗。
+- `click`、`scroll`、`drag`、`draw_strokes` 等视觉位置使用当前整帧 0..1000 的 `frame_*` 坐标，由运行时映射到同一次截图的物理区域；原生视觉 schema 隐藏物理 `x/y`。低层动作必须有与当前 hwnd、screen epoch 和窗口区域一致的新鲜帧。动作前重截图能可靠定位目标时，检查外扩 `controller.visual_preflight_target_margin`（默认 60/1000）的 ROI，并使用 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）；无法可靠定位目标时退回整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）。超过对应阈值会取消动作并返回新帧；缺少新鲜画面则返回 `visual_grounding_required`。连续第二次试图无画面依据操作会要求重新规划，第三次才安全暂停。
+- 原生视觉模型的普通无 query `observe` 使用 `fusion.native_vision_direct`：只建立 scope/几何快照，把 JPEG 直接交给主模型，跳过 UIA/OCR/VLM 的同帧拆解；二次 VLM 工具也只对 text-only 主模型开放。query、`full`、`changed_only`、结构化锚定、非视觉模型和 fallback 仍使用融合感知。
 - 真实帧是当前像素界面的权威状态；结构化元素、规则和 Controller 摘要只是提示。动作后的旧 element tree 会失效，不能压过相反的画面。
 - `observe` 只读。通信场景即使识别出会话和输入框，也只返回 `execute_subgoal` 提案，实际输入/发送必须在下一笔显式事务中发生。
+
+当前 MiMo 路由是显式白名单：`mimo-v2.5` 支持图片并可进入上述闭环；`mimo-v2.5-pro` / `mimo-v2-pro` 是 text-only，不能作为看图 GUI 主模型。MiMo/Reasonix 默认关闭 provider-side thinking；全局 `api.thinking` 可覆盖。另一个默认关闭的实验开关 `controller.native_visual_thinking` 只会在 MiMo native vision 的连续指针几何尚未产生真实进展时临时打开，已有笔画进展或工具调用截断恢复时关闭，不适合当作通用质量开关。
 
 ## 低延迟 GUI Controller
 
@@ -188,6 +203,8 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 
 汇总只把严格核验的 run 计入 `verified_success`：必须未超时、`status=done`、policy 和性能预算通过、外部 ground truth 存在且通过，并且没有 unverified done。没有检查项的报告标记为 `ungrounded`，不计成功；报告的 Git、模型、视觉配置 hash、display/DPI provenance 用来保证不同运行可比。
 
+当前已复盘的本地诚实基线之一是 2026-07-14 的单次真实前端冷启动：空白 Paint 收到“用画板画一只猫”，约 55.3 秒，2 次点击、1 次 `draw_strokes`，没有进入 undo/clear 循环。结果可辨认但粗糙且语义有歧义，不能称为“好看”。对应 trace/eval、模型、显示/DPI 和配置没有作为公开基准提交，所以这只是链路/延迟样本，不是可复现的统计成功率；必须积累带完整 provenance 的固定任务、多次运行与外部 ground truth 后才能报告成功率。
+
 ## Done Gate
 
 `done` 必须有证据。常见拒绝原因：
@@ -206,13 +223,14 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 - `agent/failure_classifier.py`
 - `agent/failure_recovery.py`
 
-原生视觉 GUI 任务在 `done` 时会重新捕获目标窗口，独立 judge 直接检查整张图与用户目标；缺少 UIA/OCR 文本但新鲜画面存在时，精确 literal 由该 judge 逐字检查，不会触发一次反向结构化 observe，更不会因“有截图”自动通过。对象、页面、文本或结果有矛盾、含糊、裁切或看不清都判 false。模型 judge 异常或达到 `done_max_rejects` 也 fail-closed；未验证结果不会因重试次数耗尽被强制升级为成功。文件/进程等不可见任务仍以确定性证据为准。
+原生视觉 GUI 任务在 `done` 时会按同一保守 scope 规则重新捕获目标窗口或完整桌面，独立 judge 直接检查整张新鲜图与用户目标；缺少 UIA/OCR 文本但新鲜画面存在时，精确 literal 由该 judge 逐字检查，不会触发一次反向结构化 observe，更不会因“有截图”自动通过。对象、页面、文本或结果有矛盾、含糊、裁切或看不清都判 false。模型 judge 异常或达到 `done_max_rejects` 也 fail-closed；未验证结果不会因重试次数耗尽被强制升级为成功。文件/进程等不可见任务仍以确定性证据为准。
 
 ### 验证并发边界
 
 - 同一个 `expect` 同时包含可见状态与文件/进程状态时，文件存在、文件内容、进程运行/退出检查会在后台与 UIA/OCR 重叠，最终仍按 AND 语义等待全部通过。
 - `shell_true` 不进入并发白名单，因为任意 PowerShell 表达式无法证明无副作用。
 - 鼠标和键盘写入继续经过全局 `physical` single-writer；同一 hwnd 和剪贴板资源也串行。只有不改变前台、光标和键盘焦点的后台窗口消息动作可在不同 hwnd 并发。
+- `controller.multi_input_cooperation=false` 默认关闭。开启后也不是第二套物理鼠标键盘：系统优先 UIA/PostMessage，物理键盘只在目标窗口拥有前台时执行；点击、滚动、拖拽、笔画和长按期间持续检查前台/光标所有权。用户切换窗口或将光标移出 `controller.cooperative_cursor_tolerance_px=12` 容差时，中止动作而不是抢回控制权。
 - OCR 与 Everything IPC 可在服务启动时后台预热。这些是只读准备工作，不改变桌面任务的顺序。
 
 ## Coding Runtime
@@ -241,7 +259,7 @@ GUI-only 任务不应暴露 coding/file/search 工具。
 - 主存储：`python/winpilot_home/memory.db`。
 - 运行时：`memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py`。
 - 兼容门面：`memory/experience.py`。
-- `experience_memory.json` 是迁移/兼容数据，不是主运行时事实。
+- `python/winpilot_home/experience_memory.json` 是迁移/兼容数据，不是主运行时事实。
 
 清除记忆后 agent 变笨，通常说明 routine、感知或验证硬实力不足；不能靠用户历史记忆撑通用能力。
 
@@ -267,7 +285,7 @@ WinPilot Agent 内部计划任务：
 
 ## 如何复盘工具细节
 
-1. 确认 runtime：`/api/status.runtime` 或前端 runtime badge。
+1. 确认 runtime：`/api/status.runtime` 或前端“系统设置 → 运行时”。必须同时核对 contract v2、`loaded_commit/current_commit` 与 `source.loaded_stamp/current_stamp/drifted`；当前 Git HEAD 相同不代表长驻 Python 解释器已加载新源码。
 2. 找 `run_id`。
 3. 看 `python/winpilot_home/traces/<run_id>.jsonl`：
    - `agent_start`
@@ -295,18 +313,24 @@ WinPilot Agent 内部计划任务：
 常见项：
 
 - `api.provider/base_url/api_key/model`
-- `api.thinking`
+- `api.thinking`（MiMo/Reasonix 默认关闭；显式 true/object 才覆盖）
 - `api.pricing`
 - `vlm.enabled/base_url/api_key/model`
 - `perception.uia/win32/ocr/cv/vlm`
+- `fusion.native_vision_direct`（默认 `true`）
 - `fusion.screen_watch_autostart`
+- `controller.visual_closed_loop`（默认 `true`）
+- `controller.target_window_capture_enabled`（默认 `true`；关闭后强制完整桌面）
+- `controller.native_visual_thinking`（默认 `false`；仅实验性连续指针 MiMo routing）
+- `controller.multi_input_cooperation`（默认 `false`）
+- `controller.cooperative_cursor_tolerance_px`（默认 `12`）
 - `agent.shell_enabled`
 - `agent.planning_enabled`
 - `agent.experience_memory`
 - `agent.tool_profile`
 - `coding.workspace`
 
-不要提交本机 `config.json` 或 key。
+“系统设置”页已提供目标窗口裁剪、多输入协同和实验性空间推理开关。`verify_done` 虽可配置，但关闭会绕过独立完成核验，只能用于受控诊断，不能用来报告可信成功。不要提交本机 `python/winpilot_home/config.json` 或 key；`python/winpilot_home/config.example.json` 应和 `winpilot/config.py` 默认值同步。
 
 ## 验证
 

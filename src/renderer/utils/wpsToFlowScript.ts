@@ -100,7 +100,7 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
   link(previous, end);
 
   const now = new Date().toISOString();
-  const name = script.name || script.task || 'Imported replay';
+  const name = script.name || script.task || '导入的重放';
   return {
     meta: {
       id: nanoid(10),

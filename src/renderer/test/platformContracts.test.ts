@@ -76,8 +76,8 @@ describe('control plane client contracts', () => {
       contracts: {},
     };
 
-    expect(runtimeCompatibilityError(null)).toContain('not been loaded');
-    expect(runtimeCompatibilityError({ ...current, status: {} })).toContain('incompatible');
+    expect(runtimeCompatibilityError(null)).toContain('尚未加载');
+    expect(runtimeCompatibilityError({ ...current, status: {} })).toContain('不兼容');
     expect(runtimeCompatibilityError(current)).toBe('');
     expect(runtimeCompatibilityError({
       ...current,
@@ -87,7 +87,7 @@ describe('control plane client contracts', () => {
           source: { loaded_stamp: 'old', current_stamp: 'new', drifted: false },
         },
       },
-    })).toContain('changed after');
+    })).toContain('启动后发生了变化');
     expect(runtimeCompatibilityError({
       ...current,
       status: {
@@ -96,7 +96,7 @@ describe('control plane client contracts', () => {
           git: { loaded_commit: 'old', current_commit: 'new' },
         },
       },
-    })).toContain('repository commit');
+    })).toContain('仓库提交');
   });
 
   it('normalizes REST and WebSocket addresses', () => {

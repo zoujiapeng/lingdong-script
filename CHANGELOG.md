@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Native visual GUI closed loop and frontend parity (2026-07)
+
+- Made `mimo-v2.5` an explicitly supported native-image main model and kept `mimo-v2.5-pro` on the text-only route; unsupported screenshot requests are no longer inferred from a provider family name. MiMo/Reasonix tool decisions disable provider thinking by default, while optional continuous-spatial reasoning remains an explicit experiment.
+- Replaced the old “always send the whole desktop” assumption with conservative capture selection. `controller.target_window_capture_enabled` uses a verified foreground target-window crop only when it is safe and materially smaller; multi-window, cross-app, global-desktop, invalid, hidden, off-screen, tiny, or ambiguous targets fall back to the complete virtual desktop. Every frame reports its scope and physical region.
+- Tightened the native-vision transaction loop: the model gets an initial authoritative frame and a fresh post-action frame, one visual mutation is accepted per turn, stale/missing frames fail closed, preflight checks use a grounded target ROI when possible, and final semantic completion is judged only from a newly captured goal-conditioned frame or deterministic evidence.
+- Hardened generic continuous-pointer execution without adding cat/dog/Paint-specific production rules. Tool arguments repair flat or stringified stroke arrays; paths are fit coherently to one detected work surface instead of clipping points independently; truncated/partial model output cannot trigger destructive recovery; visible partial work is repaired forward rather than entering repeated clear/undo loops.
+- Reduced the system prompt to one compact, vision-first contract. Same-frame UIA/OCR/VLM decomposition is skipped for ordinary native-vision observations; structured perception remains available for explicit queries, text-only models, grounding, verification, and recovery. Domain playbooks remain opt-in.
+- Made the live todo plan model-editable at any time. `revise_plan` can replace or clear the list, or atomically add, update, remove, move, and reopen items while retaining unrelated verified progress.
+- Added experimental human/Agent input arbitration behind `controller.multi_input_cooperation=false`. It prefers background-safe window/UIA actions, never steals keyboard focus from an unrelated foreground window, lets human cursor movement win during long physical input, and blocks when target ownership cannot be proved. Windows physical input remains single-writer.
+- Added runtime contract v2 and a process-loaded source fingerprint. Electron and the renderer reject incompatible, source-drifted, or different-commit Python controllers; new frontend ARP runs also fail closed until the managed runtime is restarted.
+- Localized the native workbench to Chinese while preserving technical identifiers such as API, MCP, VLM, URL, model names, and coordinate fields.
+- Verified the real frontend path from a blank Paint process for `用画板画一只猫`: ARP skill miss -> `agent_goal` -> one continuous stroke transaction -> fresh-frame completion in about 55 seconds. The result remains visually rough, so this is evidence for the end-to-end generic control path, not a claim of stable artistic quality or a statistical success rate.
+
+### Documentation and repository metadata (2026-07)
+
+- Synchronized README, architecture, Agent, provider, API, replay, flow-editor, memory, desktop-bridge, interview, contribution, and security documentation with the current code and explicit maturity limits.
+- Synchronized `config.example.json` with current defaults, including native-vision direct mode, capture scope, visual closed-loop/preflight/servo controls, cooperative input, incremental perception timing, and ChatGPT desktop integration.
+- Refreshed the DeepSeek V4-Flash fallback estimate to the official 2026-07-14 CNY rates: 1 yuan/M uncached input, 0.02 yuan/M cached input, and 2 yuan/M output.
+- Added GitHub contribution and security guidance; the repository still has no declared project license pending an explicit owner decision.
+- Local verification baseline on 2026-07-14: WinPilot `1342 passed`, root Python `2508 passed`, Vitest `194 passed`, and the production build completed. GitHub publication status is determined separately by Actions for the pushed commit.
+
 ### Unified runtime hardening
 
 - Added authenticated loopback control planes with strict renderer origins, WebSocket authentication, atomic WinPilot configuration writes, and DPAPI-backed legacy execution-vault storage/migration.
@@ -72,11 +93,9 @@
 - Verified the webpage GUI target through the real `/api/chat` path with UIA disabled: run `20260703-025138-dcf2c6` reached `LOCAL_COUNTER_1` via `run_action_batch` + `observe(changed_only=true)` and passed fresh-screen done verification.
 - Verified the merged state with `python -m pytest python/winpilot_home/tests -q`, `npx vitest run`, and `npm run build`.
 
-### Agent hardening already present on this branch
+### Earlier agent hardening
 
-- Treat plain MiMo chat models such as `mimo-v2.5-pro` as text-only unless the
-  model name explicitly indicates multimodal/vision support, preventing
-  unsupported `image_url` requests on text-only endpoints.
+- Treat `mimo-v2.5-pro` and other unverified chat models as text-only; the later explicit `mimo-v2.5` capability entry above is the only marker-free MiMo image route.
 - Prefer a matching foreground top-level window over a stale remembered hwnd
   when resolving the current target window, reducing false success with
   duplicate same-title windows.

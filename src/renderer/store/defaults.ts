@@ -58,7 +58,7 @@ interface ScriptTemplate {
 export const PRESET_TEMPLATES: ScriptTemplate[] = [
   {
     id: 'arp-quickstart', name: 'ARP 低延迟起步流程', category: 'agent',
-    description: '可直接验证和运行的 Agent Runtime Platform 起步流程',
+    description: '可直接验证和运行的智能代理运行平台起步流程',
     createScript: () => {
       const ids = { start: nanoid(), batch: nanoid(), checkpoint: nanoid(), evidence: nanoid(), end: nanoid() };
       return {
@@ -419,7 +419,7 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
 ];
 
 export const PRESET_TEMPLATE_META = [
-  { id: 'arp-quickstart', name: 'ARP 低延迟起步流程', description: '可直接验证和运行的 Agent Runtime Platform 起步流程', category: 'agent',
+  { id: 'arp-quickstart', name: 'ARP 低延迟起步流程', description: '可直接验证和运行的智能代理运行平台起步流程', category: 'agent',
     aliases: ['ARP', 'GUI Agent', '低延迟流程', 'agent workflow'], keywords: ['Agent', 'ARP', '低延迟', '编排', '批处理'], tags: ['agent', 'arp', 'workflow'] },
   { id: 'desktop-monitor', name: '桌面图标监控', description: '循环检测桌面多张目标图片，按优先级点击第一个匹配的', category: 'image',
     aliases: ['桌面监控', '图标监控', 'monitor'], keywords: ['监控', '检测', '桌面', '图标', '图片'], tags: ['image', 'monitor', 'loop'] },
