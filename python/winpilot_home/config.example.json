@@ -2,7 +2,7 @@
   "api": {
     "provider": "auto",
     "base_url": "https://api.deepseek.com",
-    "api_key": "在这里填入你的 DeepSeek API key",
+    "api_key": "在这里填入 API key",
     "model": "deepseek-v4-flash",
     "temperature": 0.3,
     "max_tokens": 4096,
@@ -10,9 +10,9 @@
     "pricing": {
       "provider": "deepseek",
       "currency": "CNY",
-      "input_per_m": 2.0,
-      "cache_hit_input_per_m": 0.2,
-      "output_per_m": 8.0
+      "input_per_m": 1.0,
+      "cache_hit_input_per_m": 0.02,
+      "output_per_m": 2.0
     }
   },
   "vlm": {
@@ -35,16 +35,19 @@
     "vlm_skip_when_uia_rich": true,
     "uia_rich_threshold": 20,
     "vlm_assist_threshold": 60,
-    "vlm_ocr_rich_threshold": 12,
+    "observe_cache_ttl_s": 2.0,
+    "native_vision_direct": true,
     "screen_watch_autostart": true,
     "predictive_ocr_enabled": true,
     "predictive_ocr_prefer_cache": true,
     "incremental_perception_enabled": true,
     "incremental_perception_debounce_ms": 80,
     "incremental_perception_max_crops": 4,
-    "incremental_perception_wait_ms": 1200,
+    "incremental_perception_wait_ms": 250,
     "incremental_perception_min_ratio": 0.00015,
-    "incremental_perception_max_ratio": 0.35
+    "incremental_perception_max_ratio": 0.35,
+    "press_probe_settle_ms": 18,
+    "press_release_settle_ms": 24
   },
   "agent": {
     "max_steps": 40,
@@ -68,10 +71,18 @@
     "reflect_interval": 8
   },
   "controller": {
+    "physical_anchor_clicks": true,
     "native_visual_thinking": false,
     "target_window_capture_enabled": true,
     "multi_input_cooperation": false,
-    "cooperative_cursor_tolerance_px": 12
+    "cooperative_cursor_tolerance_px": 12,
+    "visual_closed_loop": true,
+    "visual_preflight_change_ratio": 0.0025,
+    "visual_preflight_target_change_ratio": 0.01,
+    "visual_preflight_target_margin": 60,
+    "visual_servo_mode": "adaptive",
+    "visual_servo_recent_change_ms": 900,
+    "visual_servo_strict": true
   },
   "ocr": {
     "use_gpu": true,
@@ -85,6 +96,12 @@
     "enabled": true,
     "workspace": "",
     "max_steps": 30
+  },
+  "integrations": {
+    "chatgpt_desktop": {
+      "enabled": true,
+      "allow_desktop_mutation": true
+    }
   },
   "server": {
     "host": "127.0.0.1",

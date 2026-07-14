@@ -34,9 +34,9 @@ _DEFAULTS: dict[str, Any] = {
         "pricing": {
             "provider": "deepseek",
             "currency": "CNY",
-            "input_per_m": 2.0,
-            "cache_hit_input_per_m": 0.2,
-            "output_per_m": 8.0,
+            "input_per_m": 1.0,
+            "cache_hit_input_per_m": 0.02,
+            "output_per_m": 2.0,
         },
     },
     "vlm": {"enabled": False, "base_url": "", "api_key": "", "model": "",

@@ -106,7 +106,7 @@ export function automationIrFromWps(script: WpsScript, id = `air-${nanoid(12)}`)
   return {
     format: 'automation-ir/1',
     id,
-    name: str(script.name) || task || 'Automation',
+    name: str(script.name) || task || '自动化任务',
     created: created(anyScript.created),
     source: {
       kind: 'wps',
@@ -247,7 +247,7 @@ export function automationIrFromFlowScript(script: FlowScript, id = `air-${nanoi
   return {
     format: 'automation-ir/1',
     id,
-    name: str(script.meta?.name) || 'Flow automation',
+    name: str(script.meta?.name) || '流程自动化',
     created: nowSeconds(),
     source: {
       kind: 'flowscript',
@@ -290,7 +290,7 @@ export function automationRuntimeGraph(ir: AutomationIR): ArpGraph {
   if (error) throw new Error(error);
   if (ir.runtime?.kind !== 'arp_graph' || !ir.runtime.graph) {
     throw new Error(
-      'Automation IR has no canonical ARP runtime graph; reopen the source in Studio and save it again',
+      'Automation IR 没有规范的 ARP 运行图；请在流程工作台中重新打开来源并再次保存',
     );
   }
   return clone(ir.runtime.graph);
@@ -301,32 +301,32 @@ export function validateAutomationRuntime(ir: AutomationIR): string | undefined 
   if (error) return error;
   const kind = automationRuntimeKind(ir);
   if (kind === 'wps_replay') return undefined;
-  if (kind !== 'arp_graph') return 'Automation IR requires a supported runtime.kind';
+  if (kind !== 'arp_graph') return 'Automation IR 需要受支持的 runtime.kind';
   const graph = ir.runtime?.kind === 'arp_graph' ? ir.runtime.graph : undefined;
-  if (!graph || graph.format !== 'arp/1') return 'Automation IR arp_graph runtime requires graph format arp/1';
+  if (!graph || graph.format !== 'arp/1') return 'Automation IR 的 arp_graph 运行时要求 graph 格式为 arp/1';
   if (!Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
-    return 'Automation IR arp_graph runtime requires graph nodes and edges';
+    return 'Automation IR 的 arp_graph 运行时必须包含 graph.nodes 和 graph.edges';
   }
   const expected = str(ir.runtime?.kind === 'arp_graph' ? ir.runtime.projection_fingerprint : '');
-  if (!expected) return 'Automation IR arp_graph runtime requires projection_fingerprint';
+  if (!expected) return 'Automation IR 的 arp_graph 运行时必须包含 projection_fingerprint';
   const actual = expected.startsWith('fnv1a32:')
     ? legacyAutomationProjectionFingerprint(ir.steps, ir.variables, graph)
     : automationProjectionFingerprint(ir.steps, ir.variables, graph);
   if (expected !== actual) {
-    return `Automation IR runtime projection is stale: expected ${expected}, calculated ${actual}`;
+    return `Automation IR 运行时投影已过期：期望 ${expected}，实际计算为 ${actual}`;
   }
   return undefined;
 }
 
 export function automationIrToWps(ir: AutomationIR): WpsScript {
-  if (ir.format !== 'automation-ir/1') throw new Error('Unsupported Automation IR format');
+  if (ir.format !== 'automation-ir/1') throw new Error('不支持的 Automation IR 格式');
   const source = ir.source || {};
-  if (source.kind !== 'wps') throw new Error('Only WPS-sourced Automation IR can be converted to WPS');
+  if (source.kind !== 'wps') throw new Error('只有来源为 WPS 的 Automation IR 才能转换为 WPS');
   const conditions = clone(ir.conditions || {}) as Record<string, unknown>;
   const evidence = ir.evidence;
   const script: WpsScript = {
     format: 'wps/2',
-    name: str(ir.name) || 'Automation',
+    name: str(ir.name) || '自动化任务',
     task: str(source.task),
     source: 'automation-ir',
     source_ir: str(ir.id),
@@ -356,7 +356,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
   const source = ir.source || {};
   if (source.kind === 'wps') return wpsToFlowScript(automationIrToWps(ir));
   if (source.kind !== 'flowscript') {
-    throw new Error(`Unsupported Automation IR source kind: ${String(source.kind || '')}`);
+    throw new Error(`不支持的 Automation IR source.kind：${String(source.kind || '')}`);
   }
   const nodes: FlowNode[] = (ir.steps || []).map((raw, index) => {
     const step = raw as Record<string, any>;
@@ -416,7 +416,7 @@ export function automationIrToFlowScript(ir: AutomationIR): FlowScript {
 export function automationDocumentToFlowScript(value: unknown): FlowScript {
   const document = value as Record<string, any>;
   if (!document || typeof document !== 'object' || Array.isArray(document)) {
-    throw new Error('Automation document must be a JSON object');
+    throw new Error('自动化文档必须是 JSON 对象');
   }
   if (document.format === 'automation-ir/1') {
     return automationIrToFlowScript(document as AutomationIR);
@@ -427,46 +427,46 @@ export function automationDocumentToFlowScript(value: unknown): FlowScript {
   if (document.meta && Array.isArray(document.nodes) && Array.isArray(document.edges)) {
     return clone(document) as FlowScript;
   }
-  throw new Error(`Unsupported automation document: ${String(document.format || 'unknown format')}`);
+  throw new Error(`不支持的自动化文档：${String(document.format || '未知格式')}`);
 }
 
 export function validateAutomationIR(value: unknown): string | undefined {
   const ir = value as AutomationIR;
-  if (!ir || typeof ir !== 'object') return 'Automation IR must be an object';
-  if (ir.format !== 'automation-ir/1') return `unknown Automation IR format: ${(ir as any).format}`;
-  if (!str(ir.id)) return 'Automation IR requires id';
-  if (!str(ir.name)) return 'Automation IR requires name';
+  if (!ir || typeof ir !== 'object') return 'Automation IR 必须是对象';
+  if (ir.format !== 'automation-ir/1') return `未知的 Automation IR 格式：${(ir as any).format}`;
+  if (!str(ir.id)) return 'Automation IR 缺少 id';
+  if (!str(ir.name)) return 'Automation IR 缺少 name';
   for (const key of ['source', 'conditions', 'evidence', 'safety', 'fallback'] as const) {
-    if (!ir[key] || typeof ir[key] !== 'object' || Array.isArray(ir[key])) return `${key} must be an object`;
+    if (!ir[key] || typeof ir[key] !== 'object' || Array.isArray(ir[key])) return `${key} 必须是对象`;
   }
-  if (!ir.variables || typeof ir.variables !== 'object' || Array.isArray(ir.variables)) return 'variables must be an object';
-  if (!Array.isArray(ir.steps)) return 'steps must be a list';
+  if (!ir.variables || typeof ir.variables !== 'object' || Array.isArray(ir.variables)) return 'variables 必须是对象';
+  if (!Array.isArray(ir.steps)) return 'steps 必须是列表';
   for (let i = 0; i < ir.steps.length; i += 1) {
     const step = ir.steps[i] as Record<string, unknown>;
-    if (!step || typeof step !== 'object' || Array.isArray(step)) return `steps[${i + 1}] must be an object`;
-    if (!str(step.tool)) return `steps[${i + 1}] requires tool`;
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return `steps[${i + 1}] 必须是对象`;
+    if (!str(step.tool)) return `steps[${i + 1}] 缺少 tool`;
   }
-  if (!str(ir.source.kind)) return 'Automation IR source.kind is required';
+  if (!str(ir.source.kind)) return 'Automation IR 缺少 source.kind';
   const sourceKind = str(ir.source.kind);
   if (!['wps', 'flowscript'].includes(sourceKind)) {
-    return `unsupported Automation IR source.kind: ${sourceKind}`;
+    return `不支持的 Automation IR source.kind：${sourceKind}`;
   }
   if (sourceKind === 'flowscript') {
     const nodeIds: string[] = [];
     for (let i = 0; i < ir.steps.length; i += 1) {
       const step = ir.steps[i] as Record<string, unknown>;
       const nodeId = str(step.node_id);
-      if (!nodeId) return `steps[${i + 1}] requires node_id for flowscript source`;
+      if (!nodeId) return `steps[${i + 1}] 缺少 flowscript 来源所需的 node_id`;
       nodeIds.push(nodeId);
       if (!step.params || typeof step.params !== 'object' || Array.isArray(step.params)) {
-        return `steps[${i + 1}].params must be an object`;
+        return `steps[${i + 1}].params 必须是对象`;
       }
       if (step.outgoing !== undefined && !Array.isArray(step.outgoing)) {
-        return `steps[${i + 1}].outgoing must be a list`;
+        return `steps[${i + 1}].outgoing 必须是列表`;
       }
     }
     if (new Set(nodeIds).size !== nodeIds.length) {
-      return 'flowscript Automation IR node_id values must be unique';
+      return 'flowscript Automation IR 的 node_id 值必须唯一';
     }
     const known = new Set(nodeIds);
     for (let i = 0; i < ir.steps.length; i += 1) {
@@ -474,15 +474,15 @@ export function validateAutomationIR(value: unknown): string | undefined {
       for (let j = 0; j < outgoing.length; j += 1) {
         const target = str(outgoing[j]?.to_node);
         if (!target || !known.has(target)) {
-          return `steps[${i + 1}].outgoing[${j + 1}] references unknown to_node ${target}`;
+          return `steps[${i + 1}].outgoing[${j + 1}] 引用了未知的 to_node ${target}`;
         }
       }
     }
   }
   if (ir.runtime !== undefined) {
-    if (!ir.runtime || typeof ir.runtime !== 'object') return 'Automation IR runtime must be an object';
+    if (!ir.runtime || typeof ir.runtime !== 'object') return 'Automation IR runtime 必须是对象';
     if (!['wps_replay', 'arp_graph'].includes(str(ir.runtime.kind))) {
-      return `unsupported Automation IR runtime kind: ${str(ir.runtime.kind) || '<empty>'}`;
+      return `不支持的 Automation IR runtime.kind：${str(ir.runtime.kind) || '<空>'}`;
     }
   }
   return undefined;

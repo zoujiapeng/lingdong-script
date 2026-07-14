@@ -229,7 +229,7 @@ export function flowToArpGraph(script: FlowScript): ArpGraph {
   return {
     format: 'arp/1',
     id: script.meta.id,
-    name: script.meta.name || 'Untitled workflow',
+    name: script.meta.name || '未命名工作流',
     description: script.meta.description || '',
     nodes,
     edges,

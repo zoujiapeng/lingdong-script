@@ -103,8 +103,8 @@ describe('Automation IR adapters', () => {
     expect(automationRuntimeGraph(ir).metadata.source_ir).toBe('air-flow');
     const stale = structuredClone(ir);
     stale.steps[1].tool = 'changed-after-compile';
-    expect(validateAutomationRuntime(stale)).toContain('projection is stale');
-    expect(() => automationRuntimeGraph(stale)).toThrow('projection is stale');
+    expect(validateAutomationRuntime(stale)).toContain('投影已过期');
+    expect(() => automationRuntimeGraph(stale)).toThrow('投影已过期');
 
     const restored = automationIrToFlowScript(ir);
     expect(restored.meta.id).toBe('flow-1');
@@ -138,11 +138,11 @@ describe('Automation IR adapters', () => {
     };
     const ir = automationIrFromFlowScript(flow, 'air-flow');
 
-    expect(() => automationIrToWps(ir)).toThrow('WPS-sourced');
+    expect(() => automationIrToWps(ir)).toThrow('来源为 WPS');
   });
 
   it('rejects malformed IR', () => {
-    expect(validateAutomationIR({ format: 'wps/2' })).toContain('format');
+    expect(validateAutomationIR({ format: 'wps/2' })).toContain('格式');
     expect(validateAutomationIR({
       format: 'automation-ir/1',
       id: 'x',
@@ -154,7 +154,7 @@ describe('Automation IR adapters', () => {
       fallback: {},
       variables: {},
       steps: [{}],
-    })).toContain('requires tool');
+    })).toContain('缺少 tool');
   });
 
   it('rejects Flow IR without a canonical runtime graph at execution time', () => {
@@ -202,6 +202,6 @@ describe('Automation IR adapters', () => {
         params: {},
         outgoing: [{ to_node: 'missing' }],
       }],
-    })).toContain('unknown to_node');
+    })).toContain('未知的 to_node');
   });
 });

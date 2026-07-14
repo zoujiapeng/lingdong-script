@@ -4,19 +4,19 @@
 
 ## 前端
 
-路径：`src/renderer/`。
+路径：`src/renderer/`。当前生产工作台已中文化，主导航显示“智能代理、流程工作台、运行记录、技能与学习、系统设置”；API、MCP、VLM、URL、模型名和坐标字段等技术标识保留原文。
 
 核心内容：
 
 - `types/index.ts`：FlowScript 类型和 `NodeType`。
 - `utils/nodeDefinitions.ts`：节点定义。
-- `components/platform/PlatformWorkbench.tsx`：唯一生产工作台；Agent、ARP Studio、Runs、Skills、System 共用 control plane。
+- `components/platform/PlatformWorkbench.tsx`：唯一生产工作台；智能代理、流程工作台、运行记录、技能与学习、系统设置共用 control plane。
 - `components/PropertyPanel/`：参数编辑。
 - `store/defaults.ts`：默认设置和预置模板。
 - `store/persistence.ts`：localStorage 持久化 helper。
 - `store/index.ts`：Zustand store；不再复制 defaults/templates/persistence。
 
-当前 `NodeType` 数量：54。
+当前 `NodeType` 联合类型共 60 项；新增/删除节点后必须以 `src/renderer/types/index.ts` 重新核对，不能沿用旧文档计数。
 
 ## 执行
 
@@ -38,11 +38,20 @@ Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validat
 
 `toAutomationIR()` 只编译一次当前 Flow state，并把 `arp/1` graph 与 projection fingerprint 存入 `runtime`；Studio 直接把该 IR 提交到 `/api/v2/automation-ir/runs`。保存默认写 `.automation.json`；旧 FlowScript/WPS 可导入。`store/executor.ts` 与 `python/engine/` 仍是兼容执行入口，不是新工作台的主运行时。
 
+运行前还有两层独立兼容检查：
+
+- Automation IR 的 projection fingerprint 必须与当前 steps/variables/graph 一致，避免陈旧投影或被篡改的 graph 运行。
+- renderer 只接受 runtime contract v2，且要求 Python 进程启动时源码指纹、当前源码指纹和 Git revision 一致。源码更新后旧服务会被标记为 drifted，流程工作台禁止继续提交并要求重启。
+
+这两个 fingerprint 解决的是不同问题：前者保护 artifact 投影，后者保护正在运行的解释器；不能只通过其中一个就认为运行环境可信。
+
 可靠性边界：
 
 - `INPUT_TEXT`、`CLICK_TEXT`、`CLICK_IMAGE` / `IMAGE_CLICK` 已在 legacy `DSLExecutor` 中落到现有 `click`、`type`、`image_click` action handler，不再解析成功后静默 no-op。
 - 前端 `store/executor.ts` 是浏览器侧 FlowScript 模拟/桥接执行器，不等同于 WinPilot Replayer。`tool_call`、`process_action`、`clipboard_action`、`window_control`、`dialog_action`、`a11y_action`、`wifi_action`、`web_browser`、`system_power` 以及 `FEATURE_MAP` 节点会通过 feature 桥执行；feature 返回 `success: false`、`ok: false`、持久化子进程 `type: "error"` 或内部 `result: false` 时必须视为节点失败。
 - 无 Electron 桥时，手工流程图节点仍可用于浏览器预览模拟；但从 `.wps.json` 导入的节点带 `_source_wps_replay`，基础点击、输入、快捷键、滚动、拖拽、截图、启动/聚焦/剪贴板等会要求真实 bridge 或 fail-fast，不能把真实桌面重放模拟成成功。`wait_process` 也始终要求真实桥接。
+- ARP `action_batch`、legacy bridge 和 Agent 都共享 Desktop Action Queue。真实鼠标/键盘仍是 `physical` 全局单写；`controller.multi_input_cooperation` 默认关闭，开启后只增加人类优先的焦点/光标仲裁，不会虚拟出第二套输入设备。浏览器预览无法证明这条真实设备路径。
+- 原生视觉 `agent_goal` 收到的画面可能是经过验证的目标窗口裁剪，也可能是完整虚拟桌面。`controller.target_window_capture_enabled` 是可关闭的性能优化，跨窗口、全局或含糊任务会回退全桌面；Flow/IR 不应把某次截图像素尺寸固化成永久物理坐标。
 
 ## @feature
 
@@ -82,3 +91,9 @@ Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validat
 WinPilot 成功 trace 会生成规范 `.automation.json`，并保留 `.wps.json` 兼容导出。`src/renderer/utils/automationIR.ts` 负责 IR/Flow/WPS adapter、运行投影和 fingerprint；后端会重新计算 fingerprint，拒绝 steps/variables/graph 不一致的陈旧投影。Agent 不需要直接理解 FlowScript 内部结构。
 
 这个桥只做导入/编辑，不改变 WinPilot 的重放来源：离线 0-token 重放仍由 `python/winpilot_home/winpilot/recorder/trace.py` 的 Replayer 执行。`draw_strokes`、`run_detached`、`tray_click`、未知步骤以及 `while` / `until` 控制流导入 FlowScript 时会保留为带 `_requires_wps_replay` 的占位；占位不等于旧 `@feature` executor 已经能直接运行。WPS 导入的 FlowScript 会设置 `settings.require_real_features=true`；能桥接的基础 GUI 节点、窗口等待、弹窗处理和摄像头节点会通过 `@feature` 尝试真实执行，不能桥接或桥接失败时应让流程失败，而不是继续报告完成。没有真实桥的等待/条件/图像/颜色/缺失子脚本类节点在该模式下也必须失败，不能走浏览器模拟。
+
+## 计划与证据边界
+
+- Flow/ARP graph 是用户编辑并保存的编排 artifact，不等同于 Agent 的 live todo。运行到 `agent_goal` 时，同一 `AgentRunner` 可用 `revise_plan` 随时替换、清空、增删、移动或重新打开自己的任务项；这些变化不会静默改写已保存的 Flow 节点。
+- 客户端收到新的 `agent_plan` 快照后应整体更新显示，不能继续使用旧索引。计划项被标记完成只表示局部工作状态，不是 ARP `evidence_gate` 或最终任务成功证据。
+- `action_batch` 返回成功、画面发生变化、preview 走完、replay 结束或 graph 到达 `end` 都不能替代目标 evidence。需要可信完成时，图中必须保留与用户目标匹配的 evidence gate，或由 `agent_goal` 的新鲜画面/确定性 done gate 核验。

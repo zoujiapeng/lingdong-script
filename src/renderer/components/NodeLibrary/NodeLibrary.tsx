@@ -8,6 +8,7 @@ import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../uti
 import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
 import { getNodeIcon } from '../../utils/nodeIconMap';
+import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
 
 const CategoryIcons: Record<string, React.FC<any>> = {
   agent: Bot,
@@ -354,14 +355,14 @@ export const NodeLibrary = React.memo(function NodeLibrary() {
                   {isExpanded && (
                     <div style={{ marginTop: 6, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 11 }}>
                       {item.keywords && item.keywords.length > 0 && (
-                        <div style={{ marginBottom: 4 }}>关键词: {item.keywords.join(', ')}</div>
+                        <div style={{ marginBottom: 4 }}>关键词: {item.keywords.map(displaySearchToken).join('、')}</div>
                       )}
                       {item.tags && item.tags.length > 0 && (
-                        <div style={{ marginBottom: 4 }}>标签: {item.tags.join(', ')}</div>
+                        <div style={{ marginBottom: 4 }}>标签: {item.tags.map(displaySearchToken).join('、')}</div>
                       )}
                       <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>相关性: {r.score}/100</div>
                       {r.reasons && r.reasons.length > 0 && (
-                        <div style={{ marginTop: 4 }}>匹配理由: {r.reasons.join('; ')}</div>
+                        <div style={{ marginTop: 4 }}>匹配理由: {r.reasons.map(displaySearchReason).join('；')}</div>
                       )}
                       <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                         {isTemplate ? (

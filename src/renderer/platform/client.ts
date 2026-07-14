@@ -18,10 +18,10 @@ const ELECTRON_SERVER_POLL_MS = 200;
 export const EXPECTED_RUNTIME_CONTRACT_VERSION = 2;
 
 export function runtimeCompatibilityError(overview: PlatformOverview | null | undefined): string {
-  if (!overview) return 'Controller runtime identity has not been loaded.';
+  if (!overview) return '控制器运行时身份尚未加载。';
   const runtime = overview.status?.runtime as Record<string, any> | undefined;
   if (!runtime || Number(runtime.contract_version) !== EXPECTED_RUNTIME_CONTRACT_VERSION) {
-    return 'The managed Python controller uses an incompatible runtime contract.';
+    return '托管的 Python 控制器使用了不兼容的运行时协议。';
   }
   const source = runtime.source as Record<string, any> | undefined;
   const git = runtime.git as Record<string, any> | undefined;
@@ -34,20 +34,20 @@ export function runtimeCompatibilityError(overview: PlatformOverview | null | un
     || !Object.prototype.hasOwnProperty.call(git, 'loaded_commit')
     || !Object.prototype.hasOwnProperty.call(git, 'current_commit')
   ) {
-    return 'The managed Python controller is missing runtime identity fields.';
+    return '托管的 Python 控制器缺少运行时身份字段。';
   }
   const loadedStamp = String(source.loaded_stamp || '');
   const currentStamp = String(source.current_stamp || '');
   if (!loadedStamp || !currentStamp) {
-    return 'The managed Python controller has an incomplete source identity.';
+    return '托管的 Python 控制器源码身份不完整。';
   }
   if (source.drifted || loadedStamp !== currentStamp) {
-    return 'Python controller sources changed after the process started.';
+    return 'Python 控制器源码在进程启动后发生了变化。';
   }
   const loadedCommit = String(git.loaded_commit || '');
   const currentCommit = String(git.current_commit || '');
   if (loadedCommit && currentCommit && loadedCommit !== currentCommit) {
-    return 'The running Python controller does not match the current repository commit.';
+    return '正在运行的 Python 控制器与当前仓库提交不一致。';
   }
   return '';
 }
@@ -94,7 +94,7 @@ export async function resolveControlPlaneConnection(): Promise<ControlPlaneConne
         if (ensured?.error) throw new Error(ensured.error);
         await new Promise((resolve) => setTimeout(resolve, ELECTRON_SERVER_POLL_MS));
       }
-      throw new Error('WinPilot managed server did not become ready within 35 seconds.');
+      throw new Error('WinPilot 托管服务在 35 秒内未就绪。');
     }
   }
   return { url: FALLBACK_URL, token: '' };
@@ -317,7 +317,7 @@ export class ControlPlaneClient {
       body: JSON.stringify({ automation, inputs }),
     });
     if (!response.run) {
-      throw new Error(`Automation runtime ${response.runtime_kind || 'unknown'} did not create an ARP run`);
+      throw new Error(`自动化运行时 ${response.runtime_kind || '未知'} 未创建 ARP 运行记录`);
     }
     return response.run;
   }
@@ -396,9 +396,9 @@ export function createGoalGraph(goal: string, maxSteps = 30): ArpGraph {
     ],
     edges: [
       { id: 'start-skill', source: 'start', target: 'skill', branch: 'next', label: '' },
-      { id: 'skill-end', source: 'skill', target: 'end', branch: 'next', label: 'reused' },
-      { id: 'skill-miss-goal', source: 'skill', target: 'goal', branch: 'miss', label: 'explore' },
-      { id: 'skill-fail-goal', source: 'skill', target: 'goal', branch: 'fail', label: 'recover' },
+      { id: 'skill-end', source: 'skill', target: 'end', branch: 'next', label: '已复用' },
+      { id: 'skill-miss-goal', source: 'skill', target: 'goal', branch: 'miss', label: '探索' },
+      { id: 'skill-fail-goal', source: 'skill', target: 'goal', branch: 'fail', label: '恢复' },
       { id: 'goal-end', source: 'goal', target: 'end', branch: 'next', label: '' },
     ],
     variables: {},

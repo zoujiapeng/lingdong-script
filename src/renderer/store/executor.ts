@@ -59,7 +59,7 @@ export function createFlowExecutor(
 
   function setVariable(name: any, value: any, nodeId: string) {
     const key = String(name || '').trim();
-    if (!key) throw new Error('variable name is required');
+    if (!key) throw new Error('必须填写变量名');
     runtimeVariables[key] = String(value ?? '');
     script.variables[key] = runtimeVariables[key];
     log('info', `变量 ${key} = "${runtimeVariables[key]}"`, nodeId);
@@ -84,16 +84,16 @@ export function createFlowExecutor(
   }
 
   function featureFailureMessage(res: any, featureName: string): string | undefined {
-    if (res === false) return `${featureName} returned false`;
-    if (res?.type === 'error') return res.error || `${featureName} failed`;
-    if (res?.success === false) return res.error || `${featureName} failed`;
-    if (res?.ok === false) return res.error || `${featureName} failed`;
+    if (res === false) return `${featureName} 返回了 false`;
+    if (res?.type === 'error') return res.error || `${featureName} 执行失败`;
+    if (res?.success === false) return res.error || `${featureName} 执行失败`;
+    if (res?.ok === false) return res.error || `${featureName} 执行失败`;
     const inner = res?.type === 'result' ? res.result : res?.result;
-    if (inner === false) return `${featureName} returned false`;
-    if (inner?.success === false) return inner.error || `${featureName} failed`;
-    if (inner?.ok === false) return inner.error || `${featureName} failed`;
+    if (inner === false) return `${featureName} 返回了 false`;
+    if (inner?.success === false) return inner.error || `${featureName} 执行失败`;
+    if (inner?.ok === false) return inner.error || `${featureName} 执行失败`;
     if (res?.type === 'result' && inner?.success === true && inner?.result === false) {
-      return inner.error || `${featureName} returned false`;
+      return inner.error || `${featureName} 返回了 false`;
     }
     return undefined;
   }
@@ -142,7 +142,7 @@ export function createFlowExecutor(
     const win = window as any;
     if (!win.electronAPI?.callFeature) {
       if (requireBridge || script.settings?.require_real_features === true) {
-        throw new Error(`${featureName} requires electronAPI.callFeature`);
+        throw new Error(`${featureName} 需要 electronAPI.callFeature`);
       }
       log('warn', simulateMessage || `模拟工具调用: ${featureName}`, nodeId);
       await delay(300);
@@ -162,7 +162,7 @@ export function createFlowExecutor(
   ): Promise<any> {
     const win = window as any;
     if (!win.electronAPI?.callFeature) {
-      throw new Error(`${featureName} requires electronAPI.callFeature`);
+      throw new Error(`${featureName} 需要 electronAPI.callFeature`);
     }
     const timeoutMs = Math.max(0.1, Number(timeoutSeconds) || 10) * 1000;
     const deadline = Date.now() + timeoutMs;
@@ -172,15 +172,15 @@ export function createFlowExecutor(
       const failure = featureFailureMessage(res, featureName);
       if (!failure) return res;
       lastFailure = failure;
-      log('debug', `${featureName} wait probe failed: ${failure}`, nodeId);
+      log('debug', `${featureName} 等待探测失败：${failure}`, nodeId);
       await delay(300);
     }
-    throw new Error(`${featureName} timed out after ${timeoutSeconds}s${lastFailure ? `: ${lastFailure}` : ''}`);
+    throw new Error(`${featureName} 在 ${timeoutSeconds} 秒后超时${lastFailure ? `：${lastFailure}` : ''}`);
   }
 
   function rejectBrowserSimulation(nodeType: string): void {
     if (script.settings?.require_real_features === true) {
-      throw new Error(`${nodeType} requires real feature execution; browser simulation is disabled`);
+      throw new Error(`${nodeType} 需要真实功能执行；浏览器模拟已禁用`);
     }
   }
 
@@ -369,17 +369,17 @@ export function createFlowExecutor(
             await delay(Math.min(dur, 10) * 1000); // cap at 10s for demo (no cap in Python engine)
           } else if (isWpsReplayNode(params) && params.wait_type === 'window') {
             const title = String(params.window_title || '').trim();
-            if (!title) throw new Error('WPS window wait requires window_title');
+            if (!title) throw new Error('WPS 窗口等待需要 window_title');
             const res = await waitFeatureSuccessOrThrow(
               'focus_window',
               { title, exact: false },
               nodeId,
               params.timeout ?? 10,
             );
-            log('info', `WPS window wait result: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+            log('info', `WPS 窗口等待结果：${JSON.stringify(res).slice(0, 200)}`, nodeId);
           } else if (isWpsReplayNode(params)) {
             throw new Error(
-              `WinPilot wait step "${params.wait_type || 'condition'}" must run through the original .wps.json Replayer`
+              `WinPilot 等待步骤“${params.wait_type || 'condition'}”必须通过原始 .wps.json 重放器运行`
             );
           } else {
             rejectBrowserSimulation('wait');
@@ -506,7 +506,7 @@ export function createFlowExecutor(
         case 'loop': {
           if (params._requires_wps_replay) {
             throw new Error(
-              `WinPilot control-flow step "${params._wps_tool || 'ctrl.loop'}:${params._wps_loop_type || 'loop'}" must run through the original .wps.json Replayer`
+              `WinPilot 控制流步骤“${params._wps_tool || 'ctrl.loop'}:${params._wps_loop_type || 'loop'}”必须通过原始 .wps.json 重放器运行`
             );
           }
           const loopType = params.loop_type || 'count';
@@ -719,11 +719,11 @@ export function createFlowExecutor(
           const featureParams = params.params || {};
           if (featureParams._requires_wps_replay) {
             throw new Error(
-              `WinPilot-only replay step "${featureParams._wps_tool || featureName}" must run through the original .wps.json Replayer`
+              `仅限 WinPilot 的重放步骤“${featureParams._wps_tool || featureName}”必须通过原始 .wps.json 重放器运行`
             );
           }
           if (!(window as any).electronAPI?.callFeature) {
-            throw new Error(`${featureName} requires electronAPI.callFeature`);
+            throw new Error(`${featureName} 需要 electronAPI.callFeature`);
           }
           log('info', `调用工具: ${featureName}`, nodeId);
           const res = await callFeatureOrThrow(featureName, featureParams, nodeId, `工具调用模拟: ${featureName}`);
@@ -829,7 +829,7 @@ export function createFlowExecutor(
             name: params.name || '',
             timeout: params.timeout ?? (waitFor === 'exit' ? 60 : 30),
           }, nodeId, undefined, true);
-          log('info', `wait_process result: ${JSON.stringify(res).slice(0, 200)}`, nodeId);
+          log('info', `wait_process 结果：${JSON.stringify(res).slice(0, 200)}`, nodeId);
           result = 'output';
           break;
         }
@@ -960,7 +960,7 @@ export function createFlowExecutor(
           };
           const featureName = FEATURE_MAP[node.type];
           if (!featureName) {
-            throw new Error(`Unsupported FlowScript node type: ${node.type}`);
+            throw new Error(`不支持的 FlowScript 节点类型：${node.type}`);
           }
           if (featureName) {
             log('info', `调用系统工具: ${featureName}`, nodeId);

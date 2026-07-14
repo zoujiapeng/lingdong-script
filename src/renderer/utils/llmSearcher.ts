@@ -64,7 +64,7 @@ ${JSON.stringify(candidates, null, 2)}
 
     const content = response?.choices?.[0]?.message?.content;
     if (!content) {
-      return { enhanced: false, results: offlineResults, error: 'LLM returned no content' };
+      return { enhanced: false, results: offlineResults, error: 'LLM 未返回内容' };
     }
 
     const parsed = JSON.parse(

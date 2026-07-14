@@ -23,10 +23,10 @@ const HOST = '127.0.0.1';
 const RUNTIME_CONTRACT_VERSION = 2;
 const CONTROL_TOKEN = process.env.WINPILOT_CONTROL_TOKEN || randomBytes(32).toString('base64url');
 
-function runtimeCompatibilityProblem(payload: any): string {
+export function runtimeCompatibilityProblem(payload: any): string {
   const runtime = payload?.runtime;
   if (Number(runtime?.contract_version) !== RUNTIME_CONTRACT_VERSION) {
-    return 'Managed Python runtime contract is stale.';
+    return '托管的 Python 运行时协议已过期。';
   }
   const source = runtime?.source;
   const git = runtime?.git;
@@ -41,15 +41,15 @@ function runtimeCompatibilityProblem(payload: any): string {
     || !Object.prototype.hasOwnProperty.call(git, 'loaded_commit')
     || !Object.prototype.hasOwnProperty.call(git, 'current_commit')
   ) {
-    return 'Managed Python runtime identity is incomplete.';
+    return '托管的 Python 运行时身份不完整。';
   }
   if (source.drifted || source.loaded_stamp !== source.current_stamp) {
-    return 'Managed Python sources changed after startup.';
+    return '托管的 Python 源码在启动后发生了变化。';
   }
   const loadedCommit = String(git.loaded_commit || '');
   const currentCommit = String(git.current_commit || '');
   if (loadedCommit && currentCommit && loadedCommit !== currentCommit) {
-    return 'Managed Python process is from a different repository commit.';
+    return '托管的 Python 进程来自不同的仓库提交。';
   }
   return '';
 }
@@ -71,7 +71,7 @@ function findFreePort(): Promise<number> {
     srv.listen(0, HOST, () => {
       const addr = srv.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error('no free port'))));
+      srv.close(() => (port ? resolve(port) : reject(new Error('未找到可用端口'))));
     });
   });
 }
@@ -99,9 +99,9 @@ function waitReady(port: number, timeoutMs = 30000): Promise<void> {
               resolve();
               return;
             }
-            _lastError = `${compatibilityProblem} Restart required.`;
+            _lastError = `${compatibilityProblem} 需要重启。`;
           } catch {
-            _lastError = 'Managed Python runtime returned an invalid status payload.';
+            _lastError = '托管的 Python 运行时返回了无效的状态数据。';
           }
           retry();
         });
@@ -110,7 +110,7 @@ function waitReady(port: number, timeoutMs = 30000): Promise<void> {
       req.on('timeout', () => { req.destroy(); retry(); });
     };
     const retry = () => {
-      if (Date.now() > deadline) reject(new Error('WinPilot server did not become ready'));
+      if (Date.now() > deadline) reject(new Error('WinPilot 服务未能就绪'));
       else setTimeout(probe, 400);
     };
     probe();
@@ -152,7 +152,7 @@ export function startWinpilotServer(): Promise<number> {
       await waitReady(port);
       if (generation !== _lifecycleGeneration || _proc !== proc) {
         try { proc.kill(); } catch { /* ignore */ }
-        throw new Error('WinPilot server start was superseded by a restart.');
+        throw new Error('WinPilot 服务启动已被后续重启取代。');
       }
     } catch (e) {
       _lastError = _lastError

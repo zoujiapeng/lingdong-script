@@ -355,7 +355,7 @@ describe('textGenerator DSL mode', () => {
       ],
     });
     const result = generateText(script, 'dsl');
-    expect(result).toContain('# disabled: d1');
+    expect(result).toContain('# 已禁用：d1');
     expect(result).not.toContain('CLICK 100 200');
   });
 
@@ -365,7 +365,7 @@ describe('textGenerator DSL mode', () => {
       edges: [],
     });
     const result = generateText(script, 'dsl');
-    expect(result).toBe('# ERROR: no start node');
+    expect(result).toBe('# 错误：没有开始节点');
   });
 
   it('handles unknown node type with UNKNOWN comment', () => {

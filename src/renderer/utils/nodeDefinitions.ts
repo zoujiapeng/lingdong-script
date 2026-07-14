@@ -903,7 +903,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
 };
 
 export const NODE_CATEGORIES = [
-  { id: 'agent', label: 'Agent', icon: 'Bot' },
+  { id: 'agent', label: '智能代理', icon: 'Bot' },
   { id: 'basic', label: '常用', icon: 'Zap' },
   { id: 'image', label: '图像', icon: 'Image' },
   { id: 'control', label: '控制', icon: 'GitBranch' },

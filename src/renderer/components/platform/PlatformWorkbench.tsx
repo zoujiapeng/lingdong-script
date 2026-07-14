@@ -72,6 +72,10 @@ const PHASE_LABELS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   queued: '排队中', running: '运行中', paused: '已暂停', done: '已完成', completed: '已完成',
   success: '成功', failed: '失败', error: '错误', canceled: '已取消', idle: '就绪',
+  provisional: '待验证', active: '有效', verified: '已验证', rejected: '已拒绝', inactive: '未启用',
+};
+const RUN_KIND_LABELS: Record<string, string> = {
+  agent: '智能代理', arp: '流程', replay: '重放', schedule: '计划任务', controller: '控制器', automation: '自动化',
 };
 const EVENT_LABELS: Record<string, string> = {
   agent_start: '代理启动', agent_step: '代理步骤', agent_done: '代理完成', agent_tool: '代理工具',
@@ -402,7 +406,7 @@ function Studio({ plane }: { plane: Plane }) {
   return (
     <div className="arp-studio-page">
       <header className="arp-studio-toolbar">
-        <div className="arp-studio-title"><GitBranch size={16} /><div><strong>{script.meta.name}</strong><span>{graph.nodes.length} nodes / {graph.edges.length} edges / {compilation?.native_nodes ?? graph.nodes.length} native</span></div></div>
+        <div className="arp-studio-title"><GitBranch size={16} /><div><strong>{script.meta.name}</strong><span>{graph.nodes.length} 个节点 / {graph.edges.length} 条连线 / {compilation?.native_nodes ?? graph.nodes.length} 个原生节点</span></div></div>
         {Boolean(compilation?.legacy_nodes) && <StatusPill status="failed" label={`${compilation?.legacy_nodes} 个节点不支持`} />}
         {validation && <StatusPill status={validation.valid ? 'success' : 'failed'} label={validation.valid ? '有效' : `${validation.errors.length} 个错误`} />}
         {error && <span className="arp-toolbar-error">{error}</span>}
@@ -441,7 +445,7 @@ function RunsView({ plane }: { plane: Plane }) {
           <div className="arp-list-header"><span>任务</span><span>状态</span><span>耗时</span></div>
           {plane.runs.map((run) => (
             <button key={run.run_id} className={`arp-run-list-row ${selected?.run_id === run.run_id ? 'selected' : ''}`} onClick={() => setSelectedId(run.run_id)}>
-              <div><strong>{run.goal || run.run_id}</strong><span>{run.kind} · {formatTime(run.started_at)}</span></div>
+              <div><strong>{run.goal || run.run_id}</strong><span>{RUN_KIND_LABELS[run.kind] || run.kind} · {formatTime(run.started_at)}</span></div>
               <StatusPill status={run.status} />
               <code>{formatDuration(run)}</code>
             </button>
@@ -538,7 +542,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
       ) {
         await plane.startAutomation(asset as AutomationIR);
       } else {
-        if (plane.runtimeIssue) throw new Error(`${plane.runtimeIssue} Replay was not started.`);
+        if (plane.runtimeIssue) throw new Error(`${plane.runtimeIssue} 重放未启动。`);
         await client.replay(file);
       }
       await plane.refresh();
@@ -556,7 +560,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
 
   const toggleRecording = async () => {
     if (!recording && !apprenticeTask.trim()) {
-      setError('Enter the workflow the apprentice should learn.');
+      setError('请输入要让学习器学习的工作流。');
       return;
     }
     setBusy(true);
@@ -576,7 +580,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const verifyMemory = async (item: MemoryItem) => {
     setBusy(true); setError('');
     try {
-      await plane.getClient().verifyMemory(item.id, `Human verified apprentice replay for: ${item.task || item.id}`);
+      await plane.getClient().verifyMemory(item.id, `人工已验证学习器重放：${item.task || item.id}`);
       await refresh();
     } catch (verifyError) { setError(verifyError instanceof Error ? verifyError.message : String(verifyError)); }
     finally { setBusy(false); }
@@ -587,7 +591,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
       <div className="arp-page-title"><div><span className="arp-kicker">复用</span><h2>技能与学习</h2></div></div>
       {error && <div className="arp-inline-error"><XCircle size={14} />{error}</div>}
       <div className="arp-replay-toolbar">
-        <div className="arp-replay-modes" role="tablist" aria-label="Replay mode">
+        <div className="arp-replay-modes" role="tablist" aria-label="重放模式">
           <button className={replayMode === 'offline_graph' ? 'active' : ''} onClick={() => setReplayMode('offline_graph')} role="tab" aria-selected={replayMode === 'offline_graph'} disabled={recording}><Workflow size={14} />离线流程</button>
           <button className={replayMode === 'skill' ? 'active' : ''} onClick={() => setReplayMode('skill')} role="tab" aria-selected={replayMode === 'skill'} disabled={recording}><RefreshCw size={14} />技能复用</button>
           <button className={replayMode === 'apprentice' ? 'active' : ''} onClick={() => setReplayMode('apprentice')} role="tab" aria-selected={replayMode === 'apprentice'}><GraduationCap size={14} />示教学习</button>
@@ -595,7 +599,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         {replayMode === 'apprentice' && (
           <div className="arp-apprentice-control">
             <input value={apprenticeTask} onChange={(event) => setApprenticeTask(event.target.value)} placeholder="输入要学习的工作流" disabled={recording || busy} aria-label="要学习的工作流" />
-            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && !apprenticeTask.trim())}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? 'Finish lesson' : 'Start lesson'}</button>
+            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && !apprenticeTask.trim())}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '结束学习' : '开始学习'}</button>
           </div>
         )}
       </div>
@@ -606,7 +610,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
             {scripts.map((item) => (
               <div className="arp-asset-row" key={item.file}>
                 <div className="arp-asset-icon"><FileCode2 size={16} /></div>
-                <div><strong>{item.name || item.file}</strong><span>{item.steps} steps · {item.task || 'Recorded workflow'}</span></div>
+                <div><strong>{item.name || item.file}</strong><span>{item.steps} 步 · {item.task || '录制的工作流'}</span></div>
                 <button className="arp-icon-button" title="在流程工作台中打开" onClick={() => openSkill(item.file)} disabled={busy}><Braces size={15} /></button>
                 {replayMode === 'offline_graph' && <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />打开流程</button>}
                 {replayMode === 'skill' && <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />复用</button>}
@@ -622,7 +626,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
             {traces.map((item) => (
               <div className="arp-asset-row" key={item.run_id}>
                 <div className="arp-asset-icon"><TerminalSquare size={16} /></div>
-                <div><strong>{item.task || item.run_id}</strong><span>{item.steps} steps · {item.status}</span></div>
+                <div><strong>{item.task || item.run_id}</strong><span>{item.steps} 步 · {STATUS_LABELS[item.status] || item.status}</span></div>
                 <button className="arp-button arp-button-small" onClick={() => exportTrace(item.run_id)} disabled={busy}><Save size={13} />提取技能</button>
               </div>
             ))}
@@ -637,7 +641,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
                 <div className="arp-asset-icon"><BrainCircuit size={16} /></div>
                 <div>
                   <strong>{item.task || item.id}</strong>
-                  <span>{item.status || (item.provisional ? 'provisional' : 'active')} / {item.successes || 0}:{item.uses || 0} success / {Math.round((item.confidence || 0) * 100)}% confidence{item.app ? ` / ${item.app}` : ''}</span>
+                  <span>{STATUS_LABELS[item.status || (item.provisional ? 'provisional' : 'active')] || item.status} · 成功 {item.successes || 0} / 使用 {item.uses || 0} 次 · 置信度 {Math.round((item.confidence || 0) * 100)}%{item.app ? ` · ${item.app}` : ''}</span>
                 </div>
                 {item.script && <button className="arp-icon-button" title="在流程工作台中打开关联技能" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
                 {item.script && item.provisional && <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy}><Check size={13} />验证</button>}
@@ -790,7 +794,7 @@ function SystemView({ plane }: { plane: Plane }) {
             {schedules.length === 0 && <EmptyState icon={Clock3} title="暂无计划任务" />}
             {schedules.map((schedule) => (
               <div className="arp-schedule-row" key={schedule.id}>
-                <div><strong>{schedule.name}</strong><span>{schedule.next_run_at ? new Date(schedule.next_run_at).toLocaleString() : schedule.last_status || 'inactive'}</span></div>
+                <div><strong>{schedule.name}</strong><span>{schedule.next_run_at ? new Date(schedule.next_run_at).toLocaleString() : STATUS_LABELS[schedule.last_status || 'inactive'] || schedule.last_status}</span></div>
                 <StatusPill status={schedule.running ? 'running' : schedule.enabled ? 'queued' : 'canceled'} label={schedule.running ? '运行中' : schedule.enabled ? '已启用' : '已停用'} />
                 <button className={`arp-toggle ${schedule.enabled ? 'on' : ''}`} onClick={() => toggleSchedule(schedule)} aria-label={`${schedule.enabled ? '停用' : '启用'} ${schedule.name}`} aria-pressed={schedule.enabled}><span /></button>
                 <button className="arp-icon-button" onClick={() => cancelSchedule(schedule)} aria-label={`取消 ${schedule.name}`} title="取消计划"><X size={14} /></button>

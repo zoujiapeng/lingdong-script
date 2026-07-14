@@ -6,14 +6,14 @@
 
 ```mermaid
 flowchart LR
-  User["Agent Cockpit / ARP Studio"] --> Control["FastAPI Control Plane\n/api/v2 + /ws/events"]
+  User["智能代理 / 流程工作台"] --> Control["FastAPI Control Plane\n/api/v2 + /ws/events"]
   Control --> Jobs["RuntimeJob Manager\nquery / cancel / resource lease"]
   Jobs --> ARP["ARP Runtime\narp/1 graph"]
   Control --> Projection["Unified Run Projection\nmetrics / timeline / evidence"]
   ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
   ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
   ARP --> Skills["Automation IR Skill Replay\n0-token fast path"]
-  Runner <--> Frame["Authoritative target-window frame\ninitial / post-action / observe"]
+  Runner <--> Frame["Authoritative scoped frame\nverified target-window crop / full desktop"]
   Runner --> Tools["ToolSession + World Model"]
   Tools --> Perception["On-demand structured grounding\nUIA / Win32 / OCR / CV / VLM"]
   Controller --> Frame
@@ -28,7 +28,7 @@ flowchart LR
 
 ## 统一控制平面
 
-前端 `src/renderer/components/platform/PlatformWorkbench.tsx` 不再嵌入旧 WebUI。Agent、ARP Studio、Runs、Skills、System 都读取同一套 `/api/v2` contract 和 WebSocket 事件。
+前端 `src/renderer/components/platform/PlatformWorkbench.tsx` 不再嵌入旧 WebUI。智能代理、流程工作台、运行记录、技能与学习、系统设置都读取同一套 `/api/v2` contract 和 WebSocket 事件；主体工作台文案使用中文，API、MCP、VLM、URL、坐标字段等技术标识仍保留原名。
 
 后端核心路径：
 
@@ -62,11 +62,11 @@ start -> skill_replay -- hit ---------------------------> end
 | --- | --- | --- |
 | Electron HTTP API | `src/main/api.ts` | 默认 `127.0.0.1:7880`，供外部控制前端和查询状态 |
 | WinPilot FastAPI | `python/winpilot_home/serve.py` | 由 Electron 托管或手动启动；不要直接跑 uvicorn |
-| 原生 Runtime Platform | `src/renderer/components/platform/` | Agent Cockpit、ARP Studio、Runs、Skills、System |
+| 原生 Runtime Platform | `src/renderer/components/platform/` | 中文智能代理、流程工作台、运行记录、技能与学习、系统设置 |
 | Legacy IPC agent | `python/agent/__main__.py` | Electron stdin/stdout JSON-line 到 WinPilot BUS 的适配器 |
 | GUI eval script | `scripts/gui_eval_run.py` | 走同一个 `/api/chat` 路径，写 compact eval 报告 |
 
-`/api/status.runtime` 会返回 repo root、branch、commit、dirty、PID、port。排查多 worktree 或旧服务时先看它。
+`/api/status.runtime` 会返回 runtime contract v2、repo root、PID、动态端口、进程加载/当前 Git commit，以及 Python 源码的 `loaded_stamp`、`current_stamp`、`drifted`。源码漂移一旦在当前进程中被观察到就保持为 true；renderer 会阻止新任务并在空闲时请求重启，`POST /api/v2/arp/runs` 也会独立返回 409。排查多 worktree、热更新后旧解释器或错误服务实例时先看这些字段，不能只看当前 HEAD。
 Electron renderer 会等待 `winpilot:ensure` 返回本实例托管的随机端口；固定 `127.0.0.1:8765` 只用于纯浏览器/手动服务 fallback，不能在托管服务仍处于 `starting` 时抢先连接旧实例。
 
 ## Agent 与 Controller
@@ -78,7 +78,7 @@ flowchart TD
   Router --> Runner["AgentRunner"]
   Runner --> Profile["RuntimeProfile"]
   Runner --> Schema["tool_schemas(profile, allow flags)"]
-  Runner --> Frame["Initial / post-action real frame"]
+  Runner --> Frame["Initial / post-action scoped real frame"]
   Runner --> LLM["OpenAI-compatible LLM"]
   Frame --> LLM
   LLM --> Calls["tool calls"]
@@ -102,8 +102,8 @@ flowchart TD
 | `agent/loop.py` | LLM 主循环、上下文折叠、工具调用、usage、done gate 编排 |
 | `agent/runtime_profile.py` | 判断本次 run 是否启用 Coding Runtime、workspace、max steps |
 | `agent/task_rules.py` | GUI-only、coding task、可见 literal、done gate 辅助规则 |
-| `agent/gui_plan_helpers.py` | GUI schema profile、绘图计划解析、纯打开窗口计划判断等 helper |
-| `agent/tool_schemas.py` | function-calling schema、allow flags、`standard/lean_gui/drawing_gui` profile |
+| `agent/gui_plan_helpers.py` | 通用 GUI schema profile 与纯打开窗口计划判断等 helper；不编码猫、狗或单一应用测试题 |
+| `agent/tool_schemas.py` | function-calling schema、allow flags、`standard/lean_gui`；`drawing_gui` 仅是手工配置兼容别名，自动路由不会选择专属绘图 Agent |
 | `agent/tools.py` | `ToolSession` 状态、dispatch、目标 hwnd、world、undo stack |
 | `agent/*_tools.py` | 具体工具 mixin |
 | `agent/done_verifier.py` | 防假成功核验 |
@@ -154,13 +154,20 @@ queued
 - “打开 Photoshop” -> Computer Use / Desktop。
 - “部署这个项目” -> Coding + Terminal + Browser 能力协同。
 
+## 模型、提示与动态计划
+
+- `model_adapter.py` 把 `mimo-v2.5` 作为明确支持图片的 native-vision 主模型；`mimo-v2.5-pro` / `mimo-v2-pro` 按 text-only 处理，不能因为名字更强就把截图发给它。MiMo/Reasonix 默认发送 `thinking.disabled`，避免隐藏推理挤占工具参数预算；`api.thinking` 可显式覆盖。实验开关 `controller.native_visual_thinking=false` 默认关闭，它只会在 MiMo native vision 的连续指针几何仍未落地时临时启用，已有真实笔画进展或截断恢复时关闭，不是通用“更聪明”开关。
+- `agent/prompts.py` 的基础提示统一为 compact closed-loop contract；`prompt_style` 目前只是兼容输入，不会因 `full` 自动拼接大段领域文本。`agent.playbooks_enabled=false` 默认关闭 playbook，只有用户显式启用才注入匹配内容。提示明确规定真实画面高于 UIA/OCR/规则摘要、每轮最多一笔视觉事务、结果不清楚时 `blocked`，以及不要因工具返回 ok 就宣称完成。
+- 连续指针是通用动作形态：手写、签名、描摹、自由路径和画布笔画共用 `drag` / `draw_strokes`、工作面约束和 forward-only 修复；画猫、画狗只是压力测试，不是生产专属能力，也没有对象模板或固定坐标。
+- 模型可随时调用 `revise_plan`：用 `steps` 整体替换/清空任务列表，或以原子的 `add`、`update`、`remove`、`move`、`reopen` 操作修改当前 1-based 列表。已完成项随 move 保留，update/reopen 会重新变为 pending；计划只是路线提示，不是完成证据。
+
 ## 低延迟 GUI
 
 当前已落地：
 
-- 原生视觉闭环的主路径是 `目标窗口预绑定 → 初始真实帧 → 模型决策 → 一笔视觉事务 → 动作后真实帧 → 下一轮`。一笔事务可以是一个低层 GUI mutation，也可以是一次由 Controller 在本地管理的 `run_action_batch` / `execute_subgoal`；同一模型回复里的后续调用会被 `visual_turn_barrier` 延后，避免在看不到第一步结果时继续跑开环宏。
+- 原生视觉闭环的主路径是 `目标窗口预绑定 → 选择可信画面 scope → 初始真实帧 → 模型决策 → 一笔视觉事务 → 同 scope 动作前重检 → 动作后真实帧 → 下一轮`。`controller.target_window_capture_enabled=true` 默认开启，但只是保守优化：只有目标 hwnd 仍存在、可见、非最小化、就是当前前台、几何可信、至少节省约 8% 桌面面积且任务不要求桌面/多窗口上下文时才裁成目标窗口；否则自动回退完整虚拟桌面。关闭该开关会强制完整桌面，便于 A/B 验证是否负优化。每张模型可见帧都携带 scope/reason/region，坐标始终绑定那一张确切画面。
 - 低层视觉动作只能使用匹配当前 hwnd、screen epoch 和窗口区域的新鲜帧。视觉位置以整帧 0..1000 的 `frame_*` 字段提交，由运行时映射到截图对应的物理区域；native schema 不暴露物理 `x/y`。动作前会重新截图：若能从 frame 坐标或当前结构化目标可靠得到动作 ROI，则在目标四周外扩 `controller.visual_preflight_target_margin`（默认 60/1000），按 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）判断；无法可靠定位目标时才按整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）判断。超过对应阈值会取消旧动作并把新帧交回模型。缺帧时返回 `visual_grounding_required`；重复无依据操作会安全暂停。
-- 原生视觉模型处理普通、无 query `observe` 时，目标窗口 JPEG 是权威观测，`native_vision_direct` 跳过 UIA/OCR/VLM 的同帧拆解，且不会暴露重复的二次 VLM 工具。query、`full`、`changed_only`、结构化定位、非视觉模型和 fallback 仍走融合感知；结构化元素与规则不能覆盖相反的真实画面。
+- 原生视觉模型处理普通、无 query `observe` 时，当前 scope 的 JPEG 是权威观测，`native_vision_direct` 跳过 UIA/OCR/VLM 的同帧拆解，且不会暴露重复的二次 VLM 工具。query、`full`、`changed_only`、结构化定位、非视觉模型和 fallback 仍走融合感知；结构化元素与规则不能覆盖相反的真实画面。
 - `observe` 严格只读。它可以返回一个已落地的 Controller 提案，但不能从感知路径直接点击、输入或发送；任何桌面 mutation 都必须是下一笔显式事务。
 - LLM 可下达 `execute_subgoal` 或 ARP `agent_goal`；本地 controller 完成输入、点击、等待和验证 routine。
 - `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
@@ -179,12 +186,13 @@ queued
 - `winpilot` 包入口先初始化 Per-Monitor V2，保证只导入 action executor 的进程也不会落入 DPI 虚拟坐标；`coordinate_diagnostics` / `coordinate_click_test` 再核对物理屏幕和真实鼠标路径。
 - `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
 - `action/desktop_queue.py` 提供公平资源租约。`physical` 输入全局单写；后台安全的 PostMessage 窗口动作按 `window:<hwnd>` 隔离，不同 hwnd 可并行；同一 hwnd、剪贴板及未知物理目标仍串行。Controller batch 取得一次组合 lease，内部 public action 不重复排队。
+- `controller.multi_input_cooperation=false` 是默认关闭的实验开关，不会制造 Windows 并不存在的第二个物理鼠标。开启后优先 UIA/PostMessage 等后台安全输入；物理键盘只在目标就是前台时执行，长按/拖拽/笔画期间持续复核前台和光标，用户移动光标或切走窗口就 fail-closed，中止并由用户取得控制权。`controller.cooperative_cursor_tolerance_px=12` 控制光标所有权容差。
 - `action/raw_device.py` 让常见 batch 子动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
 - `fast/perception_daemon.py` 按 hwnd 复用 watcher + ElementCache，并维护变化 ROI 的短历史；它过滤光标噪声/大面积视频变化、合并同 ROI 普通更新、保留显式瞬态动作证据。daemon 内环不调用 UIA/VLM，完整融合仍是请求/fallback 路径。
 - `recorder/trace.py` 把截图编码/写盘放到有界异步队列，并以 `action_id` 配对 before/after。
 - `agent/failure_recovery.py` 的本地恢复探测优先走 `ToolSession.dispatch()`，没有统一 dispatch 时才退回私有 handler；这样 list/focus/observe 恢复动作仍会经过统一 world/screen/watch/scope 入口。
 
-`screen_delta.changed=true`、颜色存在或 `auto_visual_verify.summary_kind=pixel_effect_only` 只说明像素效果发生，不是业务成功或完成证据。原生视觉 GUI 的 `done` 会重新捕获目标窗口，并用用户目标做整图核验；若精确文本只缺少结构化证据，则交给这张新鲜画面的独立 judge 逐字核验，不会为此强制 UIA/OCR observe，也不会直接放行。目标对象、页面、文本或结果看不清时判 false。文件、进程等不可见任务仍以确定性证据为准。
+`screen_delta.changed=true`、颜色存在或 `auto_visual_verify.summary_kind=pixel_effect_only` 只说明像素效果发生，不是业务成功或完成证据。原生视觉 GUI 的 `done` 会按相同保守 scope 规则重新捕获新鲜画面，并用用户目标做整图核验；若精确文本只缺少结构化证据，则交给这张新鲜画面的独立 judge 逐字核验，不会为此强制 UIA/OCR observe，也不会直接放行。目标对象、页面、文本或结果看不清时判 false。文件、进程等不可见任务仍以确定性证据为准。
 
 成熟度判断：
 
@@ -205,6 +213,8 @@ queued
 ## 评测口径
 
 Eval 汇总按闭环结果 fail-closed：`verified_success` 必须同时满足未超时、`status=done`、policy 通过、性能预算通过、有外部 ground truth 且通过，并且不存在 unverified done。没有 ground-truth 检查项的报告标记为 `ungrounded`，不能进入成功率；报告同时记录 Git、模型、视觉配置 hash 与 display/DPI provenance，便于比较真实回归。
+
+2026-07-14 的一次真实前端冷启动画板样本（空白 Paint，目标“用画板画一只猫”）约 55.3 秒，执行 2 次点击和 1 次 `draw_strokes`，没有 undo/clear 死循环；输出只能评价为可辨认但粗糙、语义仍有歧义，不能称为“好看”。这是单次链路基线，只证明前端路径能完成连续指针事务，不是统计成功率，也不能替代跨任务、多次、带外部 ground truth 的 E2E 结果。
 
 ## Replay / Skill
 
@@ -233,11 +243,11 @@ Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps�
 
 长期记忆当前以 SQLite Memory Graph 为主：
 
-- `memory.db` 是主存储。
+- `python/winpilot_home/memory.db` 是主存储。
 - `memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py` 组成运行时。
 - `memory/experience.py` 是旧 recipe API 的兼容门面。
-- `experience_memory.json` 只用于迁移/兼容，不是主运行时事实。
-- Agent Cockpit 默认目标图先走 Memory Graph 的 verified Skill fast path，`miss` / `fail` 再升级到 Agent；记忆正负反馈在整个 ARP run 结束后按最终结果计算，不按局部重放结果提前奖励。
+- `python/winpilot_home/experience_memory.json` 只用于迁移/兼容，不是主运行时事实。
+- “智能代理”页默认目标图先走 Memory Graph 的 verified Skill fast path，`miss` / `fail` 再升级到 Agent；记忆正负反馈在整个 ARP run 结束后按最终结果计算，不按局部重放结果提前奖励。
 
 记忆不能弥补硬实力。清除记忆后 agent 变笨，通常说明 routine、感知或验证仍不足，不应依赖历史记忆撑通用能力。
 
@@ -245,7 +255,7 @@ Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps�
 
 当前仍有两套调度系统，主线新功能只进入第一套：
 
-- WinPilot Agent 内部调度：`python/winpilot_home/winpilot/scheduler.py`，System 页面与 Agent 工具共用 `agent_schedules.json`，到期后提交统一 RuntimeJob 再走 `AgentRunner`。
+- WinPilot Agent 内部调度：`python/winpilot_home/winpilot/scheduler.py`，“系统设置”页与 Agent 工具共用 `python/winpilot_home/agent_schedules.json`，到期后提交统一 RuntimeJob 再走 `AgentRunner`。
 - legacy Electron 模板调度：`src/main/schedulerBridge.ts` + `python/engine/scheduler_daemon.py`，数据是 Electron userData 下的 `schedules.json`，服务于流程图/模板体系。
 
 WinPilot Agent 内部调度不是 Windows Task Scheduler。

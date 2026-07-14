@@ -1,7 +1,15 @@
 {
   "name": "lingdong-script",
   "version": "1.1.0",
-  "description": "Advanced Visual Automation Script Editor",
+  "description": "Windows 通用 GUI 智能代理与自动化运行平台",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zoujiapeng/lingdong-script.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zoujiapeng/lingdong-script/issues"
+  },
+  "homepage": "https://github.com/zoujiapeng/lingdong-script#readme",
   "main": "dist/main/main.js",
   "bin": {
     "lingdong": "./dist/cli/cli/index.js"

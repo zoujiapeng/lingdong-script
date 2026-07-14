@@ -183,9 +183,9 @@ def test_cost_estimation_is_provider_scoped():
         "pricing": {
             "provider": "deepseek",
             "currency": "CNY",
-            "input_per_m": 2.0,
-            "cache_hit_input_per_m": 0.2,
-            "output_per_m": 8.0,
+            "input_per_m": 1.0,
+            "cache_hit_input_per_m": 0.02,
+            "output_per_m": 2.0,
         },
     }
     profile = model_profile_from_config(api)
@@ -205,9 +205,14 @@ def test_cost_estimation_is_provider_scoped():
 
     assert step is not None
     assert step["cost_estimated"] is True
-    assert step["cost_cny"] == 0.0002
+    assert step["cost_cny"] == 0.0001
     assert total["cost_estimated"] is True
-    assert total["cost_cny"] == 0.0002
+    assert total["cost_cny"] == 0.0001
+
+    default_pricing = pricing_from_config({}, profile)
+    assert default_pricing.input_per_m == 1.0
+    assert default_pricing.cache_hit_input_per_m == 0.02
+    assert default_pricing.output_per_m == 2.0
 
     mimo_api = {
         "base_url": "https://api.xiaomimimo.com/v1",
