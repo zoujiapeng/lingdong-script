@@ -496,15 +496,10 @@ def color_presence(image: np.ndarray) -> dict:
     return {"readable": True, "width": int(w), "height": int(h), "colors": colors}
 
 
-def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
-    """Find a large light work surface inside a window screenshot.
-
-    This is a generic heuristic for drawing/editor tasks: pick the largest
-    near-white connected region. It deliberately avoids app names and gives
-    text-only agents a better visual summary target than the whole toolbar.
-    """
+def _light_work_surface_candidates(image: np.ndarray) -> list[dict]:
+    """Return generic large near-white surface candidates, largest first."""
     if image is None or getattr(image, "size", 0) == 0:
-        return None
+        return []
     h, w = image.shape[:2]
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -514,7 +509,7 @@ def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
         mask.astype("uint8"), connectivity=8
     )
     min_area = max(20_000, int(h * w * 0.08))
-    best: tuple[int, list[int]] | None = None
+    candidates: list[dict] = []
     for label in range(1, num_labels):
         x, y, cw, ch, area = stats[label].tolist()
         if area < min_area or cw < max(120, w * 0.25) or ch < max(80, h * 0.18):
@@ -524,8 +519,17 @@ def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
         # spans that obscured area, but its columns have poor white coverage.
         # Keep the widest dense horizontal run so drawing starts on the actual
         # work surface rather than under an overlay.
-        component = _labels[y:y + ch, x:x + cw] == label
-        coverage = component.mean(axis=0)
+        # Measure all near-white pixels inside the outer component's bounds,
+        # not only pixels with this connected-component label.  Dark closed
+        # marks (outlines, handwriting, diagrams) disconnect their white
+        # interiors into child components; excluding those interiors makes the
+        # detected work surface shrink toward the remaining blank side after
+        # every successful edit.  The raw light mask still excludes genuinely
+        # dark floating controls/side panels, so the overlay guard below keeps
+        # its original safety property while content no longer moves the
+        # coordinate contract.
+        surface_light = mask[y:y + ch, x:x + cw]
+        coverage = surface_light.mean(axis=0)
         dense = coverage >= 0.72
         runs: list[tuple[int, int]] = []
         start: int | None = None
@@ -544,6 +548,100 @@ def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
                 x += run_start
                 cw = run_end - run_start
         bbox = [int(x), int(y), int(x + cw), int(y + ch)]
-        if best is None or int(area) > best[0]:
-            best = (int(area), bbox)
-    return best[1] if best else None
+        candidates.append({
+            "bbox": bbox,
+            "component_area": int(area),
+            "bbox_area": int(max(1, cw * ch)),
+        })
+    candidates.sort(key=lambda item: int(item["component_area"]), reverse=True)
+    return candidates
+
+
+def likely_canvas_bbox(image: np.ndarray) -> list[int] | None:
+    """Find the largest light work surface inside a window screenshot.
+
+    This summary-oriented helper intentionally returns the best candidate even
+    when another candidate is similar. Mutating actions must instead call
+    :func:`credible_light_work_surface`, which rejects ambiguous geometry.
+    """
+    candidates = _light_work_surface_candidates(image)
+    return list(candidates[0]["bbox"]) if candidates else None
+
+
+def credible_light_work_surface(image: np.ndarray) -> dict:
+    """Ground one mutation-safe light work surface from current window pixels.
+
+    The detector is application-agnostic. It refuses to choose when two large
+    light regions are similarly plausible, or when the chosen rectangle is not
+    predominantly light. That distinction matters: summaries may report a
+    likely region, but coordinate mutation must never guess between panels.
+    """
+    if image is None or getattr(image, "size", 0) == 0:
+        return {"ok": False, "reason": "target-window pixels were unavailable"}
+    candidates = _light_work_surface_candidates(image)
+    if not candidates:
+        return {
+            "ok": False,
+            "reason": "no sufficiently large near-white work surface was visible",
+        }
+    best = candidates[0]
+    best_box = [int(value) for value in best["bbox"]]
+
+    def nested_in_best(candidate: dict) -> bool:
+        box = candidate.get("bbox")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return False
+        x1, y1, x2, y2 = [int(value) for value in box]
+        bx1, by1, bx2, by2 = best_box
+        return bool(
+            bx1 <= x1 < x2 <= bx2
+            and by1 <= y1 < y2 <= by2
+            and [x1, y1, x2, y2] != best_box
+        )
+
+    # A large light modal/dialog can sit inside the outer white document and
+    # be separated by a dark border.  Its interior is a second connected
+    # surface; merging it into dense-column coverage would authorize input on
+    # top of the modal.  Small enclosed white islands produced by ink never
+    # reach the candidate area threshold, while a genuine nested panel does,
+    # so fail closed before choosing coordinates.
+    if any(nested_in_best(candidate) for candidate in candidates[1:]):
+        return {
+            "ok": False,
+            "reason": "a large nested light panel or modal obscured the work surface",
+            "candidate_count": len(candidates),
+        }
+    if (
+        len(candidates) > 1
+        and int(candidates[1]["component_area"])
+        >= int(best["component_area"]) * 0.72
+    ):
+        return {
+            "ok": False,
+            "reason": "multiple similarly plausible light work surfaces were visible",
+            "candidate_count": len(candidates),
+        }
+
+    x1, y1, x2, y2 = [int(value) for value in best["bbox"]]
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return {"ok": False, "reason": "detected work-surface geometry was empty"}
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    light_ratio = float(((gray > 225) & (hsv[:, :, 1] < 65)).mean())
+    if light_ratio < 0.58:
+        return {
+            "ok": False,
+            "reason": "the candidate was not predominantly a light work surface",
+            "light_ratio": round(light_ratio, 4),
+        }
+    height, width = image.shape[:2]
+    bbox_ratio = float(max(1, (x2 - x1) * (y2 - y1)) / max(1, width * height))
+    return {
+        "ok": True,
+        "bbox": [x1, y1, x2, y2],
+        "light_ratio": round(light_ratio, 4),
+        "window_area_ratio": round(bbox_ratio, 4),
+        "candidate_count": len(candidates),
+        "source": "current_target_pixels",
+    }

@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import json
+import inspect
+import os
 import queue
 import re
 import threading
@@ -21,7 +23,7 @@ import cv2
 
 from ..action import executor, verify
 from ..automation_ir import automation_ir_from_wps, validate_automation_ir, wps_from_automation_ir
-from ..config import SCRIPTS_DIR, TRACES_DIR
+from ..config import CONFIG, SCRIPTS_DIR, TRACES_DIR
 from ..fast.visual_servo import ServoConfig, track_visual_target
 from ..memory import replay_anchors
 from ..perception import fusion, groundtruth, ocr, uia, vision_cv, win32
@@ -87,6 +89,7 @@ class TraceRecorder:
         self._evidence_step = 0
         self._accepting = False
         self._action_steps: dict[str, int] = {}
+        self._action_regions: dict[str, Region] = {}
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1024)
         self._dropped_events = 0
         self._worker = threading.Thread(
@@ -110,6 +113,7 @@ class TraceRecorder:
             self._step = 0
             self._evidence_step = 0
             self._action_steps = {}
+            self._action_regions = {}
             self._accepting = True
         BUS.publish("trace", state="recording", run_id=run_id)
 
@@ -142,6 +146,7 @@ class TraceRecorder:
             phase = "after"
             event_type = str(event.get("type") or "")
             action_key = self._action_key(event)
+            frame_region: Region | None = None
             if event_type == "agent_tool_start" and event.get("tool") in _SCREENSHOT_TOOLS:
                 self._step += 1
                 step = self._step
@@ -149,6 +154,7 @@ class TraceRecorder:
                 self._action_steps[action_key] = step
             elif event_type == "agent_tool" and event.get("tool") in _SCREENSHOT_TOOLS:
                 step = self._action_steps.pop(action_key, None)
+                frame_region = self._action_regions.pop(action_key, None)
                 if step is None:
                     self._step += 1
                     step = self._step
@@ -168,21 +174,73 @@ class TraceRecorder:
                 and event.get("trace_screenshot", True) is not False
             ):
                 step = self._action_steps.pop(action_key, None)
+                frame_region = self._action_regions.pop(action_key, None)
                 if step is None:
                     self._step += 1
                     step = self._step
                 phase = "batch_after"
 
         frame = None
+        baseline_capture_source = ""
+        post_capture_source = ""
+        strict_trace = (
+            os.environ.get("WINPILOT_STRICT_TRACE_BASELINE", "1")
+            .strip()
+            .casefold()
+            not in {"0", "false", "no", "off"}
+        )
         if step is not None and phase in {"before", "batch_before"}:
-            try:
-                from ..fast.perception_daemon import PERCEPTION_DAEMON
+            expected_region = self._region_from_event(event)
+            # A causal action record is useful only when its before-frame was
+            # captured before input dispatch.  Make that invariant the normal
+            # runtime contract; an explicit opt-out remains available for
+            # latency experiments, but evaluation and ordinary production
+            # traces must not silently substitute a possibly stale daemon
+            # sample and then call the action verified.
+            if strict_trace and expected_region is not None:
+                try:
+                    # Evaluation-only strict mode pays this small synchronous
+                    # cost so the baseline is guaranteed to precede input.
+                    frame = capture(expected_region)
+                    frame_region = expected_region
+                    baseline_capture_source = "sync_pre_action"
+                except Exception:
+                    frame = None
+            elif not strict_trace:
+                try:
+                    from ..fast.perception_daemon import PERCEPTION_DAEMON
 
-                latest = PERCEPTION_DAEMON.latest_frame(run_id=str(run_id or ""), max_age_ms=500)
-                if latest is not None:
-                    frame, _region = latest
-            except Exception:
-                frame = None
+                    latest = PERCEPTION_DAEMON.latest_frame(
+                        run_id=str(run_id or ""), max_age_ms=500,
+                    )
+                    if latest is not None:
+                        candidate_frame, candidate_region = latest
+                        if expected_region is not None and candidate_region == expected_region:
+                            frame, frame_region = candidate_frame, candidate_region
+                            baseline_capture_source = "perception_daemon"
+                except Exception:
+                    frame = None
+        elif step is not None and phase in {"after", "batch_after"} and strict_trace:
+            expected_region = frame_region or self._region_from_event(event)
+            if expected_region is not None:
+                try:
+                    # Seal the post-action pixels before this event callback
+                    # returns. Otherwise the next action can start while the
+                    # trace worker is settling, and its pixels can be falsely
+                    # attributed to the previous action.
+                    time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
+                    frame = capture(expected_region)
+                    frame_region = expected_region
+                    post_capture_source = "sync_post_action"
+                except Exception:
+                    frame = None
+        if step is not None and phase in {"before", "batch_before"}:
+            if frame_region is None:
+                frame_region = self._region_from_event(event)
+            if frame_region is not None:
+                with self._lock:
+                    if self._accepting and self._run_id == run_id:
+                        self._action_regions[action_key] = frame_region
         self._enqueue({
             "kind": "event",
             "run_id": run_id,
@@ -190,6 +248,10 @@ class TraceRecorder:
             "step": step,
             "phase": phase,
             "frame": frame,
+            "region": frame_region,
+            "require_supplied_frame": phase in {"before", "batch_before"},
+            "baseline_capture_source": baseline_capture_source,
+            "post_capture_source": post_capture_source,
         })
 
     @staticmethod
@@ -202,6 +264,24 @@ class TraceRecorder:
         if batch_id or batch_index:
             return f"batch:{batch_id}:{batch_index}"
         return f"legacy:{event.get('tool') or ''}"
+
+    @staticmethod
+    def _region_from_event(event: dict[str, Any]) -> Region | None:
+        envelope = event.get("action_envelope")
+        target = envelope.get("target") if isinstance(envelope, dict) else None
+        raw = target.get("region") if isinstance(target, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        try:
+            region = Region(
+                int(raw.get("left")),
+                int(raw.get("top")),
+                int(raw.get("width")),
+                int(raw.get("height")),
+            )
+        except (TypeError, ValueError):
+            return None
+        return region if region.width > 0 and region.height > 0 else None
 
     def _enqueue(self, item: dict[str, Any]) -> bool:
         try:
@@ -236,20 +316,40 @@ class TraceRecorder:
         step = item.get("step")
         if step is not None:
             phase = str(item.get("phase") or "after")
+            screenshot_region = item.get("region")
             if phase in {"after", "batch_after"} and item.get("frame") is None:
                 # The Level-0 daemon's latest frame at action completion can
                 # still be the pre-action sample.  Capture asynchronously after
                 # a short paint interval so trace evidence represents the
                 # resulting frame without slowing the controller hot path.
                 time.sleep(_POST_ACTION_CAPTURE_SETTLE_S)
-            shot = self._save_screenshot(
-                run_id,
-                int(step),
-                phase,
-                image=item.get("frame"),
-            )
+            supplied_frame = item.get("frame")
+            shot = None
+            if supplied_frame is not None or not bool(item.get("require_supplied_frame")):
+                shot = self._save_screenshot(
+                    run_id,
+                    int(step),
+                    phase,
+                    image=supplied_frame,
+                    region=screenshot_region if isinstance(screenshot_region, Region) else None,
+                )
             if shot:
                 record["screenshot"] = shot
+                if item.get("baseline_capture_source"):
+                    record["baseline_capture_source"] = str(
+                        item.get("baseline_capture_source")
+                    )
+                if item.get("post_capture_source"):
+                    record["post_capture_source"] = str(
+                        item.get("post_capture_source")
+                    )
+                if isinstance(screenshot_region, Region):
+                    record["screenshot_region"] = {
+                        "left": int(screenshot_region.left),
+                        "top": int(screenshot_region.top),
+                        "width": int(screenshot_region.width),
+                        "height": int(screenshot_region.height),
+                    }
                 # Screenshot capture is asynchronous, so the original BUS
                 # event has already reached live projections without this
                 # path. Publish a small follow-up event after the file exists
@@ -281,11 +381,14 @@ class TraceRecorder:
         phase: str = "after",
         *,
         image: Any = None,
+        region: Region | None = None,
     ) -> str | None:
         if not run_id:
             return None
         try:
-            image = capture() if image is None else image
+            image = (
+                capture(region) if region is not None else capture()
+            ) if image is None else image
             h, w = image.shape[:2]
             if w > _SCREENSHOT_MAX_W:
                 scale = _SCREENSHOT_MAX_W / w
@@ -923,6 +1026,8 @@ class Replayer:
             foreground = 0
         if foreground == int(self.hwnd):
             return True
+        if CONFIG.get("controller", "multi_input_cooperation", default=False):
+            return False
         try:
             result = executor.focus_window(int(self.hwnd))
             return bool(result.get("ok", False))
@@ -1505,20 +1610,52 @@ class Replayer:
             )
         else:
             arm_point = (max(0, int(point[0]) - 240), max(0, int(point[1]) - 180))
-        executor.move_mouse(int(arm_point[0]), int(arm_point[1]))
-        time.sleep(0.03)
-        tracked, servo_trace = track_visual_target(
-            initial,
-            [label for label in labels if label],
-            capture_fn=capture,
-            move_fn=executor.move_mouse,
-            ocr_fn=ocr.recognize,
-            config=ServoConfig.from_action({
-                **step,
-                "servo_strict": True,
-                "servo_always_ocr": True,
-            }),
-        )
+        def guarded_move(x: int, y: int) -> None:
+            move_fn = executor.move_mouse
+            try:
+                parameters = inspect.signature(move_fn).parameters.values()
+                accepts_hwnd = any(
+                    parameter.name == "hwnd"
+                    or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters
+                )
+            except (TypeError, ValueError):
+                accepts_hwnd = True
+            move_result = (
+                move_fn(int(x), int(y), hwnd=self.hwnd)
+                if accepts_hwnd
+                else move_fn(int(x), int(y))
+            )
+            if isinstance(move_result, dict) and move_result.get("ok") is not True:
+                detail = move_result
+                raise RuntimeError(json.dumps(detail, ensure_ascii=False, default=str))
+
+        try:
+            guarded_move(int(arm_point[0]), int(arm_point[1]))
+            time.sleep(0.03)
+            tracked, servo_trace = track_visual_target(
+                initial,
+                [label for label in labels if label],
+                capture_fn=capture,
+                move_fn=guarded_move,
+                ocr_fn=ocr.recognize,
+                config=ServoConfig.from_action({
+                    **step,
+                    "servo_strict": True,
+                    "servo_always_ocr": True,
+                }),
+            )
+        except RuntimeError as exc:
+            return None, {
+                "confirmed": False,
+                "blocked": True,
+                "cooperative_input": bool(CONFIG.get(
+                    "controller", "multi_input_cooperation", default=False,
+                )),
+                "lost_reason": "cursor_move_blocked",
+                "error": str(exc),
+                "arm_point": {"x": int(arm_point[0]), "y": int(arm_point[1])},
+            }
         if tracked is None:
             servo_trace["arm_point"] = {"x": int(arm_point[0]), "y": int(arm_point[1])}
             return None, servo_trace
@@ -1898,8 +2035,24 @@ class Replayer:
                         result["verify_detail"] = f'target window found: "{found.get("title", "")}"'
                         result["verify_method"] = "win32-title"
                 elif (result.get("post_state") or {}).get("foreground_hwnd"):
-                    self.hwnd = int(result["post_state"]["foreground_hwnd"])
-                    result["target_hwnd"] = self.hwnd
+                    if CONFIG.get(
+                        "controller", "multi_input_cooperation", default=False,
+                    ):
+                        result.update({
+                            "ok": False,
+                            "verified": False,
+                            "blocked": True,
+                            "cooperative_input": True,
+                            "needs_target_window": True,
+                            "error": (
+                                "replay launch did not produce title/window evidence; "
+                                "the foreground window was not adopted in cooperative mode"
+                            ),
+                        })
+                        result.pop("target_hwnd", None)
+                    else:
+                        self.hwnd = int(result["post_state"]["foreground_hwnd"])
+                        result["target_hwnd"] = self.hwnd
                 if launch_before is not None and self.hwnd:
                     result["launch_settle"] = self._wait_for_url_launch_settle(launch_before)
             return result
@@ -2020,9 +2173,21 @@ class Replayer:
 
             def action() -> dict:
                 if point:
-                    executor.click(point[0], point[1], hwnd=self.hwnd)
+                    click_result = executor.click(point[0], point[1], hwnd=self.hwnd)
+                    if (
+                        not isinstance(click_result, dict)
+                        or click_result.get("ok") is not True
+                        or click_result.get("blocked") is True
+                    ):
+                        return (
+                            click_result
+                            if isinstance(click_result, dict)
+                            else {"ok": False, "blocked": True, "error": "pre-click failed"}
+                        )
                     time.sleep(0.15)
-                return executor.type_text(step.get("text_input", ""))
+                return executor.type_text(
+                    step.get("text_input", ""), hwnd=self.hwnd,
+                )
 
             result = verify.run_with_verify(
                 "type_text", action, expect=expect, hwnd=self.hwnd, retryable=False,
@@ -2039,12 +2204,19 @@ class Replayer:
             return result
         if tool == "hotkey":
             return verify.run_with_verify(
-                "hotkey", lambda: executor.press_keys(_normalize_hotkeys(step.get("keys", []))),
+                "hotkey",
+                lambda: executor.press_keys(
+                    _normalize_hotkeys(step.get("keys", [])),
+                    hwnd=self.hwnd,
+                ),
                 expect=expect, hwnd=self.hwnd, retryable=False,
                 stop_event=self.stop_event)
         if tool == "scroll":
             coords = step.get("coords", [0, 0])
-            return executor.scroll(coords[0], coords[1], int(step.get("amount", 0)))
+            return executor.scroll(
+                coords[0], coords[1], int(step.get("amount", 0)),
+                hwnd=self.hwnd,
+            )
         if tool == "drag":
             frm, to = step.get("from", [0, 0]), step.get("to", [0, 0])
             return executor.drag(frm[0], frm[1], to[0], to[1],

@@ -499,6 +499,8 @@ function fillSettings() {
   $("cfg-dry-run").checked = !!config.agent.dry_run;
   $("cfg-experience").checked = !!config.agent.experience_memory;
   if ($("cfg-no-steal")) $("cfg-no-steal").checked = !!config.agent.no_mouse_steal;
+  if ($("cfg-window-crop")) $("cfg-window-crop").checked = config.controller?.target_window_capture_enabled !== false;
+  if ($("cfg-multi-input")) $("cfg-multi-input").checked = !!config.controller?.multi_input_cooperation;
   if ($("cfg-provider")) $("cfg-provider").value = config.api.provider || "auto";
   if ($("cfg-api-base")) $("cfg-api-base").value = config.api.base_url || "";
   $("cfg-model").value = config.api.model;
@@ -516,6 +518,12 @@ function bindSettings() {
   $("cfg-experience").onchange = (e) => patchConfig({ agent: { experience_memory: e.target.checked } });
   $("cfg-shell").onchange = (e) => patchConfig({ agent: { shell_enabled: e.target.checked } });
   $("cfg-no-steal").onchange = (e) => patchConfig({ agent: { no_mouse_steal: e.target.checked } });
+  if ($("cfg-window-crop")) $("cfg-window-crop").onchange = (e) => patchConfig({
+    controller: { target_window_capture_enabled: e.target.checked },
+  });
+  if ($("cfg-multi-input")) $("cfg-multi-input").onchange = (e) => patchConfig({
+    controller: { multi_input_cooperation: e.target.checked },
+  });
   if ($("cfg-provider")) $("cfg-provider").onchange = (e) => patchConfig({ api: { provider: e.target.value } });
   if ($("cfg-api-base")) $("cfg-api-base").onchange = (e) => patchConfig({ api: { base_url: e.target.value.trim() } });
   $("cfg-model").onchange = (e) => patchConfig({ api: { model: e.target.value.trim() } });

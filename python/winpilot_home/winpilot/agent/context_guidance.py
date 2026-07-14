@@ -68,7 +68,8 @@ class ContextGuidanceMixin:
             "content": (
                 f"[强制重规划] 检测到卡住：{why}。停止重复当前做法，先想清楚再动：\n"
                 f"1) 现在卡在哪一步/哪个子目标？2) 已经试过什么、为什么没用？"
-                f"3) 有什么【完全不同】的办法（换工具/换路径/run_shell 命令行/find_program/重新 observe）？\n"
+                f"3) 有什么【完全不同】的办法（换工具/换路径/重新观察；"
+                f"仅在当前工具列表确实暴露时才考虑 run_shell 或 find_program）？\n"
                 f"然后{plan_hint}并按新计划执行。"),
         })
         BUS.publish("agent_recovery", run_id=self.run_id, kind="structured_replan", reason=why)

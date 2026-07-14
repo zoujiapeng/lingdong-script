@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
 
 from ..action import verify
 from ..utils.log import BUS
 from . import planner
-from .task_rules import _is_drawing_task, _is_multi_source_research_task, _required_image_paths
+from .task_rules import _is_multi_source_research_task
 from .tool_result import ToolResult
 
 
@@ -177,45 +176,6 @@ def _file_check_paths(check: dict | None) -> list[str]:
     return paths
 
 
-def _task_mentions_path(task: str, path: str) -> bool:
-    task_text = (task or "").casefold()
-    value = (path or "").strip()
-    if not task_text or not value:
-        return False
-    if value.casefold() in task_text:
-        return True
-    name = Path(value).name.casefold()
-    return bool(name and name in task_text)
-
-
-def _spurious_drawing_file_check(
-    task: str,
-    check: dict | None,
-) -> tuple[bool, str]:
-    """Ignore planner-invented output files for visual-only drawing tasks.
-
-    A drawing task can ask for visual confirmation without asking to save a
-    file. The planner sometimes invents a ``file_exists`` check for that
-    confirmation, which turns a visibly successful canvas task into a fake
-    failure. Keep real file checks whenever the user named an output path.
-    """
-    if not _is_drawing_task(task):
-        return False, ""
-    paths = _file_check_paths(check)
-    if not paths:
-        return False, ""
-    if _required_image_paths(task):
-        return False, ""
-    explicit = [path for path in paths if _task_mentions_path(task, path)]
-    if explicit:
-        return False, ""
-    return (
-        True,
-        "ignored planner-invented file check for drawing task without "
-        f"requested output path: {', '.join(paths)}",
-    )
-
-
 def _spurious_agent_schedule_file_check(
     task: str,
     goal: str,
@@ -247,23 +207,6 @@ def _spurious_agent_schedule_file_check(
         "ignored planner-invented Windows Task Scheduler file check for "
         "a WinPilot internal scheduled task: " + ", ".join(invented_windows_paths),
     )
-
-def _drop_unrequested_drawing_output_steps(task: str, steps: list) -> tuple[list, list[str]]:
-    """Remove planner-invented save/export work from visual-only drawing tasks."""
-    if not _is_drawing_task(task) or _required_image_paths(task):
-        return steps, []
-    if _SUBMIT_OR_SAVE_RE.search(task or ""):
-        return steps, []
-    kept: list = []
-    dropped: list[str] = []
-    for step in steps:
-        goal = str(step.get("goal") or "") if isinstance(step, dict) else str(step or "")
-        if _SUBMIT_OR_SAVE_RE.search(goal):
-            dropped.append(goal)
-        else:
-            kept.append(step)
-    return (kept or steps), dropped
-
 
 _COLOR_ALIASES = {
     "blue": {"blue", "蓝", "蓝色"},
@@ -420,16 +363,65 @@ class PlanToolMixin:
         return ""
 
     def _t_revise_plan(self, args: dict) -> ToolResult:
-        steps = args.get("steps") or []
-        if not isinstance(steps, list) or not steps:
-            return ToolResult("revise_plan 需要非空的 steps 数组")
-        steps, dropped_output_steps = _drop_unrequested_drawing_output_steps(
-            str(getattr(self, "task", "") or ""),
-            steps,
-        )
-        self.plan = planner.Plan(steps)
+        steps = args.get("steps")
+        operations = args.get("operations")
+        has_steps = "steps" in args
+        has_operations = "operations" in args
+        if has_steps == has_operations:
+            return ToolResult(
+                "revise_plan requires exactly one field: steps or operations"
+            )
+        if has_steps and not isinstance(steps, list):
+            return ToolResult("revise_plan steps must be an array (it may be empty)")
+        if has_operations and (
+            not isinstance(operations, list) or not operations
+        ):
+            return ToolResult("revise_plan operations must be a non-empty array")
+
+        changes: list[str] = []
+        skip_working_set_restore = False
+        if has_steps:
+            assert isinstance(steps, list)
+            previously_done = [
+                (
+                    str(step.get("goal") or "").strip().casefold(),
+                    step.get("check"),
+                )
+                for step in (self.plan.steps if self.plan is not None else [])
+                if step.get("done")
+            ]
+            replacement = planner.Plan(steps)
+            for index, step in enumerate(replacement.steps, start=1):
+                goal_key = str(step.get("goal") or "").strip().casefold()
+                match = next((
+                    position
+                    for position, (prior_goal, prior_check) in enumerate(previously_done)
+                    if prior_goal == goal_key and prior_check == step.get("check")
+                ), None)
+                if match is not None:
+                    replacement.complete(index)
+                    previously_done.pop(match)
+            self.plan = replacement
+            changes.append("replaced the ordered todo list")
+        else:
+            assert isinstance(operations, list)
+            skip_working_set_restore = any(
+                isinstance(operation, dict)
+                and str(operation.get("op") or "").strip().casefold() == "reopen"
+                for operation in operations
+            )
+            candidate_plan = self.plan if self.plan is not None else planner.Plan([])
+            try:
+                changes = candidate_plan.apply_operations(operations)
+            except ValueError as exc:
+                return ToolResult(f"revise_plan operations rejected atomically: {exc}")
+            self.plan = candidate_plan
+
         restored: list[int] = []
-        if _is_multi_source_research_task(getattr(self, "task", "")):
+        if (
+            not skip_working_set_restore
+            and _is_multi_source_research_task(getattr(self, "task", ""))
+        ):
             for index, step in enumerate(self.plan.steps, start=1):
                 goal = str(step.get("goal") or "")
                 if (
@@ -441,26 +433,33 @@ class PlanToolMixin:
         self._fail_softened = False
         BUS.publish(
             "agent_plan",
+            run_id=getattr(self, "run_id", ""),
             action="revise",
             plan=self.plan.snapshot(),
             restored_from_working_set=restored,
-            dropped_unrequested_output_steps=dropped_output_steps,
         )
         restored_text = (
             f"\nRestored completed source steps from working set: {restored}."
             if restored else ""
         )
-        return ToolResult(f"已更新计划：\n{self.plan.render()}{restored_text}")
+        return ToolResult(
+            f"Plan updated ({'; '.join(changes)}).\n"
+            f"{self.plan.render()}{restored_text}"
+        )
 
     def _t_complete_subgoal(self, args: dict) -> ToolResult:
         verify_mod = _tools_attr("verify", verify)
         if self.plan is None or not self.plan.active():
             return ToolResult("当前没有计划，可先调用 revise_plan 制定")
-        index = int(args.get("index", -1))
+        raw_index = args.get("index", -1)
+        if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+            return ToolResult("complete_subgoal index must be a 1-based integer")
+        index = raw_index
         if not (1 <= index <= len(self.plan.steps)):
             return ToolResult(f"子目标序号 {index} 无效。\n{self.plan.render()}")
         if self.plan.steps[index - 1].get("done"):
-            BUS.publish("agent_plan", action="complete", index=index,
+            BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                        action="complete", index=index,
                         plan=self.plan.snapshot(), already_done=True)
             if self.plan.all_done():
                 return ToolResult(
@@ -477,6 +476,7 @@ class PlanToolMixin:
         if source_error:
             BUS.publish(
                 "agent_plan",
+                run_id=getattr(self, "run_id", ""),
                 action="subgoal_check",
                 index=index,
                 verified=False,
@@ -495,6 +495,7 @@ class PlanToolMixin:
             )
             BUS.publish(
                 "agent_plan",
+                run_id=getattr(self, "run_id", ""),
                 action="subgoal_check",
                 index=index,
                 verified=False,
@@ -504,25 +505,22 @@ class PlanToolMixin:
             return ToolResult(
                 f"Subgoal {index} is a compound open/create step and is not complete: {detail}."
             )
-        ignored_file_check, ignored_detail = _spurious_drawing_file_check(
+        ignored_file_check, ignored_detail = _spurious_agent_schedule_file_check(
             getattr(self, "task", ""),
+            goal,
             check_expect,
         )
-        if not ignored_file_check:
-            ignored_file_check, ignored_detail = _spurious_agent_schedule_file_check(
-                getattr(self, "task", ""),
-                goal,
-                check_expect,
-            )
         if ignored_file_check:
-            BUS.publish("agent_plan", action="subgoal_check", index=index,
+            BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                        action="subgoal_check", index=index,
                         verified=True, detail=ignored_detail,
                         source="ignored_spurious_file_check")
             check_expect = None
         if check_expect:
             current_ok, current_detail = self._current_controller_visible_subgoal_ok(check_expect)
             if current_ok:
-                BUS.publish("agent_plan", action="subgoal_check", index=index,
+                BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                            action="subgoal_check", index=index,
                             verified=True, detail=current_detail,
                             source="current_controller_evidence")
             else:
@@ -533,10 +531,12 @@ class PlanToolMixin:
             )
             if not current_ok:
                 outcome = verify_mod.check(check_expect, hwnd=self.hwnd, timeout_s=4.0)
-                BUS.publish("agent_plan", action="subgoal_check", index=index,
+                BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                            action="subgoal_check", index=index,
                             verified=outcome.verified, detail=outcome.detail)
             if historical_ok and not current_ok and outcome is not None and not outcome.verified:
-                BUS.publish("agent_plan", action="subgoal_check", index=index,
+                BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                            action="subgoal_check", index=index,
                             verified=True, detail=historical_detail,
                             source="historical_visible_evidence")
             if (
@@ -553,6 +553,7 @@ class PlanToolMixin:
             if blocker:
                 BUS.publish(
                     "agent_plan",
+                    run_id=getattr(self, "run_id", ""),
                     action="subgoal_check",
                     index=index,
                     verified=False,
@@ -564,7 +565,8 @@ class PlanToolMixin:
                     f"{blocker}"
                 )
         self.plan.complete(index)
-        BUS.publish("agent_plan", action="complete", index=index,
+        BUS.publish("agent_plan", run_id=getattr(self, "run_id", ""),
+                    action="complete", index=index,
                     plan=self.plan.snapshot())
         if self.plan.all_done():
             return ToolResult(

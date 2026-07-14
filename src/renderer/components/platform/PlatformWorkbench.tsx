@@ -660,7 +660,7 @@ function SystemView({ plane }: { plane: Plane }) {
     if (!config) return;
     setSaving(true); setError('');
     try {
-      const next = await plane.getClient().patchConfig({ api: config.api, vlm: config.vlm, perception: config.perception, fusion: config.fusion, agent: config.agent, ocr: config.ocr, integrations: config.integrations });
+      const next = await plane.getClient().patchConfig({ api: config.api, vlm: config.vlm, perception: config.perception, fusion: config.fusion, controller: config.controller, agent: config.agent, ocr: config.ocr, integrations: config.integrations });
       setConfig(next);
       setChatgptBridge(await plane.getClient().chatgptIntegration());
       setSaved(true); setTimeout(() => setSaved(false), 1800);
@@ -727,6 +727,8 @@ function SystemView({ plane }: { plane: Plane }) {
               <div className="arp-perception-row" key={dimension}><span className="arp-level">L{index}</span><Toggle label={dimension.toUpperCase()} checked={Boolean(config.perception?.[dimension]?.enabled)} onChange={(value) => setConfig((current) => current ? { ...current, perception: { ...current.perception, [dimension]: { ...current.perception?.[dimension], enabled: value } } } : current)} /><code>P{config.perception?.[dimension]?.priority || index + 1}</code></div>
             ))}
             <Toggle checked={Boolean(config.fusion?.screen_watch_autostart)} onChange={(value) => patch('fusion', 'screen_watch_autostart', value)} label="Screen watcher autostart" />
+            <Toggle checked={config.controller?.target_window_capture_enabled !== false} onChange={(value) => patch('controller', 'target_window_capture_enabled', value)} label="Auto target-window frame crop" />
+            <Toggle checked={Boolean(config.controller?.multi_input_cooperation)} onChange={(value) => patch('controller', 'multi_input_cooperation', value)} label="Experimental mouse/keyboard cooperation" />
             <Toggle checked={Boolean(config.fusion?.ocr_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'ocr_skip_when_uia_rich', value)} label="Skip OCR on rich UIA" />
             <Toggle checked={Boolean(config.fusion?.vlm_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'vlm_skip_when_uia_rich', value)} label="Skip VLM on rich UIA" />
           </div>}

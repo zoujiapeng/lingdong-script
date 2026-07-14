@@ -20,7 +20,7 @@ from zipfile import BadZipFile, ZipFile
 from ..config import CONFIG
 from ..model_adapter import model_profile_from_config, model_supports_vision
 from ..perception import fusion, intent, ocr, vision_cv, vlm as vlm_mod
-from ..utils.image_capture import capture_window_jpeg_b64
+from ..utils.image_capture import capture_window_jpeg_b64, select_visual_capture_scope
 from ..utils.log import BUS, logger
 from .task_rules import (
     _communication_mode,
@@ -834,6 +834,9 @@ class DoneVerifierMixin:
         # capture. Literal checks may defer to the image judge only when this
         # invocation produced a real, fresh target-window frame.
         self._fresh_done_image_b64 = ""
+        self._fresh_done_capture_scope = ""
+        self._fresh_done_capture_region = None
+        self._fresh_done_capture_reason = ""
         try:
             fusion_mod = _loop_attr("fusion", fusion)
             intent_mod = _loop_attr("intent", intent)
@@ -847,12 +850,31 @@ class DoneVerifierMixin:
                 hwnd
                 and (
                     model_profile_from_config(api).supports_vision
-                    or (_is_drawing_task(self.task) and fallback_visual_judge)
+                    or fallback_visual_judge
                 )
             )
             if native_visual:
                 try:
-                    self._fresh_done_image_b64 = capture_window_jpeg_b64(hwnd)
+                    decision = select_visual_capture_scope(
+                        hwnd,
+                        task=self.task,
+                        related_window=getattr(
+                            self.session, "_window_related_to_target", None,
+                        ),
+                    )
+                    invalid_target_reasons = {
+                        "target_window_invalid",
+                        "target_window_not_visible",
+                        "target_window_validation_failed",
+                        "target_window_geometry_unavailable",
+                    }
+                    if decision.reason not in invalid_target_reasons:
+                        self._fresh_done_image_b64 = capture_window_jpeg_b64(
+                            hwnd, region=decision.region,
+                        )
+                    self._fresh_done_capture_scope = decision.scope
+                    self._fresh_done_capture_region = decision.region
+                    self._fresh_done_capture_reason = decision.reason
                 except Exception as exc:
                     logger.debug("fresh done visual capture failed: %s", exc)
                 # Do not decompose a successfully captured real frame through a
@@ -874,7 +896,8 @@ class DoneVerifierMixin:
             text = snap.to_text(limit) if snap else ""
             if self._fresh_done_image_b64:
                 text += (
-                    "\nFresh native-vision frame attached to the independent done judge; "
+                    "\nFresh native-vision frame attached to the independent done judge "
+                    f"(scope={getattr(self, '_fresh_done_capture_scope', 'unknown')}); "
                     "it is authoritative over stale structured elements."
                 )
             if hwnd and _is_arithmetic_task(self.task):
@@ -914,19 +937,6 @@ class DoneVerifierMixin:
             evidence += "\n- historical_visible_evidence: " + json.dumps(
                 ledger[-20:], ensure_ascii=False
             )[:2000]
-        if _is_drawing_task(self.task):
-            stats = []
-            for path in _required_image_paths(self.task):
-                try:
-                    item = vision_cv.image_ink_stats(path)
-                    item["color_stats"] = vision_cv.image_color_stats(path)
-                    stats.append(item)
-                except Exception as exc:
-                    stats.append({"path": path, "error": str(exc)})
-            if stats:
-                evidence += "\n- image_ink_stats: " + json.dumps(
-                    stats, ensure_ascii=False
-                )[:1200]
         return recent, evidence
 
     def _deterministic_saved_file_verdict(
@@ -1855,6 +1865,18 @@ class DoneVerifierMixin:
         judge_client = client
         judge_extra_body: dict | None = None
         fresh_image = str(getattr(self, "_fresh_done_image_b64", "") or "")
+        fresh_scope = str(
+            getattr(self, "_fresh_done_capture_scope", "") or "unknown"
+        )
+        fresh_region = getattr(self, "_fresh_done_capture_region", None)
+        if fresh_region is not None:
+            fresh_scope_note = (
+                f"scope={fresh_scope}; physical screen region "
+                f"left={fresh_region.left}, top={fresh_region.top}, "
+                f"width={fresh_region.width}, height={fresh_region.height}."
+            )
+        else:
+            fresh_scope_note = f"scope={fresh_scope}."
         pending_literals = list(
             getattr(self, "_pending_visual_literal_tokens", []) or []
         )
@@ -1912,6 +1934,8 @@ class DoneVerifierMixin:
                 judge_model = vlm_model
         sys_p = (
             "你是严格、怀疑的任务完成核验员。判断用户任务是否【真正达成】，不要轻信 agent 的自述。"
+            "原始用户任务是唯一验收合同；不要把计划、提示词、动作数量或控制器自行发明的条件"
+            "升级成用户要求，也不要把动作成功误当成任务成功。"
             "重要：文件/文件夹/进程/命令类任务，以【确定性证据】(run_shell 输出、Test-Path/Exists 结果、"
             "verified 字段)为准——这类结果在桌面/后台,GUI 界面上【本来就看不到】,"
             "**绝不能因为‘最终界面没显示’就判未完成**。只有可视交互(网页填表/界面内容)才看界面。"
@@ -1998,25 +2022,11 @@ class DoneVerifierMixin:
                   "not delivery evidence. If recipient/conversation context or delivery state "
                   "is ambiguous, return done=false."
             )
-        if _is_drawing_task(self.task):
-            user_p += (
-                "\n\nAUTHORITATIVE DRAWING-QUALITY CHECK:\n"
-                "Judge the actual canvas pixels in the attached fresh target-window frame, not "
-                "the plan, primitive count, action log, color statistics, or agent claim. The "
-                "original user task is the only acceptance contract: do not turn a color, style, "
-                "or detail invented only by the agent/plan into a required condition. "
-                "requested subject must be immediately recognizable and visibly complete. "
-                "Subject-defining parts, proportions, and spatial relationships must form one "
-                "coherent composition. If the user requested a good-looking, polished, detailed, "
-                "or non-crude result, a few circles/ellipses, a bare geometric outline, an "
-                "obviously partial figure, or abandoned/selected shapes are insufficient. "
-                "Require multiple meaningful details and intentional visual structure; return "
-                "done=false whenever quality or completeness is ambiguous."
-            )
         if fresh_image:
             user_p += (
                 "\n\nAUTHORITATIVE NATIVE GUI EVIDENCE ORDER:\n"
-                "The attached fresh whole-window frame is the authoritative current GUI state. "
+                "The attached fresh frame is the authoritative current GUI state "
+                f"({fresh_scope_note}) "
                 "A recent tool result with ok=true and native_action_executed=true proves that "
                 "the low-level native mouse/keyboard path actually dispatched; it does not by "
                 "itself prove the goal, so inspect the fresh pixels for the requested result. "
@@ -2033,7 +2043,7 @@ class DoneVerifierMixin:
                     "type": "text",
                     "text": (
                         user_p
-                        + "\n\n下面附有刚刚重新捕获的真实目标窗口。对 GUI 任务，必须直接检查整张图："
+                        + "\n\n下面附有刚刚重新捕获的真实 GUI 帧。对 GUI 任务，必须直接检查整张图："
                           "目标对象、当前页面、动作结果和完成条件有任何看不清或歧义，都判 done=false。"
                     ),
                 },
@@ -2127,38 +2137,11 @@ class DoneVerifierMixin:
         self._last_done_reject_reason = reason
         self._last_done_reject_generation = self._done_evidence_generation()
         self._done_rejects += 1
-        if _is_drawing_task(self.task):
-            quality_rejects = int(
-                getattr(self, "_drawing_quality_rejects", 0) or 0
-            ) + 1
-            self._drawing_quality_rejects = quality_rejects
-            if quality_rejects == 1:
-                # The next canvas mutation is the only repair opportunity. Keep
-                # an exact history boundary so the runtime can distinguish the
-                # already-delivered scene from a later additive detail batch.
-                self._drawing_quality_repair_history_start = len(
-                    getattr(self, "_tool_history", []) or []
-                )
-                recovery_message = (
-                    f"[drawing quality check failed] {reason}. Preserve the current canvas: "
-                    "do not clear, restart, redraw the whole subject, or bulk-undo. Make at most "
-                    "one incremental execute_subgoal repair containing only brand-new missing "
-                    "semantic details, then call done for one fresh visual judgment. If the fresh "
-                    "judge still rejects it and no safe additive repair is clear, call blocked/fail "
-                    "honestly instead of continuing to mutate the canvas."
-                )
-            else:
-                recovery_message = (
-                    f"[drawing quality check failed again] {reason}. The single safe additive "
-                    "repair opportunity has been consumed. Do not mutate, clear, redraw, undo, "
-                    "or restart the canvas again; call blocked/fail with this exact visual "
-                    "quality blocker instead of entering another repair loop."
-                )
-        else:
-            recovery_message = (
-                f"[完成核验未通过] {reason}。任务尚未真正达成，请不要直接调 done——"
-                "先把缺的部分补完（必要时重新 observe / 用确定性 expect 验证），完成后再调 done。"
-            )
+        recovery_message = (
+            f"[完成核验未通过] {reason}。基于最新真实画面判断下一步：只有新动作有明确、"
+            "可验证的改进时才继续；若当前方法停滞就换策略，若没有安全进展路径则如实调用 "
+            "blocked/fail。不要仅因旧规则、动作计数或工具返回成功而重复执行。"
+        )
         self.messages.append({
             "role": "user",
             "content": recovery_message,
@@ -2281,23 +2264,31 @@ class DoneVerifierMixin:
                 if not passed:
                     return self._reject_done(reason, f"[done check failed] {reason}")
                 evidence += "\n- causal_communication_evidence: " + reason
-        if _is_drawing_task(self.task):
-            # Capture before the drawing gates so a native visual model can
-            # satisfy semantic/detail verification directly, without first
-            # calling a secondary VLM tool.
-            screen = self._fresh_done_screen()
-            if not self._verify_drawing_done(evidence):
-                return False
-            # Color presence and pixel deltas prove that paint changed, not that
-            # the requested object/shape is actually present.  Keep them as a
-            # necessary gate above, then let the fresh goal-conditioned visual
-            # judge inspect the complete result instead of upgrading a local
-            # color statistic into task success.
-
         if screen is None:
             screen = self._fresh_done_screen()
-        if not self._verify_drawing_semantic_evidence(evidence):
-            return False
+        fresh_native_image = bool(
+            str(getattr(self, "_fresh_done_image_b64", "") or "")
+        )
+        if self._history_mentions_action("drag", "draw_strokes") and not fresh_native_image:
+            deterministic_spatial = self._desktop_drag_has_deterministic_done_evidence(
+                screen, evidence,
+            )
+            semantic_verdict = self._latest_semantic_visual_drawing_verdict(evidence)
+            if not deterministic_spatial and not (semantic_verdict and semantic_verdict[0]):
+                reason = (
+                    semantic_verdict[1]
+                    if semantic_verdict is not None
+                    else (
+                        "A spatial GUI mutation cannot be accepted from action success or pixel "
+                        "change alone; no fresh goal-conditioned frame or deterministic final "
+                        "geometry proves the requested result."
+                    )
+                )
+                return self._reject_done(
+                    reason,
+                    f"[done check failed] {reason} Capture a fresh authoritative frame and "
+                    "judge the original user goal before calling done again.",
+                )
         arithmetic_verdict = _deterministic_arithmetic_verdict(self.task, screen)
         if arithmetic_verdict is not None:
             passed, reason = arithmetic_verdict
@@ -2334,13 +2325,7 @@ class DoneVerifierMixin:
             evidence += "\n- deterministic_saved_file: " + reason
         if not self._verify_visible_payloads(screen, evidence):
             return False
-        fresh_native_image = bool(
-            str(getattr(self, "_fresh_done_image_b64", "") or "")
-        )
-        if (
-            not fresh_native_image
-            and self._desktop_drag_has_deterministic_done_evidence(screen, evidence)
-        ):
+        if self._desktop_drag_has_deterministic_done_evidence(screen, evidence):
             reason = (
                 "Desktop icon drag accepted from deterministic evidence: target "
                 "listitem at requested area plus drag visual_change_detected=true."
@@ -2365,7 +2350,6 @@ class DoneVerifierMixin:
         if (
             not self._pending_visual_literal_tokens
             and not self._pending_visual_payloads
-            and not _is_drawing_task(self.task)
             and (
                 not fresh_native_image
                 or self._task_accepts_historical_visible_state(self.task)

@@ -131,7 +131,7 @@ def load_all() -> list[Playbook]:
 
 
 def enabled() -> bool:
-    return bool(CONFIG.get("agent", "playbooks_enabled", default=True))
+    return bool(CONFIG.get("agent", "playbooks_enabled", default=False))
 
 
 def for_task(task: str) -> list[Playbook]:

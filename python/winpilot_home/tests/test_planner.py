@@ -57,11 +57,11 @@ def test_plan_merges_click_then_visible_state_verify():
 
     assert len(plan.steps) == 1
     assert plan.steps[0]["check"] == {"text_appears": "LOCAL_COUNTER"}
-    assert "GUI routine hint" in plan.render()
-    assert "do not call revise_plan just to restate it" in plan.render()
+    assert "add/update/remove/move" in plan.render()
+    assert "guidance, not completion evidence" in plan.render()
 
 
-def test_plan_drops_drawing_color_as_text_check():
+def test_plan_keeps_model_authored_visual_check_as_guidance():
     plan = planner.Plan(
         [
             {
@@ -71,10 +71,10 @@ def test_plan_drops_drawing_color_as_text_check():
         ]
     )
 
-    assert plan.steps[0]["check"] is None
+    assert plan.steps[0]["check"] == {"text_appears": "蓝色"}
 
 
-def test_plan_drops_weak_app_title_check_for_visual_confirmation():
+def test_plan_does_not_apply_drawing_specific_check_sanitization():
     plan = planner.Plan(
         [
             {
@@ -84,7 +84,7 @@ def test_plan_drops_weak_app_title_check_for_visual_confirmation():
         ]
     )
 
-    assert plan.steps[0]["check"] is None
+    assert plan.steps[0]["check"] == {"text_appears": "Paint"}
 
 
 def test_plan_keeps_state_token_check_for_visual_confirmation():
@@ -127,3 +127,37 @@ def test_four_explicit_gui_actions_still_use_upfront_plan(monkeypatch):
     assert planner.should_plan_upfront(
         "Open Notepad type the note save it and confirm the saved file"
     ) is True
+
+
+def test_plan_operations_can_add_update_remove_and_reorder_without_losing_progress():
+    plan = planner.Plan(["open source", "collect facts", "write result"])
+    plan.complete(1)
+
+    changes = plan.apply_operations([
+        {"op": "add", "index": 3, "goal": "cross-check facts"},
+        {"op": "update", "index": 2, "goal": "collect grounded facts"},
+        {"op": "move", "index": 4, "to_index": 3},
+        {"op": "remove", "index": 4},
+    ])
+
+    assert [step["goal"] for step in plan.steps] == [
+        "open source", "collect grounded facts", "write result"
+    ]
+    assert [step["done"] for step in plan.steps] == [True, False, False]
+    assert len(changes) == 4
+
+
+def test_plan_operations_are_atomic_when_one_index_is_invalid():
+    plan = planner.Plan(["first", "second"])
+
+    try:
+        plan.apply_operations([
+            {"op": "add", "goal": "temporary"},
+            {"op": "remove", "index": 99},
+        ])
+    except ValueError as exc:
+        assert "outside" in str(exc)
+    else:
+        raise AssertionError("invalid mutation should fail")
+
+    assert [step["goal"] for step in plan.steps] == ["first", "second"]

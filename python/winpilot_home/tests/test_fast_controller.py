@@ -4884,6 +4884,30 @@ Make the first paragraph bold and centered. Save the file."""
     assert "formats" not in upgraded
 
 
+def test_runner_preserves_explicit_document_append_instead_of_auto_replacing():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("""Type exactly these paragraphs:
+Heading
+Body TOKEN_KEEP_712""")
+    original = {
+        "subgoal": "Append one note without replacing existing content",
+        "input": {
+            "label": "Document body",
+            "text": "one extra note",
+            "document_surface": True,
+            "clear": False,
+        },
+    }
+
+    upgraded = runner._maybe_upgrade_execute_subgoal_document_input(
+        "execute_subgoal", original,
+    )
+
+    assert upgraded == original
+    assert upgraded["input"]["clear"] is False
+
+
 def test_runner_upgrades_multiline_document_input_despite_terminal_punctuation_drift():
     from winpilot.agent.loop import AgentRunner
 
@@ -4982,6 +5006,51 @@ Body TOKEN_FULL_712. Make only the first paragraph bold and centered; keep body 
         action.get("action") == "hotkey"
         and action.get("keys") == ["enter"]
         and action.get("expect", {}).get("file_exists", "").endswith("full.docx")
+        for action in actions
+    )
+
+
+def test_exact_document_controller_respects_explicit_append_semantics(monkeypatch):
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+    from winpilot.utils.screenshot import Region
+
+    class Session:
+        task = """Type exactly these paragraphs:
+Heading
+Body TOKEN_KEEP_712"""
+        hwnd = 42
+        snapshot = None
+        _document_surface_ready = True
+
+    monkeypatch.setattr(
+        subgoal_mod,
+        "window_region",
+        lambda _hwnd: Region(left=100, top=200, width=1000, height=800),
+    )
+    session = Session()
+    request = parse_subgoal_request({
+        "subgoal": "Append one note without replacing the existing document",
+        "input": {
+            "text": "one extra note",
+            "document_surface": True,
+            "clear": False,
+        },
+    }, task=session.task)
+    executor = SubgoalExecutor(session, FastGuiController(session))
+
+    assert executor._document_task_actions(request) == []
+    actions = executor._build_actions(request)
+
+    assert any(
+        action.get("action") == "type_text"
+        and action.get("text") == "one extra note"
+        for action in actions
+    )
+    assert not any(
+        action.get("action") == "hotkey"
+        and set(action.get("keys") or ()) & {"a", "backspace", "delete"}
         for action in actions
     )
 
@@ -5995,6 +6064,8 @@ def test_subgoal_input_locator_failure_falls_back_to_keyboard_text():
 
         def dispatch(self, name, args):
             calls.append((name, args))
+            if name == "focus_window":
+                return ToolResult('{"ok": true, "verified": true}')
             if name == "type_text":
                 return ToolResult('{"ok": true, "verified": true}')
             return ToolResult('{"ok": false, "blocked": true}')
@@ -7038,11 +7109,15 @@ def test_execute_subgoal_draw_waits_for_ready_canvas(monkeypatch):
     monkeypatch.setattr(subgoal_mod, "window_region", lambda hwnd: window)
     monkeypatch.setattr(subgoal_mod.time, "sleep", lambda _seconds: None)
 
-    def fake_bbox(_image):
+    def fake_surface(_image):
         bbox_calls.append(1)
-        return None if len(bbox_calls) == 1 else (80, 120, 460, 360)
+        if len(bbox_calls) == 1:
+            return {"ok": False, "reason": "not ready"}
+        return {"ok": True, "bbox": [80, 120, 460, 360]}
 
-    monkeypatch.setattr(subgoal_mod.vision_cv, "likely_canvas_bbox", fake_bbox)
+    monkeypatch.setattr(
+        subgoal_mod.vision_cv, "credible_light_work_surface", fake_surface
+    )
 
     class Watcher:
         @staticmethod
@@ -7254,7 +7329,7 @@ def test_explicit_shape_box_uses_full_rectangular_geometry():
     ]]
 
 
-def test_closed_shape_corrects_obvious_mislabeled_detail_endpoints(monkeypatch):
+def test_closed_shape_honors_explicit_xywh_without_semantic_rewrite(monkeypatch):
     from winpilot.fast.subgoal import _normalized_closed_shape_region
     from winpilot.utils.screenshot import Region
 
@@ -7269,9 +7344,9 @@ def test_closed_shape_corrects_obvious_mislabeled_detail_endpoints(monkeypatch):
         semantic_part="left ear",
     )
 
-    assert region == Region(530, 308, 40, 40)
-    assert metadata["box_interpretation"] == "xyxy_corrected_from_xywh"
-    assert metadata["box_interpretation_corrected"] is True
+    assert region == Region(530, 308, 470, 248)
+    assert metadata["box_interpretation"] == "xywh"
+    assert "box_interpretation_corrected" not in metadata
 
 
 def test_closed_shape_preserves_large_core_xywh_box(monkeypatch):
@@ -7655,20 +7730,20 @@ def test_draw_color_evidence_filters_out_unexecuted_white_plan():
     assert "white" not in matched
 
 
-def test_normalized_line_box_accepts_endpoints_and_legacy_xywh():
+def test_normalized_line_box_accepts_typed_endpoints_and_xywh():
     from winpilot.fast.subgoal import _normalized_line_geometry
     from winpilot.utils.screenshot import Region
 
     canvas = Region(100, 200, 1000, 500)
     endpoints = _normalized_line_geometry(canvas, [460, 360, 500, 370])
-    legacy_xywh = _normalized_line_geometry(canvas, [380, 290, 60, 0])
+    typed_xywh = _normalized_line_geometry(canvas, [380, 290, 60, 0], "xywh")
 
     assert endpoints is not None
     assert endpoints[0] == [[[560, 380], [600, 385]]]
     assert endpoints[1].width == 41
-    assert legacy_xywh is not None
-    assert legacy_xywh[0] == [[[480, 345], [540, 345]]]
-    assert legacy_xywh[1].width == 61
+    assert typed_xywh is not None
+    assert typed_xywh[0] == [[[480, 345], [540, 345]]]
+    assert typed_xywh[1].width == 61
 
 
 def test_boxed_eye_pupil_and_shine_strokes_shrink_monotonically():
@@ -7694,7 +7769,7 @@ def test_boxed_eye_pupil_and_shine_strokes_shrink_monotonically():
     assert extents[0][1] > extents[1][1] > extents[2][1]
 
 
-def test_detailed_scene_uses_square_logical_canvas_without_leaving_real_canvas():
+def test_task_wording_does_not_rewrite_detected_canvas_geometry():
     from winpilot.fast.subgoal import (
         _logical_scene_canvas,
         _normalized_box_region,
@@ -7719,17 +7794,13 @@ def test_detailed_scene_uses_square_logical_canvas_without_leaving_real_canvas()
             "height": logical.height,
         },
     )
-    square = _normalized_box_region(logical, [400, 250, 180, 180])
-    repair_square = _normalized_box_region(repair_logical, [400, 250, 180, 180])
+    mapped = _normalized_box_region(logical, [400, 250, 180, 180])
 
-    assert logical.width == logical.height == 413
-    assert repair_logical == logical
-    assert repair_square == square
-    assert logical.left == real_canvas.left + (real_canvas.width - logical.width) // 2
-    assert square is not None
-    assert abs(square.width - square.height) <= 1
+    assert logical == real_canvas
+    assert repair_logical == Region(90, 190, 886, 433)
+    assert mapped is not None
 
-    stroke = _shape_strokes("ellipse", square, margin_ratio=0.0)[0]
+    stroke = _shape_strokes("ellipse", mapped, margin_ratio=0.0)[0]
     assert all(
         real_canvas.left <= x <= real_canvas.right
         and real_canvas.top <= y <= real_canvas.bottom
@@ -7737,31 +7808,25 @@ def test_detailed_scene_uses_square_logical_canvas_without_leaving_real_canvas()
     )
 
 
-def test_detailed_scene_freezes_first_trace_canvas_transform_across_ink_components(
+def test_each_draw_uses_current_detected_canvas_without_hidden_scene_transform(
     monkeypatch,
 ):
     from winpilot.fast import subgoal as subgoal_mod
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
     from winpilot.utils.screenshot import Region
 
-    # Real values from trace 20260713-183846-44c5a9. Paint's initially whole
-    # white canvas was detected as x=606,w=866; after ink landed CV alternated
-    # between right and left white sub-components. All three detections belong
-    # to one unchanged Paint window and must retain the first x=832 square.
     window = Region(480, 154, 1008, 720)
     image = np.zeros((window.height, window.width, 3), dtype=np.uint8)
     bboxes = iter([
         (126, 258, 992, 671),  # absolute x=606, width=866
         (634, 258, 992, 671),  # absolute x=1114, width=358
         (126, 258, 482, 671),  # absolute x=606, width=356
-        (126, 258, 482, 671),  # a genuinely new document generation
-        (634, 258, 992, 671),  # same geometry but a different hwnd
     ])
     monkeypatch.setattr(subgoal_mod, "window_region", lambda _hwnd: window)
     monkeypatch.setattr(
         subgoal_mod.vision_cv,
-        "likely_canvas_bbox",
-        lambda _image: next(bboxes),
+        "credible_light_work_surface",
+        lambda _image: {"ok": True, "bbox": list(next(bboxes))},
     )
 
     class Controller:
@@ -7780,7 +7845,7 @@ def test_detailed_scene_freezes_first_trace_canvas_transform_across_ink_componen
         "draws": [{
             "shape": "line",
             "part": "mouth",
-            "box": [490, 180, 30, 10],
+            "box": [490, 180, 520, 190],
             "box_mode": "endpoints",
         }],
     }, task=session.task)
@@ -7794,29 +7859,20 @@ def test_detailed_scene_freezes_first_trace_canvas_transform_across_ink_componen
     right_component = draw_action()["canvas_region"]
     left_component = draw_action()["canvas_region"]
 
-    assert first == {"x": 832, "y": 412, "width": 413, "height": 413}
-    assert first_action["strokes"] == [[[1034, 486], [1047, 490]]]
-    assert right_component == first
-    assert left_component == first
-    metadata = session._last_canvas_region["_canvas_transform_cache"]
-    assert metadata["hwnd"] == 3344228
-    assert metadata["detected_canvas"] == {
+    assert first == {"x": 606, "y": 412, "width": 866, "height": 413}
+    assert first_action["strokes"] == [[[1030, 486], [1056, 490]]]
+    assert right_component == {"x": 1114, "y": 412, "width": 358, "height": 413}
+    assert left_component == {"x": 606, "y": 412, "width": 356, "height": 413}
+    assert session._last_canvas_region == {
         "x": 606,
         "y": 412,
-        "width": 866,
+        "width": 356,
         "height": 413,
     }
-
-    session._canvas_generation = 1
-    new_generation = draw_action()["canvas_region"]
-    assert new_generation == {"x": 606, "y": 440, "width": 356, "height": 356}
-
-    session.hwnd = 3344999
-    new_hwnd = draw_action()["canvas_region"]
-    assert new_hwnd == {"x": 1114, "y": 439, "width": 358, "height": 358}
+    assert "_canvas_transform_cache" not in session._last_canvas_region
 
 
-def test_strict_drawing_canvas_never_falls_back_to_an_unrecognized_bright_window(
+def test_drawing_canvas_defaults_to_fail_closed_for_unrecognized_bright_window(
     monkeypatch,
 ):
     from winpilot.fast import subgoal as subgoal_mod
@@ -7829,20 +7885,65 @@ def test_strict_drawing_canvas_never_falls_back_to_an_unrecognized_bright_window
     monkeypatch.setattr(subgoal_mod, "_canvas_region_from_image", lambda *_args: None)
     monkeypatch.setattr(subgoal_mod, "_looks_like_unready_window", lambda _image: False)
 
-    fallback, _ = executor._ready_canvas_region(
-        window,
-        timeout_s=0.1,
-        allow_fallback=True,
-    )
-    strict, attempts = executor._ready_canvas_region(
-        window,
-        timeout_s=0.1,
-        allow_fallback=False,
-    )
+    strict, attempts = executor._ready_canvas_region(window, timeout_s=0.1)
 
-    assert fallback is not None
     assert strict is None
     assert attempts[-1]["ok"] is False
+
+
+def test_execute_subgoal_default_draw_route_never_dispatches_surface_fallback(
+    monkeypatch,
+):
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import subgoal as subgoal_mod
+    from winpilot.utils.screenshot import Region
+
+    window = Region(10, 20, 800, 600)
+    image = np.full((window.height, window.width, 3), 245, dtype=np.uint8)
+    dispatched = []
+    monkeypatch.setattr(subgoal_mod, "window_region", lambda _hwnd: window)
+    monkeypatch.setattr(subgoal_mod, "_canvas_region_from_image", lambda *_args: None)
+    monkeypatch.setattr(subgoal_mod, "_looks_like_unready_window", lambda _image: False)
+
+    class Watcher:
+        @staticmethod
+        def status():
+            return {}
+
+    class Controller:
+        watcher = Watcher()
+        capture_fn = staticmethod(lambda _region: image)
+
+        def execute(self, actions, **_kwargs):
+            dispatched.extend(actions)
+            raise AssertionError("surface fallback must not reach the controller")
+
+    class Session:
+        task = "trace a continuous path on the visible work surface"
+        hwnd = 7
+        snapshot = None
+        run_id = "surface-fail-closed"
+
+        @staticmethod
+        def dispatch(name, _args):
+            assert name == "focus_window"
+            return ToolResult('{"ok": true}')
+
+    result = subgoal_mod.SubgoalExecutor(Session(), Controller()).execute({
+        "subgoal": "trace the supplied continuous path",
+        "draw": {
+            "shape": "line",
+            "box": [200, 300, 800, 700],
+            "box_mode": "endpoints",
+        },
+    })
+    payload = json.loads(result.text)
+
+    assert payload["ok"] is False
+    assert payload["blocked"] is True
+    assert payload["work_surface_fail_closed"] is True
+    assert "uniquely ground one credible work surface" in payload["error"]
+    assert dispatched == []
 
 
 def test_normalized_line_box_mode_can_override_ambiguous_coordinates():
@@ -7859,16 +7960,22 @@ def test_normalized_line_box_mode_can_override_ambiguous_coordinates():
     ]
 
 
-def test_detail_line_corrects_obvious_mislabeled_endpoints_without_changing_limbs():
+def test_semantic_part_never_rewrites_typed_line_coordinates():
     from winpilot.fast.subgoal import _normalized_line_geometry
     from winpilot.utils.screenshot import Region
 
     canvas = Region(0, 0, 1000, 1000)
 
-    mouth = _normalized_line_geometry(
+    declared_endpoints = _normalized_line_geometry(
         canvas,
         [490, 180, 30, 10],
         "endpoints",
+        semantic_part="mouth",
+    )
+    declared_offsets = _normalized_line_geometry(
+        canvas,
+        [490, 180, 30, 10],
+        "xywh",
         semantic_part="mouth",
     )
     front_leg = _normalized_line_geometry(
@@ -7884,10 +7991,10 @@ def test_detail_line_corrects_obvious_mislabeled_endpoints_without_changing_limb
         semantic_part="tail",
     )
 
-    assert mouth is not None
-    assert mouth[0] == [[[490, 180], [520, 190]]]
-    assert mouth[1].width == 31
-    assert mouth[1].height == 11
+    assert declared_endpoints is not None
+    assert declared_endpoints[0] == [[[490, 180], [30, 10]]]
+    assert declared_offsets is not None
+    assert declared_offsets[0] == [[[490, 180], [520, 190]]]
     assert front_leg is not None
     assert front_leg[0] == [[[400, 450], [400, 550]]]
     assert tail is not None
@@ -7914,389 +8021,150 @@ def test_normalized_multi_point_geometry_supports_triangle_and_bent_tail():
     assert tail[0][0] == [[800, 450], [900, 375], [880, 340]]
 
 
-def test_detailed_creature_scene_preflight_requires_semantic_structure():
+def test_detailed_scene_preflight_defers_semantics_to_fresh_visual_judge():
     from winpilot.fast.subgoal import _scene_structure_preflight
 
-    invalid = [
+    sparse = [
         {"shape": "ellipse", "color": "orange", "box": [300, 300, 400, 300]},
-        *[
-            {"shape": "line", "color": "black", "box": [300 + i * 10, 300, 400, 320]}
-            for i in range(8)
-        ],
+        {"shape": "line", "color": "black", "box": [300, 300, 400, 320]},
     ]
-    valid = [
-        {"shape": "ellipse", "color": "orange", "part": "body", "box": [300, 420, 400, 300]},
-        {"shape": "circle", "color": "orange", "part": "head", "box": [390, 220, 220, 220]},
-        {"shape": "triangle", "color": "pink", "part": "left ear", "box": [390, 180, 90, 100]},
-        {"shape": "triangle", "color": "pink", "part": "right ear", "box": [520, 180, 90, 100]},
-        {"shape": "circle", "color": "green", "part": "left eye", "box": [435, 285, 35, 35]},
-        {"shape": "circle", "color": "green", "part": "right eye", "box": [530, 285, 35, 35]},
-        {"shape": "ellipse", "color": "black", "part": "nose", "box": [475, 340, 50, 35]},
-        {"shape": "line", "color": "black", "part": "mouth", "box": [465, 385, 535, 385]},
-        {"shape": "rectangle", "color": "blue", "part": "left front leg", "box": [350, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "right front leg", "box": [430, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "left back leg", "box": [530, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "right back leg", "box": [610, 650, 65, 120]},
-        {"shape": "ellipse", "color": "purple", "part": "left front paw", "box": [345, 760, 75, 30]},
-        {"shape": "ellipse", "color": "purple", "part": "right front paw", "box": [425, 760, 75, 30]},
-        {"shape": "ellipse", "color": "purple", "part": "left back paw", "box": [525, 760, 75, 30]},
-        {"shape": "ellipse", "color": "purple", "part": "right back paw", "box": [605, 760, 75, 30]},
-        {"shape": "line", "color": "purple", "part": "tail", "box": [690, 550, 790, 470]},
-        {"shape": "ellipse", "color": "yellow", "part": "belly", "box": [410, 500, 180, 90]},
-        {"shape": "circle", "color": "red", "part": "left cheek", "box": [410, 350, 25, 25]},
-        {"shape": "circle", "color": "red", "part": "right cheek", "box": [555, 350, 25, 25]},
+    many = [
+        {"shape": "circle", "part": f"detail-{index}", "box": [index, index, 10, 10]}
+        for index in range(40)
     ]
-    crude_trace_plan = [
-        *valid[:8],
-        valid[8],
-        valid[9],
-        valid[16],
+    collapsed = [
+        {"shape": "circle", "part": f"layer-{index}", "box": [400, 400, 200, 200]}
+        for index in range(4)
     ]
-    crude_with_two_paws = [*crude_trace_plan, valid[12], valid[13]]
-    oversized = [
-        {**spec, "part": f"{spec['part']} {index}"}
-        for index, spec in enumerate((valid * 2)[:31])
-    ]
-    collapsed = [{**spec, "box": [400, 400, 200, 200]} for spec in valid]
 
-    invalid_result = _scene_structure_preflight(invalid, "draw a detailed colorful cat")
-    valid_result = _scene_structure_preflight(valid, "draw a detailed colorful cat")
-    crude_result = _scene_structure_preflight(crude_trace_plan, "draw a detailed colorful cat")
-    crude_13_result = _scene_structure_preflight(crude_with_two_paws, "draw a detailed colorful cat")
-    oversized_result = _scene_structure_preflight(oversized, "draw a detailed colorful cat")
-    collapsed_result = _scene_structure_preflight(collapsed, "draw a detailed colorful cat")
+    for specs in (sparse, many, collapsed):
+        result = _scene_structure_preflight(specs, "draw a detailed polished illustration")
+        assert result["required"] is True
+        assert result["ok"] is True
+        assert result["quality_deferred_to_visual_judge"] is True
+        assert "creature_scene" not in result
+        assert "creature_part_counts" not in result
 
-    assert invalid_result["ok"] is False
-    assert any("semantic part labels" in error for error in invalid_result["errors"])
-    assert crude_result["primitive_count"] == 11
-    assert crude_result["ok"] is False
-    assert crude_13_result["primitive_count"] == 13
-    assert crude_13_result["ok"] is False
-    assert oversized_result["primitive_count"] == 31
-    assert oversized_result["ok"] is False
-    assert collapsed_result["ok"] is False
-    assert any("same geometry" in error for error in collapsed_result["errors"])
-    assert any("at most 30" in error for error in oversized_result["errors"])
     assert _scene_structure_preflight(
-        oversized,
-        "draw a detailed colorful cat",
-        enforce_primitive_ceiling=False,
-    )["ok"] is True
-    assert any("at least 16 primitives" in error for error in crude_result["errors"])
-    assert any("2 labelled foot" in error for error in crude_result["errors"])
-    assert any("2 labelled detail" in error for error in crude_result["errors"])
-    assert valid_result["ok"] is True
-    assert valid_result["creature_scene"] is True
-    assert valid_result["creature_part_counts"]["limb"] == 4
-    assert valid_result["creature_part_counts"]["foot"] == 4
-    assert valid_result["creature_part_counts"]["detail"] == 3
-
-    incremental_details = [
-        {"shape": "circle", "color": "black", "part": "left pupil", "box": [435, 285, 15, 15]},
-        {"shape": "circle", "color": "red", "part": "left cheek", "box": [410, 330, 25, 25]},
-        {"shape": "ellipse", "color": "yellow", "part": "belly", "box": [410, 500, 180, 90]},
-    ]
-    assert _scene_structure_preflight(
-        incremental_details, "draw a detailed colorful cat"
-    )["ok"] is False
-    assert _scene_structure_preflight(
-        [*valid[:17], *incremental_details], "draw a detailed colorful cat"
-    )["ok"] is True
+        collapsed, "draw a detailed polished illustration"
+    )["warnings"]
+    unsupported = _scene_structure_preflight(
+        [{**sparse[0], "filled": True}],
+        "draw a detailed polished illustration",
+    )
+    assert unsupported["ok"] is False
+    assert any("unsupported" in error for error in unsupported["errors"])
 
 
-def test_exact_chinese_polished_dog_task_requires_complete_scene():
+def test_exact_polished_dog_request_has_no_animal_part_or_count_gate():
     from winpilot.fast.subgoal import _scene_structure_preflight
 
     task = "用画板画一只狗,要好看一点不要简陋的"
-    dog = [
-        {"shape": "ellipse", "color": "orange", "part": "身体", "box": [300, 420, 400, 300]},
-        {"shape": "ellipse", "color": "orange", "part": "头", "box": [390, 220, 220, 220]},
-        {"shape": "triangle", "color": "orange", "part": "左耳", "box": [390, 180, 90, 100]},
-        {"shape": "triangle", "color": "orange", "part": "右耳", "box": [520, 180, 90, 100]},
-        {"shape": "circle", "color": "orange", "part": "左眼", "box": [435, 285, 35, 35]},
-        {"shape": "circle", "color": "orange", "part": "右眼", "box": [530, 285, 35, 35]},
-        {"shape": "ellipse", "color": "orange", "part": "鼻子", "box": [475, 340, 50, 35]},
-        {"shape": "line", "color": "orange", "part": "嘴", "box": [465, 385, 535, 385]},
-        {"shape": "rectangle", "color": "orange", "part": "左前腿", "box": [350, 650, 65, 120]},
-        {"shape": "rectangle", "color": "orange", "part": "右前腿", "box": [430, 650, 65, 120]},
-        {"shape": "rectangle", "color": "orange", "part": "左后腿", "box": [530, 650, 65, 120]},
-        {"shape": "rectangle", "color": "orange", "part": "右后腿", "box": [610, 650, 65, 120]},
-        {"shape": "ellipse", "color": "orange", "part": "左前爪", "box": [345, 760, 75, 30]},
-        {"shape": "ellipse", "color": "orange", "part": "右前爪", "box": [425, 760, 75, 30]},
-        {"shape": "ellipse", "color": "orange", "part": "左后爪", "box": [525, 760, 75, 30]},
-        {"shape": "ellipse", "color": "orange", "part": "右后爪", "box": [605, 760, 75, 30]},
-        {"shape": "line", "color": "orange", "part": "尾巴", "box": [690, 550, 790, 470]},
-        {"shape": "ellipse", "color": "orange", "part": "肚皮", "box": [410, 500, 180, 90]},
-        {"shape": "ellipse", "color": "orange", "part": "项圈", "box": [405, 430, 190, 35]},
-        {"shape": "ellipse", "color": "orange", "part": "舌头", "box": [485, 390, 30, 45]},
+    two_shapes = [
+        {"shape": "ellipse", "color": "orange", "part": "body", "box": [300, 420, 400, 300]},
+        {"shape": "ellipse", "color": "orange", "part": "head", "box": [390, 220, 220, 220]},
     ]
 
-    # Keep a copy of the box-only model output. The runtime compiles its
-    # explicitly labelled core boxes into organic contours before execution;
-    # the independent image judge, not this structural gate, decides whether
-    # the rendered result is genuinely attractive.
-    geometric_dog = [dict(spec) for spec in dog]
-    expressive_paths = {
-        0: [[250, 500], [290, 420], [400, 385], [560, 390], [690, 455], [720, 570], [660, 680], [370, 700], [260, 620], [250, 500]],
-        1: [[370, 300], [390, 215], [465, 165], [545, 180], [610, 250], [620, 335], [570, 410], [470, 425], [390, 375], [370, 300]],
-        2: [[405, 235], [345, 150], [315, 270], [350, 345], [405, 300], [405, 235]],
-        3: [[575, 235], [635, 150], [665, 270], [630, 345], [575, 300], [575, 235]],
-        8: [[330, 560], [315, 675], [335, 790], [395, 790], [410, 675], [390, 555], [330, 560]],
-        9: [[420, 555], [410, 680], [430, 795], [485, 795], [495, 680], [480, 550], [420, 555]],
-        10: [[525, 545], [520, 675], [540, 790], [595, 790], [605, 675], [585, 540], [525, 545]],
-        11: [[610, 525], [620, 655], [640, 770], [695, 770], [700, 650], [670, 520], [610, 525]],
-        16: [[680, 520], [760, 480], [815, 395], [790, 320], [735, 355], [750, 430], [680, 470]],
+    result = _scene_structure_preflight(two_shapes, task)
+
+    assert result["required"] is True
+    assert result["ok"] is True
+    assert result["primitive_count"] == 2
+    assert result["quality_deferred_to_visual_judge"] is True
+    assert "creature_scene" not in result
+    assert "creature_part_counts" not in result
+
+
+def test_normalized_strokes_are_explicit_and_box_geometry_is_not_auto_compiled():
+    from winpilot.fast.subgoal import _effective_normalized_strokes
+
+    explicit = [[[100, 200], [300, 400], [500, 250]]]
+    supplied = {
+        "shape": "line",
+        "part": "accent",
+        "normalized_strokes": explicit,
     }
-    for index, path in expressive_paths.items():
-        dog[index]["shape"] = "line"
-        dog[index]["normalized_strokes"] = [path]
-
-    complete = _scene_structure_preflight(dog, task)
-    geometric = _scene_structure_preflight(geometric_dog, task)
-    two_circles = _scene_structure_preflight(dog[:2], task)
-    crude_11 = _scene_structure_preflight(
-        [*dog[:8], dog[8], dog[9], dog[16]],
-        task,
-    )
-    crude_13 = _scene_structure_preflight(
-        [*dog[:8], dog[8], dog[9], dog[16], dog[12], dog[13]],
-        task,
-    )
-    filled = _scene_structure_preflight(
-        [{**dog[0], "filled": True}, *dog[1:]],
-        task,
-    )
-
-    assert complete["required"] is True
-    assert complete["creature_scene"] is True
-    assert complete["colorful_scene"] is False
-    assert complete["primitive_count"] == 20
-    assert complete["ok"] is True
-    assert complete["polished_scene"] is True
-    assert complete["expressive_contour_count"] >= 6
-    assert geometric["ok"] is True
-    assert geometric["expressive_contour_count"] >= 6
-    assert complete["creature_part_counts"]["limb"] == 4
-    assert complete["creature_part_counts"]["foot"] == 4
-    assert complete["creature_part_counts"]["detail"] == 3
-    assert two_circles["required"] is True
-    assert two_circles["ok"] is False
-    assert crude_11["primitive_count"] == 11
-    assert crude_11["ok"] is False
-    assert crude_13["primitive_count"] == 13
-    assert crude_13["ok"] is False
-    assert filled["ok"] is False
-    assert any("outline-only" in error for error in filled["errors"])
-
-
-def test_polished_creature_compiles_three_point_limbs_instead_of_requery_loop():
-    from winpilot.fast.subgoal import (
-        _custom_contour_metrics,
-        _effective_normalized_strokes,
-        _scene_structure_preflight,
-    )
-
-    def custom(part, points, shape="line"):
-        return {
-            "part": part,
-            "shape": shape,
-            "color": "black",
-            "normalized_strokes": [points],
-        }
-
-    scene = [
-        custom("head", [[370, 220], [430, 170], [540, 170], [600, 240], [580, 360], [450, 400], [370, 300], [370, 220]]),
-        custom("body", [[340, 410], [440, 370], [600, 390], [680, 480], [630, 610], [400, 620], [330, 520], [340, 410]]),
-        custom("left ear", [[400, 210], [350, 120], [335, 220]]),
-        custom("right ear", [[565, 205], [620, 120], [630, 220]]),
-        custom("left eye", [[430, 260], [440, 250], [450, 260], [440, 270], [430, 260]], "circle"),
-        custom("right eye", [[520, 260], [530, 250], [540, 260], [530, 270], [520, 260]], "circle"),
-        custom("nose", [[470, 310], [480, 300], [490, 310], [480, 320], [470, 310]], "ellipse"),
-        custom("mouth", [[480, 320], [480, 345], [455, 355]]),
-        custom("front left leg", [[400, 560], [395, 650], [390, 700]]),
-        custom("front right leg", [[470, 560], [470, 650], [475, 700]]),
-        custom("back left leg", [[560, 550], [570, 640], [575, 690]]),
-        custom("back right leg", [[620, 530], [640, 620], [650, 675]]),
-        custom("tail", [[660, 440], [735, 390], [760, 320], [725, 285]]),
-        custom("collar", [[410, 395], [480, 385], [550, 395], [480, 410], [410, 395]], "ellipse"),
-        custom("collar tag", [[475, 410], [485, 405], [495, 415], [485, 425], [475, 410]], "circle"),
-    ]
-
-    result = _scene_structure_preflight(
-        scene,
-        "use Paint to draw a good-looking dog that is not crude",
-    )
-    expanded = _effective_normalized_strokes(scene[8])
-    compiled_head = _effective_normalized_strokes({
-        "part": "head",
+    box_only = {
         "shape": "ellipse",
+        "part": "subject",
         "box": [300, 180, 260, 240],
         "box_mode": "xywh",
-    })
-    compiled_leg = _effective_normalized_strokes({
-        "part": "left front leg",
-        "shape": "rectangle",
-        "box": [360, 520, 70, 210],
-        "box_mode": "xywh",
-    })
+    }
 
-    assert result["ok"] is True
-    assert result["primitive_count"] == 15
-    assert result["expressive_contour_count"] >= 6
-    assert len(expanded[0]) >= 8
-    assert expanded[0][0] == expanded[0][-1]
-    assert len(compiled_head[0]) >= 10
-    assert compiled_head[0][0] == compiled_head[0][-1]
-    assert len(compiled_leg[0]) >= 10
-    assert compiled_leg[0][0] == compiled_leg[0][-1]
-    assert _custom_contour_metrics(scene[8])["valid"] is True
-
-    pose_scene = [
-        *scene[:9],
-        {**scene[9], "part": "right hind haunch"},
-        scene[12],
-        scene[13],
-        scene[14],
-        custom("left eyebrow", [[420, 240], [440, 230]], "line"),
-        custom("right eyebrow", [[520, 230], [540, 240]], "line"),
-    ]
-    pose_result = _scene_structure_preflight(
-        pose_scene,
-        "use Paint to draw a good-looking dog that is not crude",
-    )
-    assert pose_result["ok"] is True
-    assert pose_result["creature_part_counts"]["limb"] == 2
-
-    overlapping_pose = [dict(item) for item in pose_scene]
-    overlapping_pose[9]["normalized_strokes"] = pose_scene[8]["normalized_strokes"]
-    overlap_result = _scene_structure_preflight(
-        overlapping_pose,
-        "use Paint to draw a good-looking dog that is not crude",
-    )
-    assert overlap_result["ok"] is False
-    assert any("spatially distinct" in error for error in overlap_result["errors"])
+    assert _effective_normalized_strokes(supplied) is explicit
+    assert _effective_normalized_strokes(box_only) is None
 
 
-def test_polished_incremental_detail_reuses_verified_scene_fit(monkeypatch):
-    from winpilot.fast import subgoal as subgoal_mod
+def test_draw_action_does_not_silently_fit_supplied_geometry(monkeypatch):
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
     from winpilot.utils.screenshot import Region
 
-    prior_scene = [
-        {"part": "head", "shape": "line", "normalized_strokes": [[[200, 200], [400, 150], [450, 350], [200, 200]]]},
-        {"part": "body", "shape": "line", "normalized_strokes": [[[350, 350], [750, 350], [800, 700], [350, 700], [350, 350]]]},
-    ]
-    repair = {
-        "part": "left_eye_highlight",
+    supplied_path = [[[300, 259], [309, 250], [318, 259], [309, 268], [300, 259]]]
+    draw = {
+        "part": "highlight",
         "shape": "circle",
         "box": [300, 250, 18, 18],
-        "normalized_strokes": [[[300, 259], [309, 250], [318, 259], [309, 268], [300, 259]]],
+        "normalized_strokes": supplied_path,
     }
-    seen_scene_specs = []
-    original_fit = subgoal_mod._fit_polished_scene_draw_spec
-
-    def recording_fit(draw_spec, scene_specs):
-        seen_scene_specs.append(scene_specs)
-        return original_fit(draw_spec, scene_specs)
-
-    monkeypatch.setattr(subgoal_mod, "_fit_polished_scene_draw_spec", recording_fit)
-
     class Session:
-        task = "draw a polished dog that is not crude"
-        _verified_draw_scene_specs = prior_scene
+        task = "draw a polished illustration"
+        _verified_draw_scene_specs = [{"part": "subject", "shape": "ellipse", "box": [1, 2, 3, 4]}]
         _last_canvas_region = None
 
     executor = SubgoalExecutor(Session(), SimpleNamespace())
-    request = parse_subgoal_request({"subgoal": "add highlight", "draw": repair})
+    request = parse_subgoal_request({"subgoal": "add highlight", "draw": draw})
     action = executor._build_draw_action(
         request,
-        repair,
+        draw,
         canvas_context=(Region(0, 0, 1000, 1000), []),
     )
 
     assert action is not None
-    assert seen_scene_specs == [prior_scene]
+    assert action["strokes"] == supplied_path
 
 
-def test_partial_scene_repair_keeps_first_complete_fit_basis(monkeypatch):
-    from winpilot.fast import subgoal as subgoal_mod
+def test_repeated_draw_actions_do_not_create_hidden_scene_fit_state(monkeypatch):
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
     from winpilot.utils.screenshot import Region
 
-    full_scene = [
-        {"part": "head", "shape": "line", "normalized_strokes": [[[150, 150], [350, 120], [430, 260], [300, 400], [150, 300], [150, 150]]]},
-        {"part": "body", "shape": "line", "normalized_strokes": [[[320, 360], [760, 340], [820, 650], [600, 780], [300, 680], [320, 360]]]},
-    ]
-    repair = {
-        "part": "left_eye_highlight",
-        "shape": "circle",
-        "box": [260, 240, 18, 18],
-        "normalized_strokes": [[[260, 249], [269, 240], [278, 249], [269, 258], [260, 249]]],
-    }
-    seen_bases = []
-    original_fit = subgoal_mod._fit_polished_scene_draw_spec
-
-    def recording_fit(draw_spec, scene_specs):
-        seen_bases.append(scene_specs)
-        return original_fit(draw_spec, scene_specs)
-
-    monkeypatch.setattr(subgoal_mod, "_fit_polished_scene_draw_spec", recording_fit)
-
     class Session:
-        task = "draw a polished dog that is not crude"
+        task = "draw a polished illustration"
         _verified_draw_scene_specs = []
         _last_canvas_region = None
 
     session = Session()
     executor = SubgoalExecutor(session, SimpleNamespace())
-    initial_request = parse_subgoal_request({"subgoal": "draw dog", "draws": full_scene})
-    assert executor._build_draw_action(
-        initial_request,
-        full_scene[0],
-        canvas_context=(Region(0, 0, 1000, 1000), []),
-    ) is not None
-    # Simulate only the first primitive succeeding before the batch stopped.
-    session._verified_draw_scene_specs = [full_scene[0]]
-    repair_request = parse_subgoal_request({"subgoal": "repair detail", "draw": repair})
-    assert executor._build_draw_action(
-        repair_request,
-        repair,
-        canvas_context=(Region(0, 0, 1000, 1000), []),
-    ) is not None
+    for part, offset in (("subject", 0), ("detail", 20)):
+        draw = {
+            "part": part,
+            "shape": "line",
+            "normalized_strokes": [[[100 + offset, 100], [200 + offset, 200]]],
+        }
+        request = parse_subgoal_request({"subgoal": f"draw {part}", "draw": draw})
+        assert executor._build_draw_action(
+            request,
+            draw,
+            canvas_context=(Region(0, 0, 1000, 1000), []),
+        ) is not None
 
-    assert seen_bases[0] == full_scene
-    assert seen_bases[1] == full_scene
+    assert not hasattr(session, "_drawing_scene_fit_basis")
 
 
-def test_scene_fit_preserves_mislabeled_small_detail_line_as_short_offset():
-    from winpilot.fast.subgoal import (
-        _fit_polished_scene_draw_spec,
-        _line_box_coordinates,
+def test_line_box_default_is_endpoints_and_xywh_requires_explicit_mode():
+    from winpilot.fast.subgoal import _line_box_coordinates
+
+    default = _line_box_coordinates([490, 180, 30, 10], semantic_part="mouth")
+    offsets = _line_box_coordinates(
+        [490, 180, 30, 10],
+        "xywh",
+        semantic_part="mouth",
     )
 
-    body = {"part": "body", "shape": "ellipse", "box": [100, 100, 400, 400]}
-    for mode in ("endpoints", "xywh", ""):
-        mouth = {
-            "part": "mouth",
-            "shape": "line",
-            "box": [490, 180, 30, 10],
-            "box_mode": mode,
-        }
-        fitted = _fit_polished_scene_draw_spec(mouth, [body, mouth])
-        resolved = _line_box_coordinates(
-            fitted["box"],
-            fitted["box_mode"],
-            semantic_part="mouth",
-        )
-
-        assert fitted["scene_fit_scale"] == 1.6
-        assert resolved is not None
-        x1, y1, x2, y2, _ = resolved
-        assert 40 <= x2 - x1 <= 50
-        assert 12 <= y2 - y1 <= 20
+    assert default == (490.0, 180.0, 30.0, 10.0, False)
+    assert offsets == (490.0, 180.0, 520.0, 190.0, True)
 
 
-def test_drawing_gui_profile_omits_todo_mutators_and_keeps_one_shot_guidance():
+def test_legacy_drawing_profile_is_general_and_keeps_plan_mutators():
     from winpilot.agent.tool_schemas import tool_schemas
 
     standard = tool_schemas(
@@ -8321,11 +8189,12 @@ def test_drawing_gui_profile_omits_todo_mutators_and_keeps_one_shot_guidance():
     description = execute["function"]["description"]
 
     assert {"revise_plan", "complete_subgoal"} <= standard_names
-    assert {"revise_plan", "complete_subgoal"}.isdisjoint(drawing_names)
+    assert {"revise_plan", "complete_subgoal"} <= drawing_names
     assert {"open_app", "execute_subgoal", "done", "blocked"} <= drawing_names
-    assert "one complete 15-30" in description
-    assert "outline-only" in description
-    assert "pose-visible limbs" in description
+    assert "one complete 15-30" not in description
+    assert "outline-only" not in description
+    assert "pose-visible limbs" not in description
+    assert "dog" not in description.casefold()
 
 
 def test_drawing_quantity_range_is_not_treated_as_arithmetic_expression():
@@ -8343,7 +8212,7 @@ def test_drawing_quantity_range_is_not_treated_as_arithmetic_expression():
     assert _request_arithmetic_keyboard_text(arithmetic, arithmetic.subgoal) == "2026*7*12"
 
 
-def test_successful_partial_draw_specs_can_seed_incremental_scene_preflight():
+def test_partial_draw_specs_merge_without_anatomy_threshold():
     from winpilot.fast.subgoal import (
         _merge_draw_scene_specs,
         _scene_structure_preflight,
@@ -8351,54 +8220,35 @@ def test_successful_partial_draw_specs_can_seed_incremental_scene_preflight():
     )
 
     base = [
-        {"shape": "ellipse", "color": "orange", "part": "body", "box": [300, 420, 400, 300]},
-        {"shape": "circle", "color": "orange", "part": "head", "box": [390, 220, 220, 220]},
-        {"shape": "triangle", "color": "pink", "part": "left ear", "box": [390, 180, 90, 100]},
-        {"shape": "triangle", "color": "pink", "part": "right ear", "box": [520, 180, 90, 100]},
-        {"shape": "circle", "color": "green", "part": "left eye", "box": [435, 285, 35, 35]},
-        {"shape": "circle", "color": "green", "part": "right eye", "box": [530, 285, 35, 35]},
-        {"shape": "ellipse", "color": "black", "part": "nose", "box": [475, 340, 50, 35]},
-        {"shape": "line", "color": "black", "part": "mouth", "box": [465, 385, 535, 385]},
-        {"shape": "rectangle", "color": "blue", "part": "left front leg", "box": [350, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "right front leg", "box": [430, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "left back leg", "box": [530, 650, 65, 120]},
-        {"shape": "rectangle", "color": "blue", "part": "right back leg", "box": [610, 650, 65, 120]},
-        {"shape": "ellipse", "color": "purple", "part": "left front paw", "box": [345, 760, 75, 30]},
-        {"shape": "ellipse", "color": "purple", "part": "right front paw", "box": [425, 760, 75, 30]},
-        {"shape": "line", "color": "purple", "part": "tail", "box": [690, 550, 790, 470]},
-        {"shape": "circle", "color": "black", "part": "left pupil", "box": [443, 293, 14, 14]},
+        {"shape": "ellipse", "color": "orange", "part": "area", "box": [300, 420, 400, 300]},
+        {"shape": "line", "color": "black", "part": "accent", "box": [300, 300, 400, 320]},
     ]
-    actions = []
-    for spec_index, _spec in enumerate(base):
-        actions.append({"action": "select_color"})
-        actions.append({
-            "action": "draw_strokes",
-            "defer_visual_verify": spec_index < len(base) - 1,
-        })
+    actions = [
+        {"action": "draw_strokes", "defer_visual_verify": True},
+        {"action": "draw_strokes", "defer_visual_verify": False},
+    ]
     results = [
-        {
-            "index": index,
-            "ok": True,
-            "data": (
-                {"visual_verify_deferred": True}
-                if actions[index - 1].get("defer_visual_verify") else
-                {"visual_change_detected": True}
-            ) if actions[index - 1]["action"] == "draw_strokes" else {},
-        }
-        for index in range(1, len(actions) + 1)
+        {"index": 1, "ok": True, "data": {"visual_verify_deferred": True}},
+        {"index": 2, "ok": True, "data": {"visual_change_detected": True}},
     ]
-    results.append({"index": len(actions) + 1, "ok": False})
 
     remembered = _successful_draw_scene_specs(base, actions, {"results": results})
-    incremental = [{"shape": "circle", "color": "black", "part": "right pupil", "box": [538, 293, 14, 14]}]
+    incremental = [
+        {"shape": "circle", "color": "black", "part": "detail", "box": [538, 293, 14, 14]}
+    ]
     merged = _merge_draw_scene_specs(remembered, incremental)
+    base_result = _scene_structure_preflight(base, "draw a detailed illustration")
+    merged_result = _scene_structure_preflight(merged, "draw a detailed illustration")
 
-    assert len(remembered) == len(base)
-    assert _scene_structure_preflight(base, "draw a detailed colorful cat")["ok"] is False
-    assert _scene_structure_preflight(merged, "draw a detailed colorful cat")["ok"] is True
+    assert remembered == base
+    assert len(merged) == 3
+    assert base_result["ok"] is True
+    assert merged_result["ok"] is True
+    assert base_result["quality_deferred_to_visual_judge"] is True
+    assert merged_result["quality_deferred_to_visual_judge"] is True
 
 
-def test_batch_maps_canvas_normalized_strokes_through_last_canvas_region():
+def test_batch_delegates_normalized_strokes_to_interaction_surface_resolver():
     from winpilot.agent.tool_result import ToolResult
     from winpilot.fast.controller import FastGuiController
 
@@ -8410,7 +8260,16 @@ def test_batch_maps_canvas_normalized_strokes_through_last_canvas_region():
         _screen_epoch = 0
         _observe_cache = None
         snapshot = None
-        _last_canvas_region = {"x": 100, "y": 200, "width": 1000, "height": 500}
+        # Historical controller geometry must not ground a new mutation.
+        _last_canvas_region = {"x": 1, "y": 2, "width": 3, "height": 4}
+
+        def _prepare_draw_strokes_args(self, args, capture_fn):
+            assert callable(capture_fn)
+            prepared = dict(args)
+            prepared.pop("normalized_strokes")
+            prepared["strokes"] = [[[100, 200], [599, 449], [1099, 699]]]
+            prepared["mapped_from_coordinate_space"] = "work_surface_normalized_0_1000"
+            return prepared
 
     controller = FastGuiController(Session())
 
@@ -8429,8 +8288,10 @@ def test_batch_maps_canvas_normalized_strokes_through_last_canvas_region():
 
     assert payload["ok"] is True
     assert dispatched[0][0] == "draw_strokes"
-    assert dispatched[0][1]["strokes"] == [[[100, 200], [600, 450], [1100, 700]]]
-    assert dispatched[0][1]["mapped_from_coordinate_space"] == "canvas_normalized"
+    assert dispatched[0][1]["strokes"] == [[[100, 200], [599, 449], [1099, 699]]]
+    assert dispatched[0][1]["mapped_from_coordinate_space"] == (
+        "work_surface_normalized_0_1000"
+    )
 
 
 def test_multi_draw_build_locates_canvas_once_and_defers_inner_verification(monkeypatch):
@@ -8443,7 +8304,11 @@ def test_multi_draw_build_locates_canvas_once_and_defers_inner_verification(monk
     image[120:360, 80:460] = 255
     captures = []
     monkeypatch.setattr(subgoal_mod, "window_region", lambda _hwnd: window)
-    monkeypatch.setattr(subgoal_mod.vision_cv, "likely_canvas_bbox", lambda _image: (80, 120, 460, 360))
+    monkeypatch.setattr(
+        subgoal_mod.vision_cv,
+        "credible_light_work_surface",
+        lambda _image: {"ok": True, "bbox": [80, 120, 460, 360]},
+    )
 
     class Controller:
         @staticmethod
@@ -8479,7 +8344,7 @@ def test_multi_draw_build_locates_canvas_once_and_defers_inner_verification(monk
     assert all(action["strict"] is True for action in colors)
 
 
-def test_polished_dog_without_color_request_skips_optional_palette_actions(monkeypatch):
+def test_typed_draw_colors_drive_palette_without_aesthetic_keyword_policy(monkeypatch):
     from winpilot.fast import subgoal as subgoal_mod
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
     from winpilot.utils.screenshot import Region
@@ -8488,7 +8353,11 @@ def test_polished_dog_without_color_request_skips_optional_palette_actions(monke
     image = np.zeros((600, 900, 3), dtype=np.uint8)
     image[120:570, 40:860] = 255
     monkeypatch.setattr(subgoal_mod, "window_region", lambda _hwnd: window)
-    monkeypatch.setattr(subgoal_mod.vision_cv, "likely_canvas_bbox", lambda _image: (40, 120, 860, 570))
+    monkeypatch.setattr(
+        subgoal_mod.vision_cv,
+        "credible_light_work_surface",
+        lambda _image: {"ok": True, "bbox": [40, 120, 860, 570]},
+    )
 
     class Controller:
         capture_fn = staticmethod(lambda _region: image)
@@ -8516,72 +8385,12 @@ def test_polished_dog_without_color_request_skips_optional_palette_actions(monke
     actions = executor._build_actions(request)
     selections = [action for action in actions if action.get("action") == "select_color"]
 
-    assert selections == []
+    assert [item["color"] for item in selections] == [
+        "orange", "white", "brown", "black", "pink", "orange",
+    ]
+    assert all(item["strict"] is False for item in selections)
 
 
-def test_repeated_full_draw_batch_is_narrowed_to_missing_colors():
-    from winpilot.agent.loop import AgentRunner
-
-    original = {
-        "subgoal": "draw a detailed cat",
-        "draws": [
-            {"shape": "ellipse", "color": "orange", "box": [300, 300, 300, 300]},
-            {"shape": "circle", "color": "black", "box": [420, 240, 20, 20]},
-            {"shape": "line", "color": "gray", "box": [360, 300, 60, 0]},
-        ],
-    }
-    prior = {
-        "ok": False,
-        "verified": False,
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "gray"],
-            "missing_visual_colors": ["black"],
-        },
-    }
-    runner = AgentRunner.__new__(AgentRunner)
-    runner.task = "draw a detailed colorful cat in Paint"
-    runner.run_id = "run-draw-repair"
-    runner._tool_history = [("execute_subgoal", original, json.dumps(prior))]
-    runner._trace_debug = lambda *_args, **_kwargs: None
-
-    filtered = runner._filter_repeated_draw_batch("execute_subgoal", original)
-
-    assert len(filtered["draws"]) == 1
-    assert filtered["draws"][0]["color"] == "black"
-    assert "missing colors: black" in filtered["subgoal"]
-
-
-def test_verified_drawing_blocks_unrequested_select_all_delete():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("在画板上画一只五颜六色的猫")
-    runner._tool_history.append((
-        "execute_subgoal",
-        {"subgoal": "draw cat"},
-        json.dumps({
-            "ok": True,
-            "verified": True,
-            "structured_scene_verified": True,
-            "evidence_packet": {
-                "scene_structure": {"structured_scene_verified": True},
-            },
-        }),
-    ))
-
-    result = runner._drawing_destructive_clear_result(
-        "run_action_batch",
-        {
-            "actions": [
-                {"action": "hotkey", "keys": ["ctrl", "a"]},
-                {"action": "hotkey", "keys": ["delete"]},
-            ],
-        },
-    )
-
-    assert result is not None
-    payload = json.loads(result.text)
-    assert payload["destructive_clear_blocked"] is True
-    assert payload["verified"] is False
 
 
 def test_select_color_prefers_target_hwnd_region_over_stale_snapshot(monkeypatch):

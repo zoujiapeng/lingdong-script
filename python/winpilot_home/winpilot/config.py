@@ -79,8 +79,10 @@ _DEFAULTS: dict[str, Any] = {
         "world_model": True,
         "replan_on_fail": True,
         "planning_enabled": True,
-        "playbooks_enabled": True,
-        "prompt_style": "full",
+        # Keep app/domain recipes opt-in.  The compact visual contract is the
+        # default; matching a task keyword must not silently expand it again.
+        "playbooks_enabled": False,
+        "prompt_style": "compact",
         "tool_profile": "auto",
         "session_memory": True,
         "verify_done": True,
@@ -93,6 +95,17 @@ _DEFAULTS: dict[str, Any] = {
     },
     "controller": {
         "physical_anchor_clicks": True,
+        # Conservative auto mode.  A crop is used only for a validated,
+        # foreground, single-window target; every ambiguous/global scene falls
+        # back to the complete virtual desktop.  Disable to force full-screen
+        # frames while evaluating whether cropping helps a particular setup.
+        "target_window_capture_enabled": True,
+        # Experimental human/agent input arbitration.  Window-message/UIA
+        # actions are preferred; physical keyboard focus is never taken from
+        # a different foreground window, and human cursor movement wins over
+        # automatic cursor restoration.
+        "multi_input_cooperation": False,
+        "cooperative_cursor_tolerance_px": 12,
         # A model turn may commit one visual transaction.  The resulting real
         # frame is returned before another transaction is accepted.
         "visual_closed_loop": True,

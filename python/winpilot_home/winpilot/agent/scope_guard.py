@@ -15,12 +15,15 @@ from typing import Any
 import win32gui
 
 from ..action import executor
+from ..config import CONFIG
 from ..perception import win32
 from .tool_result import ToolResult
 
 GUI_SCOPE_MUTATIONS = {
     "click",
+    "click_element",
     "type_text",
+    "type_into_element",
     "hotkey",
     "scroll",
     "drag",
@@ -139,9 +142,39 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     """
     if tool_name in _SCOPE_RECOVERY_TOOLS or tool_name not in GUI_SCOPE_MUTATIONS:
         return None
-    # The first GUI action after launch/list/focus may establish target. Do not
-    # block if no target exists yet.
+    cooperative = bool(CONFIG.get(
+        "controller", "multi_input_cooperation", default=False,
+    ))
+    # Cooperative mutations may only use a target established by an explicit
+    # launch/focus/discovery step.  Inferring the first target here would adopt
+    # whichever foreground window the human happens to own.
     target = getattr(session, "hwnd", None)
+    if cooperative and not _window_alive(target):
+        before = _context(session)
+        payload = {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "missing_live_target": True,
+            "error": (
+                "Cooperative input requires an already established live target "
+                "window before any GUI mutation. Use launch/focus_window first; "
+                "the current foreground window was not adopted."
+            ),
+            "tool": tool_name,
+            "scope_guard": {
+                "before": before,
+                "after": before,
+                "recovery_attempted": False,
+                "focus_stolen": False,
+            },
+            "needs_observe": True,
+        }
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
+
+    # Outside cooperative mode the first GUI action may retain the historical
+    # target-hint recovery behaviour.
     if not _window_alive(target):
         try:
             target = session._find_target_window()
@@ -182,6 +215,43 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
     if _same_or_related(session, foreground, target):
         return None
+
+    if cooperative:
+        # User foreground ownership wins. Do not adopt a same-process sibling
+        # and never steal focus back. Background-safe paths may continue to the
+        # executor, which binds PostMessage/UIA to the remembered hwnd; every
+        # physical/keyboard path below is rejected before it can inject input.
+        background_safe = bool(
+            tool_name in {
+                "click", "click_element", "scroll",
+                "type_into_element", "run_action_batch", "execute_subgoal",
+            }
+            or (
+                tool_name == "type_text"
+                and args.get("element_id") is not None
+            )
+        )
+        if background_safe:
+            return None
+        payload = {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "cooperative_input": True,
+            "error": (
+                "Cooperative input blocked a foreground-dependent GUI action because "
+                "the user currently owns a different window. Focus was not changed."
+            ),
+            "tool": tool_name,
+            "scope_guard": {
+                "before": before,
+                "after": before,
+                "recovery_attempted": False,
+                "focus_stolen": False,
+            },
+            "needs_observe": True,
+        }
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
     # Modern apps frequently replace their top-level hwnd during navigation,
     # document creation, or tab/window promotion.  A visible foreground sibling

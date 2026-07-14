@@ -83,3 +83,56 @@ def test_likely_canvas_bbox_excludes_vertical_overlay_on_work_surface():
     image[70:230, 35:82] = 20
 
     assert likely_canvas_bbox(image) == [82, 60, 400, 240]
+
+
+def test_likely_canvas_bbox_does_not_shrink_after_closed_ink_is_added():
+    from winpilot.perception.vision_cv import likely_canvas_bbox
+
+    image = np.full((720, 1008, 3), 30, dtype=np.uint8)
+    image[258:671, 33:1006] = 255
+    # Keep the same dark side control used by a real editable surface.
+    image[258:671, 33:126] = 20
+    # Closed marks split their white interiors into separate connected
+    # components. They are content, not new surface boundaries.
+    for center, axes in (
+        ((310, 350), (60, 45)),
+        ((390, 350), (60, 45)),
+        ((470, 330), (55, 50)),
+        ((550, 340), (55, 50)),
+        ((610, 355), (35, 25)),
+        ((280, 320), (35, 35)),
+        ((350, 290), (30, 30)),
+    ):
+        cv2.ellipse(image, center, axes, 0, 0, 360, (0, 0, 0), 4)
+    cv2.line(image, (350, 380), (480, 650), (0, 0, 0), 4)
+    cv2.line(image, (370, 380), (500, 650), (0, 0, 0), 4)
+
+    assert likely_canvas_bbox(image) == [126, 258, 1006, 671]
+
+
+def test_credible_light_work_surface_rejects_ambiguous_panels():
+    from winpilot.perception.vision_cv import credible_light_work_surface
+
+    image = np.full((300, 600, 3), 50, dtype=np.uint8)
+    image[60:260, 30:280] = 255
+    image[60:260, 320:570] = 255
+
+    result = credible_light_work_surface(image)
+
+    assert result["ok"] is False
+    assert "multiple similarly plausible" in result["reason"]
+
+
+def test_credible_light_work_surface_rejects_nested_light_modal():
+    from winpilot.perception.vision_cv import credible_light_work_surface
+
+    image = np.full((500, 1000, 3), 35, dtype=np.uint8)
+    image[50:450, 50:950] = 255
+    # Large light dialog, disconnected from the document by a dark border.
+    image[150:350, 150:850] = 20
+    image[155:345, 155:845] = 248
+
+    result = credible_light_work_surface(image)
+
+    assert result["ok"] is False
+    assert "nested light panel or modal" in result["reason"]

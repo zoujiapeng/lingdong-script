@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
+import math
 import sys
 import time
 from typing import Any
@@ -10,9 +12,10 @@ from typing import Any
 import win32gui
 
 from ..action import executor, verify
+from ..config import CONFIG
 from ..perception import vision_cv
 from ..utils.log import BUS, logger
-from ..utils.screenshot import Region, capture
+from ..utils.screenshot import Region, capture, window_region
 from .task_rules import _is_desktop_icon_drag_task
 from .tool_result import ToolResult
 
@@ -30,6 +33,22 @@ _POWER_TASK_ALLOW_TERMS = (
     "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
     "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90", "\u7535\u6c60",
 )
+
+
+def _call_with_optional_hwnd(fn, *args, hwnd: int | None = None):
+    """Keep test/adaptor compatibility while passing scope to new executors."""
+    try:
+        parameters = inspect.signature(fn).parameters.values()
+        accepts_hwnd = any(
+            parameter.name == "hwnd"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_hwnd = True
+    if accepts_hwnd:
+        return fn(*args, hwnd=hwnd)
+    return fn(*args)
 
 
 def _clipboard_sequence_number() -> int | None:
@@ -152,6 +171,46 @@ def _normalize_draw_strokes(raw: object) -> list[list[list[int]]]:
         if len(pts) >= 2:
             normalized.append(pts)
     return normalized
+
+
+def _validate_normalized_draw_strokes(
+    raw: object,
+) -> tuple[list[list[list[float]]], str]:
+    """Validate canonical 0..1000 work-surface paths without partial repair."""
+    if not isinstance(raw, list) or not raw:
+        return [], "normalized_strokes must contain at least one stroke"
+    normalized: list[list[list[float]]] = []
+    for stroke_index, stroke in enumerate(raw):
+        if not isinstance(stroke, (list, tuple)) or len(stroke) < 2:
+            return [], (
+                f"normalized_strokes[{stroke_index}] must contain at least two [x,y] points"
+            )
+        points: list[list[float]] = []
+        for point_index, point in enumerate(stroke):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                return [], (
+                    f"normalized_strokes[{stroke_index}][{point_index}] must be exactly [x,y]"
+                )
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in point
+            ):
+                return [], (
+                    f"normalized_strokes[{stroke_index}][{point_index}] coordinates must be numeric"
+                )
+            x, y = float(point[0]), float(point[1])
+            if not math.isfinite(x) or not math.isfinite(y):
+                return [], (
+                    f"normalized_strokes[{stroke_index}][{point_index}] coordinates must be finite"
+                )
+            if not (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0):
+                return [], (
+                    f"normalized_strokes[{stroke_index}][{point_index}] is outside 0..1000; "
+                    "the whole action was rejected instead of clamping"
+                )
+            points.append([x, y])
+        normalized.append(points)
+    return normalized, ""
 
 
 def _tools_attr(name: str, default):
@@ -297,12 +356,16 @@ class InteractionToolMixin:
         return ToolResult(self._fmt(result))
 
     def _action_hwnd(self) -> int | None:
+        # Action dispatch must not resolve/adopt a new foreground window.  The
+        # remembered target is established by launch/focus/observe workflows;
+        # mutating actions merely consume that binding.
         try:
-            target = self._resolve_hwnd({})
-            if target:
-                return int(target)
+            if self._window_alive(self.hwnd):
+                return int(self.hwnd)
         except Exception:
             pass
+        if CONFIG.get("controller", "multi_input_cooperation", default=False):
+            return None
         try:
             fg = win32gui.GetForegroundWindow()
             if fg and win32gui.IsWindowVisible(fg):
@@ -431,6 +494,7 @@ class InteractionToolMixin:
                 })
 
         def action() -> dict:
+            target = self._action_hwnd()
             if element is not None:
                 prefer_physical = _prefer_physical_text_input(
                     element,
@@ -439,10 +503,23 @@ class InteractionToolMixin:
                 )
                 if not prefer_physical and executor_mod.uia_set_value(element, text):
                     return {"ok": True, "via": "uia_set_value"}
-                executor_mod.click(element.cx, element.cy, hwnd=self._action_hwnd())
+            cooperative_guard = getattr(
+                executor_mod, "cooperative_input_guard", lambda *_args, **_kwargs: None,
+            )
+            cooperative_block = cooperative_guard("type_text", target)
+            if cooperative_block is not None:
+                return cooperative_block
+            if element is not None:
+                click_result = executor_mod.click(
+                    element.cx, element.cy, hwnd=self._action_hwnd(),
+                )
+                if click_result.get("ok") is not True:
+                    return click_result
                 time.sleep(0.15)
-            target = self._action_hwnd()
             if target and win32gui_mod.GetForegroundWindow() != target:
+                cooperative_block = cooperative_guard("type_text", target)
+                if cooperative_block is not None:
+                    return cooperative_block
                 executor_mod.focus_window(target)
                 time.sleep(0.12)
             if numeric_keypad:
@@ -492,10 +569,21 @@ class InteractionToolMixin:
 
         def action() -> dict:
             target = self._action_hwnd()
+            cooperative_guard = getattr(
+                executor_mod, "cooperative_input_guard", lambda *_args, **_kwargs: None,
+            )
+            cooperative_block = cooperative_guard("hotkey", target)
+            if cooperative_block is not None:
+                return cooperative_block
             if target and win32gui_mod.GetForegroundWindow() != target:
+                cooperative_block = cooperative_guard("hotkey", target)
+                if cooperative_block is not None:
+                    return cooperative_block
                 executor_mod.focus_window(target)
                 time.sleep(0.12)
-            result = executor_mod.press_keys(keys)
+            result = _call_with_optional_hwnd(
+                executor_mod.press_keys, keys, hwnd=target,
+            )
             if not verifies_text_copy:
                 return result
             time.sleep(0.08)
@@ -542,7 +630,13 @@ class InteractionToolMixin:
     def _t_scroll(self, args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)
         x, y, amount = int(args["x"]), int(args["y"]), int(args["amount"])
-        result = executor_mod.scroll(x, y, amount)
+        result = _call_with_optional_hwnd(
+            executor_mod.scroll,
+            x,
+            y,
+            amount,
+            hwnd=self._action_hwnd(),
+        )
         return ToolResult(
             self._fmt(result),
             replay={"tool": "scroll", "coords": [x, y], "amount": amount},
@@ -730,9 +824,239 @@ class InteractionToolMixin:
             "reason": "desktop icon drop target overlapped another icon; adjusted to nearby empty desktop space",
         }
 
+    @staticmethod
+    def _draw_region_payload(region: Region) -> dict[str, int]:
+        return {
+            "x": int(region.left),
+            "y": int(region.top),
+            "width": int(region.width),
+            "height": int(region.height),
+        }
+
+    def _draw_target_geometry(self) -> tuple[int | None, Region | None, str]:
+        """Return the explicitly bound, visible target window geometry."""
+        target = getattr(self, "hwnd", None)
+        try:
+            target = int(target) if target else None
+        except (TypeError, ValueError):
+            target = None
+        if not target:
+            return None, None, (
+                "normalized_strokes requires an explicitly focused/observed target window"
+            )
+        try:
+            if not self._window_alive(target):
+                return target, None, "the bound target window is no longer visible"
+            if bool(win32gui.IsIconic(target)):
+                return target, None, "the bound target window is minimized"
+        except Exception:
+            return target, None, "the bound target window could not be validated"
+        try:
+            region_fn = _tools_attr("window_region", window_region)
+            region = region_fn(target).clamp_to_screen()
+        except Exception as exc:
+            return target, None, f"target-window geometry could not be read: {exc}"
+        if region.width < 160 or region.height < 120:
+            return target, None, "the visible target window is too small to ground a work surface"
+        return target, region, ""
+
+    def _cached_draw_surface(
+        self,
+        target: int,
+        window: Region,
+    ) -> tuple[Region | None, dict[str, Any] | None]:
+        cache = getattr(self, "_draw_surface_cache", None)
+        if not isinstance(cache, dict):
+            return None, None
+        expected_window = self._draw_region_payload(window)
+        if cache.get("hwnd") != target or cache.get("window_region") != expected_window:
+            self._draw_surface_cache = None
+            return None, None
+        raw = cache.get("surface_region")
+        if not isinstance(raw, dict):
+            self._draw_surface_cache = None
+            return None, None
+        try:
+            surface = Region(
+                int(raw["x"]), int(raw["y"]),
+                int(raw["width"]), int(raw["height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            self._draw_surface_cache = None
+            return None, None
+        if (
+            surface.width < 120
+            or surface.height < 80
+            or surface.left < window.left
+            or surface.top < window.top
+            or surface.right > window.right
+            or surface.bottom > window.bottom
+        ):
+            self._draw_surface_cache = None
+            return None, None
+        evidence = dict(cache)
+        evidence["mapping_source"] = "same_hwnd_and_window_geometry_cache"
+        return surface, evidence
+
+    def _locate_draw_surface(
+        self,
+        target: int,
+        window: Region,
+        capture_fn,
+    ) -> tuple[Region | None, dict[str, Any] | None, str]:
+        cached, evidence = self._cached_draw_surface(target, window)
+        if cached is not None:
+            return cached, evidence, ""
+        try:
+            image = capture_fn(window)
+        except Exception as exc:
+            return None, None, f"could not capture current target-window pixels: {exc}"
+        if image is None or getattr(image, "size", 0) == 0:
+            return None, None, "current target-window capture was empty"
+        try:
+            image_height, image_width = image.shape[:2]
+        except (AttributeError, TypeError, ValueError):
+            return None, None, "current target-window capture had invalid pixel geometry"
+        if image_width != window.width or image_height != window.height:
+            return None, None, (
+                "target-window capture dimensions did not match its physical-pixel geometry"
+            )
+        detection = vision_cv.credible_light_work_surface(image)
+        if not isinstance(detection, dict) or detection.get("ok") is not True:
+            reason = (
+                str(detection.get("reason") or "surface detector returned no grounded region")
+                if isinstance(detection, dict)
+                else "surface detector returned invalid evidence"
+            )
+            return None, detection if isinstance(detection, dict) else None, reason
+        bbox = detection.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None, detection, "surface detector returned invalid bounding geometry"
+        try:
+            x1, y1, x2, y2 = [int(value) for value in bbox]
+        except (TypeError, ValueError):
+            return None, detection, "surface detector returned non-integer bounding geometry"
+        if not (0 <= x1 < x2 <= image_width and 0 <= y1 < y2 <= image_height):
+            return None, detection, "surface detector returned out-of-frame bounding geometry"
+        surface = Region(
+            window.left + x1,
+            window.top + y1,
+            x2 - x1,
+            y2 - y1,
+        )
+        if surface.width < 120 or surface.height < 80:
+            return None, detection, "detected work surface was too small for safe path mapping"
+        payload: dict[str, Any] = {
+            "hwnd": target,
+            "window_region": self._draw_region_payload(window),
+            "surface_region": self._draw_region_payload(surface),
+            "detected_from": "pre_action_current_target_pixels",
+            "mapping_source": "pre_action_current_target_pixels",
+            "detection": {
+                key: value for key, value in detection.items()
+                if key != "bbox"
+            },
+        }
+        self._draw_surface_cache = payload
+        return surface, dict(payload), ""
+
+    @staticmethod
+    def _draw_prepare_error(failure_type: str, error: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "verified": False,
+            "blocked": True,
+            "mutation_applied": False,
+            "failure_type": failure_type,
+            "error": error,
+            "needs_observe": True,
+            "recovery": (
+                "Focus and uncover exactly one editable light work surface, observe the target "
+                "again, then retry normalized_strokes. Do not guess physical coordinates."
+            ),
+        }
+
+    def _prepare_draw_strokes_args(self, args: dict, capture_fn=None) -> dict:
+        """Resolve one physical or surface-normalized stroke source exactly once."""
+        prepared = dict(args or {})
+        if prepared.get("_draw_strokes_prepared") is True:
+            return prepared
+        prepared["_draw_strokes_prepared"] = True
+        has_physical = "strokes" in prepared and prepared.get("strokes") is not None
+        has_normalized = (
+            "normalized_strokes" in prepared
+            and prepared.get("normalized_strokes") is not None
+        )
+        if has_physical == has_normalized:
+            prepared["_draw_strokes_error"] = self._draw_prepare_error(
+                "DRAW_COORDINATE_SOURCE_INVALID",
+                "draw_strokes requires exactly one of strokes or normalized_strokes",
+            )
+            return prepared
+
+        capture_fn = capture_fn or _tools_attr("capture", capture)
+        target, window, target_error = self._draw_target_geometry()
+        if has_physical:
+            # Preserve the legacy physical-pixel contract. Surface grounding is
+            # best-effort here solely to prime a complete pre-draw cache for a
+            # later normalized call; failure must not block grounded px input.
+            if target is not None and window is not None:
+                surface, evidence, _error = self._locate_draw_surface(
+                    target, window, capture_fn,
+                )
+                if surface is not None and evidence is not None:
+                    prepared["_draw_surface_evidence"] = evidence
+            return prepared
+
+        normalized, validation_error = _validate_normalized_draw_strokes(
+            prepared.get("normalized_strokes"),
+        )
+        if validation_error:
+            prepared["_draw_strokes_error"] = self._draw_prepare_error(
+                "INVALID_NORMALIZED_STROKES", validation_error,
+            )
+            return prepared
+        if target is None or window is None:
+            prepared["_draw_strokes_error"] = self._draw_prepare_error(
+                "DRAW_SURFACE_NOT_GROUNDED", target_error,
+            )
+            return prepared
+        surface, evidence, surface_error = self._locate_draw_surface(
+            target, window, capture_fn,
+        )
+        if surface is None:
+            prepared["_draw_strokes_error"] = self._draw_prepare_error(
+                "DRAW_SURFACE_NOT_GROUNDED",
+                f"normalized paths were not executed: {surface_error}",
+            )
+            if evidence:
+                prepared["_draw_strokes_error"]["surface_detection"] = evidence
+            return prepared
+
+        x_span = max(0, surface.width - 1)
+        y_span = max(0, surface.height - 1)
+        prepared["strokes"] = [
+            [
+                [
+                    surface.left + int(round(point[0] * x_span / 1000.0)),
+                    surface.top + int(round(point[1] * y_span / 1000.0)),
+                ]
+                for point in stroke
+            ]
+            for stroke in normalized
+        ]
+        prepared.pop("normalized_strokes", None)
+        prepared["mapped_from_coordinate_space"] = "work_surface_normalized_0_1000"
+        prepared["_draw_surface_evidence"] = evidence
+        return prepared
+
     def _t_draw_strokes(self, args: dict) -> ToolResult:
         executor_mod = _tools_attr("executor", executor)
         capture_fn = _tools_attr("capture", capture)
+        args = self._prepare_draw_strokes_args(args, capture_fn=capture_fn)
+        prepare_error = args.get("_draw_strokes_error")
+        if isinstance(prepare_error, dict):
+            return ToolResult(self._fmt(prepare_error))
         raw = args.get("strokes")
         if not isinstance(raw, list) or not raw:
             return ToolResult("draw_strokes 需要 strokes: [[[x,y],...], ...]（至少一条笔画）")
@@ -757,6 +1081,19 @@ class InteractionToolMixin:
             except Exception as exc:
                 logger.debug("draw_strokes pre-capture failed: %s", exc)
         result = executor_mod.draw_strokes(strokes, duration_s=duration, hwnd=self.hwnd)
+        surface_evidence = args.get("_draw_surface_evidence")
+        if isinstance(surface_evidence, dict):
+            result["surface_region"] = surface_evidence.get("surface_region")
+            result["surface_mapping_source"] = surface_evidence.get("mapping_source")
+        if args.get("mapped_from_coordinate_space"):
+            result["mapped_from_coordinate_space"] = args["mapped_from_coordinate_space"]
+        frame_stroke_preparation = args.get("frame_stroke_preparation")
+        if isinstance(frame_stroke_preparation, dict):
+            # Keep the safety transform auditable without echoing the often
+            # large point arrays back to the model.  This proves whether the
+            # runtime used direct frame mapping, one whole-composition affine
+            # fit, and/or conservative dense-anchor simplification.
+            result["frame_stroke_preparation"] = frame_stroke_preparation
         if deferred_verify:
             result["visual_verify_deferred"] = True
             result["verify_method"] = "batch-final-visual-verify"
@@ -807,7 +1144,18 @@ class InteractionToolMixin:
             result["verify_detail"] = "draw result has no visual capture evidence"
         return ToolResult(
             self._fmt(result),
-            replay={"tool": "draw_strokes", "strokes": strokes, "duration": duration},
+            replay={
+                "tool": "draw_strokes",
+                "strokes": strokes,
+                "duration": duration,
+                **({
+                    "surface_region": surface_evidence.get("surface_region"),
+                    "mapped_from_coordinate_space": args.get("mapped_from_coordinate_space"),
+                } if isinstance(surface_evidence, dict) else {}),
+                **({
+                    "frame_stroke_preparation": frame_stroke_preparation,
+                } if isinstance(frame_stroke_preparation, dict) else {}),
+            },
         )
 
     def _t_wait(self, args: dict) -> ToolResult:

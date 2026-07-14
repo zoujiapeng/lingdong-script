@@ -2757,77 +2757,6 @@ def test_complete_subgoal_append_preserves_raw_trace_but_compacts_message():
     assert "Plan hint:" not in runner.messages[-1]["content"]
 
 
-def test_execute_subgoal_draw_expands_adjacent_plan_draws():
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("打开画图，画蓝色三角形和红色矩形")
-    runner.session.plan = planner.Plan([
-        "打开画图",
-        "在左边绘制蓝色三角形",
-        "在右边绘制红色矩形",
-        "确认画布上同时存在蓝色三角形和红色矩形",
-    ])
-    runner.session.plan.complete(1)
-    args = {
-        "subgoal": "Draw a blue triangle",
-        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
-    }
-
-    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
-
-    assert expanded is not args
-    assert expanded["draws"] == [
-        {"shape": "triangle", "color": "blue", "expected_region": "left"},
-        {"shape": "rectangle", "color": "red", "expected_region": "right"},
-    ]
-    assert "combined adjacent drawing plan items" in expanded["subgoal"]
-
-
-def test_execute_subgoal_draw_expands_from_task_when_plan_has_verify_noise():
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "open Paint, draw a blue triangle on the left and a red rectangle on the right"
-    )
-    runner.session.plan = planner.Plan([
-        "open Paint and verify blue triangle",
-        "draw red rectangle on the right",
-        "confirm both shapes are visible",
-    ])
-    args = {
-        "subgoal": "Draw a blue triangle",
-        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
-    }
-
-    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
-
-    assert expanded is not args
-    assert expanded["draws"] == [
-        {"shape": "triangle", "color": "blue", "expected_region": "left"},
-        {"shape": "rectangle", "color": "red", "expected_region": "right"},
-    ]
-
-
-def test_execute_subgoal_draw_expands_from_task_without_plan():
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(
-        "draw a blue triangle on the left and a red rectangle on the right"
-    )
-    args = {
-        "subgoal": "Draw a blue triangle",
-        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
-    }
-
-    expanded = runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args)
-
-    assert expanded is not args
-    assert expanded["draws"] == [
-        {"shape": "triangle", "color": "blue", "expected_region": "left"},
-        {"shape": "rectangle", "color": "red", "expected_region": "right"},
-    ]
 
 
 def test_verified_launch_auto_completes_pure_open_plan_item():
@@ -2905,319 +2834,6 @@ def test_verified_launch_does_not_auto_complete_open_and_create_blank_workbook_g
     assert runner.session.plan.steps[0]["done"] is False
 
 
-def test_execute_subgoal_draw_does_not_expand_custom_strokes():
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw custom strokes")
-    runner.session.plan = planner.Plan([
-        "绘制蓝色三角形",
-        "绘制红色矩形",
-    ])
-    args = {
-        "subgoal": "Draw exact custom stroke",
-        "draw": {
-            "shape": "triangle",
-            "color": "blue",
-            "strokes": [[[1, 2], [3, 4]]],
-        },
-    }
-
-    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
-
-
-def test_execute_subgoal_draw_only_expands_adjacent_plan_items():
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw shapes with a verification break")
-    runner.session.plan = planner.Plan([
-        "open paint",
-        "draw blue triangle on the left",
-        "verify the blue triangle is visible",
-        "draw red rectangle on the right",
-    ])
-    runner.session.plan.complete(1)
-    args = {
-        "subgoal": "Draw a blue triangle",
-        "draw": {"shape": "triangle", "color": "blue", "expected_region": "left"},
-    }
-
-    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
-
-
-def test_execute_subgoal_draw_does_not_expand_before_current_plan_item():
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw shapes in order")
-    runner.session.plan = planner.Plan([
-        "draw blue triangle on the left",
-        "draw red rectangle on the right",
-    ])
-    args = {
-        "subgoal": "Draw a red rectangle",
-        "draw": {"shape": "rectangle", "color": "red", "expected_region": "right"},
-    }
-
-    assert runner._maybe_expand_execute_subgoal_draws_from_plan("execute_subgoal", args) is args
-
-
-def test_execute_subgoal_draw_reuses_recent_controller_evidence():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle on the canvas")
-    runner._tool_history = [(
-        "execute_subgoal",
-        {
-            "subgoal": "Draw requested shapes",
-            "draws": [
-                {"shape": "triangle", "color": "blue", "expected_region": "left"},
-                {"shape": "rectangle", "color": "red", "expected_region": "right"},
-            ],
-        },
-        json.dumps({
-            "ok": True,
-            "verified": True,
-            "actions_executed": [
-                {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
-                {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
-            ],
-            "evidence_packet": {
-                "matched_visual_colors": ["blue", "red"],
-                "missing_visual_colors": [],
-            },
-        }),
-    )]
-
-    result = runner._maybe_reuse_recent_draw_evidence(
-        "execute_subgoal",
-        {
-            "subgoal": "Draw a red rectangle on the right side",
-            "draw": {"shape": "rectangle", "color": "red", "expected_region": "right"},
-        },
-    )
-
-    assert result is not None
-    payload = json.loads(result.text)
-    assert payload["subgoal_route"] == "controller_evidence_reuse"
-    assert payload["actions_executed"] == []
-    assert payload["evidence_packet"]["matched_visual_colors"] == ["red"]
-
-
-def test_execute_subgoal_draw_reuse_is_conservative():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle on the canvas")
-    runner._tool_history = [(
-        "execute_subgoal",
-        {"draw": {"shape": "rectangle", "color": "red", "expected_region": "left"}},
-        json.dumps({
-            "ok": True,
-            "verified": True,
-            "actions_executed": [
-                {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
-            ],
-            "evidence_packet": {
-                "matched_visual_colors": ["red"],
-                "missing_visual_colors": [],
-            },
-        }),
-    )]
-
-    assert runner._maybe_reuse_recent_draw_evidence(
-        "execute_subgoal",
-        {"draw": {"shape": "rectangle", "color": "red", "expected_region": "right"}},
-    ) is None
-    assert runner._maybe_reuse_recent_draw_evidence(
-        "execute_subgoal",
-        {"draw": {"shape": "rectangle", "color": "red", "strokes": [[[1, 2], [3, 4]]]}},
-    ) is None
-    assert runner._maybe_reuse_recent_draw_evidence(
-        "execute_subgoal",
-        {"draw": {"shape": "triangle", "color": "red", "expected_region": "left"}},
-    ) is None
-
-
-def test_execute_subgoal_color_verify_reuses_recent_visual_evidence():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle")
-    runner._recent_results = [(
-        "execute_subgoal",
-        json.dumps({
-            "verified": True,
-            "evidence_packet": {
-                "matched_visual_colors": ["blue", "red"],
-                "missing_visual_colors": [],
-            },
-        }),
-    )]
-
-    result = runner._maybe_reuse_recent_visual_color_verify(
-        "execute_subgoal",
-        {"subgoal": "verify the blue and red shapes", "verify_texts": ["blue", "red"]},
-    )
-
-    assert result is not None
-    payload = json.loads(result.text)
-    assert payload["subgoal_route"] == "controller_visual_evidence_reuse"
-    assert payload["evidence_packet"]["matched_visual_colors"] == ["blue", "red"]
-
-
-def test_execute_subgoal_color_verify_reuse_requires_all_colors_and_drawing_task():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle")
-    runner._recent_results = [(
-        "execute_subgoal",
-        json.dumps({
-            "verified": True,
-            "evidence_packet": {"matched_visual_colors": ["blue"]},
-        }),
-    )]
-
-    assert runner._maybe_reuse_recent_visual_color_verify(
-        "execute_subgoal",
-        {"verify_texts": ["blue", "red"]},
-    ) is None
-
-    non_drawing = AgentRunner("type blue and red into a text field")
-    non_drawing._recent_results = runner._recent_results
-    assert non_drawing._maybe_reuse_recent_visual_color_verify(
-        "execute_subgoal",
-        {"verify_texts": ["blue"]},
-    ) is None
-
-
-def test_execute_subgoal_draws_auto_complete_matching_plan_items():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle")
-    runner.session.plan = planner.Plan([
-        "draw a blue triangle",
-        "draw a red rectangle on the right",
-        "verify both shapes are visible",
-    ])
-    args = {
-        "draws": [
-            {"shape": "triangle", "color": "blue", "expected_region": "left"},
-            {"shape": "rectangle", "color": "red", "expected_region": "right"},
-        ],
-    }
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "actions_executed": [
-            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
-            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
-        ],
-        "evidence_packet": {
-            "matched_visual_colors": ["blue", "red"],
-            "missing_visual_colors": [],
-        },
-    }))
-
-    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
-    payload = json.loads(updated.text)
-
-    assert [step["done"] for step in runner.session.plan.steps] == [True, True, True]
-    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2, 3]
-    assert payload["plan_all_done"] is True
-    assert updated.terminal == "done"
-    assert "plan_after_auto_complete" in payload
-
-
-def test_execute_subgoal_draws_does_not_auto_complete_file_output_task():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    output_path = r"C:\Users\Public\Pictures\paint_confirm.png"
-    runner = AgentRunner(f"draw a blue triangle and red rectangle, then save as {output_path}")
-    runner.session.plan = planner.Plan([
-        "draw a blue triangle",
-        "draw a red rectangle on the right",
-        "verify both shapes are visible",
-        {"goal": "save the final drawing file", "check": {"file_exists": output_path}},
-    ])
-    args = {
-        "draws": [
-            {"shape": "triangle", "color": "blue", "expected_region": "left"},
-            {"shape": "rectangle", "color": "red", "expected_region": "right"},
-        ],
-    }
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "actions_executed": [
-            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
-            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
-        ],
-        "evidence_packet": {
-            "matched_visual_colors": ["blue", "red"],
-            "missing_visual_colors": [],
-        },
-    }))
-
-    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
-    payload = json.loads(updated.text)
-
-    assert [step["done"] for step in runner.session.plan.steps] == [True, True, False, False]
-    assert [item["index"] for item in payload["auto_completed_plan_items"]] == [1, 2]
-    assert "plan_all_done" not in payload
-    assert updated.terminal is None
-
-
-def test_execute_subgoal_draws_auto_complete_requires_matched_color():
-    import json
-
-    from winpilot.agent import planner
-    from winpilot.agent.loop import AgentRunner
-    from winpilot.agent.tool_result import ToolResult
-
-    runner = AgentRunner("draw a blue triangle and a red rectangle")
-    runner.session.plan = planner.Plan([
-        "draw a blue triangle",
-        "draw a red rectangle on the right",
-    ])
-    args = {
-        "draws": [
-            {"shape": "triangle", "color": "blue", "expected_region": "left"},
-            {"shape": "rectangle", "color": "red", "expected_region": "right"},
-        ],
-    }
-    result = ToolResult(json.dumps({
-        "ok": True,
-        "verified": False,
-        "actions_executed": [
-            {"action": "draw_strokes", "shape": "triangle", "requested_color": "blue"},
-            {"action": "draw_strokes", "shape": "rectangle", "requested_color": "red"},
-        ],
-        "evidence_packet": {
-            "matched_visual_colors": ["blue"],
-            "missing_visual_colors": ["red"],
-        },
-    }))
-
-    updated = runner._maybe_auto_complete_draw_plan_items("execute_subgoal", args, result)
-
-    assert updated is result
-    assert [step["done"] for step in runner.session.plan.steps] == [False, False]
 
 
 def test_compact_execute_subgoal_keeps_draw_actions_before_plan_summary():
@@ -3369,19 +2985,6 @@ def test_verified_saved_docx_format_plan_auto_terminates(monkeypatch, tmp_path):
     assert runner.session.plan.all_done()
 
 
-def test_plan_draw_parser_ignores_visual_verification_items():
-    from winpilot.agent.loop import _parse_plan_draw_spec
-
-    assert _parse_plan_draw_spec("确认画布上同时存在蓝色三角形和红色矩形") == {}
-    assert _parse_plan_draw_spec("在画布上绘制蓝色三角形") == {
-        "shape": "triangle",
-        "color": "blue",
-    }
-    assert _parse_plan_draw_spec("在蓝色三角形右边绘制一个红色矩形") == {
-        "shape": "rectangle",
-        "color": "red",
-        "expected_region": "right",
-    }
 
 
 def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
@@ -3401,143 +3004,73 @@ def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
     assert runner._history_mentions_action("draw_strokes") is True
 
 
-def test_done_gate_rejects_recent_missing_visual_color():
+def test_spatial_done_uses_fresh_goal_judge_not_color_counters(monkeypatch):
     import json
 
     from winpilot.agent.loop import AgentRunner
 
-    runner = AgentRunner("draw a blue triangle on the canvas")
-    runner._recent_results = [
-        ("execute_subgoal", json.dumps({
+    task = "draw a blue triangle on the visible canvas"
+    runner = AgentRunner(task)
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._steps_log = [
+        'execute_subgoal({"draw": {"shape": "triangle", "color": "blue"}})'
+    ]
+    runner._recent_results = [(
+        "execute_subgoal",
+        json.dumps({
+            "ok": True,
+            "verified": False,
             "actions_executed": [{"action": "draw_strokes"}],
             "evidence_packet": {
+                "matched_visual_colors": [],
                 "missing_visual_colors": ["blue"],
-                "matched_visual_colors": [],
             },
-            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
-        })),
-    ]
-
-    assert runner._verify_drawing_done(json.dumps({
-        "visual_change_detected": True,
-        "missing_visual_colors": ["blue"],
-    })) is False
-    assert "still missing: blue" in runner._last_done_reject_reason
-
-
-def test_drawing_done_requires_matched_visual_color_even_when_steps_are_low():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle on the canvas")
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._steps_log = ['execute_subgoal({"draw": {"shape": "triangle", "color": "blue"}})']
-    runner._recent_results = [
-        ("execute_subgoal", json.dumps({
-            "actions_executed": [{"action": "draw_strokes"}],
-            "evidence_packet": {
-                "matched_visual_colors": [],
-                "missing_visual_colors": [],
-            },
-            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
-        })),
-    ]
+            "results": [{
+                "action": "draw_strokes",
+                "data": {"visual_change_detected": True},
+            }],
+        }),
+    )]
+    runner._fresh_done_image_b64 = "fresh-goal-frame"
+    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: 'Window: "Paint"')
+    requests = []
 
     class _Client:
         class chat:
             class completions:
                 @staticmethod
-                def create(*_a, **_k):
-                    raise AssertionError("missing visual color evidence should reject before LLM judge")
-
-    assert runner._verify_done(_Client(), steps_left=0) is False
-    assert "has not matched them yet: blue" in runner._last_done_reject_reason
-
-
-def test_drawing_done_requires_goal_conditioned_visual_judge_after_color_match(monkeypatch):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a blue triangle on the canvas")
-    runner.session.hwnd = 123
-    runner.result_text = "done"
-    runner._steps_log = ['execute_subgoal({"draw": {"shape": "triangle", "color": "blue"}})']
-    runner._recent_results = [
-        ("execute_subgoal", json.dumps({
-            "actions_executed": [{"action": "draw_strokes"}],
-            "evidence_packet": {
-                "matched_visual_colors": ["blue"],
-                "missing_visual_colors": [],
-            },
-            "results": [{"action": "draw_strokes", "data": {"visual_change_detected": True}}],
-        })),
-    ]
-
-    runner._fresh_done_image_b64 = "fresh-frame"
-    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: "fresh visual frame")
-    calls = []
-
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(*_a, **kwargs):
-                    calls.append(kwargs)
-                    from types import SimpleNamespace
-
+                def create(*_args, **kwargs):
+                    requests.append(kwargs)
                     return SimpleNamespace(choices=[SimpleNamespace(
                         message=SimpleNamespace(content=json.dumps({
                             "done": True,
-                            "reason": "the fresh frame shows the requested blue triangle",
+                            "reason": "the fresh frame satisfies the original user task",
                         }))
                     )])
 
     assert runner._verify_done(_Client(), steps_left=0) is True
-    assert calls
-    assert isinstance(calls[0]["messages"][1]["content"], list)
     assert runner._done_verified is True
-    assert runner._done_unverified is False
+    assert requests
+    user_content = requests[0]["messages"][1]["content"]
+    prompt = next(part["text"] for part in user_content if part.get("type") == "text")
+    assert task in prompt
+    assert any(part.get("type") == "image_url" for part in user_content)
 
 
-def test_colorful_detailed_drawing_rejects_pixel_change_without_semantic_visual_evidence():
+def test_spatial_done_without_fresh_frame_fails_closed_despite_controller_metadata(
+    monkeypatch,
+):
     import json
 
     from winpilot.agent.loop import AgentRunner
 
-    task = "\u5728\u753b\u677f\u4e0a\u753b\u4e00\u53ea\u4e94\u989c\u516d\u8272\u7684\u3001\u5f88\u7ec6\u8282\u7684\u732b"
-    runner = AgentRunner(task)
-    runner._steps_log = [
-        'draw_strokes({"strokes": [[[10, 10], [50, 50]]]})',
-    ]
-    result = json.dumps({
-        "actions_executed": [{"action": "draw_strokes"}],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-        },
-        "results": [{
-            "action": "draw_strokes",
-            "data": {"visual_change_detected": True},
-        }],
-    })
-    runner._recent_results = [("execute_subgoal", result)]
-    runner._tool_history = [("execute_subgoal", {}, result)]
-
-    assert runner._verify_drawing_done(result) is False
-    assert "semantic visual evidence is missing" in runner._last_done_reject_reason
-
-
-def test_colorful_detailed_drawing_rejects_structured_plan_without_semantic_evidence():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
+    runner = AgentRunner("create a detailed illustration in the visible canvas")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
     runner._steps_log = ['execute_subgoal({"draws": [...]})']
     result = json.dumps({
+        "ok": True,
         "verified": True,
         "structured_scene_verified": True,
         "actions_executed": [{"action": "draw_strokes"}],
@@ -3546,289 +3079,24 @@ def test_colorful_detailed_drawing_rejects_structured_plan_without_semantic_evid
             "missing_visual_colors": [],
             "scene_structure": {
                 "structured_scene_verified": True,
-                "primitive_count": 12,
-                "semantic_part_count": 12,
+                "primitive_count": 30,
             },
         },
-        "results": [{
-            "action": "draw_strokes",
-            "data": {"visual_change_detected": True},
-        }],
-    })
-    runner._recent_results = [("execute_subgoal", result)]
-    runner._tool_history = [("execute_subgoal", {"draws": [{}] * 12}, result)]
-
-    assert runner._verify_drawing_done(result) is False
-    assert "semantic visual evidence is missing" in runner._last_done_reject_reason
-
-
-def test_compacted_structured_scene_evidence_does_not_bypass_semantic_gate():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    runner._steps_log = ['execute_subgoal({"draws": [...]})']
-    raw = json.dumps({
-        "ok": True,
-        "verified": True,
-        "structured_scene_verified": True,
-        "actions_executed": [
-            {
-                "action": "draw_strokes",
-                "shape": "ellipse",
-                "semantic_part": "body",
-                "requested_color": "orange",
-            },
-        ],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-            "scene_structure": {
-                "required": True,
-                "ok": True,
-                "creature_scene": True,
-                "primitive_count": 12,
-                "semantic_part_count": 12,
-                "matched_visual_color_count": 3,
-                "structured_scene_verified": True,
-            },
-        },
-    })
-    compact = AgentRunner._compact_tool_evidence("execute_subgoal", raw)
-    runner._recent_results = [("execute_subgoal", compact)]
-    runner._tool_history = [("execute_subgoal", {"draws": [{}] * 12}, compact)]
-
-    assert json.loads(compact)["structured_scene_verified"] is True
-    assert runner._verify_drawing_done(compact) is False
-
-
-def test_strict_semantic_vlm_evidence_passes_detailed_drawing_gate():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    runner._steps_log = ['execute_subgoal({"draws": [...]})']
-    result = json.dumps({
-        "verified": True,
-        "semantic_visual_verified": True,
-        "verify_method": "semantic-vlm",
-        "actions_executed": [{"action": "draw_strokes"}],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-        },
-    })
-    runner._recent_results = [("vlm_verify", result)]
-    runner._tool_history = [("execute_subgoal", {"draws": [{}] * 12}, result)]
-
-    assert runner._verify_drawing_done(result) is True
-
-
-def test_semantic_drawing_gate_does_not_mix_failed_vlm_with_other_verified_flag():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    mixed = json.dumps({
-        "verify_method": "semantic-vlm",
-        "verified": False,
-        "semantic_visual_verified": False,
-        "verdict": {
-            "passed": False,
-            "detail_level": "low",
-            "issues": ["drawing is very basic"],
-        },
-        "unrelated_controller_result": {"verified": True},
-    })
-
-    assert runner._has_semantic_visual_drawing_evidence(mixed) is False
-    verdict = runner._latest_semantic_visual_drawing_verdict(mixed)
-    assert verdict is not None
-    assert verdict[0] is False
-    assert "detail_level=low" in verdict[1]
-
-
-def test_detailed_drawing_rejects_failed_latest_vlm_despite_verified_controller():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    runner._steps_log = ['execute_subgoal({"draws": [...]})']
-    draw_result = json.dumps({
-        "ok": True,
-        "verified": True,
-        "actions_executed": [{"action": "draw_strokes"}],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-        },
-        "visual_change_detected": True,
-    })
-    failed_vlm = json.dumps({
-        "ok": True,
-        "verified": False,
-        "semantic_visual_verified": False,
-        "verify_method": "semantic-vlm",
-        "verdict": {
-            "passed": False,
-            "detail_level": "low",
-            "issues": ["missing bell", "drawing is very basic"],
-        },
-    })
-    unrelated_verified = json.dumps({"ok": True, "verified": True})
-    runner._recent_results = [
-        ("execute_subgoal", draw_result),
-        ("vlm_verify", failed_vlm),
-        ("complete_subgoal", unrelated_verified),
-    ]
-    runner._tool_history = [
-        ("execute_subgoal", {"draws": [{}] * 12}, draw_result),
-        ("vlm_verify", {}, failed_vlm),
-        ("complete_subgoal", {}, unrelated_verified),
-    ]
-
-    assert runner._verify_drawing_done("\n".join(
-        result for _name, result in runner._recent_results
-    )) is False
-    assert "Latest semantic-vlm verification failed" in runner._last_done_reject_reason
-    assert "missing bell" in runner._last_done_reject_reason
-
-
-def test_detailed_drawing_rejects_semantic_verdict_stale_after_canvas_change():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    runner._steps_log = ['execute_subgoal({"draws": [...]})']
-    draw_result = json.dumps({
-        "ok": True,
-        "verified": True,
-        "actions_executed": [{"action": "draw_strokes"}],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-        },
-        "visual_change_detected": True,
-    })
-    passed_vlm = json.dumps({
-        "ok": True,
-        "verified": True,
-        "semantic_visual_verified": True,
-        "verify_method": "semantic-vlm",
-        "verdict": {"passed": True, "detail_level": "high"},
-    })
-    runner._recent_results = [
-        ("vlm_verify", passed_vlm),
-        ("execute_subgoal", draw_result),
-    ]
-    runner._tool_history = [
-        ("execute_subgoal", {"draws": [{}] * 12}, draw_result),
-        ("vlm_verify", {}, passed_vlm),
-        ("execute_subgoal", {"draws": [{"part": "bell"}]}, draw_result),
-    ]
-
-    assert runner._verify_drawing_done("\n".join(
-        result for _name, result in runner._recent_results
-    )) is False
-    assert "stale because the canvas was changed" in runner._last_done_reject_reason
-
-
-def test_detailed_drawing_accepts_passing_vlm_after_final_canvas_change():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a detailed colorful cat on the canvas")
-    runner._steps_log = ['execute_subgoal({"draws": [...]})']
-    draw_result = json.dumps({
-        "ok": True,
-        "verified": True,
-        "actions_executed": [{"action": "draw_strokes"}],
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-        },
-        "visual_change_detected": True,
-    })
-    passed_vlm = json.dumps({
-        "ok": True,
-        "verified": True,
-        "semantic_visual_verified": True,
-        "verify_method": "semantic-vlm",
-        "verdict": {"passed": True, "detail_level": "high"},
-    })
-    runner._recent_results = [
-        ("execute_subgoal", draw_result),
-        ("vlm_verify", passed_vlm),
-    ]
-    runner._tool_history = [
-        ("execute_subgoal", {"draws": [{}] * 12}, draw_result),
-        ("vlm_verify", {}, passed_vlm),
-    ]
-
-    assert runner._verify_drawing_done("\n".join(
-        result for _name, result in runner._recent_results
-    )) is True
-
-
-def test_identical_verified_draw_batch_reuses_evidence_without_redraw():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    args = {
-        "subgoal": "draw a detailed colorful cat",
-        "draws": [
-            {"shape": "ellipse", "color": "orange", "part": "body", "box": [300, 400, 400, 300]},
-            {"shape": "circle", "color": "orange", "part": "head", "box": [400, 200, 200, 200]},
-        ],
-    }
-    previous = json.dumps({
-        "ok": True,
-        "verified": True,
-        "evidence_packet": {
-            "matched_visual_colors": ["orange", "green", "purple"],
-            "missing_visual_colors": [],
-            "scene_structure": {"structured_scene_verified": True},
-        },
-    })
-    runner = AgentRunner.__new__(AgentRunner)
-    runner.task = "draw a detailed colorful cat"
-    runner.run_id = "run-reuse-draw-batch"
-    runner._tool_history = [("execute_subgoal", args, previous)]
-    runner._trace_debug = lambda *_args, **_kwargs: None
-
-    reused = runner._maybe_reuse_recent_draw_batch("execute_subgoal", args)
-    payload = json.loads(reused.text)
-
-    assert payload["verified"] is True
-    assert payload["actions_executed"] == []
-    assert payload["subgoal_route"] == "controller_batch_evidence_reuse"
-
-
-def test_colorful_drawing_requires_three_controller_confirmed_roi_colors():
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner("draw a colorful cat on the canvas")
-    runner._steps_log = [
-        'draw_strokes({"strokes": [[[10, 10], [50, 50]]]})',
-    ]
-    result = json.dumps({
-        "evidence_packet": {"matched_visual_colors": ["orange"]},
         "visual_change_detected": True,
     })
     runner._recent_results = [("execute_subgoal", result)]
-    runner._tool_history = [("execute_subgoal", {}, result)]
+    runner._tool_history = [("execute_subgoal", {"draws": [{}] * 30}, result)]
+    monkeypatch.setattr(runner, "_fresh_done_screen", lambda: 'Window: "Paint"')
 
-    assert runner._verify_drawing_done(result) is False
-    assert "confirmed only 1 distinct color" in runner._last_done_reject_reason
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("judge must not run without a fresh semantic frame")
+
+    assert runner._verify_done(_Client()) is False
+    assert "no fresh goal-conditioned frame" in runner._last_done_reject_reason
 
 
 def test_top_level_click_uses_fast_controller_without_explicit_batch():
@@ -4156,16 +3424,6 @@ def test_snapshot_to_text_query_surfaces_omitted_target():
     assert "center=(1852,58)" in filtered
 
 
-def test_drawing_stops_mutation_after_plan_done_and_file_exists(tmp_path):
-    from winpilot.agent.loop import AgentRunner
-
-    out = tmp_path / "done.png"
-    out.write_bytes(b"not-really-a-png-but-existing-is-enough-for-the-guard")
-    runner = AgentRunner(f"draw a house on a canvas and save as {out}")
-    runner._steps_log = ['drag({"x1": 1, "y1": 1, "x2": 20, "y2": 20})']
-    runner.session.plan = SimpleNamespace(all_done=lambda: True)
-
-    assert runner._drawing_should_stop_mutating()
 
 
 def test_gui_search_done_requires_on_screen_query(monkeypatch):
@@ -4310,6 +3568,12 @@ def test_disabled_playbooks_inject_nothing(monkeypatch):
     )
 
     assert playbooks.for_task("save a file") == []
+
+
+def test_playbooks_are_opt_in_by_default():
+    from winpilot.config import _DEFAULTS
+
+    assert _DEFAULTS["agent"]["playbooks_enabled"] is False
 
 
 def test_gui_only_detects_bare_chinese_gui_operation_marker():
@@ -4717,7 +3981,7 @@ def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(mo
     assert "AUTHORITATIVE SPATIAL RESULT CHECK" in prompt
 
 
-def test_text_only_pro_routes_fresh_drawing_judge_to_configured_vision_model(monkeypatch):
+def test_text_only_pro_routes_fresh_gui_frame_to_configured_vision_model(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent import done_verifier as done_mod
 
@@ -4750,7 +4014,7 @@ def test_text_only_pro_routes_fresh_drawing_judge_to_configured_vision_model(mon
                     captured.update(kwargs)
                     return SimpleNamespace(choices=[SimpleNamespace(
                         message=SimpleNamespace(content=(
-                            '{"done": true, "reason": "fresh frame shows a complete polished dog"}'
+                            '{"done": true, "reason": "fresh frame satisfies the original task"}'
                         ))
                     )])
 
@@ -4769,7 +4033,8 @@ def test_text_only_pro_routes_fresh_drawing_judge_to_configured_vision_model(mon
         lambda: {"thinking": {"type": "disabled"}},
     )
 
-    runner = AgentRunner("draw a good-looking dog in Paint")
+    task = "create a polished illustration in the visible canvas"
+    runner = AgentRunner(task)
     runner.result_text = "done"
     runner._fresh_done_image_b64 = "fresh-dog-frame"
 
@@ -4779,8 +4044,10 @@ def test_text_only_pro_routes_fresh_drawing_judge_to_configured_vision_model(mon
     user_content = captured["messages"][1]["content"]
     assert any(part.get("type") == "image_url" for part in user_content)
     user_prompt = next(part["text"] for part in user_content if part.get("type") == "text")
-    assert "original user task is the only acceptance contract" in user_prompt
-    assert "invented only by the agent/plan" in user_prompt
+    assert task in user_prompt
+    assert "AUTHORITATIVE NATIVE GUI EVIDENCE ORDER" in user_prompt
+    assert "AUTHORITATIVE DRAWING-QUALITY CHECK" not in user_prompt
+    assert "at least three canvas colors" not in user_prompt
 
 
 def test_text_only_pro_verify_done_captures_fresh_drawing_frame_for_vision_judge(monkeypatch):
@@ -4788,6 +4055,8 @@ def test_text_only_pro_verify_done_captures_fresh_drawing_frame_for_vision_judge
 
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent import done_verifier as done_mod
+    from winpilot.utils.image_capture import VisualCaptureScope
+    from winpilot.utils.screenshot import Region
 
     class _Config:
         values = {
@@ -4833,8 +4102,19 @@ def test_text_only_pro_verify_done_captures_fresh_drawing_frame_for_vision_judge
     monkeypatch.setattr(done_mod, "_config", lambda: _Config())
     monkeypatch.setattr(
         done_mod,
+        "select_visual_capture_scope",
+        lambda *_args, **_kwargs: VisualCaptureScope(
+            Region(10, 20, 800, 600),
+            "target_window",
+            "verified_foreground_target",
+            target_hwnd=321,
+            target_verified=True,
+        ),
+    )
+    monkeypatch.setattr(
+        done_mod,
         "capture_window_jpeg_b64",
-        lambda hwnd: capture_calls.append(hwnd) or "fresh-dog-frame",
+        lambda hwnd, **_kwargs: capture_calls.append(hwnd) or "fresh-dog-frame",
     )
     monkeypatch.setattr(done_mod.vlm_mod, "_client", lambda: _VisionClient())
     monkeypatch.setattr(
@@ -4872,133 +4152,4 @@ def test_text_only_pro_verify_done_captures_fresh_drawing_frame_for_vision_judge
         for part in captured["messages"][1]["content"]
     )
 
-
-def _runner_with_verified_scene_for_post_scene_save(task):
-    import json
-
-    from winpilot.agent.loop import AgentRunner
-
-    runner = AgentRunner(task)
-    parts = [
-        "head", "body", "left_ear", "right_eye",
-        "nose", "mouth", "front_leg", "tail",
-    ]
-    result = json.dumps({
-        "ok": True,
-        "verified": True,
-        "structured_scene_verified": True,
-        "evidence_packet": {
-            "scene_structure": {
-                "structured_scene_verified": True,
-                "primitive_count": len(parts),
-                "distinct_semantic_parts": parts,
-            },
-        },
-    })
-    runner._tool_history = [(
-        "execute_subgoal",
-        {"draws": [{"part": part} for part in parts]},
-        result,
-    )]
-    assert runner._active_verified_structured_drawing_scene() is not None
-    return runner
-
-
-def _standard_post_scene_save_as_batch(shortcut=None):
-    return {
-        "actions": [
-            {"action": "hotkey", "keys": shortcut or ["Ctrl", "S"]},
-            {
-                "action": "type_into_element",
-                "label": "File name",
-                "text": r"C:\Users\zou\Desktop\dog.png",
-                "clear": True,
-            },
-            {"action": "hotkey", "keys": ["Enter"]},
-        ],
-    }
-
-
-@pytest.mark.parametrize("shortcut", [
-    ["Ctrl", "S"],
-    ["Ctrl", "Shift", "S"],
-])
-def test_post_scene_file_output_guard_allows_complete_save_as_batch(shortcut):
-    runner = _runner_with_verified_scene_for_post_scene_save(
-        "draw a polished dog and save it as dog.png"
-    )
-
-    assert runner._drawing_post_scene_manual_mutation_result(
-        "run_action_batch",
-        _standard_post_scene_save_as_batch(shortcut),
-    ) is None
-
-
-@pytest.mark.parametrize("extra_action", [
-    {"action": "click", "x": 922, "y": 298},
-    {"action": "hotkey", "keys": ["ctrl", "z"]},
-    {"action": "draw_strokes", "strokes": [[[1, 1], [2, 2]]]},
-    {"action": "drag", "x1": 1, "y1": 1, "x2": 10, "y2": 10},
-    {"action": "select_color", "color": "red"},
-])
-def test_post_scene_file_output_guard_blocks_save_batch_with_extra_mutation(extra_action):
-    runner = _runner_with_verified_scene_for_post_scene_save(
-        "draw a polished dog and save it as dog.png"
-    )
-    batch = _standard_post_scene_save_as_batch()
-    batch["actions"].append(extra_action)
-
-    blocked = runner._drawing_post_scene_manual_mutation_result(
-        "run_action_batch",
-        batch,
-    )
-
-    assert blocked is not None
-    assert blocked.terminal == "done"
-
-
-def test_post_scene_file_output_guard_does_not_allow_plain_enter():
-    runner = _runner_with_verified_scene_for_post_scene_save(
-        "draw a polished dog and save it as dog.png"
-    )
-
-    blocked = runner._drawing_post_scene_manual_mutation_result(
-        "hotkey", {"keys": ["Enter"]},
-    )
-
-    assert blocked is not None
-    assert blocked.terminal == "done"
-
-
-def test_post_scene_file_output_guard_allows_enter_after_exact_split_save_as_steps():
-    import json
-
-    runner = _runner_with_verified_scene_for_post_scene_save(
-        "draw a polished dog and save it as dog.png"
-    )
-    runner._tool_history.extend([
-        ("hotkey", {"keys": ["Ctrl", "Shift", "S"]}, json.dumps({"ok": True})),
-        (
-            "type_into_element",
-            {"label": "File name", "text": "dog.png", "clear": True},
-            json.dumps({"ok": True}),
-        ),
-    ])
-
-    assert runner._drawing_post_scene_manual_mutation_result(
-        "hotkey", {"keys": ["Enter"]},
-    ) is None
-
-
-def test_post_scene_non_file_task_blocks_standard_save_as_batch():
-    runner = _runner_with_verified_scene_for_post_scene_save(
-        "draw a polished dog in Paint"
-    )
-
-    blocked = runner._drawing_post_scene_manual_mutation_result(
-        "run_action_batch",
-        _standard_post_scene_save_as_batch(),
-    )
-
-    assert blocked is not None
-    assert blocked.terminal == "done"
+# Drawing completion is covered by the generic fresh-frame contracts above.
