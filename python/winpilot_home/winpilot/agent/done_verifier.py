@@ -929,7 +929,7 @@ class DoneVerifierMixin:
             return ""
 
     def _done_evidence(self) -> tuple[str, str]:
-        recent = "；".join(self._steps_log[-6:]) or "(无动作记录)"
+        recent = "；".join(self._steps_log[-20:]) or "(无动作记录)"
         evidence = "\n".join(f"- {name}: {out}" for name, out in self._recent_results) \
             or "(无)"
         ledger = getattr(self, "_visible_evidence_ledger", [])
@@ -1865,6 +1865,15 @@ class DoneVerifierMixin:
         judge_client = client
         judge_extra_body: dict | None = None
         fresh_image = str(getattr(self, "_fresh_done_image_b64", "") or "")
+        current_hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        historical_frames = [
+            item
+            for item in getattr(self, "_historical_visual_checkpoints", [])[-3:]
+            if isinstance(item, dict)
+            and str(item.get("image_b64") or "")
+            and int(item.get("hwnd", 0) or 0) != current_hwnd
+            and str(item.get("image_b64") or "") != fresh_image
+        ][-2:]
         fresh_scope = str(
             getattr(self, "_fresh_done_capture_scope", "") or "unknown"
         )
@@ -2035,8 +2044,10 @@ class DoneVerifierMixin:
                 "or a stale controller state says needs_observe. Those are historical or missing "
                 "semantic metadata, not evidence that the later successful native action did not "
                 "execute. Do not require a redundant observe/read_text call when the fresh frame "
-                "is already clear. Reject when the latest native action failed, the current frame "
-                "contradicts the claim, or the visual result remains ambiguous."
+                "is already clear. Earlier labeled post-action frames may prove completed work in "
+                "other windows; they are immutable historical checkpoints, never the current "
+                "foreground state. Reject when the latest native action failed, the current frame "
+                "contradicts the claim, or any required visual result remains ambiguous."
             )
             user_content: object = [
                 {
@@ -2052,6 +2063,28 @@ class DoneVerifierMixin:
                     "image_url": {"url": f"data:image/jpeg;base64,{fresh_image}"},
                 },
             ]
+            for checkpoint in historical_frames:
+                user_content.extend([
+                    {
+                        "type": "text",
+                        "text": (
+                            "Historical cross-window post-action checkpoint: "
+                            f"title={checkpoint.get('title') or '(unknown)'!r}, "
+                            f"hwnd={int(checkpoint.get('hwnd', 0) or 0)}, "
+                            f"after_action={checkpoint.get('action') or '(unknown)'!r}, "
+                            f"frame_id={int(checkpoint.get('frame_id', 0) or 0)}. "
+                            "Use this image only to verify the earlier requested result in that "
+                            "window; do not treat it as the current foreground frame."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/jpeg;base64,"
+                            + str(checkpoint.get("image_b64") or "")
+                        },
+                    },
+                ])
         else:
             user_content = user_p
         judge_messages = [
@@ -2076,6 +2109,7 @@ class DoneVerifierMixin:
                 },
             ],
             "native_visual": bool(fresh_image),
+            "historical_visual_checkpoint_count": len(historical_frames),
         })
         try:
             request_kwargs = {
@@ -2151,6 +2185,7 @@ class DoneVerifierMixin:
 
     def _verify_done(self, client, steps_left: int = 99) -> bool:
         """Independently verify a ``done`` claim before accepting it."""
+        self._done_reject_terminal = False
         self._pending_visual_literal_tokens = []
         self._pending_visual_payloads = []
         self._pending_visual_spatial_check = ""
@@ -2216,6 +2251,7 @@ class DoneVerifierMixin:
                     "Continue only if new deterministic evidence can be collected; "
                     "otherwise call fail with the exact blocker."
                 )
+                self._done_reject_terminal = True
                 return self._reject_done(reason, f"[done check failed] {reason}")
 
         recent, evidence = self._done_evidence()

@@ -2,7 +2,7 @@
 
 This script assumes the WinPilot server is already running, usually through the
 Electron frontend. It does not bypass the GUI path: it submits the same
-``/api/chat`` request the frontend uses, waits for completion, reads the trace,
+the same ARP graph request the Agent Cockpit uses, waits for completion, reads the trace,
 and writes a JSON report that points at screenshots and summarizes suspicious
 done-gate / tool behavior.
 """
@@ -1796,6 +1796,43 @@ def _budget_result(report: dict[str, Any], budgets: dict[str, float | None]) -> 
     }
 
 
+def _frontend_goal_graph(task: str, max_steps: int = 40) -> dict[str, Any]:
+    """Mirror renderer ``createGoalGraph`` exactly for parity evaluations."""
+    timestamp = int(time.time() * 1000)
+    retry = {"max_attempts": 1, "delay_ms": 0, "backoff": 1}
+    return {
+        "format": "arp/1",
+        "id": f"goal-{timestamp}",
+        "name": task[:80] or "Agent goal",
+        "description": "Memory-first goal run created by the Agent Cockpit.",
+        "nodes": [
+            {"id": "start", "kind": "start", "name": "Start", "config": {}, "retry": retry, "disabled": False, "x": 0, "y": 0},
+            {"id": "skill", "kind": "skill_replay", "name": "Reuse verified skill", "config": {"task": task}, "retry": retry, "disabled": False, "x": 0, "y": 120},
+            {"id": "goal", "kind": "agent_goal", "name": "Agent exception handler", "config": {"goal": task, "max_steps": int(max_steps)}, "retry": retry, "disabled": False, "x": 180, "y": 240},
+            {"id": "end", "kind": "end", "name": "Done", "config": {}, "retry": retry, "disabled": False, "x": 0, "y": 360},
+        ],
+        "edges": [
+            {"id": "start-skill", "source": "start", "target": "skill", "branch": "next", "label": ""},
+            {"id": "skill-end", "source": "skill", "target": "end", "branch": "next", "label": "reused"},
+            {"id": "skill-miss-goal", "source": "skill", "target": "goal", "branch": "miss", "label": "explore"},
+            {"id": "skill-fail-goal", "source": "skill", "target": "goal", "branch": "fail", "label": "recover"},
+            {"id": "goal-end", "source": "goal", "target": "end", "branch": "next", "label": ""},
+        ],
+        "variables": {},
+        "policy": {
+            "max_node_visits": 20,
+            "fail_fast": True,
+            "require_evidence_on_done": True,
+            "allow_shell": False,
+            "allow_desktop_mutation": True,
+        },
+        "metadata": {
+            "source": "agent-cockpit",
+            "routing": "verified-skill-first-agent-on-miss-or-failure",
+        },
+    }
+
+
 def run_eval(
     base_url: str,
     task: str,
@@ -1805,6 +1842,7 @@ def run_eval(
     budgets: dict[str, float] | None = None,
     max_steps: int | None = None,
     token: str = "",
+    entrypoint: str = "frontend",
 ) -> Path:
     started_at = time.time()
     try:
@@ -1816,25 +1854,49 @@ def run_eval(
         token,
         initial_status if isinstance(initial_status, dict) else {},
     )
-    payload: dict[str, Any] = {"task": task}
-    if max_steps:
-        payload["max_steps"] = int(max_steps)
-    started = _request_json("POST", f"{base_url}/api/chat", payload, token=token)
+    if entrypoint == "frontend":
+        payload = {
+            "graph": _frontend_goal_graph(task, int(max_steps or 40)),
+            "inputs": {},
+        }
+        started = _request_json(
+            "POST", f"{base_url}/api/v2/arp/runs", payload, token=token,
+        )
+    elif entrypoint == "chat":
+        payload = {"task": task}
+        if max_steps:
+            payload["max_steps"] = int(max_steps)
+        started = _request_json("POST", f"{base_url}/api/chat", payload, token=token)
+    else:
+        raise ValueError(f"Unsupported eval entrypoint: {entrypoint}")
     run_id = str(started["run_id"])
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id).strip("._") or "run"
     deadline = time.time() + timeout_s
     last_status: dict[str, Any] = {}
     timed_out = False
     while time.time() < deadline:
-        last_status = _request_json("GET", f"{base_url}/api/status", token=token)
-        if not last_status.get("running"):
-            break
+        if entrypoint == "frontend":
+            detail = _request_json(
+                "GET", f"{base_url}/api/v2/arp/runs/{urllib.parse.quote(run_id, safe='')}",
+                token=token,
+            )
+            run = detail.get("run", {}) if isinstance(detail, dict) else {}
+            if str(run.get("status") or "") not in {"pending", "queued", "running", "paused", "stopping"}:
+                break
+        else:
+            last_status = _request_json("GET", f"{base_url}/api/status", token=token)
+            if not last_status.get("running"):
+                break
         time.sleep(1.0)
     else:
-        _request_json("POST", f"{base_url}/api/stop", token=token)
+        stop_url = (
+            f"{base_url}/api/v2/arp/runs/{urllib.parse.quote(run_id, safe='')}/cancel"
+            if entrypoint == "frontend" else f"{base_url}/api/stop"
+        )
+        _request_json("POST", stop_url, token=token)
         timed_out = True
         time.sleep(0.5)
-        last_status = _request_json("GET", f"{base_url}/api/status", token=token)
+    last_status = _request_json("GET", f"{base_url}/api/status", token=token)
 
     time.sleep(0.5)
     events = _request_json(
@@ -1854,6 +1916,7 @@ def run_eval(
         "case_id": case_id,
         "task": task,
         "base_url": base_url,
+        "entrypoint": entrypoint,
         "timed_out": timed_out,
         "status": summary.get("status", ""),
         "result": summary.get("result", ""),
@@ -1891,7 +1954,7 @@ def run_eval(
 
 def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
               budgets: dict[str, float], case_ids: set[str] | None = None,
-              token: str = "") -> Path:
+              token: str = "", entrypoint: str = "frontend") -> Path:
     cases = SUITES.get(suite_name)
     if not cases:
         raise SystemExit(f"Unknown suite {suite_name!r}. Available: {', '.join(sorted(SUITES))}")
@@ -1918,6 +1981,7 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
                 budgets=budgets,
                 max_steps=int(case.get("max_steps") or 0) or None,
                 token=token,
+                entrypoint=entrypoint,
             )
             report = json.loads(path.read_text(encoding="utf-8"))
             report_run_id = str(report.get("run_id") or "")
@@ -1998,7 +2062,7 @@ def run_suite(base_url: str, suite_name: str, out_dir: Path, timeout_s: float,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a real WinPilot GUI eval task.")
-    parser.add_argument("task", nargs="?", help="Task text to submit through /api/chat.")
+    parser.add_argument("task", nargs="?", help="Task text to submit through the frontend-equivalent ARP entrypoint.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help=f"WinPilot server URL. Default: {DEFAULT_BASE_URL}")
     parser.add_argument(
@@ -2010,8 +2074,14 @@ def main() -> int:
                         help=f"Report output directory. Default: {DEFAULT_OUT_DIR}")
     parser.add_argument("--timeout", type=float, default=300.0,
                         help="Maximum seconds to wait before stopping the run.")
+    parser.add_argument(
+        "--entrypoint",
+        choices=("frontend", "chat"),
+        default="frontend",
+        help="Runtime entrypoint. Default frontend mirrors Agent Cockpit; chat is legacy.",
+    )
     parser.add_argument("--suite", choices=sorted(SUITES),
-                        help="Run a built-in GUI eval suite through /api/chat.")
+                        help="Run a built-in GUI eval suite through the frontend-equivalent ARP graph.")
     parser.add_argument("--case", action="append", default=[],
                         help="Run only a case id from the selected suite. Can be repeated.")
     parser.add_argument("--list-suites", action="store_true",
@@ -2042,12 +2112,13 @@ def main() -> int:
         if args.suite:
             path = run_suite(args.base_url.rstrip("/"), args.suite, args.out_dir,
                              args.timeout, budgets, case_ids=set(args.case) or None,
-                             token=args.token)
+                             token=args.token, entrypoint=args.entrypoint)
         else:
             if not args.task:
                 raise SystemExit("task is required unless --suite is used")
             path = run_eval(args.base_url.rstrip("/"), args.task, args.out_dir,
-                            args.timeout, budgets=budgets, token=args.token)
+                            args.timeout, budgets=budgets, token=args.token,
+                            entrypoint=args.entrypoint)
     except urllib.error.URLError as exc:
         raise SystemExit(f"WinPilot server request failed: {exc}") from exc
     print(path)

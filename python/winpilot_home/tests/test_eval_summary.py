@@ -1724,3 +1724,25 @@ def test_visual_action_success_rejects_conflicting_or_terminal_metadata():
     assert _successful_action({"ok": True, "result_meta": {"ok": False}}) is False
     assert _successful_action({"result_meta": {"ok": True, "blocked": True}}) is False
     assert _successful_action({"result_meta": {"ok": True}, "terminal": "fail"}) is False
+
+
+def test_eval_frontend_graph_matches_agent_cockpit_contract():
+    from scripts.gui_eval_run import _frontend_goal_graph
+
+    graph = _frontend_goal_graph("type a date, then draw a cat", 40)
+
+    assert graph["format"] == "arp/1"
+    assert graph["metadata"] == {
+        "source": "agent-cockpit",
+        "routing": "verified-skill-first-agent-on-miss-or-failure",
+    }
+    assert [node["kind"] for node in graph["nodes"]] == [
+        "start", "skill_replay", "agent_goal", "end",
+    ]
+    goal = next(node for node in graph["nodes"] if node["id"] == "goal")
+    assert goal["config"] == {
+        "goal": "type a date, then draw a cat",
+        "max_steps": 40,
+    }
+    assert graph["policy"]["allow_shell"] is False
+    assert graph["policy"]["require_evidence_on_done"] is True

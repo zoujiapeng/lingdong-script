@@ -406,6 +406,73 @@ def test_done_judge_receives_fresh_real_frame(monkeypatch):
     image = next(part for part in user_content if part.get("type") == "image_url")
     assert image["image_url"]["url"].endswith("fresh-frame")
 
+
+def test_done_judge_receives_bounded_cross_window_post_action_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content='{"done": true, "reason": "both windows verified"}')
+        )])
+
+    runner = AgentRunner("type the date in Notepad, then draw a cat in Paint")
+    runner.result_text = "done"
+    runner.session.hwnd = 22
+    runner._fresh_done_image_b64 = "paint-current"
+    runner._historical_visual_checkpoints = [{
+        "image_b64": "notepad-after-type",
+        "hwnd": 11,
+        "title": "Untitled - Notepad",
+        "action": "type_text",
+        "frame_id": 2,
+    }]
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+    assert runner._call_done_judge(client, "", "", "") is True
+    content = captured["messages"][1]["content"]
+    urls = [
+        part["image_url"]["url"]
+        for part in content
+        if part.get("type") == "image_url"
+    ]
+    assert urls == [
+        "data:image/jpeg;base64,paint-current",
+        "data:image/jpeg;base64,notepad-after-type",
+    ]
+    labels = "\n".join(
+        part.get("text", "") for part in content if part.get("type") == "text"
+    )
+    assert "Untitled - Notepad" in labels
+    assert "after_action='type_text'" in labels
+
+
+def test_window_switch_checkpoints_only_fresh_post_action_frame():
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("type in one app and continue in another")
+    runner.session.hwnd = 11
+    runner.session._screen_epoch = 4
+    runner.session.snapshot = SimpleNamespace(title="Untitled - Notepad")
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_epoch = 4
+    runner._visual_frame_id = 3
+    runner._last_visual_feedback_b64 = "notepad-frame"
+    runner._last_visual_feedback_action = "type_text"
+
+    runner._checkpoint_visual_frame_before_window_switch("open_app")
+
+    assert runner._historical_visual_checkpoints == [{
+        "image_b64": "notepad-frame",
+        "hwnd": 11,
+        "title": "Untitled - Notepad",
+        "action": "type_text",
+        "frame_id": 3,
+        "screen_epoch": 4,
+    }]
+
 def test_done_rejections_rejudge_each_new_frame_without_a_fixed_repair_cap(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent import done_verifier as done_mod

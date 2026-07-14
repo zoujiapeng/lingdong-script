@@ -102,6 +102,13 @@ _NATIVE_OPERATOR_GUIDANCE = (
     "or tracing, clicks are setup only and never output evidence; use drag/draw_strokes for "
     "the output itself. Never approximate a continuous path with repeated clicks. One "
     "draw_strokes call may contain every independent path already grounded in the current frame. "
+    "For any requested visual composition, plan the whole layout from the pixels first: keep the "
+    "subject centered, proportionate, spatially connected, and readable as one coherent object. "
+    "Use a compact base pass containing the main silhouette plus key landmarks, with smooth curve "
+    "anchors rather than disconnected placeholder primitives. Validate that frame_strokes is "
+    "non-empty and every path has at least two points before calling it. After the fresh frame, "
+    "make at most one additive detail/correction pass when it clearly improves the visible result; "
+    "do not erase and restart merely because the rendering is imperfect. "
     "Do one spatial mutation, then inspect its fresh frame; never infer success from the "
     "tool call alone."
 )

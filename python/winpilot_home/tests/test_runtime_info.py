@@ -8,6 +8,11 @@ def test_runtime_fingerprint_exposes_non_secret_service_identity():
     assert info["winpilot_home"]
     assert "git" in info
     assert "commit" in info["git"]
+    assert info["git"]["commit"] == info["git"]["loaded_commit"]
+    assert "current_commit" in info["git"]
+    assert info["source"]["loaded_stamp"]
+    assert info["source"]["current_stamp"]
+    assert isinstance(info["source"]["drifted"], bool)
     assert "capabilities" in info
     assert info["capabilities"]["runtime_profile"] is True
     assert info["capabilities"]["automation_ir"] is True
