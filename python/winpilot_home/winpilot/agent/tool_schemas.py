@@ -345,8 +345,11 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 "to physical screen pixels. Use only key vertices/curve anchors, normally 4-16 "
                 "points per path; do not emit dense equal-step samples because the executor connects "
                 "successive anchors continuously. If the current frame reports work_surface_frame_bounds, "
-                "each stroke must start inside those whole-frame bounds and at least 90% of its "
-                "points must remain inside. The bounds do not create another coordinate space."
+                "they are already inset from scrollbars and window edges. Keep the whole intended "
+                "composition comfortably inside them; each stroke must start and keep every authored "
+                "point inside those whole-frame bounds. The bounds do not create "
+                "another coordinate space. Prefer one coherent complete base composition over several "
+                "successive whole-layout alternatives."
             )
         elif name == "run_action_batch":
             actions = props.get("actions")

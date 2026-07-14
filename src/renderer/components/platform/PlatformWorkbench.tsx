@@ -182,8 +182,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const [actionError, setActionError] = useState('');
   const run = plane.currentRun;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
-  const runtimeInfo = (plane.overview?.status as any)?.runtime;
-  const runtimeSourceDrift = Boolean(runtimeInfo?.source?.drifted);
+  const runtimeIssue = plane.runtimeIssue;
   const modelProfile = (plane.overview?.status as any)?.model_profile;
   const metrics = run?.metrics;
   const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
@@ -197,8 +196,8 @@ function AgentCockpit({ plane }: { plane: Plane }) {
 
   const execute = async () => {
     if (!goal.trim() || submitting) return;
-    if (runtimeSourceDrift) {
-      setActionError('Python runtime sources changed after startup. Restart WinPilot before running this goal.');
+    if (runtimeIssue) {
+      setActionError(`${runtimeIssue} The goal was not started.`);
       return;
     }
     setSubmitting(true);
@@ -238,13 +237,13 @@ function AgentCockpit({ plane }: { plane: Plane }) {
           {active ? (
             <button className="arp-button arp-button-danger" onClick={stop}><CircleStop size={15} />Stop</button>
           ) : (
-            <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting || runtimeSourceDrift}>
+            <button className="arp-button arp-button-primary" onClick={execute} disabled={!goal.trim() || submitting || Boolean(runtimeIssue)}>
               {submitting ? <Loader2 size={15} className="arp-spin" /> : <Play size={15} fill="currentColor" />}Run goal
             </button>
           )}
         </div>
         {actionError && <div className="arp-inline-error"><XCircle size={14} />{actionError}</div>}
-        {runtimeSourceDrift && !actionError && <div className="arp-inline-error"><XCircle size={14} />Loaded Python code is stale. Restart WinPilot before testing; hot-reloaded UI code does not restart the controller.</div>}
+        {runtimeIssue && !actionError && <div className="arp-inline-error"><XCircle size={14} />{runtimeIssue} The app will replace an idle incompatible controller automatically; restart the desktop app once if this build was hot-reloaded.</div>}
         {modelProfile?.model && modelProfile?.supports_vision === false && <div className="arp-inline-error"><Eye size={14} />{String(modelProfile.model)} does not accept image input. Pixel-heavy GUI tasks will use the slower perception/controller fallback; choose a vision-capable main model for real-time control.</div>}
       </section>
 
@@ -519,8 +518,9 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         asset.format === 'automation-ir/1'
         && automationRuntimeKind(asset as AutomationIR) === 'arp_graph'
       ) {
-        await client.startAutomation(asset as AutomationIR);
+        await plane.startAutomation(asset as AutomationIR);
       } else {
+        if (plane.runtimeIssue) throw new Error(`${plane.runtimeIssue} Replay was not started.`);
         await client.replay(file);
       }
       await plane.refresh();
@@ -736,6 +736,7 @@ function SystemView({ plane }: { plane: Plane }) {
               <div className="arp-perception-row" key={dimension}><span className="arp-level">L{index}</span><Toggle label={dimension.toUpperCase()} checked={Boolean(config.perception?.[dimension]?.enabled)} onChange={(value) => setConfig((current) => current ? { ...current, perception: { ...current.perception, [dimension]: { ...current.perception?.[dimension], enabled: value } } } : current)} /><code>P{config.perception?.[dimension]?.priority || index + 1}</code></div>
             ))}
             <Toggle checked={Boolean(config.fusion?.screen_watch_autostart)} onChange={(value) => patch('fusion', 'screen_watch_autostart', value)} label="Screen watcher autostart" />
+            <Toggle checked={Boolean(config.controller?.native_visual_thinking)} onChange={(value) => patch('controller', 'native_visual_thinking', value)} label="Experimental spatial reasoning" />
             <Toggle checked={config.controller?.target_window_capture_enabled !== false} onChange={(value) => patch('controller', 'target_window_capture_enabled', value)} label="Auto target-window frame crop" />
             <Toggle checked={Boolean(config.controller?.multi_input_cooperation)} onChange={(value) => patch('controller', 'multi_input_cooperation', value)} label="Experimental mouse/keyboard cooperation" />
             <Toggle checked={Boolean(config.fusion?.ocr_skip_when_uia_rich)} onChange={(value) => patch('fusion', 'ocr_skip_when_uia_rich', value)} label="Skip OCR on rich UIA" />
@@ -751,7 +752,8 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>Current run</dt><dd>{plane.currentRun?.run_id || 'idle'}</dd></div>
             <div><dt>Loaded commit</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.loaded_commit || '-')}</dd></div>
             <div><dt>Working commit</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.current_commit || '-')}</dd></div>
-            <div><dt>Source state</dt><dd>{(plane.overview?.status as any)?.runtime?.source?.drifted ? 'stale — restart required' : 'loaded/current match'}</dd></div>
+            <div><dt>Runtime contract</dt><dd>{String((plane.overview?.status as any)?.runtime?.contract_version || '-')}</dd></div>
+            <div><dt>Source state</dt><dd>{plane.runtimeIssue || 'loaded/current match'}</dd></div>
             <div><dt>Main model vision</dt><dd>{String((plane.overview?.status as any)?.model_profile?.supports_vision ?? '-')}</dd></div>
             <div><dt>World model</dt><dd>{String((plane.overview?.status as any)?.world_model ?? config?.agent?.world_model ?? '-')}</dd></div>
             <div><dt>VLM configured</dt><dd>{String((plane.overview?.status as any)?.vlm_configured ?? '-')}</dd></div>

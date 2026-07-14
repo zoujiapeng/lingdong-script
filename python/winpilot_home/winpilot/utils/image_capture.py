@@ -44,6 +44,27 @@ _DESKTOP_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Multi-window observation is broader than copy/move workflows. Keep this
+# separate from the legacy transfer grammar so ordinary wording such as
+# "compare both apps" or "look at the left and right windows" cannot silently
+# discard half of the evidence when the remembered target happens to be front.
+_MULTI_VIEW_CONTEXT_RE = re.compile(
+    r"\b(?:compare|comparison|contrast|side[- ]by[- ]side|"
+    r"both\s+(?:apps?|applications?|windows?|documents?|pages?)|"
+    r"(?:two|multiple)\s+(?:apps?|applications?|windows?|documents?|pages?)|"
+    r"left\s+(?:app|application|window|pane|document|page).{0,50}"
+    r"right\s+(?:app|application|window|pane|document|page)|"
+    r"right\s+(?:app|application|window|pane|document|page).{0,50}"
+    r"left\s+(?:app|application|window|pane|document|page))\b|"
+    r"(?:同时|一起|一同|并排|分别).{0,20}(?:查看|观察|对照|比较|对比).{0,30}"
+    r"(?:两个|多个|应用|程序|窗口|文档|页面)|"
+    r"(?:比较|对比|对照).{0,50}(?:应用|程序|窗口|文档|页面|记事本|Word|WPS|浏览器)|"
+    r"(?:左边|左侧|左面).{0,50}(?:右边|右侧|右面)|"
+    r"(?:右边|右侧|右面).{0,50}(?:左边|左侧|左面)|"
+    r"(?:两个|多个).{0,12}(?:应用|程序|窗口|文档|页面)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class VisualCaptureScope:
@@ -105,7 +126,11 @@ def select_visual_capture_scope(
         ))
     if not enabled:
         return full("optimization_disabled")
-    if _DESKTOP_CONTEXT_RE.search(str(task or "")):
+    task_text = str(task or "")
+    if (
+        _DESKTOP_CONTEXT_RE.search(task_text)
+        or _MULTI_VIEW_CONTEXT_RE.search(task_text)
+    ):
         return full("task_requires_desktop_context", target=int(hwnd or 0) or None)
     try:
         target = int(hwnd or 0)
@@ -180,6 +205,9 @@ def capture_window_jpeg_b64(hwnd: int, max_side: int = 1120,
         return ""
 
 
+_CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS = 24
+
+
 def credible_work_surface_frame_bounds(image_b64: str) -> dict[str, object] | None:
     """Locate one light work surface in the exact model-visible JPEG.
 
@@ -188,41 +216,100 @@ def credible_work_surface_frame_bounds(image_b64: str) -> dict[str, object] | No
     reinterpreting another coordinate system.
     """
     if not image_b64:
-        return None
+        return {
+            "ok": False,
+            "reason": "authoritative frame pixels were unavailable",
+            "failure_kind": "unavailable",
+        }
     try:
         raw = np.frombuffer(base64.b64decode(image_b64), dtype=np.uint8)
         image = cv2.imdecode(raw, cv2.IMREAD_COLOR)
         if image is None or image.size == 0:
-            return None
+            return {
+                "ok": False,
+                "reason": "authoritative frame pixels could not be decoded",
+                "failure_kind": "unavailable",
+            }
         # Local import avoids a package-initialization cycle: perception CV
         # itself depends on low-level screenshot helpers.
         from ..perception import vision_cv
 
         detection = vision_cv.credible_light_work_surface(image)
         if not isinstance(detection, dict) or detection.get("ok") is not True:
-            return None
+            reason = (
+                str(detection.get("reason") or "no credible light work surface was found")
+                if isinstance(detection, dict)
+                else "work-surface detector returned no decision"
+            )
+            ambiguous = bool(
+                "nested" in reason.casefold()
+                or "modal" in reason.casefold()
+                or "multiple" in reason.casefold()
+                or "ambiguous" in reason.casefold()
+            )
+            return {
+                "ok": False,
+                "reason": reason,
+                "failure_kind": "ambiguous" if ambiguous else "not_detected",
+                "ambiguous": ambiguous,
+                "candidate_count": (
+                    detection.get("candidate_count")
+                    if isinstance(detection, dict)
+                    else None
+                ),
+                "source": "authoritative_frame_pixels",
+            }
         bbox = detection.get("bbox")
         if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-            return None
+            return {
+                "ok": False,
+                "reason": "detector returned invalid work-surface geometry",
+                "failure_kind": "invalid",
+                "source": "authoritative_frame_pixels",
+            }
         x1, y1, x2, y2 = [int(value) for value in bbox]
         height, width = image.shape[:2]
         if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-            return None
+            return {
+                "ok": False,
+                "reason": "detector returned out-of-frame work-surface geometry",
+                "failure_kind": "invalid",
+                "source": "authoritative_frame_pixels",
+            }
         x_span = max(1, width - 1)
         y_span = max(1, height - 1)
+        detected_bounds = [
+            int(round(x1 * 1000.0 / x_span)),
+            int(round(y1 * 1000.0 / y_span)),
+            int(round((x2 - 1) * 1000.0 / x_span)),
+            int(round((y2 - 1) * 1000.0 / y_span)),
+        ]
+        left, top, right, bottom = detected_bounds
+        inset = _CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS
+        if right - left > inset * 2 + 40 and bottom - top > inset * 2 + 40:
+            safe_bounds = [left + inset, top + inset, right - inset, bottom - inset]
+        else:
+            safe_bounds = list(detected_bounds)
+            inset = 0
         return {
-            "work_surface_frame_bounds": [
-                int(round(x1 * 1000.0 / x_span)),
-                int(round(y1 * 1000.0 / y_span)),
-                int(round((x2 - 1) * 1000.0 / x_span)),
-                int(round((y2 - 1) * 1000.0 / y_span)),
-            ],
+            "ok": True,
+            # Mutating continuous input uses the inset rectangle. Detectors
+            # often include the final antialiased row beside scrollbars or
+            # resize handles; starting a drag there scrolls/resizes the view
+            # and makes an existing result appear to vanish.
+            "work_surface_frame_bounds": safe_bounds,
+            "detected_work_surface_frame_bounds": detected_bounds,
+            "continuous_input_edge_inset": inset,
             "source": "authoritative_frame_pixels",
             "light_ratio": detection.get("light_ratio"),
             "candidate_count": detection.get("candidate_count"),
         }
     except Exception:
-        return None
+        return {
+            "ok": False,
+            "reason": "work-surface detection failed on the authoritative frame",
+            "failure_kind": "unavailable",
+        }
 
 
 def jpeg_diff_ratio(image_a_b64: str, image_b_b64: str,

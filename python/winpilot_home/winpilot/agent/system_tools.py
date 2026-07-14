@@ -576,7 +576,8 @@ class SystemToolMixin:
                     "needs_observe": True,
                     "fast_path_advice": (
                         "The app is open and focused with target_hwnd established. "
-                        "Observe it once, then execute the next GUI subgoal; do not launch it again."
+                        "Continue from the newest attached frame or structured observation; "
+                        "observe once only when no fresh state was supplied. Do not launch it again."
                     ),
                 }
             self._mark_blank_document_surface(payload, component_hint)
@@ -611,14 +612,16 @@ class SystemToolMixin:
         if target_hwnd:
             payload["fast_path_advice"] = (
                 "Background/no-window app recovery succeeded and target_hwnd is established. "
-                "Observe it once and continue the GUI task; do not inspect processes or paths with shell."
+                "Continue from the newest attached frame or structured observation; observe once "
+                "only when no fresh state was supplied. Do not inspect processes or paths with shell."
             )
         else:
             payload["error"] = str(launched.get("error") or "app launched but no visible target window appeared")
             payload["needs_llm_reason"] = True
             payload["fast_path_advice"] = (
-                "No visible app window appeared after local resolve+launch. Use scan_windows once "
-                "or report the actual blocker; do not repeat process/path shell probes."
+                "No visible app window appeared after local resolve+launch. Use one exposed "
+                "window-list/focus recovery tool or report the actual blocker; do not repeat "
+                "process/path shell probes."
             )
         self._mark_blank_document_surface(payload, component_hint)
         return ToolResult(

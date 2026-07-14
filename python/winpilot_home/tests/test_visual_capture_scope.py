@@ -20,7 +20,42 @@ def test_credible_work_surface_bounds_use_authoritative_frame_coordinates():
 
     assert result is not None
     assert result["source"] == "authoritative_frame_pixels"
-    assert result["work_surface_frame_bounds"] == [125, 359, 984, 932]
+    assert result["detected_work_surface_frame_bounds"] == [125, 359, 984, 932]
+    assert result["work_surface_frame_bounds"] == [149, 383, 960, 908]
+    assert result["continuous_input_edge_inset"] == 24
+
+
+def test_credible_work_surface_bounds_preserve_ambiguous_failure(monkeypatch):
+    import base64
+
+    import cv2
+    import numpy as np
+
+    from winpilot.perception import vision_cv
+    from winpilot.utils.image_capture import credible_work_surface_frame_bounds
+
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok is True
+    monkeypatch.setattr(
+        vision_cv,
+        "credible_light_work_surface",
+        lambda _image: {
+            "ok": False,
+            "reason": "multiple similarly plausible light work surfaces were visible",
+            "candidate_count": 2,
+        },
+    )
+
+    result = credible_work_surface_frame_bounds(
+        base64.b64encode(encoded.tobytes()).decode("ascii")
+    )
+
+    assert result is not None
+    assert result["ok"] is False
+    assert result["ambiguous"] is True
+    assert result["failure_kind"] == "ambiguous"
+    assert result["candidate_count"] == 2
 
 
 def test_capture_scope_toggle_off_forces_full_desktop(monkeypatch):
@@ -134,6 +169,33 @@ def test_capture_scope_detects_common_cross_application_word_orders(monkeypatch)
         "把记事本的文字复制到Word",
         "从记事本复制文本到Word",
         "复制记事本文字到Word",
+    ]
+
+    for task in tasks:
+        decision = image_capture.select_visual_capture_scope(71, enabled=True, task=task)
+        assert decision.scope == "full_desktop", task
+        assert decision.reason == "task_requires_desktop_context", task
+
+
+def test_capture_scope_keeps_both_windows_for_comparison_and_side_by_side_tasks(monkeypatch):
+    from winpilot.utils import image_capture
+    from winpilot.utils.screenshot import Region
+
+    desktop = Region(0, 0, 1920, 1080)
+    monkeypatch.setattr(image_capture.screenshot, "virtual_screen_region", lambda: desktop)
+    monkeypatch.setattr(
+        image_capture.win32gui,
+        "IsWindow",
+        lambda _hwnd: (_ for _ in ()).throw(
+            AssertionError("multi-view task must choose desktop before probing hwnd")
+        ),
+    )
+    tasks = [
+        "compare Notepad and Word side by side",
+        "look at both applications and report the differences",
+        "同时查看两个应用",
+        "对比记事本和Word的内容",
+        "查看左边窗口和右边窗口",
     ]
 
     for task in tasks:

@@ -35,6 +35,8 @@ def test_open_app_focuses_existing_visible_window_without_launch(monkeypatch):
     assert data["target_hwnd"] == 22
     assert session.hwnd == 22
     assert focused == [22]
+    assert "newest attached frame or structured observation" in data["fast_path_advice"]
+    assert "Observe it once" not in data["fast_path_advice"]
 
 
 def test_open_app_marks_existing_blank_writer_as_ready_without_new_click(monkeypatch):
@@ -201,6 +203,38 @@ def test_open_app_reopens_background_process_once_without_shell(monkeypatch):
     assert data["target_hwnd"] == 44
     assert calls == [{"command": "Chat"}]
     assert "shell" in data["fast_path_advice"].casefold()
+
+
+def test_open_app_failure_advice_does_not_require_an_unexposed_scan_tool(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open MissingApp")
+    monkeypatch.setattr(
+        tools,
+        "win32",
+        SimpleNamespace(
+            find_app=lambda _name: {
+                "running": False,
+                "process_count": 0,
+                "windows": [],
+            },
+            find_window=lambda _name: None,
+        ),
+    )
+    session._t_launch = lambda _args: ToolResult(json.dumps({
+        "ok": False,
+        "verified": False,
+        "error": "no visible window",
+    }))
+
+    data = json.loads(session._t_open_app({"name": "MissingApp"}).text)
+
+    assert data["ok"] is False
+    assert data["needs_llm_reason"] is True
+    assert "scan_windows" not in data["fast_path_advice"]
+    assert "exposed window-list/focus recovery tool" in data["fast_path_advice"]
 
 
 def test_resolve_launch_target_accepts_registered_multiword_application_name(monkeypatch):

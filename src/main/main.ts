@@ -14,7 +14,7 @@ import { getBaseDir, isDev } from './env';
 import { startApiServer, ApiDeps } from './api';
 import { resolveMacroPath } from './macroPaths';
 import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
-import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer } from './winpilotServer';
+import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
@@ -862,6 +862,7 @@ ipcMain.handle('winpilot:connection', () => getWinpilotConnection());
 // Trigger a (re)start if the server isn't up, and report status (url/starting/
 // error). The Agent panel polls this so a failed startup can recover from UI.
 ipcMain.handle('winpilot:ensure', () => ensureWinpilotServer());
+ipcMain.handle('winpilot:restart', () => restartWinpilotServer());
 
 ipcMain.handle('agent:chat', (_, text: string) => {
   sendToAgent({ type: 'chat', text });

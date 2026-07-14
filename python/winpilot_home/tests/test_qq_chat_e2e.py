@@ -63,6 +63,7 @@ class TestVisionPrompt:
 
     def test_compact_prompt_is_domain_neutral_and_fail_closed(self):
         from winpilot.agent.prompts import system_prompt
+        from winpilot.agent.tool_schemas import tool_schemas
 
         prompt = system_prompt(
             main_model_has_vision=True,
@@ -76,6 +77,21 @@ class TestVisionPrompt:
         assert "detailed creature" not in prompt
         assert "For a dog" not in prompt
         assert "15-30" not in prompt
+        native_tools = {
+            item["function"]["name"]
+            for item in tool_schemas(
+                planning=True,
+                coding_runtime=False,
+                allow_shell=False,
+                allow_files=False,
+                profile="lean_gui",
+                native_vision=True,
+            )
+        }
+        assert {"list_windows", "focus_window", "open_app", "observe"} <= native_tools
+        for unavailable in ("scan_windows", "find_app", "find_program"):
+            assert unavailable not in native_tools
+            assert unavailable not in prompt
 
     def test_main_model_vision_capability_detection(self):
         from winpilot.agent.loop import _main_model_has_vision

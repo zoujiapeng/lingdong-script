@@ -122,6 +122,60 @@ def test_adapter_disables_provider_thinking_for_mimo_and_reasonix_only():
     assert "extra_body" not in kwargs
 
 
+def test_main_agent_adapter_keeps_configured_thinking_until_request_routing(monkeypatch):
+    from winpilot.agent import loop
+
+    values = {
+        ("api",): {
+            "provider": "mimo",
+            "base_url": "https://api.xiaomimimo.com/v1",
+            "model": "mimo-v2.5",
+            "thinking": False,
+        },
+        ("controller", "native_visual_thinking"): True,
+    }
+    monkeypatch.setattr(
+        loop.CONFIG,
+        "get",
+        lambda *path, default=None: values.get(tuple(path), default),
+    )
+
+    assert loop._main_agent_api_settings()["thinking"] is False
+
+    values[("api",)] = {
+        **values[("api",)],
+        "model": "mimo-v2.5-pro",
+    }
+    assert loop._main_agent_api_settings()["thinking"] is False
+
+    values[("api",)] = {
+        **values[("api",)],
+        "model": "mimo-v2.5",
+    }
+    values[("controller", "native_visual_thinking")] = False
+    assert loop._main_agent_api_settings()["thinking"] is False
+
+
+def test_thinking_tool_history_can_preserve_complete_reasoning_content():
+    from winpilot.agent.loop import _sanitize_assistant
+
+    call = SimpleNamespace(
+        id="call-1",
+        function=SimpleNamespace(name="click", arguments='{"frame_x":500,"frame_y":500}'),
+    )
+    message = SimpleNamespace(
+        content="",
+        tool_calls=[call],
+        reasoning_content="complete provider reasoning",
+    )
+
+    preserved = _sanitize_assistant(message, preserve_reasoning=True)
+    stripped = _sanitize_assistant(message)
+
+    assert preserved["reasoning_content"] == "complete provider reasoning"
+    assert "reasoning_content" not in stripped
+
+
 def test_cost_estimation_is_provider_scoped():
     api = {
         "base_url": "https://api.deepseek.com",

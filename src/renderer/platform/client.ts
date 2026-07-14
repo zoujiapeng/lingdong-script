@@ -15,6 +15,42 @@ import type { AutomationIR } from '../utils/automationIR';
 const FALLBACK_URL = 'http://127.0.0.1:8765/';
 const ELECTRON_SERVER_READY_TIMEOUT_MS = 35_000;
 const ELECTRON_SERVER_POLL_MS = 200;
+export const EXPECTED_RUNTIME_CONTRACT_VERSION = 2;
+
+export function runtimeCompatibilityError(overview: PlatformOverview | null | undefined): string {
+  if (!overview) return 'Controller runtime identity has not been loaded.';
+  const runtime = overview.status?.runtime as Record<string, any> | undefined;
+  if (!runtime || Number(runtime.contract_version) !== EXPECTED_RUNTIME_CONTRACT_VERSION) {
+    return 'The managed Python controller uses an incompatible runtime contract.';
+  }
+  const source = runtime.source as Record<string, any> | undefined;
+  const git = runtime.git as Record<string, any> | undefined;
+  if (
+    !source
+    || !Object.prototype.hasOwnProperty.call(source, 'loaded_stamp')
+    || !Object.prototype.hasOwnProperty.call(source, 'current_stamp')
+    || typeof source.drifted !== 'boolean'
+    || !git
+    || !Object.prototype.hasOwnProperty.call(git, 'loaded_commit')
+    || !Object.prototype.hasOwnProperty.call(git, 'current_commit')
+  ) {
+    return 'The managed Python controller is missing runtime identity fields.';
+  }
+  const loadedStamp = String(source.loaded_stamp || '');
+  const currentStamp = String(source.current_stamp || '');
+  if (!loadedStamp || !currentStamp) {
+    return 'The managed Python controller has an incomplete source identity.';
+  }
+  if (source.drifted || loadedStamp !== currentStamp) {
+    return 'Python controller sources changed after the process started.';
+  }
+  const loadedCommit = String(git.loaded_commit || '');
+  const currentCommit = String(git.current_commit || '');
+  if (loadedCommit && currentCommit && loadedCommit !== currentCommit) {
+    return 'The running Python controller does not match the current repository commit.';
+  }
+  return '';
+}
 
 export function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim();

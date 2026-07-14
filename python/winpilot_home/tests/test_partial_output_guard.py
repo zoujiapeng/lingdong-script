@@ -459,6 +459,49 @@ def test_one_fresh_same_window_local_undo_is_allowed_then_next_is_blocked(monkey
     assert second["destructive_action"] == "single_undo"
 
 
+def test_sequential_undo_can_roll_back_only_tracked_run_mutations(monkeypatch):
+    runner, calls = _runner(monkeypatch)
+    _seed_output(runner)
+    _confirm_visual_change(runner, "type_text", 7)
+
+    assert _run(
+        runner, "second-output", "type_text", {"text": " second"},
+    )["ok"] is True
+    _confirm_visual_change(runner, "type_text", 8)
+
+    assert _run(
+        runner, "undo-second", "hotkey", {"keys": ["ctrl", "z"]},
+    )["ok"] is True
+    _confirm_visual_change(runner, "hotkey", 9)
+
+    # A freshly attached same-window post-action frame is valid rollback
+    # evidence for the previous tracked mutation even if an internal session
+    # epoch advanced after that older mutation was recorded.
+    runner.session._screen_epoch += 1
+    before_second_undo = len(calls)
+    second_undo = _run(
+        runner, "undo-first", "hotkey", {"keys": ["ctrl", "z"]},
+    )
+    assert second_undo["ok"] is True
+    assert len(calls) == before_second_undo + 1
+    _confirm_visual_change(runner, "hotkey", 10)
+    assert runner._partial_output_guard._active(runner.session.hwnd) is None
+
+    before_extra = len(calls)
+    extra = _run(runner, "undo-extra", "hotkey", {"keys": ["ctrl", "z"]})
+    assert len(calls) == before_extra
+    assert extra["no_tracked_mutation_available"] is True
+    assert extra["fresh_pixel_evidence"] is True
+    assert extra["safe_stop"] is False
+
+    repeated = _run(
+        runner, "undo-extra-again", "hotkey", {"keys": ["ctrl", "z"]},
+    )
+    assert repeated["safe_stop"] is True
+    assert repeated["guard_blocks"] == 2
+    assert len(calls) == before_extra
+
+
 def test_visible_undo_then_immediate_second_reversal_is_blocked_as_no_net_progress(
     monkeypatch,
 ):

@@ -44,6 +44,56 @@ from ..utils.screenshot import capture, virtual_screen_region, window_region
 
 
 _JUDGE_MAX_TOKENS = 2500
+_NATIVE_JUDGE_NONVISUAL_TOOLS = frozenset({
+    # These tools can prove obligations that are not necessarily visible in a
+    # GUI frame.  Mouse/keyboard/controller/perception tools are deliberately
+    # absent: their output must never describe the pixels to the visual judge.
+    "run_shell",
+    "run_detached",
+    "search_files",
+    "list_dir",
+    "read_file",
+    "search_text",
+    "github_search",
+    "apply_patch",
+    "write_file",
+    "file_exists",
+    "process_exists",
+    "schedule_task",
+    "list_scheduled_tasks",
+    "cancel_scheduled_task",
+})
+_NATIVE_JUDGE_SCHEDULE_TOOLS = frozenset({
+    "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
+})
+_NATIVE_JUDGE_PROCESS_TOOLS = frozenset({"process_exists", "run_detached"})
+_NATIVE_JUDGE_CERTIFIED_EVIDENCE_PREFIXES = (
+    "- deterministic_saved_file:",
+    "- deterministic_image_delivery:",
+    "- causal_image_delivery_mutation:",
+    "- causal_communication_mutation:",
+    "- causal_communication_evidence:",
+)
+_NATIVE_JUDGE_GEOMETRY_KEYS = frozenset({
+    "frame_strokes",
+    "normalized_strokes",
+    "strokes",
+    "frame_points",
+    "points",
+    "source_frame_coordinates",
+    "mapped_coordinates",
+    "adjusted_drop_target",
+    "bbox",
+    "region",
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "physical_x",
+    "physical_y",
+})
 _SAVED_FILE_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])([A-Za-z0-9][A-Za-z0-9_. -]{0,120}\."
     r"(?:txt|md|csv|docx?|xlsx?|pptx?|pdf|png|jpe?g|bmp))\b",
@@ -938,6 +988,114 @@ class DoneVerifierMixin:
                 ledger[-20:], ensure_ascii=False
             )[:2000]
         return recent, evidence
+
+    @staticmethod
+    def _sanitize_native_nonvisual_output(output: object) -> str:
+        """Bound non-visual proof and remove any embedded GUI geometry.
+
+        Even allow-listed tools can echo arbitrary JSON (for example a saved
+        schedule may itself contain GUI actions).  Recursively removing visual
+        geometry here keeps controller coordinates and stroke plans out of the
+        independent image judge's semantic context.
+        """
+        raw = str(output or "").strip()
+        if not raw:
+            return ""
+
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = None
+
+        if parsed is not None:
+            def redact(value):
+                if isinstance(value, dict):
+                    return {
+                        str(key): redact(item)
+                        for key, item in value.items()
+                        if str(key).casefold() not in _NATIVE_JUDGE_GEOMETRY_KEYS
+                    }
+                if isinstance(value, list):
+                    return [redact(item) for item in value[:50]]
+                return value
+
+            text = json.dumps(
+                redact(parsed), ensure_ascii=False, sort_keys=True, default=str,
+            )
+        else:
+            geometry_assignment = re.compile(
+                r"(?:frame[_ -]?strokes?|normalized_strokes|frame_points|"
+                r"source_frame_coordinates|mapped_coordinates|adjusted_drop_target|"
+                r"physical_[xy]|(?:^|[\s,{])[\"']?(?:x|y|x1|y1|x2|y2)"
+                r"[\"']?\s*[:=])",
+                re.IGNORECASE,
+            )
+            safe_lines = [
+                line
+                for line in raw.splitlines()
+                if not geometry_assignment.search(line)
+            ]
+            text = "\n".join(safe_lines).strip()
+
+        # Fail closed on odd non-JSON spellings too.  This is intentionally a
+        # last boundary check, not a claim that the remaining output is visual
+        # evidence.
+        text = re.sub(
+            r"frame[_ -]?strokes?",
+            "[visual geometry omitted]",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text[:1200]
+
+    def _native_judge_nonvisual_evidence(self, evidence: str) -> str:
+        """Return only deterministic obligations that pixels cannot prove.
+
+        The fresh native frame is authoritative for every visible condition.
+        Agent prose, step logs, UIA/OCR text, controller verification metadata,
+        and action coordinates are therefore excluded by construction.
+        """
+        items: list[str] = []
+        task_text = str(getattr(self, "task", "") or "").casefold()
+        has_artifact_obligation = bool(
+            getattr(self, "_is_coding", False)
+            or _explicit_saved_paths(task_text)
+            or any(marker in task_text for marker in (
+                "file", "folder", "directory", "path", "command", "script",
+                "文件", "文件夹", "目录", "路径", "命令", "脚本",
+            ))
+        )
+        has_schedule_obligation = any(marker in task_text for marker in (
+            "schedule", "scheduled", "remind", "reminder", "later",
+            "定时", "提醒", "计划任务", "稍后",
+        ))
+        has_process_obligation = any(marker in task_text for marker in (
+            "process", "service", "daemon", "background", "进程", "服务", "后台",
+        ))
+        for name, output in (getattr(self, "_recent_results", []) or [])[-20:]:
+            tool_name = str(name or "")
+            if tool_name not in _NATIVE_JUDGE_NONVISUAL_TOOLS:
+                continue
+            if tool_name in _NATIVE_JUDGE_SCHEDULE_TOOLS:
+                relevant = has_schedule_obligation
+            elif tool_name in _NATIVE_JUDGE_PROCESS_TOOLS:
+                relevant = has_process_obligation
+            else:
+                relevant = has_artifact_obligation
+            if not relevant:
+                continue
+            safe_output = self._sanitize_native_nonvisual_output(output)
+            if safe_output:
+                items.append(f"- {tool_name}: {safe_output}")
+
+        for line in str(evidence or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith(_NATIVE_JUDGE_CERTIFIED_EVIDENCE_PREFIXES):
+                safe_line = self._sanitize_native_nonvisual_output(stripped)
+                if safe_line:
+                    items.append(safe_line)
+
+        return "\n".join(dict.fromkeys(items))[:5000]
 
     def _deterministic_saved_file_verdict(
         self,
@@ -1941,6 +2099,9 @@ class DoneVerifierMixin:
                     reason = f"The configured visual completion judge could not be created: {exc}"
                     return self._reject_done(reason, f"[done check failed] {reason}")
                 judge_model = vlm_model
+        native_nonvisual_evidence = (
+            self._native_judge_nonvisual_evidence(evidence) if fresh_image else ""
+        )
         sys_p = (
             "你是严格、怀疑的任务完成核验员。判断用户任务是否【真正达成】，不要轻信 agent 的自述。"
             "原始用户任务是唯一验收合同；不要把计划、提示词、动作数量或控制器自行发明的条件"
@@ -1958,14 +2119,29 @@ class DoneVerifierMixin:
             "（例如聊天记录出现要发送的文本、输入框清空并记录出现、或应用明确发送成功状态）才可判 done。"
             '只输出 JSON: {"done": true/false, "reason": "简短中文理由"}。'
         )
-        user_p = (
-            f"Current local date/time: {datetime.now().astimezone().isoformat()}\n\n"
-            f"用户任务：{self.task}\n\n"
-            f"agent 声称完成：{self.result_text[:200]}\n\n"
-            f"已执行动作(最近)：{recent}\n\n"
-            f"确定性证据(工具真实输出/验证结果)：\n{evidence}\n\n"
-            f"当前前台界面元素(仅供参考,文件/进程类勿据此判负)：\n{screen[:1000]}"
-        )
+        if fresh_image:
+            sys_p += (
+                " 对附带新鲜截图的任务，可见语义只能由截图像素证明；agent 自述、动作轨迹、"
+                "鼠标坐标、笔画参数、像素变化和控制器 verified 状态都不是可见结果证据。"
+                "截图若为空白、明显劣化、残缺、与任务不符或存在歧义，必须判 done=false。"
+            )
+            user_p = (
+                f"Current local date/time: {datetime.now().astimezone().isoformat()}\n\n"
+                f"用户任务：{self.task}\n\n"
+                "可见完成条件：只检查随请求附带的最新权威 GUI 截图，以及下方明确标注的"
+                "跨窗口截图。不要推测 agent 原本想画、想输入或想点击什么。\n\n"
+                "确定性非视觉义务（仅用于文件、进程、计划或真实发送等截图无法单独证明的条件）：\n"
+                + (native_nonvisual_evidence or "(无；不得用动作成功补足截图中的缺失结果)")
+            )
+        else:
+            user_p = (
+                f"Current local date/time: {datetime.now().astimezone().isoformat()}\n\n"
+                f"用户任务：{self.task}\n\n"
+                f"agent 声称完成：{self.result_text[:200]}\n\n"
+                f"已执行动作(最近)：{recent}\n\n"
+                f"确定性证据(工具真实输出/验证结果)：\n{evidence}\n\n"
+                f"当前前台界面元素(仅供参考,文件/进程类勿据此判负)：\n{screen[:1000]}"
+            )
         if pending_literals:
             literal_checklist = json.dumps(pending_literals, ensure_ascii=False)
             user_p += (
@@ -2069,12 +2245,10 @@ class DoneVerifierMixin:
                         "type": "text",
                         "text": (
                             "Historical cross-window post-action checkpoint: "
-                            f"title={checkpoint.get('title') or '(unknown)'!r}, "
-                            f"hwnd={int(checkpoint.get('hwnd', 0) or 0)}, "
-                            f"after_action={checkpoint.get('action') or '(unknown)'!r}, "
-                            f"frame_id={int(checkpoint.get('frame_id', 0) or 0)}. "
+                            f"window_title={checkpoint.get('title') or '(unknown)'!r}. "
                             "Use this image only to verify the earlier requested result in that "
-                            "window; do not treat it as the current foreground frame."
+                            "window; do not infer success from the checkpoint label and do not "
+                            "treat it as the current foreground frame."
                         ),
                     },
                     {

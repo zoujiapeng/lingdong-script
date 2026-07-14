@@ -1060,8 +1060,28 @@ class InteractionToolMixin:
         raw = args.get("strokes")
         if not isinstance(raw, list) or not raw:
             return ToolResult("draw_strokes 需要 strokes: [[[x,y],...], ...]（至少一条笔画）")
-        duration = float(args.get("duration", 0.4))
         strokes = _normalize_draw_strokes(raw)
+        duration_defaulted = args.get("duration") is None
+        try:
+            duration = (
+                max(0.08, min(0.24, 1.2 / max(1, len(strokes))))
+                if duration_defaulted
+                else float(args.get("duration"))
+            )
+        except (TypeError, ValueError):
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "failure_type": "INVALID_DRAW_DURATION",
+                "error": "draw_strokes duration must be a finite positive number",
+            }))
+        if not math.isfinite(duration) or duration <= 0:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "failure_type": "INVALID_DRAW_DURATION",
+                "error": "draw_strokes duration must be a finite positive number",
+            }))
         all_coords: list[tuple[int, int]] = []
         for stroke in strokes:
             all_coords.extend((point[0], point[1]) for point in stroke)
@@ -1081,6 +1101,8 @@ class InteractionToolMixin:
             except Exception as exc:
                 logger.debug("draw_strokes pre-capture failed: %s", exc)
         result = executor_mod.draw_strokes(strokes, duration_s=duration, hwnd=self.hwnd)
+        result["motion_duration_per_stroke_s"] = round(duration, 4)
+        result["motion_duration_defaulted"] = duration_defaulted
         surface_evidence = args.get("_draw_surface_evidence")
         if isinstance(surface_evidence, dict):
             result["surface_region"] = surface_evidence.get("surface_region")

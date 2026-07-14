@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 def test_draw_stroke_normalizer_accepts_flat_segments_and_unwrapped_polyline():
@@ -60,6 +61,50 @@ def test_draw_strokes_visual_change_marks_action_verified(monkeypatch):
     assert "instead of redrawing" in data["visual_feedback"]
 
 
+def test_compacted_pixel_effect_does_not_look_like_goal_verification():
+    from winpilot.agent.loop import AgentRunner
+
+    raw = json.dumps({
+        "ok": True,
+        "verified": True,
+        "wrapped_by_fast_controller": True,
+        "visual_change_detected": True,
+        "visual_change_ratio": 0.04,
+        "verify_method": "source-verification+pixel-effect-summary",
+        "native_action_executed": True,
+        "auto_visual_verify": {
+            "source_action": "draw_strokes",
+            "verified": True,
+            "visual_change_detected": True,
+            "visual_change_ratio": 0.04,
+            "verify_method": "source-verification+pixel-effect-summary",
+            "semantic_verified": False,
+            "completion_evidence": False,
+            "summary_kind": "pixel_effect_only",
+        },
+    })
+
+    for tool_name in ("draw_strokes", "drag"):
+        compact = json.loads(AgentRunner._compact_tool_evidence(tool_name, raw))
+
+        assert "verified" not in compact
+        assert compact["action_verified"] is True
+        assert compact["semantic_verified"] is False
+        assert compact["completion_evidence"] is False
+        assert compact["summary_kind"] == "pixel_effect_only"
+        assert compact["auto_visual_verify"]["action_verified"] is True
+        assert compact["auto_visual_verify"]["semantic_verified"] is False
+        assert compact["auto_visual_verify"]["completion_evidence"] is False
+        assert compact["auto_visual_verify"]["summary_kind"] == "pixel_effect_only"
+
+    rolled_preview = json.loads(AgentRunner._native_action_result_preview(raw))
+    assert "verified" not in rolled_preview
+    assert rolled_preview["action_verified"] is True
+    assert rolled_preview["semantic_verified"] is False
+    assert rolled_preview["completion_evidence"] is False
+    assert rolled_preview["summary_kind"] == "pixel_effect_only"
+
+
 def test_draw_strokes_without_pixel_change_is_a_fail_closed_result(monkeypatch):
     from winpilot.agent import tools
     from winpilot.agent.tools import ToolSession
@@ -85,6 +130,34 @@ def test_draw_strokes_without_pixel_change_is_a_fail_closed_result(monkeypatch):
     assert data["verified"] is False
     assert data["visual_change_detected"] is False
     assert data["failure_type"] == "DRAW_NO_VISIBLE_CHANGE"
+
+
+def test_draw_strokes_default_motion_budget_is_shared_across_many_paths(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    durations = []
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(draw_strokes=lambda strokes, duration_s, hwnd: (
+            durations.append(duration_s)
+            or {"ok": True, "strokes_drawn": len(strokes)}
+        )),
+    )
+    session = ToolSession(task="create several continuous paths")
+    session.hwnd = 123
+    paths = [[[index, 10], [index + 5, 20]] for index in range(12)]
+
+    data = json.loads(session._t_draw_strokes({
+        "_draw_strokes_prepared": True,
+        "strokes": paths,
+        "defer_visual_verify": True,
+    }).text)
+
+    assert durations == [pytest.approx(0.1)]
+    assert data["motion_duration_per_stroke_s"] == 0.1
+    assert data["motion_duration_defaulted"] is True
 
 
 def test_draw_strokes_returns_frame_preparation_evidence(monkeypatch):

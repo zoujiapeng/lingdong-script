@@ -3,9 +3,11 @@ import type { FlowScript } from '../types';
 import {
   ControlPlaneClient,
   createGoalGraph,
+  EXPECTED_RUNTIME_CONTRACT_VERSION,
   normalizeBaseUrl,
   resolveControlPlaneConnection,
   resolveControlPlaneUrl,
+  runtimeCompatibilityError,
   websocketUrl,
 } from '../platform/client';
 import { edgeBranch, flowToArpGraph } from '../platform/flowToArpGraph';
@@ -58,6 +60,45 @@ function scriptFixture(): FlowScript {
 }
 
 describe('control plane client contracts', () => {
+  it('fails closed for missing, stale, or mismatched controller identity', () => {
+    const current = {
+      api_version: '2',
+      product: 'WinPilot',
+      status: {
+        runtime: {
+          contract_version: EXPECTED_RUNTIME_CONTRACT_VERSION,
+          source: { loaded_stamp: 'same', current_stamp: 'same', drifted: false },
+          git: { loaded_commit: 'abc', current_commit: 'abc' },
+        },
+      },
+      current_run: null,
+      capabilities: [],
+      contracts: {},
+    };
+
+    expect(runtimeCompatibilityError(null)).toContain('not been loaded');
+    expect(runtimeCompatibilityError({ ...current, status: {} })).toContain('incompatible');
+    expect(runtimeCompatibilityError(current)).toBe('');
+    expect(runtimeCompatibilityError({
+      ...current,
+      status: {
+        runtime: {
+          ...current.status.runtime,
+          source: { loaded_stamp: 'old', current_stamp: 'new', drifted: false },
+        },
+      },
+    })).toContain('changed after');
+    expect(runtimeCompatibilityError({
+      ...current,
+      status: {
+        runtime: {
+          ...current.status.runtime,
+          git: { loaded_commit: 'old', current_commit: 'new' },
+        },
+      },
+    })).toContain('repository commit');
+  });
+
   it('normalizes REST and WebSocket addresses', () => {
     expect(normalizeBaseUrl('http://127.0.0.1:8765')).toBe('http://127.0.0.1:8765/');
     expect(websocketUrl('https://example.test/runtime/')).toBe('wss://example.test/runtime/ws/events');

@@ -68,6 +68,7 @@
     "reflect_interval": 8
   },
   "controller": {
+    "native_visual_thinking": false,
     "target_window_capture_enabled": true,
     "multi_input_cooperation": false,
     "cooperative_cursor_tolerance_px": 12
