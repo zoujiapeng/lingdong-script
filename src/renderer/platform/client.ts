@@ -386,13 +386,13 @@ export function createGoalGraph(goal: string, maxSteps = 30): ArpGraph {
   return {
     format: 'arp/1',
     id: `goal-${timestamp}`,
-    name: goal.slice(0, 80) || 'Agent goal',
-    description: 'Memory-first goal run created by the Agent Cockpit.',
+    name: goal.slice(0, 80) || '智能代理任务',
+    description: '由智能代理工作台创建的记忆优先任务。',
     nodes: [
-      { id: 'start', kind: 'start', name: 'Start', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 0 },
-      { id: 'skill', kind: 'skill_replay', name: 'Reuse verified skill', config: { task: goal }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 120 },
-      { id: 'goal', kind: 'agent_goal', name: 'Agent exception handler', config: { goal, max_steps: maxSteps }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 180, y: 240 },
-      { id: 'end', kind: 'end', name: 'Done', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 360 },
+      { id: 'start', kind: 'start', name: '开始', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 0 },
+      { id: 'skill', kind: 'skill_replay', name: '复用已验证技能', config: { task: goal }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 120 },
+      { id: 'goal', kind: 'agent_goal', name: '智能代理任务', config: { goal, max_steps: maxSteps }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 180, y: 240 },
+      { id: 'end', kind: 'end', name: '完成', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 360 },
     ],
     edges: [
       { id: 'start-skill', source: 'start', target: 'skill', branch: 'next', label: '' },

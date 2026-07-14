@@ -71,19 +71,19 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
           version: '2.0.0',
         },
         nodes: [
-          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: 'Start' }, label: 'Start', status: 'idle' },
+          { id: ids.start, type: 'start', x: 360, y: 40, params: { label: '开始' }, label: '开始', status: 'idle' },
           {
             id: ids.batch,
             type: 'action_batch',
             x: 360,
             y: 180,
             params: {
-              subgoal: 'Establish a stable controller baseline',
+              subgoal: '建立稳定的控制器基线',
               actions: [{ action: 'wait', duration_ms: 80 }],
               stop_on_error: true,
               sync: false,
             },
-            label: 'Controller batch',
+            label: '控制器批次',
             status: 'idle',
           },
           {
@@ -92,11 +92,11 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
             x: 360,
             y: 330,
             params: {
-              message: 'Local quickstart checkpoint',
+              message: '本地起步检查点',
               timeout_s: 30,
               approved: true,
             },
-            label: 'Local checkpoint',
+            label: '本地检查点',
             status: 'idle',
           },
           {
@@ -105,10 +105,10 @@ export const PRESET_TEMPLATES: ScriptTemplate[] = [
             x: 360,
             y: 480,
             params: { required: ['human_gate'] },
-            label: 'Evidence gate',
+            label: '证据门',
             status: 'idle',
           },
-          { id: ids.end, type: 'end', x: 360, y: 630, params: { label: 'Done' }, label: 'Done', status: 'idle' },
+          { id: ids.end, type: 'end', x: 360, y: 630, params: { label: '完成' }, label: '完成', status: 'idle' },
         ],
         edges: [
           { id: nanoid(), from_node: ids.start, from_port: 'output', to_node: ids.batch, to_port: 'input' },

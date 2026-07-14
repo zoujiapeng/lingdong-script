@@ -81,7 +81,7 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
     });
   };
 
-  const start = add('start', { label: 'Start' } as NodeParams);
+  const start = add('start', { label: '开始' } as NodeParams);
   let previous = start;
   for (const step of script.steps || []) {
     const stepTarget = step.target_window ?? targetWindow;
@@ -96,7 +96,7 @@ export function wpsToFlowScript(script: WpsScript): FlowScript {
     link(previous, node);
     previous = node;
   }
-  const end = add('end', { label: 'End' } as NodeParams);
+  const end = add('end', { label: '结束' } as NodeParams);
   link(previous, end);
 
   const now = new Date().toISOString();
