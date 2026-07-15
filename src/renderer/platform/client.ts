@@ -204,7 +204,21 @@ export class ControlPlaneClient {
     return this.request('api/traces');
   }
 
-  scripts(): Promise<Array<{ file: string; name: string; task: string; steps: number }>> {
+  scripts(): Promise<Array<{
+    file: string;
+    name: string;
+    task: string;
+    steps: number;
+    format: string;
+    valid: boolean;
+    validation_error?: string;
+    trust: 'verified' | 'draft';
+    memory_id?: string | null;
+    memory_status?: string | null;
+    verification_state?: string;
+    verification_count?: number;
+    script_sha256?: string;
+  }>> {
     return this.request('api/scripts');
   }
 
@@ -218,8 +232,46 @@ export class ControlPlaneClient {
     uses?: number;
     successes?: number;
     provisional?: boolean;
+    conditions?: string[];
+    evidence?: string[];
+    verification?: Array<Record<string, unknown>>;
+    applicability?: Record<string, unknown>;
+    verification_state?: string;
+    script_sha256?: string;
   }>> {
     return this.request('api/memory');
+  }
+
+  memoryLineage(memoryId: string): Promise<{
+    ok: boolean;
+    node: Record<string, any>;
+    related: Array<Record<string, any>>;
+    attempts: Array<Record<string, any>>;
+  }> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}/lineage`);
+  }
+
+  updateMemory(memoryId: string, patch: Record<string, unknown>): Promise<Record<string, any>> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  retireMemory(memoryId: string): Promise<{ ok: boolean; id: string }> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}/retire`, { method: 'POST' });
+  }
+
+  deleteMemory(memoryId: string): Promise<{ ok: boolean }> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}`, { method: 'DELETE' });
+  }
+
+  sessions(): Promise<Array<{ task: string; status: string; result: string; run_id: string }>> {
+    return this.request('api/session');
+  }
+
+  clearSessions(): Promise<{ ok: boolean }> {
+    return this.request('api/session', { method: 'DELETE' });
   }
 
   script<T = Record<string, unknown>>(file: string): Promise<T> {
@@ -261,10 +313,14 @@ export class ControlPlaneClient {
     return this.request('api/v2/replay/apprentice/status');
   }
 
-  apprenticeStart(task: string, app = ''): Promise<Record<string, any>> {
+  apprenticeStart(
+    task: string,
+    app = '',
+    verification: Array<Record<string, unknown>> = [],
+  ): Promise<Record<string, any>> {
     return this.request('api/v2/replay/apprentice/start', {
       method: 'POST',
-      body: JSON.stringify({ task, app }),
+      body: JSON.stringify({ task, app, verification }),
     });
   }
 
@@ -272,11 +328,19 @@ export class ControlPlaneClient {
     return this.request('api/v2/replay/apprentice/stop', { method: 'POST' });
   }
 
-  verifyMemory(memoryId: string, evidence: string): Promise<Record<string, any>> {
-    return this.request(`api/memory/${encodeURIComponent(memoryId)}/verify`, {
+  startMemoryVerification(memoryId: string): Promise<{
+    ok: boolean;
+    job: { replay_id: string; status: string };
+  }> {
+    return this.request(`api/memory/${encodeURIComponent(memoryId)}/verification-runs`, {
       method: 'POST',
-      body: JSON.stringify({ evidence, status: 'verified' }),
     });
+  }
+
+  memoryVerificationStatus(memoryId: string, replayId: string): Promise<Record<string, any>> {
+    return this.request(
+      `api/memory/${encodeURIComponent(memoryId)}/verification-runs/${encodeURIComponent(replayId)}`,
+    );
   }
 
   traceScreenshotUrl(runId: string, path: string): string {

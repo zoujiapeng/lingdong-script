@@ -46,7 +46,11 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
     )
     manager = apprentice.ApprenticeManager(fake)
 
-    started = manager.start("Send a message", app="QQ")
+    started = manager.start(
+        "Send a message",
+        app="QQ",
+        verification=[{"predicate": "visible.text", "value": "sent"}],
+    )
     assert started["recording"] is True
     assert manager.status()["task"] == "Send a message"
 
@@ -61,6 +65,8 @@ def test_apprentice_lesson_becomes_editable_script_and_provisional_skill(tmp_pat
     assert canonical["format"] == "automation-ir/1"
     assert saved["task"] == "Send a message"
     assert saved["source"] == "apprentice"
+    assert saved["evidence"]["required"] == [{"predicate": "visible.text", "value": "sent"}]
+    assert captured[0][1]["verification"] == [{"predicate": "visible.text", "value": "sent"}]
     assert saved["source_session"] == started["session_id"]
     assert captured[0][0][:2] == ("Send a message", "QQ")
     assert captured[0][1]["verified"] is False

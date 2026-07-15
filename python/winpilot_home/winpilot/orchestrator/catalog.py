@@ -16,6 +16,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=False,
             requires_llm=True,
             input_schema={"goal": "string", "max_steps": "integer?"},
+            flow_node_types=["agent_goal"],
         ),
         CapabilitySpec(
             id="controller.batch",
@@ -27,6 +28,21 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"actions": "array", "sync": "object?", "subgoal": "string?"},
+            flow_node_types=[
+                "action_batch",
+                "click",
+                "click_text",
+                "input_text",
+                "keyboard",
+                "swipe",
+                "focus_window",
+                "launch_program",
+                "screenshot",
+                "clipboard_set",
+                "clipboard_get",
+                "mouse_operation",
+                "wait",
+            ],
         ),
         CapabilitySpec(
             id="skill.replay",
@@ -38,6 +54,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"script": "string?", "task": "string?", "memory_id": "string?"},
+            flow_node_types=["skill_replay"],
         ),
         CapabilitySpec(
             id="task.stage",
@@ -65,6 +82,7 @@ def capability_catalog() -> list[CapabilitySpec]:
                 "session": "string?",
                 "pace_ms": "integer?",
             },
+            flow_node_types=["replay_step"],
         ),
         CapabilitySpec(
             id="control.condition",
@@ -76,6 +94,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"source": "string", "operator": "string", "value": "any"},
+            flow_node_types=["condition"],
         ),
         CapabilitySpec(
             id="control.delay",
@@ -87,6 +106,19 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"duration_ms": "integer"},
+            flow_node_types=["wait"],
+        ),
+        CapabilitySpec(
+            id="control.variable",
+            name="Set variable",
+            category="control",
+            description="Set one graph variable without involving the language model.",
+            node_kind=ArpNodeKind.SET_VARIABLE,
+            latency_class="local",
+            deterministic=True,
+            requires_llm=False,
+            input_schema={"name": "string", "value": "any"},
+            flow_node_types=["variable_set"],
         ),
         CapabilitySpec(
             id="evidence.gate",
@@ -98,6 +130,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"required": "array"},
+            flow_node_types=["evidence_gate"],
         ),
         CapabilitySpec(
             id="human.approval",
@@ -109,6 +142,7 @@ def capability_catalog() -> list[CapabilitySpec]:
             deterministic=True,
             requires_llm=False,
             input_schema={"message": "string", "approved": "boolean?"},
+            flow_node_types=["human_gate"],
         ),
         CapabilitySpec(
             id="legacy.flow",

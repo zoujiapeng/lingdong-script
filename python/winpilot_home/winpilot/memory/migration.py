@@ -117,6 +117,7 @@ def migrate_json_if_needed(
         if store.get_node(node_id, hydrate=False):
             continue
         kind = _kind_for(recipe)
+        untrusted_action = kind in {"skill", "procedure"} and not recipe.get("manual")
         steps = _as_list(recipe.get("steps"))
         title = str(recipe.get("task") or recipe.get("title") or "legacy memory")[:500]
         app = str(recipe.get("app") or "")[:200]
@@ -126,8 +127,13 @@ def migrate_json_if_needed(
             conditions = _default_conditions(recipe)
         if not evidence:
             evidence = _default_evidence(recipe)
-        status = "provisional" if recipe.get("provisional") else "active"
-        confidence = 0.35 if recipe.get("provisional") else 0.65
+        if untrusted_action:
+            evidence = [
+                *evidence,
+                "Legacy import has no current script digest or machine verification provenance.",
+            ][:5]
+        status = "provisional" if untrusted_action or recipe.get("provisional") else "active"
+        confidence = 0.35 if status == "provisional" else 0.65
         if recipe.get("successes"):
             confidence = min(0.95, confidence + min(int(recipe.get("successes") or 0), 5) * 0.05)
         node = store.add_node(
@@ -138,7 +144,18 @@ def migrate_json_if_needed(
             app=app,
             status=status,
             confidence=confidence,
-            payload={**recipe, "legacy_json": True, "migrated_at": int(time.time())},
+            payload={
+                **recipe,
+                **({
+                    "provisional": True,
+                    "script_sha256": "",
+                    "verification_state": "legacy_unverified",
+                    "verification_replay_id": "",
+                    "verified_at": None,
+                } if untrusted_action else {}),
+                "legacy_json": True,
+                "migrated_at": int(time.time()),
+            },
             source=str(path),
             manual=bool(recipe.get("manual")),
             node_id=node_id,

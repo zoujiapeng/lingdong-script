@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any
 
+from .applicability import evaluate, runtime_context
 from .store import MemoryStore
 from .types import ACTION_KINDS, FACTUAL_KINDS, MemoryCandidate, TaskFrame
 
@@ -63,11 +64,21 @@ def parse_task_frame(
     runtime_profile: dict[str, Any] | None = None,
     session_context: Any = None,
 ) -> TaskFrame:
-    runtime_profile = runtime_profile or {}
+    profile = runtime_profile or {}
+    profile_data = (
+        profile
+        if isinstance(profile, dict)
+        else profile.to_dict() if callable(getattr(profile, "to_dict", None)) else {}
+    )
+    current = runtime_context(profile_data, session_context)
     return TaskFrame(
         task=task or "",
-        app=str(runtime_profile.get("app") or runtime_profile.get("window_title") or ""),
-        coding=bool(runtime_profile.get("coding") or runtime_profile.get("notes_only")),
+        app=current["app"],
+        app_version=current["app_version"],
+        stage_type=current["stage_type"],
+        parameters=current["parameters"],
+        anchors=current["anchors"],
+        coding=bool(profile_data.get("coding") or profile_data.get("notes_only")),
         volatile=is_volatile_state_task(task or ""),
         words=words_for(task or ""),
         bigrams=bigrams(task or ""),
@@ -99,6 +110,21 @@ def passes_hard_filters(
         return False
     if is_volatile_state_task(str(node.get("title") or "")) and kind in ACTION_KINDS:
         return False
+    if kind in ACTION_KINDS:
+        decision = evaluate(
+            node,
+            frame.task,
+            runtime_profile={
+                "app": frame.app,
+                "app_version": frame.app_version,
+                "stage_type": frame.stage_type,
+                "parameters": frame.parameters,
+                "anchors": frame.anchors,
+            },
+            require_runtime_context=False,
+        )
+        if not decision.allowed:
+            return False
     return True
 
 
@@ -192,8 +218,19 @@ def top_reusable_skill(
     task: str,
     store: MemoryStore,
     runtime_profile: dict[str, Any] | None = None,
+    session_context: Any = None,
+    *,
+    parameters: dict[str, Any] | None = None,
+    require_runtime_context: bool = False,
 ) -> tuple[dict[str, Any] | None, float]:
-    frame, candidates = recall(task, store, runtime_profile, notes_only=False, limit=6)
+    frame, candidates = recall(
+        task,
+        store,
+        runtime_profile,
+        session_context,
+        notes_only=False,
+        limit=6,
+    )
     for candidate in candidates:
         node = candidate.node
         payload = node.get("payload") or {}
@@ -207,7 +244,18 @@ def top_reusable_skill(
             node.get("kind") == "skill"
             and node.get("status") == "active"
             and script
+            and not payload.get("provisional")
+            and payload.get("script_sha256")
+            and payload.get("verification_state") in {"source_run_verified", "replay_verified"}
             and strong_match(frame.task, str(node.get("title") or ""))
+            and evaluate(
+                node,
+                task,
+                runtime_profile=runtime_profile,
+                session_context=session_context,
+                parameters=parameters,
+                require_runtime_context=require_runtime_context,
+            ).allowed
         ):
             return node, candidate.score
     return None, 0.0

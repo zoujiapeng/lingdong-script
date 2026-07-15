@@ -290,8 +290,10 @@ GUI-only 任务不应暴露 coding/file/search 工具。
 - `recorder/trace.py` 通过有界异步 writer 记录 BUS、截图和 LLM I/O，before/after 由 `action_id` 配对。
 - `automation-ir/1` 是新 Skill/Flow/trace artifact；`.wps.json` 是兼容步骤格式。
 - 直接 Agent 的 `reuse_skill` 保留对已验证 `.automation.json` 的兼容（旧 WPS 仍可读）；自然语言 Task Contract 主路径按 `stage_type + parameters + app_version` 组合参数化阶段 Skill，保存前置条件、输出 artifact、验证条件和失效原因。0-token replay 后仍要求当前状态验证，miss/fail 只恢复当前阶段。
+- `reuse_skill` 会强匹配 active Memory Skill、typed applicability 和当前脚本 SHA-256；即使显式传 `memory_id` 也不能绕过任务意图与运行时条件。旧 WPS 可读，但没有可验证摘要的迁移条目不会直接复用。
 - Replay 成功不是 done 证据；必须 observe/read_text/expect 证明最终结果。
 - FlowScript 导入只是编辑桥。WPS-only 节点 fail-fast，WPS 来源基础 GUI 节点要求真实 Electron feature bridge。
+- Apprentice 开始录制时必须声明至少一个结构化终态谓词（可见文本、可见窗口、文件存在或进程运行）。停止录制只产生 provisional candidate；只有真实 replay 的结构化 postflight 全部通过才晋升。
 
 ## Memory
 
@@ -299,8 +301,13 @@ GUI-only 任务不应暴露 coding/file/search 工具。
 
 - 主存储：`python/winpilot_home/memory.db`。
 - 运行时：`memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py`。
+- 适用性：`memory/applicability.py` 执行 task/app/app_version/stage/parameters/anchors 条件，conditions 文本只承担解释职责。
 - 兼容门面：`memory/experience.py`。
 - `python/winpilot_home/experience_memory.json` 是迁移/兼容数据，不是主运行时事实。
+- Agent run 只由 compiler 幂等写入一次；候选版本以 `supersedes` 建谱系，不会因同名直接删除旧 Skill。
+- “技能与学习”把 verified skills、draft/invalid scripts、长期记忆和 session memory 分开显示；lineage 同时显示条件、evidence、attempts 和 relations。
+
+旧工具结果的通用折叠 checkpoint 保留当前 goal、mutable plan、关键窗口、run-state/失败原因和最近三条工具结论。原生视觉 rolling context 继续以最新权威帧为准；内容未变化的 world advisory 会去重。长期 Memory Pack 与 session context 都不能覆盖新鲜截图、文件或工具证据。
 
 清除记忆后 agent 变笨，通常说明 routine、感知或验证硬实力不足；不能靠用户历史记忆撑通用能力。
 

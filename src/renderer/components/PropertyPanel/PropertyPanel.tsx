@@ -607,7 +607,6 @@ function NodeParamEditor({ node, updateParams }: { node: FlowNode; updateParams:
             <div className="form-group"><label className="form-label">点击模式</label>
               <select className="form-input" value={p.mode || 'coordinate'} onChange={(e) => updateParams({ ...p, mode: e.target.value })}>
                 <option value="coordinate">坐标点击</option>
-                <option value="image">图片识别</option>
                 <option value="text">文字识别</option>
               </select>
             </div>

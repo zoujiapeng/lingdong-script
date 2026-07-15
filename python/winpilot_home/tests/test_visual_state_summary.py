@@ -20,3 +20,29 @@ def test_loop_surfaces_visual_advisory(monkeypatch):
     assert runner.messages[-1]["content"] == (
         "[visual state warning] close the color modal before drawing"
     )
+
+
+def test_loop_deduplicates_unchanged_world_advisories(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+
+    runner = AgentRunner("open settings")
+    runner.session.world_enabled = True
+    monkeypatch.setattr(runner.session.world, "state", lambda: {})
+    monkeypatch.setattr(runner.session.world, "screen_advisory", lambda: "same screen")
+    monkeypatch.setattr(runner.session.world, "advisory", lambda: "same advice")
+    monkeypatch.setattr(runner.session.world, "working_set_advisory", lambda: "")
+    monkeypatch.setattr(runner.run_state, "guidance", lambda: "")
+    monkeypatch.setattr(runner, "_maybe_structured_replan", lambda: None)
+
+    runner._surface_world_advisory()
+    runner._surface_world_advisory()
+
+    contents = [message["content"] for message in runner.messages]
+    assert contents.count("[screen watch] same screen") == 1
+    assert contents.count("[系统观察] same advice") == 1
+
+    runner.messages = runner.messages[-1:]
+    runner._surface_world_advisory()
+
+    contents = [message["content"] for message in runner.messages]
+    assert contents.count("[screen watch] same screen") == 1

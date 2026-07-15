@@ -6,6 +6,8 @@ from typing import Any
 
 from .. import config
 from ..utils.log import logger
+from .applicability import build_applicability
+from .experience import _link_prior_versions, script_sha256
 from .migration import migrate_json_if_needed
 from .retriever import is_volatile_state_task
 from .store import MemoryStore
@@ -85,7 +87,16 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
         app_hint = str(getattr(snapshot, "title", "") or "")
     except Exception:
         app_hint = ""
-    episode = memory_store.add_node(
+    prior_for_run = [
+        node
+        for node in memory_store.list_nodes(include_inactive=True, limit=500)
+        if run_id and str(node.get("source") or "") == run_id
+    ]
+    prior_episode = next((node for node in prior_for_run if node.get("kind") == "episode"), None)
+    prior_recipe = next((node for node in prior_for_run if node.get("kind") in {"procedure", "skill"}), None)
+    prior_warning = next((node for node in prior_for_run if node.get("kind") == "warning"), None)
+
+    episode = prior_episode or memory_store.add_node(
         "episode",
         task[:500] or run_id or "agent run",
         summary=f"Run {status}: {task[:200]}",
@@ -105,8 +116,12 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
     )
 
     created: dict[str, Any] = {"episode": episode}
+    if prior_recipe:
+        created["recipe"] = prior_recipe
+    if prior_warning:
+        created["warning"] = prior_warning
     is_coding = bool(getattr(runner, "_is_coding", False))
-    if status == "done" and not is_coding and steps and not is_volatile_state_task(task):
+    if status == "done" and not prior_recipe and not is_coding and steps and not is_volatile_state_task(task):
         verified = _verified_run(runner)
         script = ""
         if verified:
@@ -119,8 +134,16 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
                 logger.debug("run has no replayable script: %s", exc)
             except OSError as exc:
                 logger.warning("failed to export replay script: %s", exc)
-        kind = "skill" if verified and script else "procedure"
-        provisional = not (verified and script)
+        digest = script_sha256(script) if verified and script else ""
+        kind = "skill" if verified and script and digest else "procedure"
+        provisional = not (verified and script and digest)
+        profile = getattr(runner, "runtime_profile", None)
+        profile_data = (
+            profile.to_dict()
+            if callable(getattr(profile, "to_dict", None))
+            else dict(profile or {}) if isinstance(profile, dict) else {}
+        )
+        stage_type = str(profile_data.get("stage_type") or "")
         node = memory_store.add_node(
             kind,
             task[:500],
@@ -138,6 +161,18 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
                 "successes": 0,
                 "provisional": provisional,
                 "manual": False,
+                "stage_type": stage_type,
+                "parameters": {},
+                "app_version": "",
+                "verification": [],
+                "applicability": build_applicability(
+                    task,
+                    app_hint,
+                    stage_type=stage_type,
+                ),
+                "script_sha256": digest,
+                "verification_state": "source_run_verified" if not provisional else "provisional",
+                "verified_source_run_id": run_id if not provisional else "",
             },
             source=run_id,
             manual=False,
@@ -149,8 +184,29 @@ def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, An
             memory_store.add_artifact(node["id"], "wps_script", script, {"run_id": run_id})
         if episode and node:
             memory_store.add_edge(node["id"], episode["id"], "derived_from")
+        if node and not provisional:
+            verification = memory_store.add_node(
+                "observation",
+                f"Source run verified: {task[:300]}",
+                summary="The originating run completed with independently verified action evidence.",
+                status="active",
+                confidence=0.85,
+                payload={
+                    "run_id": run_id,
+                    "done_verified": bool(getattr(runner, "_done_verified", False)),
+                    "had_verified_action": bool(getattr(runner, "_had_verified_action", False)),
+                    "script": script,
+                    "script_sha256": digest,
+                },
+                source=run_id,
+                manual=False,
+                anchors=[task, app_hint, run_id],
+            )
+            if verification:
+                memory_store.add_edge(node["id"], verification["id"], "verified_by")
+        _link_prior_versions(memory_store, node, task, retire_previous=not provisional)
         created["recipe"] = node
-    elif status in {"fail", "error"}:
+    elif status in {"fail", "error"} and not prior_warning:
         used = []
         session = getattr(runner, "session", None)
         for rid in getattr(session, "used_memory_recipe_ids", []) or []:

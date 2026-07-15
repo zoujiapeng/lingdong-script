@@ -16,7 +16,6 @@ export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
   const [showUnifiedSearch, setShowUnifiedSearch] = useState(false);
   const scripts = useStore((s) => s.scripts);
   const activeScriptId = useStore((s) => s.activeScriptId);
-  const featureList = useStore((s) => s.featureList);
 
   // Combine store scripts with registry templates
   const allScripts = useMemo(() => {
@@ -56,11 +55,11 @@ export function ScriptBrowser({ onSelect, onCancel }: ScriptBrowserProps) {
   const filtered = useMemo(() => {
     if (!search.trim()) return allScripts;
     // Use unified search for better matching
-    unifiedSearch.rebuildIndex(featureList as any);
+    unifiedSearch.rebuildIndex();
     const unified = unifiedSearch.search(search, { types: ['template'], maxResults: 20, minScore: 10 });
     const matchedIds = new Set(unified.map(r => r.item.id));
     return allScripts.filter(s => matchedIds.has(s.id));
-  }, [allScripts, search, featureList]);
+  }, [allScripts, search]);
 
   const handleSelect = (entry: { id: string; name: string }) => {
     // Warn if selecting current script (circular reference)

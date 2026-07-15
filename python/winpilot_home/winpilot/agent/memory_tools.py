@@ -121,7 +121,10 @@ class MemoryToolMixin:
         }
         if not patch:
             return ToolResult("memory_update requires at least one field.")
-        updated = experience.update(memory_id, patch)
+        try:
+            updated = experience.update(memory_id, patch)
+        except ValueError as exc:
+            return ToolResult(_fmt({"ok": False, "error": str(exc)}))
         if updated is not None:
             return ToolResult(_fmt({"ok": True, "memory": updated}))
         store = experience._store()
@@ -142,7 +145,31 @@ class MemoryToolMixin:
 
         task = str(args.get("task", "")).strip()
         memory_id = str(args.get("memory_id") or args.get("recipe_id") or "").strip()
-        script, recipe = experience.reusable_script_for(task or self.task, memory_id)
+        profile = getattr(self, "runtime_profile", None)
+        profile_data = (
+            profile.to_dict()
+            if callable(getattr(profile, "to_dict", None))
+            else dict(profile or {}) if isinstance(profile, dict) else {}
+        )
+        snapshot = getattr(self, "snapshot", None)
+        if snapshot is not None:
+            profile_data["app"] = str(getattr(snapshot, "title", "") or "")
+        profile_data["anchors"] = [
+            value
+            for value in (
+                str(getattr(snapshot, "title", "") or ""),
+                str(getattr(self, "target_hint", "") or ""),
+            )
+            if value
+        ]
+        script, recipe = experience.reusable_script_for(
+            task or self.task,
+            memory_id,
+            runtime_profile=profile_data,
+            session_context=self,
+            parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else None,
+            require_runtime_context=True,
+        )
         if not script:
             return ToolResult(
                 "No matching verified replay script is available. Use live GUI actions."

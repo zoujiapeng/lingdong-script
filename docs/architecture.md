@@ -55,8 +55,10 @@ flowchart LR
 - `perception/surface_binding.py`：用目标 hwnd、capture scope、物理 frame region 和窗口 client authority 维持稳定交互面；检测缺失、初始含糊、陈旧帧、坐标空间变化和未经确认的布局位移均 fail-closed。
 - `tasking/adapters.py`、`tasking/completion.py`：通信领域动作与合同验收；粘贴预览不算送达，图片完成要求同一 artifact 的真实发送和发送后视觉对应证据。
 - `runtime_jobs.py`：统一 Agent、ARP、Replay 和 schedule 的异步生命周期、取消、查询和 `interactive_runtime` 资源租约。
+- Memory verification 也使用同一个 `interactive_runtime` 租约；它不会与 Agent、ARP 或普通 replay 并发争用桌面。
 - `automation_ir.py`：新流程和 Skill 的规范 artifact；WPS/FlowScript 是受检 adapter。
 - `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；点击、文字锚点、输入、键盘、拖拽、启动、聚焦、截图、剪贴板和部分组合节点直接编译为 Controller batch；其余旧节点显式标记 `legacy_flow` 并在运行前拒绝。
+- `orchestrator/catalog.py` 的 `CapabilitySpec.flow_node_types` 与 renderer 的 `RUNNABLE_FLOW_NODE_TYPES` 共同形成可见节点目录；只有交集进入节点库和统一搜索。旧定义仍用于打开历史文件，不代表可新建或可运行。
 
 ### ARP 节点
 
@@ -286,8 +288,10 @@ Agent live run
 - `recorder/trace.py` 是离线 replay 源。
 - `POST /api/replay` 返回 `replay_id`；`GET /api/replay/{replay_id}` 查询状态、结果和失败细节；`POST /api/replay/{replay_id}/cancel` 取消。
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。
+- 当前预置模板只有由同一 registry 生成 metadata 与脚本的通用可执行模板；模板 ID 不存在时不会静默回退到另一个模板。
 - WPS-only 节点带 `_requires_wps_replay`，前端 executor 必须 fail-fast。
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
+- 当前 Studio 不从动态 `@feature` 索引创建 `tool_call` 节点。`featureList`、属性面板和旧 Electron/Python engine 只保留给历史 Flow/外部兼容入口；当前 store 调用兼容浏览器 executor 时强制 `require_real_features=true`。
 - Agent 内的 `reuse_skill` 保留兼容。自然语言 Task Contract 按 `stage_type + parameters + app_version` 组合已验证阶段 Skill；重放后仍执行该阶段的当前状态验证，失败只进入当前 `task_stage`，不会把整项任务退回探索。
 
 Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps，Flow editor 内存仍使用 FlowScript，legacy DSL 仍由 `python/engine/` 处理；但所有新持久化、Skill 和运行编译入口必须先经过 IR，不再新增第四种 metadata envelope。
@@ -298,9 +302,15 @@ Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps�
 
 - `python/winpilot_home/memory.db` 是主存储。
 - `memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py` 组成运行时。
+- `memory/applicability.py` 保存并执行通用 typed applicability：task intent、app/window、app version、stage type、parameters 和 required anchors。显式 ID 与自动召回走同一检查。
 - `memory/experience.py` 是旧 recipe API 的兼容门面。
 - `python/winpilot_home/experience_memory.json` 只用于迁移/兼容，不是主运行时事实。
 - “智能代理”页由 Task Contract 编译器为可复用阶段插入 Memory Graph skill gate；`miss` / `fail` 只进入对应 `task_stage`。记忆正负反馈仍按最终 ARP run 结果计算，不按局部重放提前奖励。
+- Agent 完成后只由 `memory/compiler.py` 幂等写一次 episode/recipe/verification observation。同名 provisional 版本不会删除或停用旧 active 版本；新版本真实验证后才以 `supersedes` 关系退役旧版本。
+- Apprentice 脚本先是 provisional candidate。`verification-runs` 会绑定候选证据快照与脚本 SHA-256，真实 replay 的结构化 postflight checks 全部通过后才写 `verified_by` 并晋升；排队期间候选或脚本变化会让作业失败。
+- `GET /api/scripts` 将合法性和信任分开返回：`valid` 只代表格式可读，`trust=verified` 还要求 active Skill 与当前文件摘要一致。工作台分开展示 verified Skill、draft/invalid artifact、长期记忆和 session memory。
+
+上下文有两条压缩路径。原生视觉路径滚动丢弃旧工具事务并保留当前计划和权威帧；通用 folding checkpoint 保留任务目标、当前 mutable plan、窗口标题/hwnd、run state 与失败原因、world change，以及最近三条工具结果的结论。相同 world/screen/run-state advisory 在内容未变化时不重复进入消息。Session memory 只对“继续/刚才/再来一次”等指代型任务注入，不能替代当前状态证据。
 
 记忆不能弥补硬实力。清除记忆后 agent 变笨，通常说明 routine、感知或验证仍不足，不应依赖历史记忆撑通用能力。
 

@@ -769,20 +769,24 @@ class StageRuntime:
             try:
                 from ..memory import experience
 
-                _script, recipe = (
-                    experience.reusable_script_for(goal)
-                    if contract.experience_policy != "disabled"
-                    else (None, None)
-                )
-                if recipe and recipe.get("id"):
-                    experience.update(str(recipe["id"]), {
+                recipe_node = next((
+                    item
+                    for item in experience._store().list_nodes(
+                        kinds={"skill", "procedure"},
+                        include_inactive=True,
+                        limit=200,
+                    )
+                    if str(item.get("source") or "") == str(runner.run_id)
+                ), None) if contract.experience_policy != "disabled" else None
+                if recipe_node and recipe_node.get("id"):
+                    experience.update(str(recipe_node["id"]), {
                         "stage_type": stage.type.value,
                         "parameters": dict(stage.parameters),
                         "outputs": [item.model_dump(mode="json") for item in stage.outputs],
-                        "verification": [item.id for item in stage.obligations],
+                        "stage_obligations": [item.id for item in stage.obligations],
                         "app_version": str(params.get("app_version") or ""),
                         "failure_reason": "",
-                    })
+                    }, preserve_trust=True)
             except Exception:
                 # Memory enrichment must not change the stage result.
                 pass

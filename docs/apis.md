@@ -72,7 +72,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/trace/{run_id}/shot/{name}` | 读取 trace 截图 |
 | POST | `/api/export/{run_id}` | 导出兼容 `.wps.json` |
 | POST | `/api/export/{run_id}/ir` | 导出 `automation-ir/1` |
-| GET | `/api/scripts` | 列脚本 |
+| GET | `/api/scripts` | 列脚本 artifact；返回 `valid/validation_error` 与独立的 `trust/memory_id/script_sha256` |
 | GET/PUT | `/api/script/{file}` | 读取/保存 `.wps.json` |
 | GET | `/api/script/{file}/ir` | 将 `.wps.json` 包装为 `automation-ir/1` |
 | GET | `/api/automation-ir/{file}` | 读取并校验 `.automation.json` |
@@ -90,7 +90,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v2/replay/apprentice/start`、`/api/v2/replay/apprentice/stop` | 开始或停止 Apprentice 录制 |
+| POST | `/api/v2/replay/apprentice/start`、`/api/v2/replay/apprentice/stop` | 开始或停止 Apprentice 录制；start 必须带非空结构化 `verification` |
 | GET | `/api/v2/replay/apprentice/status` | Apprentice 录制状态 |
 | POST | `/api/replay` | 启动 replay job，返回 `replay_id` |
 | GET | `/api/replay/{replay_id}` | 查询 replay job 状态、结果和失败细节 |
@@ -98,10 +98,13 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET/POST | `/api/agent-schedules` | 列出或创建 WinPilot Agent 计划任务 |
 | PATCH/DELETE | `/api/agent-schedules/{schedule_id}` | 更新、启用、重新定时或禁用计划任务 |
 | GET/POST/DELETE | `/api/memory` | 兼容 recipe 视图的记忆列表、创建和清空 |
-| PUT/DELETE | `/api/memory/{recipe_id}` | 更新或删除单条记忆 |
+| PUT/DELETE | `/api/memory/{recipe_id}` | 更新或删除单条记忆；动作记忆的适用条件/证据被修改后自动退回 provisional，不能用 PUT 手工激活 |
 | POST | `/api/memory/search` | Memory Graph 搜索 |
-| GET | `/api/memory/{recipe_id}/lineage`、`/api/memory/{recipe_id}/related` | 谱系和邻接关系 |
-| POST | `/api/memory/{recipe_id}/retire`、`/api/memory/{recipe_id}/verify` | 退役或人工验证记忆 |
+| GET | `/api/memory/{recipe_id}/lineage`、`/api/memory/{recipe_id}/related` | 谱系、邻接关系和 attempts |
+| POST | `/api/memory/{recipe_id}/retire` | 退役记忆 |
+| POST | `/api/memory/{recipe_id}/verification-runs` | 排队真实 Skill 验证 replay；与其他交互运行共享资源锁 |
+| GET | `/api/memory/{recipe_id}/verification-runs/{replay_id}` | 查询 Skill 验证状态、postflight 和晋升结果 |
+| POST | `/api/memory/{recipe_id}/verify` | 兼容查询入口，只接受真实 `replay_id`，不再接受人工 evidence 文本或执行晋升 |
 | GET/DELETE | `/api/session` | 会话记忆 |
 | WS | `/ws/events` | BUS 事件流；使用同一控制 token |
 | POST | `/mcp` | WinPilot GUI Controller + ARP 的 Streamable HTTP MCP |
@@ -118,6 +121,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 - `agent_plan` WebSocket 事件里的计划可被模型在运行中完全替换、清空，或原子 add/update/remove/move/reopen。客户端应把新快照当作当前状态，不能把旧索引缓存成固定任务清单。
 - 计划完成、Controller 返回 `ok`、`screen_delta.changed=true`、颜色存在或 replay 成功都不是最终任务证据。完成仍由当前目标匹配的新鲜视觉核验或文件/进程等确定性 evidence 决定。
 - Agent、ARP、Replay 与计划任务按 `interactive_runtime` 资源排队。`desktop_action_queue` 对真实鼠标键盘保持 `physical` 全局单写；只有明确证明不会移动真实输入的窗口消息动作才可跨 hwnd 并发。
+- Memory verification 也按 `interactive_runtime` 排队。同一 memory 不能重复排队；候选、verification 条件或脚本摘要在排队/执行期间变化时 fail-closed。晋升要求 replay `ok=true`、非空结构化 postflight、所有 checks 通过且结束时 SHA-256 仍与开始时一致。
 
 `/api/trace/{run_id}/summary` 的 `low_latency` / `fast_gui` 是性能复盘入口，包含 capture、perception、LLM decision、action、post-verify、VLM、replan、skill reuse、p50/p95 以及 Controller/anchor 指标。没有外部 ground truth 的 `status=done` 不能据此换算成成功率。
 

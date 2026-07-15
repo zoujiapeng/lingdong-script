@@ -47,7 +47,13 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
     assert data["api_version"] == "2"
     assert data["contracts"]["arp"] == "arp/1"
     capability_ids = {item["id"] for item in data["capabilities"]}
-    assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate", "task.stage"} <= capability_ids
+    assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate", "task.stage", "control.variable"} <= capability_ids
+    advertised_nodes = {
+        node_type
+        for item in data["capabilities"]
+        for node_type in item.get("flow_node_types", [])
+    }
+    assert {"agent_goal", "action_batch", "skill_replay", "variable_set", "human_gate"} <= advertised_nodes
 
 
 def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph(client):

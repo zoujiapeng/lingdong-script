@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  Archive,
   Bot,
   BrainCircuit,
   Braces,
@@ -999,7 +1000,7 @@ function Studio({ plane }: { plane: Plane }) {
         </div>
       )}
       <div className={`arp-studio-shell${mobilePanel ? ` mobile-${mobilePanel}-open` : ''}`}>
-        <NodeLibrary />
+        <NodeLibrary capabilities={plane.capabilities} />
         <main className="arp-canvas-stage"><FlowCanvas /></main>
         <PropertyPanel />
         {mobilePanel && <button type="button" className="arp-studio-scrim" aria-label="关闭侧栏" onClick={() => setMobilePanel(null)} />}
@@ -1051,7 +1052,20 @@ function RunsView({ plane }: { plane: Plane }) {
 }
 
 interface TraceItem { run_id: string; task: string; status: string; steps: number }
-interface ScriptItem { file: string; name: string; task: string; steps: number }
+interface ScriptItem {
+  file: string;
+  name: string;
+  task: string;
+  steps: number;
+  format: string;
+  valid: boolean;
+  validation_error?: string;
+  trust: 'verified' | 'draft';
+  memory_id?: string | null;
+  memory_status?: string | null;
+  verification_state?: string;
+  verification_count?: number;
+}
 interface MemoryItem {
   id: string;
   task: string;
@@ -1062,7 +1076,14 @@ interface MemoryItem {
   uses?: number;
   successes?: number;
   provisional?: boolean;
+  conditions?: string[];
+  evidence?: string[];
+  verification?: Array<Record<string, any>>;
+  applicability?: Record<string, any>;
+  verification_state?: string;
+  script_sha256?: string;
 }
+interface SessionItem { task: string; status: string; result: string; run_id: string }
 
 type ReplayMode = 'offline_graph' | 'skill' | 'apprentice';
 
@@ -1070,9 +1091,17 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const [traces, setTraces] = useState<TraceItem[]>([]);
   const [scripts, setScripts] = useState<ScriptItem[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [recording, setRecording] = useState(false);
   const [replayMode, setReplayMode] = useState<ReplayMode>('offline_graph');
   const [apprenticeTask, setApprenticeTask] = useState('');
+  const [evidencePredicate, setEvidencePredicate] = useState('visible.text');
+  const [evidenceValue, setEvidenceValue] = useState('');
+  const [memoryView, setMemoryView] = useState<'long' | 'session'>('long');
+  const [selectedMemoryId, setSelectedMemoryId] = useState('');
+  const [memoryDetail, setMemoryDetail] = useState<Record<string, any> | null>(null);
+  const [memoryEvidencePredicate, setMemoryEvidencePredicate] = useState('visible.text');
+  const [memoryEvidenceValue, setMemoryEvidenceValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const loadScript = useStore((state) => state.loadScript);
@@ -1081,16 +1110,25 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
     if (!plane.baseUrl) return;
     try {
       const client = plane.getClient();
-      const [nextTraces, nextScripts, nextMemories, apprentice] = await Promise.all([
-        client.traces(), client.scripts(), client.memories(), client.apprenticeStatus(),
+      const [nextTraces, nextScripts, nextMemories, nextSessions, apprentice] = await Promise.all([
+        client.traces(), client.scripts(), client.memories(), client.sessions(), client.apprenticeStatus(),
       ]);
-      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setRecording(Boolean(apprentice.recording));
+      setTraces(nextTraces); setScripts(nextScripts); setMemories(nextMemories); setSessions(nextSessions); setRecording(Boolean(apprentice.recording));
       if (apprentice.task) setApprenticeTask((current) => current || apprentice.task || '');
       setError('');
     } catch (refreshError) { setError(refreshError instanceof Error ? refreshError.message : String(refreshError)); }
   }, [plane.baseUrl]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const verifiedScripts = useMemo(
+    () => scripts.filter((item) => item.valid && item.trust === 'verified'),
+    [scripts],
+  );
+  const draftScripts = useMemo(
+    () => scripts.filter((item) => !item.valid || item.trust !== 'verified'),
+    [scripts],
+  );
 
   const openSkill = async (file: string) => {
     setBusy(true);
@@ -1138,6 +1176,10 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
       setError('请输入要让学习器学习的工作流。');
       return;
     }
+    if (!recording && !evidenceValue.trim()) {
+      setError('请填写可机器检查的终态证据。');
+      return;
+    }
     setBusy(true);
     try {
       if (recording) {
@@ -1146,7 +1188,11 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         if (result.file) await openSkill(String(result.file));
         return;
       }
-      await plane.getClient().apprenticeStart(apprenticeTask.trim());
+      await plane.getClient().apprenticeStart(
+        apprenticeTask.trim(),
+        '',
+        [{ predicate: evidencePredicate, value: evidenceValue.trim() }],
+      );
       await refresh();
     } catch (recordError) { setError(recordError instanceof Error ? recordError.message : String(recordError)); }
     finally { setBusy(false); }
@@ -1155,9 +1201,69 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
   const verifyMemory = async (item: MemoryItem) => {
     setBusy(true); setError('');
     try {
-      await plane.getClient().verifyMemory(item.id, `人工已验证学习器重放：${item.task || item.id}`);
+      if (!item.verification?.length) throw new Error('请先为候选技能保存结构化终态证据。');
+      const client = plane.getClient();
+      const started = await client.startMemoryVerification(item.id);
+      const replayId = started.job.replay_id;
+      let completed: Record<string, any> | null = null;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const status = await client.memoryVerificationStatus(item.id, replayId);
+        if (['done', 'failed', 'stopped', 'canceled'].includes(String(status.status))) {
+          completed = status;
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      if (!completed) throw new Error('验证回放仍在排队或运行，请稍后刷新状态。');
+      if (completed.ok !== true) throw new Error(String(completed.error || '结构化回放证据未通过。'));
       await refresh();
     } catch (verifyError) { setError(verifyError instanceof Error ? verifyError.message : String(verifyError)); }
+    finally { setBusy(false); }
+  };
+
+  const inspectMemory = async (item: MemoryItem) => {
+    setBusy(true); setError('');
+    try {
+      if (selectedMemoryId === item.id) {
+        setSelectedMemoryId(''); setMemoryDetail(null); return;
+      }
+      const detail = await plane.getClient().memoryLineage(item.id);
+      setSelectedMemoryId(item.id);
+      setMemoryDetail(detail);
+      const requirement = item.verification?.[0] || {};
+      setMemoryEvidencePredicate(String(requirement.predicate || 'visible.text'));
+      setMemoryEvidenceValue(String(requirement.value || ''));
+    } catch (detailError) { setError(detailError instanceof Error ? detailError.message : String(detailError)); }
+    finally { setBusy(false); }
+  };
+
+  const saveMemoryEvidence = async (item: MemoryItem) => {
+    if (!memoryEvidenceValue.trim()) { setError('请填写证据值。'); return; }
+    setBusy(true); setError('');
+    try {
+      await plane.getClient().updateMemory(item.id, {
+        verification: [{ predicate: memoryEvidencePredicate, value: memoryEvidenceValue.trim() }],
+      });
+      await refresh();
+      setMemoryDetail(await plane.getClient().memoryLineage(item.id));
+    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : String(saveError)); }
+    finally { setBusy(false); }
+  };
+
+  const retireMemory = async (item: MemoryItem) => {
+    setBusy(true); setError('');
+    try {
+      await plane.getClient().retireMemory(item.id);
+      if (selectedMemoryId === item.id) { setSelectedMemoryId(''); setMemoryDetail(null); }
+      await refresh();
+    } catch (retireError) { setError(retireError instanceof Error ? retireError.message : String(retireError)); }
+    finally { setBusy(false); }
+  };
+
+  const clearSessions = async () => {
+    setBusy(true); setError('');
+    try { await plane.getClient().clearSessions(); await refresh(); }
+    catch (clearError) { setError(clearError instanceof Error ? clearError.message : String(clearError)); }
     finally { setBusy(false); }
   };
 
@@ -1174,25 +1280,47 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
         {replayMode === 'apprentice' && (
           <div className="arp-apprentice-control">
             <input value={apprenticeTask} onChange={(event) => setApprenticeTask(event.target.value)} placeholder="输入要学习的工作流" disabled={recording || busy} aria-label="要学习的工作流" />
-            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && !apprenticeTask.trim())}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '结束学习' : '开始学习'}</button>
+            <select value={evidencePredicate} onChange={(event) => setEvidencePredicate(event.target.value)} disabled={recording || busy} aria-label="终态证据类型">
+              <option value="visible.text">可见文本</option>
+              <option value="window.visible">可见窗口</option>
+              <option value="file.exists">文件存在</option>
+              <option value="process.running">进程运行</option>
+            </select>
+            <input value={evidenceValue} onChange={(event) => setEvidenceValue(event.target.value)} placeholder="终态证据值" disabled={recording || busy} aria-label="终态证据值" />
+            <button className={`arp-button ${recording ? 'arp-button-danger' : 'arp-button-primary'}`} onClick={toggleRecording} disabled={busy || (!recording && (!apprenticeTask.trim() || !evidenceValue.trim()))}>{recording ? <CircleStop size={14} /> : <Radio size={14} />}{recording ? '结束学习' : '开始学习'}</button>
           </div>
         )}
       </div>
       <div className="arp-assets-grid">
         <section className="arp-panel">
-          <div className="arp-panel-heading"><div><Library size={15} /><strong>可复用技能</strong></div><span>{scripts.length}</span></div>
+          <div className="arp-panel-heading"><div><ShieldCheck size={15} /><strong>已验证技能</strong></div><span>{verifiedScripts.length}</span></div>
           <div className="arp-asset-list">
-            {scripts.map((item) => (
+            {verifiedScripts.map((item) => (
               <div className="arp-asset-row" key={item.file}>
                 <div className="arp-asset-icon"><FileCode2 size={16} /></div>
-                <div><strong>{item.name || item.file}</strong><span>{item.steps} 步 · {item.task || '录制的工作流'}</span></div>
-                <button className="arp-icon-button" title="在流程工作台中打开" onClick={() => openSkill(item.file)} disabled={busy}><Braces size={15} /></button>
-                {replayMode === 'offline_graph' && <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />打开流程</button>}
-                {replayMode === 'skill' && <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />复用</button>}
-                {replayMode === 'apprentice' && <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><GraduationCap size={13} />查看</button>}
+                <div><strong>{item.name || item.file}</strong><span>{item.steps} 步 · {item.task || '录制的工作流'} · {item.verification_state || 'verified'}</span></div>
+                <div className="arp-row-actions">
+                  <button className="arp-icon-button" title="在流程工作台中打开" onClick={() => openSkill(item.file)} disabled={busy}><Braces size={15} /></button>
+                  {replayMode === 'skill' ? <button className="arp-button arp-button-small" onClick={() => replay(item.file)} disabled={busy}><Play size={13} />复用</button> : <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy}><Workflow size={13} />打开</button>}
+                </div>
               </div>
             ))}
-            {!scripts.length && <EmptyState icon={Library} title="暂无可复用技能" />}
+            {!verifiedScripts.length && <EmptyState icon={ShieldCheck} title="暂无已验证技能" />}
+          </div>
+        </section>
+        <section className="arp-panel">
+          <div className="arp-panel-heading"><div><FileCode2 size={15} /><strong>草稿与待处置脚本</strong></div><span>{draftScripts.length}</span></div>
+          <div className="arp-asset-list">
+            {draftScripts.map((item) => (
+              <div className="arp-asset-row" key={item.file} title={item.validation_error || ''}>
+                <div className="arp-asset-icon"><FileCode2 size={16} /></div>
+                <div><strong>{item.name || item.file}</strong><span>{item.valid ? '待验证' : '格式无效'} · {item.steps} 步 · {item.task || item.file}</span></div>
+                <div className="arp-row-actions">
+                  <button className="arp-button arp-button-small" onClick={() => openSkill(item.file)} disabled={busy || !item.valid}><Workflow size={13} />打开</button>
+                </div>
+              </div>
+            ))}
+            {!draftScripts.length && <EmptyState icon={FileCode2} title="暂无草稿脚本" />}
           </div>
         </section>
         <section className="arp-panel">
@@ -1202,28 +1330,65 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
               <div className="arp-asset-row" key={item.run_id}>
                 <div className="arp-asset-icon"><TerminalSquare size={16} /></div>
                 <div><strong>{item.task || item.run_id}</strong><span>{item.steps} 步 · {STATUS_LABELS[item.status] || item.status}</span></div>
-                <button className="arp-button arp-button-small" onClick={() => exportTrace(item.run_id)} disabled={busy}><Save size={13} />提取技能</button>
+                <div className="arp-row-actions"><button className="arp-button arp-button-small" onClick={() => exportTrace(item.run_id)} disabled={busy}><Save size={13} />提取草稿</button></div>
               </div>
             ))}
             {!traces.length && <EmptyState icon={Database} title="暂无探索轨迹" />}
           </div>
         </section>
-        <section className="arp-panel arp-memory-assets">
-          <div className="arp-panel-heading"><div><BrainCircuit size={15} /><strong>记忆图谱</strong></div><span>{memories.length}</span></div>
+        <section className="arp-panel">
+          <div className="arp-panel-heading">
+            <div><BrainCircuit size={15} /><strong>{memoryView === 'long' ? '长期记忆' : '会话记忆'}</strong></div>
+            <div className="arp-memory-tabs">
+              <button className={memoryView === 'long' ? 'active' : ''} onClick={() => setMemoryView('long')}>长期 {memories.length}</button>
+              <button className={memoryView === 'session' ? 'active' : ''} onClick={() => setMemoryView('session')}>会话 {sessions.length}</button>
+              {memoryView === 'session' && sessions.length > 0 && <button className="arp-icon-button" title="清空会话记忆" onClick={clearSessions} disabled={busy}><X size={13} /></button>}
+            </div>
+          </div>
           <div className="arp-asset-list">
-            {memories.map((item) => (
-              <div className="arp-asset-row" key={item.id}>
-                <div className="arp-asset-icon"><BrainCircuit size={16} /></div>
-                <div>
-                  <strong>{item.task || item.id}</strong>
-                  <span>{STATUS_LABELS[item.status || (item.provisional ? 'provisional' : 'active')] || item.status} · 成功 {item.successes || 0} / 使用 {item.uses || 0} 次 · 置信度 {Math.round((item.confidence || 0) * 100)}%{item.app ? ` · ${item.app}` : ''}</span>
+            {memoryView === 'long' && memories.map((item) => (
+              <React.Fragment key={item.id}>
+                <div className="arp-asset-row">
+                  <div className="arp-asset-icon"><BrainCircuit size={16} /></div>
+                  <div>
+                    <strong>{item.task || item.id}</strong>
+                    <span>{STATUS_LABELS[item.status || (item.provisional ? 'provisional' : 'active')] || item.status} · 成功 {item.successes || 0} / 使用 {item.uses || 0} 次 · 置信度 {Math.round((item.confidence || 0) * 100)}%{item.app ? ` · ${item.app}` : ''}</span>
+                  </div>
+                  <div className="arp-row-actions">
+                    {item.script && <button className="arp-icon-button" title="打开关联脚本" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
+                    <button className="arp-icon-button" title="查看适用条件与证据" onClick={() => inspectMemory(item)} disabled={busy}><Eye size={15} /></button>
+                    {item.script && item.provisional && item.verification?.length ? <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy}><Check size={13} />回放验证</button> : null}
+                    {item.script && !item.provisional && item.script_sha256 ? <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />复用</button> : null}
+                    <button className="arp-icon-button" title="停用记忆" onClick={() => retireMemory(item)} disabled={busy}><Archive size={14} /></button>
+                  </div>
                 </div>
-                {item.script && <button className="arp-icon-button" title="在流程工作台中打开关联技能" onClick={() => openSkill(item.script!)} disabled={busy}><Braces size={15} /></button>}
-                {item.script && item.provisional && <button className="arp-button arp-button-small" onClick={() => verifyMemory(item)} disabled={busy}><Check size={13} />验证</button>}
-                {item.script && !item.provisional && <button className="arp-button arp-button-small" onClick={() => replay(item.script!)} disabled={busy}><Play size={13} />复用</button>}
+                {selectedMemoryId === item.id && memoryDetail && (
+                  <div className="arp-memory-detail">
+                    <div><strong>适用条件</strong><span>{(memoryDetail.node?.conditions || item.conditions || []).join(' · ') || '未声明'}</span></div>
+                    <div><strong>证据要求</strong><span>{(memoryDetail.node?.evidence || item.evidence || []).join(' · ') || '未声明'}</span></div>
+                    <div><strong>结构化条件</strong><code>{JSON.stringify(memoryDetail.node?.payload?.applicability || item.applicability || {})}</code></div>
+                    <div><strong>验证记录</strong><span>{memoryDetail.attempts?.length || 0} 次 · 关联 {memoryDetail.related?.length || 0} 条</span></div>
+                    {item.script && item.provisional && (
+                      <div className="arp-evidence-editor">
+                        <select value={memoryEvidencePredicate} onChange={(event) => setMemoryEvidencePredicate(event.target.value)} disabled={busy} aria-label="记忆证据类型">
+                          <option value="visible.text">可见文本</option><option value="window.visible">可见窗口</option><option value="file.exists">文件存在</option><option value="process.running">进程运行</option>
+                        </select>
+                        <input value={memoryEvidenceValue} onChange={(event) => setMemoryEvidenceValue(event.target.value)} placeholder="证据值" disabled={busy} />
+                        <button className="arp-button arp-button-small" onClick={() => saveMemoryEvidence(item)} disabled={busy || !memoryEvidenceValue.trim()}><Save size={13} />保存证据</button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </React.Fragment>
+            ))}
+            {memoryView === 'long' && !memories.length && <EmptyState icon={BrainCircuit} title="暂无长期记忆" />}
+            {memoryView === 'session' && sessions.map((item) => (
+              <div className="arp-asset-row" key={`${item.run_id}-${item.task}`}>
+                <div className="arp-asset-icon"><Clock3 size={16} /></div>
+                <div><strong>{item.task}</strong><span>{STATUS_LABELS[item.status] || item.status} · {item.result || item.run_id}</span></div>
               </div>
             ))}
-            {!memories.length && <EmptyState icon={BrainCircuit} title="暂无可复用记忆" />}
+            {memoryView === 'session' && !sessions.length && <EmptyState icon={Clock3} title="暂无会话记忆" />}
           </div>
         </section>
       </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { FlowScript } from '../types';
+import type { FlowScript, NodeType } from '../types';
 import {
   ControlPlaneClient,
   EXPECTED_RUNTIME_CONTRACT_VERSION,
@@ -9,8 +9,10 @@ import {
   runtimeCompatibilityError,
   websocketUrl,
 } from '../platform/client';
-import { edgeBranch, flowToArpGraph } from '../platform/flowToArpGraph';
+import { edgeBranch, flowToArpGraph, RUNNABLE_FLOW_NODE_TYPES } from '../platform/flowToArpGraph';
 import { automationIrFromFlowScript } from '../utils/automationIR';
+import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
+import { PRESET_TEMPLATE_META, PRESET_TEMPLATES } from '../store/defaults';
 
 function scriptFixture(): FlowScript {
   return {
@@ -247,6 +249,36 @@ describe('control plane client contracts', () => {
 });
 
 describe('flow to ARP compiler', () => {
+  it('compiles every node exposed by the executable-node directory without legacy fallback', () => {
+    for (const type of RUNNABLE_FLOW_NODE_TYPES) {
+      const script = scriptFixture();
+      script.nodes.splice(1, 0, {
+        id: `node-${type}`,
+        type,
+        x: 0,
+        y: 0,
+        params: structuredClone(NODE_DEFINITIONS[type].defaultParams),
+      });
+      const compiled = flowToArpGraph(script).nodes.find((node) => node.id === `node-${type}`);
+      expect(compiled?.kind, type).not.toBe('legacy_flow');
+    }
+  });
+
+  it('keeps preset metadata and executable templates in one registry', () => {
+    expect(PRESET_TEMPLATE_META.map((item) => item.id)).toEqual(PRESET_TEMPLATES.map((item) => item.id));
+    for (const template of PRESET_TEMPLATES) {
+      const script = template.createScript();
+      expect(script.nodes.every((node) => (
+        node.type === 'start' || node.type === 'end' || RUNNABLE_FLOW_NODE_TYPES.has(node.type)
+      ))).toBe(true);
+      expect(flowToArpGraph(script).metadata.compilation).toMatchObject({ legacy_nodes: 0 });
+    }
+    const quickstart = PRESET_TEMPLATES.find((item) => item.id === 'arp-quickstart')!.createScript();
+    expect((quickstart.nodes.find((node) => node.type === 'evidence_gate')?.params as any).required).toEqual([
+      { predicate: 'human.approved', source: 'human_gate', equals: true },
+    ]);
+  });
+
   it('preserves native runtime nodes, anchors, evidence, and retry policy', () => {
     const graph = flowToArpGraph(scriptFixture());
     const goal = graph.nodes.find((node) => node.id === 'goal')!;
@@ -272,6 +304,46 @@ describe('flow to ARP compiler', () => {
     const graph = flowToArpGraph(script);
     expect(graph.nodes.find((node) => node.id === 'wait')).toMatchObject({ kind: 'delay', config: { duration_ms: 250 } });
     expect(graph.nodes.find((node) => node.id === 'condition')).toMatchObject({ kind: 'condition', config: { source: 'variables.ready', operator: 'eq', value: 'yes' } });
+  });
+
+  it('compiles every parameter branch exposed by the production property panels', () => {
+    const cases: Array<{ type: NodeType; params: Record<string, unknown> }> = [
+      { type: 'wait', params: { wait_type: 'time', duration: 1 } },
+      { type: 'wait', params: { wait_type: 'window', window_title: 'Target', timeout: 5 } },
+      { type: 'condition', params: { condition_type: 'always_true' } },
+      { type: 'condition', params: { condition_type: 'variable_equals', variable_name: 'n', variable_value: 1 } },
+      { type: 'condition', params: { condition_type: 'variable_greater', variable_name: 'n', variable_value: 1 } },
+      { type: 'condition', params: { condition_type: 'variable_less', variable_name: 'n', variable_value: 1 } },
+      { type: 'mouse_operation', params: { sub_operation: 'click', mode: 'coordinate', x: 1, y: 2 } },
+      { type: 'mouse_operation', params: { sub_operation: 'click', mode: 'text', text: 'Save' } },
+      { type: 'mouse_operation', params: { sub_operation: 'scroll', x: 1, y: 2, scroll_amount: 3 } },
+      { type: 'mouse_operation', params: { sub_operation: 'move', move_x: 1, move_y: 2 } },
+      { type: 'mouse_operation', params: { sub_operation: 'hover', hover_x: 1, hover_y: 2 } },
+      { type: 'screenshot', params: { quality: 85 } },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const script = scriptFixture();
+      script.nodes.splice(1, 0, { id: `branch-${index}`, type: item.type, x: 0, y: 0, params: item.params });
+      const compiled = flowToArpGraph(script).nodes.find((node) => node.id === `branch-${index}`);
+      expect(compiled?.kind, `${item.type}:${JSON.stringify(item.params)}`).not.toBe('legacy_flow');
+    }
+  });
+
+  it('fails closed for historical parameter branches that ARP cannot execute', () => {
+    const cases: Array<{ type: NodeType; params: Record<string, unknown> }> = [
+      { type: 'wait', params: { wait_type: 'image', image_path: 'legacy.png' } },
+      { type: 'condition', params: { condition_type: 'image_exists', image_path: 'legacy.png' } },
+      { type: 'mouse_operation', params: { sub_operation: 'click', mode: 'image', targets: [] } },
+      { type: 'screenshot', params: { save_path: 'legacy.png' } },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const script = scriptFixture();
+      script.nodes.splice(1, 0, { id: `legacy-${index}`, type: item.type, x: 0, y: 0, params: item.params });
+      const compiled = flowToArpGraph(script).nodes.find((node) => node.id === `legacy-${index}`);
+      expect(compiled?.kind, `${item.type}:${JSON.stringify(item.params)}`).toBe('legacy_flow');
+    }
   });
 
   it('compiles exact replay steps as native zero-token nodes with explicit shell policy', () => {

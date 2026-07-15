@@ -112,8 +112,17 @@ scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
 - `automation-ir/1` 是新保存流程和 Skill 的规范中间层；`.wps.json` 与 FlowScript 是兼容 adapter。
 - 离线 0-token replay 由 `recorder/trace.py` 执行，IR 会先通过受检 adapter 转成 WPS runtime steps。
 - Studio 运行链为 Flow editor state -> Automation IR -> `arp/1`；旧 `store/executor.ts` 仅保留兼容执行入口。
+- Studio 节点库必须取 `RUNNABLE_FLOW_NODE_TYPES` 与后端 `CapabilitySpec.flow_node_types` 的交集。不要把历史 `NodeType` 或动态 `@feature` 仅因“有属性面板”就重新暴露为可执行节点。
+- `GET /api/scripts` 中 `trust=draft` 的文件只是 artifact；只有 active memory、匹配 SHA-256 和验证来源齐全时才是 `trust=verified` Skill。脚本内容变化会使旧验证失效。
 - WPS-only 步骤会导入为 `_requires_wps_replay` 占位，前端 executor 必须 fail-fast。
 - 从 WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会优先走真实 Electron `callFeature` bridge；没有 bridge 或 bridge 返回失败时节点失败，不能浏览器模拟成功。
+
+## Memory / Context 边界
+
+- `memory/compiler.py` 是 Agent run 的唯一长期记忆写入链；不要在 `AgentRunner` 完成路径再次调用 `experience.record()`。
+- `memory/applicability.py` 的 typed contract 才决定 action memory 是否能复用；conditions/evidence 文本只用于解释。显式 `memory_id` 也不能绕过任务、app/window、stage、parameters、anchors 或脚本摘要检查。
+- Apprentice 只产出 provisional candidate。任意人工字符串都不能晋升 Skill；必须由 `/api/memory/{id}/verification-runs` 的真实 replay 通过至少一个结构化 postflight check。
+- 折叠旧上下文时必须保留 task goal、当前 mutable plan、关键 screen/window、run state/失败原因和最近工具证据。session memory 仅解指代，不能证明当前 GUI 状态。
 
 ## 计划任务
 

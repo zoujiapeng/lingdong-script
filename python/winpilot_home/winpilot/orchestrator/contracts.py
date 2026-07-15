@@ -116,6 +116,7 @@ class CapabilitySpec(BaseModel):
     deterministic: bool
     requires_llm: bool
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    flow_node_types: list[str] = Field(default_factory=list)
 
 
 class EvidenceRecord(BaseModel):

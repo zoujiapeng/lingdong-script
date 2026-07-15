@@ -293,8 +293,7 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
     category: 'control',
     color: '#f97316',
     defaultParams: {
-      condition_type: 'image_exists',
-      similarity: 85,
+      condition_type: 'always_true',
     },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
@@ -342,11 +341,11 @@ export const NODE_DEFINITIONS: Record<NodeType, NodeDefinition> = {
   screenshot: {
     type: 'screenshot',
     label: '截图',
-    description: '截取屏幕图像（支持全屏/区域截图，PNG/JPG/BMP格式）',
+    description: '采集当前屏幕图像作为运行时证据',
     icon: 'Camera',
     category: 'image',
     color: '#64748b',
-    defaultParams: { format: 'png' },
+    defaultParams: { quality: 85 },
     ports: {
       inputs: [{ id: 'input', type: 'flow' }],
       outputs: [{ id: 'output', type: 'flow' }],

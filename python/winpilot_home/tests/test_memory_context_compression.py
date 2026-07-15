@@ -10,6 +10,7 @@ def fresh_memory(tmp_path, monkeypatch):
 
     mem = tmp_path / "experience_memory.json"
     monkeypatch.setattr(config, "MEMORY_PATH", mem)
+    monkeypatch.setattr(config, "SCRIPTS_DIR", tmp_path)
     monkeypatch.setitem(config.CONFIG._data["agent"], "experience_memory", True)
     from winpilot.memory import experience
 
@@ -45,12 +46,17 @@ def test_memory_hints_render_conditions_evidence_and_truncate_steps(fresh_memory
 
 def test_reusable_script_requires_strong_implicit_match(fresh_memory):
     exp = fresh_memory
+    (exp.config.SCRIPTS_DIR / "clear-cache.wps.json").write_text(
+        '{"format":"wps/2","steps":[]}', encoding="utf-8"
+    )
     exp.record(
         "open browser settings and clear cache",
         "Browser",
         ["click Settings", "click Clear cache"],
         verified=True,
         script="clear-cache.wps.json",
+        source_run_id="clear-cache-run",
+        source_verification={"done_verified": True},
     )
 
     script, recipe = exp.reusable_script_for("open calculator")
@@ -80,11 +86,16 @@ def test_fold_checkpoint_preserves_goal_screen_and_recent_evidence():
     runner.session.snapshot = SimpleNamespace(
         title="Settings",
         hwnd=42,
-        elements=[object(), object()],
+        elements=[
+            SimpleNamespace(role="checkbox", text="Sync", states=["unchecked"]),
+            SimpleNamespace(role="button", text="Enable", states=["enabled"]),
+        ],
     )
+    runner.session.plan = SimpleNamespace(render=lambda: "1. Open settings\n2. Enable sync")
     runner._recent_results = [
         ("read_text", "Sync is still off; enable button visible"),
         ("run_shell", "deterministic check pending"),
+        ("observe", "Settings screen is still active"),
     ]
 
     for i in range(3):
@@ -99,8 +110,13 @@ def test_fold_checkpoint_preserves_goal_screen_and_recent_evidence():
     assert "[folded context checkpoint]" in folded
     assert "goal: open settings and enable sync" in folded
     assert 'screen: title="Settings"' in folded
+    assert 'checkbox:"Sync" [unchecked]' in folded
+    assert "current_plan:" in folded
+    assert "Enable sync" in folded
     assert "recent_tool_evidence:" in folded
     assert "Sync is still off" in folded
+    assert "run_shell" in folded
+    assert "observe" in folded
     assert "folded_item: [folded] bulky observation 0" in folded
 
 
@@ -202,7 +218,7 @@ def test_reuse_skill_records_actual_recipe_use(tmp_path, monkeypatch):
     monkeypatch.setattr(
         memory_tools.experience,
         "reusable_script_for",
-        lambda task, recipe_id="": ("demo.wps.json", {"id": "rid-1", "task": task}),
+        lambda task, recipe_id="", **kwargs: ("demo.wps.json", {"id": "rid-1", "task": task}),
     )
     monkeypatch.setattr(trace_mod, "replay", lambda *a, **k: {"ok": True, "results": []})
 
@@ -226,7 +242,7 @@ def test_reuse_skill_records_failed_replay_attempt(tmp_path, monkeypatch):
     monkeypatch.setattr(
         memory_tools.experience,
         "reusable_script_for",
-        lambda task, recipe_id="": ("demo.wps.json", {"id": "rid-1", "task": task}),
+        lambda task, recipe_id="", **kwargs: ("demo.wps.json", {"id": "rid-1", "task": task}),
     )
     monkeypatch.setattr(
         trace_mod,
