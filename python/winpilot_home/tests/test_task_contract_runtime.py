@@ -1349,13 +1349,19 @@ def test_stage_skill_graph_resumes_at_failed_stage_instead_of_whole_task():
     assert skill.config["parameters"]["subject"]
 
 
-def test_stage_skill_matching_checks_type_parameters_and_app_version(monkeypatch):
+def test_stage_skill_matching_checks_type_parameters_and_app_version(monkeypatch, tmp_path):
     from winpilot.memory import experience
+
+    script_name = "draw.wps.json"
+    (tmp_path / script_name).write_text('{"version": "wps/1", "steps": []}', encoding="utf-8")
+    monkeypatch.setattr(experience.config, "SCRIPTS_DIR", tmp_path)
 
     node = {
         "id": "skill-1", "kind": "skill", "status": "active", "confidence": 0.8,
         "title": "drawing stage", "payload": {
-            "script": "draw.wps.json", "stage_type": "DrawArtifact",
+            "script": script_name, "script_sha256": experience.script_sha256(script_name),
+            "verification_state": "source_run_verified",
+            "stage_type": "DrawArtifact",
             "parameters": {"app": "Paint"}, "outputs": [{"name": "visual_content"}],
             "verification": ["artifact.semantic_visible"], "app_version": "11.0",
             "provisional": False, "successes": 2,
@@ -1371,7 +1377,7 @@ def test_stage_skill_matching_checks_type_parameters_and_app_version(monkeypatch
     script, matched = experience.reusable_stage_script_for(
         "DrawArtifact", {"app": "Paint", "subject": "bird"}, app_version="11.0",
     )
-    assert script == "draw.wps.json"
+    assert script == script_name
     assert matched and matched["id"] == "skill-1"
     assert experience.reusable_stage_script_for(
         "DrawArtifact", {"app": "Whiteboard"}, app_version="11.0",

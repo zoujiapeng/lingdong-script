@@ -2,6 +2,7 @@ import { FlowScript, FeatureDefinition, NodeType } from '../types';
 import { templateRegistry, TemplateEntry } from './templateRegistry';
 import { itemMarker } from './itemMarker';
 import { NODE_DEFINITIONS } from './nodeDefinitions';
+import { isRunnableFlowNodeType } from '../platform/flowToArpGraph';
 
 export type SearchItemType = 'feature' | 'template' | 'node';
 
@@ -53,8 +54,8 @@ class UnifiedSearchEngine {
   private index: UnifiedSearchItem[] = [];
   private built = false;
 
-  /** Rebuild the search index from current data sources */
-  rebuildIndex(features?: FeatureDefinition[]): void {
+  /** Rebuild from executable templates and compiler-supported nodes only. */
+  rebuildIndex(_features?: FeatureDefinition[]): void {
     const index: UnifiedSearchItem[] = [];
 
     // 1. Add template registry entries
@@ -62,33 +63,9 @@ class UnifiedSearchEngine {
       index.push(this.templateToItem(t));
     }
 
-    // 2. Add feature registry items
-    if (features) {
-      for (const f of features) {
-        if (f.deprecated) continue;
-        index.push({
-          id: f.name,
-          name: f.display_name || f.name,
-          description: f.description,
-          type: 'feature',
-          aliases: [f.name, f.mcp_tool_name || ''],
-          keywords: [f.name, ...(f.category ? [f.category] : []), ...(f.dsl_keyword ? [f.dsl_keyword] : [])],
-          tags: [f.category],
-          category: f.category || '',
-          featureName: f.name,
-          params: f.params,
-          dslKeyword: f.dsl_keyword,
-          tested: itemMarker.isTested(f.name, 'feature'),
-        });
-      }
-    }
-
-    // 3. Add native node definitions
-    const OBSOLETE_TYPES = new Set(['start','end','click','image_click','click_text','click_action','shutdown','reboot','logoff','hibernate','lock_workstation','system_sleep','display_off',
-      'volume_set','volume_mute','show_desktop','set_wallpaper','empty_recycle_bin',
-      'clipboard_set','clipboard_get','launch_program','kill_process','wait_process','focus_window']);
+    // 2. Add native node definitions.
     for (const def of Object.values(NODE_DEFINITIONS)) {
-      if (OBSOLETE_TYPES.has(def.type) || def.type === 'start' || def.type === 'end') continue;
+      if (!isRunnableFlowNodeType(def.type)) continue;
       index.push({
         id: def.type,
         name: def.label,

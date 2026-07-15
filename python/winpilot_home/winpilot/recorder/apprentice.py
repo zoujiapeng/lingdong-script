@@ -47,10 +47,21 @@ class ApprenticeManager:
         self._lock = threading.RLock()
         self._session: dict[str, Any] | None = None
 
-    def start(self, task: str, *, name: str = "", app: str = "") -> dict[str, Any]:
+    def start(
+        self,
+        task: str,
+        *,
+        name: str = "",
+        app: str = "",
+        verification: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         task = str(task or "").strip()
         if not task:
             raise ValueError("apprentice mode requires a task")
+        requirements = list(verification or [])
+        evidence_error = trace_mod.validate_evidence_requirements(requirements)
+        if evidence_error:
+            raise ValueError(evidence_error)
         with self._lock:
             if self.recorder.is_recording():
                 raise RuntimeError("a demonstration is already recording")
@@ -60,6 +71,7 @@ class ApprenticeManager:
                 "task": task,
                 "app": str(app or "").strip(),
                 "name": str(name or "").strip() or task[:80],
+                "verification": requirements,
                 "started_at": time.time(),
             }
             self.recorder.start(session["name"])
@@ -75,6 +87,7 @@ class ApprenticeManager:
                 "session_id": session.get("session_id"),
                 "task": session.get("task", ""),
                 "app": session.get("app", ""),
+                "verification": session.get("verification", []),
                 "started_at": session.get("started_at"),
             }
 
@@ -98,6 +111,7 @@ class ApprenticeManager:
                 "task": session["task"],
                 "source": "apprentice",
                 "source_session": session["session_id"],
+                "evidence": {"required": list(session.get("verification") or [])},
             })
             error = trace_mod.validate_script(script)
             if error:
@@ -122,8 +136,9 @@ class ApprenticeManager:
                     *([f'Current app or window must match "{session["app"]}".'] if session.get("app") else []),
                 ],
                 evidence=[
-                    "Replay the lesson and visibly verify the final state before promoting it.",
+                    "Promotion requires a real replay whose structured postflight checks all pass.",
                 ],
+                verification=list(session.get("verification") or []),
             )
             self._session = None
             return {

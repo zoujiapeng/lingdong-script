@@ -339,10 +339,10 @@ def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):
             self.recording = False
             self.task = ""
 
-        def start(self, task, *, name="", app=""):
+        def start(self, task, *, name="", app="", verification=None):
             self.recording = True
             self.task = task
-            return {"session_id": "lesson-1", "task": task, "recording": True}
+            return {"session_id": "lesson-1", "task": task, "recording": True, "verification": verification or []}
 
         def stop(self):
             self.recording = False
@@ -364,7 +364,13 @@ def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):
         "offline_graph", "skill", "apprentice",
     ]
 
-    started = client.post("/api/v2/replay/apprentice/start", json={"task": "Send message"})
+    started = client.post(
+        "/api/v2/replay/apprentice/start",
+        json={
+            "task": "Send message",
+            "verification": [{"predicate": "visible.text", "value": "sent"}],
+        },
+    )
     assert started.status_code == 200
     assert started.json()["session"]["recording"] is True
     assert client.get("/api/v2/replay/apprentice/status").json()["task"] == "Send message"
@@ -373,3 +379,144 @@ def test_replay_mode_api_exposes_apprentice_lifecycle(client, monkeypatch):
     assert stopped.status_code == 200
     assert stopped.json()["file"] == "lesson.wps.json"
     assert stopped.json()["memory"]["provisional"] is True
+
+
+def _wait_for_memory_verification(client, memory_id, replay_id, timeout=2.0):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        response = client.get(f"/api/memory/{memory_id}/verification-runs/{replay_id}")
+        assert response.status_code == 200
+        last = response.json()
+        if last["status"] in {"done", "failed", "stopped"}:
+            return last
+        time.sleep(0.02)
+    raise AssertionError(f"memory verification did not finish: {last}")
+
+
+def _fresh_api_memory(tmp_path, monkeypatch):
+    import importlib
+
+    from winpilot import config
+    from winpilot.memory import experience
+
+    monkeypatch.setattr(config, "MEMORY_DB_PATH", tmp_path / "memory.db")
+    monkeypatch.setattr(config, "MEMORY_PATH", tmp_path / "experience_memory.json")
+    monkeypatch.setattr(config, "SCRIPTS_DIR", tmp_path)
+    monkeypatch.setitem(config.CONFIG._data["agent"], "experience_memory", True)
+    return importlib.reload(experience)
+
+
+def test_memory_verification_promotes_only_machine_checked_replay(client, tmp_path, monkeypatch):
+    from winpilot import server
+
+    experience = _fresh_api_memory(tmp_path, monkeypatch)
+    path = tmp_path / "lesson.wps.json"
+    path.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    candidate = experience.record(
+        "send message",
+        "Chat",
+        ["send"],
+        verified=False,
+        script=path.name,
+        verification=[{"predicate": "visible.text", "value": "sent"}],
+    )
+
+    class FakeReplayer:
+        def __init__(self, stop_event):
+            self.stop_event = stop_event
+
+        def run_script(self, script, *, script_name):
+            assert script["evidence"]["required"][0]["value"] == "sent"
+            return {
+                "ok": True,
+                "results": [{"index": 1, "ok": True}],
+                "postflight": {
+                    "ok": True,
+                    "required": True,
+                    "checks": [{"ok": True, "check": {"text_appears": "sent"}}],
+                },
+            }
+
+    monkeypatch.setattr(server.trace_mod, "Replayer", FakeReplayer)
+    created = client.post(f"/api/memory/{candidate['id']}/verification-runs")
+    assert created.status_code == 200
+    replay_id = created.json()["job"]["replay_id"]
+    done = _wait_for_memory_verification(client, candidate["id"], replay_id)
+
+    assert done["ok"] is True
+    promoted = experience.get(candidate["id"])
+    assert promoted["status"] == "active"
+    assert promoted["verification_state"] == "replay_verified"
+    assert promoted["script_sha256"]
+
+
+def test_memory_verification_failure_never_promotes(client, tmp_path, monkeypatch):
+    from winpilot import server
+
+    experience = _fresh_api_memory(tmp_path, monkeypatch)
+    path = tmp_path / "lesson-fail.wps.json"
+    path.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    candidate = experience.record(
+        "send another message",
+        "Chat",
+        ["send"],
+        verified=False,
+        script=path.name,
+        verification=[{"predicate": "visible.text", "value": "sent"}],
+    )
+
+    class FakeReplayer:
+        def __init__(self, stop_event):
+            self.stop_event = stop_event
+
+        def run_script(self, script, *, script_name):
+            return {
+                "ok": False,
+                "error": "text not found",
+                "results": [{"index": 1, "ok": True}],
+                "postflight": {
+                    "ok": False,
+                    "required": True,
+                    "checks": [{"ok": False, "check": {"text_appears": "sent"}}],
+                },
+            }
+
+    monkeypatch.setattr(server.trace_mod, "Replayer", FakeReplayer)
+    created = client.post(f"/api/memory/{candidate['id']}/verification-runs")
+    replay_id = created.json()["job"]["replay_id"]
+    failed = _wait_for_memory_verification(client, candidate["id"], replay_id)
+
+    assert failed["ok"] is False
+    assert experience.get(candidate["id"])["provisional"] is True
+    assert any(
+        item["event"] == "verification_replay_failed" and item["success"] is False
+        for item in experience._store().attempts_for_node(candidate["id"])
+    )
+
+
+def test_memory_update_api_cannot_fake_activation_or_save_invalid_evidence(client, tmp_path, monkeypatch):
+    experience = _fresh_api_memory(tmp_path, monkeypatch)
+    path = tmp_path / "lesson-edit.wps.json"
+    path.write_text('{"format":"wps/2","steps":[]}', encoding="utf-8")
+    candidate = experience.record(
+        "edit candidate",
+        "App",
+        ["step"],
+        verified=False,
+        script=path.name,
+        verification=[{"predicate": "visible.text", "value": "done"}],
+    )
+
+    activation = client.put(
+        f"/api/memory/{candidate['id']}",
+        json={"provisional": False},
+    )
+    invalid = client.put(
+        f"/api/memory/{candidate['id']}",
+        json={"verification": [{"predicate": "visible.text", "value": "done", "typo": True}]},
+    )
+
+    assert activation.status_code == 409
+    assert invalid.status_code == 400
+    assert experience.get(candidate["id"])["provisional"] is True

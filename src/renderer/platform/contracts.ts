@@ -77,6 +77,7 @@ export interface CapabilitySpec {
   deterministic: boolean;
   requires_llm: boolean;
   input_schema: Record<string, unknown>;
+  flow_node_types: string[];
 }
 
 export interface RunTimelineEvent {

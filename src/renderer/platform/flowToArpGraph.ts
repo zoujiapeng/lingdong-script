@@ -1,9 +1,36 @@
-import type { FlowNode, FlowScript } from '../types';
+import type { FlowNode, FlowScript, NodeType } from '../types';
 import type { ArpEdge, ArpGraph, ArpNode, ArpNodeKind } from './contracts';
 
 const NATIVE_KINDS = new Set<ArpNodeKind>([
   'start', 'end', 'agent_goal', 'action_batch', 'replay_step', 'skill_replay', 'evidence_gate', 'human_gate',
 ]);
+
+export const RUNNABLE_FLOW_NODE_TYPES = new Set<NodeType>([
+  'agent_goal',
+  'action_batch',
+  'replay_step',
+  'skill_replay',
+  'evidence_gate',
+  'human_gate',
+  'click',
+  'click_text',
+  'wait',
+  'input_text',
+  'keyboard',
+  'swipe',
+  'condition',
+  'screenshot',
+  'variable_set',
+  'launch_program',
+  'focus_window',
+  'clipboard_set',
+  'clipboard_get',
+  'mouse_operation',
+]);
+
+export function isRunnableFlowNodeType(type: string): type is NodeType {
+  return RUNNABLE_FLOW_NODE_TYPES.has(type as NodeType);
+}
 
 function retryOf(params: Record<string, any>) {
   return {

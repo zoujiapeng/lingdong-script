@@ -226,7 +226,7 @@ class _RunState:
         return RUNTIME_JOBS.get(job_id) if job_id else None
 
     def replay_busy(self) -> bool:
-        return RUNTIME_JOBS.busy(kind="replay")
+        return RUNTIME_JOBS.busy(kind="replay") or RUNTIME_JOBS.busy(kind="memory_verification")
 
     def agent_busy(self) -> bool:
         return RUNTIME_JOBS.busy(kind="agent")
@@ -264,6 +264,28 @@ def _public_runtime_replay_job(job: RuntimeJob) -> dict[str, Any]:
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "result": job.result,
+        "resources": list(job.resources),
+    }
+
+
+def _public_memory_verification_job(job: RuntimeJob) -> dict[str, Any]:
+    status = {
+        "waiting_resources": "queued",
+        "canceled": "stopped",
+    }.get(job.status, job.status)
+    result = job.result if isinstance(job.result, dict) else None
+    return {
+        "replay_id": job.id,
+        "memory_id": str(job.metadata.get("memory_id") or ""),
+        "script": str(job.metadata.get("script") or ""),
+        "status": status,
+        "runtime_status": job.status,
+        "ok": result.get("ok") if result is not None else (False if status in {"failed", "stopped"} else None),
+        "error": job.error or (str(result.get("error") or "") if result else ""),
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "result": result,
         "resources": list(job.resources),
     }
 
@@ -475,6 +497,7 @@ class MemoryPatchRequest(BaseModel):
     steps: list[str] | None = None
     conditions: list[str] | None = None
     evidence: list[str] | None = None
+    verification: list[dict[str, Any]] | None = None
     provisional: bool | None = None
 
 
@@ -484,8 +507,7 @@ class MemorySearchRequest(BaseModel):
 
 
 class MemoryVerifyRequest(BaseModel):
-    evidence: str = ""
-    status: str = "verified"
+    replay_id: str
 
 
 class ReplayRequest(BaseModel):
@@ -508,6 +530,7 @@ class ApprenticeStartRequest(BaseModel):
     task: str
     name: str = ""
     app: str = ""
+    verification: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ArpGateDecisionRequest(BaseModel):
@@ -1317,7 +1340,12 @@ def apprentice_start(req: ApprenticeStartRequest) -> dict[str, Any]:
         if STATE.busy():
             raise HTTPException(409, "another agent, replay, or recording is active")
         try:
-            session = apprentice_mod.APPRENTICE.start(req.task, name=req.name, app=req.app)
+            session = apprentice_mod.APPRENTICE.start(
+                req.task,
+                name=req.name,
+                app=req.app,
+                verification=req.verification,
+            )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:
@@ -1466,7 +1494,14 @@ def memory_update(recipe_id: str, req: MemoryPatchRequest) -> dict[str, Any]:
     patch = req.model_dump(exclude_unset=True)
     if not patch:
         raise HTTPException(400, "没有要修改的字段")
-    updated = experience.update(recipe_id, patch)
+    if patch.get("verification"):
+        evidence_error = trace_mod.validate_evidence_requirements(patch["verification"])
+        if evidence_error:
+            raise HTTPException(400, evidence_error)
+    try:
+        updated = experience.update(recipe_id, patch)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if updated is None:
         raise HTTPException(404, "记忆条目不存在")
     return updated
@@ -1480,7 +1515,12 @@ def memory_lineage(recipe_id: str) -> dict[str, Any]:
     node = store.get_node(recipe_id)
     if not node:
         raise HTTPException(404, "memory not found")
-    return {"ok": True, "node": node, "related": store.related(recipe_id, direction="both", limit=100)}
+    return {
+        "ok": True,
+        "node": node,
+        "related": store.related(recipe_id, direction="both", limit=100),
+        "attempts": store.attempts_for_node(recipe_id),
+    }
 
 
 @app.get("/api/memory/{recipe_id}/related")
@@ -1503,32 +1543,165 @@ def memory_retire(recipe_id: str) -> dict[str, Any]:
     return {"ok": True, "id": recipe_id}
 
 
-@app.post("/api/memory/{recipe_id}/verify")
-def memory_verify(recipe_id: str, req: MemoryVerifyRequest) -> dict[str, Any]:
+@app.post("/api/memory/{recipe_id}/verification-runs")
+def memory_verification_start(recipe_id: str) -> dict[str, Any]:
     from .memory import experience
 
+    if runtime_source_drifted():
+        raise HTTPException(409, "runtime sources changed; restart before verification")
+    if not _RECIPE_ID_RE.fullmatch(recipe_id):
+        raise HTTPException(404, "memory not found")
+    if any(
+        str(job.metadata.get("memory_id") or "") == recipe_id
+        for job in RUNTIME_JOBS.active(kind="memory_verification")
+    ):
+        raise HTTPException(409, "memory verification is already queued or running")
     store = experience._store()
     node = store.get_node(recipe_id)
     if not node:
         raise HTTPException(404, "memory not found")
-    promoted = experience.promote_skill(recipe_id, req.evidence, req.status)
-    if promoted:
-        return {"ok": True, "memory": promoted}
-    if req.evidence.strip():
-        store.add_evidence(recipe_id, req.evidence.strip(), required=True)
-    store.record_attempt(recipe_id, "manual_verify", status=req.status, success=True)
+    if node.get("kind") not in {"skill", "procedure"}:
+        raise HTTPException(409, "memory is not a replayable action candidate")
+    if node.get("status") in {"retired", "superseded"}:
+        raise HTTPException(409, "retired memory cannot be verified")
     payload = dict(node.get("payload") or {})
-    payload["successes"] = int(payload.get("successes") or 0) + 1
-    payload["uses"] = int(payload.get("uses") or 0) + 1
-    updated = store.update_node(
-        recipe_id,
-        {
-            "status": "active",
-            "confidence": min(0.98, float(node.get("confidence") or 0.5) + 0.1),
-            "payload": payload,
+    script_name = str(payload.get("script") or "").strip()
+    if not script_name:
+        raise HTTPException(409, "memory has no replayable script")
+    verification = payload.get("verification") or []
+    evidence_error = trace_mod.validate_evidence_requirements(verification)
+    if evidence_error:
+        raise HTTPException(409, evidence_error)
+    script_path = _ensure_inside(SCRIPTS_DIR / script_name, SCRIPTS_DIR, "script")
+    if not script_path.is_file():
+        raise HTTPException(409, "memory script is missing")
+    script_digest = experience.script_sha256(script_name)
+    if not script_digest:
+        raise HTTPException(409, "memory script cannot be hashed")
+    try:
+        document = json.loads(script_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(400, f"script parse failed: {exc}") from exc
+    if document.get("format") == "automation-ir/1":
+        error = validate_automation_ir(document)
+        script = wps_from_automation_ir(document) if not error else {}
+    else:
+        script = document
+        error = trace_mod.validate_script(script)
+    if error:
+        raise HTTPException(400, f"script validation failed: {error}")
+    script["evidence"] = {"required": verification}
+    verification_snapshot = json.loads(json.dumps(verification, ensure_ascii=False, sort_keys=True))
+    replay_id = f"verify-{uuid.uuid4().hex[:12]}"
+
+    def verification_worker(runtime_stop: threading.Event) -> dict[str, Any]:
+        current = store.get_node(recipe_id)
+        current_payload = dict((current or {}).get("payload") or {})
+        if (
+            not current
+            or current.get("status") in {"retired", "superseded"}
+            or str(current_payload.get("script") or "") != script_name
+            or current_payload.get("verification") != verification_snapshot
+            or experience.script_sha256(script_name) != script_digest
+        ):
+            store.record_attempt(
+                recipe_id,
+                "verification_replay_failed",
+                run_id=replay_id,
+                status="candidate_changed",
+                success=False,
+                detail={"script": script_name, "script_sha256": script_digest},
+            )
+            return {
+                "ok": False,
+                "error": "memory candidate changed while verification was queued",
+                "memory_id": recipe_id,
+                "replay_id": replay_id,
+            }
+        BUS.publish(
+            "memory",
+            action="verification_replay_start",
+            id=recipe_id,
+            replay_id=replay_id,
+            script=script_name,
+        )
+        result = trace_mod.Replayer(runtime_stop).run_script(
+            script,
+            script_name=script_name,
+        )
+        promoted = experience.promote_skill_from_replay(
+            recipe_id,
+            replay_id,
+            result,
+            expected_script=script_name,
+            expected_script_sha256=script_digest,
+            expected_verification=verification_snapshot,
+        )
+        ok = promoted is not None
+        output = {
+            **result,
+            "ok": ok,
+            "memory": promoted,
+            "memory_id": recipe_id,
+            "replay_id": replay_id,
+        }
+        if not ok:
+            output["error"] = str(
+                result.get("error")
+                or (result.get("postflight") or {}).get("error")
+                or "structured replay evidence did not pass"
+            )
+        BUS.publish(
+            "memory",
+            action="verification_replay_done",
+            id=recipe_id,
+            replay_id=replay_id,
+            ok=ok,
+        )
+        return output
+
+    job = RUNTIME_JOBS.submit(
+        "memory_verification",
+        verification_worker,
+        resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
+        metadata={
+            "memory_id": recipe_id,
+            "script": script_name,
+            "script_sha256": script_digest,
         },
+        job_id=replay_id,
     )
-    return {"ok": True, "memory": updated}
+    return {"ok": True, "job": _public_memory_verification_job(job)}
+
+
+@app.get("/api/memory/{recipe_id}/verification-runs/{replay_id}")
+def memory_verification_status(recipe_id: str, replay_id: str) -> dict[str, Any]:
+    job = RUNTIME_JOBS.get(replay_id)
+    if (
+        not job
+        or job.kind != "memory_verification"
+        or str(job.metadata.get("memory_id") or "") != recipe_id
+    ):
+        raise HTTPException(404, "memory verification replay not found")
+    return _public_memory_verification_job(job)
+
+
+@app.post("/api/memory/{recipe_id}/verify")
+def memory_verify(recipe_id: str, req: MemoryVerifyRequest) -> dict[str, Any]:
+    """Compatibility endpoint: inspect a real verification replay, never mutate."""
+    job = RUNTIME_JOBS.get(req.replay_id)
+    if (
+        not job
+        or job.kind != "memory_verification"
+        or str(job.metadata.get("memory_id") or "") != recipe_id
+    ):
+        raise HTTPException(404, "memory verification replay not found")
+    public = _public_memory_verification_job(job)
+    if job.status in RUNTIME_JOBS.ACTIVE:
+        raise HTTPException(409, "memory verification replay is still running")
+    if not public.get("ok"):
+        raise HTTPException(409, public.get("error") or "memory verification failed")
+    return public
 
 
 @app.delete("/api/memory/{recipe_id}")

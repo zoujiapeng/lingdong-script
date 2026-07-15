@@ -701,12 +701,28 @@ def list_scripts() -> list[dict[str, Any]]:
     SCRIPTS_DIR.mkdir(exist_ok=True)
     out = []
     canonical_bases: set[str] = set()
+
+    def trust(file: str) -> dict[str, Any]:
+        try:
+            from ..memory import experience
+
+            return experience.script_trust(file)
+        except Exception:
+            return {
+                "trust": "draft",
+                "memory_id": None,
+                "memory_status": None,
+                "verification_state": "",
+                "verification_count": 0,
+                "script_sha256": "",
+            }
+
     for path in sorted(SCRIPTS_DIR.glob("*.automation.json"), reverse=True):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if validate_automation_ir(data):
-                continue
-            canonical_bases.add(path.name.removesuffix(".automation.json"))
+            error = validate_automation_ir(data)
+            if not error:
+                canonical_bases.add(path.name.removesuffix(".automation.json"))
             source = data.get("source") if isinstance(data.get("source"), dict) else {}
             out.append({
                 "file": path.name,
@@ -714,22 +730,104 @@ def list_scripts() -> list[dict[str, Any]]:
                 "task": source.get("task", ""),
                 "steps": len(data.get("steps", [])),
                 "format": "automation-ir/1",
+                "valid": not bool(error),
+                "validation_error": error or "",
+                **trust(path.name),
             })
-        except (json.JSONDecodeError, OSError):
-            continue
+        except (json.JSONDecodeError, OSError) as exc:
+            out.append({
+                "file": path.name,
+                "name": path.stem,
+                "task": "",
+                "steps": 0,
+                "format": "automation-ir/1",
+                "valid": False,
+                "validation_error": str(exc),
+                **trust(path.name),
+            })
     for path in sorted(SCRIPTS_DIR.glob("*.wps.json"), reverse=True):
         if path.name.removesuffix(".wps.json") in canonical_bases:
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            error = validate_script(data)
             out.append({
                 "file": path.name, "name": data.get("name", path.stem),
                 "task": data.get("task", ""), "steps": len(data.get("steps", [])),
                 "format": data.get("format", "wps/2"),
+                "valid": not bool(error),
+                "validation_error": error or "",
+                **trust(path.name),
             })
-        except (json.JSONDecodeError, OSError):
-            continue
+        except (json.JSONDecodeError, OSError) as exc:
+            out.append({
+                "file": path.name,
+                "name": path.stem,
+                "task": "",
+                "steps": 0,
+                "format": "wps/2",
+                "valid": False,
+                "validation_error": str(exc),
+                **trust(path.name),
+            })
     return out
+
+
+def evidence_expectation(requirement: Any) -> dict[str, Any] | None:
+    """Translate one persisted evidence predicate into a verifier condition."""
+    if not isinstance(requirement, dict):
+        return None
+    direct = {
+        key: value for key, value in requirement.items()
+        if key in verify.SUPPORTED_CONDITIONS
+    }
+    if direct:
+        if "timeout_s" in requirement:
+            direct["timeout_s"] = requirement["timeout_s"]
+        return direct
+    predicate = str(requirement.get("predicate") or "").strip().casefold()
+    value = requirement.get("value")
+    mapping = {
+        "visible.text": "text_appears",
+        "window.visible": "window_appears",
+        "file.exists": "file_exists",
+        "process.running": "process_running",
+    }
+    key = mapping.get(predicate)
+    return {key: value} if key and value not in (None, "") else None
+
+
+def validate_evidence_requirements(requirements: Any) -> str | None:
+    if not isinstance(requirements, list) or not requirements:
+        return "at least one structured evidence requirement is required"
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            return f"evidence requirement {index + 1} must be an object"
+        predicate = str(requirement.get("predicate") or "").strip()
+        if predicate:
+            unknown = set(requirement) - {"predicate", "value"}
+            if unknown:
+                return f"evidence requirement {index + 1} has unsupported fields"
+        else:
+            unknown = set(requirement) - set(verify.SUPPORTED_CONDITIONS) - {"timeout_s"}
+            if unknown:
+                return f"evidence requirement {index + 1} has unsupported fields"
+            condition_values = [
+                value for key, value in requirement.items()
+                if key in verify.SUPPORTED_CONDITIONS
+            ]
+            if not condition_values or any(value in (None, "") for value in condition_values):
+                return f"evidence requirement {index + 1} has no checkable value"
+        if "timeout_s" in requirement:
+            try:
+                timeout_s = float(requirement["timeout_s"])
+            except (TypeError, ValueError):
+                return f"evidence requirement {index + 1} has invalid timeout_s"
+            if timeout_s <= 0:
+                return f"evidence requirement {index + 1} has invalid timeout_s"
+        if evidence_expectation(requirement) is None:
+            return f"evidence requirement {index + 1} is unsupported"
+    return None
 
 
 # ---------------------------------------------------------------- validation
@@ -1922,24 +2020,7 @@ class Replayer:
 
     @staticmethod
     def _evidence_expectation(requirement: Any) -> dict[str, Any] | None:
-        if not isinstance(requirement, dict):
-            return None
-        direct = {
-            key: value for key, value in requirement.items()
-            if key in verify.SUPPORTED_CONDITIONS
-        }
-        if direct:
-            return direct
-        predicate = str(requirement.get("predicate") or "").strip().casefold()
-        value = requirement.get("value")
-        mapping = {
-            "visible.text": "text_appears",
-            "window.visible": "window_appears",
-            "file.exists": "file_exists",
-            "process.running": "process_running",
-        }
-        key = mapping.get(predicate)
-        return {key: value} if key and value not in (None, "") else None
+        return evidence_expectation(requirement)
 
     def _postflight_evidence(self, script: dict[str, Any]) -> dict[str, Any]:
         evidence = script.get("evidence")

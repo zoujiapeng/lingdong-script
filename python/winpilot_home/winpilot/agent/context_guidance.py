@@ -8,6 +8,25 @@ from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
 
 
 class ContextGuidanceMixin:
+    def _append_advisory_once(self, key: str, prefix: str, note: str) -> None:
+        """Keep changing guidance while suppressing identical prompt repeats."""
+        cache = getattr(self, "_last_context_advisories", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._last_context_advisories = cache
+        compact = " ".join(str(note or "").split()).strip()
+        if not compact:
+            cache.pop(key, None)
+            return
+        content = f"[{prefix}] {compact}"
+        if cache.get(key) == compact and any(
+            message.get("content") == content
+            for message in self.messages[-24:]
+        ):
+            return
+        cache[key] = compact
+        self.messages.append({"role": "user", "content": content})
+
     def _maybe_plan_upfront(self, client) -> None:
         """Create an upfront plan for clearly multi-step tasks."""
         if not should_plan_upfront(self.task):
@@ -35,23 +54,15 @@ class ContextGuidanceMixin:
             return
         BUS.publish("world", run_id=self.run_id, **self.session.world.state())
         visual_note = self.session.take_visual_advisory()
-        if visual_note:
-            self.messages.append({
-                "role": "user",
-                "content": f"[visual state warning] {visual_note}",
-            })
+        self._append_advisory_once("visual", "visual state warning", visual_note)
         screen_note = self.session.world.screen_advisory()
-        if screen_note:
-            self.messages.append({"role": "user", "content": f"[screen watch] {screen_note}"})
+        self._append_advisory_once("screen", "screen watch", screen_note)
         run_note = self.run_state.guidance()
-        if run_note:
-            self.messages.append({"role": "user", "content": f"[run state] {run_note}"})
+        self._append_advisory_once("run_state", "run state", run_note)
         note = self.session.world.advisory()
-        if note:
-            self.messages.append({"role": "user", "content": f"[系统观察] {note}"})
+        self._append_advisory_once("world", "系统观察", note)
         working_set = self.session.world.working_set_advisory()
-        if working_set:
-            self.messages.append({"role": "user", "content": f"[working set] {working_set}"})
+        self._append_advisory_once("working_set", "working set", working_set)
         self._maybe_structured_replan()
 
     def _maybe_structured_replan(self) -> None:

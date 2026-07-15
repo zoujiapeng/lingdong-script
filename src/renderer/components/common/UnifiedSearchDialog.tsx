@@ -3,15 +3,14 @@ import { useStore } from '../../store';
 import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../utils/unifiedSearch';
 import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
-import { Search, X, Check, RotateCw, Sparkles, Loader2, Tag, Database, FileType, Star } from 'lucide-react';
+import { Search, X, Check, Sparkles, Loader2, Tag, FileType } from 'lucide-react';
 import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
 
-type FilterTab = 'all' | 'template' | 'feature' | 'tested';
+type FilterTab = 'all' | 'template' | 'tested';
 
 interface UnifiedSearchDialogProps {
   onClose: () => void;
   onSelectTemplate?: (entry: { id: string; name: string }) => void;
-  onCallFeature?: (featureName: string, params?: Record<string, any>) => void;
   initialQuery?: string;
 }
 
@@ -32,22 +31,17 @@ const DIALOG_STYLE: React.CSSProperties = {
 const FILTER_TABS: { key: FilterTab; label: string; icon: React.ReactNode }[] = [
   { key: 'all', label: '全部', icon: null },
   { key: 'template', label: '模板', icon: <FileType size={13} /> },
-  { key: 'feature', label: '功能', icon: <Database size={13} /> },
-  { key: 'tested', label: '已验证', icon: <Check size={13} /> },
+  { key: 'tested', label: '已标记', icon: <Check size={13} /> },
 ];
 
-const EXAMPLE_QUERIES = ['截图', '登录', '点击', '浏览器', '文件', '循环'];
+const EXAMPLE_QUERIES = ['ARP', '智能任务', '证据', '编排'];
 
 export function UnifiedSearchDialog({
   onClose,
   onSelectTemplate,
-  onCallFeature,
   initialQuery = '',
 }: UnifiedSearchDialogProps) {
-  const featureList = useStore(s => s.featureList);
-  const addLog = useStore(s => s.addLog);
   const loadTemplate = useStore(s => s.loadTemplate);
-  const callFeatureDirect = useStore(s => s.callFeatureDirect);
 
   const [query, setQuery] = useState(initialQuery);
   const [results, setResults] = useState<UnifiedSearchResult[]>([]);
@@ -61,10 +55,10 @@ export function UnifiedSearchDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  // Rebuild index with latest features on mount
+  // Historical sub-script selection is limited to executable templates.
   useEffect(() => {
-    unifiedSearch.rebuildIndex(featureList.length > 0 ? featureList as any : undefined);
-  }, [featureList]);
+    unifiedSearch.rebuildIndex();
+  }, []);
 
   // Focus input on mount
   useEffect(() => {
@@ -88,7 +82,8 @@ export function UnifiedSearchDialog({
       // Update tested status
       unifiedSearch.refreshTestedStatus();
 
-      const offline = unifiedSearch.search(q, { maxResults: 20 });
+      const offline = unifiedSearch.search(q, { types: ['template'], maxResults: 20 })
+        .filter((result) => result.item.hasScript);
       let final = offline;
       let enhanced = false;
 
@@ -100,7 +95,9 @@ export function UnifiedSearchDialog({
           const llmResult = await llmEnhanceSearch(q, offline, apiKey);
           setLlmLoading(false);
           if (llmResult.enhanced) {
-            final = llmResult.results;
+            final = llmResult.results.filter(
+              (result) => result.item.type === 'template' && result.item.hasScript,
+            );
             enhanced = true;
           }
         }
@@ -143,21 +140,6 @@ export function UnifiedSearchDialog({
     onClose();
   };
 
-  // Call a feature directly
-  const handleCallFeature = async (item: UnifiedSearchItem) => {
-    if (onCallFeature) {
-      onCallFeature(item.featureName || item.id, {});
-    } else {
-      try {
-        await callFeatureDirect(item.featureName || item.id, item.name, {});
-        addLog({ level: 'info', message: `调用了功能: ${item.name}` });
-      } catch (e: any) {
-        addLog({ level: 'error', message: `调用功能失败: ${e?.message}` });
-      }
-    }
-    onClose();
-  };
-
   // Show feature detail
   const handleShowDetail = (item: UnifiedSearchItem) => {
     setSelectedItem(selectedItem?.id === item.id ? null : item);
@@ -166,7 +148,6 @@ export function UnifiedSearchDialog({
   // Filter results
   const filtered = results.filter(r => {
     if (filter === 'template') return r.item.type === 'template';
-    if (filter === 'feature') return r.item.type === 'feature';
     if (filter === 'tested') return r.item.tested;
     return true;
   });
@@ -185,7 +166,7 @@ export function UnifiedSearchDialog({
           <input ref={inputRef}
             value={query}
             onChange={e => handleInputChange(e.target.value)}
-            placeholder="搜索指令库 — 输入关键词查找模板或功能..."
+            placeholder="搜索可执行流程模板..."
             style={{
               flex: 1, border: 'none', outline: 'none', fontSize: 15,
               background: 'transparent', color: 'var(--text-primary)',
@@ -299,7 +280,7 @@ export function UnifiedSearchDialog({
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                     {/* Type badge */}
                     <span style={getTypeBadgeStyle(r.item.type)}>
-                      {r.item.type === 'template' ? '模板' : '功能'}
+                      模板
                     </span>
 
                     {/* Name */}
@@ -321,7 +302,7 @@ export function UnifiedSearchDialog({
                         display: 'flex', alignItems: 'center', gap: 3,
                       }}
                       title={r.item.tested ? '点击取消标记' : '点击标记为已测试'}>
-                      {r.item.tested ? <><Check size={10} /> 已验证</> : '未测试'}
+                      {r.item.tested ? <><Check size={10} /> 已标记</> : '未标记'}
                     </span>
 
                     {/* Score bar */}
@@ -380,19 +361,6 @@ export function UnifiedSearchDialog({
                         </div>
                       )}
 
-                      {/* Feature params */}
-                      {r.item.type === 'feature' && r.item.params && r.item.params.length > 0 && (
-                        <div style={{ marginBottom: 6 }}>
-                          <span style={{ fontWeight: 600 }}>参数: </span>
-                          {r.item.params.map(p => (
-                            <span key={p.name} style={{ marginRight: 8 }}>
-                              {p.name}
-                              {p.required ? <span style={{ color: 'var(--error)' }}>*</span> : '?'}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
                       {/* Actions */}
                       <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                         {r.item.type === 'template' && r.item.hasScript && (
@@ -400,13 +368,6 @@ export function UnifiedSearchDialog({
                             onClick={(e) => { e.stopPropagation(); handleUseTemplate(r.item); }}
                             style={{ padding: '4px 10px', fontSize: 11 }}>
                             使用此模板
-                          </button>
-                        )}
-                        {r.item.type === 'feature' && (
-                          <button className="btn btn-primary"
-                            onClick={(e) => { e.stopPropagation(); handleCallFeature(r.item); }}
-                            style={{ padding: '4px 10px', fontSize: 11 }}>
-                            调用功能
                           </button>
                         )}
                       </div>
@@ -429,7 +390,7 @@ export function UnifiedSearchDialog({
             {llmEnhanced && <span style={{ color: 'var(--accent)', marginLeft: 4 }}>· AI 增强已启用</span>}
           </span>
           <span>
-            Esc 关闭 · 点击名称查看详情 · 标记「已验证」
+            Esc 关闭 · 点击名称查看详情 · 标记「已测试」
           </span>
         </div>
       </div>

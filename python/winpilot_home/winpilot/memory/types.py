@@ -41,6 +41,10 @@ PACKABLE_KINDS = ACTION_KINDS | FACTUAL_KINDS | {"warning", "summary"}
 class TaskFrame:
     task: str
     app: str = ""
+    app_version: str = ""
+    stage_type: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
+    anchors: list[str] = field(default_factory=list)
     coding: bool = False
     volatile: bool = False
     words: list[str] = field(default_factory=list)

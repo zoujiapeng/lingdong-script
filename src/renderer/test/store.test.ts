@@ -49,8 +49,12 @@ describe('store', () => {
     expect(state.script.nodes.map((node) => node.type)).toEqual([
       'start', 'action_batch', 'human_gate', 'evidence_gate', 'end',
     ]);
-    expect(state.script.nodes.find((node) => node.type === 'human_gate')?.params).toMatchObject({ approved: true });
-    expect(state.script.nodes.find((node) => node.type === 'evidence_gate')?.params).toMatchObject({ required: ['human_gate'] });
+    const humanGate = state.script.nodes.find((node) => node.type === 'human_gate');
+    expect(humanGate?.params).toMatchObject({ message: expect.any(String) });
+    expect(humanGate?.params).not.toHaveProperty('approved', true);
+    expect(state.script.nodes.find((node) => node.type === 'evidence_gate')?.params).toMatchObject({
+      required: [{ predicate: 'human.approved', source: 'human_gate', equals: true }],
+    });
     expect(state.ui).toBeDefined();
     expect(state.ui.dark_mode).toBe(false);
     expect(state.ui.themeMode).toBe('system');

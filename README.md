@@ -34,6 +34,8 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - 前端主工作台已中文化；API、MCP、VLM、URL、坐标和模型名等技术标识保留原文。Electron 与 Python 使用 runtime contract v2、进程启动时源码指纹和 Git revision 校验；源码漂移或旧进程不兼容时禁止启动新前端任务并要求重启。
 - 像素变化、颜色存在和 Controller 的 `auto_visual_verify` 只说明发生了视觉效果，不是任务完成证据；当前尚未内置带正式权重的常驻学习型 UI detector。
 - 长期记忆以 `python/winpilot_home/memory.db` 的 SQLite Memory Graph 为主；`python/winpilot_home/experience_memory.json` 只保留迁移兼容。Memory Pack 作为有界 user message 注入，不能覆盖当前截图或确定性证据。
+- Studio 只展示同时被前端编译器和后端 capability catalog 声明可执行的节点。历史 FlowScript 节点定义仍可用于读取旧文件，但不会再从节点库或动态 `@feature` 搜索中创建；兼容浏览器执行器强制禁止模拟成功。
+- 脚本文件默认是 draft artifact，不等于 Skill。Skill 复用要求 active Memory Graph 节点、结构化适用条件和匹配的脚本 SHA-256；Apprentice 候选必须经过占用 `interactive_runtime` 资源锁的真实 replay，并让结构化 postflight evidence 全部通过后才能晋升。
 - `python/winpilot_home/config.json`、`python/winpilot_home/traces/`、`python/winpilot_home/evals/`、`python/winpilot_home/scripts/`、`python/winpilot_home/experience_memory.json` 是本机运行数据，不提交；根目录 `scripts/` 是受版本控制的开发与评测工具。
 
 ## 成熟度快照
@@ -46,8 +48,9 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | Raw Device Executor | `action/raw_device.py` 让 Controller batch 的常见 click/type/key/drag/focus/launch 子动作直接调用已授权 handler，不再递归支付完整 `ToolSession.dispatch()`；少数复杂动作仍走外层工具生命周期。 |
 | Action Queue | `action/desktop_queue.py` 是公平资源队列：真实鼠标/键盘仍按 `physical` 全局单写；明确使用 PostMessage、不会移动鼠标的后台窗口动作可按 `window:<hwnd>` 在不同窗口并发，同一 hwnd 串行；剪贴板另有独占资源。 |
 | Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，并在有意义的 ROI 变化后合并调度轻量 OCR/Win32；changed-only observe 可消费热缓存，UIA/VLM 不进入 daemon 内环。lease 释放会设置 generation-scoped cancellation，旧的排队/完成中结果不能进入重获 lease 后的 history；ONNX 已开始的一次推理本身不能安全抢占。它还不是常驻学习型 YOLO/UI detector。 |
-| Runtime jobs | Agent、ARP、Replay 和计划任务统一进入 `runtime_jobs.py`；API 可查询/取消，交互任务按 `interactive_runtime` 排队，真实鼠标键盘仍由 Desktop Action Queue 单写保护。 |
+| Runtime jobs | Agent、ARP、Replay、Memory verification 和计划任务统一进入 `runtime_jobs.py`；API 可查询/取消，交互任务按 `interactive_runtime` 排队，真实鼠标键盘仍由 Desktop Action Queue 单写保护。 |
 | ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层。Flow editor 在 IR 的 `runtime.arp_graph` 中保存一次编译后的 `arp/1` 投影及 fingerprint，后端校验后直接运行；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
+| Memory / Skill | Agent run 只经 `memory/compiler.py` 写入一次；同名候选保留谱系而不删除旧版本。实际复用同时检查任务意图、app/window、stage/parameters/anchors（存在时）和脚本摘要。前端分开展示已验证技能、草稿/无效脚本、长期记忆和进程内 session memory。 |
 | Task Contract / Artifact | 前端自然语言入口先生成 `task-contract/1`：结构化 intent、typed stages、每阶段 capability selection、artifact binding、evidence provider 和 completion obligation。`ArtifactStore` 将用户工件与模型观察帧分离，并以 run-scoped `artifact_id`、哈希、来源、时间贯穿投递和验收。 |
 | 实时视觉交互 | `SurfaceBinding` 将交互面绑定到一个新鲜目标 hwnd、capture scope、窗口 client authority 和 frame identity；`InteractionRegion` 是该帧 0..1000 坐标空间中的显式安全区域。语义模型只提出一个 typed turn，Controller 在本地连续执行并返回动作后权威帧；区域外动作、陈旧帧、目标失焦或含糊表面均 fail-closed。 |
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |

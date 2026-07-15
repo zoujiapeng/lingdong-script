@@ -22,9 +22,9 @@ import { loadCustomTemplates, saveCustomTemplates, loadAgentHistory, saveAgentHi
 export { loadTemplateShortcuts, saveTemplateShortcut, deleteTemplateShortcut, loadCustomTemplates, saveCustomTemplates } from './persistence';
 export type { CustomTemplate } from './persistence';
 
-function createTemplateScript(templateId: string): FlowScript {
+function createTemplateScript(templateId: string): FlowScript | null {
   const tpl = PRESET_TEMPLATES.find((t) => t.id === templateId);
-  return tpl ? tpl.createScript() : PRESET_TEMPLATES[0].createScript();
+  return tpl ? tpl.createScript() : null;
 }
 
 interface AppStore {
@@ -284,7 +284,7 @@ function pushHistory(nodes: FlowNode[], edges: FlowEdge[]) {
 
 export const useStore = createWithEqualityFn<AppStore>()(
   immer((set, get) => ({
-    script: createTemplateScript('arp-quickstart'),
+    script: createTemplateScript('arp-quickstart')!,
     scripts: {},
     activeScriptId: '',
     recentScripts: [],
@@ -319,6 +319,7 @@ export const useStore = createWithEqualityFn<AppStore>()(
 
     newScript: () => {
       const s = createTemplateScript('arp-quickstart');
+      if (!s) throw new Error('Default ARP template is unavailable.');
       history = [];
       historyIndex = -1;
       pushHistory(s.nodes, s.edges);
@@ -334,6 +335,10 @@ export const useStore = createWithEqualityFn<AppStore>()(
 
     loadTemplate: (templateId) => {
       const s = createTemplateScript(templateId);
+      if (!s) {
+        get().addLog({ level: 'error', message: `模板不存在或不可执行: ${templateId}` });
+        return;
+      }
       history = [];
       historyIndex = -1;
       pushHistory(s.nodes, s.edges);
@@ -787,6 +792,7 @@ export const useStore = createWithEqualityFn<AppStore>()(
       if (api) {
         // --- REAL PYTHON ENGINE via Electron IPC ---
         set((s) => { s.execution.log = []; });
+        get().addLog({ level: 'warn', message: '兼容执行器仅用于历史流程；新流程由 ARP 运行时执行。' });
         get().addLog({ level: 'info', message: '🔄 启动 Python 自动化引擎...' });
 
         // Send script to engine (IPC listeners are already registered at module level)
@@ -803,10 +809,18 @@ export const useStore = createWithEqualityFn<AppStore>()(
         });
       } else {
         // --- BROWSER SIMULATOR (fallback for dev) ---
+        get().addLog({ level: 'warn', message: '兼容执行器仅用于历史流程；浏览器环境禁止模拟成功。' });
         const bp = freshState.execution.breakpoints || [];
         const stepping = freshState.execution.stepping;
+        const failClosedScript = {
+          ...freshState.script,
+          settings: {
+            ...freshState.script.settings,
+            require_real_features: true,
+          },
+        };
         const ctrl = createFlowExecutor(
-          freshState.script,
+          failClosedScript,
           {
             onNodeStatus: (nodeId, status, error) => {
               get().updateNodeStatus(nodeId, status, error);
@@ -1306,7 +1320,7 @@ for (const meta of PRESET_TEMPLATE_META) {
     keywords: [...meta.keywords],
     tags: [...meta.tags],
     source: 'preset',
-    hasScript: true,
+    hasScript: Boolean(preset),
     flowScript: preset?.createScript(),
   });
 }

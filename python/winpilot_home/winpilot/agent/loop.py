@@ -2059,6 +2059,14 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
     def _fold_checkpoint(self, folded_summary: str) -> str:
         """Compact state that survives when an old bulky tool result is folded."""
         parts = ["[folded context checkpoint]", f"goal: {self.task[:200]}"]
+        plan = getattr(self.session, "plan", None)
+        if plan is not None:
+            try:
+                rendered_plan = re.sub(r"\s+", " ", str(plan.render() or "")).strip()
+            except Exception:
+                rendered_plan = ""
+            if rendered_plan:
+                parts.append(f"current_plan: {rendered_plan[:400]}")
         snapshot = self.session.snapshot
         if snapshot is not None:
             elements = getattr(snapshot, "elements", []) or []
@@ -2066,29 +2074,42 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 f'screen: title="{getattr(snapshot, "title", "")[:80]}" '
                 f'hwnd={getattr(snapshot, "hwnd", "")} elements={len(elements)}'
             )
+            key_elements = []
+            for element in elements:
+                text = re.sub(r"\s+", " ", str(getattr(element, "text", "") or "")).strip()
+                if not text:
+                    continue
+                role = str(getattr(element, "role", "") or "element")
+                states = ",".join(str(item)[:20] for item in (getattr(element, "states", []) or [])[:3])
+                state_note = f" [{states}]" if states else ""
+                key_elements.append(f'{role[:30]}:"{text[:50]}"{state_note}')
+                if len(key_elements) >= 3:
+                    break
+            if key_elements:
+                parts.append("screen_keys: " + " | ".join(key_elements))
         state = self.run_state.to_dict()
         if state.get("phase") and state.get("phase") != "idle":
-            issue = str(state.get("last_issue") or "")[:180]
+            issue = str(state.get("last_issue") or "")[:140]
             parts.append(
                 f'run_state: phase={state.get("phase")} '
-                f'last_tool={state.get("last_tool")} issue="{issue}"'
+                f'last_tool={str(state.get("last_tool") or "")[:60]} issue="{issue}"'
             )
         if self.session.world_enabled:
             world_state = self.session.world.state()
             if world_state.get("last_change") or world_state.get("screen_watch"):
                 parts.append(
                     "world: "
-                    f'last_change="{str(world_state.get("last_change") or "")[:180]}" '
+                    f'last_change="{str(world_state.get("last_change") or "")[:120]}" '
                     f'repeated={world_state.get("repeated")} '
                     f'identical_observes={world_state.get("identical_observes")}'
                 )
         if self._recent_results:
             parts.append("recent_tool_evidence:")
             for name, text in reversed(self._recent_results[-3:]):
-                one_line = self._folded_tool_evidence_preview(str(text), limit=520)
+                one_line = self._folded_tool_evidence_preview(str(text), limit=180)
                 parts.append(f"- {name}: {one_line}")
-        parts.append(f"folded_item: {folded_summary}")
-        return "\n".join(parts)[:1800]
+        parts.append(f"folded_item: {folded_summary[:180]}")
+        return "\n".join(parts)[:2400]
 
     def _fold_old(self) -> None:
         """Compress old bulky observations — but ONLY when the context is large.
@@ -8996,24 +9017,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
                 self.messages.append({"role": "user", "content": ctx})
-        # Proactive reuse: when this task strongly matches a past run that left a
-        # verified replay script, direct the agent to reuse it first (it's the
-        # whole point of skills; replay failure auto-falls-back to live actions).
-        # Skipped for coding tasks — they are never in the reusable scope.
-        if not self._is_coding and self.runtime_profile.experience_enabled:
-            try:
-                script, recipe = experience.reusable_script_for(self.task)
-                if script and recipe:
-                    self.messages.append({
-                        "role": "user",
-                        "content": (
-                            f"⚡ 本任务与上次成功完成的「{recipe['task']}」高度一致，已有可复用流程脚本。"
-                            f"**第一步请直接调用 reuse_skill 复用**（0-token 重放上次步骤）；"
-                            "若重放中途某步失败，它会告诉你卡在哪，你再从那步起实时操作。"),
-                    })
-                    BUS.publish("memory", action="reuse_suggested", task=recipe["task"])
-            except Exception as exc:
-                logger.debug("复用建议注入失败: %s", exc)
         is_gui_only_task = _is_gui_only_task(self.task)
         allow_shell_tools = self.allow_shell_tools
         if allow_shell_tools is None:
@@ -9210,36 +9213,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.result_text = str(exc)
             BUS.publish("agent_error", run_id=self.run_id, error=str(exc))
 
-        # Record a reusable recipe (+ export canonical Automation IR) ONLY for
-        # non-coding successes. Coding tasks are excluded from the reusable
-        # scope entirely — solved fresh next time, guided by the playbook.
-        if (
-            self.status == "done"
-            and not self._is_coding
-            and self.runtime_profile.experience_enabled
-        ):
-            app_hint = self.session.snapshot.title if self.session.snapshot else ""
-            # Trusted (→ reusable skill + linked script) when EITHER the done-gate
-            # judge independently confirmed success, OR an action passed external
-            # verify; and never when done was force-accepted after max rejects.
-            verified_run = (
-                (self._done_verified
-                 or (self._had_verified_action and self._last_verify_ok is not False))
-                and not self._done_unverified)
-            # A trusted success becomes replayable canonical Automation IR
-            # linked to the recipe, so a future identical task can reuse_skill it.
-            script_name = ""
-            if verified_run:
-                try:
-                    from ..recorder import trace as _trace
-                    script_path = _trace.export_automation_ir(self.run_id)
-                    script_name = script_path.name
-                except (FileNotFoundError, ValueError) as exc:
-                    logger.debug("成功流程无可重放步骤，跳过导出: %s", exc)
-                except OSError as exc:
-                    logger.warning("成功流程导出脚本失败(IO): %s", exc)
-            experience.record(self.task, app_hint, self._steps_log,
-                              verified=verified_run, script=script_name)
         if self.runtime_profile.experience_enabled:
             try:
                 compiler.ingest_run(self)

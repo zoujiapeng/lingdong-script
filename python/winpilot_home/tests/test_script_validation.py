@@ -7,6 +7,35 @@ from winpilot.recorder import trace as trace_mod
 
 
 # ----------------------------------------------------------- validate_script
+def test_structured_evidence_validation_rejects_unknown_fields():
+    assert trace_mod.validate_evidence_requirements([
+        {"predicate": "visible.text", "value": "done", "typo": True},
+    ]) == "evidence requirement 1 has unsupported fields"
+    assert trace_mod.validate_evidence_requirements([
+        {"text_appears": "done", "timeout_s": 4},
+    ]) is None
+    assert trace_mod.validate_evidence_requirements([
+        {"text_appears": "done", "timeout_s": "later"},
+    ]) == "evidence requirement 1 has invalid timeout_s"
+    assert trace_mod.evidence_expectation(
+        {"text_appears": "done", "timeout_s": 4},
+    ) == {"text_appears": "done", "timeout_s": 4}
+
+
+def test_invalid_canonical_script_does_not_hide_valid_wps_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(trace_mod, "SCRIPTS_DIR", tmp_path)
+    (tmp_path / "lesson.automation.json").write_text("{broken", encoding="utf-8")
+    (tmp_path / "lesson.wps.json").write_text(
+        json.dumps({"format": "wps/2", "steps": []}),
+        encoding="utf-8",
+    )
+
+    scripts = {item["file"]: item for item in trace_mod.list_scripts()}
+
+    assert scripts["lesson.automation.json"]["valid"] is False
+    assert scripts["lesson.wps.json"]["valid"] is True
+
+
 def test_valid_v1_script():
     assert trace_mod.validate_script(
         {"format": "wps/1", "steps": [{"tool": "click", "coords": [1, 2]}]}) is None
