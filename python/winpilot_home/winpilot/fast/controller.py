@@ -1346,6 +1346,7 @@ class FastGuiController:
 
     def _dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         started = _now_ms()
+        scope_recovery = None
         if self.raw_device.supports(name):
             # The batch owns one outer ToolSession call, but foreground scope
             # can change between child actions (launches, dialogs, user input,
@@ -1355,14 +1356,22 @@ class FastGuiController:
                 from ..agent import scope_guard
 
                 blocked = scope_guard.ensure_scope(self.session, name, args)
+                scope_recovery = scope_guard.take_scope_recovery(self.session)
                 if blocked is not None:
                     result = blocked
                 else:
+                    if scope_recovery is not None:
+                        self._invalidate_after_scope_recovery()
                     result = self.raw_device.execute(name, args)
             else:
                 result = self.raw_device.execute(name, args)
         else:
             result = self.session.dispatch(name, args)
+        if scope_recovery is not None:
+            data = _json_dict(result.text)
+            if data:
+                data.setdefault("scope_recovery", scope_recovery)
+                result.text = json.dumps(data, ensure_ascii=False, default=str)
         elapsed = max(0, _now_ms() - started)
         result.replay = result.replay or {}
         result.replay.setdefault("elapsed_ms", elapsed)
@@ -2480,6 +2489,20 @@ class FastGuiController:
             return args
         return resolver(dict(args), capture_fn=self.capture_fn)
 
+    def _invalidate_after_scope_recovery(self) -> None:
+        """Discard state that may describe the temporarily foreground app.
+
+        The next normalized draw mapping will consequently capture current
+        target pixels and bind the work surface again before the uncommitted
+        primitive is dispatched.  Completed primitives are not replayed.
+        """
+
+        for attr in ("snapshot", "_observe_cache", "_draw_surface_cache"):
+            try:
+                setattr(self.session, attr, None)
+            except Exception:
+                pass
+
     @staticmethod
     def _action_region(name: str, args: dict[str, Any]) -> Region | None:
         coords: list[tuple[int, int]] = []
@@ -2649,8 +2672,6 @@ class FastGuiController:
                 break
             name, normalised_args = _normalise_action(action)
             name, normalised_args, upgraded_from = _upgrade_semantic_action(name, normalised_args)
-            if name == "draw_strokes":
-                normalised_args = self._map_canvas_relative_draw(normalised_args)
             normalised_args = _with_batch_expect_defaults(name, normalised_args)
             optional_action = bool(normalised_args.pop("optional", False))
             last_action = name
@@ -2667,10 +2688,20 @@ class FastGuiController:
             # before their eventual raw click; guarding only RawDeviceExecutor
             # let those actions inspect an occluding foreground window.
             scope_blocked = None
+            scope_recovery = None
             if name in BATCH_MUTATING_ACTIONS:
                 from ..agent import scope_guard
 
                 scope_blocked = scope_guard.ensure_scope(self.session, name, normalised_args)
+                scope_recovery = scope_guard.take_scope_recovery(self.session)
+                if scope_recovery is not None:
+                    metrics.scope_recovery_count += 1
+                    self._invalidate_after_scope_recovery()
+            if name == "draw_strokes" and scope_blocked is None:
+                # Map only after foreground ownership has been proved.  A
+                # successful refocus invalidates the surface cache above, so
+                # this binds the uncommitted primitive from fresh target pixels.
+                normalised_args = self._map_canvas_relative_draw(normalised_args)
             epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             started = _now_ms()
             action_envelope = self._publish_child_start(
@@ -2736,11 +2767,18 @@ class FastGuiController:
                 "terminal": result.terminal,
                 "preview": result.text[:800],
             }
+            if scope_recovery is not None:
+                item["scope_recovery"] = scope_recovery
             if name in BATCH_OBSERVE_ACTIONS and len(result.text or "") > 800:
                 item["full_text"] = result.text
             if upgraded_from:
                 item["upgraded_from"] = upgraded_from
             data = _json_dict(result.text)
+            nested_scope_recovery = data.get("scope_recovery")
+            if scope_recovery is None and isinstance(nested_scope_recovery, dict):
+                scope_recovery = dict(nested_scope_recovery)
+                metrics.scope_recovery_count += 1
+                item["scope_recovery"] = scope_recovery
             post_state = data.get("post_state") if isinstance(data.get("post_state"), dict) else {}
             try:
                 foreground_hwnd = int(post_state.get("foreground_hwnd") or 0)
@@ -3033,6 +3071,21 @@ class FastGuiController:
             "last_action": last_action,
             "sync": sync_result,
             "needs_observe": needs_observe,
+            "transaction": {
+                "planned_action_count": len(actions),
+                "attempted_action_count": min(len(actions), len(results)),
+                "committed_action_count": sum(
+                    1
+                    for item in results[:len(actions)]
+                    if isinstance(item, dict) and item.get("ok") is True
+                ),
+                "next_uncommitted_action_index": metrics.failed_at,
+                "remaining_action_count": (
+                    max(0, len(actions) - int(metrics.failed_at) + 1)
+                    if metrics.failed_at is not None else 0
+                ),
+                "scope_recovery_count": metrics.scope_recovery_count,
+            },
         }
         if current_state_verified and metrics.failed_at is None:
             payload["verified"] = True

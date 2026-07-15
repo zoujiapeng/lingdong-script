@@ -360,7 +360,15 @@ class FailureRecoveryLayer:
     def _dispatch_probe(self, session: Any, name: str, args: dict[str, Any]) -> tuple[Any | None, str]:
         dispatcher = getattr(session, "dispatch", None)
         if callable(dispatcher):
-            return dispatcher(name, args), "dispatch"
+            depth = int(getattr(session, "_local_recovery_depth", 0) or 0)
+            try:
+                session._local_recovery_depth = depth + 1
+                return dispatcher(name, args), "dispatch"
+            finally:
+                try:
+                    session._local_recovery_depth = depth
+                except Exception:
+                    pass
         handler = getattr(session, f"_t_{name}", None)
         if callable(handler):
             return handler(args), "handler"

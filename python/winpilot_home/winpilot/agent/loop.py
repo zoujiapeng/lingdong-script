@@ -1132,6 +1132,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self.status = "pending"                     # running/done/fail/reply/stopped/error
         self.result_text = ""
         self.usage_total = empty_usage_total()
+        self.model_request_count = 0
+        self._inline_stage_semantic_attempted = False
+        self._inline_stage_semantic_passed = False
+        self._inline_stage_semantic_last_verdict: dict[str, Any] = {}
+        self._inline_stage_semantic_region: dict[str, int] = {}
         self._model_adapter = None
         self._last_llm_model = ""
         self._last_llm_thinking_enabled = False
@@ -1202,6 +1207,203 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._continuous_semantic_surface_hwnd = 0
         self._constraint_rejection_category = ""
         self._constraint_rejection_streak = 0
+
+    def bind_target_window(self, hwnd: int, hint: str = "") -> None:
+        """Carry a controller-resolved window into a bounded semantic stage.
+
+        This is deliberately explicit: a new AgentRunner must not rediscover
+        or lose the application state established by the preceding stage.
+        """
+        self.session._remember_target(int(hwnd), str(hint or ""))
+
+    @staticmethod
+    def _inline_semantic_region(payload: dict[str, Any]) -> dict[str, int]:
+        """Derive a fresh-pixel semantic ROI from executed controller geometry.
+
+        The region is subject-agnostic: it is the padded union of actual draw
+        actions, clamped to the controller-resolved canvas.  Model-provided
+        screenshot coordinates are never consulted.
+        """
+
+        def rect(value: Any) -> tuple[int, int, int, int] | None:
+            if not isinstance(value, dict):
+                return None
+            try:
+                left = int(value.get("left", value.get("x", 0)))
+                top = int(value.get("top", value.get("y", 0)))
+                width = int(value.get("width", 0))
+                height = int(value.get("height", 0))
+            except (TypeError, ValueError):
+                return None
+            if width <= 0 or height <= 0:
+                return None
+            return left, top, left + width, top + height
+
+        draws: list[tuple[int, int, int, int]] = []
+        canvases: list[tuple[int, int, int, int]] = []
+        for action in payload.get("actions_executed") or []:
+            if not isinstance(action, dict):
+                continue
+            if str(action.get("action") or "").casefold() != "draw_strokes":
+                continue
+            draw = rect(action.get("draw_region"))
+            canvas = rect(action.get("canvas_region"))
+            if draw is not None:
+                draws.append(draw)
+            if canvas is not None:
+                canvases.append(canvas)
+        if not draws:
+            return {}
+
+        left = min(item[0] for item in draws)
+        top = min(item[1] for item in draws)
+        right = max(item[2] for item in draws)
+        bottom = max(item[3] for item in draws)
+        width = right - left
+        height = bottom - top
+        pad_x = max(12, int(round(width * 0.12)))
+        pad_y = max(12, int(round(height * 0.12)))
+        left, top, right, bottom = (
+            left - pad_x,
+            top - pad_y,
+            right + pad_x,
+            bottom + pad_y,
+        )
+        if canvases:
+            canvas_left = max(item[0] for item in canvases)
+            canvas_top = max(item[1] for item in canvases)
+            canvas_right = min(item[2] for item in canvases)
+            canvas_bottom = min(item[3] for item in canvases)
+            if canvas_right > canvas_left and canvas_bottom > canvas_top:
+                left = max(left, canvas_left)
+                top = max(top, canvas_top)
+                right = min(right, canvas_right)
+                bottom = min(bottom, canvas_bottom)
+        if right <= left or bottom <= top:
+            return {}
+        return {
+            "left": left,
+            "top": top,
+            "width": right - left,
+            "height": bottom - top,
+        }
+
+    @staticmethod
+    def _merge_inline_semantic_regions(
+        previous: dict[str, int],
+        current: dict[str, int],
+    ) -> dict[str, int]:
+        if not previous:
+            return dict(current)
+        if not current:
+            return dict(previous)
+        left = min(int(previous["left"]), int(current["left"]))
+        top = min(int(previous["top"]), int(current["top"]))
+        right = max(
+            int(previous["left"]) + int(previous["width"]),
+            int(current["left"]) + int(current["width"]),
+        )
+        bottom = max(
+            int(previous["top"]) + int(previous["height"]),
+            int(current["top"]) + int(current["height"]),
+        )
+        return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+    def _inline_stage_semantic_verdict(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Run a typed-stage semantic gate immediately after a real transaction.
+
+        This is profile-driven rather than task-keyword driven. It lets a local
+        Controller transaction advance the stage without another main-model
+        turn, while still requiring fresh-pixel semantic evidence.
+        """
+        if not self.runtime_profile.inline_semantic_verification:
+            return None
+        if str(tool_name or "") not in {"execute_subgoal", "run_action_batch"}:
+            return None
+        if payload.get("ok") is not True or payload.get("blocked") is True:
+            return None
+        packet = payload.get("evidence_packet")
+        scene = packet.get("scene_structure") if isinstance(packet, dict) else None
+        try:
+            executed_draw_count = int((scene or {}).get("executed_draw_count") or 0)
+        except (TypeError, ValueError):
+            executed_draw_count = 0
+        if executed_draw_count <= 0:
+            return None
+        current_region = self._inline_semantic_region(payload)
+        self._inline_stage_semantic_region = self._merge_inline_semantic_regions(
+            self._inline_stage_semantic_region,
+            current_region,
+        )
+        verify_args: dict[str, Any] = {"criteria": self.task}
+        verify_args.update(self._inline_stage_semantic_region)
+        self.model_request_count += 1
+        started = time.monotonic()
+        verify_result = self.session.dispatch("vlm_verify", verify_args)
+        try:
+            verdict = json.loads(verify_result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            verdict = {}
+        if not isinstance(verdict, dict):
+            verdict = {}
+        verdict["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        verdict["inline_stage_verifier"] = True
+        args = {**verify_args, "inline_stage_verifier": True}
+        self._record_step("vlm_verify", args, verify_result.replay)
+        self._track_verification("vlm_verify", verify_result.text)
+        self._track_visible_evidence("vlm_verify", args, verify_result.text)
+        self._tool_history.append(("vlm_verify", args, verify_result.text or ""))
+        self._tool_history = self._tool_history[-40:]
+        self._recent_results.append(("vlm_verify", (verify_result.text or "")[:1600]))
+        self._recent_results = self._recent_results[-20:]
+        passed = bool(
+            verdict.get("ok") is True
+            and verdict.get("verified") is True
+            and verdict.get("semantic_visual_verified") is True
+        )
+        self._inline_stage_semantic_attempted = True
+        self._inline_stage_semantic_passed = passed
+        self._inline_stage_semantic_last_verdict = dict(verdict)
+        BUS.publish(
+            "task_stage_inline_verify",
+            run_id=self.run_id,
+            stage_type=self.runtime_profile.stage_type,
+            provider="semantic_visual_judge",
+            verified=passed,
+            verdict=verdict,
+        )
+        if passed:
+            self._done_verified = True
+            self._had_verified_action = True
+        return verdict
+
+    @staticmethod
+    def _inline_stage_repair_hint(verdict: dict[str, Any]) -> str:
+        """Turn a failed fresh-frame verdict into one bounded repair action."""
+        if not isinstance(verdict, dict):
+            return ""
+        if verdict.get("semantic_visual_verified") is True:
+            return ""
+        detail = verdict.get("verdict")
+        issues = detail.get("issues") if isinstance(detail, dict) else []
+        issue_text = "; ".join(
+            str(item).strip() for item in (issues or []) if str(item).strip()
+        )[:700]
+        if not issue_text:
+            issue_text = str(verdict.get("reason") or "the requested subject is not yet recognizable")[:700]
+        return (
+            "[typed-stage semantic repair required] The independent fresh-frame verifier rejected "
+            f"the current result: {issue_text}. Do not call done, and do not spend the next turn "
+            "calling observe because the authoritative post-action frame is already attached. "
+            "Call execute_subgoal once with only the missing parts or contour repairs needed to "
+            "satisfy those issues. If existing named parts still look abstract or unrecognizable, repair "
+            "their shared outer silhouette and spatial attachment instead of drawing another complete "
+            "copy of the subject. Preserve existing correct work; do not clear or redraw the whole canvas."
+        )
 
     def interject(self, text: str) -> None:
         """Queue a user hint to inject before the agent's next decision."""
@@ -4148,6 +4350,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         abandon an in-flight LLM call immediately, instead of waiting up to the
         120s request timeout. Returns the response, or None if stopped."""
         self._roll_native_visual_context()
+        self.model_request_count += 1
         decision_started = time.monotonic()
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")
@@ -8149,6 +8352,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (json.JSONDecodeError, TypeError):
                 parsed_result = {}
             if isinstance(parsed_result, dict):
+                inline_verdict = self._inline_stage_semantic_verdict(
+                    tc.function.name,
+                    parsed_result,
+                )
+                if inline_verdict is not None:
+                    parsed_result["stage_semantic_verification"] = inline_verdict
+                    result.text = json.dumps(parsed_result, ensure_ascii=False)
+                    if self._done_verified:
+                        parsed_result["auto_completed_stage"] = True
+                        result.text = json.dumps(parsed_result, ensure_ascii=False)
+                        result.terminal = "done"
+                    else:
+                        repair_hint = self._inline_stage_repair_hint(inline_verdict)
+                        if repair_hint:
+                            post_tool_hints.append(repair_hint)
                 if tc.function.name == "execute_subgoal":
                     packet = parsed_result.get("evidence_packet")
                     if isinstance(packet, dict):
@@ -8369,7 +8587,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Coding tasks are excluded from action-replay reuse, but relevant
         # factual project notes (manual 'remember' entries) still help — inject
         # them read-only (empty hint_ids → never scored/evicted by this run).
-        if self._is_coding:
+        if not self.runtime_profile.experience_enabled:
+            hints, self._hint_ids = "", []
+        elif self._is_coding:
             hints, self._hint_ids = experience.note_hints(self.task), []
         else:
             hints, self._hint_ids = experience.hints_with_ids(self.task)
@@ -8488,6 +8708,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 })
         if (
             self.session_context
+            and self.runtime_profile.experience_enabled
             and CONFIG.get("agent", "session_memory", default=True)
             and session_mod.should_include_context(self.task)
         ):
@@ -8498,7 +8719,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # verified replay script, direct the agent to reuse it first (it's the
         # whole point of skills; replay failure auto-falls-back to live actions).
         # Skipped for coding tasks — they are never in the reusable scope.
-        if not self._is_coding:
+        if not self._is_coding and self.runtime_profile.experience_enabled:
             try:
                 script, recipe = experience.reusable_script_for(self.task)
                 if script and recipe:
@@ -8534,7 +8755,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             allow_files=allow_file_tools,
             profile=schema_profile,
             native_vision=_main_model_has_vision(),
+            required_capabilities=self.runtime_profile.required_capabilities,
+            stage_tools=self.runtime_profile.stage_tools,
+            stage_type=self.runtime_profile.stage_type,
         )
+        if self.runtime_profile.model_tool_allowlist:
+            allowed_stage_tools = set(self.runtime_profile.model_tool_allowlist)
+            tools = [
+                item for item in tools
+                if str(item.get("function", {}).get("name") or "") in allowed_stage_tools
+            ]
         model_tool_names = [
             str(item.get("function", {}).get("name") or "")
             for item in tools
@@ -8546,6 +8776,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     schema_profile=schema_profile,
                     model_tool_count=len(model_tool_names),
                     model_tool_names=model_tool_names,
+                    task_contract_id=self.runtime_profile.task_contract_id,
+                    stage_type=self.runtime_profile.stage_type,
+                    experience_enabled=self.runtime_profile.experience_enabled,
+                    required_capabilities=list(self.runtime_profile.required_capabilities),
+                    exposed_capabilities=list(self.runtime_profile.exposed_capabilities),
+                    domain_adapter=self.runtime_profile.domain_adapter,
                     service_runtime=runtime_fingerprint())
         try:
             raw_client = _client()
@@ -8666,7 +8902,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     action_names = {tc.function.name for tc in msg.tool_calls}
                     if action_names & _ACTION_TOOLS:
                         self._consecutive_unverified += 1
-                if terminal == "done" and not self._verify_done(client, steps_left=max_steps - step):
+                if (
+                    terminal == "done"
+                    and not self._done_verified
+                    and not self._verify_done(client, steps_left=max_steps - step)
+                ):
                     if self._continuous_pointer_output_requested():
                         self._continuous_pointer_done_repair_required = True
                     if self._safe_stop_after_repeated_done_rejection():
@@ -8692,7 +8932,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # Record a reusable recipe (+ export canonical Automation IR) ONLY for
         # non-coding successes. Coding tasks are excluded from the reusable
         # scope entirely — solved fresh next time, guided by the playbook.
-        if self.status == "done" and not self._is_coding:
+        if (
+            self.status == "done"
+            and not self._is_coding
+            and self.runtime_profile.experience_enabled
+        ):
             app_hint = self.session.snapshot.title if self.session.snapshot else ""
             # Trusted (→ reusable skill + linked script) when EITHER the done-gate
             # judge independently confirmed success, OR an action passed external
@@ -8715,11 +8959,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     logger.warning("成功流程导出脚本失败(IO): %s", exc)
             experience.record(self.task, app_hint, self._steps_log,
                               verified=verified_run, script=script_name)
-        try:
-            compiler.ingest_run(self)
-        except Exception as exc:
-            logger.debug("memory graph ingest failed: %s", exc)
-        self._score_experience_feedback()
+        if self.runtime_profile.experience_enabled:
+            try:
+                compiler.ingest_run(self)
+            except Exception as exc:
+                logger.debug("memory graph ingest failed: %s", exc)
+            self._score_experience_feedback()
 
         try:
             self.session.close()

@@ -5,6 +5,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - **Main LLM Agent**：理解目标、下达子目标、处理异常和调整策略。
 - **Fast GUI Controller**：变化触发感知、视觉锚点、批量动作、视觉伺服和动作后验证。
 - **ARP Runtime + Studio**：用版本化 `arp/1` 图编排 Agent、Controller、Skill、证据门和人工门。
+- **Task Contract + Stage Runtime**：先把自然语言编译成类型化阶段、工件、能力和完成义务，再选择 Controller、Adapter、工具与证据路径。
 - **World Model + Run Projection**：统一屏幕状态、元素、页面阶段、timeline、evidence 和延迟指标。
 
 `automation-ir/1` 是新保存流程、Skill、WPS 导出和 Flow 编辑的规范中间层；`arp/1` 是可执行图契约。Legacy WPS、FlowScript 和 DSL 仍作为导入/导出或兼容格式存在，不支持的旧节点会显式标记为 `legacy_flow` 并在运行前失败，不会伪装成等价迁移。
@@ -13,7 +14,8 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 
 - GitHub 默认且唯一长期主分支是 `master`；临时开发分支验证后必须合并或删除，不保留第二条产品主线。
 - 用户始终面对一个 WinPilot Agent；Agent、ARP 图和 Controller 的事件统一投影成同一种 Run。
-- “智能代理”页创建的目标图先本地检索并重放已验证 Skill；未命中或重放失败才走 `agent_goal`，显式 `miss` / `fail` 分支不会被 `fail_fast` 提前吞掉。
+- “智能代理”页先调用 `/api/v2/task-contracts/compile`，再从同一个 `/api/v2/arp/runs` 入口运行 `task_stage` 图。跨应用工件任务不再退化为整句 `agent_goal`；阶段 Skill 未命中或失败只恢复当前阶段。
+- 前端提供 run 级“冷启动（禁用 Skill/Memory）”开关。开启后合同编译、RuntimeProfile、StageRuntime 与 trace 共享 `experience_policy=disabled`，用于真实验证首次探索，不靠删除本地文件或仅隐藏一个 replay 节点。
 - 编程/仓库能力由 `agent/runtime_profile.py` 启用 Coding Runtime；`agent/coding.py` 只是旧 import 的兼容 shim，不再有独立 CodingRunner 主循环。
 - Electron 主进程 HTTP API 默认监听 `127.0.0.1:7880`。WinPilot FastAPI 由 `python/winpilot_home/serve.py` 启动，端口由 Electron 动态选择；两者除公开 ping 外都使用进程随机 bearer token。不要直接运行 `uvicorn winpilot.server:app`。
 - 默认模型配置在 `python/winpilot_home/winpilot/config.py` 和本机 `python/winpilot_home/config.json`。provider、cache、usage、cost 归一化在 `winpilot/model_adapter.py`。
@@ -44,10 +46,11 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | Perception daemon | `fast/perception_daemon.py` 按 hwnd 复用 watcher 与 ElementCache，并在有意义的 ROI 变化后合并调度轻量 OCR/Win32；changed-only observe 可消费热缓存，UIA/VLM 不进入 daemon 内环。它还不是常驻学习型 YOLO/UI detector。 |
 | Runtime jobs | Agent、ARP、Replay 和计划任务统一进入 `runtime_jobs.py`；API 可查询/取消，交互任务按 `interactive_runtime` 排队，真实鼠标键盘仍由 Desktop Action Queue 单写保护。 |
 | ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层。Flow editor 在 IR 的 `runtime.arp_graph` 中保存一次编译后的 `arp/1` 投影及 fingerprint，后端校验后直接运行；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
+| Task Contract / Artifact | 前端自然语言入口先生成 `task-contract/1`：结构化 intent、typed stages、每阶段 capability selection、artifact binding、evidence provider 和 completion obligation。`ArtifactStore` 将用户工件与模型观察帧分离，并以 run-scoped `artifact_id`、哈希、来源、时间贯穿投递和验收。 |
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |
 | 多输入协同 | 实验开关默认关闭；开启时实行人类优先的焦点/光标仲裁并 fail-closed，不能把它描述成两套真实鼠标键盘并发。 |
 | 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。 |
-| 真实能力 | 计算器、记事本、网页靶场、简单连续指针/拖拽已有回归；真实画板单次前端闭环约 55 秒且成图仍粗糙，只证明通用连续动作链可执行，不代表稳定“好看”或形成统计成功率。QQ/微信/Steam/抖音/网易云等复杂软件仍缺系统化非破坏性 E2E。 |
+| 真实能力 | 计算器、记事本、网页靶场、简单连续指针/拖拽已有回归。2026-07-15 在一台已登录 QQ 的 Windows 机器上，关闭 Skill/Memory 后，四种跨应用表达均从前端同一路径完成了 Paint 绘图或当前工件捕获、QQ 会话解析、真实发送和发送后同一 artifact 可见核验；测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
 
 ## 快速启动
 
@@ -79,7 +82,7 @@ npx vitest run
 npm run build
 ```
 
-2026-07-14 本地基线为 WinPilot `1342 passed`、根 Python `2508 passed`、Vitest `194 passed`，构建通过。数字会随测试增长；GitHub 是否可发布以当前提交的 Actions 结果为准。
+2026-07-15 本地最终验证为 WinPilot `1393 passed, 4 skipped`、根 Python `2508 passed`、Vitest `194 passed`，TypeScript/Vite/Electron 构建通过；另在显式授权的真实桌面环境中单独运行 opt-in Windows E2E，结果为 `4 passed`。常规全量测试中的 4 个 skip 正是这组需要真实 Paint、已登录 QQ 和发送授权的测试。数字会随测试增长；GitHub 是否可发布以当前提交的 Actions 结果为准。
 
 清理生成产物和缓存：
 
@@ -89,7 +92,7 @@ npm run clean
 
 `npm run clean:runtime` 会额外删除忽略的 `python-runtime/`。只有确认可重新准备运行时环境时再使用。
 
-直接 Agent GUI 评测走 `/api/chat`；当前原生前端目标入口走 `/api/v2/arp/runs`，先尝试已验证 Skill，miss/fail 后才进入同一个 `AgentRunner`：
+直接 Agent GUI 评测走 `/api/chat`；当前原生前端目标先调用 `/api/v2/task-contracts/compile`，再走 `/api/v2/arp/runs`。普通阶段由本地 `StageRuntime` 执行，只有语义内容和异常阶段进入有界 `AgentRunner`：
 
 ```bash
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
@@ -97,7 +100,7 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 
 报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。汇总中的 `verified_success` 只统计同时满足未超时、`status=done`、有外部 ground truth 且通过、policy 通过、性能预算通过并且没有 unverified done 标记的 run；没有检查项的报告记为 `ungrounded`，不再把 agent 自报 done 算成功。
 
-单次手工成功不能换算成“成功率”。当前画板回归证明了从中文前端、ARP、AgentRunner 到真实鼠标笔画和新鲜帧核验的链路，但约 55 秒且审美质量仍不稳定；后续性能结论必须来自固定任务集、多次运行、同模型/显示/DPI 配置和外部 ground truth。
+单次手工成功不能换算成“成功率”。2026-07-15 的三条真实通信样本使用相同前端 API 路径和 typed contract：两条包含绘图的任务各用了 2 次模型调用，一条“发送刚画的截图”用了 0 次模型调用；Controller 总耗时分别约 51.6 秒、17.9 秒和 49.0 秒。每条都记录了阶段、artifact_id、当前工具面、发送动作与发送后证据，但绘图审美质量仍不稳定；后续性能结论必须来自更大的固定任务集、多次运行、同模型/显示/DPI 配置和外部 ground truth。
 
 网页靶场用于复现输入、按钮、局部变化、弹窗、拖拽和画布任务：
 
@@ -116,6 +119,7 @@ python -m http.server 8877 --bind 127.0.0.1
 | `src/renderer/` | 原生中文“智能代理、流程工作台、运行记录、技能与学习、系统设置”和 FlowCanvas |
 | `python/winpilot_home/winpilot/` | 当前 WinPilot agent、感知、动作、录制、记忆、REST |
 | `python/winpilot_home/winpilot/orchestrator/` | `arp/1` contract、runtime、adapter、capability catalog、Run Projection |
+| `python/winpilot_home/winpilot/tasking/` | TaskIntent、TaskContract、CapabilityPlanner、StageRuntime、ArtifactStore、Communication Adapter、Evidence 与完成验收 |
 | `python/agent/__main__.py` | Electron IPC 到 WinPilot 的适配器 |
 | `python/engine/` | legacy FlowScript/DSL 执行引擎 |
 | `python/features/` | legacy `@feature` 注册表，供流程图/MCP/HTTP/CLI 使用 |

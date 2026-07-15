@@ -263,8 +263,17 @@ class ToolSession(
                 "needs_replan": True,
             }, ensure_ascii=False))
         guard_result = scope_guard.ensure_scope(self, name, args)
+        scope_recovery = scope_guard.take_scope_recovery(self)
         if guard_result is not None:
             return guard_result
+        if scope_recovery is not None:
+            # Any foreground transition invalidates the previous authoritative
+            # perception.  Direct tools and Controller tools now share this
+            # cache boundary, so recovery evidence cannot leak into a later
+            # unrelated action.
+            self.snapshot = None
+            self._observe_cache = None
+            self._draw_surface_cache = None
         screen_delta_context = None
         press_probe_previous = None
         press_probe_installed = False
@@ -285,11 +294,24 @@ class ToolSession(
                 restore_probe = getattr(executor, "restore_press_probe", None)
                 if callable(restore_probe):
                     restore_probe(press_probe_previous)
+        if scope_recovery is not None:
+            try:
+                scope_payload = json.loads(result.text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                scope_payload = {}
+            if isinstance(scope_payload, dict):
+                scope_payload.setdefault("scope_recovery", scope_recovery)
+                result.text = json.dumps(scope_payload, ensure_ascii=False, default=str)
         if screen_delta_context is not None:
             result = self._attach_action_screen_delta(result, screen_delta_context)
         if self.world_enabled:
             try:
-                self.world.record_action(name, args)
+                # Controller-owned recovery probes are causal maintenance, not
+                # repeated business actions.  Counting them as model actions
+                # can spuriously trigger a structured replan after legitimate
+                # cross-window focus recovery.
+                if not int(getattr(self, "_local_recovery_depth", 0) or 0):
+                    self.world.record_action(name, args)
                 try:
                     outcome = json.loads(result.text or "{}")
                 except (json.JSONDecodeError, TypeError):
@@ -1154,6 +1176,16 @@ class ToolSession(
             logger.debug("screen_watch auto-start status publish failed", exc_info=True)
 
     def close(self) -> None:
+        communication_adapter = getattr(self, "communication_adapter", None)
+        if communication_adapter is not None:
+            try:
+                # Avoid self-recursion when an adapter owns this exact session.
+                nested = getattr(communication_adapter, "session", None)
+                if nested is not self:
+                    communication_adapter.close()
+            except Exception:
+                logger.debug("communication adapter cleanup failed", exc_info=True)
+            self.communication_adapter = None
         try:
             released = executor.release_held_mouse_buttons()
             if released:

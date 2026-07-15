@@ -34,6 +34,7 @@ class ArpNodeKind(str, Enum):
     ACTION_BATCH = "action_batch"
     REPLAY_STEP = "replay_step"
     SKILL_REPLAY = "skill_replay"
+    TASK_STAGE = "task_stage"
     CONDITION = "condition"
     DELAY = "delay"
     SET_VARIABLE = "set_variable"
@@ -179,6 +180,22 @@ def _validate_node_config(node: ArpNode) -> list[str]:
     elif node.kind == ArpNodeKind.SKILL_REPLAY:
         if not any(str(config.get(key) or "").strip() for key in ("script", "task", "memory_id")):
             errors.append(f"{prefix} requires config.script, config.task, or config.memory_id")
+    elif node.kind == ArpNodeKind.TASK_STAGE:
+        stage = config.get("stage")
+        if not isinstance(stage, dict):
+            errors.append(f"{prefix} requires config.stage object")
+        else:
+            try:
+                from ..tasking.contracts import TaskStage
+
+                parsed = TaskStage.model_validate(stage)
+                if parsed.execution is None:
+                    errors.append(f"{prefix} requires a capability selection")
+                elif not parsed.execution.satisfiable:
+                    missing = ", ".join(parsed.execution.missing_capabilities)
+                    errors.append(f"{prefix} has missing capabilities: {missing}")
+            except Exception as exc:
+                errors.append(f"{prefix} has invalid typed stage: {exc}")
     elif node.kind == ArpNodeKind.CONDITION:
         if not str(config.get("source") or "").strip():
             errors.append(f"{prefix} requires config.source")
@@ -297,6 +314,7 @@ def validate_graph(graph: ArpGraph) -> GraphValidation:
                 ArpNodeKind.ACTION_BATCH,
                 ArpNodeKind.REPLAY_STEP,
                 ArpNodeKind.SKILL_REPLAY,
+                ArpNodeKind.TASK_STAGE,
                 ArpNodeKind.EVIDENCE_GATE,
                 ArpNodeKind.HUMAN_GATE,
             }

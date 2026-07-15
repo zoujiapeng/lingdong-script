@@ -102,7 +102,12 @@ _LEAN_GUI_TOOLS = {
     "draw_strokes",
     "wait",
     "screenshot",
+    "capture_artifact",
     "paste_image_file",
+    "open_conversation",
+    "send_text",
+    "send_artifact",
+    "verify_delivery",
     "zoom",
     "coordinate_diagnostics",
     "coordinate_click_test",
@@ -214,15 +219,20 @@ def _compact_tool_descriptions(tool: dict, descriptions: dict[str, str] | None =
     return compact
 
 
-def _apply_tool_profile(tools: list[dict], profile: str) -> list[dict]:
+def _apply_tool_profile(
+    tools: list[dict],
+    profile: str,
+    required_tool_names: set[str] | None = None,
+) -> list[dict]:
     """Return a task-profiled schema list without changing dispatch capability."""
+    required = set(required_tool_names or ())
     if profile in {"", "standard", "full"}:
         return tools
     if profile in {"lean_gui", "drawing_gui"}:
         return [
             _compact_tool_descriptions(tool)
             for tool in tools
-            if _tool_name(tool) in _LEAN_GUI_TOOLS
+            if _tool_name(tool) in (_LEAN_GUI_TOOLS | required)
         ]
     return tools
 
@@ -395,13 +405,82 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
     return adapted
 
 
-def _native_vision_lean_tools(tools: list[dict], profile: str) -> list[dict]:
+def _native_vision_lean_tools(
+    tools: list[dict],
+    profile: str,
+    required_tool_names: set[str] | None = None,
+) -> list[dict]:
     if profile not in {"lean_gui", "drawing_gui"}:
         return tools
+    allowed = _NATIVE_VISION_LEAN_TOOLS | set(required_tool_names or ())
     return [
         tool for tool in tools
-        if _tool_name(tool) in _NATIVE_VISION_LEAN_TOOLS
+        if _tool_name(tool) in allowed
     ]
+
+
+def _specialize_stage_tools(tools: list[dict], stage_type: str) -> list[dict]:
+    """Tighten model-facing schemas for a typed stage.
+
+    The direct pointer renderer remains a Controller capability. DrawArtifact
+    asks the model for a compact semantic scene plan instead of permitting a
+    one-primitive shorthand that invites long corrective pixel paths.
+    """
+    if str(stage_type or "") != "DrawArtifact":
+        return tools
+    specialized = deepcopy(tools)
+    for tool in specialized:
+        function = tool.get("function") or {}
+        if str(function.get("name") or "") != "execute_subgoal":
+            continue
+        parameters = function.get("parameters") or {}
+        properties = parameters.get("properties") or {}
+        properties.pop("draw", None)
+        draws = properties.get("draws")
+        if isinstance(draws, dict):
+            draws["minItems"] = 1
+            draws["maxItems"] = 16
+            draws["description"] = (
+                "Required compact semantic scene plan. Include every major visible part needed "
+                "to recognize the requested subject in this one ordered list. Use one conventional "
+                "coherent view: multipart subjects need a readable shared silhouette and attached "
+                "spatial relationships, not detached or vertically stacked symbol-like primitives. Give each part a "
+                "semantic label and either an outline primitive with box geometry or concise "
+                "canvas-relative normalized_strokes. Later calls may contain only localized "
+                "missing-part repairs."
+            )
+            item = draws.get("items")
+            if isinstance(item, dict):
+                item["required"] = ["part"]
+                item_properties = item.get("properties") or {}
+                shape = item_properties.get("shape")
+                if isinstance(shape, dict):
+                    shape["enum"] = [
+                        "triangle", "rectangle", "circle", "ellipse", "line", "check",
+                    ]
+                    shape["description"] = "Supported outline primitive; omit when normalized_strokes is supplied."
+                box = item_properties.get("box")
+                if isinstance(box, dict):
+                    box["description"] = (
+                        "Canonical canvas-relative endpoint box [x1,y1,x2,y2] in 0..1000. "
+                        "x2/y2 are the lower-right endpoint, never width/height."
+                    )
+                box_mode = item_properties.get("box_mode")
+                if isinstance(box_mode, dict):
+                    box_mode["enum"] = ["endpoints"]
+                    box_mode["description"] = "Required endpoint interpretation for primitive box geometry."
+                item["anyOf"] = [
+                    {"required": ["part", "shape", "box", "box_mode"]},
+                    {"required": ["part", "normalized_strokes"]},
+                ]
+        parameters["required"] = ["subgoal", "draws"]
+        function["description"] = (
+            "DrawArtifact scene planner and local renderer. Submit one ordered draws list with "
+            "the subject's major recognizable parts; the Controller maps it to the bound canvas, "
+            "executes continuous pointer paths, and returns a fresh frame. Do not submit a singular "
+            "draw shorthand or dense frame-coordinate paths."
+        )
+    return specialized
 
 
 def tool_schemas(
@@ -411,6 +490,9 @@ def tool_schemas(
     allow_files: bool = True,
     profile: str = "standard",
     native_vision: bool = False,
+    required_capabilities: tuple[str, ...] | list[str] = (),
+    stage_tools: tuple[str, ...] | list[str] = (),
+    stage_type: str = "",
 ) -> list[dict]:
     """Return the OpenAI tools array for the unified Agent.
 
@@ -419,6 +501,8 @@ def tool_schemas(
     """
     tools = []
     include_file_tools = allow_files or coding_runtime
+    from ..tasking.capability import tools_for_capabilities
+    required_tool_names = set(stage_tools) | tools_for_capabilities(required_capabilities)
 
     if allow_shell and shell.shell_enabled():
         tools.extend([
@@ -1166,6 +1250,38 @@ def tool_schemas(
             },
             ["path"],
         ),
+        _tool(
+            "capture_artifact",
+            "Capture a user-task artifact into the current run's managed store and return artifact_id. This is distinct from a transient model observation frame.",
+            {
+                "scope": _prop("string", "window, screen, canvas, or region."),
+                "source_hwnd": _prop("integer", "Optional source window; defaults to the bound target."),
+                "region": {"type": "object"},
+            },
+        ),
+        _tool(
+            "open_conversation",
+            "Open and bind a recipient conversation through the registered domain adapter.",
+            {"app": _prop("string"), "recipient": _prop("string")},
+            ["app", "recipient"],
+        ),
+        _tool(
+            "send_text",
+            "Send text through the bound communication adapter, recording a real send action.",
+            {"text": _prop("string")},
+            ["text"],
+        ),
+        _tool(
+            "send_artifact",
+            "Send a current-run managed artifact_id through the bound communication adapter. Never invent a path.",
+            {"artifact_id": _prop("string"), "app": _prop("string"), "recipient": _prop("string")},
+            ["artifact_id"],
+        ),
+        _tool(
+            "verify_delivery",
+            "Verify post-send visible evidence in the correct conversation. A composer preview alone always fails.",
+            {"artifact_id": _prop("string"), "text": _prop("string")},
+        ),
         _tool("hold_key", "Hold keys for a duration in milliseconds, then release.",
               {"keys": {"type": "array", "items": {"type": "string"}},
                "duration_ms": _prop("integer")}, ["keys", "duration_ms"]),
@@ -1219,9 +1335,14 @@ def tool_schemas(
                   {"query": _prop("string"), "path": _prop("string"), "glob": _prop("string"),
                    "regex": _prop("boolean")}, ["query"]),
         ])
-    profiled = _apply_tool_profile(tools, profile)
+    profiled = _apply_tool_profile(tools, profile, required_tool_names)
+    if required_tool_names:
+        always = {"done", "blocked", "fail", "observe", "focus_window", "list_windows", "revise_plan", "complete_subgoal"}
+        allowed = required_tool_names | always
+        profiled = [tool for tool in profiled if _tool_name(tool) in allowed]
+    profiled = _specialize_stage_tools(profiled, stage_type)
     if native_vision:
         return _native_frame_coordinate_tools(
-            _native_vision_lean_tools(profiled, profile)
+            _native_vision_lean_tools(profiled, profile, required_tool_names)
         )
     return profiled

@@ -133,6 +133,86 @@ def _context(session) -> dict[str, Any]:
     return ctx
 
 
+def take_scope_recovery(session) -> dict[str, Any] | None:
+    """Consume evidence from the most recent successful foreground recovery.
+
+    ``ensure_scope`` historically returned only ``None`` on success, which made
+    an in-transaction refocus invisible to the Controller.  Keeping the public
+    return contract intact while exposing one-shot evidence lets callers
+    invalidate stale perception and record the recovery in the batch trace.
+    """
+
+    value = getattr(session, "_last_scope_recovery", None)
+    try:
+        session._last_scope_recovery = None
+    except Exception:
+        pass
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _recover_target_focus(
+    session,
+    target: int,
+    tool_name: str,
+    before: dict[str, Any],
+) -> tuple[bool, dict[str, Any], int, bool]:
+    """Refocus a remembered target and prove stable ownership before input.
+
+    Windows activation is asynchronous and a foreground process can briefly
+    reclaim focus.  A single API ``ok`` followed by one sample is therefore not
+    sufficient evidence.  This bounded loop requires two consecutive target-
+    related foreground samples.  It is app-agnostic and runs only after an
+    actual scope mismatch.
+    """
+
+    try:
+        max_attempts = int(CONFIG.get(
+            "controller", "focus_recovery_attempts", default=3,
+        ) or 3)
+    except (TypeError, ValueError):
+        max_attempts = 3
+    max_attempts = max(1, min(3, max_attempts))
+    try:
+        settle_s = float(CONFIG.get(
+            "controller", "focus_recovery_settle_s", default=0.08,
+        ) or 0.08)
+    except (TypeError, ValueError):
+        settle_s = 0.08
+    settle_s = max(0.02, min(0.2, settle_s))
+
+    after = dict(before)
+    focus_api_ok = False
+    for attempt in range(1, max_attempts + 1):
+        focus_api_ok = bool(_focus(target)) or focus_api_ok
+        time.sleep(settle_s)
+        first = _context(session)
+        first_target = first.get("target_hwnd") or target
+        if _same_or_related(session, first.get("foreground_hwnd"), first_target):
+            time.sleep(settle_s)
+            after = _context(session)
+            after_target = after.get("target_hwnd") or target
+            if _same_or_related(session, after.get("foreground_hwnd"), after_target):
+                evidence = {
+                    "tool": str(tool_name or ""),
+                    "target_hwnd": int(target),
+                    "attempts": attempt,
+                    "focus_api_ok": focus_api_ok,
+                    "before": before,
+                    "after": after,
+                    "authoritative_frame_required": True,
+                }
+                try:
+                    session._last_scope_recovery = evidence
+                except Exception:
+                    pass
+                return True, after, attempt, focus_api_ok
+        else:
+            after = first
+        if attempt < max_attempts:
+            time.sleep(settle_s)
+    return False, after, max_attempts, focus_api_ok
+
+
 def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | None:
     """Return a blocking ToolResult when a GUI action is out of scope.
 
@@ -268,10 +348,10 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
             pass
         return None
 
-    recovered = _focus(target)
-    time.sleep(0.12)
-    after = _context(session)
-    if recovered and _same_or_related(session, after.get("foreground_hwnd"), after.get("target_hwnd") or target):
+    recovered, after, recovery_attempts, focus_api_ok = _recover_target_focus(
+        session, int(target), tool_name, before,
+    )
+    if recovered:
         return None
 
     payload = {
@@ -284,7 +364,8 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
             "before": before,
             "after": after,
             "recovery_attempted": True,
-            "recovery_focus_ok": bool(recovered),
+            "recovery_attempts": recovery_attempts,
+            "recovery_focus_ok": bool(focus_api_ok),
         },
         "needs_observe": True,
     }

@@ -40,6 +40,17 @@ def capability_catalog() -> list[CapabilitySpec]:
             input_schema={"script": "string?", "task": "string?", "memory_id": "string?"},
         ),
         CapabilitySpec(
+            id="task.stage",
+            name="Typed task stage",
+            category="orchestration",
+            description="Execute one contract-bound stage with preflighted capabilities and evidence providers.",
+            node_kind=ArpNodeKind.TASK_STAGE,
+            latency_class="mixed",
+            deterministic=False,
+            requires_llm=False,
+            input_schema={"stage": "TaskStage", "contract_id": "string"},
+        ),
+        CapabilitySpec(
             id="replay.step",
             name="Offline replay step",
             category="replay",

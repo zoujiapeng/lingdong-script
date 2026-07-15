@@ -1,6 +1,6 @@
-"""End-to-end behavioural tests for "用QQ找我的手机聊天".
+"""Component-level behavioural tests for "用QQ找我的手机聊天".
 
-These tests do NOT hit a real QQ process or LLM. They verify that:
+These tests do NOT hit a real QQ process or LLM and therefore are not E2E. They verify that:
 
 1. The agent is wired correctly for a vision-capable main model:
    - system prompt declares native vision instead of "text-only"

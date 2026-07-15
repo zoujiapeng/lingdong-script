@@ -52,7 +52,9 @@
 ## 运行时路径
 
 ```text
-Frontend Agent page -> /api/v2/arp/runs -> RuntimeJob -> Skill fast path / agent_goal
+Frontend Agent page -> /api/v2/task-contracts/compile -> /api/v2/arp/runs
+  -> TaskContract capability preflight -> typed task_stage graph
+  -> StageRuntime / parameterized stage Skill / bounded semantic AgentRunner
 scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
   -> agent/router.py builds the same AgentRunner
   -> RuntimeProfile enables desktop/coding capabilities

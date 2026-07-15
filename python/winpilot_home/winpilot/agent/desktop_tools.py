@@ -16,6 +16,23 @@ from .tool_result import ToolResult
 
 
 class DesktopToolMixin:
+    def _managed_artifacts(self):
+        run_id = str(getattr(self, "run_id", "") or "").strip()
+        if not run_id:
+            return None, None
+        from ..tasking.artifacts import ArtifactStore
+        from ..tasking.evidence import EvidenceRegistry
+
+        store = getattr(self, "managed_artifact_store", None)
+        if not isinstance(store, ArtifactStore):
+            store = ArtifactStore(run_id)
+            self.managed_artifact_store = store
+        registry = getattr(self, "evidence_registry", None)
+        if not isinstance(registry, EvidenceRegistry):
+            registry = EvidenceRegistry(run_id)
+            self.evidence_registry = registry
+        return store, registry
+
     def _t_clipboard_read(self, _args: dict) -> ToolResult:
         text = executor.clipboard_read()
         return ToolResult(text or "（剪贴板为空）",
@@ -117,6 +134,25 @@ class DesktopToolMixin:
                 if isinstance(saved, list):
                     saved.append(str(target))
                     self.saved_screenshot_paths = saved[-12:]
+                store, registry = self._managed_artifacts()
+                if store is not None:
+                    artifact = store.import_file(
+                        target,
+                        purpose="user_output",
+                        sendable=True,
+                        metadata={"compatibility_tool": "screenshot"},
+                    )
+                    result["artifact_id"] = artifact.artifact_id
+                    result["managed_path"] = artifact.managed_path
+                    result["sha256"] = artifact.sha256
+                    if registry is not None:
+                        registry.record(
+                            "artifact.current_run_valid",
+                            provider="artifact_store_capture",
+                            verified=True,
+                            artifact_id=artifact.artifact_id,
+                            metadata={"compatibility_tool": "screenshot", "sha256": artifact.sha256},
+                        )
                 return ToolResult(self._fmt(result))
             except Exception as exc:
                 return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
@@ -128,12 +164,131 @@ class DesktopToolMixin:
         path = str(args.get("path") or "").strip()
         if not path:
             return ToolResult("paste_image_file requires an absolute image path")
+        store, registry = self._managed_artifacts()
+        artifact = None
+        if store is not None:
+            for item in store.artifacts():
+                if str(Path(item.get("managed_path") or "").resolve()) == str(Path(path).expanduser().resolve()):
+                    artifact = store.get(str(item.get("artifact_id") or ""), require_sendable=True)
+                    break
+            if artifact is None:
+                artifact = store.import_file(
+                    path,
+                    purpose="selected_input",
+                    sendable=True,
+                    metadata={"compatibility_tool": "paste_image_file"},
+                )
+            path = artifact.managed_path
         target = args.get("hwnd") or getattr(self, "hwnd", None)
         if not target:
             action_hwnd = getattr(self, "_action_hwnd", None)
             target = action_hwnd() if callable(action_hwnd) else None
         result = executor.paste_image_file(path, hwnd=int(target) if target else None)
+        if artifact is not None:
+            result["artifact_id"] = artifact.artifact_id
+            result["sha256"] = artifact.sha256
+            result["delivery"] = False
+            result["preview_only"] = True
+            if registry is not None and result.get("ok") is True:
+                registry.record(
+                    "artifact.composer_preview",
+                    provider="compatibility_paste_image_file",
+                    verified=True,
+                    artifact_id=artifact.artifact_id,
+                    metadata={"delivery": False, "sha256": artifact.sha256},
+                )
         return ToolResult(self._fmt(result))
+
+    def _t_capture_artifact(self, args: dict) -> ToolResult:
+        store, registry = self._managed_artifacts()
+        if store is None:
+            return ToolResult(self._fmt({"ok": False, "error": "capture_artifact requires an active run_id"}))
+        hwnd = int(args.get("source_hwnd") or getattr(self, "hwnd", 0) or 0)
+        region = args.get("region") if isinstance(args.get("region"), dict) else None
+        try:
+            artifact = store.capture_artifact(
+                scope=str(args.get("scope") or "window"),
+                source_hwnd=hwnd,
+                region=region,
+                purpose="user_output",
+                sendable=True,
+                metadata={"tool": "capture_artifact"},
+            )
+        except Exception as exc:
+            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
+        evidence = registry.record(
+            "artifact.current_run_valid",
+            provider="artifact_store_capture",
+            verified=True,
+            artifact_id=artifact.artifact_id,
+            metadata={"sha256": artifact.sha256, "source_window": artifact.source_window},
+        ) if registry is not None else None
+        return ToolResult(self._fmt({"ok": True, "artifact": artifact.model_dump(mode="json"), "evidence": evidence}))
+
+    def _communication_adapter(self, app: str = "", recipient: str = ""):
+        from ..tasking.adapters import CommunicationAdapter, DomainAdapterRegistry
+
+        adapter = getattr(self, "communication_adapter", None)
+        if isinstance(adapter, CommunicationAdapter):
+            return adapter
+        store, registry = self._managed_artifacts()
+        if store is None or registry is None:
+            raise ValueError("communication adapter requires an active run_id")
+        app = str(app or "").strip()
+        if not app:
+            raise ValueError("communication adapter requires app/channel")
+        adapter = DomainAdapterRegistry.create(
+            app,
+            run_id=str(getattr(self, "run_id", "")),
+            task=str(getattr(self, "task", "")),
+            store=store,
+            evidence=registry,
+            stop_event=getattr(self, "stop_event", None),
+        )
+        self.communication_adapter = adapter
+        if recipient:
+            adapter.recipient = str(recipient)
+        return adapter
+
+    def _t_open_conversation(self, args: dict) -> ToolResult:
+        try:
+            adapter = self._communication_adapter(str(args.get("app") or ""), str(args.get("recipient") or ""))
+            result = adapter.open_conversation(str(args.get("recipient") or ""))
+            if result.get("ok") is True:
+                result["composer"] = adapter.resolve_composer()
+            self.hwnd = adapter.session.hwnd
+            return ToolResult(self._fmt(result))
+        except Exception as exc:
+            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
+
+    def _t_send_artifact(self, args: dict) -> ToolResult:
+        try:
+            adapter = self._communication_adapter(str(args.get("app") or ""), str(args.get("recipient") or ""))
+            artifact_id = str(args.get("artifact_id") or "")
+            staged = adapter.paste_or_attach_artifact(artifact_id)
+            if staged.get("ok") is not True:
+                return ToolResult(self._fmt(staged))
+            sent = adapter.send_current_composer(artifact_id=artifact_id)
+            return ToolResult(self._fmt({"ok": sent.get("ok") is True, "artifact_id": artifact_id, "staged": staged, "sent": sent}))
+        except Exception as exc:
+            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
+
+    def _t_send_text(self, args: dict) -> ToolResult:
+        try:
+            adapter = self._communication_adapter()
+            return ToolResult(self._fmt(adapter.send_text(str(args.get("text") or ""))))
+        except Exception as exc:
+            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
+
+    def _t_verify_delivery(self, args: dict) -> ToolResult:
+        try:
+            adapter = self._communication_adapter()
+            return ToolResult(self._fmt(adapter.verify_latest_outbound(
+                artifact_id=str(args.get("artifact_id") or ""),
+                text=str(args.get("text") or ""),
+            )))
+        except Exception as exc:
+            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
 
     def _t_hold_key(self, args: dict) -> ToolResult:
         keys = normalize_key_sequence(args.get("keys") or [])

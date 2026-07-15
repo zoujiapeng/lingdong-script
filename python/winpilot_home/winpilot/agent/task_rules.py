@@ -391,8 +391,9 @@ def _is_coding_task(task: str) -> bool:
 
 
 def _is_communication_task(task: str) -> bool:
-    text = (task or "").lower()
-    return any(hint in text for hint in _COMMUNICATION_HINTS)
+    from ..tasking.intent import TaskIntentParser
+
+    return "send" in TaskIntentParser().parse(task).operation
 
 
 def _is_arithmetic_task(task: str) -> bool:
@@ -421,6 +422,11 @@ def _communication_mode(task: str) -> str:
     stays open until the user stops the run, while ordinary send/reply tasks
     finish after one verified outbound message.
     """
+    from ..tasking.intent import TaskIntentParser
+
+    parsed_mode = TaskIntentParser().parse(task).send_mode
+    if parsed_mode == "draft":
+        return "draft"
     text = (task or "").casefold()
     compact = re.sub(r"\s+", "", text)
     draft_markers = (

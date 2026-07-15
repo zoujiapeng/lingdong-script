@@ -7,6 +7,7 @@ export type ArpNodeKind =
   | 'action_batch'
   | 'replay_step'
   | 'skill_replay'
+  | 'task_stage'
   | 'condition'
   | 'delay'
   | 'set_variable'
@@ -91,6 +92,11 @@ export interface RunTimelineEvent {
 export interface RunMetrics {
   event_count: number;
   decision_count: number;
+  model_call_count: number;
+  stage_count: number;
+  stage_failure_count: number;
+  retry_count: number;
+  controller_elapsed_total_ms: number;
   tool_count: number;
   batch_action_count: number;
   perception_count: number;
@@ -168,7 +174,96 @@ export interface ArpExecutionSnapshot {
   status: string;
   current_node_id?: string | null;
   error?: string;
+  task_contract?: TaskContract | null;
+  experience_policy?: 'allow' | 'disabled';
+  skill_replay_node_count?: number;
+  satisfiability?: Record<string, unknown> | null;
+  current_stage?: TaskStage | null;
+  artifacts?: { run_id: string; count: number; artifacts: ManagedArtifact[] };
+  contract_evidence?: { run_id: string; count: number; records: Array<Record<string, unknown>> };
+  stage_trace?: Array<Record<string, unknown>>;
   [key: string]: unknown;
+}
+
+export type TaskStageType =
+  | 'OpenApplication' | 'FocusWindow' | 'CreateOrEditArtifact' | 'DrawArtifact'
+  | 'CaptureArtifact' | 'SaveArtifact' | 'OpenConversation' | 'ResolveRecipient'
+  | 'SendText' | 'SendArtifact' | 'VerifyArtifact' | 'VerifyDelivery';
+
+export interface TaskIntent {
+  original_text: string;
+  operation: string[];
+  media_type: string;
+  channel: string;
+  recipient: string;
+  source: string;
+  capture_scope: string;
+  destination: string;
+  send_mode: string;
+  subject: string;
+  quality: string;
+  confidence: number;
+  ambiguous_fields: string[];
+  provenance: Record<string, string>;
+}
+
+export interface StageCapabilitySelection {
+  required_capabilities: string[];
+  verifier_requirements: string[];
+  exposed_capabilities: string[];
+  missing_capabilities: string[];
+  tools: string[];
+  model_tools: string[];
+  controller_tools: string[];
+  controller: string;
+  adapter: string;
+  model_role: string;
+  satisfiable: boolean;
+  expansions: string[];
+  selected_evidence_providers: Record<string, string>;
+}
+
+export interface TaskStage {
+  id: string;
+  type: TaskStageType;
+  name: string;
+  parameters: Record<string, unknown>;
+  depends_on: string[];
+  inputs: Array<Record<string, unknown>>;
+  outputs: Array<Record<string, unknown>>;
+  required_capabilities: string[];
+  obligations: Array<Record<string, unknown>>;
+  execution: StageCapabilitySelection | null;
+  allow_skill_replay: boolean;
+}
+
+export interface TaskContract {
+  format: 'task-contract/1';
+  task_id: string;
+  task: string;
+  intent: TaskIntent;
+  stages: TaskStage[];
+  obligations: Array<Record<string, unknown>>;
+  final_conditions: string[];
+  satisfiable: boolean;
+  missing_capabilities: string[];
+  experience_policy: 'allow' | 'disabled';
+  compiler_version: string;
+}
+
+export interface ManagedArtifact {
+  artifact_id: string;
+  run_id: string;
+  managed_path: string;
+  sha256: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  size_bytes: number;
+  source_window: string;
+  created_at: number;
+  purpose: string;
+  sendable: boolean;
 }
 
 export interface CurrentRunResponse {

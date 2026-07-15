@@ -79,6 +79,11 @@ class RunProjectionStore:
             "metrics": {
                 "event_count": 0,
                 "decision_count": 0,
+                "model_call_count": 0,
+                "stage_count": 0,
+                "stage_failure_count": 0,
+                "retry_count": 0,
+                "controller_elapsed_total_ms": 0,
                 "tool_count": 0,
                 "batch_action_count": 0,
                 "perception_count": 0,
@@ -127,9 +132,9 @@ class RunProjectionStore:
             "replay_anchor_cache",
         }:
             return "perceiving"
-        if event_type in {"agent_tool_start", "agent_batch_action_start", "arp_node_start"}:
+        if event_type in {"agent_tool_start", "agent_batch_action_start", "arp_node_start", "task_stage_start"}:
             return "acting"
-        if event_type in {"done_check", "verify"}:
+        if event_type in {"done_check", "verify", "task_stage_done"}:
             return "verifying"
         if event_type == "arp_evidence":
             return "verifying"
@@ -365,6 +370,29 @@ class RunProjectionStore:
                     })
             if event_type == "arp_node_start":
                 run["current_node_id"] = event.get("node_id")
+            if event_type == "task_stage_start":
+                run["current_node_id"] = event.get("stage_id") or event.get("node_id")
+                run["current_stage_type"] = event.get("stage_type")
+                run["current_capabilities"] = copy.deepcopy(event.get("capabilities") or {})
+            if event_type == "task_stage_done":
+                run["current_stage_type"] = event.get("stage_type")
+                run["last_stage_elapsed_ms"] = int(event.get("elapsed_ms") or 0)
+                run["last_stage_artifact_ids"] = list(event.get("artifact_ids") or [])
+                run["metrics"]["stage_count"] += 1
+                run["metrics"]["model_call_count"] += max(0, int(event.get("model_calls") or 0))
+                run["metrics"]["controller_elapsed_total_ms"] += max(0, int(event.get("elapsed_ms") or 0))
+            if event_type == "task_stage_failed":
+                run["current_stage_type"] = event.get("stage_type")
+                run["metrics"]["stage_failure_count"] += 1
+                run["failed_stage"] = {
+                    "stage_id": event.get("stage_id"),
+                    "stage_type": event.get("stage_type"),
+                    "failure_type": event.get("failure_type"),
+                    "recovery": copy.deepcopy(event.get("recovery") or {}),
+                    "error": str(event.get("error") or ""),
+                }
+            if event_type == "arp_node_retry":
+                run["metrics"]["retry_count"] += 1
             if event_type == "arp_node_done":
                 run["current_node_id"] = event.get("node_id")
                 if event.get("ok") is False:

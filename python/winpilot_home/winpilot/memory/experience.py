@@ -151,6 +151,12 @@ def _recipe_from_node(node: dict[str, Any] | None) -> dict[str, Any] | None:
         "kind": node.get("kind"),
         "status": node.get("status"),
         "confidence": node.get("confidence"),
+        "stage_type": str(payload.get("stage_type") or ""),
+        "parameters": dict(payload.get("parameters") or {}),
+        "outputs": list(payload.get("outputs") or []),
+        "verification": list(payload.get("verification") or []),
+        "app_version": str(payload.get("app_version") or ""),
+        "failure_reason": str(payload.get("failure_reason") or ""),
     }
     return recipe
 
@@ -304,6 +310,56 @@ def reusable_script_for(task: str, recipe_id: str = "") -> tuple[str, dict | Non
     return "", None
 
 
+def reusable_stage_script_for(
+    stage_type: str,
+    parameters: dict[str, Any],
+    recipe_id: str = "",
+    *,
+    app_version: str = "",
+) -> tuple[str, dict | None]:
+    """Return a parameterized stage skill only when its preconditions match."""
+    if not enabled():
+        return "", None
+
+    def matches(recipe: dict[str, Any] | None) -> bool:
+        if not recipe or not recipe.get("script") or recipe.get("provisional"):
+            return False
+        if str(recipe.get("stage_type") or "") != str(stage_type):
+            return False
+        recorded_version = str(recipe.get("app_version") or "")
+        if recorded_version and recorded_version != app_version:
+            return False
+        expected = dict(recipe.get("parameters") or {})
+        for key, value in expected.items():
+            if key in {"max_steps", "original_task"} or value in (None, "", [], {}):
+                continue
+            if key not in parameters or str(parameters[key]) != str(value):
+                return False
+        return True
+
+    if recipe_id:
+        recipe = _recipe_from_node(_store().get_node(recipe_id))
+        return (str(recipe.get("script") or ""), recipe) if matches(recipe) else ("", recipe)
+
+    candidates: list[dict[str, Any]] = []
+    for node in _store().list_nodes(kinds={"skill"}, include_inactive=False, limit=200):
+        recipe = _recipe_from_node(node)
+        if matches(recipe):
+            candidates.append(recipe or {})
+    if not candidates:
+        return "", None
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("successes") or 0),
+            float(item.get("confidence") or 0),
+            int(item.get("uses") or 0),
+        ),
+        reverse=True,
+    )
+    recipe = candidates[0]
+    return str(recipe.get("script") or ""), recipe
+
+
 def all_recipes() -> list[dict]:
     if not enabled():
         return []
@@ -386,6 +442,9 @@ def update(recipe_id: str, patch: dict) -> dict | None:
     if "steps" in patch:
         payload["steps"] = _clean_steps(patch.get("steps") or [])
         node_patch["body"] = "\n".join(payload["steps"])
+    for key in ("stage_type", "parameters", "outputs", "verification", "app_version", "failure_reason"):
+        if key in patch:
+            payload[key] = patch[key]
     if "provisional" in patch:
         payload["provisional"] = bool(patch["provisional"])
         node_patch["status"] = "provisional" if patch["provisional"] else "active"

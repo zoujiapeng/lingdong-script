@@ -98,6 +98,43 @@ def _json_preview(
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _typed_snapshot_list(
+    snapshot: Any,
+    list_key: str,
+    *,
+    item_limit: int,
+    item_budget: int,
+) -> dict[str, Any]:
+    """Bound nested payloads without changing typed list items into strings.
+
+    Runtime views are an API contract, not a log line.  A single large evidence
+    metadata object must therefore be truncated inside that record; it must not
+    consume a shared budget and turn later evidence/artifact objects into the
+    literal string ``"<truncated>"``.
+    """
+    source = snapshot if isinstance(snapshot, dict) else {}
+    out: dict[str, Any] = {}
+    for key, value in source.items():
+        if key == list_key:
+            continue
+        out[str(key)] = _json_preview(value, item_limit, _budget=[80])
+    items: list[dict[str, Any]] = []
+    raw_items = source.get(list_key)
+    for index, item in enumerate(raw_items if isinstance(raw_items, list) else []):
+        if isinstance(item, dict):
+            preview = _json_preview(item, item_limit, _budget=[max(20, item_budget)])
+            if isinstance(preview, dict):
+                items.append(preview)
+                continue
+        items.append({
+            "_invalid_item": True,
+            "index": index,
+            "value": _json_preview(item, item_limit, _budget=[20]),
+        })
+    out[list_key] = items
+    return out
+
+
 class ArpExecution:
     def __init__(
         self,
@@ -133,6 +170,48 @@ class ArpExecution:
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
+            contract_data = self.graph.metadata.get("task_contract")
+            contract_data = contract_data if isinstance(contract_data, dict) else {}
+            artifact_store = self.runtime_state.get("artifact_store")
+            evidence_registry = self.runtime_state.get("evidence_registry")
+            artifact_snapshot = (
+                artifact_store.snapshot()
+                if artifact_store is not None and callable(getattr(artifact_store, "snapshot", None))
+                else {"run_id": self.run_id, "count": 0, "artifacts": []}
+            )
+            contract_evidence = (
+                evidence_registry.snapshot()
+                if evidence_registry is not None and callable(getattr(evidence_registry, "snapshot", None))
+                else {"run_id": self.run_id, "count": 0, "records": []}
+            )
+            stage_trace = []
+            for record in self.history:
+                if record.get("kind") != "task_stage":
+                    continue
+                output = record.get("output") if isinstance(record.get("output"), dict) else {}
+                artifact = output.get("artifact") if isinstance(output.get("artifact"), dict) else {}
+                stage_trace.append({
+                    "stage_id": output.get("stage_id") or record.get("node_id"),
+                    "stage_type": output.get("stage_type"),
+                    "status": output.get("status") or ("done" if record.get("ok") else "failed"),
+                    "attempts": record.get("attempts"),
+                    "tools": output.get("tools") or [],
+                    "model_tools": output.get("model_tools") or [],
+                    "controller_tools": output.get("controller_tools") or [],
+                    "required_capabilities": output.get("required_capabilities") or [],
+                    "verifier_requirements": output.get("verifier_requirements") or [],
+                    "exposed_capabilities": output.get("exposed_capabilities") or [],
+                    "missing_capabilities": output.get("missing_capabilities") or [],
+                    "satisfiable": bool(output.get("satisfiable")),
+                    "adapter": output.get("adapter") or "",
+                    "model_role": output.get("model_role") or "none",
+                    "artifact_id": output.get("artifact_id") or artifact.get("artifact_id") or "",
+                    "model_calls": int(output.get("model_calls") or 0),
+                    "controller_elapsed_ms": int(output.get("controller_elapsed_ms") or 0),
+                    "failure_type": output.get("failure_type") or "",
+                    "recovery": output.get("recovery") or {},
+                    "error": record.get("error") or output.get("error") or "",
+                })
             return {
                 "run_id": self.run_id,
                 "kind": "arp",
@@ -149,6 +228,34 @@ class ArpExecution:
                 "created_at": self.created_at,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,
+                "experience_policy": str(
+                    contract_data.get("experience_policy")
+                    or self.graph.metadata.get("experience_policy")
+                    or "allow"
+                ),
+                "skill_replay_node_count": sum(
+                    1 for node in self.graph.nodes
+                    if node.kind == ArpNodeKind.SKILL_REPLAY
+                ),
+                "task_contract": _json_preview(self.graph.metadata.get("task_contract")),
+                "satisfiability": _json_preview(self.graph.metadata.get("satisfiability")),
+                "current_stage": _json_preview(self.runtime_state.get("current_stage")),
+                "artifacts": _typed_snapshot_list(
+                    artifact_snapshot,
+                    "artifacts",
+                    item_limit=1200,
+                    item_budget=140,
+                ),
+                "contract_evidence": _typed_snapshot_list(
+                    contract_evidence,
+                    "records",
+                    item_limit=1200,
+                    item_budget=180,
+                ),
+                "stage_trace": [
+                    _json_preview(item, limit=1800, _budget=[160])
+                    for item in stage_trace
+                ],
             }
 
     def cancel(self) -> None:
@@ -539,6 +646,13 @@ class ArpExecution:
             self.status = ArpRunStatus.CANCELED if self.stop_event.is_set() else ArpRunStatus.FAILED
             self.error = str(exc)
         finally:
+            adapter = self.runtime_state.get("communication_adapter")
+            close_adapter = getattr(adapter, "close", None)
+            if callable(close_adapter):
+                try:
+                    close_adapter()
+                except Exception:
+                    logger.debug("communication adapter cleanup failed", exc_info=True)
             self.current_node_id = None
             self.finished_at = time.time()
             BUS.publish(

@@ -47,7 +47,48 @@ def test_platform_overview_exposes_contracts_and_capabilities(client):
     assert data["api_version"] == "2"
     assert data["contracts"]["arp"] == "arp/1"
     capability_ids = {item["id"] for item in data["capabilities"]}
-    assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate"} <= capability_ids
+    assert {"agent.goal", "controller.batch", "replay.step", "skill.replay", "evidence.gate", "task.stage"} <= capability_ids
+
+
+def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph(client):
+    response = client.post(
+        "/api/v2/task-contracts/compile",
+        json={"task": "用画板画一只鸟然后截图用QQ发给测试联系人", "max_steps": 50},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["contract"]["satisfiable"] is True
+    assert [stage["type"] for stage in data["contract"]["stages"]] == [
+        "DrawArtifact", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
+    ]
+    assert "task_stage" in {node["kind"] for node in data["graph"]["nodes"]}
+    assert "agent_goal" not in {node["kind"] for node in data["graph"]["nodes"]}
+
+
+def test_frontend_compile_cold_start_disables_skill_and_memory_paths(client):
+    response = client.post(
+        "/api/v2/task-contracts/compile",
+        json={
+            "task": "用画板画一只鸟然后截图用QQ发给测试联系人",
+            "max_steps": 50,
+            "cold_start": True,
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["contract"]["experience_policy"] == "disabled"
+    assert data["graph"]["metadata"]["experience_policy"] == "disabled"
+    assert all(stage["allow_skill_replay"] is False for stage in data["contract"]["stages"])
+    assert "skill_replay" not in {node["kind"] for node in data["graph"]["nodes"]}
+
+
+def test_compile_reports_missing_adapter_before_starting_a_run(client):
+    response = client.post(
+        "/api/v2/task-contracts/compile",
+        json={"task": "把截图发给测试联系人", "max_steps": 20},
+    )
+    assert response.status_code == 422
+    assert "missing capabilities" in response.json()["detail"]
 
 
 def test_validate_and_run_arp_graph_through_api(client):

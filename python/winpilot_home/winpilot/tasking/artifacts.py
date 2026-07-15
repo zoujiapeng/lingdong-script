@@ -1,0 +1,574 @@
+"""Managed, run-scoped artifacts distinct from transient perception frames."""
+from __future__ import annotations
+
+import hashlib
+from io import BytesIO
+import json
+from pathlib import Path
+import shutil
+import threading
+import time
+from typing import Any
+import uuid
+
+from pydantic import BaseModel, Field
+
+from ..config import TRACES_DIR
+from ..perception import win32
+from ..utils.screenshot import Region, capture, window_region
+
+
+class Artifact(BaseModel):
+    artifact_id: str
+    run_id: str
+    managed_path: str
+    sha256: str
+    mime_type: str
+    width: int = 0
+    height: int = 0
+    size_bytes: int = 0
+    source_window: str = ""
+    source_hwnd: int = 0
+    source_scope: str = ""
+    created_at: float = Field(default_factory=time.time)
+    selected_at: float = 0.0
+    purpose: str = "user_output"
+    sendable: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def _mime_for(path: Path) -> str:
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+        ".txt": "text/plain",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }.get(path.suffix.casefold(), "application/octet-stream")
+
+
+def _window_title(hwnd: int) -> str:
+    if not hwnd:
+        return ""
+    for item in win32.list_windows():
+        try:
+            if int(item.get("hwnd") or 0) == int(hwnd):
+                return str(item.get("title") or "")
+        except (TypeError, ValueError):
+            continue
+    return ""
+
+
+class ArtifactStore:
+    """Own every file passed between task stages.
+
+    Observation frames can be retained for audit but have ``sendable=False``;
+    ``require_sendable`` therefore prevents a model-facing screenshot from
+    silently becoming the user's outbound attachment.
+    """
+
+    def __init__(self, run_id: str, root: str | Path | None = None) -> None:
+        self.run_id = str(run_id)
+        self.root = Path(root) if root else TRACES_DIR / self.run_id / "artifacts"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._artifacts: dict[str, Artifact] = {}
+        self._lock = threading.RLock()
+        self._manifest = self.root / "manifest.json"
+
+    @staticmethod
+    def _hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _dimensions(path: Path) -> tuple[int, int]:
+        if path.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
+            return 0, 0
+        try:
+            from PIL import Image
+            with Image.open(path) as image:
+                return int(image.width), int(image.height)
+        except Exception:
+            return 0, 0
+
+    def _persist(self) -> None:
+        payload = {
+            "format": "artifact-store/1",
+            "run_id": self.run_id,
+            "artifacts": [item.model_dump(mode="json") for item in self._artifacts.values()],
+        }
+        self._manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _register_path(
+        self,
+        path: Path,
+        *,
+        artifact_id: str = "",
+        source_window: str = "",
+        source_hwnd: int = 0,
+        source_scope: str = "",
+        purpose: str = "user_output",
+        sendable: bool = True,
+        selected_at: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> Artifact:
+        path = path.resolve()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError(f"artifact file is missing or empty: {path}")
+        aid = artifact_id or f"art-{uuid.uuid4().hex[:16]}"
+        width, height = self._dimensions(path)
+        artifact = Artifact(
+            artifact_id=aid,
+            run_id=self.run_id,
+            managed_path=str(path),
+            sha256=self._hash(path),
+            mime_type=_mime_for(path),
+            width=width,
+            height=height,
+            size_bytes=path.stat().st_size,
+            source_window=source_window,
+            source_hwnd=int(source_hwnd or 0),
+            source_scope=source_scope,
+            purpose=purpose,
+            sendable=bool(sendable),
+            selected_at=float(selected_at or 0.0),
+            metadata=dict(metadata or {}),
+        )
+        with self._lock:
+            self._artifacts[aid] = artifact
+            self._persist()
+        return artifact
+
+    def capture_artifact(
+        self,
+        *,
+        scope: str = "window",
+        source_hwnd: int = 0,
+        region: Region | dict[str, int] | None = None,
+        source_window: str = "",
+        purpose: str = "user_output",
+        sendable: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> Artifact:
+        resolved_region: Region | None
+        if isinstance(region, dict):
+            resolved_region = Region(
+                int(region.get("left", region.get("x", 0))),
+                int(region.get("top", region.get("y", 0))),
+                int(region.get("width", 0)),
+                int(region.get("height", 0)),
+            ).clamp_to_screen()
+        elif isinstance(region, Region):
+            resolved_region = region.clamp_to_screen()
+        elif scope in {"window", "canvas"}:
+            if not source_hwnd:
+                raise ValueError("window artifact capture requires source_hwnd")
+            resolved_region = window_region(int(source_hwnd)).clamp_to_screen()
+        else:
+            resolved_region = None
+        frame = capture(resolved_region)
+        if getattr(frame, "size", 0) <= 0:
+            raise ValueError("captured artifact frame is empty")
+        canvas_bbox: list[int] | None = None
+        if scope == "canvas" and region is None:
+            from ..perception.vision_cv import likely_canvas_bbox
+
+            canvas_bbox = likely_canvas_bbox(frame)
+            if canvas_bbox is None:
+                raise ValueError("no credible canvas/work surface was found in the source window")
+            x1, y1, x2, y2 = [int(value) for value in canvas_bbox]
+            if x2 <= x1 or y2 <= y1:
+                raise ValueError("detected canvas/work-surface geometry was empty")
+            frame = frame[y1:y2, x1:x2]
+            # Persist the absolute screen region as provenance, while retaining
+            # the detector-relative box for auditing and reproducibility.
+            resolved_region = Region(
+                resolved_region.left + x1,
+                resolved_region.top + y1,
+                x2 - x1,
+                y2 - y1,
+            ).clamp_to_screen()
+        from PIL import Image
+        image = Image.fromarray(frame[:, :, ::-1].copy())
+        aid = f"art-{uuid.uuid4().hex[:16]}"
+        path = self.root / f"{aid}.png"
+        payload = BytesIO()
+        image.save(payload, format="PNG", optimize=True)
+        path.write_bytes(payload.getvalue())
+        return self._register_path(
+            path,
+            artifact_id=aid,
+            source_window=source_window or _window_title(source_hwnd),
+            source_hwnd=source_hwnd,
+            source_scope=scope,
+            purpose=purpose,
+            sendable=sendable,
+            metadata={
+                **dict(metadata or {}),
+                "region": {
+                    "left": resolved_region.left,
+                    "top": resolved_region.top,
+                    "width": resolved_region.width,
+                    "height": resolved_region.height,
+                } if resolved_region else None,
+                "canvas_bbox_in_window": canvas_bbox,
+            },
+        )
+
+    def capture_observation(self, **kwargs: Any) -> Artifact:
+        return self.capture_artifact(purpose="observation", sendable=False, **kwargs)
+
+    def import_file(
+        self,
+        path: str | Path,
+        *,
+        purpose: str = "selected_input",
+        sendable: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> Artifact:
+        source = Path(path).expanduser().resolve()
+        if not source.is_file() or source.stat().st_size <= 0:
+            raise ValueError(f"artifact file is missing or empty: {source}")
+        aid = f"art-{uuid.uuid4().hex[:16]}"
+        suffix = source.suffix.casefold() or ".bin"
+        target = self.root / f"{aid}{suffix}"
+        shutil.copy2(source, target)
+        return self._register_path(
+            target,
+            artifact_id=aid,
+            source_window="external selection",
+            source_scope="selected_file",
+            purpose=purpose,
+            sendable=sendable,
+            selected_at=time.time(),
+            metadata={**dict(metadata or {}), "original_path": str(source)},
+        )
+
+    def get(self, artifact_id: str, *, require_sendable: bool = False) -> Artifact:
+        with self._lock:
+            artifact = self._artifacts.get(str(artifact_id))
+        if artifact is None:
+            raise KeyError(f"unknown artifact_id for current run: {artifact_id}")
+        if artifact.run_id != self.run_id:
+            raise ValueError("artifact does not belong to the current run")
+        path = Path(artifact.managed_path)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError("artifact file no longer exists or is empty")
+        if self._hash(path) != artifact.sha256:
+            raise ValueError("artifact hash changed after registration")
+        if require_sendable and not artifact.sendable:
+            raise ValueError("perception/observation frames cannot be sent as task artifacts")
+        return artifact
+
+    def latest(self, *, sendable: bool | None = None, purpose: str = "") -> Artifact | None:
+        with self._lock:
+            items = list(self._artifacts.values())
+        filtered = [
+            item for item in items
+            if (sendable is None or item.sendable is sendable)
+            and (not purpose or item.purpose == purpose)
+        ]
+        return max(filtered, key=lambda item: item.created_at, default=None)
+
+    def artifacts(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [item.model_dump(mode="json") for item in self._artifacts.values()]
+
+    def visual_match(
+        self,
+        source_id: str,
+        frame_id: str,
+        *,
+        target_region: dict[str, int] | None = None,
+        baseline_frame_id: str = "",
+        require_changed: bool = False,
+        min_scale: float = 0.04,
+    ) -> dict[str, Any]:
+        """Match an artifact in a stage-owned ROI of a later evidence frame.
+
+        Chat clients routinely resize raster attachments, so both geometric
+        feature matching and multi-scale edge templates are used.  When a
+        pre-send baseline is supplied, a match must also occupy pixels that
+        changed after the send action; this prevents a composer preview or an
+        older identical bubble from satisfying delivery.
+        """
+        source = self.get(source_id, require_sendable=True)
+        frame = self.get(frame_id)
+        try:
+            import cv2
+            import numpy as np
+            min_scale = max(0.02, min(1.0, float(min_scale or 0.04)))
+            src = cv2.imread(source.managed_path, cv2.IMREAD_GRAYSCALE)
+            dst = cv2.imread(frame.managed_path, cv2.IMREAD_GRAYSCALE)
+            if src is None or dst is None:
+                raise ValueError("OpenCV could not decode artifact images")
+            offset_x = offset_y = 0
+            if isinstance(target_region, dict):
+                left = max(0, int(target_region.get("left", target_region.get("x", 0))))
+                top = max(0, int(target_region.get("top", target_region.get("y", 0))))
+                right = min(dst.shape[1], left + max(0, int(target_region.get("width", 0))))
+                bottom = min(dst.shape[0], top + max(0, int(target_region.get("height", 0))))
+                if right <= left or bottom <= top:
+                    raise ValueError("target visual-match region is empty")
+                dst = dst[top:bottom, left:right]
+                offset_x, offset_y = left, top
+
+            baseline = None
+            if baseline_frame_id:
+                baseline_artifact = self.get(baseline_frame_id)
+                baseline = cv2.imread(baseline_artifact.managed_path, cv2.IMREAD_GRAYSCALE)
+                if baseline is not None and isinstance(target_region, dict):
+                    baseline = baseline[
+                        offset_y:offset_y + dst.shape[0],
+                        offset_x:offset_x + dst.shape[1],
+                    ]
+                if baseline is not None and baseline.shape != dst.shape:
+                    baseline = None
+            if require_changed and baseline is None:
+                raise ValueError("changed-after-send matching requires an aligned baseline frame")
+
+            def change_at(box: tuple[int, int, int, int]) -> tuple[bool, float, float]:
+                if baseline is None:
+                    return True, 1.0, 255.0
+                x, y, width, height = box
+                x = max(0, min(dst.shape[1], x))
+                y = max(0, min(dst.shape[0], y))
+                width = max(0, min(dst.shape[1] - x, width))
+                height = max(0, min(dst.shape[0] - y, height))
+                if width <= 0 or height <= 0:
+                    return False, 0.0, 0.0
+                diff = cv2.absdiff(dst[y:y + height, x:x + width], baseline[y:y + height, x:x + width])
+                ratio = float(np.mean(diff >= 18))
+                mean_delta = float(np.mean(diff))
+                return ratio >= 0.025 and mean_delta >= 2.0, ratio, mean_delta
+
+            detector = cv2.ORB_create(nfeatures=1800, scaleFactor=1.2, nlevels=8)
+            kp1, des1 = detector.detectAndCompute(src, None)
+            kp2, des2 = detector.detectAndCompute(dst, None)
+            good = []
+            if des1 is not None and des2 is not None:
+                matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+                pairs = matcher.knnMatch(des1, des2, k=2)
+                good = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.76 * pair[1].distance]
+
+            geometric_match = False
+            geometric_inliers = 0
+            geometric_box: tuple[int, int, int, int] | None = None
+            geometric_change = (False, 0.0, 0.0)
+            if len(good) >= 6:
+                src_points = np.float32([kp1[item.queryIdx].pt for item in good]).reshape(-1, 1, 2)
+                dst_points = np.float32([kp2[item.trainIdx].pt for item in good]).reshape(-1, 1, 2)
+                homography, mask = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 4.0)
+                if homography is not None and mask is not None:
+                    geometric_inliers = int(mask.ravel().sum())
+                    corners = np.float32([
+                        [0, 0], [src.shape[1], 0],
+                        [src.shape[1], src.shape[0]], [0, src.shape[0]],
+                    ]).reshape(-1, 1, 2)
+                    projected = cv2.perspectiveTransform(corners, homography).reshape(-1, 2)
+                    x1 = int(np.floor(projected[:, 0].min()))
+                    y1 = int(np.floor(projected[:, 1].min()))
+                    x2 = int(np.ceil(projected[:, 0].max()))
+                    y2 = int(np.ceil(projected[:, 1].max()))
+                    if x2 > x1 and y2 > y1:
+                        geometric_box = (x1, y1, x2 - x1, y2 - y1)
+                        geometric_change = change_at(geometric_box)
+                        width_ratio = (x2 - x1) / max(1, src.shape[1])
+                        height_ratio = (y2 - y1) / max(1, src.shape[0])
+                        aspect_ratio = (
+                            ((x2 - x1) / max(1, y2 - y1))
+                            / (src.shape[1] / max(1, src.shape[0]))
+                        )
+                        mostly_inside = (
+                            x2 > 0 and y2 > 0
+                            and x1 < dst.shape[1] and y1 < dst.shape[0]
+                            and x1 >= -0.10 * (x2 - x1)
+                            and y1 >= -0.10 * (y2 - y1)
+                            and x2 <= dst.shape[1] + 0.10 * (x2 - x1)
+                            and y2 <= dst.shape[0] + 0.10 * (y2 - y1)
+                        )
+                        geometric_match = (
+                            geometric_inliers >= 8
+                            and geometric_inliers / max(1, len(good)) >= 0.25
+                            and width_ratio >= min_scale
+                            and height_ratio >= min_scale * 0.65
+                            and 0.45 <= aspect_ratio <= 2.20
+                            and mostly_inside
+                            and (not require_changed or geometric_change[0])
+                        )
+
+            # Chat clients resize attachments. ORB is strong on textured
+            # images but sparse drawings may have too few keypoints, so add a
+            # subject-agnostic multi-scale edge comparison.
+            src_edge = cv2.Canny(src, 55, 155)
+            dst_edge = cv2.Canny(dst, 55, 155)
+            max_scale = min(
+                1.0,
+                dst.shape[1] / max(1, src.shape[1]),
+                dst.shape[0] / max(1, src.shape[0]),
+            )
+            template_score = 0.0
+            template_scale = 0.0
+            template_box: tuple[int, int, int, int] | None = None
+            template_change = (False, 0.0, 0.0)
+            if max_scale >= min_scale and float(src_edge.std()) > 1.0:
+                for raw_scale in (0.04, 0.055, 0.07, 0.10, 0.14, 0.18, 0.20, 0.24, 0.32, 0.42, 0.55, 0.70, 0.85, 1.0):
+                    scale = min(max_scale, raw_scale)
+                    if scale < min_scale:
+                        continue
+                    width = max(10, int(src_edge.shape[1] * scale))
+                    height = max(10, int(src_edge.shape[0] * scale))
+                    if width > dst_edge.shape[1] or height > dst_edge.shape[0]:
+                        continue
+                    templ = cv2.resize(src_edge, (width, height), interpolation=cv2.INTER_AREA)
+                    score_map = cv2.matchTemplate(dst_edge, templ, cv2.TM_CCOEFF_NORMED)
+                    # Inspect several separated peaks.  The strongest match may
+                    # be an older identical outbound bubble; a newly changed
+                    # candidate is the one that proves this send action.
+                    for _candidate in range(5):
+                        _minimum, score, _min_loc, location = cv2.minMaxLoc(score_map)
+                        score = float(score)
+                        box = (int(location[0]), int(location[1]), width, height)
+                        changed = change_at(box)
+                        eligible = not require_changed or changed[0]
+                        if eligible and score > template_score:
+                            template_score = score
+                            template_scale = scale
+                            template_box = box
+                            template_change = changed
+                        x1 = max(0, int(location[0]) - width // 2)
+                        y1 = max(0, int(location[1]) - height // 2)
+                        x2 = min(score_map.shape[1], int(location[0]) + width // 2 + 1)
+                        y2 = min(score_map.shape[0], int(location[1]) + height // 2 + 1)
+                        score_map[y1:y2, x1:x2] = -1.0
+                    if raw_scale >= max_scale:
+                        break
+            template_match = template_score >= 0.45
+            matched = geometric_match or template_match
+            selected_box = geometric_box if geometric_match else template_box
+            selected_change = geometric_change if geometric_match else template_change
+            return {
+                "matched": matched,
+                "good_matches": len(good),
+                "geometric_inliers": geometric_inliers,
+                "geometric_match": geometric_match,
+                "geometric_bbox": (
+                    [
+                        geometric_box[0] + offset_x,
+                        geometric_box[1] + offset_y,
+                        geometric_box[2],
+                        geometric_box[3],
+                    ]
+                    if geometric_box is not None else []
+                ),
+                "geometric_change_ratio": round(float(geometric_change[1]), 4),
+                "geometric_mean_pixel_delta": round(float(geometric_change[2]), 3),
+                "source_keypoints": len(kp1 or []),
+                "frame_keypoints": len(kp2 or []),
+                "template_score": round(template_score, 4),
+                "template_scale": round(template_scale, 4),
+                "match_bbox": (
+                    [
+                        selected_box[0] + offset_x,
+                        selected_box[1] + offset_y,
+                        selected_box[2],
+                        selected_box[3],
+                    ]
+                    if selected_box is not None else []
+                ),
+                "target_region": dict(target_region or {}),
+                "min_scale": round(min_scale, 4),
+                "baseline_frame_id": baseline_frame_id,
+                "changed_after_send": bool(selected_change[0]) if baseline is not None else None,
+                "change_ratio": round(float(selected_change[1]), 4),
+                "mean_pixel_delta": round(float(selected_change[2]), 3),
+                "method": "orb_homography+multiscale_edge_template",
+            }
+        except Exception as exc:
+            return {"matched": False, "good_matches": 0, "reason": str(exc), "method": "unavailable"}
+
+    def frame_change(
+        self,
+        baseline_frame_id: str,
+        current_frame_id: str,
+        *,
+        target_region: dict[str, int] | None = None,
+        pixel_threshold: int = 18,
+        min_change_ratio: float = 0.025,
+        min_mean_delta: float = 2.0,
+    ) -> dict[str, Any]:
+        """Prove that a stage-owned screen region changed between two frames.
+
+        This is intentionally separate from artifact identity matching.  It is
+        useful for causal UI transitions such as a newly opened attachment
+        confirmation, while ``visual_match`` remains responsible for proving
+        that a sent message bubble corresponds to a particular artifact.
+        """
+        baseline_artifact = self.get(baseline_frame_id)
+        current_artifact = self.get(current_frame_id)
+        try:
+            import cv2
+            import numpy as np
+
+            baseline = cv2.imread(baseline_artifact.managed_path, cv2.IMREAD_GRAYSCALE)
+            current = cv2.imread(current_artifact.managed_path, cv2.IMREAD_GRAYSCALE)
+            if baseline is None or current is None:
+                raise ValueError("OpenCV could not decode comparison frames")
+            if baseline.shape != current.shape:
+                raise ValueError("comparison frames are not geometrically aligned")
+
+            region = dict(target_region or {})
+            left = max(0, int(region.get("left", region.get("x", 0))))
+            top = max(0, int(region.get("top", region.get("y", 0))))
+            width = int(region.get("width", current.shape[1] - left))
+            height = int(region.get("height", current.shape[0] - top))
+            right = min(current.shape[1], left + max(0, width))
+            bottom = min(current.shape[0], top + max(0, height))
+            if right <= left or bottom <= top:
+                raise ValueError("frame-change region is empty")
+
+            delta = cv2.absdiff(
+                current[top:bottom, left:right],
+                baseline[top:bottom, left:right],
+            )
+            threshold = max(1, min(255, int(pixel_threshold)))
+            ratio = float(np.mean(delta >= threshold))
+            mean_delta = float(np.mean(delta))
+            ratio_floor = max(0.0, min(1.0, float(min_change_ratio)))
+            mean_floor = max(0.0, float(min_mean_delta))
+            return {
+                "changed": ratio >= ratio_floor and mean_delta >= mean_floor,
+                "change_ratio": round(ratio, 4),
+                "mean_pixel_delta": round(mean_delta, 3),
+                "pixel_threshold": threshold,
+                "min_change_ratio": round(ratio_floor, 4),
+                "min_mean_delta": round(mean_floor, 3),
+                "target_region": {
+                    "left": left,
+                    "top": top,
+                    "width": right - left,
+                    "height": bottom - top,
+                },
+                "baseline_frame_id": baseline_frame_id,
+                "current_frame_id": current_frame_id,
+                "method": "aligned_frame_delta",
+            }
+        except Exception as exc:
+            return {
+                "changed": False,
+                "change_ratio": 0.0,
+                "mean_pixel_delta": 0.0,
+                "reason": str(exc),
+                "method": "unavailable",
+            }
+
+    def snapshot(self) -> dict[str, Any]:
+        items = self.artifacts()
+        return {"run_id": self.run_id, "root": str(self.root), "count": len(items), "artifacts": items}

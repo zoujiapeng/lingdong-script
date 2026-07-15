@@ -2071,6 +2071,114 @@ def test_batch_scope_guard_runs_before_controller_local_select_color(monkeypatch
     assert out["results"][0]["data"]["blocked"] is True
 
 
+def test_batch_scope_recovery_rebinds_and_continues_only_uncommitted_action(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        hwnd = 77
+        snapshot = object()
+        _observe_cache = object()
+        _draw_surface_cache = {"stale": True}
+        _screen_epoch = 0
+
+    session = Session()
+    guard_calls = 0
+
+    def guarded(current, name, _args):
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            current._last_scope_recovery = {
+                "tool": name,
+                "attempts": 1,
+                "authoritative_frame_required": True,
+            }
+        return None
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", guarded)
+    controller = FastGuiController(session)
+    dispatched = []
+    mapped_cache_states = []
+
+    def map_draw(args):
+        mapped_cache_states.append(session._draw_surface_cache)
+        return {"strokes": args["normalized_strokes"], "_draw_strokes_prepared": True}
+
+    monkeypatch.setattr(controller, "_map_canvas_relative_draw", map_draw)
+    monkeypatch.setattr(
+        controller,
+        "_dispatch",
+        lambda name, args: dispatched.append((name, dict(args)))
+        or ToolResult('{"ok": true, "verified": true, "visual_change_detected": true}'),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_auto_visual_verify",
+        lambda *_args: ToolResult('{"ok": true, "verified": true}'),
+    )
+
+    out = controller.execute([
+        {"action": "hotkey", "keys": ["ctrl", "a"]},
+        {"action": "draw_strokes", "normalized_strokes": [[[1, 1], [2, 2]]]},
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert [name for name, _args in dispatched] == ["hotkey", "draw_strokes"]
+    assert mapped_cache_states == [None]
+    assert out["metrics"]["scope_recovery_count"] == 1
+    assert out["transaction"] == {
+        "planned_action_count": 2,
+        "attempted_action_count": 2,
+        "committed_action_count": 2,
+        "next_uncommitted_action_index": None,
+        "remaining_action_count": 0,
+        "scope_recovery_count": 1,
+    }
+    assert out["results"][1]["scope_recovery"]["tool"] == "draw_strokes"
+
+
+def test_raw_controller_dispatch_consumes_inner_scope_recovery(monkeypatch):
+    import json
+
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        hwnd = 77
+        snapshot = object()
+        _observe_cache = object()
+        _draw_surface_cache = {"stale": True}
+
+    session = Session()
+    controller = FastGuiController(session)
+    monkeypatch.setattr(controller.raw_device, "supports", lambda name: name == "click")
+    monkeypatch.setattr(
+        controller.raw_device,
+        "execute",
+        lambda _name, _args: ToolResult('{"ok": true, "verified": true}'),
+    )
+
+    def recovered(current, name, _args):
+        current._last_scope_recovery = {
+            "tool": name,
+            "attempts": 1,
+            "authoritative_frame_required": True,
+        }
+        return None
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", recovered)
+
+    payload = json.loads(controller._dispatch("click", {"x": 1, "y": 2}).text)
+
+    assert payload["scope_recovery"]["tool"] == "click"
+    assert session.snapshot is None
+    assert session._draw_surface_cache is None
+    assert scope_guard.take_scope_recovery(session) is None
+
+
 def test_select_color_uses_vlm_labeled_control_after_swatch_cv_miss(monkeypatch):
     from winpilot.fast.controller import FastGuiController
     from winpilot.perception.model import UIElement
@@ -7710,6 +7818,7 @@ def test_only_user_explicit_draw_colors_are_strict_requirements():
     assert _required_user_draw_colors("draw a blue and brown dog in Paint") == ["blue", "brown"]
     # The drawing surface name is not itself a request for white paint.
     assert _required_user_draw_colors("draw a dog on a whiteboard") == []
+    assert _required_user_draw_colors("use one ordered draws list with semantic part labels") == []
 
 
 def test_unexecuted_white_primitive_is_not_satisfied_by_canvas_background():
