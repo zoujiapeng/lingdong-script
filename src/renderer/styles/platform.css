@@ -250,6 +250,8 @@
 .arp-command-actions { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .arp-step-control { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--arp-text-muted); }
 .arp-step-control input { width: 61px; height: 29px; padding: 0 7px; border: 1px solid var(--arp-line); border-radius: 4px; color: var(--arp-text); background: var(--arp-surface); font: 11px "Cascadia Code", Consolas, monospace; outline: none; }
+.arp-cold-start-control { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--arp-text-muted); cursor: pointer; }
+.arp-cold-start-control input { width: 14px; height: 14px; accent-color: var(--arp-accent); }
 
 .arp-gate-banner { min-height: 58px; margin-top: 10px; padding: 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #d89d45; border-radius: 6px; background: var(--arp-amber-soft); }
 .arp-gate-banner > div { display: flex; align-items: center; gap: 9px; }
@@ -273,6 +275,17 @@
 .arp-runtime-focus code { overflow: hidden; color: var(--arp-text-soft); text-overflow: ellipsis; white-space: nowrap; }
 
 .arp-metrics-row { margin-top: 10px; display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); border: 1px solid var(--arp-line); border-radius: 7px; background: var(--arp-surface); overflow: hidden; }
+.arp-contract-panel { margin-top: 10px; padding: 12px; }
+.arp-contract-summary { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto minmax(80px, 1fr) auto minmax(80px, 1fr) auto minmax(80px, 1fr); gap: 6px 10px; align-items: center; font-size: 12px; color: var(--arp-muted); }
+.arp-contract-summary code { color: var(--arp-text); overflow: hidden; text-overflow: ellipsis; }
+.arp-stage-list { display: grid; gap: 6px; margin-top: 10px; }
+.arp-stage-row { display: grid; grid-template-columns: 18px minmax(150px, .8fr) minmax(220px, 1.5fr) minmax(90px, .4fr); gap: 8px; align-items: center; min-height: 42px; padding: 7px 9px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-soft); }
+.arp-stage-row.active { border-color: var(--arp-accent); box-shadow: inset 3px 0 0 var(--arp-accent); }
+.arp-stage-row > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.arp-stage-row > div span, .arp-stage-row > span { color: var(--arp-muted); font-size: 11px; }
+.arp-stage-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.arp-artifact-strip { display: grid; gap: 5px; margin-top: 10px; }
+.arp-artifact-strip > div { display: grid; grid-template-columns: 160px 1fr 1fr; gap: 8px; padding: 6px 8px; border-radius: 5px; background: var(--arp-surface-soft); font-size: 11px; color: var(--arp-muted); }
 .arp-metrics-row.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 14px 0; }
 .arp-metric { min-width: 0; min-height: 55px; padding: 9px 11px; display: flex; flex-direction: column; justify-content: space-between; border-right: 1px solid var(--arp-line); }
 .arp-metric:last-child { border-right: 0; }

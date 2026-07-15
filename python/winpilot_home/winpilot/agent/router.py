@@ -20,6 +20,7 @@ def build_runner(
     session_context: list | None = None,
     max_steps_override: int | None = None,
     allow_shell_tools: bool | None = None,
+    runtime_profile=None,
 ) -> AgentRunner:
     """Return the unified AgentRunner for every task.
 
@@ -27,7 +28,7 @@ def build_runner(
     example, a repository task enables Coding Runtime tools without becoming a
     separate coding sub-agent.
     """
-    profile = build_runtime_profile(task)
+    profile = runtime_profile or build_runtime_profile(task)
     logger.info("构建统一 AgentRunner: runtime=%s task=%s", profile.label, task[:60])
     return AgentRunner(
         task,

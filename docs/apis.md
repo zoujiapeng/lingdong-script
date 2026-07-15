@@ -56,6 +56,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/v2/jobs/{job_id}` | 单个 runtime job |
 | POST | `/api/v2/jobs/{job_id}/cancel` | 取消任意 runtime job |
 | POST | `/api/v2/arp/validate` | 校验 `arp/1` 图 |
+| POST | `/api/v2/task-contracts/compile` | 将自然语言编译为可满足性已检查的 `task-contract/1` 与 typed `arp/1` graph |
 | POST | `/api/v2/arp/runs` | 启动原生 ARP 图；源码漂移时 fail-closed |
 | GET | `/api/v2/arp/runs/{run_id}` | 查询 ARP 执行快照 |
 | POST | `/api/v2/arp/runs/{run_id}/cancel` | 取消 ARP run |
@@ -78,6 +79,10 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | POST | `/api/human/start`、`/api/human/stop` | 开始或停止人类演示录制 |
 | GET | `/api/human/status` | 人类演示录制状态 |
 | GET | `/api/v2/replay/modes` | 查询 replay / apprentice 模式 |
+
+`POST /api/v2/task-contracts/compile` 接受 `task`、`max_steps` 与可选的 `cold_start`。`cold_start=true` 会在合同和图上写入 `experience_policy=disabled`，不生成 `skill_replay` 节点，并禁止该 run 读取或写入阶段 Skill、经验提示和会话记忆；它用于验证首次探索路径，不会改变任务语义或为某个测试对象增加分支。
+
+`GET /api/v2/arp/runs/{run_id}` 的 typed-task 快照包含 `task_contract`、`satisfiability`、`current_stage`、`stage_trace`、`artifacts`、`contract_evidence`、`experience_policy` 与 `skill_replay_node_count`。`stage_trace` 记录阶段状态、能力、模型可见工具、Controller 工具、artifact id、模型调用、Controller 耗时、尝试次数、失败分类和恢复策略；Controller batch 的 transaction trace 还记录 planned/attempted/committed/next-uncommitted、scope recovery 和重新绑定证据。观察帧不会出现在可发送 artifact 集合中。
 | POST | `/api/v2/replay/apprentice/start`、`/api/v2/replay/apprentice/stop` | 开始或停止 Apprentice 录制 |
 | GET | `/api/v2/replay/apprentice/status` | Apprentice 录制状态 |
 | POST | `/api/replay` | 启动 replay job，返回 `replay_id` |

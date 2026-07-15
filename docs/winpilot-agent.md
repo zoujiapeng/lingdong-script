@@ -17,11 +17,14 @@
 
 ## 主循环
 
-直接 `/api/chat` 与原生前端 ARP 目标最终共享同一个 AgentRunner：
+直接 `/api/chat` 仍运行完整 AgentRunner；原生前端自然语言目标改为 Task Contract + Stage Runtime，只在语义阶段创建有界 AgentRunner：
 
 ```text
 /api/chat -> RuntimeJob(interactive_runtime)
-/api/v2/arp/runs -> RuntimeJob -> skill_replay miss/fail -> agent_goal
+/api/v2/task-contracts/compile -> typed task_stage graph
+/api/v2/arp/runs -> RuntimeJob -> StageRuntime
+  -> parameterized stage skill OR deterministic Controller/ArtifactStore/DomainAdapter
+  -> bounded AgentRunner only for semantic drawing/editing or recovery
   -> router.build_runner()
   -> AgentRunner.run()
   -> build messages + tool_schemas()
@@ -204,6 +207,8 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 汇总只把严格核验的 run 计入 `verified_success`：必须未超时、`status=done`、policy 和性能预算通过、外部 ground truth 存在且通过，并且没有 unverified done。没有检查项的报告标记为 `ungrounded`，不计成功；报告的 Git、模型、视觉配置 hash、display/DPI provenance 用来保证不同运行可比。
 
 当前已复盘的本地诚实基线之一是 2026-07-14 的单次真实前端冷启动：空白 Paint 收到“用画板画一只猫”，约 55.3 秒，2 次点击、1 次 `draw_strokes`，没有进入 undo/clear 循环。结果可辨认但粗糙且语义有歧义，不能称为“好看”。对应 trace/eval、模型、显示/DPI 和配置没有作为公开基准提交，所以这只是链路/延迟样本，不是可复现的统计成功率；必须积累带完整 provenance 的固定任务、多次运行与外部 ground truth 后才能报告成功率。
+
+2026-07-15 在用户明确授权真实发送、QQ 已登录的单台 Windows 环境中，`test_windows_task_contract_e2e.py` 以 `cold_start=true` 从 `/api/v2/task-contracts/compile` 和 `/api/v2/arp/runs` 真实执行了四种跨应用表达，其中包含完整绘图链路、指代已有工件和窗口级捕获。最终 run `arp-20260715-144521-c93f28`、`arp-20260715-144632-a860b5`、`arp-20260715-144808-57af96`、`arp-20260715-144837-7f2b05` 均完成；模型调用分别为 2、2、0、2，Controller 阶段总耗时约 69.7、65.2、26.7、69.4 秒，所有阶段一次通过，`experience_policy=disabled` 且 `skill_replay_node_count=0`。四个 run 均在执行前通过 capability satisfiability，创建当前 run 的 sendable artifact，并记录正确会话、真实发送动作和发送后同一 artifact 可见匹配证据。最后一次生产去特判改动并重启服务后，指定完整任务又在 run `arp-20260715-151736-9fe263` 通过：5 个 typed stages 一次完成、0 missing capability、2 次模型调用、Controller 阶段总耗时 68.5 秒；工件 `art-b9901e5ad28440aa` 的哈希贯穿确认框发送事务和发送后气泡匹配。测试中的对象、应用和收件人均是合同参数，不对应生产模板、别名或固定物理坐标。该结果只证明这些固定样本在本机当前 QQ/显示/模型配置下可达，不代表跨机器、跨版本或统计成功率。
 
 ## Done Gate
 

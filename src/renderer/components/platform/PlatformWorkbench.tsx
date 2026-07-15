@@ -82,11 +82,13 @@ const EVENT_LABELS: Record<string, string> = {
   agent_tool_start: '工具开始', agent_usage: '模型用量', agent_model_call: '模型调用',
   arp_run_start: '流程开始', arp_run_done: '流程完成', arp_node_start: '节点开始', arp_node_done: '节点完成',
   arp_child_run: '子任务', arp_evidence: '证据记录', screen_watch: '屏幕观察', screen_delta: '画面变化',
+  task_stage_start: '阶段开始', task_stage_done: '阶段完成', task_stage_failed: '阶段失败',
   visual_feedback: '视觉反馈', visual_preflight: '执行前画面检查', done_check: '完成检查', run_state: '运行状态',
 };
 const TOOL_LABELS: Record<string, string> = {
   click: '点击', draw_strokes: '连续绘制', type_text: '输入文字', hotkey: '快捷键', scroll: '滚动',
   drag: '拖拽', open_app: '打开应用', focus_window: '聚焦窗口', observe: '观察', done: '完成',
+  capture_artifact: '创建工件', send_artifact: '发送工件', verify_delivery: '验证送达', open_conversation: '打开会话',
 };
 
 function viewFromStore(mode: UIState['viewMode']): PlatformView {
@@ -200,9 +202,14 @@ function PhaseRail({ run }: { run: RunProjection | null }) {
 function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
+  const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
   const run = plane.currentRun;
+  const arp = plane.arpSnapshot;
+  const taskContract = arp?.task_contract || null;
+  const managedArtifacts = arp?.artifacts?.artifacts || [];
+  const activeStage = taskContract?.stages.find((stage) => stage.id === (arp?.current_stage?.id || run?.current_node_id));
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = (plane.overview?.status as any)?.model_profile;
@@ -226,7 +233,8 @@ function AgentCockpit({ plane }: { plane: Plane }) {
     setActionError('');
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
-      await plane.startGoal(goal.trim(), maxSteps);
+      localStorage.setItem('arp-cold-start', coldStart ? '1' : '0');
+      await plane.startGoal(goal.trim(), maxSteps, coldStart);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -255,6 +263,10 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         />
         <div className="arp-command-actions">
           <label className="arp-step-control">步骤上限<input type="number" min={1} max={400} value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value) || 40)} disabled={active} /></label>
+          <label className="arp-cold-start-control" title="禁用 Skill 重放、经验提示与会话记忆；用于真实冷启动验收">
+            <input type="checkbox" checked={coldStart} onChange={(event) => setColdStart(event.target.checked)} disabled={active} />
+            冷启动（禁用 Skill/Memory）
+          </label>
           <div className="arp-action-spacer" />
           {active ? (
           <button className="arp-button arp-button-danger" onClick={stop}><CircleStop size={15} />停止</button>
@@ -282,12 +294,55 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         <div className="arp-runtime-focus"><span>节点</span><code>{run?.current_node_id || '-'}</code><span>工具</span><code>{TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '-'}</code></div>
       </section>
 
+      {taskContract && (
+        <section className="arp-panel arp-contract-panel">
+          <div className="arp-panel-heading">
+            <div><Network size={15} /><strong>任务合同与阶段运行时</strong></div>
+            <StatusPill status={taskContract.satisfiable ? 'done' : 'failed'} label={taskContract.satisfiable ? '能力可满足' : '能力缺失'} />
+          </div>
+          <div className="arp-contract-summary">
+            <span>意图</span><code>{taskContract.intent.operation.join(' → ') || 'semantic'}</code>
+            <span>通道</span><code>{taskContract.intent.channel || '-'}</code>
+            <span>接收方</span><code>{taskContract.intent.recipient || '-'}</code>
+            <span>工件类型</span><code>{taskContract.intent.media_type}</code>
+            <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp?.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
+          </div>
+          <div className="arp-stage-list">
+            {taskContract.stages.map((stage) => {
+              const current = stage.id === activeStage?.id;
+              const done = Boolean((arp?.history as Array<Record<string, unknown>> | undefined)?.some((item) => item.node_id === stage.id && item.ok === true));
+              return (
+                <div className={`arp-stage-row ${current ? 'active' : ''}`} key={stage.id}>
+                  {done ? <CheckCircle2 size={14} /> : current ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}
+                  <div><strong>{stage.name}</strong><span>{stage.type}</span></div>
+                  <code title={`Controller: ${stage.execution?.controller_tools.join(', ') || 'local'}`}>
+                    {stage.execution?.model_tools.length
+                      ? `LLM: ${stage.execution.model_tools.join(', ')}`
+                      : `Controller: ${stage.execution?.controller_tools.join(', ') || 'local'}`}
+                  </code>
+                  <span>{stage.execution?.adapter || stage.execution?.model_role || 'controller'}</span>
+                </div>
+              );
+            })}
+          </div>
+          {managedArtifacts.length > 0 && <div className="arp-artifact-strip">
+            {managedArtifacts.map((artifact) => (
+              <div key={artifact.artifact_id}><code>{artifact.artifact_id}</code><span>{artifact.mime_type} · {artifact.width}×{artifact.height} · {artifact.size_bytes} B</span><span>{artifact.source_window}</span></div>
+            ))}
+          </div>}
+          {!taskContract.satisfiable && <div className="arp-inline-error"><XCircle size={14} />{taskContract.missing_capabilities.join(', ')}</div>}
+        </section>
+      )}
+
       <section className="arp-metrics-row">
         <Metric label="截图" value={metrics?.screen_capture_latency_avg_ms || 0} unit="毫秒" />
         <Metric label="感知" value={metrics?.perception_latency_avg_ms || 0} unit="毫秒" />
         <Metric label="决策" value={metrics?.action_decision_latency_avg_ms || 0} unit="毫秒" />
         <Metric label="执行" value={metrics?.action_execution_latency_avg_ms || 0} unit="毫秒" />
         <Metric label="执行后验证" value={metrics?.post_action_verify_latency_avg_ms || 0} unit="毫秒" />
+        <Metric label="模型调用" value={metrics?.model_call_count || 0} />
+        <Metric label="阶段重试" value={metrics?.retry_count || 0} />
+        <Metric label="控制器总耗时" value={metrics?.controller_elapsed_total_ms || 0} unit="毫秒" />
         <Metric label="快速验证" value={`${Math.round((metrics?.semantic_verify_fast_path_rate || 0) * 100)}%`} />
         <Metric label="重规划率" value={`${Math.round((metrics?.replan_frequency || 0) * 100)}%`} />
         <Metric label="视觉模型调用率" value={`${Math.round((metrics?.vlm_call_frequency || 0) * 100)}%`} />

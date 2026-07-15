@@ -9,6 +9,7 @@ import type {
   RunProjection,
   RuntimeEvent,
   AgentSchedule,
+  TaskContract,
 } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 
@@ -304,6 +305,17 @@ export class ControlPlaneClient {
     return response.run;
   }
 
+  async compileTask(task: string, maxSteps = 40, coldStart = false): Promise<{ contract: TaskContract; graph: ArpGraph }> {
+    const response = await this.request<{ ok: boolean; contract: TaskContract; graph: ArpGraph }>('api/v2/task-contracts/compile', {
+      method: 'POST',
+      body: JSON.stringify({ task, max_steps: maxSteps, cold_start: coldStart }),
+    });
+    if (!response.contract.satisfiable) {
+      throw new Error(`任务合同不可执行：${response.contract.missing_capabilities.join(', ') || '能力路径未知'}`);
+    }
+    return { contract: response.contract, graph: response.graph };
+  }
+
   async startAutomation(
     automation: AutomationIR,
     inputs: Record<string, unknown> = {},
@@ -379,30 +391,4 @@ export class ControlPlaneClient {
       socket?.close();
     };
   }
-}
-
-export function createGoalGraph(goal: string, maxSteps = 30): ArpGraph {
-  const timestamp = Date.now();
-  return {
-    format: 'arp/1',
-    id: `goal-${timestamp}`,
-    name: goal.slice(0, 80) || '智能代理任务',
-    description: '由智能代理工作台创建的记忆优先任务。',
-    nodes: [
-      { id: 'start', kind: 'start', name: '开始', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 0 },
-      { id: 'skill', kind: 'skill_replay', name: '复用已验证技能', config: { task: goal }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 120 },
-      { id: 'goal', kind: 'agent_goal', name: '智能代理任务', config: { goal, max_steps: maxSteps }, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 180, y: 240 },
-      { id: 'end', kind: 'end', name: '完成', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 360 },
-    ],
-    edges: [
-      { id: 'start-skill', source: 'start', target: 'skill', branch: 'next', label: '' },
-      { id: 'skill-end', source: 'skill', target: 'end', branch: 'next', label: '已复用' },
-      { id: 'skill-miss-goal', source: 'skill', target: 'goal', branch: 'miss', label: '探索' },
-      { id: 'skill-fail-goal', source: 'skill', target: 'goal', branch: 'fail', label: '恢复' },
-      { id: 'goal-end', source: 'goal', target: 'end', branch: 'next', label: '' },
-    ],
-    variables: {},
-    policy: { max_node_visits: 20, fail_fast: true, require_evidence_on_done: true, allow_shell: false, allow_desktop_mutation: true },
-    metadata: { source: 'agent-cockpit', routing: 'verified-skill-first-agent-on-miss-or-failure' },
-  };
 }

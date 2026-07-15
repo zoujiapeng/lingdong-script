@@ -39,15 +39,40 @@ def test_scope_guard_recovers_by_refocusing_target(monkeypatch):
         return True
 
     monkeypatch.setattr(scope_guard, "_focus", fake_focus)
+    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
 
     assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
     assert session.focus_calls == [100]
+    recovery = scope_guard.take_scope_recovery(session)
+    assert recovery["attempts"] == 1
+    assert recovery["authoritative_frame_required"] is True
+
+
+def test_scope_guard_retries_transient_focus_reclaim_and_proves_stability(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
+
+    def fake_focus(hwnd):
+        session.focus_calls.append(hwnd)
+        if len(session.focus_calls) >= 2:
+            session.fg = hwnd
+        return True
+
+    monkeypatch.setattr(scope_guard, "_focus", fake_focus)
+
+    assert scope_guard.ensure_scope(session, "draw_strokes", {}) is None
+    recovery = scope_guard.take_scope_recovery(session)
+    assert session.focus_calls == [100, 100]
+    assert recovery["attempts"] == 2
+    assert recovery["after"]["foreground_hwnd"] == 100
 
 
 def test_scope_guard_blocks_when_refocus_cannot_recover(monkeypatch):
     session = _Session()
     monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
     monkeypatch.setattr(scope_guard, "_focus", lambda hwnd: False)
+    monkeypatch.setattr(scope_guard.time, "sleep", lambda _seconds: None)
 
     result = scope_guard.ensure_scope(session, "type_text", {"text": "hello"})
 
@@ -55,6 +80,7 @@ def test_scope_guard_blocks_when_refocus_cannot_recover(monkeypatch):
     payload = json.loads(result.text)
     assert payload["blocked"] is True
     assert payload["scope_guard"]["recovery_attempted"] is True
+    assert payload["scope_guard"]["recovery_attempts"] == 3
     assert payload["tool"] == "type_text"
 
 

@@ -59,6 +59,7 @@ class BatchMetrics:
     internal_action_count: int = 0
     compound_round_trips_saved: int = 0
     controller_round_trips_saved: int = 0
+    scope_recovery_count: int = 0
     visual_servo_count: int = 0
     visual_servo_correction_count: int = 0
     visual_servo_failure_count: int = 0
@@ -81,6 +82,7 @@ class BatchMetrics:
             "internal_action_count": int(self.internal_action_count),
             "compound_round_trips_saved": int(self.compound_round_trips_saved),
             "controller_round_trips_saved": int(self.controller_round_trips_saved),
+            "scope_recovery_count": int(self.scope_recovery_count),
             "visual_servo_count": int(self.visual_servo_count),
             "visual_servo_correction_count": int(self.visual_servo_correction_count),
             "visual_servo_failure_count": int(self.visual_servo_failure_count),

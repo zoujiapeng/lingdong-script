@@ -36,6 +36,16 @@ class RuntimeProfile:
     safety: bool = True
     async_jobs: bool = True
     perception_daemon: bool = True
+    task_contract_id: str = ""
+    stage_type: str = ""
+    required_capabilities: tuple[str, ...] = ()
+    exposed_capabilities: tuple[str, ...] = ()
+    stage_tools: tuple[str, ...] = ()
+    domain_adapter: str = ""
+    stage_guidance: str = ""
+    model_tool_allowlist: tuple[str, ...] = ()
+    inline_semantic_verification: bool = False
+    experience_enabled: bool = True
 
     @property
     def label(self) -> str:
@@ -82,13 +92,32 @@ class RuntimeProfile:
             "safety": self.safety,
             "async_jobs": self.async_jobs,
             "perception_daemon": self.perception_daemon,
+            "task_contract_id": self.task_contract_id,
+            "stage_type": self.stage_type,
+            "required_capabilities": list(self.required_capabilities),
+            "exposed_capabilities": list(self.exposed_capabilities),
+            "stage_tools": list(self.stage_tools),
+            "domain_adapter": self.domain_adapter,
+            "stage_guidance": self.stage_guidance,
+            "model_tool_allowlist": list(self.model_tool_allowlist),
+            "inline_semantic_verification": self.inline_semantic_verification,
+            "experience_enabled": self.experience_enabled,
         }
 
     def prompt_section(self) -> str:
+        sections: list[str] = []
+        if self.stage_guidance:
+            sections.append(
+                "# Typed stage execution guidance\n"
+                "This is controller strategy, not part of the user's visible completion "
+                "criteria. Do not require these implementation words or numbers to appear "
+                "in the output.\n"
+                + self.stage_guidance.strip()
+            )
         if not self.coding:
-            return ""
+            return "\n\n".join(sections)
         workspace = self.coding_workspace or coding_workspace_dir()
-        return f"""
+        sections.append(f"""
 # Active runtime capability: Coding Runtime
 You are still one WinPilot Agent. Do not treat coding as a separate sub-agent;
 combine repository tools, shell, browser, and GUI tools whenever the task needs
@@ -113,19 +142,51 @@ Coding workspace root: {workspace}
 Safety: do not edit .env, credentials, tokens, keys, or secret/config files
 unless the user explicitly requested configuration. For missing credentials,
 report the required variable instead of inventing one.
-""".strip()
+""".strip())
+        return "\n\n".join(sections)
 
 
-def build_runtime_profile(task: str) -> RuntimeProfile:
+def build_runtime_profile(
+    task: str,
+    *,
+    task_contract=None,
+    stage=None,
+    stage_guidance: str = "",
+    model_tool_allowlist: tuple[str, ...] | list[str] = (),
+    inline_semantic_verification: bool = False,
+) -> RuntimeProfile:
     """Decide which runtimes are active inside the single AgentRunner."""
     coding_enabled = bool(CONFIG.get("coding", "enabled", default=True))
     use_coding = coding_enabled and _is_coding_task(task) and not _is_gui_only_task(task)
+    stage_execution = getattr(stage, "execution", None)
+    experience_enabled = str(
+        getattr(task_contract, "experience_policy", "allow") or "allow"
+    ).casefold() != "disabled"
+    stage_values = {
+        "task_contract_id": str(getattr(task_contract, "task_id", "") or ""),
+        "stage_type": str(getattr(getattr(stage, "type", None), "value", "") or ""),
+        "required_capabilities": tuple(getattr(stage_execution, "required_capabilities", ()) or ()),
+        "exposed_capabilities": tuple(getattr(stage_execution, "exposed_capabilities", ()) or ()),
+        "stage_tools": tuple(getattr(stage_execution, "tools", ()) or ()),
+        "domain_adapter": str(getattr(stage_execution, "adapter", "") or ""),
+        "stage_guidance": str(stage_guidance or "").strip(),
+        "model_tool_allowlist": tuple(str(item) for item in model_tool_allowlist if str(item)),
+        "inline_semantic_verification": bool(inline_semantic_verification),
+        "experience_enabled": experience_enabled,
+    }
     if not use_coding:
-        return RuntimeProfile(desktop=True, coding=False)
+        return RuntimeProfile(
+            desktop=True,
+            coding=False,
+            replay=experience_enabled,
+            **stage_values,
+        )
     max_steps = int(CONFIG.get("coding", "max_steps", default=30))
     return RuntimeProfile(
         desktop=True,
         coding=True,
+        replay=experience_enabled,
         coding_workspace=coding_workspace_dir(),
         max_steps=max_steps,
+        **stage_values,
     )

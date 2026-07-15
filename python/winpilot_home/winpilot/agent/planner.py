@@ -265,6 +265,21 @@ def should_plan_upfront(task: str) -> bool:
     if not planning_enabled():
         return False
     text = (task or "").strip()
+    # Structural intent outranks prose-length heuristics.  Any cross-application
+    # artifact transfer or communication workflow is long-horizon even when it
+    # contains no explicit "first/then/finally" markers.
+    from ..tasking.intent import TaskIntentParser
+
+    intent = TaskIntentParser().parse(text)
+    if (
+        "send" in intent.operation
+        and (
+            intent.media_type in {"image", "file"}
+            or bool(intent.source and intent.channel and intent.source.casefold() != intent.channel.casefold())
+            or len(intent.operation) >= 2
+        )
+    ):
+        return True
     # Count semantic sequence markers, not commas: policy/constraint prose often
     # contains long comma-separated forbidden-tool lists that are not steps.
     folded = f" {text.casefold()} "

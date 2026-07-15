@@ -336,6 +336,44 @@ def test_tool_session_records_fast_screen_bulletin_after_dispatch():
     assert session.world.state()["screen_watch"]["sequence"] == 7
 
 
+def test_tool_session_consumes_scope_recovery_and_excludes_local_probe_from_world(monkeypatch):
+    import json
+
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="operate the currently bound application")
+    session.snapshot = object()
+    session._observe_cache = object()
+    session._draw_surface_cache = {"stale": True}
+    session._local_recovery_depth = 1
+    seen_snapshot = []
+    session._t_click = lambda _args: seen_snapshot.append(session.snapshot) or ToolResult(
+        '{"ok": true, "verified": true}'
+    )
+
+    def recovered(current, name, _args):
+        current._last_scope_recovery = {
+            "tool": name,
+            "attempts": 2,
+            "authoritative_frame_required": True,
+        }
+        return None
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", recovered)
+
+    payload = json.loads(session.dispatch(
+        "click", {"x": 10, "y": 20, "skip_screen_delta": True},
+    ).text)
+
+    assert payload["scope_recovery"]["attempts"] == 2
+    assert seen_snapshot == [None]
+    assert session._draw_surface_cache is None
+    assert scope_guard.take_scope_recovery(session) is None
+    assert session.world.repeated_action_count() == 0
+
+
 def test_tool_session_attaches_screen_delta_to_visible_action():
     import json
 

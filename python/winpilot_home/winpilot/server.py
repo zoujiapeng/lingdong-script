@@ -64,6 +64,10 @@ from .orchestrator.contracts import (
 )
 from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
+from .orchestrator.graph_compiler import legacy_goal_graph_task
+from .tasking.capability import CapabilityPlanner
+from .tasking.compiler import TaskContractCompiler
+from .tasking.contracts import ContractCompileRequest
 
 WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
@@ -627,6 +631,7 @@ def platform_overview() -> dict[str, Any]:
         "capabilities": [item.model_dump(mode="json") for item in capability_catalog()],
         "contracts": {
             "arp": "arp/1",
+            "task_contract": "task-contract/1",
             "automation_ir": "automation-ir/1",
             "event_stream": "/ws/events",
             "mcp": "/mcp",
@@ -699,6 +704,23 @@ def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
     return validate_graph(graph).model_dump(mode="json")
 
 
+@app.post("/api/v2/task-contracts/compile")
+def compile_task_contract(req: ContractCompileRequest) -> dict[str, Any]:
+    try:
+        contract, graph = TaskContractCompiler().compile_graph(
+            req.task,
+            max_steps=req.max_steps,
+            cold_start=req.cold_start,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "ok": True,
+        "contract": contract.model_dump(mode="json"),
+        "graph": graph.model_dump(mode="json"),
+    }
+
+
 @app.post("/api/v2/automation-ir/validate")
 def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, Any]:
     if automation_runtime_kind(automation) == "wps_replay":
@@ -717,6 +739,11 @@ def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, An
 
 
 def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
+    contract_data = graph.metadata.get("task_contract")
+    if isinstance(contract_data, dict):
+        from .tasking.contracts import TaskContract
+
+        CapabilityPlanner.assert_satisfiable(TaskContract.model_validate(contract_data))
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))
@@ -781,12 +808,23 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
             "Restart the runtime before starting another frontend task.",
         )
     try:
-        execution = _start_arp_execution(req.graph, req.inputs)
+        graph = req.graph
+        legacy_task = legacy_goal_graph_task(graph)
+        if legacy_task is not None:
+            task, max_steps = legacy_task
+            _contract, graph = TaskContractCompiler().compile_graph(task, max_steps=max_steps)
+        execution = _start_arp_execution(graph, req.inputs)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "run_id": execution.run_id, "run": execution.to_dict()}
+    return {
+        "ok": True,
+        "run_id": execution.run_id,
+        "run": execution.to_dict(),
+        "graph": execution.graph.model_dump(mode="json"),
+        "contract": execution.graph.metadata.get("task_contract"),
+    }
 
 
 @app.post("/api/v2/automation-ir/runs")

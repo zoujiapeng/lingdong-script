@@ -254,7 +254,16 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
     task = str(node.config.get("task") or node.name or "").strip()
     if not script_name:
         try:
-            script_name, recipe = experience.reusable_script_for(task, memory_id)
+            stage_type = str(node.config.get("stage_type") or "")
+            if stage_type:
+                script_name, recipe = experience.reusable_stage_script_for(
+                    stage_type,
+                    dict(node.config.get("parameters") or {}),
+                    memory_id,
+                    app_version=str(node.config.get("app_version") or ""),
+                )
+            else:
+                script_name, recipe = experience.reusable_script_for(task, memory_id)
         except Exception as exc:
             return NodeResult(ok=False, branch="fail", error=f"skill lookup failed: {exc}")
         memory_id = str((recipe or {}).get("id") or memory_id)
@@ -308,12 +317,48 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
                 )
             except Exception:
                 pass
+            try:
+                experience.update(memory_id, {"failure_reason": str(exc)})
+            except Exception:
+                pass
         return NodeResult(ok=False, branch="fail", error=f"skill replay failed: {exc}")
     _publish_anchor_metrics(result, context, node)
     verified_steps = [step for step in (result.get("results") or []) if step.get("ok") is True]
     ok = bool(result.get("ok")) and bool(verified_steps)
     if result.get("ok") and not verified_steps:
         result = {**result, "ok": False, "error": "skill replay produced no verified steps"}
+    stage_verification: dict[str, Any] = {}
+    stage_type = str(node.config.get("stage_type") or "")
+    parameters = dict(node.config.get("parameters") or {})
+    if ok and stage_type == "DrawArtifact":
+        subject = str(parameters.get("subject") or "the requested subject")
+        quality = str(parameters.get("quality") or "normal")
+        session = ToolSession(
+            stop_event=stop_event,
+            task=f"Verify replayed drawing stage: {subject}",
+            runtime_profile=build_runtime_profile(f"Verify drawing of {subject}"),
+        )
+        session.run_id = context["run_id"]
+        try:
+            verdict = session.dispatch("vlm_verify", {
+                "criteria": (
+                    f"The latest drawing canvas clearly and recognizably depicts {subject}. "
+                    + ("It also meets the requested polished/detailed quality." if quality == "detailed" else "Do not require unrequested decorative detail.")
+                ),
+            })
+            stage_verification = _json_result(verdict.text)
+        finally:
+            session.close()
+        ok = bool(
+            stage_verification.get("verified") is True
+            or stage_verification.get("semantic_visual_verified") is True
+        )
+        if not ok:
+            result = {
+                **result,
+                "ok": False,
+                "error": str(stage_verification.get("error") or stage_verification.get("reason") or "stage semantic verification failed"),
+            }
     if memory_id:
         try:
             experience._store().record_attempt(
@@ -326,26 +371,59 @@ def _skill_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeRe
             )
         except Exception:
             pass
+        try:
+            experience.update(memory_id, {
+                "failure_reason": "" if ok else str(result.get("error") or "stage replay validation failed"),
+            })
+        except Exception:
+            pass
     output = {
         **result,
         "script": script_name,
         "memory_id": memory_id or None,
         "memory_replay_ok": ok,
+        "stage_verification": stage_verification,
     }
+    evidence = [{
+        "predicate": "skill.replay",
+        "value": script_name,
+        "source": "memory_skill_replayer",
+        "verified": True,
+        "metadata": {
+            "memory_id": memory_id or None,
+            "verified_steps": len(verified_steps),
+            "stage_id": str(node.config.get("stage_id") or ""),
+            "stage_type": str(node.config.get("stage_type") or ""),
+        },
+    }] if ok else []
+    if ok:
+        provided = [str(item) for item in (node.config.get("provides_evidence") or []) if str(item).strip()]
+        if provided:
+            from ..tasking.evidence import EvidenceRegistry
+
+            registry = context["runtime_state"].get("evidence_registry")
+            if not isinstance(registry, EvidenceRegistry):
+                registry = EvidenceRegistry(context["run_id"])
+                context["runtime_state"]["evidence_registry"] = registry
+            for predicate in provided:
+                record = registry.record(
+                    predicate,
+                    provider="verified_stage_skill",
+                    verified=True,
+                    stage_id=str(node.config.get("stage_id") or ""),
+                    metadata={
+                        "memory_id": memory_id or None,
+                        "script": script_name,
+                        "verified_steps": len(verified_steps),
+                        "parameters": node.config.get("parameters") or {},
+                    },
+                )
+                evidence.append(record)
     return NodeResult(
         ok=ok,
         branch="next" if ok else "fail",
         output=output,
-        evidence=[{
-            "predicate": "skill.replay",
-            "value": script_name,
-            "source": "memory_skill_replayer",
-            "verified": True,
-            "metadata": {
-                "memory_id": memory_id or None,
-                "verified_steps": len(verified_steps),
-            },
-        }] if ok else [],
+        evidence=evidence,
         error="" if ok else str(result.get("error") or "skill replay failed"),
     )
 
@@ -413,11 +491,14 @@ def _legacy_handler(node: ArpNode, context: dict[str, Any], stop_event) -> NodeR
 
 
 def default_handlers(on_runner: RunnerCallback | None = None) -> dict[ArpNodeKind, NodeHandler]:
+    from ..tasking.stage_runtime import task_stage_handler
+
     return {
         ArpNodeKind.AGENT_GOAL: _agent_handler(on_runner),
         ArpNodeKind.ACTION_BATCH: _batch_handler,
         ArpNodeKind.REPLAY_STEP: _replay_step_handler,
         ArpNodeKind.SKILL_REPLAY: _skill_handler,
+        ArpNodeKind.TASK_STAGE: task_stage_handler,
         ArpNodeKind.LEGACY_FLOW: _legacy_handler,
     }
 

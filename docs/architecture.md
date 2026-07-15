@@ -7,12 +7,18 @@
 ```mermaid
 flowchart LR
   User["智能代理 / 流程工作台"] --> Control["FastAPI Control Plane\n/api/v2 + /ws/events"]
+  Control --> Compiler["TaskIntentParser + TaskContractCompiler\ntyped stages / obligations"]
+  Compiler --> Planner["CapabilityPlanner\npreflight satisfiability"]
   Control --> Jobs["RuntimeJob Manager\nquery / cancel / resource lease"]
   Jobs --> ARP["ARP Runtime\narp/1 graph"]
+  ARP --> Stage["StageRuntime\ndeterministic state machine"]
   Control --> Projection["Unified Run Projection\nmetrics / timeline / evidence"]
   ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
   ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
   ARP --> Skills["Automation IR Skill Replay\n0-token fast path"]
+  Stage --> Artifacts["ArtifactStore\nrun-scoped id / hash / provenance"]
+  Stage --> Adapters["DomainAdapterRegistry\nQQ / WeChat"]
+  Stage --> Runner
   Runner <--> Frame["Authoritative scoped frame\nverified target-window crop / full desktop"]
   Runner --> Tools["ToolSession + World Model"]
   Tools --> Perception["On-demand structured grounding\nUIA / Win32 / OCR / CV / VLM"]
@@ -36,24 +42,28 @@ flowchart LR
 - `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试；显式失败恢复边优先于 `fail_fast`。
 - `orchestrator/adapters.py`：Agent Goal、Action Batch、Memory-backed Skill Replay、legacy 节点适配和最终运行结果驱动的记忆反馈。
 - `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
+- `tasking/intent.py`、`tasking/compiler.py`：结构化 operation/media/channel/recipient/source/destination，并编译 typed stages、artifact binding 和 completion obligations。
+- `tasking/capability.py`：以阶段要求与选定 evidence provider 要求的并集做运行前可满足性检查，生成阶段动态工具、Controller、Adapter 和 model role。
+- `tasking/stage_runtime.py`、`tasking/artifacts.py`：执行本地状态机并管理 run-scoped 工件；观察帧默认不可发送。
+- `tasking/adapters.py`、`tasking/completion.py`：通信领域动作与合同验收；粘贴预览不算送达，图片完成要求同一 artifact 的真实发送和发送后视觉对应证据。
 - `runtime_jobs.py`：统一 Agent、ARP、Replay 和 schedule 的异步生命周期、取消、查询和 `interactive_runtime` 资源租约。
 - `automation_ir.py`：新流程和 Skill 的规范 artifact；WPS/FlowScript 是受检 adapter。
 - `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；点击、文字锚点、输入、键盘、拖拽、启动、聚焦、截图、剪贴板和部分组合节点直接编译为 Controller batch；其余旧节点显式标记 `legacy_flow` 并在运行前拒绝。
 
 ### ARP 节点
 
-原生节点包括 `start`、`end`、`agent_goal`、`action_batch`、`skill_replay`、`condition`、`delay`、`set_variable`、`evidence_gate`、`human_gate`。每个节点都有 retry、timeout、disabled 和分支语义。
+原生节点包括 `start`、`end`、`task_stage`、`agent_goal`、`action_batch`、`skill_replay`、`condition`、`delay`、`set_variable`、`evidence_gate`、`human_gate`。每个节点都有 retry、timeout、disabled 和分支语义；自然语言前端入口生成 `task_stage`，`agent_goal` 保留给显式 ARP/兼容调用。
 
 默认新流程是合法且无副作用的 `ARP 低延迟起步流程`，可以直接 Validate/Run。真实复杂流程通常是：
 
 ```text
-start -> skill_replay -- hit ---------------------------> end
-             | miss / replay failure
+start -> stage_skill -- hit -----------------------> next typed stage
+             | miss / replay or post-verify failure
              v
-        agent_goal -> action_batch -> evidence_gate ---> end
-                           | explicit failure
-                           v
-                     agent_goal / human_gate
+         task_stage -> task_stage -> ... -> completion contract -> end
+             | deterministic stage              |
+             | semantic stage                    +-> ArtifactStore / DomainAdapter
+             +-> bounded AgentRunner
 ```
 
 ## 进程和端口
@@ -73,7 +83,7 @@ Electron renderer 会等待 `winpilot:ensure` 返回本实例托管的随机端�
 
 ```mermaid
 flowchart TD
-  Chat["/api/chat 或 ARP agent_goal"] --> Job["RuntimeJob / ARP node"]
+  Chat["/api/chat 或 semantic task_stage"] --> Job["RuntimeJob / ARP node"]
   Job --> Router["agent/router.py"]
   Router --> Runner["AgentRunner"]
   Runner --> Profile["RuntimeProfile"]
@@ -169,7 +179,10 @@ queued
 - 低层视觉动作只能使用匹配当前 hwnd、screen epoch 和窗口区域的新鲜帧。视觉位置以整帧 0..1000 的 `frame_*` 字段提交，由运行时映射到截图对应的物理区域；native schema 不暴露物理 `x/y`。动作前会重新截图：若能从 frame 坐标或当前结构化目标可靠得到动作 ROI，则在目标四周外扩 `controller.visual_preflight_target_margin`（默认 60/1000），按 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）判断；无法可靠定位目标时才按整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）判断。超过对应阈值会取消旧动作并把新帧交回模型。缺帧时返回 `visual_grounding_required`；重复无依据操作会安全暂停。
 - 原生视觉模型处理普通、无 query `observe` 时，当前 scope 的 JPEG 是权威观测，`native_vision_direct` 跳过 UIA/OCR/VLM 的同帧拆解，且不会暴露重复的二次 VLM 工具。query、`full`、`changed_only`、结构化定位、非视觉模型和 fallback 仍走融合感知；结构化元素与规则不能覆盖相反的真实画面。
 - `observe` 严格只读。它可以返回一个已落地的 Controller 提案，但不能从感知路径直接点击、输入或发送；任何桌面 mutation 都必须是下一笔显式事务。
-- LLM 可下达 `execute_subgoal` 或 ARP `agent_goal`；本地 controller 完成输入、点击、等待和验证 routine。
+- Task Contract 中的应用启动、聚焦、工件捕获/传递、通信投递、等待和确定性验证由 StageRuntime/Controller 连续执行；LLM 处理目标语义、复杂异常、策略切换和绘图质量。
+- `CapabilitySelection` 分别记录 `model_tools` 与 `controller_tools`。绘图模型只提交带语义部件和画布相对几何的场景事务，`draw_strokes` 等原始连续指针能力留在 Controller；每次真实绘图事务后由新鲜目标窗口帧做语义验收，失败只做 forward-only 局部修补。
+- `cold_start=true` 是 run 级经验策略，不是测试词特判：编译器移除所有 `skill_replay`，RuntimeProfile 同时关闭经验提示、会话记忆、复用建议、经验写入和反馈，让 E2E 能证明首次探索路径本身可达。
+- Communication Adapter 只暴露 `open_conversation`、`resolve_composer`、`paste_or_attach_artifact`、`send_current_composer` 和 `verify_latest_outbound` 等领域能力。QQ 实现使用版本化窗口相对布局、UIA/OCR 和视觉工件匹配；收件人、媒体主题和物理屏幕坐标都不是生产常量。低分辨率附件确认缩略图无法可靠保留像素身份时，预发送绑定要求“当前 run 的精确 artifact/hash/尺寸粘贴回执 + 粘贴前后对齐帧的局部变化 + 新出现的正确收件人单附件确认框”；这只允许执行发送动作，不能满足送达合同。附件确认态与会话中的发送后气泡是两个不同状态，只有后者的发送后同工件匹配能满足送达合同。遗留确认框先做可逆取消并复核，不会被下一次任务沿用。
 - `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
 - 满足 `require_transient` 的 press 证据会覆盖底层“未提供 expect”的普通未验证状态并提升为节点级 evidence；捕获成功但证据没有上卷不允许到达 `end`。
 - `screen_watch` 持续做便宜帧差；动作前后差分与 watcher 独立，changed-only observe 只理解 ROI。
@@ -181,7 +194,7 @@ queued
 - `click_element` 支持 `visual_anchor`、fallback text、expected region、物理点击和点击前局部视觉伺服修正。
 - 按需结构化感知覆盖 UIA、Win32、OCR、传统 CV 和独立 VLM fallback；UIA 丰富时跳过昂贵维度，查询不可靠时定向 OCR。它是原生真实帧的补充，不是纯视觉主路径的前置关卡。
 - Perception reducer 只给 LLM compact state，完整元素写入 trace。
-- `scope_guard` 在 GUI mutation 前检查前台/目标窗口。
+- `scope_guard` 在 GUI mutation 前检查前台/目标窗口。若非目标窗口意外抢占前台，Controller 只做有界、应用无关的重新聚焦，要求连续两次前台归属证明，随后废弃旧帧/元素/画布绑定并从 batch 的首个未提交动作继续；已提交动作不会重放，无法恢复则 fail-closed。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - `winpilot` 包入口先初始化 Per-Monitor V2，保证只导入 action executor 的进程也不会落入 DPI 虚拟坐标；`coordinate_diagnostics` / `coordinate_click_test` 再核对物理屏幕和真实鼠标路径。
 - `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
@@ -207,7 +220,7 @@ queued
 - 带正式权重、可部署和可评估的常驻轻量学习型 UI detector（当前 Level 2 是 UIA + OCR + 传统 CV，不冒充 YOLO 已落地）。
 - 多显示器/缩放/动画目标下的连续视觉伺服，而不只是点击前局部迭代修正。
 - Raw Device adapter 尚未覆盖少数复杂工具；后台并发只开放给已证明不会移动真实鼠标/键盘的动作，不能把任意带 hwnd 的动作误当成可并发。
-- 跨软件高成功率 skill 参数化、版本迁移和失效检测。
+- 阶段 Skill 已保存 `stage_type`、参数、输出、验证、应用版本和失败原因，并从失败阶段恢复；跨更多软件的大规模版本迁移矩阵仍未完成。
 - 历史分位数 dashboard（当前为每 run avg/max 和频率指标）。
 
 ## 评测口径
@@ -235,7 +248,7 @@ Agent live run
 - FlowScript 导入只是编辑桥，不保证所有节点等价执行。
 - WPS-only 节点带 `_requires_wps_replay`，前端 executor 必须 fail-fast。
 - WPS 导入的基础 GUI 节点带 `_source_wps_replay`，会要求真实 Electron feature bridge 或失败，不能浏览器模拟真实桌面成功。
-- Agent 内的 `reuse_skill` 会强匹配历史成功脚本并 0-token replay，随后仍需当前状态证据。ARP `skill_replay` 也可按 task / memory id 检索；只有非空且每个执行叶子通过 Replayer 验证的脚本才产生节点 evidence，空脚本不能完成流程。
+- Agent 内的 `reuse_skill` 保留兼容。自然语言 Task Contract 按 `stage_type + parameters + app_version` 组合已验证阶段 Skill；重放后仍执行该阶段的当前状态验证，失败只进入当前 `task_stage`，不会把整项任务退回探索。
 
 Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps，Flow editor 内存仍使用 FlowScript，legacy DSL 仍由 `python/engine/` 处理；但所有新持久化、Skill 和运行编译入口必须先经过 IR，不再新增第四种 metadata envelope。
 
@@ -247,7 +260,7 @@ Automation IR 没有删除兼容层：Replayer 内部仍执行 WPS-shaped steps�
 - `memory/store.py`、`memory/runtime.py`、`memory/retriever.py`、`memory/packer.py`、`memory/feedback.py`、`memory/compiler.py` 组成运行时。
 - `memory/experience.py` 是旧 recipe API 的兼容门面。
 - `python/winpilot_home/experience_memory.json` 只用于迁移/兼容，不是主运行时事实。
-- “智能代理”页默认目标图先走 Memory Graph 的 verified Skill fast path，`miss` / `fail` 再升级到 Agent；记忆正负反馈在整个 ARP run 结束后按最终结果计算，不按局部重放结果提前奖励。
+- “智能代理”页由 Task Contract 编译器为可复用阶段插入 Memory Graph skill gate；`miss` / `fail` 只进入对应 `task_stage`。记忆正负反馈仍按最终 ARP run 结果计算，不按局部重放提前奖励。
 
 记忆不能弥补硬实力。清除记忆后 agent 变笨，通常说明 routine、感知或验证仍不足，不应依赖历史记忆撑通用能力。
 

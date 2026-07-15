@@ -107,8 +107,8 @@ def test_comms_done_gate_no_payload_requires_read_text():
     assert runner._done_rejects == 1
 
 
-def test_comms_done_gate_no_payload_passes_with_read_text():
-    """Without quoted payload, done is allowed when read_text has real chat content."""
+def test_comms_done_gate_no_payload_rejects_read_text_without_send_action():
+    """Existing chat history is not causal proof that this run sent anything."""
     runner = _make_runner("打开QQ给我的手机发一条消息")
     # Simulate a real chat window read_text: long enough lines that look like
     # actual message bubbles, not a short contacts-list preview.
@@ -138,7 +138,9 @@ def test_comms_done_gate_no_payload_passes_with_read_text():
         )
         result = runner._verify_done(client, steps_left=10)
 
-    assert result is True
+    assert result is False
+    assert runner._done_verified is False
+    assert "causal evidence" in runner._last_done_reject_reason
 
 
 def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
@@ -155,6 +157,28 @@ def test_image_send_done_gate_accepts_current_attachment_delivery_evidence():
     assert verdict is not None
     assert verdict[0] is True
     assert "图片附件" in verdict[1]
+
+
+@pytest.mark.parametrize(
+    ("task", "recipient"),
+    [
+        ("把截图用QQ发给项目讨论群", "项目讨论群"),
+        ("通过QQ把图片发送给设计评审", "设计评审"),
+    ],
+)
+def test_legacy_image_send_gate_reuses_structured_recipient_intent(task, recipient):
+    """The compatibility gate must not depend on a built-in recipient alias."""
+    runner = _make_runner(task)
+    runner._tool_history = [
+        ("paste_image_file", {"path": r"C:\\tmp\\result.png"}, '{"ok": true}'),
+        ("hotkey", {"keys": ["ENTER"]}, '{"ok": true}'),
+        ("observe", {"query": "delivery"}, f"{recipient}\n28.58KB已发送"),
+    ]
+
+    verdict = runner._deterministic_image_send_verdict()
+
+    assert verdict is not None
+    assert verdict[0] is True
 
 
 def test_image_send_done_gate_rejects_paste_without_send_action():

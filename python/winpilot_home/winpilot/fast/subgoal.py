@@ -1480,10 +1480,11 @@ def _required_user_draw_colors(task: str) -> list[str]:
     postconditions.  Keeping this distinction prevents an unavailable optional
     palette shade from aborting an otherwise valid drawing routine.
     """
-    colors = [
-        _canonical_color_name(color)
-        for color in _required_drawing_colors(task)
-    ]
+    # Do not seed this from the legacy substring matcher: words such as
+    # "ordered" contain "red" and can turn a Controller instruction into a
+    # fabricated user color postcondition.  Only explicit bounded color terms
+    # in the user-level task are strict.
+    colors: list[str] = []
     text = str(task or "").casefold()
     for color, terms in _DRAW_COLOR_TERMS.items():
         if color in colors:

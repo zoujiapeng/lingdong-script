@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FlowScript } from '../types';
 import {
   ControlPlaneClient,
-  createGoalGraph,
   EXPECTED_RUNTIME_CONTRACT_VERSION,
   normalizeBaseUrl,
   resolveControlPlaneConnection,
@@ -157,14 +156,37 @@ describe('control plane client contracts', () => {
     }
   });
 
-  it('creates a valid high-level goal graph', () => {
-    const graph = createGoalGraph('Export the current report', 24);
-    expect(graph.format).toBe('arp/1');
-    expect(graph.nodes.map((node) => node.kind)).toEqual(['start', 'skill_replay', 'agent_goal', 'end']);
-    expect(graph.nodes[1].config).toMatchObject({ task: 'Export the current report' });
-    expect(graph.nodes[2].config).toMatchObject({ goal: 'Export the current report', max_steps: 24 });
-    expect(graph.edges.map((edge) => edge.branch)).toEqual(['next', 'next', 'miss', 'fail', 'next']);
-    expect(graph.metadata.routing).toBe('verified-skill-first-agent-on-miss-or-failure');
+  it('compiles a typed task contract before starting an ARP run', async () => {
+    const graph = {
+      format: 'arp/1', id: 'task-1', name: 'Export report', description: '',
+      nodes: [
+        { id: 'start', kind: 'start', name: 'start', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 0 },
+        { id: 'stage-1', kind: 'task_stage', name: 'typed stage', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 100 },
+        { id: 'end', kind: 'end', name: 'end', config: {}, retry: { max_attempts: 1, delay_ms: 0, backoff: 1 }, disabled: false, x: 0, y: 200 },
+      ],
+      edges: [], variables: {},
+      policy: { max_node_visits: 20, fail_fast: true, require_evidence_on_done: true, allow_shell: false, allow_desktop_mutation: true },
+      metadata: { routing: 'typed-stage-runtime' },
+    } as any;
+    const contract = {
+      format: 'task-contract/1', task_id: 'task-1', task: 'Export the current report',
+      intent: { original_text: 'Export the current report', operation: ['save'], media_type: 'file', channel: '', recipient: '', source: '', destination: '', send_mode: 'send', subject: '', quality: 'normal', confidence: 0.9, ambiguous_fields: [], provenance: {} },
+      stages: [{ id: 'stage-1', type: 'SaveArtifact' }], obligations: [], final_conditions: [],
+      satisfiable: true, missing_capabilities: [], compiler_version: 'typed-stage-1',
+    } as any;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, contract, graph }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const compiled = await new ControlPlaneClient('http://127.0.0.1:8765').compileTask('Export the current report', 24);
+      expect(compiled.graph.nodes.map((node) => node.kind)).toContain('task_stage');
+      expect(compiled.graph.nodes.map((node) => node.kind)).not.toContain('agent_goal');
+      expect(compiled.contract.satisfiable).toBe(true);
+      const calls = fetchMock.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>;
+      expect(calls[0]?.[0].toString()).toContain('/api/v2/task-contracts/compile');
+      expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ task: 'Export the current report', max_steps: 24, cold_start: false });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('reconnects the runtime event socket after a backend restart', () => {

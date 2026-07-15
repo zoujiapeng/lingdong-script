@@ -522,6 +522,29 @@ def test_recovery_focus_prefers_session_dispatch_over_private_handlers():
     ]
 
 
+def test_local_recovery_probe_marks_dispatch_context_and_restores_it():
+    from types import SimpleNamespace
+
+    from winpilot.agent.failure_recovery import FailureRecoveryLayer
+
+    seen_depths = []
+
+    class _Session:
+        _local_recovery_depth = 0
+
+        def dispatch(self, _name, _args):
+            seen_depths.append(self._local_recovery_depth)
+            return SimpleNamespace(text='{"ok": true}')
+
+    session = _Session()
+    result, via = FailureRecoveryLayer()._dispatch_probe(session, "focus_window", {"hwnd": 7})
+
+    assert result.text == '{"ok": true}'
+    assert via == "dispatch"
+    assert seen_depths == [1]
+    assert session._local_recovery_depth == 0
+
+
 def test_recovery_layer_does_not_attach_failure_to_verified_root_result():
     from winpilot.agent.failure_recovery import FailureRecoveryLayer
 

@@ -1893,7 +1893,7 @@ class DoneVerifierMixin:
         paste_indices = [
             index
             for index, (name, _args, output) in enumerate(history)
-            if name == "paste_image_file" and self._communication_mutation_succeeded(output)
+            if name in {"paste_image_file", "send_artifact"} and self._communication_mutation_succeeded(output)
         ]
         send_indices = [
             index
@@ -1966,23 +1966,56 @@ class DoneVerifierMixin:
         return None
 
     def _deterministic_image_send_verdict(self) -> tuple[bool, str] | None:
-        """Accept a sent image only with current paste and visible delivery evidence."""
+        """Accept any contract-compatible image delivery implementation.
+
+        New runs use provider evidence keyed by artifact_id.  The legacy tool
+        history path remains only for old callers that do not yet own an
+        EvidenceRegistry.
+        """
         if not _is_communication_task(self.task):
             return None
-        task = str(self.task or "").casefold()
-        if not any(marker in task for marker in ("截图", "screenshot", "图片", "image", "photo", "照片")):
+        from ..tasking.intent import TaskIntentParser
+
+        parsed = TaskIntentParser().parse(self.task)
+        if parsed.media_type != "image":
             return None
+        registry = getattr(self.session, "evidence_registry", None)
+        if registry is not None and callable(getattr(registry, "find", None)):
+            delivered = registry.find(
+                predicate="delivery.visible_outbound",
+                recipient=parsed.recipient,
+                verified=True,
+            )
+            sent = registry.find(
+                predicate="delivery.send_action",
+                recipient=parsed.recipient,
+                verified=True,
+            )
+            if delivered and sent:
+                delivered_id = str(delivered[-1].get("artifact_id") or "")
+                if delivered_id:
+                    return True, (
+                        "Current-run artifact delivery is proven by a real send action and "
+                        "a post-send visible-outbound evidence provider."
+                    )
+            previews = registry.find(predicate="artifact.composer_preview", verified=True)
+            if previews:
+                return False, (
+                    "The artifact is visible only as a composer preview; no provider has "
+                    "proven a post-send outbound bubble in the requested conversation."
+                )
+            return False, "No contract-compatible artifact delivery evidence is registered for this run."
         history = list(getattr(self, "_tool_history", []) or [])
         paste_index = next(
             (
                 index for index in range(len(history) - 1, -1, -1)
-                if history[index][0] == "paste_image_file"
+                if history[index][0] in {"paste_image_file", "send_artifact"}
                 and self._communication_mutation_succeeded(history[index][2])
             ),
             None,
         )
         if paste_index is None:
-            return False, "图片发送任务尚未成功执行 paste_image_file。"
+            return False, "图片发送任务尚未由任何受支持的工件投递能力创建投递证据。"
         send_index = next(
             (
                 index
@@ -2005,8 +2038,11 @@ class DoneVerifierMixin:
         )
         has_sent_marker = any(marker in after_paste.casefold() for marker in ("已发送", "发送成功", " sent"))
         has_attachment_size = bool(re.search(r"\d+(?:\.\d+)?\s*(?:kb|mb)", after_paste, re.IGNORECASE))
-        target_match = re.search(r"(?:给|to)\s*(我的手机|[^，。,.\s]{2,20})", str(self.task or ""), re.IGNORECASE)
-        target = target_match.group(1) if target_match else ""
+        # The compatibility path must use the same structured intent as the
+        # typed-contract path above.  Keeping a second recipient regex here
+        # caused verifier routing to drift and encouraged task-specific
+        # aliases in production code.
+        target = parsed.recipient
         target_visible = not target or target in after_paste
         if has_sent_marker and has_attachment_size and target_visible:
             return True, "目标会话可见图片附件大小与“已发送”状态，且本轮已执行图片粘贴。"
@@ -2369,6 +2405,23 @@ class DoneVerifierMixin:
         cfg = _config()
         if not cfg.get("agent", "verify_done", default=True):
             return True
+        if (
+            bool(getattr(getattr(self, "runtime_profile", None), "inline_semantic_verification", False))
+            and bool(getattr(self, "_inline_stage_semantic_attempted", False))
+            and not bool(getattr(self, "_inline_stage_semantic_passed", False))
+        ):
+            verdict = getattr(self, "_inline_stage_semantic_last_verdict", {}) or {}
+            details = verdict.get("verdict") if isinstance(verdict, dict) else {}
+            issues = details.get("issues") if isinstance(details, dict) else []
+            reason = (
+                "The latest typed-stage fresh-frame semantic verifier rejected completion"
+                + (f": {'; '.join(str(item) for item in issues[:3])}" if issues else ".")
+            )
+            return self._reject_done(
+                reason,
+                "[typed stage semantic check failed] Apply one localized repair justified by "
+                "the listed visible issues, then let the same fresh-frame verifier run again.",
+            )
         run_state = getattr(self, "run_state", None)
         pending_actions = int(getattr(run_state, "unverified_actions", 0) or 0)
         # Coding/file/shell runs use deterministic tool output and the final

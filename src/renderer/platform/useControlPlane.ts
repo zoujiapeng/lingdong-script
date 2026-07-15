@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ControlPlaneClient,
-  createGoalGraph,
   resolveControlPlaneConnection,
   runtimeCompatibilityError,
 } from './client';
-import type { ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
+import type { ArpExecutionSnapshot, ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
@@ -23,7 +22,7 @@ export function useControlPlane() {
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
   const [capabilities, setCapabilities] = useState<CapabilitySpec[]>([]);
   const [currentRun, setCurrentRun] = useState<RunProjection | null>(null);
-  const [arpSnapshot, setArpSnapshot] = useState<Record<string, unknown> | null>(null);
+  const [arpSnapshot, setArpSnapshot] = useState<ArpExecutionSnapshot | null>(null);
   const [runs, setRuns] = useState<RunProjection[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState('');
@@ -161,8 +160,10 @@ export function useControlPlane() {
     return requireClient();
   };
 
-  const startGoal = useCallback(async (goal: string, maxSteps = 30) => {
-    const run = await requireCompatibleClient().startGraph(createGoalGraph(goal, maxSteps));
+  const startGoal = useCallback(async (goal: string, maxSteps = 30, coldStart = false) => {
+    const client = requireCompatibleClient();
+    const compiled = await client.compileTask(goal, maxSteps, coldStart);
+    const run = await client.startGraph(compiled.graph);
     await refresh();
     return run;
   }, [refresh]);
