@@ -98,10 +98,82 @@ class ToolSession(
 ):
     """Per-run state: latest snapshot + current target window."""
 
-    def __init__(self, stop_event=None, task: str = "", runtime_profile: RuntimeProfile | None = None) -> None:
+    def __init__(
+        self,
+        stop_event=None,
+        task: str = "",
+        runtime_profile: RuntimeProfile | None = None,
+        *,
+        task_intent: Any | None = None,
+        communication_context: dict[str, Any] | None = None,
+    ) -> None:
         self.snapshot: fusion.Snapshot | None = None
         self.hwnd: int | None = None
         self.task = task or ""
+        # Typed runtimes inject the compiler-owned intent.  Only legacy callers
+        # that have no TaskContract may parse the raw task here; this prevents a
+        # second default parser from discarding semantic-extractor results or
+        # disagreeing with the stage contract.
+        self.task_intent: dict[str, Any] = {}
+        self.communication_context: dict[str, Any] = {
+            "active": False, "recipient": "", "channel": "", "send_mode": "send",
+        }
+        try:
+            if task_intent is None:
+                from ..tasking.intent import TaskIntentParser
+
+                parsed_intent = TaskIntentParser().parse(self.task)
+                intent_payload = parsed_intent.model_dump(mode="json")
+            elif hasattr(task_intent, "model_dump"):
+                intent_payload = task_intent.model_dump(mode="json")
+            elif isinstance(task_intent, dict):
+                intent_payload = dict(task_intent)
+            else:
+                raise TypeError("task_intent must be a TaskIntent or mapping")
+            self.task_intent = intent_payload
+            operations_raw = intent_payload.get("operation") or []
+            if isinstance(operations_raw, str):
+                operations_raw = [operations_raw]
+            operations = {str(item).casefold() for item in operations_raw}
+            derived_context = {
+                "active": bool(
+                    operations.intersection({"send", "share", "draft"})
+                    and (
+                        intent_payload.get("channel")
+                        or intent_payload.get("destination")
+                        or intent_payload.get("recipient")
+                    )
+                ),
+                "recipient": str(intent_payload.get("recipient") or ""),
+                "channel": str(
+                    intent_payload.get("channel")
+                    or intent_payload.get("destination")
+                    or ""
+                ),
+                "send_mode": str(intent_payload.get("send_mode") or "send"),
+            }
+            if communication_context is None:
+                self.communication_context = derived_context
+            else:
+                self.communication_context = {
+                    **derived_context,
+                    **dict(communication_context),
+                }
+                self.communication_context["active"] = bool(
+                    self.communication_context.get("active")
+                )
+                self.communication_context["recipient"] = str(
+                    self.communication_context.get("recipient") or ""
+                )
+                self.communication_context["channel"] = str(
+                    self.communication_context.get("channel") or ""
+                )
+        except Exception:
+            if task_intent is not None:
+                raise
+            # Concrete UIA/OCR inputs remain usable; only the synthetic chat
+            # composer fallback is disabled when intent parsing is unavailable.
+            pass
         # Shared with the runner so long ops (reuse_skill replay) honor Stop.
         import threading
         self.stop_event = stop_event or threading.Event()
@@ -371,7 +443,7 @@ class ToolSession(
         return result
 
     def _draft_communication_block(self, name: str, args: dict[str, Any]) -> str:
-        if _communication_mode(self.task) != "draft":
+        if _communication_mode(self.task_intent) != "draft":
             return ""
 
         def has_send_marker(value: object) -> bool:
@@ -891,19 +963,20 @@ class ToolSession(
         def worker() -> None:
             started = time.monotonic()
             elements: list[UIElement] = []
-            for image, evidence_region in crops:
-                recognized = ocr.recognize(
-                    image,
-                    origin=(evidence_region.left, evidence_region.top),
-                )
-                merged = self._merge_ocr_line_elements(recognized)
-                for element in [*recognized, *merged]:
-                    if "predictive_ocr" not in element.states:
-                        element.states.append("predictive_ocr")
-                    if transient and "transient_action_evidence" not in element.states:
-                        element.states.append("transient_action_evidence")
-                elements.extend(recognized)
-                elements.extend(merged)
+            with ocr.inference_scope("background"):
+                for image, evidence_region in crops:
+                    recognized = ocr.recognize(
+                        image,
+                        origin=(evidence_region.left, evidence_region.top),
+                    )
+                    merged = self._merge_ocr_line_elements(recognized)
+                    for element in [*recognized, *merged]:
+                        if "predictive_ocr" not in element.states:
+                            element.states.append("predictive_ocr")
+                        if transient and "transient_action_evidence" not in element.states:
+                            element.states.append("transient_action_evidence")
+                    elements.extend(recognized)
+                    elements.extend(merged)
             current = watcher.status() if callable(getattr(watcher, "status", None)) else {}
             if generation and int(current.get("last_action_change_ms") or 0) != generation:
                 return
@@ -1125,24 +1198,52 @@ class ToolSession(
             from ..fast.perception_daemon import PERCEPTION_DAEMON
 
             previous_watcher = getattr(controller, "watcher", None)
-            if current is not None:
-                PERCEPTION_DAEMON.release(current)
+            previous_cache = getattr(controller, "cache", None)
             lease = PERCEPTION_DAEMON.acquire(
                 int(hwnd),
                 run_id=str(getattr(self, "run_id", "") or ""),
             )
-            if (
-                current is None
-                and previous_watcher is not None
-                and previous_watcher is not lease.watcher
-                and not getattr(previous_watcher, "_perception_daemon_managed", False)
-            ):
-                previous_watcher.stop()
-            controller.watcher = lease.watcher
-            controller.cache = lease.cache
-            self._perception_lease = lease
         except Exception:
             logger.debug("perception daemon target bind failed", exc_info=True)
+            return
+
+        # Do not release the working lease until the replacement has been
+        # acquired and installed. A transient acquire failure must leave the
+        # session's current watcher/cache and shared reference count intact.
+        try:
+            controller.watcher = lease.watcher
+            controller.cache = lease.cache
+        except Exception:
+            try:
+                controller.watcher = previous_watcher
+                controller.cache = previous_cache
+            except Exception:
+                logger.debug("perception controller rollback failed", exc_info=True)
+            try:
+                PERCEPTION_DAEMON.release(lease)
+            except Exception:
+                logger.debug("replacement perception lease release failed", exc_info=True)
+            logger.debug("perception daemon target install failed", exc_info=True)
+            return
+
+        self._perception_lease = lease
+        if current is not None:
+            try:
+                PERCEPTION_DAEMON.release(current)
+            except Exception:
+                # The replacement remains authoritative. Retrying a release is
+                # unsafe because an implementation may have decremented before
+                # raising, which would double-release a shared reference.
+                logger.debug("previous perception lease release failed", exc_info=True)
+        elif (
+            previous_watcher is not None
+            and previous_watcher is not lease.watcher
+            and not getattr(previous_watcher, "_perception_daemon_managed", False)
+        ):
+            try:
+                previous_watcher.stop()
+            except Exception:
+                logger.debug("legacy perception watcher stop failed", exc_info=True)
 
     def _ensure_screen_watch(self, reason: str = "") -> None:
         if not CONFIG.get("fusion", "screen_watch_autostart", default=True):

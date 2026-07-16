@@ -45,6 +45,7 @@ class _PendingChange:
     action_delta: bool
     transient: bool
     metadata: dict[str, Any]
+    cancel_event: threading.Event | None = None
     created_ms: int = field(default_factory=_now_ms)
 
 
@@ -74,6 +75,7 @@ class _Entry:
     history: deque[_IncrementalRecord] = field(default_factory=lambda: deque(maxlen=8))
     analysis_event: threading.Event = field(default_factory=threading.Event)
     analysis_stop: threading.Event = field(default_factory=threading.Event)
+    lease_cancel: threading.Event = field(default_factory=threading.Event)
     analysis_thread: threading.Thread | None = None
     analysis_running: bool = False
     scheduled: int = 0
@@ -81,6 +83,7 @@ class _Entry:
     coalesced: int = 0
     superseded: int = 0
     skipped_noise: int = 0
+    skipped_inactive: int = 0
     failed: int = 0
     last_analysis_ms: int = 0
     last_error: str = ""
@@ -193,6 +196,14 @@ class PerceptionDaemon:
                     add_listener(listener)
                 setattr(entry.watcher, "_perception_daemon_managed", True)
                 self._entries[target] = entry
+            if entry.references == 0:
+                # A reacquired hwnd starts a new lease. Reuse the expensive
+                # watcher, but never expose semantic anchors or incremental
+                # evidence collected for the prior owner. Results from an old
+                # in-flight analysis are rejected by the new cancel token below.
+                entry.history.clear()
+                entry.cache.clear()
+                entry.lease_cancel = threading.Event()
             entry.references += 1
             entry.last_used = time.monotonic()
             entry.context = {"run_id": run_id} if run_id else {}
@@ -209,7 +220,11 @@ class PerceptionDaemon:
             entry.references = max(0, entry.references - 1)
             entry.last_used = time.monotonic()
             if entry.references == 0:
+                entry.lease_cancel.set()
                 entry.context = {}
+                entry.coalesced += len(entry.pending)
+                entry.pending.clear()
+                entry.analysis_event.clear()
 
     def _schedule_change(
         self,
@@ -230,6 +245,9 @@ class PerceptionDaemon:
         with self._lock:
             entry = self._entries.get(int(hwnd))
             if entry is None:
+                return
+            if entry.references <= 0:
+                entry.skipped_inactive += 1
                 return
             entry.generation += 1
             action_delta = bool(metadata.get("action_delta"))
@@ -254,6 +272,7 @@ class PerceptionDaemon:
                 action_delta=action_delta,
                 transient=bool(metadata.get("transient")),
                 metadata={**entry.context, **dict(metadata)},
+                cancel_event=entry.lease_cancel,
             )
             if not action_delta:
                 for index in range(len(entry.pending) - 1, -1, -1):
@@ -316,8 +335,16 @@ class PerceptionDaemon:
                 entry = self._entries.get(hwnd)
                 if entry is None or entry.analysis_stop.is_set():
                     return
+                if entry.references <= 0:
+                    entry.coalesced += len(entry.pending)
+                    entry.pending.clear()
+                    entry.analysis_event.clear()
+                    continue
                 pending = self._next_pending(entry)
                 if pending is None:
+                    continue
+                if pending.cancel_event is not None and pending.cancel_event.is_set():
+                    entry.coalesced += 1
                     continue
                 entry.analysis_running = True
             started = time.monotonic()
@@ -331,6 +358,7 @@ class PerceptionDaemon:
                         "regions": pending.regions,
                         "action_delta": pending.action_delta,
                         "transient": pending.transient,
+                        "cancel_event": pending.cancel_event,
                     },
                 )
                 if not isinstance(snapshot, Snapshot):
@@ -360,6 +388,19 @@ class PerceptionDaemon:
                 current = self._entries.get(hwnd)
                 if current is None:
                     return
+                if (
+                    pending.cancel_event is not None
+                    and (
+                        pending.cancel_event.is_set()
+                        or current.lease_cancel is not pending.cancel_event
+                        or current.references <= 0
+                    )
+                ):
+                    current.analysis_running = False
+                    current.superseded += 1
+                    if current.pending:
+                        current.analysis_event.set()
+                    continue
                 retained: list[_IncrementalRecord] = []
                 for old in current.history:
                     overlaps = any(
@@ -392,7 +433,7 @@ class PerceptionDaemon:
             reserved = {
                 "type", "source", "dimension", "hwnd", "generation",
                 "action_delta", "transient", "count", "elapsed_ms",
-                "dims", "texts",
+                "dims", "texts", "cancel_event",
             }
             event_context = {
                 key: value for key, value in pending.metadata.items()
@@ -512,6 +553,7 @@ class PerceptionDaemon:
                             "coalesced": item.coalesced,
                             "superseded": item.superseded,
                             "skipped_noise": item.skipped_noise,
+                            "skipped_inactive": item.skipped_inactive,
                             "failed": item.failed,
                             "last_analysis_ms": item.last_analysis_ms,
                             "last_error": item.last_error,

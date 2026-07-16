@@ -62,7 +62,7 @@ class PerceptionToolMixin:
         the proposed composer/send target.  Keep the generic proposal for the
         next decision turn, but execution now requires an explicit tool call.
         """
-        if not _is_communication_task(self.task) or _communication_mode(self.task) != "send":
+        if not _is_communication_task(self.task_intent) or _communication_mode(self.task_intent) != "send":
             return None
         payloads = _quoted_payloads(self.task)
         if not payloads:
@@ -115,7 +115,7 @@ class PerceptionToolMixin:
     def _perception_mode(self) -> str:
         """Return the perception strategy mode for the current task + window title."""
         title = self.snapshot.title if self.snapshot else ""
-        return intent.perception_mode(self.task, title)
+        return intent.perception_mode(self.task_intent, title)
 
     def _vision_priority(self) -> bool:
         """Legacy accessor - True when perception mode is 'visual'."""
@@ -637,6 +637,9 @@ class PerceptionToolMixin:
             query=query,
             recent_changes=recent_changes,
             max_candidates=max_candidates,
+            communication_context=getattr(
+                self, "communication_context", None,
+            ),
         )
         trace_rel = self._write_perception_trace(snapshot, reduction, observe_profile, query, args)
         full_requested = bool(args.get("full") or args.get("force_full"))
@@ -707,6 +710,13 @@ class PerceptionToolMixin:
         include_icons = bool(args.get("include_icons", True))
         fusion_mod = _tools_attr("fusion", fusion)
         perception_mode = self._perception_mode()
+        # Domain controllers sometimes need a cheap structural snapshot and
+        # then perform obligation-scoped OCR themselves.  Keep this private to
+        # deterministic controller calls so the model-facing observe contract
+        # does not acquire another policy knob.
+        controller_mode = str(args.get("_controller_perception_mode") or "").strip()
+        if controller_mode == "structured_ui":
+            perception_mode = controller_mode
         changed_regions = self._recent_changed_regions(hwnd) if bool(args.get("changed_only")) else []
         native_visual = self._native_visual_direct_enabled(args)
         observe_profile = (

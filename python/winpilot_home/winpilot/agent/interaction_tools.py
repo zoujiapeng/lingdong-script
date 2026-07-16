@@ -687,8 +687,9 @@ class InteractionToolMixin:
                 if ratio < 0.0008:
                     result["visual_feedback"] = (
                         "drag completed but the local screen region barely changed; "
-                        "for drawing/canvas tasks, re-observe and try a visible stroke "
-                        "inside the canvas rather than toolbar or popup chrome."
+                        "re-observe and re-ground the source, path, and target before "
+                        "retrying; do not repeat identical pointer geometry without "
+                        "new visual evidence."
                     )
                 else:
                     result["visual_feedback"] = (
@@ -1137,7 +1138,7 @@ class InteractionToolMixin:
                     # Device input being accepted is not proof that it landed
                     # on the intended drawable surface.  Keep this fail-closed:
                     # callers must recover focus/tool/canvas grounding instead
-                    # of treating a no-op drag as completed work.
+                    # of treating a no-op stroke as completed work.
                     result.update({
                         "ok": False,
                         "verified": False,

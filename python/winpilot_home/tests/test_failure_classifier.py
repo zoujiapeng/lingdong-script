@@ -328,6 +328,33 @@ def test_draw_without_pixel_change_has_dedicated_recovery_classification():
     assert "Re-observe" in cls.patch_hint
 
 
+def test_drag_without_pixel_change_uses_generic_spatial_recovery():
+    from winpilot.agent.failure_classifier import FailureType
+
+    cls = _classify(
+        "run_action_batch",
+        {
+            "ok": False,
+            "results": [{
+                "action": "drag",
+                "ok": False,
+                "verified": False,
+                "data": {
+                    "visual_change_detected": False,
+                    "visual_change_ratio": 0.0,
+                    "failure_type": "VISUAL_ACTION_NO_EFFECT",
+                    "failure_subtype": "source_or_target_not_confirmed",
+                },
+            }],
+        },
+    )
+
+    assert cls is not None
+    assert cls.failure_type == FailureType.VISUAL_ACTION_NO_EFFECT
+    assert cls.llm_required is False
+    assert "source, path, target" in cls.patch_hint
+
+
 def test_required_task_literal_missing_is_task_constraint_lost():
     from winpilot.agent.failure_classifier import FailureType
 

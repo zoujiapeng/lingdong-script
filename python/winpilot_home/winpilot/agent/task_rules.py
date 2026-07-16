@@ -6,6 +6,7 @@ These helpers are intentionally pure/string-based. Keep them out of
 from __future__ import annotations
 
 import re
+from typing import Any
 
 
 _OPEN_INTENT = re.compile(r"^(打开|开启|启动|运行|玩|播放|关闭|切换|最小化|最大化|登录|搜索)")
@@ -390,10 +391,22 @@ def _is_coding_task(task: str) -> bool:
     return bool(_CODING_BUILD.search(text))
 
 
-def _is_communication_task(task: str) -> bool:
+def _structured_task_intent(task: Any) -> dict[str, Any]:
+    if hasattr(task, "model_dump"):
+        return dict(task.model_dump(mode="json"))
+    if isinstance(task, dict):
+        return dict(task)
     from ..tasking.intent import TaskIntentParser
 
-    return "send" in TaskIntentParser().parse(task).operation
+    return TaskIntentParser().parse(str(task or "")).model_dump(mode="json")
+
+
+def _is_communication_task(task: Any) -> bool:
+    intent = _structured_task_intent(task)
+    operations = intent.get("operation") or []
+    if isinstance(operations, str):
+        operations = [operations]
+    return "send" in {str(item).casefold() for item in operations}
 
 
 def _is_arithmetic_task(task: str) -> bool:
@@ -413,7 +426,7 @@ def _is_arithmetic_task(task: str) -> bool:
     return bool(intent and (expression or date_product))
 
 
-def _communication_mode(task: str) -> str:
+def _communication_mode(task: Any) -> str:
     """Classify external communication into a bounded execution policy.
 
     A plain "chat" request is otherwise open ended: the model may either stop
@@ -422,11 +435,16 @@ def _communication_mode(task: str) -> str:
     stays open until the user stops the run, while ordinary send/reply tasks
     finish after one verified outbound message.
     """
-    from ..tasking.intent import TaskIntentParser
-
-    parsed_mode = TaskIntentParser().parse(task).send_mode
+    intent = _structured_task_intent(task)
+    parsed_mode = str(intent.get("send_mode") or "send")
+    if not isinstance(task, str):
+        return parsed_mode if parsed_mode in {
+            "send", "draft", "share", "bounded_chat", "continuous_chat",
+        } else "send"
     if parsed_mode == "draft":
         return "draft"
+    if parsed_mode in {"bounded_chat", "continuous_chat"}:
+        return parsed_mode
     text = (task or "").casefold()
     compact = re.sub(r"\s+", "", text)
     draft_markers = (

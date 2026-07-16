@@ -177,9 +177,10 @@ def test_visual_frame_reports_unique_work_surface_in_frame_coordinates(monkeypat
     runner.session.hwnd = 99
     runner.session._screen_epoch = 4
     monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(runner, "_continuous_pointer_output_requested", lambda: True)
     monkeypatch.setattr(
         "winpilot.agent.loop.credible_work_surface_frame_bounds",
-        lambda _b64: {
+        lambda _b64, **_kwargs: {
             "work_surface_frame_bounds": [125, 359, 984, 932],
             "source": "authoritative_frame_pixels",
         },
@@ -198,6 +199,38 @@ def test_visual_frame_reports_unique_work_surface_in_frame_coordinates(monkeypat
     assert runner._visual_work_surface_frame_bounds == (125, 359, 984, 932)
     assert runner._visual_work_surface_frame_id == runner._visual_frame_id
     assert runner.session._visual_work_surface_frame_bounds == [125, 359, 984, 932]
+
+
+def test_visual_frame_skips_light_surface_detection_for_non_continuous_task(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("click the visible primary action")
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner.session.hwnd = 99
+    runner.session._screen_epoch = 4
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+
+    def unexpected_surface_detection(*_args, **_kwargs):
+        raise AssertionError("non-continuous tasks must not run light-surface detection")
+
+    monkeypatch.setattr(
+        "winpilot.agent.loop.credible_work_surface_frame_bounds",
+        unexpected_surface_detection,
+    )
+
+    assert runner._inject_visual_frame(
+        phase="initial",
+        image_b64="exact-authoritative-frame",
+        frame_region=Region(480, 154, 1008, 720),
+    ) is True
+
+    text = runner.messages[-1]["content"][0]["text"]
+    assert "light work surface" not in text
+    assert "work_surface_frame_bounds" not in text
+    assert runner._visual_work_surface_frame_bounds is None
+    assert runner._visual_work_surface_blocked_reason == ""
+    assert runner.session._visual_work_surface_frame_bounds is None
 
 
 def test_visual_work_surface_binding_survives_content_component_shrink():
@@ -332,9 +365,10 @@ def test_ambiguous_current_surface_blocks_continuous_input(monkeypatch):
         },
     ])
     monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr(runner, "_continuous_pointer_output_requested", lambda: True)
     monkeypatch.setattr(
         "winpilot.agent.loop.credible_work_surface_frame_bounds",
-        lambda _b64: next(detections),
+        lambda _b64, **_kwargs: next(detections),
     )
     monkeypatch.setattr(
         "winpilot.agent.loop.window_region",
@@ -2082,12 +2116,12 @@ def test_native_batch_coordinates_cannot_bypass_frame_mapping(monkeypatch):
         [
             {"action": "click", "element_id": 7},
             {
-                "tool": "click_element",
-                "params": {"label": "Continue", "fallback_text": ["Next"]},
+                "tool": "click",
+                "params": {"element_id": 8},
             },
         ],
     ],
-    ids=["frame-coordinates", "element-id-and-semantic-hint"],
+    ids=["frame-coordinates", "two-element-ids"],
 )
 def test_native_batch_rejects_two_spatial_mutations_before_preflight_or_dispatch(
     monkeypatch, actions,
@@ -2188,6 +2222,90 @@ def test_native_batch_allows_one_spatial_mutation_plus_keyboard_input(monkeypatc
     assert click["coordinate_space"] == "current_frame_normalized_0_1000"
     assert typed == {"action": "type_text", "text": "exact query"}
     assert hotkey == {"action": "hotkey", "keys": ["enter"]}
+
+
+def test_native_batch_maps_balanced_pointer_transaction_from_one_frame(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("perform one continuous pointer transaction")
+    runner.session.hwnd = 11
+    runner.session._screen_epoch = 2
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_epoch = 2
+    runner._visual_frame_region = (100, 200, 1000, 500)
+    runner._visual_frame_id = 9
+    runner._last_visual_feedback_b64 = "synthetic-frame"
+    monkeypatch.setattr(
+        "winpilot.agent.loop.window_region",
+        lambda _hwnd: Region(100, 200, 1000, 500),
+    )
+
+    mapped = runner._map_normalized_frame_coordinates("run_action_batch", {
+        "actions": [
+            {"action": "mouse_down", "button": "left", "frame_x": 100, "frame_y": 200},
+            {"action": "move_mouse", "frame_x": 500, "frame_y": 500},
+            {"action": "mouse_up", "button": "left", "frame_x": 900, "frame_y": 800},
+        ],
+    })
+
+    assert [(item["x"], item["y"]) for item in mapped["actions"]] == [
+        (200, 300), (600, 450), (999, 599),
+    ]
+
+
+def test_native_batch_allows_controller_rebound_semantic_setup_and_one_raw_gesture(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.utils.screenshot import Region
+
+    runner = AgentRunner("use a visible tool, then drag the grounded object")
+    runner._visual_closed_loop_active = True
+    runner.messages = [{"role": "system", "content": "sys"}]
+    runner.session.hwnd = 11
+    runner.session._screen_epoch = 2
+    runner._visual_frame_hwnd = 11
+    runner._visual_frame_epoch = 2
+    runner._visual_frame_region = (100, 200, 1000, 500)
+    runner._last_visual_feedback_b64 = "synthetic-frame"
+    region = Region(100, 200, 1000, 500)
+    monkeypatch.setattr("winpilot.agent.loop._main_model_has_vision", lambda: True)
+    monkeypatch.setattr("winpilot.agent.loop.window_region", lambda _hwnd: region)
+    monkeypatch.setattr(runner, "_preflight_visual_frame", lambda *_args: ("", 0.0, "", region))
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "_dispatch_with_fast_visual_wrap",
+        lambda name, args: calls.append((name, args)) or ToolResult('{"ok": true}'),
+    )
+    monkeypatch.setattr(runner, "_inject_visual_frame", lambda **_kwargs: True)
+
+    runner._handle_tool_calls([_tool_call("semantic-transaction", "run_action_batch", {
+        "actions": [
+            {"action": "select_color", "color": "red"},
+            {"action": "click_element", "label": "Start", "role": "button"},
+            {
+                "action": "drag",
+                "frame_x1": 200, "frame_y1": 220,
+                "frame_x2": 700, "frame_y2": 720,
+            },
+            {
+                "action": "wait_for_visual_change",
+                "frame_region": {"x": 250, "y": 250, "width": 300, "height": 180},
+                "required": False,
+            },
+        ],
+    })])
+
+    assert len(calls) == 1
+    mapped = calls[0][1]["actions"]
+    assert mapped[0] == {"action": "select_color", "color": "red"}
+    assert mapped[1]["label"] == "Start"
+    assert (mapped[2]["x1"], mapped[2]["y1"], mapped[2]["x2"], mapped[2]["y2"]) == (
+        300, 310, 799, 559,
+    )
+    assert mapped[3]["action"] == "wait_for_visual_change"
+    assert mapped[3]["region"] == {"x": 350, "y": 325, "width": 299, "height": 90}
 
 
 def test_preflight_external_change_cancels_action_and_returns_new_frame(monkeypatch):

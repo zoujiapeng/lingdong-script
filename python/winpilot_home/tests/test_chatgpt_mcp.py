@@ -1,9 +1,15 @@
 import asyncio
 import base64
+import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+
+from PIL import Image
+import pytest
 
 from winpilot.agent.tool_result import ToolResult
 from winpilot.integrations.chatgpt_mcp import (
@@ -73,10 +79,12 @@ def test_mcp_catalog_exposes_controller_first_tools_and_annotations():
 
     assert {
         "get_gui_agent_state",
+        "begin_gui_task",
         "observe_desktop",
         "capture_visual_fallback",
         "execute_gui_subgoal",
         "execute_action_batch",
+        "execute_visual_transaction",
         "run_arp_graph",
     } <= set(by_name)
     assert by_name["observe_desktop"].annotations.readOnlyHint is True
@@ -133,6 +141,524 @@ def test_visual_fallback_returns_raw_image_bytes_without_leaking_base64(monkeypa
     assert metadata["ok"] is True
     assert "base64" not in metadata
     assert image == raw
+    binding = metadata["authoritative_frame"]
+    assert binding["frame_id"] == 1
+    assert binding["region"] == {"x": 10, "y": 20, "width": 30, "height": 40}
+    assert binding["sha256"]
+
+
+def test_mcp_frame_coordinates_are_bound_and_mapped_from_exact_capture(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    raw = _jpeg()
+    authority = _authority()
+    _bind_frame(bridge, raw, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.executor.zoom_region",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "base64": base64.b64encode(raw).decode("ascii"),
+        },
+    )
+    args = {
+        "source_frame_id": 4,
+        "actions": [
+            {"action": "drag", "frame_x1": 0, "frame_y1": 0,
+             "frame_x2": 1000, "frame_y2": 1000},
+            {"action": "wait_for_visual_change",
+             "frame_region": {"x": 250, "y": 250, "width": 500, "height": 500}},
+        ],
+    }
+
+    blocked = bridge._prepare_frame_bound_batch(FakeSession(), args)
+
+    assert blocked is None
+    action = args["actions"][0]
+    assert (action["x1"], action["y1"], action["x2"], action["y2"]) == (100, 200, 500, 400)
+    assert action["source_frame_coordinates"]["frame_id"] == 4
+    assert args["actions"][1]["region"] == {"x": 200, "y": 250, "width": 200, "height": 100}
+
+
+def test_mcp_balanced_pointer_path_is_one_frame_bound_local_gesture(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    raw = _jpeg()
+    authority = _authority()
+    _bind_frame(bridge, raw, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (raw, None))
+    args = {
+        "source_frame_id": 4,
+        "actions": [
+            {"action": "mouse_down", "button": "left", "frame_x": 100, "frame_y": 200},
+            {"action": "move_mouse", "frame_x": 500, "frame_y": 500},
+            {"action": "mouse_up", "button": "left", "frame_x": 900, "frame_y": 800},
+        ],
+    }
+
+    blocked = bridge._prepare_frame_bound_batch(FakeSession(), args)
+
+    assert blocked is None
+    assert [(item["x"], item["y"]) for item in args["actions"]] == [
+        (140, 240), (300, 300), (460, 360),
+    ]
+    assert all("source_frame_coordinates" in item for item in args["actions"])
+
+
+def _jpeg(color=(30, 60, 90)):
+    buffer = BytesIO()
+    Image.new("RGB", (32, 24), color).save(buffer, format="JPEG", quality=70)
+    return buffer.getvalue()
+
+
+def _jpeg_with_block(*, block_x: int) -> bytes:
+    image = Image.new("RGB", (1000, 500), (245, 245, 245))
+    for x in range(block_x, block_x + 18):
+        for y in range(241, 259):
+            image.putpixel((x, y), (10, 10, 10))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def _authority(hwnd=91, *, foreground=91, left=100, top=200):
+    return {
+        "hwnd": hwnd,
+        "foreground_hwnd": foreground,
+        "desktop_region": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+        "window_region": (
+            {"x": left, "y": top, "width": 401, "height": 201} if hwnd else None
+        ),
+        "client_region": (
+            {"x": left + 8, "y": top + 30, "width": 385, "height": 163}
+            if hwnd else None
+        ),
+        "valid": True,
+    }
+
+
+def _bind_frame(bridge, raw, *, authority=None):
+    authority = authority or _authority()
+    bridge._session_id = "mcp-frame-test"
+    bridge._authoritative_frame_raw = raw
+    bridge._authoritative_frame = {
+        "frame_id": 4,
+        "bridge_session_id": bridge._session_id,
+        "screen_epoch": 7,
+        "hwnd": 91,
+        "session_target_hwnd": 91,
+        "foreground_hwnd": 91,
+        "region": {"x": 100, "y": 200, "width": 401, "height": 201},
+        "capture_scope": "target_window",
+        "authority_kind": "target_window",
+        "authority_region": authority["window_region"],
+        "authority_snapshot": authority,
+        "capture_quality": 70,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def test_mcp_rejects_stale_or_unidentified_frame_coordinates(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 8
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    monkeypatch.setattr(
+        bridge,
+        "_replacement_frame_rejection",
+        lambda _session, _frame, **kwargs: {
+            "ok": False,
+            "stale_authoritative_frame": True,
+            **kwargs,
+        },
+    )
+    bridge._authoritative_frame = {
+        "frame_id": 4,
+        "screen_epoch": 7,
+        "hwnd": 91,
+        "region": {"x": 100, "y": 200, "width": 401, "height": 201},
+    }
+    missing_id = bridge._prepare_frame_bound_batch(FakeSession(), {
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    })
+    stale = bridge._prepare_frame_bound_batch(FakeSession(), {
+        "source_frame_id": 4,
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    })
+
+    assert missing_id["needs_visual_capture"] is True
+    assert stale["stale_authoritative_frame"] is True
+
+
+def test_explicit_roi_must_stay_inside_bound_window_authority(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        task = "interact with the current target"
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    authority = _authority()
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    captures = []
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.executor.zoom_region",
+        lambda *args, **kwargs: captures.append((args, kwargs)) or {"ok": False},
+    )
+
+    metadata, raw = bridge._capture_authoritative_locked(
+        FakeSession(), x=20, y=20, width=30, height=30, quality=70,
+    )
+
+    assert raw is None
+    assert metadata["blocked"] is True
+    assert "outside" in metadata["error"].lower()
+    assert metadata["target_hwnd"] == 91
+    assert captures == []
+
+
+def test_explicit_roi_inside_client_binds_real_target_authority(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        task = "interact with the current target"
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    bridge._session_id = "mcp-frame-test"
+    authority = _authority()
+    raw = _jpeg()
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.executor.zoom_region",
+        lambda x, y, width, height, quality: {
+            "ok": True,
+            "base64": base64.b64encode(raw).decode("ascii"),
+            "region": {"x": x, "y": y, "width": width, "height": height},
+        },
+    )
+
+    metadata, image = bridge._capture_authoritative_locked(
+        FakeSession(), x=120, y=240, width=40, height=30, quality=70,
+    )
+
+    assert image == raw
+    binding = metadata["authoritative_frame"]
+    assert binding["hwnd"] == 91
+    assert binding["session_target_hwnd"] == 91
+    assert binding["authority_kind"] == "window_client"
+    assert binding["capture_scope"] == "explicit_target_client_roi"
+    assert binding["authority_region"] == authority["client_region"]
+
+
+def test_full_desktop_fallback_never_carries_unverified_session_hwnd(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        task = "inspect multiple windows"
+        _screen_epoch = 7
+        _window_related_to_target = None
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    bridge._session_id = "mcp-frame-test"
+    raw = _jpeg()
+    desktop = _authority(hwnd=0, foreground=333)
+    region = SimpleNamespace(left=0, top=0, width=1920, height=1080)
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.select_visual_capture_scope",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            region=region,
+            scope="full_desktop",
+            target_hwnd=91,
+            target_verified=False,
+        ),
+    )
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda hwnd: desktop if hwnd == 0 else _authority())
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.executor.zoom_region",
+        lambda x, y, width, height, quality: {
+            "ok": True,
+            "base64": base64.b64encode(raw).decode("ascii"),
+            "region": {"x": x, "y": y, "width": width, "height": height},
+        },
+    )
+
+    metadata, image = bridge._capture_authoritative_locked(
+        FakeSession(), x=None, y=None, width=None, height=None, quality=70,
+    )
+
+    assert image == raw
+    binding = metadata["authoritative_frame"]
+    assert binding["capture_scope"] == "full_desktop"
+    assert binding["hwnd"] == 0
+    assert binding["session_target_hwnd"] == 91
+    assert binding["authority_kind"] == "virtual_desktop"
+
+
+def test_full_desktop_recovery_frame_cannot_ground_bound_target_gesture(monkeypatch):
+    """Scope recovery must not refocus after desktop coordinates were mapped."""
+
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    bridge._session_id = "mcp-desktop-recovery-test"
+    raw = _jpeg()
+    authority = _authority(hwnd=0, foreground=333)
+    frame = {
+        "frame_id": 4,
+        "bridge_session_id": bridge._session_id,
+        "screen_epoch": 7,
+        "hwnd": 0,
+        "session_target_hwnd": 91,
+        "foreground_hwnd": 333,
+        "region": dict(authority["desktop_region"]),
+        "capture_scope": "full_desktop",
+        "authority_kind": "virtual_desktop",
+        "authority_region": dict(authority["desktop_region"]),
+        "authority_snapshot": authority,
+        "capture_quality": 70,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    bridge._authoritative_frame = frame
+    bridge._authoritative_frame_raw = raw
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (raw, None))
+    args = {
+        "source_frame_id": 4,
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    }
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), args)
+
+    assert result["blocked"] is True
+    assert result["needs_target_frame"] is True
+    assert result["fresh_target_frame_required"] is True
+    assert result["session_target_hwnd"] == 91
+    assert "frame_x" in args["actions"][0]
+    assert "x" not in args["actions"][0]
+
+
+def test_raw_frame_gesture_rejects_every_visual_invalidating_prefix(monkeypatch):
+    from winpilot.fast.action_contract import BATCH_MUTATING_ACTIONS
+
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    raw = _jpeg()
+    authority = _authority()
+    _bind_frame(bridge, raw, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (raw, None))
+    invalidating = set(BATCH_MUTATING_ACTIONS) | {
+        "wait", "wait_change", "wait_for_visual_change", "wait_stable",
+    }
+
+    for prefix in sorted(invalidating):
+        args = {
+            "source_frame_id": 4,
+            "actions": [
+                {"action": prefix},
+                {"action": "click", "frame_x": 500, "frame_y": 500},
+            ],
+        }
+        result = bridge._prepare_frame_bound_batch(FakeSession(), args)
+        assert result["blocked"] is True, prefix
+        assert result["fresh_target_frame_required"] is True, prefix
+        assert result["invalidating_prefix_actions"] == [
+            {"index": 0, "action": prefix},
+        ]
+        assert "frame_x" in args["actions"][1]
+        assert "x" not in args["actions"][1]
+
+
+def test_read_only_prefix_may_share_frame_with_later_raw_gesture(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    raw = _jpeg()
+    authority = _authority()
+    _bind_frame(bridge, raw, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (raw, None))
+    args = {
+        "source_frame_id": 4,
+        "actions": [
+            {"action": "read_text"},
+            {"action": "click", "frame_x": 500, "frame_y": 500},
+        ],
+    }
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), args)
+
+    assert result is None
+    assert args["actions"][1]["x"] == 300
+    assert args["actions"][1]["y"] == 300
+
+
+@pytest.mark.parametrize(
+    ("live_authority", "expected_reason"),
+    [
+        (_authority(left=140), "window_geometry_changed"),
+        (_authority(foreground=777), "foreground_changed"),
+    ],
+)
+def test_window_move_or_foreground_change_rejects_and_returns_replacement_frame(
+    monkeypatch, live_authority, expected_reason,
+):
+    class FakeSession:
+        hwnd = 91
+        task = "interact with target"
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    raw = _jpeg()
+    _bind_frame(bridge, raw)
+    replacement = {"frame_id": 5, "hwnd": 0, "capture_scope": "full_desktop"}
+    replacement_raw = _jpeg((90, 20, 10))
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: live_authority)
+    monkeypatch.setattr(
+        bridge,
+        "_capture_authoritative_locked",
+        lambda *_args, **_kwargs: (
+            {"ok": True, "authoritative_frame": replacement}, replacement_raw,
+        ),
+    )
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), {
+        "source_frame_id": 4,
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    })
+
+    assert result["blocked"] is True
+    assert result["stale_reason"] == expected_reason
+    assert result["replacement_frame"] == replacement
+    assert result["replacement_frame_available"] is True
+    assert bridge.take_last_post_frame() == replacement_raw
+
+
+def test_frame_preflight_uses_action_roi_and_not_exact_jpeg_sha(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    captured = _jpeg((10, 20, 30))
+    recaptured = _jpeg((200, 210, 220))
+    authority = _authority()
+    _bind_frame(bridge, captured, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (recaptured, None))
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.image_capture.jpeg_diff_ratio",
+        lambda *_args, **_kwargs: 0.25,
+    )
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.image_capture.jpeg_diff_ratios_in_normalized_rois",
+        lambda _before, _after, rois, **_kwargs: [0.0] * len(rois),
+    )
+    args = {
+        "source_frame_id": 4,
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    }
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), args)
+
+    assert result is None
+    assert args["actions"][0]["x"] == 300
+    assert args["actions"][0]["y"] == 300
+
+
+def test_long_drag_preflight_does_not_dilute_small_endpoint_motion(monkeypatch):
+    """A tiny moved source blocks a long stale drag despite low global delta."""
+    class FakeSession:
+        hwnd = 91
+        task = "manipulate the visible target"
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    captured = _jpeg_with_block(block_x=41)
+    recaptured = _jpeg_with_block(block_x=941)
+    authority = _authority()
+    _bind_frame(bridge, captured, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (recaptured, None))
+    replacement = {"frame_id": 5, "hwnd": 91, "capture_scope": "target_window"}
+    monkeypatch.setattr(
+        bridge,
+        "_capture_authoritative_locked",
+        lambda *_args, **_kwargs: (
+            {"ok": True, "authoritative_frame": replacement}, recaptured,
+        ),
+    )
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), {
+        "source_frame_id": 4,
+        "actions": [{
+            "action": "drag",
+            "frame_x1": 50,
+            "frame_y1": 500,
+            "frame_x2": 950,
+            "frame_y2": 500,
+        }],
+    })
+
+    assert result["stale_reason"] == "visual_preflight_changed"
+    assert result["global_change_ratio"] < 0.0025
+    assert result["target_change_ratio"] > 0.01
+    assert len(result["target_rois"]) == 2
+    assert result["replacement_frame"] == replacement
+
+
+def test_frame_preflight_blocks_action_target_change(monkeypatch):
+    class FakeSession:
+        hwnd = 91
+        task = "interact with target"
+        _screen_epoch = 7
+
+    bridge = ChatGPTDesktopBridge(_hooks())
+    captured = _jpeg((10, 20, 30))
+    recaptured = _jpeg((200, 210, 220))
+    authority = _authority()
+    _bind_frame(bridge, captured, authority=authority)
+    monkeypatch.setattr(bridge, "_live_authority_state", lambda _hwnd: authority)
+    monkeypatch.setattr(bridge, "_capture_frame_region", lambda _frame: (recaptured, None))
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.image_capture.jpeg_diff_ratio",
+        lambda *_args, **_kwargs: 0.001,
+    )
+    monkeypatch.setattr(
+        "winpilot.integrations.chatgpt_mcp.image_capture.jpeg_diff_ratios_in_normalized_rois",
+        lambda _before, _after, rois, **_kwargs: [0.2] * len(rois),
+    )
+    replacement = {"frame_id": 5, "hwnd": 91, "capture_scope": "target_window"}
+    monkeypatch.setattr(
+        bridge,
+        "_capture_authoritative_locked",
+        lambda *_args, **_kwargs: (
+            {"ok": True, "authoritative_frame": replacement}, recaptured,
+        ),
+    )
+
+    result = bridge._prepare_frame_bound_batch(FakeSession(), {
+        "source_frame_id": 4,
+        "actions": [{"action": "click", "frame_x": 500, "frame_y": 500}],
+    })
+
+    assert result["stale_reason"] == "visual_preflight_changed"
+    assert result["decision_scope"] == "action_target_roi"
+    assert result["target_change_ratio"] == 0.2
+    assert result["replacement_frame"] == replacement
 
 
 def test_controller_result_is_compact_before_returning_to_chatgpt():

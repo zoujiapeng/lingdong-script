@@ -140,6 +140,30 @@ def test_strict_gui_schema_hides_file_tools_without_hiding_gui_tools():
     assert {"execute_subgoal", "run_action_batch", "launch", "screenshot", "done"} <= names
 
 
+def test_raw_press_primitives_are_exposed_only_inside_validated_controller_batch():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(
+        planning=True,
+        coding_runtime=False,
+        allow_shell=False,
+        allow_files=False,
+        profile="standard",
+    )
+    names = set(_names(tools))
+    assert {"mouse_down", "mouse_up", "hold_key"}.isdisjoint(names)
+
+    batch = next(
+        tool["function"] for tool in tools
+        if tool["function"]["name"] == "run_action_batch"
+    )
+    variants = {
+        variant["properties"]["action"]["const"]
+        for variant in batch["parameters"]["properties"]["actions"]["items"]["oneOf"]
+    }
+    assert {"mouse_down", "mouse_up", "hold_key"} <= variants
+
+
 def test_coding_runtime_keeps_file_tools_even_when_gui_files_are_hidden():
     from winpilot.agent.tool_schemas import tool_schemas
 
@@ -557,6 +581,50 @@ def test_native_vision_exposes_only_normalized_frame_coordinates():
     assert normalized_point["maxItems"] == 2
     assert normalized_point["items"]["minimum"] == 0
     assert normalized_point["items"]["maximum"] == 1000
+
+
+def test_action_batch_projects_every_controller_action_as_typed_variant():
+    from winpilot.agent.tool_schemas import tool_schemas
+    from winpilot.fast.action_contract import supported_actions
+
+    batch = next(
+        tool["function"] for tool in tool_schemas(native_vision=False)
+        if tool["function"]["name"] == "run_action_batch"
+    )
+    item = batch["parameters"]["properties"]["actions"]["items"]
+    variants = {
+        variant["properties"]["action"]["const"]: variant
+        for variant in item["oneOf"]
+    }
+
+    assert set(variants) == set(supported_actions())
+    assert variants["select_color"]["properties"]["color"]["type"] == "string"
+    assert "color" in variants["select_color"]["required"]
+    visual_wait = variants["wait_for_visual_change"]["properties"]
+    assert visual_wait["region"]["required"] == ["x", "y", "width", "height"]
+    assert {"timeout_s", "min_ratio", "required"} <= set(visual_wait)
+
+
+def test_native_action_batch_typed_variants_use_frame_coordinates():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    batch = next(
+        tool["function"] for tool in tool_schemas(native_vision=True)
+        if tool["function"]["name"] == "run_action_batch"
+    )
+    variants = {
+        variant["properties"]["action"]["const"]: variant
+        for variant in batch["parameters"]["properties"]["actions"]["items"]["oneOf"]
+    }
+    drag = variants["drag"]["properties"]
+    assert {"frame_x1", "frame_y1", "frame_x2", "frame_y2", "frame_points"} <= set(drag)
+    assert {"x1", "y1", "x2", "y2", "points"}.isdisjoint(drag)
+    assert "frame_strokes" in variants["draw_strokes"]["properties"]
+    visual_wait = variants["wait_for_visual_change"]["properties"]
+    assert "frame_region" in visual_wait
+    assert "region" not in visual_wait
+    assert "effect_frame_region" in variants["drag"]["properties"]
+    assert "effect_region" not in variants["drag"]["properties"]
 
 
 def test_native_vision_lean_profile_has_small_single_action_operator():

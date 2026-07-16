@@ -177,18 +177,70 @@ export interface ArpExecutionSnapshot {
   task_contract?: TaskContract | null;
   experience_policy?: 'allow' | 'disabled';
   skill_replay_node_count?: number;
-  satisfiability?: Record<string, unknown> | null;
+  satisfiability?: CapabilitySatisfiabilityState | null;
   current_stage?: TaskStage | null;
-  artifacts?: { run_id: string; count: number; artifacts: ManagedArtifact[] };
-  contract_evidence?: { run_id: string; count: number; records: Array<Record<string, unknown>> };
-  stage_trace?: Array<Record<string, unknown>>;
+  artifacts?: ArtifactStoreSnapshot;
+  contract_evidence?: EvidenceRegistrySnapshot;
+  completion_contract?: CompletionContractState | null;
+  stage_trace?: StageRuntimeTrace[];
+  history?: ArpHistoryRecord[];
+  interaction_state?: InteractionRuntimeState | null;
   [key: string]: unknown;
 }
 
 export type TaskStageType =
   | 'OpenApplication' | 'FocusWindow' | 'CreateOrEditArtifact' | 'DrawArtifact'
   | 'CaptureArtifact' | 'SaveArtifact' | 'OpenConversation' | 'ResolveRecipient'
-  | 'SendText' | 'SendArtifact' | 'VerifyArtifact' | 'VerifyDelivery';
+  | 'SendText' | 'SendArtifact' | 'VerifyArtifact' | 'VerifyDelivery'
+  | 'ObserveScene' | 'InferInteraction' | 'PerformTurn' | 'VerifyLocalEffect'
+  | 'WaitForExternalChange';
+
+export interface InteractionActor {
+  id: string;
+  kind: string;
+  display_name: string;
+  role: string;
+  attributes: Record<string, string>;
+}
+
+export interface InteractionIntent {
+  active: boolean;
+  mode: string;
+  actors: InteractionActor[];
+  role_assignments: Record<string, Record<string, string>>;
+  turn_owner: string;
+  session_mode: string;
+  continuation_policy: string;
+  target: string;
+  region_hint: string;
+  action_modalities: string[];
+  user_started: boolean;
+  expected_external_change: boolean;
+  confidence: number;
+  signals: string[];
+  ambiguous_fields: string[];
+  provenance: Record<string, string>;
+}
+
+export interface InteractionSessionContract {
+  session_id: string;
+  mode: string;
+  lifecycle: string;
+  actors: InteractionActor[];
+  role_assignments: Record<string, Record<string, string>>;
+  initial_turn_owner: string;
+  target: string;
+  authoritative_state_ref: string;
+  interaction_region_ref: string;
+  continuation_policy: string;
+  max_agent_turns_per_activation: number;
+  wait_for_external_change: boolean;
+  requested_max_steps?: number;
+  max_semantic_turns?: number;
+  max_replans?: number;
+  max_model_calls?: number;
+  external_change_timeout_s?: number;
+}
 
 export interface TaskIntent {
   original_text: string;
@@ -205,6 +257,24 @@ export interface TaskIntent {
   confidence: number;
   ambiguous_fields: string[];
   provenance: Record<string, string>;
+  interaction?: InteractionIntent;
+}
+
+export interface ArtifactBinding {
+  name: string;
+  media_type: string;
+  source: string;
+  artifact_id: string;
+  required: boolean;
+}
+
+export interface StateBinding {
+  name: string;
+  state_type: string;
+  source: string;
+  scope: string;
+  required: boolean;
+  ephemeral: boolean;
 }
 
 export interface StageCapabilitySelection {
@@ -229,8 +299,10 @@ export interface TaskStage {
   name: string;
   parameters: Record<string, unknown>;
   depends_on: string[];
-  inputs: Array<Record<string, unknown>>;
-  outputs: Array<Record<string, unknown>>;
+  inputs: ArtifactBinding[];
+  outputs: ArtifactBinding[];
+  state_inputs?: StateBinding[];
+  state_outputs?: StateBinding[];
   required_capabilities: string[];
   obligations: Array<Record<string, unknown>>;
   execution: StageCapabilitySelection | null;
@@ -245,10 +317,110 @@ export interface TaskContract {
   stages: TaskStage[];
   obligations: Array<Record<string, unknown>>;
   final_conditions: string[];
+  session?: InteractionSessionContract | null;
   satisfiable: boolean;
   missing_capabilities: string[];
   experience_policy: 'allow' | 'disabled';
   compiler_version: string;
+}
+
+export interface InteractionTargetBinding {
+  hwnd?: number;
+  app?: string;
+  title?: string;
+  status?: string;
+  capture_scope?: string;
+  frame_id?: number | string;
+  frame_epoch?: number;
+  policy?: string;
+  source?: string;
+  confidence?: number;
+  [key: string]: unknown;
+}
+
+export interface InteractionRegionBinding {
+  bounds?: number[];
+  coordinate_space?: string;
+  label?: string;
+  source?: string;
+  confidence?: number;
+  generation?: number;
+  policy?: string;
+  retained_anchor?: boolean;
+  blocked_reason?: string;
+  [key: string]: unknown;
+}
+
+export interface InteractionActionState {
+  action?: string;
+  modality?: string;
+  summary?: string;
+  actor?: string;
+  target?: string;
+  status?: string;
+  transaction_id?: string;
+  coordinates?: unknown;
+  ts?: number;
+  [key: string]: unknown;
+}
+
+export interface InteractionVerificationState {
+  verified?: boolean;
+  status?: string;
+  provider?: string;
+  reason?: string;
+  evidence_id?: string;
+  frame_id?: number | string;
+  [key: string]: unknown;
+}
+
+export interface ExternalChangeState {
+  armed?: boolean;
+  waiting?: boolean;
+  changed?: boolean;
+  status?: string;
+  watch_scope?: string;
+  baseline_frame_id?: number | string;
+  latest_frame_id?: number | string;
+  last_change_at?: number;
+  [key: string]: unknown;
+}
+
+export interface InteractionFailureStage {
+  stage_id?: string;
+  stage_type?: TaskStageType | string;
+  failure_type?: string;
+  error?: string;
+  recovery?: Record<string, unknown> | string;
+  [key: string]: unknown;
+}
+
+/** Live state emitted by StageRuntime for a stateful visual interaction. */
+export interface InteractionRuntimeState {
+  session_id?: string;
+  status?: string;
+  mode?: string;
+  frame_id?: number | string;
+  baseline_artifact_id?: string;
+  current_artifact_id?: string;
+  current_stage_id?: string;
+  model_calls?: number;
+  target_binding?: InteractionTargetBinding | null;
+  interaction_region?: InteractionRegionBinding | null;
+  turn_owner?: string;
+  planned_action?: InteractionActionState | string | null;
+  executed_action?: InteractionActionState | string | null;
+  local_verification?: InteractionVerificationState | null;
+  last_mutating_plan?: InteractionActionState | string | null;
+  last_executed_action?: InteractionActionState | string | null;
+  last_local_verification?: InteractionVerificationState | null;
+  external_change?: ExternalChangeState | null;
+  failure_stage?: InteractionFailureStage | string | null;
+  budget?: InteractionRuntimeBudget | null;
+  turn_index?: number;
+  replan_count?: number;
+  state_bindings?: StateBinding[];
+  [key: string]: unknown;
 }
 
 export interface ManagedArtifact {
@@ -261,9 +433,128 @@ export interface ManagedArtifact {
   height: number;
   size_bytes: number;
   source_window: string;
+  source_hwnd?: number;
+  source_scope?: string;
   created_at: number;
+  selected_at?: number;
   purpose: string;
   sendable: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CapabilitySatisfiabilityState {
+  satisfiable: boolean;
+  missing_capabilities: string[];
+  [key: string]: unknown;
+}
+
+export interface InteractionRuntimeBudget {
+  semantic_turns_used?: number;
+  semantic_turns_limit?: number;
+  replans_used?: number;
+  replans_limit?: number;
+  model_calls_used?: number;
+  model_calls_limit?: number;
+  external_change_timeout_s?: number;
+  [key: string]: unknown;
+}
+
+export interface ContractEvidenceRecord {
+  id: string;
+  predicate: string;
+  source: string;
+  provider: string;
+  verified: boolean;
+  value?: unknown;
+  stage_id: string;
+  artifact_id: string;
+  recipient: string;
+  run_id: string;
+  captured_at: number;
+  metadata: Record<string, unknown>;
+  text: string;
+}
+
+export interface EvidenceRegistrySnapshot {
+  run_id: string;
+  count: number;
+  records: ContractEvidenceRecord[];
+}
+
+export interface ArtifactStoreSnapshot {
+  run_id: string;
+  root?: string;
+  count: number;
+  artifacts: ManagedArtifact[];
+}
+
+export interface CompletionObligationResult {
+  obligation_id: string;
+  predicate: string;
+  description: string;
+  satisfied: boolean;
+  provider: string;
+  evidence_id: string;
+  stage_id: string;
+  artifact_ref: string;
+  artifact_id: string;
+}
+
+export interface CompletionConditionResult {
+  condition: string;
+  satisfied: boolean;
+  evidence_id: string;
+}
+
+export interface CompletionContractState {
+  ok: boolean;
+  run_id: string;
+  contract_id: string;
+  obligations: CompletionObligationResult[];
+  final_conditions: CompletionConditionResult[];
+  missing: CompletionObligationResult[];
+  contract_errors: string[];
+  artifact_refs: Record<string, string>;
+  primary_artifact_id: string;
+  reason: string;
+  [key: string]: unknown;
+}
+
+export interface StageRuntimeTrace {
+  stage_id: string;
+  stage_type: TaskStageType | string;
+  status: string;
+  attempts?: number;
+  tools: string[];
+  model_tools: string[];
+  controller_tools: string[];
+  required_capabilities: string[];
+  verifier_requirements: string[];
+  exposed_capabilities: string[];
+  missing_capabilities: string[];
+  satisfiable: boolean;
+  adapter: string;
+  model_role: string;
+  artifact_id: string;
+  model_calls: number;
+  model_elapsed_ms?: number;
+  controller_elapsed_ms: number;
+  capture_elapsed_ms?: number;
+  failure_type: string;
+  recovery: Record<string, unknown> | string;
+  error: string;
+  interaction_state?: InteractionRuntimeState | Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ArpHistoryRecord {
+  kind?: string;
+  node_id?: string;
+  ok?: boolean;
+  attempts?: number;
+  error?: string;
+  output?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 export interface CurrentRunResponse {

@@ -57,14 +57,59 @@ class DesktopToolMixin:
     def _t_mouse_down(self, args: dict) -> ToolResult:
         button = str(args.get("button", "left"))
         target = getattr(self, "_action_hwnd", lambda: None)()
+        preposition = None
+        if args.get("x") is not None or args.get("y") is not None:
+            if args.get("x") is None or args.get("y") is None:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "error": "mouse_down requires x and y together",
+                }))
+            preposition = _call_with_optional_hwnd(
+                executor.move_mouse,
+                int(args["x"]),
+                int(args["y"]),
+                hwnd=target,
+            )
+            if preposition.get("ok") is not True:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "error": preposition.get("error") or "mouse_down preposition failed",
+                    "preposition": preposition,
+                }))
         result = _call_with_optional_hwnd(
             executor.mouse_down, button, hwnd=target,
         )
+        if preposition is not None:
+            result["preposition"] = preposition
         return ToolResult(self._fmt(result))
 
     def _t_mouse_up(self, args: dict) -> ToolResult:
         button = str(args.get("button", "left"))
+        target = getattr(self, "_action_hwnd", lambda: None)()
+        preposition = None
+        if args.get("x") is not None or args.get("y") is not None:
+            if args.get("x") is None or args.get("y") is None:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "error": "mouse_up requires x and y together",
+                }))
+            preposition = _call_with_optional_hwnd(
+                executor.move_mouse,
+                int(args["x"]),
+                int(args["y"]),
+                hwnd=target,
+            )
+        # Releasing an agent-owned button is safety cleanup and must still run
+        # if cursor prepositioning was interrupted by lost ownership.
         result = executor.mouse_up(button=button)
+        if preposition is not None:
+            result["preposition"] = preposition
+            if preposition.get("ok") is not True:
+                result["ok"] = False
+                result["error"] = (
+                    preposition.get("error")
+                    or "mouse_up released safely but endpoint preposition failed"
+                )
         return ToolResult(self._fmt(result))
 
     def _t_move_mouse(self, args: dict) -> ToolResult:
@@ -293,11 +338,11 @@ class DesktopToolMixin:
     def _t_hold_key(self, args: dict) -> ToolResult:
         keys = normalize_key_sequence(args.get("keys") or [])
         target = getattr(self, "_action_hwnd", lambda: None)()
-        result = _call_with_optional_hwnd(
-            executor.hold_keys,
+        result = executor.hold_keys(
             keys,
             int(args.get("duration_ms", 0)),
             hwnd=target,
+            stop_event=getattr(self, "stop_event", None),
         )
         return ToolResult(self._fmt(result))
 

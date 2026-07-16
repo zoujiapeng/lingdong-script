@@ -293,15 +293,176 @@ class ScreenWatcher:
             crops.append((crop, Region(left, top, right - left, bottom - top)))
         return crops
 
-    def wait_for_change(self, timeout_s: float = 3.0, min_ratio: float = 0.0005) -> ScreenDelta:
+    @staticmethod
+    def _wait_interval(stop_event: Any, seconds: float) -> bool:
+        """Wait for one sampling interval and report cooperative cancellation.
+
+        ``time.sleep`` made a low-fps or long-lived watcher insensitive to the
+        owning run's cancel event.  Accept any Event-like object so the ARP
+        runtime's combined run/timeout event works without a dependency on its
+        concrete type.
+        """
+        delay = max(0.0, float(seconds))
+        if stop_event is not None:
+            wait = getattr(stop_event, "wait", None)
+            if callable(wait):
+                return bool(wait(delay))
+            if bool(getattr(stop_event, "is_set", lambda: False)()):
+                return True
+        time.sleep(delay)
+        return False
+
+    def wait_for_change(
+        self,
+        timeout_s: float = 3.0,
+        min_ratio: float = 0.0005,
+        *,
+        stop_event: Any = None,
+    ) -> ScreenDelta:
         deadline = time.monotonic() + float(timeout_s)
         last = self.sample_once()
         while time.monotonic() < deadline:
-            time.sleep(1.0 / self.fps)
+            if self._wait_interval(stop_event, 1.0 / self.fps):
+                return ScreenDelta(False, last.ratio, last.regions, last.elapsed_ms)
             last = self.sample_once()
             if last.changed and last.ratio >= float(min_ratio):
                 return last
         return last
+
+    def wait_for_region_change(
+        self,
+        region: Region,
+        timeout_s: float = 3.0,
+        min_ratio: float = 0.0005,
+        *,
+        stop_event: Any = None,
+        require_persistent: bool = False,
+        stable_ms: int = 350,
+        stable_max_ratio: float = 0.0008,
+    ) -> ScreenDelta:
+        """Wait for change inside an exact ROI without perturbing watcher state.
+
+        This is used for human turns, drag/drop targets, challenge widgets and
+        other local interactions where animation elsewhere in the target window
+        must not manufacture progress.  Captures are independent of ``_prev`` so
+        a concurrent background watcher cannot race the transaction baseline.
+        """
+        scoped = region.clamp_to_screen()
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        baseline = self.capture_fn(scoped)
+        before = baseline
+        last = ScreenDelta(False, 0.0, [], 0)
+        candidate = last
+        stable_since: float | None = None
+        change_seen = False
+        capture_ms = 0
+        while time.monotonic() < deadline:
+            if self._wait_interval(stop_event, 1.0 / self.fps):
+                return ScreenDelta(
+                    False, candidate.ratio, candidate.regions, candidate.elapsed_ms,
+                )
+            started = _now_ms()
+            after = self.capture_fn(scoped)
+            capture_ms = max(0, _now_ms() - started)
+            step_delta = changed_regions(
+                before,
+                after,
+                root_region=scoped,
+                pixel_thresh=self.pixel_thresh,
+            )
+            self._update_bulletin(
+                step_delta, scoped, capture_ms, step_delta.elapsed_ms,
+            )
+            if not require_persistent:
+                last = step_delta
+                if last.changed and last.ratio >= float(min_ratio):
+                    crops = self._crop_evidence(after, last, scoped)
+                    with self._lock:
+                        self._recent_evidence = crops
+                        self._recent_evidence_ms = _now_ms()
+                    self._notify_change(last, crops, action_delta=False, transient=False)
+                    return last
+                before = after
+                continue
+
+            # A persistent external turn is a transition, not the first frame
+            # of that transition.  Compare the candidate state with the armed
+            # baseline, then wait for adjacent samples to settle.  A transient
+            # that returns to baseline is deliberately discarded.
+            cumulative = changed_regions(
+                baseline,
+                after,
+                root_region=scoped,
+                pixel_thresh=self.pixel_thresh,
+            )
+            if cumulative.changed and cumulative.ratio >= float(min_ratio):
+                candidate = cumulative
+                change_seen = True
+            elif change_seen:
+                change_seen = False
+                candidate = ScreenDelta(False, 0.0, [], cumulative.elapsed_ms)
+                stable_since = None
+
+            if change_seen and step_delta.ratio <= float(stable_max_ratio):
+                stable_since = stable_since or time.monotonic()
+            else:
+                stable_since = None
+            if (
+                change_seen
+                and stable_since is not None
+                and (time.monotonic() - stable_since) * 1000.0 >= max(0, int(stable_ms))
+            ):
+                last = candidate
+                crops = self._crop_evidence(after, last, scoped)
+                with self._lock:
+                    self._recent_evidence = crops
+                    self._recent_evidence_ms = _now_ms()
+                self._notify_change(last, crops, action_delta=False, transient=False)
+                return last
+            before = after
+        if require_persistent and change_seen:
+            # A change that never settled is not a complete external turn.
+            return ScreenDelta(
+                False, candidate.ratio, candidate.regions, candidate.elapsed_ms,
+            )
+        return last
+
+    def wait_for_region_stable(
+        self,
+        region: Region,
+        stable_ms: int = 500,
+        timeout_s: float = 5.0,
+        max_ratio: float = 0.0008,
+    ) -> dict:
+        """Wait until an exact ROI settles, ignoring unrelated target pixels."""
+        scoped = region.clamp_to_screen()
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        stable_since: float | None = None
+        before = self.capture_fn(scoped)
+        last = ScreenDelta(False, 0.0, [], 0)
+        while time.monotonic() < deadline:
+            time.sleep(1.0 / self.fps)
+            after = self.capture_fn(scoped)
+            last = changed_regions(
+                before,
+                after,
+                root_region=scoped,
+                pixel_thresh=self.pixel_thresh,
+            )
+            if last.ratio <= float(max_ratio):
+                stable_since = stable_since or time.monotonic()
+                if (time.monotonic() - stable_since) * 1000 >= int(stable_ms):
+                    return {"stable": True, "delta": last.to_dict(), "region": {
+                        "x": scoped.left, "y": scoped.top,
+                        "width": scoped.width, "height": scoped.height,
+                    }}
+            else:
+                stable_since = None
+            before = after
+        return {"stable": False, "delta": last.to_dict(), "region": {
+            "x": scoped.left, "y": scoped.top,
+            "width": scoped.width, "height": scoped.height,
+        }}
 
     def wait_for_stable(
         self,

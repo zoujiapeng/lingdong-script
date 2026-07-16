@@ -1,5 +1,25 @@
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_pointer_tests_bypass_live_hwnd_scope(request, monkeypatch):
+    """These tests exercise delta plumbing with synthetic, non-Windows hwnds."""
+    if request.node.name not in {
+        "test_tool_session_attaches_screen_delta_to_visible_action",
+        "test_tool_session_action_delta_uses_independent_before_after_frames",
+        "test_scroll_retries_with_physical_input_when_post_message_has_no_effect",
+        "test_scroll_reports_no_visible_effect_after_both_paths_fail",
+        "test_tool_session_preserves_pressed_state_when_after_frame_reverts",
+        "test_tool_session_does_not_claim_transient_when_press_frame_is_unchanged",
+        "test_mouse_down_records_pressed_frame_as_transient_while_still_held",
+    }:
+        return
+    from winpilot.agent import scope_guard
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+
 
 def _status(sequence: int = 3) -> dict:
     return {
@@ -57,6 +77,24 @@ def test_world_model_tracks_no_pixel_change_before_waiting_for_ocr_delta():
     assert "visual actions" in reason
     assert world.state()["visual_no_progress"] == 2
     assert world.state()["last_visual_outcome"]["changed"] is False
+
+
+def test_world_model_no_effect_advisory_is_not_drawing_specific():
+    from winpilot.perception.world import WorldModel
+
+    world = WorldModel()
+    world.record_action("drag", {"x1": 10, "y1": 20, "x2": 30, "y2": 40})
+    world.record_action_outcome("drag", {
+        "visual_change_detected": False,
+        "visual_change_ratio": 0.0,
+        "failure_type": "VISUAL_ACTION_NO_EFFECT",
+    })
+
+    advisory = world.advisory()
+
+    assert "source, path, target, and effect region" in advisory
+    assert "canvas" not in advisory
+    assert "tool" not in advisory
 
 
 def test_world_model_retains_source_bound_facts_per_run():
@@ -892,6 +930,85 @@ def test_tool_session_auto_starts_and_releases_shared_screen_watch_for_target(mo
     assert released == [lease]
     assert watcher.stop_calls == 0
     assert watcher.running is True
+
+
+def test_tool_session_switches_perception_lease_acquire_before_release(monkeypatch):
+    from winpilot.agent.tools import ToolSession
+    from winpilot.fast.perception_daemon import PERCEPTION_DAEMON
+
+    old_watcher = SimpleNamespace()
+    old_cache = SimpleNamespace()
+    new_watcher = SimpleNamespace()
+    new_cache = SimpleNamespace()
+    old_lease = SimpleNamespace(hwnd=111, watcher=old_watcher, cache=old_cache)
+    new_lease = SimpleNamespace(hwnd=222, watcher=new_watcher, cache=new_cache)
+    calls = []
+
+    def acquire(hwnd, run_id=""):
+        calls.append(("acquire", hwnd, run_id))
+        return new_lease
+
+    def release(lease):
+        calls.append(("release", lease.hwnd))
+
+    monkeypatch.setattr(PERCEPTION_DAEMON, "acquire", acquire)
+    monkeypatch.setattr(PERCEPTION_DAEMON, "release", release)
+    session = ToolSession(task="demo")
+    session.run_id = "switch-run"
+    session._perception_lease = old_lease
+    session._fast_gui_controller = SimpleNamespace(
+        watcher=old_watcher,
+        cache=old_cache,
+    )
+
+    session._bind_perception_target(222)
+
+    assert calls == [
+        ("acquire", 222, "switch-run"),
+        ("release", 111),
+    ]
+    assert session._perception_lease is new_lease
+    assert session._fast_gui_controller.watcher is new_watcher
+    assert session._fast_gui_controller.cache is new_cache
+
+    session.close()
+    assert calls[-1] == ("release", 222)
+    assert calls.count(("release", 111)) == 1
+    assert calls.count(("release", 222)) == 1
+
+
+def test_tool_session_failed_perception_rebind_preserves_current_lease(monkeypatch):
+    from winpilot.agent.tools import ToolSession
+    from winpilot.fast.perception_daemon import PERCEPTION_DAEMON
+
+    old_watcher = SimpleNamespace()
+    old_cache = SimpleNamespace()
+    old_lease = SimpleNamespace(hwnd=111, watcher=old_watcher, cache=old_cache)
+    released = []
+
+    def fail_acquire(hwnd, run_id=""):
+        raise RuntimeError("temporary perception service failure")
+
+    monkeypatch.setattr(PERCEPTION_DAEMON, "acquire", fail_acquire)
+    monkeypatch.setattr(PERCEPTION_DAEMON, "release", lambda lease: released.append(lease))
+    session = ToolSession(task="demo")
+    session.run_id = "failed-switch-run"
+    session._perception_lease = old_lease
+    session._fast_gui_controller = SimpleNamespace(
+        watcher=old_watcher,
+        cache=old_cache,
+    )
+
+    session._bind_perception_target(222)
+    session._bind_perception_target(222)
+
+    assert session._perception_lease is old_lease
+    assert session._fast_gui_controller.watcher is old_watcher
+    assert session._fast_gui_controller.cache is old_cache
+    assert released == []
+
+    session.close()
+    assert released == [old_lease]
 
 
 def test_tool_session_auto_watch_requires_real_run_id():

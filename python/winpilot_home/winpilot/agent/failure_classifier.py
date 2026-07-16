@@ -39,6 +39,7 @@ class FailureType(str, Enum):
     TASK_CONSTRAINT_LOST = "TASK_CONSTRAINT_LOST"
     VISUAL_GROUNDING_REQUIRED = "VISUAL_GROUNDING_REQUIRED"
     ACTION_SUCCEEDED_VERIFICATION_FAILED = "ACTION_SUCCEEDED_VERIFICATION_FAILED"
+    VISUAL_ACTION_NO_EFFECT = "VISUAL_ACTION_NO_EFFECT"
     DRAW_NO_VISIBLE_CHANGE = "DRAW_NO_VISIBLE_CHANGE"
 
 
@@ -112,6 +113,11 @@ _STRATEGIES: dict[FailureType, tuple[str, str, int]] = {
     FailureType.VISUAL_GROUNDING_REQUIRED: (
         "capture_fresh_target_frame_before_action",
         "The action did not run. Capture a fresh real frame for the current target hwnd/screen epoch, inspect it, then choose one action.",
+        1,
+    ),
+    FailureType.VISUAL_ACTION_NO_EFFECT: (
+        "reobserve_and_reground_spatial_action",
+        "Do not repeat identical pointer geometry. Capture a fresh authoritative frame, confirm the source, path, target, and intended effect region, then retry only with new grounding evidence.",
         1,
     ),
     FailureType.DRAW_NO_VISIBLE_CHANGE: (
@@ -397,6 +403,10 @@ class FailureClassifier:
         if draw_no_change is not None:
             return draw_no_change
 
+        visual_no_effect = self._classify_visual_action_no_effect(data)
+        if visual_no_effect is not None:
+            return visual_no_effect
+
         action_verify = self._classify_action_succeeded_verify_failed(data, text)
         if action_verify is not None:
             return action_verify
@@ -471,6 +481,42 @@ class FailureClassifier:
             0.97,
             {"draw_failures": failed_draws[:4]},
             "drawing input was issued but the intended canvas region did not change",
+            llm_required=False,
+            retryable=True,
+            retry_budget=1,
+        )
+
+    def _classify_visual_action_no_effect(
+        self,
+        data: dict[str, Any],
+    ) -> FailureClassification | None:
+        if not data:
+            return None
+        failures: list[dict[str, Any]] = []
+        for item in _child_payloads(data):
+            payload = item.get("data") if isinstance(item.get("data"), dict) else item
+            if item.get("action") == "draw_strokes":
+                continue
+            if (
+                payload.get("failure_type") == "VISUAL_ACTION_NO_EFFECT"
+                or (
+                    item.get("action") == "drag"
+                    and _truthy_bool(payload.get("visual_change_detected")) is False
+                )
+            ):
+                failures.append({
+                    "action": item.get("action"),
+                    "visual_change_ratio": payload.get("visual_change_ratio"),
+                    "failure_subtype": payload.get("failure_subtype"),
+                    "error": payload.get("error") or item.get("error"),
+                })
+        if not failures:
+            return None
+        return _classification(
+            FailureType.VISUAL_ACTION_NO_EFFECT,
+            0.97,
+            {"visual_action_failures": failures[:4]},
+            "pointer input was issued but its intended visual region did not change",
             llm_required=False,
             retryable=True,
             retry_budget=1,

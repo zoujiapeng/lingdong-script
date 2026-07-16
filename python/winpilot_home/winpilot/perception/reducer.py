@@ -27,12 +27,6 @@ _IMPORTANT_ROLES = (
 _INPUT_ROLES = ("edit", "combobox", "textbox", "search", "input", "编辑", "组合框")
 _BUTTON_ROLES = ("button", "submit", "link", "menu", "按钮", "链接", "菜单")
 _LITERAL_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_\-]{3,80}\b|\b\d{4,18}\b")
-_CHAT_TASK_RE = re.compile(
-    r"\b(?:chat|message|reply|send)\b|"
-    r"\u804a\u5929|\u53d1\u6d88\u606f|\u53d1\u4fe1\u606f|\u56de\u590d|"
-    r"\u79c1\u4fe1|\u6211\u7684\u624b\u673a|\bqq\b|\bwechat\b",
-    re.IGNORECASE,
-)
 _QUOTED_RE = re.compile(r'"([^"]{1,120})"|“([^”]{1,120})”|「([^」]{1,120})」')
 
 
@@ -111,14 +105,15 @@ def _stage(snapshot: Snapshot, elements: list[UIElement] | None = None) -> str:
 
 def _chat_context(
     snapshot: Snapshot,
-    task: str,
+    communication_context: dict[str, Any] | None,
     elements: list[UIElement] | None = None,
 ) -> dict[str, Any] | None:
     """Detect an open split-pane conversation using generic geometry."""
-    if not _CHAT_TASK_RE.search(task or ""):
+    facts = communication_context if isinstance(communication_context, dict) else {}
+    if facts.get("active") is not True:
         return None
     window = snapshot.region
-    task_norm = re.sub(r"\s+", "", _norm(task))
+    recipient = re.sub(r"\s+", "", _norm(facts.get("recipient")))
     by_text: dict[str, list[UIElement]] = {}
     for element in (elements if elements is not None else snapshot.scoped_elements()):
         text = re.sub(r"\s+", "", _norm(element.text))
@@ -127,7 +122,7 @@ def _chat_context(
         by_text.setdefault(text, []).append(element)
     target = ""
     for text, elements in by_text.items():
-        if text not in task_norm:
+        if recipient and text not in recipient and recipient not in text:
             continue
         has_list_row = any(
             int(element.cx) <= window.left + int(window.width * 0.17)
@@ -312,6 +307,7 @@ def reduce_snapshot(
     query: str = "",
     recent_changes: dict[str, Any] | None = None,
     max_candidates: int = 12,
+    communication_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a small, source-attributed summary of a full Snapshot."""
     terms = _extract_terms(task=task, query=query)
@@ -325,7 +321,9 @@ def reduce_snapshot(
         )
     scoped_elements = snapshot.scoped_elements()
     filtered_count = max(0, len(snapshot.elements) - len(scoped_elements))
-    chat_context = _chat_context(snapshot, task, scoped_elements)
+    chat_context = _chat_context(
+        snapshot, communication_context, scoped_elements,
+    )
     non_blocking_notice = _non_blocking_notice_context(snapshot, scoped_elements)
     scored = [_score_element(element, terms, changed_regions) for element in scoped_elements]
     scored.sort(key=lambda item: item.score, reverse=True)
@@ -451,6 +449,7 @@ def render_reduced_snapshot(
     query: str = "",
     recent_changes: dict[str, Any] | None = None,
     max_candidates: int = 12,
+    communication_context: dict[str, Any] | None = None,
 ) -> str:
     reduced = reduce_snapshot(
         snapshot,
@@ -458,6 +457,7 @@ def render_reduced_snapshot(
         query=query,
         recent_changes=recent_changes,
         max_candidates=max_candidates,
+        communication_context=communication_context,
     )
     lines = [
         "Perception reducer:",

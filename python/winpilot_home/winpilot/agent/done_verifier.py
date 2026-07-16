@@ -892,7 +892,7 @@ class DoneVerifierMixin:
             intent_mod = _loop_attr("intent", intent)
             hwnd = self.session.hwnd
             title = self.session.snapshot.title if self.session.snapshot else ""
-            pmode = intent_mod.perception_mode(self.task, title)
+            pmode = intent_mod.perception_mode(self.task_intent, title)
             cfg = _config()
             api = cfg.get("api", default={})
             fallback_visual_judge = _configured_vision_judge_model(cfg)
@@ -1574,14 +1574,14 @@ class DoneVerifierMixin:
         )
 
     def _verify_communication_done(self, screen: str) -> bool:
-        if not _is_communication_task(self.task):
+        if not _is_communication_task(self.task_intent):
             return True
         payloads = _quoted_payloads(self.task)
         if payloads and not any(payload in screen for payload in payloads):
             if str(getattr(self, "_fresh_done_image_b64", "") or ""):
                 pending = list(getattr(self, "_pending_visual_payloads", []) or [])
                 self._pending_visual_payloads = list(dict.fromkeys([*pending, *payloads]))
-                self._pending_visual_communication_check = _communication_mode(self.task)
+                self._pending_visual_communication_check = _communication_mode(self.task_intent)
                 return True
             reason = (
                 "通信任务缺少最终可见证据：目标窗口当前画面没有出现要发送的消息文本，"
@@ -1597,7 +1597,7 @@ class DoneVerifierMixin:
             return True
 
         if str(getattr(self, "_fresh_done_image_b64", "") or ""):
-            self._pending_visual_communication_check = _communication_mode(self.task)
+            self._pending_visual_communication_check = _communication_mode(self.task_intent)
             return True
 
         has_chat_evidence = any(
@@ -1878,7 +1878,7 @@ class DoneVerifierMixin:
             if kind == "typed" and str(value or "").strip()
         ]
         sent_turns = self._communication_sent_turns(history)
-        mode = _communication_mode(self.task)
+        mode = _communication_mode(self.task_intent)
         if mode == "draft":
             return bool(typed) and not any(
                 self._communication_entry_sends(name, args or {}, output)
@@ -1908,9 +1908,9 @@ class DoneVerifierMixin:
 
     def _deterministic_communication_verdict(self) -> tuple[bool, str] | None:
         """Return a local done verdict when real send/read evidence is enough."""
-        if not _is_communication_task(self.task):
+        if not _is_communication_task(self.task_intent):
             return None
-        mode = _communication_mode(self.task)
+        mode = _communication_mode(self.task_intent)
         if mode == "continuous_chat":
             return False, (
                 "这是持续聊天任务；除非用户明确停止或给出结束条件，否则不能自行 done。"
@@ -1972,23 +1972,21 @@ class DoneVerifierMixin:
         history path remains only for old callers that do not yet own an
         EvidenceRegistry.
         """
-        if not _is_communication_task(self.task):
+        if not _is_communication_task(self.task_intent):
             return None
-        from ..tasking.intent import TaskIntentParser
-
-        parsed = TaskIntentParser().parse(self.task)
-        if parsed.media_type != "image":
+        parsed = self.task_intent
+        if str(parsed.get("media_type") or "") != "image":
             return None
         registry = getattr(self.session, "evidence_registry", None)
         if registry is not None and callable(getattr(registry, "find", None)):
             delivered = registry.find(
                 predicate="delivery.visible_outbound",
-                recipient=parsed.recipient,
+                recipient=str(parsed.get("recipient") or ""),
                 verified=True,
             )
             sent = registry.find(
                 predicate="delivery.send_action",
-                recipient=parsed.recipient,
+                recipient=str(parsed.get("recipient") or ""),
                 verified=True,
             )
             if delivered and sent:
@@ -2042,7 +2040,7 @@ class DoneVerifierMixin:
         # typed-contract path above.  Keeping a second recipient regex here
         # caused verifier routing to drift and encouraged task-specific
         # aliases in production code.
-        target = parsed.recipient
+        target = str(parsed.get("recipient") or "")
         target_visible = not target or target in after_paste
         if has_sent_marker and has_attachment_size and target_visible:
             return True, "目标会话可见图片附件大小与“已发送”状态，且本轮已执行图片粘贴。"
@@ -2483,7 +2481,7 @@ class DoneVerifierMixin:
 
         recent, evidence = self._done_evidence()
         screen: str | None = None
-        if _is_communication_task(self.task):
+        if _is_communication_task(self.task_intent):
             screen = self._fresh_done_screen()
         communication_evidence_passed = False
         image_send_verdict = self._deterministic_image_send_verdict()
@@ -2504,7 +2502,7 @@ class DoneVerifierMixin:
             else:
                 communication_evidence_passed = True
                 evidence += "\n- deterministic_image_delivery: " + reason
-        if _is_communication_task(self.task) and not communication_evidence_passed:
+        if _is_communication_task(self.task_intent) and not communication_evidence_passed:
             communication_verdict = self._deterministic_communication_verdict()
             if communication_verdict is None:
                 if (

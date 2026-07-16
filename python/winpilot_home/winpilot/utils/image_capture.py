@@ -11,6 +11,7 @@ import numpy as np
 import win32gui
 
 from ..config import CONFIG
+from ..perception.surface_binding import InteractionRegion
 from . import screenshot
 
 
@@ -75,9 +76,10 @@ class VisualCaptureScope:
     reason: str
     target_hwnd: int | None = None
     target_verified: bool = False
+    client_region: screenshot.Region | None = None
 
     def metadata(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "scope": self.scope,
             "reason": self.reason,
             "target_hwnd": self.target_hwnd,
@@ -91,6 +93,65 @@ class VisualCaptureScope:
                 "height": self.region.height,
             },
         }
+        if self.client_region is not None:
+            payload["window_client_region"] = {
+                "left": self.client_region.left,
+                "top": self.client_region.top,
+                "width": self.client_region.width,
+                "height": self.client_region.height,
+            }
+            payload["window_client_frame_bounds"] = region_frame_bounds(
+                self.client_region, self.region,
+            )
+        return payload
+
+
+def window_client_region(hwnd: int) -> screenshot.Region | None:
+    """Return the Win32 client rectangle in physical screen pixels.
+
+    The result is an authority envelope for later visual grounding, not an
+    automatic action surface: client areas commonly contain toolbars and
+    navigation panes.  Failure stays explicit as ``None`` instead of silently
+    substituting the whole window.
+    """
+    try:
+        left, top, right, bottom = win32gui.GetClientRect(int(hwnd))
+        screen_left, screen_top = win32gui.ClientToScreen(
+            int(hwnd), (int(left), int(top)),
+        )
+        screen_right, screen_bottom = win32gui.ClientToScreen(
+            int(hwnd), (int(right), int(bottom)),
+        )
+        width = int(screen_right) - int(screen_left)
+        height = int(screen_bottom) - int(screen_top)
+        if width <= 0 or height <= 0:
+            return None
+        return screenshot.Region(
+            int(screen_left), int(screen_top), width, height,
+        ).clamp_to_screen()
+    except Exception:
+        return None
+
+
+def region_frame_bounds(
+    region: screenshot.Region,
+    frame_region: screenshot.Region,
+) -> list[int] | None:
+    """Map a physical region to clipped inclusive 0..1000 frame bounds."""
+    left = max(region.left, frame_region.left)
+    top = max(region.top, frame_region.top)
+    right = min(region.right, frame_region.right)
+    bottom = min(region.bottom, frame_region.bottom)
+    if right <= left or bottom <= top:
+        return None
+    x_span = max(1, frame_region.width - 1)
+    y_span = max(1, frame_region.height - 1)
+    return [
+        int(round((left - frame_region.left) * 1000.0 / x_span)),
+        int(round((top - frame_region.top) * 1000.0 / y_span)),
+        int(round((right - frame_region.left - 1) * 1000.0 / x_span)),
+        int(round((bottom - frame_region.top - 1) * 1000.0 / y_span)),
+    ]
 
 
 def select_visual_capture_scope(
@@ -180,6 +241,7 @@ def select_visual_capture_scope(
         reason="verified_foreground_target",
         target_hwnd=target,
         target_verified=True,
+        client_region=window_client_region(target),
     )
 
 
@@ -208,7 +270,11 @@ def capture_window_jpeg_b64(hwnd: int, max_side: int = 1120,
 _CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS = 24
 
 
-def credible_work_surface_frame_bounds(image_b64: str) -> dict[str, object] | None:
+def credible_work_surface_frame_bounds(
+    image_b64: str,
+    *,
+    client_frame_bounds: tuple[int, int, int, int] | list[int] | None = None,
+) -> dict[str, object] | None:
     """Locate one light work surface in the exact model-visible JPEG.
 
     Bounds are inclusive 0..1000 coordinates relative to the authoritative
@@ -284,13 +350,41 @@ def credible_work_surface_frame_bounds(image_b64: str) -> dict[str, object] | No
             int(round((x2 - 1) * 1000.0 / x_span)),
             int(round((y2 - 1) * 1000.0 / y_span)),
         ]
-        left, top, right, bottom = detected_bounds
+        detected_region = InteractionRegion(
+            tuple(detected_bounds),
+            coordinate_space="frame_0_1000",
+            label="detected_interaction_surface",
+            source=str(detection.get("source") or "authoritative_frame_pixels"),
+            confidence=max(0.0, min(1.0, float(detection.get("light_ratio") or 0.0))),
+        )
+        if client_frame_bounds is not None:
+            try:
+                client_region = InteractionRegion(
+                    tuple(int(value) for value in client_frame_bounds),
+                    coordinate_space="frame_0_1000",
+                    label="window_client_authority",
+                    source="win32_client_rect",
+                )
+                clipped = detected_region.intersection(client_region)
+            except (TypeError, ValueError):
+                clipped = None
+            if clipped is None:
+                return {
+                    "ok": False,
+                    "reason": "detected work surface was outside the window client region",
+                    "failure_kind": "invalid",
+                    "source": "authoritative_frame_pixels",
+                }
+            detected_region = clipped
+            detected_bounds = list(clipped.bounds)
+        left, top, right, bottom = detected_region.bounds
         inset = _CONTINUOUS_INPUT_EDGE_INSET_FRAME_UNITS
         if right - left > inset * 2 + 40 and bottom - top > inset * 2 + 40:
-            safe_bounds = [left + inset, top + inset, right - inset, bottom - inset]
+            safe_region = detected_region.inset(inset)
         else:
-            safe_bounds = list(detected_bounds)
+            safe_region = detected_region
             inset = 0
+        safe_bounds = list(safe_region.bounds)
         return {
             "ok": True,
             # Mutating continuous input uses the inset rectangle. Detectors
@@ -303,6 +397,8 @@ def credible_work_surface_frame_bounds(image_b64: str) -> dict[str, object] | No
             "source": "authoritative_frame_pixels",
             "light_ratio": detection.get("light_ratio"),
             "candidate_count": detection.get("candidate_count"),
+            "interaction_region": safe_region.to_dict(),
+            "detected_interaction_region": detected_region.to_dict(),
         }
     except Exception:
         return {
@@ -367,5 +463,56 @@ def jpeg_diff_ratio_in_normalized_roi(
         changed = int((delta.max(axis=2) > int(pixel_thresh)).sum())
         total = int(delta.shape[0] * delta.shape[1])
         return changed / total if total else None
+    except Exception:
+        return None
+
+
+def jpeg_diff_ratios_in_normalized_rois(
+    image_a_b64: str,
+    image_b_b64: str,
+    rois: list[tuple[float, float, float, float]],
+    pixel_thresh: int = 12,
+) -> list[float] | None:
+    """Return changed-pixel fractions for several 0..1000 frame ROIs.
+
+    Gesture preflight needs small regions around the start, end, and sampled
+    path points.  Decoding the same JPEG once per region adds avoidable
+    latency, so this helper decodes the pair once and evaluates every bounded
+    ROI against the identical pixels.  Any invalid ROI fails the comparison
+    closed instead of silently weakening the authority check.
+    """
+    try:
+        raw_a = np.frombuffer(base64.b64decode(image_a_b64), dtype=np.uint8)
+        raw_b = np.frombuffer(base64.b64decode(image_b_b64), dtype=np.uint8)
+        image_a = cv2.imdecode(raw_a, cv2.IMREAD_COLOR)
+        image_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
+        if image_a is None or image_b is None:
+            return None
+        if image_a.shape != image_b.shape:
+            return [1.0 for _ in rois]
+        height, width = image_a.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        threshold = int(pixel_thresh)
+        ratios: list[float] = []
+        for roi in rois:
+            if len(roi) != 4:
+                return None
+            left, top, right, bottom = (
+                max(0.0, min(1000.0, float(value))) for value in roi
+            )
+            if right <= left or bottom <= top:
+                return None
+            x1 = max(0, min(width - 1, int(np.floor(left / 1000.0 * width))))
+            y1 = max(0, min(height - 1, int(np.floor(top / 1000.0 * height))))
+            x2 = max(x1 + 1, min(width, int(np.ceil(right / 1000.0 * width))))
+            y2 = max(y1 + 1, min(height, int(np.ceil(bottom / 1000.0 * height))))
+            delta = cv2.absdiff(image_a[y1:y2, x1:x2], image_b[y1:y2, x1:x2])
+            total = int(delta.shape[0] * delta.shape[1])
+            if total <= 0:
+                return None
+            changed = int((delta.max(axis=2) > threshold).sum())
+            ratios.append(changed / total)
+        return ratios
     except Exception:
         return None

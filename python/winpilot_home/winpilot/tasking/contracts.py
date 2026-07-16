@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,87 @@ class StageType(str, Enum):
     SEND_ARTIFACT = "SendArtifact"
     VERIFY_ARTIFACT = "VerifyArtifact"
     VERIFY_DELIVERY = "VerifyDelivery"
+    OBSERVE_SCENE = "ObserveScene"
+    INFER_INTERACTION = "InferInteraction"
+    PERFORM_TURN = "PerformTurn"
+    VERIFY_LOCAL_EFFECT = "VerifyLocalEffect"
+    WAIT_FOR_EXTERNAL_CHANGE = "WaitForExternalChange"
+
+
+class InteractionActor(BaseModel):
+    """A participant in a live visual interaction.
+
+    ``attributes`` deliberately carries open-ended role constraints (colour,
+    tool, side, responsibility, and so on).  They are not flattened into task
+    keywords because the same UI can assign entirely different roles at run
+    time.
+    """
+
+    id: str
+    kind: str = "external"
+    display_name: str = ""
+    role: str = ""
+    attributes: dict[str, str] = Field(default_factory=dict)
+
+
+class InteractionIntent(BaseModel):
+    """Structured candidate for a shared, stateful visual interaction."""
+
+    active: bool = False
+    mode: str = "none"
+    actors: list[InteractionActor] = Field(default_factory=list)
+    role_assignments: dict[str, dict[str, str]] = Field(default_factory=dict)
+    turn_owner: str = "unknown"
+    session_mode: str = "bounded"
+    continuation_policy: str = "finish_after_verified_effect"
+    target: str = ""
+    region_hint: str = ""
+    action_modalities: list[str] = Field(default_factory=list)
+    # One explicit modality may constrain the semantic plan.  Unknown or
+    # multi-modal tasks retain ``infer_from_scene`` so complex workflows are
+    # not accidentally reduced to one primitive.
+    primary_action_modality: str = "infer_from_scene"
+    user_started: bool = False
+    expected_external_change: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    signals: list[str] = Field(default_factory=list)
+    ambiguous_fields: list[str] = Field(default_factory=list)
+    provenance: dict[str, str] = Field(default_factory=dict)
+
+
+class InteractionSessionContract(BaseModel):
+    """Execution semantics for one activation of a live UI session.
+
+    A turn is semantic and may contain a controller transaction with multiple
+    pointer events.  ``max_agent_turns_per_activation`` therefore does not
+    reintroduce the old one-click-per-model-call restriction.
+    """
+
+    session_id: str
+    mode: str
+    lifecycle: str = "persistent"
+    actors: list[InteractionActor] = Field(default_factory=list)
+    role_assignments: dict[str, dict[str, str]] = Field(default_factory=dict)
+    initial_turn_owner: str = "unknown"
+    target: str = "active_window"
+    authoritative_state_ref: str = "interaction_scene"
+    surface_region_ref: str = "surface_region"
+    interaction_region_ref: str = "interaction_region"
+    primary_action_modality: str = "infer_from_scene"
+    continuation_policy: str = "wait_for_external_change"
+    max_agent_turns_per_activation: int = Field(default=1, ge=1, le=8)
+    wait_for_external_change: bool = True
+    # The frontend/API budget that this contract was compiled from.  Keeping
+    # the source budget in the serialized contract makes runtime limits
+    # auditable instead of leaving several unrelated magic constants behind.
+    requested_max_steps: int = Field(default=40, ge=1, le=400)
+    # These budgets are part of the executable contract, not UI hints.  The
+    # interaction runtime consumes them before another semantic model call,
+    # replan, or mutating turn can be attempted.
+    max_semantic_turns: int = Field(default=20, ge=1, le=200)
+    max_replans: int = Field(default=8, ge=0, le=100)
+    max_model_calls: int = Field(default=40, ge=2, le=400)
+    external_change_timeout_s: float = Field(default=300.0, ge=5.0, le=1800.0)
 
 
 class TaskIntent(BaseModel):
@@ -34,12 +115,26 @@ class TaskIntent(BaseModel):
     source: str = ""
     capture_scope: str = "window"
     destination: str = ""
-    send_mode: str = "send"
+    send_mode: Literal[
+        "send", "draft", "share", "bounded_chat", "continuous_chat",
+    ] = "send"
     subject: str = ""
     quality: str = "normal"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     ambiguous_fields: list[str] = Field(default_factory=list)
     provenance: dict[str, str] = Field(default_factory=dict)
+    interaction: InteractionIntent = Field(default_factory=InteractionIntent)
+
+
+class StateBinding(BaseModel):
+    """Typed ephemeral state passed between stages, never a user artifact."""
+
+    name: str
+    state_type: str
+    source: str = ""
+    scope: str = ""
+    required: bool = True
+    ephemeral: bool = True
 
 
 class ArtifactBinding(BaseModel):
@@ -61,8 +156,19 @@ class CompletionObligation(BaseModel):
     description: str
     stage_id: str
     evidence_providers: list[EvidenceProviderSpec]
+    # ``id`` is the stable contract condition identifier.  ``predicate`` is
+    # the exact run-evidence claim that may discharge it.  They currently
+    # match for compiler-produced contracts, but keeping them separate avoids
+    # accidentally treating an arbitrary record from an allowed provider as
+    # proof.  The empty default preserves older serialized task-contract/1
+    # payloads; verifiers interpret it as ``id``.
+    predicate: str = ""
     artifact_ref: str = ""
     recipient: str = ""
+
+    @property
+    def evidence_predicate(self) -> str:
+        return str(self.predicate or self.id)
 
     @property
     def verifier_capabilities(self) -> set[str]:
@@ -97,6 +203,8 @@ class TaskStage(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     inputs: list[ArtifactBinding] = Field(default_factory=list)
     outputs: list[ArtifactBinding] = Field(default_factory=list)
+    state_inputs: list[StateBinding] = Field(default_factory=list)
+    state_outputs: list[StateBinding] = Field(default_factory=list)
     required_capabilities: list[str] = Field(default_factory=list)
     obligations: list[CompletionObligation] = Field(default_factory=list)
     execution: CapabilitySelection | None = None
@@ -111,6 +219,7 @@ class TaskContract(BaseModel):
     stages: list[TaskStage]
     obligations: list[CompletionObligation]
     final_conditions: list[str]
+    session: InteractionSessionContract | None = None
     satisfiable: bool = False
     missing_capabilities: list[str] = Field(default_factory=list)
     experience_policy: str = "allow"

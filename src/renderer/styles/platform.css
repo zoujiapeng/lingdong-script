@@ -278,9 +278,61 @@
 .arp-contract-panel { margin-top: 10px; padding: 12px; }
 .arp-contract-summary { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto minmax(80px, 1fr) auto minmax(80px, 1fr) auto minmax(80px, 1fr); gap: 6px 10px; align-items: center; font-size: 12px; color: var(--arp-muted); }
 .arp-contract-summary code { color: var(--arp-text); overflow: hidden; text-overflow: ellipsis; }
+.arp-interaction-runtime { margin-top: 10px; padding: 9px; border: 1px solid color-mix(in srgb, var(--arp-blue) 28%, var(--arp-line)); border-radius: 6px; background: color-mix(in srgb, var(--arp-blue-soft) 45%, var(--arp-surface-soft)); }
+.arp-interaction-heading { min-height: 27px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.arp-interaction-heading > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.arp-interaction-heading strong { font-size: 10px; }
+.arp-interaction-heading code { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--arp-blue); font-size: 8px; }
+.arp-interaction-grid { margin-top: 6px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.arp-interaction-card { min-width: 0; min-height: 69px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--arp-line); border-radius: 5px; background: var(--arp-surface); }
+.arp-interaction-card > span { color: var(--arp-text-muted); font-size: 8px; }
+.arp-interaction-card > strong { min-width: 0; color: var(--arp-text); font-size: 10px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arp-interaction-card > small { min-width: 0; color: var(--arp-text-muted); font: 8px/1.35 "Cascadia Code", Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arp-interaction-card.active { border-color: color-mix(in srgb, var(--arp-blue) 48%, var(--arp-line)); background: var(--arp-blue-soft); }
+.arp-interaction-card.success { border-color: color-mix(in srgb, var(--arp-green) 48%, var(--arp-line)); background: var(--arp-green-soft); }
+.arp-interaction-card.danger { border-color: color-mix(in srgb, var(--arp-red) 48%, var(--arp-line)); background: var(--arp-red-soft); }
+.arp-interaction-artifacts { margin-top: 6px; padding: 5px 7px; display: flex; flex-wrap: wrap; gap: 8px 16px; border-radius: 4px; color: var(--arp-text-muted); background: var(--arp-surface); font-size: 8px; }
+.arp-interaction-artifacts code { color: var(--arp-text-soft); }
+.arp-interaction-failure { margin-top: 6px; padding: 7px 8px; display: flex; align-items: flex-start; gap: 7px; border: 1px solid color-mix(in srgb, var(--arp-red) 40%, var(--arp-line)); border-radius: 5px; color: var(--arp-red); background: var(--arp-red-soft); }
+.arp-interaction-failure > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.arp-interaction-failure strong { font-size: 9px; }
+.arp-interaction-failure span { color: var(--arp-text-soft); font-size: 8px; line-height: 1.4; overflow-wrap: anywhere; }
+.arp-runtime-audit { margin-top: 10px; padding: 9px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-soft); }
+.arp-runtime-audit-heading { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.arp-runtime-audit-heading > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.arp-runtime-audit-heading strong { font-size: 11px; }
+.arp-runtime-audit-summary { margin-top: 7px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.arp-runtime-audit-summary > div { min-width: 0; min-height: 58px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--arp-line); border-radius: 5px; background: var(--arp-surface); }
+.arp-runtime-audit-summary span { color: var(--arp-text-muted); font-size: 8px; }
+.arp-runtime-audit-summary strong { color: var(--arp-text); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+.arp-runtime-audit-summary small { color: var(--arp-text-muted); font-size: 8px; line-height: 1.35; overflow-wrap: anywhere; }
+.arp-runtime-stage-list { margin-top: 7px; display: grid; gap: 6px; }
+.arp-runtime-stage { min-width: 0; display: grid; grid-template-columns: 94px minmax(145px, .65fr) minmax(180px, 1.15fr) minmax(155px, .9fr) minmax(210px, 1.1fr); gap: 7px; align-items: stretch; padding: 7px; border: 1px solid var(--arp-line); border-radius: 5px; background: var(--arp-surface); }
+.arp-runtime-stage.active { border-color: var(--arp-accent); box-shadow: inset 3px 0 0 var(--arp-accent); }
+.arp-runtime-stage.failed { border-color: color-mix(in srgb, var(--arp-red) 48%, var(--arp-line)); background: var(--arp-red-soft); }
+.arp-runtime-stage-status { display: flex; align-items: center; gap: 5px; }
+.arp-runtime-stage-identity, .arp-runtime-stage-detail { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+.arp-runtime-stage-identity strong { color: var(--arp-text); font-size: 9px; line-height: 1.35; }
+.arp-runtime-stage-identity code { color: var(--arp-blue); font-size: 8px; overflow-wrap: anywhere; }
+.arp-runtime-stage-detail span { color: var(--arp-text-muted); font-size: 8px; line-height: 1.35; overflow-wrap: anywhere; }
+.arp-runtime-stage-detail span.danger { color: var(--arp-red); font-weight: 650; }
+.arp-runtime-stage-error { grid-column: 2 / -1; padding: 5px 7px; border-radius: 4px; color: var(--arp-red); background: color-mix(in srgb, var(--arp-red-soft) 70%, var(--arp-surface)); font-size: 8px; overflow-wrap: anywhere; }
+.arp-runtime-audit-columns { margin-top: 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; align-items: start; }
+.arp-runtime-audit-columns > section { min-width: 0; display: grid; gap: 5px; }
+.arp-runtime-subheading { min-height: 23px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+.arp-runtime-subheading strong { color: var(--arp-text); font-size: 9px; }
+.arp-runtime-subheading span { color: var(--arp-muted); font: 8px "Cascadia Code", Consolas, monospace; }
+.arp-runtime-record { min-width: 0; padding: 6px 7px; display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--arp-line); border-radius: 5px; background: var(--arp-surface); }
+.arp-runtime-record.verified { border-color: color-mix(in srgb, var(--arp-green) 35%, var(--arp-line)); }
+.arp-runtime-record.rejected { border-color: color-mix(in srgb, var(--arp-red) 35%, var(--arp-line)); }
+.arp-runtime-record > div { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.arp-runtime-record code { color: var(--arp-blue); font-size: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arp-runtime-record > span, .arp-runtime-record > small { color: var(--arp-text-muted); font-size: 8px; line-height: 1.35; overflow-wrap: anywhere; }
+.arp-runtime-contract-error { padding: 6px 7px; border: 1px solid color-mix(in srgb, var(--arp-red) 40%, var(--arp-line)); border-radius: 5px; color: var(--arp-red); background: var(--arp-red-soft); font-size: 8px; overflow-wrap: anywhere; }
 .arp-stage-list { display: grid; gap: 6px; margin-top: 10px; }
 .arp-stage-row { display: grid; grid-template-columns: 18px minmax(150px, .8fr) minmax(220px, 1.5fr) minmax(90px, .4fr); gap: 8px; align-items: center; min-height: 42px; padding: 7px 9px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-soft); }
 .arp-stage-row.active { border-color: var(--arp-accent); box-shadow: inset 3px 0 0 var(--arp-accent); }
+.arp-stage-row.failed { border-color: color-mix(in srgb, var(--arp-red) 48%, var(--arp-line)); color: var(--arp-red); background: var(--arp-red-soft); }
 .arp-stage-row > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .arp-stage-row > div span, .arp-stage-row > span { color: var(--arp-muted); font-size: 11px; }
 .arp-stage-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
@@ -465,6 +517,7 @@
   .arp-runtime-focus { display: none; }
   .arp-studio-shell .node-library { width: 196px; }
   .arp-studio-shell .property-panel { width: 250px; }
+  .arp-runtime-stage { grid-template-columns: 90px minmax(130px, .7fr) repeat(3, minmax(150px, 1fr)); overflow-x: auto; }
 }
 
 @media (max-width: 900px) {
@@ -474,6 +527,9 @@
   .arp-live-strip { grid-template-columns: 1fr; }
   .arp-phase-rail { justify-content: flex-start; overflow: hidden; }
   .arp-metrics-row { grid-template-columns: repeat(4, 1fr); }
+  .arp-interaction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .arp-runtime-audit-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .arp-runtime-audit-columns { grid-template-columns: 1fr; }
   .arp-metrics-row.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .arp-metric:nth-child(4n) { border-right: 0; }
   .arp-metrics-row:not(.compact) .arp-metric:nth-child(-n+8) { border-bottom: 1px solid var(--arp-line); }
@@ -495,6 +551,10 @@
 @media (max-width: 700px) {
   .arp-metrics-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .arp-metrics-row.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .arp-interaction-grid { grid-template-columns: 1fr; }
+  .arp-runtime-audit-summary { grid-template-columns: 1fr; }
+  .arp-runtime-stage { grid-template-columns: 1fr; }
+  .arp-runtime-stage-error { grid-column: 1; }
   .arp-metrics-row .arp-metric { border-right: 1px solid var(--arp-line); border-bottom: 1px solid var(--arp-line); }
   .arp-metrics-row:not(.compact) .arp-metric:nth-child(3n),
   .arp-metrics-row.compact .arp-metric:nth-child(2n) { border-right: 0; }

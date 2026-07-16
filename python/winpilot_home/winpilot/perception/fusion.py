@@ -297,11 +297,12 @@ def _run_uia(hwnd: int) -> tuple[list[UIElement], int]:
     return collected, int((time.monotonic() - started) * 1000)
 
 
-def _run_ocr(region: Region) -> tuple[list[UIElement], int]:
+def _run_ocr(region: Region, *, cancel_event=None) -> tuple[list[UIElement], int]:
     """Run OCR collection and return (elements, elapsed_ms). Never raises."""
     started = time.monotonic()
     try:
-        collected = ocr.collect(region)
+        with ocr.inference_scope("foreground", cancel_event=cancel_event):
+            collected = ocr.collect(region)
     except Exception as exc:
         logger.warning("OCR 并行采集异常: %s", exc)
         collected = []
@@ -313,6 +314,7 @@ def _bounded_parallel_jobs(
     *,
     timeout_s: float,
     stop_event=None,
+    cancel_events: dict[str, threading.Event] | None = None,
 ) -> dict:
     """Run independent perception jobs without letting one block the caller.
 
@@ -355,10 +357,21 @@ def _bounded_parallel_jobs(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        # Wake frequently so /api/stop can interrupt a blocked provider.
-        next(iter(done.values())).wait(min(0.05, remaining))
+        # Wake frequently so /api/stop can interrupt a blocked provider. Pick
+        # an unfinished event: waiting on the first already-complete job would
+        # otherwise spin a CPU core while a second provider is still running.
+        pending = next(event for event in done.values() if not event.is_set())
+        pending.wait(min(0.05, remaining))
 
     timed_out = [name for name, event in done.items() if not event.is_set()]
+    for name in timed_out:
+        event = (cancel_events or {}).get(name)
+        if event is not None:
+            event.set()
+    if canceled:
+        for name, event in (cancel_events or {}).items():
+            if not done.get(name, threading.Event()).is_set():
+                event.set()
     return {
         "results": results,
         "errors": errors,
@@ -396,9 +409,12 @@ def observe(hwnd: int, include_icons: bool = True,
       "pixel_text" — office/document surfaces: UIA and OCR run in parallel;
                    VLM runs only if OCR returns no readable content.
       "visual"  — chat/canvas/mirror tasks: OCR always runs; when VLM is
-                  configured it also runs as an assist dimension (not just
-                  as rescue), unless the window is extremely UIA-rich
-                  (>= vlm_assist_threshold, default 60).
+                   configured it also runs as an assist dimension (not just
+                   as rescue), unless the window is extremely UIA-rich
+                   (>= vlm_assist_threshold, default 60).
+      "structured_ui" — deterministic controller path: collect UIA/Win32
+                   structure only.  Callers must run scoped OCR themselves for
+                   the exact regions whose visible text is an obligation.
       "vlm_first" — future; reserved.
 
     For backward-compat, passing vision_priority=True is equivalent to
@@ -415,6 +431,7 @@ def observe(hwnd: int, include_icons: bool = True,
     order = CONFIG.enabled_dimensions()
     is_visual = perception_mode == "visual"
     is_pixel_text = perception_mode == "pixel_text"
+    is_structured_ui = perception_mode == "structured_ui"
     parallel_ocr = is_visual or is_pixel_text
     if is_visual and vlm.is_configured() and "vlm" not in order:
         order.append("vlm")
@@ -456,7 +473,10 @@ def observe(hwnd: int, include_icons: bool = True,
         uia_ms = 0
         ocr_ms = 0
         uia_was_suppressed = _uia_suppressed(hwnd)
-        jobs: dict[str, object] = {"ocr": lambda: _run_ocr(region)}
+        ocr_cancel = threading.Event()
+        jobs: dict[str, object] = {
+            "ocr": lambda: _run_ocr(region, cancel_event=ocr_cancel),
+        }
         if not uia_was_suppressed:
             jobs["uia"] = lambda: _run_uia(hwnd)
         dimension_timeout_s = float(CONFIG.get(
@@ -466,6 +486,7 @@ def observe(hwnd: int, include_icons: bool = True,
             jobs,
             timeout_s=dimension_timeout_s,
             stop_event=stop_event,
+            cancel_events={"ocr": ocr_cancel},
         )
         uia_payload = parallel["results"].get("uia")
         ocr_payload = parallel["results"].get("ocr")
@@ -565,6 +586,8 @@ def observe(hwnd: int, include_icons: bool = True,
     else:
         # Normal mode: serial execution (unchanged behaviour).
         for dim in order:
+            if stop_event is not None and stop_event.is_set():
+                break
             started = time.monotonic()
             collected = []
             try:
@@ -574,6 +597,54 @@ def observe(hwnd: int, include_icons: bool = True,
                             "count": 0, "ms": 0, "skipped": "foreground_modal_overlay",
                         }
                         continue
+                    if is_structured_ui:
+                        # Controller probes deliberately avoid full-frame OCR/VLM,
+                        # but UIA itself is an out-of-process provider and can hang
+                        # indefinitely.  Keep this otherwise-serial path bounded in
+                        # exactly the same way as the visual/pixel-text path.  A
+                        # cancellation is not a provider failure, so only a real
+                        # deadline expiry suppresses UIA for the cooldown window.
+                        if _uia_suppressed(hwnd):
+                            snapshot.dim_stats["uia"] = {
+                                "count": 0,
+                                "ms": 0,
+                                "content_count": 0,
+                                "rich": False,
+                                "skipped": "recent_provider_timeout",
+                            }
+                            continue
+                        dimension_timeout_s = float(CONFIG.get(
+                            "fusion", "visual_dimension_timeout_s", default=6.0,
+                        ) or 6.0)
+                        bounded = _bounded_parallel_jobs(
+                            {"uia": lambda: _run_uia(hwnd)},
+                            timeout_s=dimension_timeout_s,
+                            stop_event=stop_event,
+                        )
+                        payload = bounded["results"].get("uia")
+                        if isinstance(payload, tuple) and len(payload) == 2:
+                            collected, _provider_ms = payload
+                        uia_count = sum(
+                            1 for element in collected if (element.text or "").strip()
+                        )
+                        uia_elements = list(collected)
+                        uia_rich = _uia_is_rich(
+                            uia_elements, region, uia_rich_threshold,
+                        )
+                        stats = {
+                            "count": len(collected),
+                            "ms": bounded["wall_ms"],
+                            "content_count": _uia_content_count(collected, region),
+                            "rich": uia_rich,
+                        }
+                        if bounded["canceled"]:
+                            stats["canceled"] = True
+                        elif "uia" in bounded["timed_out"]:
+                            _suppress_uia(hwnd)
+                            stats["timed_out"] = True
+                        snapshot.dim_stats["uia"] = stats
+                        fused = _merge(fused, collected) if fused else list(collected)
+                        continue
                     collected = uia.collect(hwnd)
                     uia_count = sum(1 for e in collected if (e.text or "").strip())
                     uia_elements = list(collected)
@@ -582,6 +653,11 @@ def observe(hwnd: int, include_icons: bool = True,
                     collected = win32.collect(hwnd)
                     collected.extend(win32.explorer_items(hwnd))
                 elif dim == "ocr":
+                    if is_structured_ui:
+                        snapshot.dim_stats["ocr"] = {
+                            "count": 0, "ms": 0, "skipped": "structured_ui_scoped_ocr",
+                        }
+                        continue
                     if skip_ocr_if_rich and uia_rich:
                         snapshot.dim_stats["ocr"] = {"count": 0, "ms": 0, "skipped": "uia_rich"}
                         continue
@@ -589,6 +665,11 @@ def observe(hwnd: int, include_icons: bool = True,
                 elif dim == "cv":
                     collected = vision_cv.detect_icon_candidates(region) if include_icons else []
                 elif dim == "vlm":
+                    if is_structured_ui:
+                        snapshot.dim_stats["vlm"] = {
+                            "count": 0, "ms": 0, "skipped": "structured_ui_controller",
+                        }
+                        continue
                     if is_visual:
                         skip_vlm = _uia_is_rich(uia_elements, region, vlm_assist_threshold)
                         skip_reason = "vlm_assist_threshold"
@@ -630,6 +711,7 @@ def observe(hwnd: int, include_icons: bool = True,
     if (
         not _has_readable(fused)
         and not (stop_event is not None and stop_event.is_set())
+        and not is_structured_ui
         and CONFIG.get("fusion", "escalate_on_empty", default=True)
     ):
         fused = _escalate_empty(snapshot, region, fused)

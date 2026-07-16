@@ -8,6 +8,7 @@ screen coordinates.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import re
 import threading
 import time
@@ -25,12 +26,92 @@ from .model import UIElement
 
 _engine = None
 _engine_lock = threading.Lock()
-_inference_lock = threading.Lock()
+_inference_condition = threading.Condition()
+_inference_active = False
+_foreground_waiters = 0
+_foreground_leases = 0
+_inference_context = threading.local()
 _warm_thread: threading.Thread | None = None
 _warm_thread_lock = threading.Lock()
 _active_provider = "uninitialized"
 _control_cache_lock = threading.Lock()
 _control_cache: dict[tuple, tuple[float, list[UIElement]]] = {}
+
+
+@contextmanager
+def foreground_priority():
+    """Keep best-effort background OCR out of a controller transaction.
+
+    ONNX inference cannot be interrupted safely once it has started.  This
+    lease guarantees that, after the current inference finishes, obligation-
+    scoped foreground OCR runs before any queued predictive work.
+    """
+
+    global _foreground_leases
+    previous_priority = getattr(_inference_context, "priority", None)
+    previous_cancel = getattr(_inference_context, "cancel_event", None)
+    _inference_context.priority = "foreground"
+    _inference_context.cancel_event = None
+    with _inference_condition:
+        _foreground_leases += 1
+        _inference_condition.notify_all()
+    try:
+        yield
+    finally:
+        with _inference_condition:
+            _foreground_leases = max(0, _foreground_leases - 1)
+            _inference_condition.notify_all()
+        _inference_context.priority = previous_priority
+        _inference_context.cancel_event = previous_cancel
+
+
+@contextmanager
+def inference_scope(priority: str = "foreground", cancel_event=None):
+    """Tag OCR calls in this thread without changing the public API shape."""
+
+    previous_priority = getattr(_inference_context, "priority", None)
+    previous_cancel = getattr(_inference_context, "cancel_event", None)
+    _inference_context.priority = str(priority or "foreground").casefold()
+    _inference_context.cancel_event = cancel_event
+    try:
+        yield
+    finally:
+        _inference_context.priority = previous_priority
+        _inference_context.cancel_event = previous_cancel
+
+
+@contextmanager
+def _inference_slot():
+    """Serialize the shared OCR engine while preferring foreground callers."""
+
+    global _inference_active, _foreground_waiters
+    priority = str(getattr(_inference_context, "priority", None) or "foreground").casefold()
+    cancel_event = getattr(_inference_context, "cancel_event", None)
+    foreground = str(priority or "foreground").casefold() != "background"
+    acquired = False
+    with _inference_condition:
+        if foreground:
+            _foreground_waiters += 1
+        try:
+            while _inference_active or (
+                not foreground and (_foreground_waiters > 0 or _foreground_leases > 0)
+            ):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                _inference_condition.wait(timeout=0.05)
+            if cancel_event is None or not cancel_event.is_set():
+                _inference_active = True
+                acquired = True
+        finally:
+            if foreground:
+                _foreground_waiters = max(0, _foreground_waiters - 1)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with _inference_condition:
+                _inference_active = False
+                _inference_condition.notify_all()
 
 
 def _match_text(needle: str, text: str) -> bool:
@@ -157,7 +238,9 @@ def recognize(image: np.ndarray, origin: tuple[int, int] = (0, 0),
         min_conf = float(CONFIG.get("ocr", "min_confidence", default=0.55))
     ox, oy = origin
     try:
-        with _inference_lock:
+        with _inference_slot() as acquired:
+            if not acquired:
+                return []
             result, _elapsed = engine(image)
     except Exception as exc:
         logger.warning("OCR 识别异常: %s", exc)
@@ -387,7 +470,9 @@ def locate_control_text(
         return []
     engine = get_engine()
     try:
-        with _inference_lock:
+        with _inference_slot() as acquired:
+            if not acquired:
+                return []
             recognized, _elapsed = engine.text_recognizer(crops)
     except Exception as exc:
         logger.debug("targeted control OCR failed: %s", exc)

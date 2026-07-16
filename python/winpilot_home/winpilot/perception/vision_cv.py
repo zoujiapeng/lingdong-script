@@ -517,8 +517,14 @@ def _light_work_surface_candidates(image: np.ndarray) -> list[dict]:
         # A large white document can sit behind vertical sliders, floating
         # panels, or a left navigation gutter.  The connected component still
         # spans that obscured area, but its columns have poor white coverage.
-        # Keep the widest dense horizontal run so drawing starts on the actual
-        # work surface rather than under an overlay.
+        #
+        # Do *not* keep only the widest dense horizontal run.  Ordinary
+        # document content (table borders, handwriting, diagrams, game boards,
+        # charts, and code editor guides) can create low-light columns inside
+        # one perfectly valid surface.  Selecting the widest blank run then
+        # moves the coordinate contract away from the content as soon as the
+        # user edits it.  Only trim persistent occlusion at the *outer edges*;
+        # retain all gaps between the first and last substantial light runs.
         # Measure all near-white pixels inside the outer component's bounds,
         # not only pixels with this connected-component label.  Dark closed
         # marks (outlines, handwriting, diagrams) disconnect their white
@@ -543,10 +549,20 @@ def _light_work_surface_candidates(image: np.ndarray) -> list[dict]:
         if start is not None and cw - start >= max(24, int(cw * 0.08)):
             runs.append((start, cw))
         if runs:
-            run_start, run_end = max(runs, key=lambda run: run[1] - run[0])
-            if run_end - run_start >= max(80, int(cw * 0.35)):
-                x += run_start
-                cw = run_end - run_start
+            substantial = [
+                run for run in runs
+                if run[1] - run[0] >= max(24, int(cw * 0.08))
+            ]
+            if substantial:
+                span_start = substantial[0][0]
+                span_end = substantial[-1][1]
+                # Keep the connected component's outer evidence whenever the
+                # proposed span would be implausibly small.  Mutation callers
+                # can still fail closed later; this detector must not invent a
+                # blank sub-surface merely because content is present.
+                if span_end - span_start >= max(80, int(cw * 0.35)):
+                    x += span_start
+                    cw = span_end - span_start
         bbox = [int(x), int(y), int(x + cw), int(y + ch)]
         candidates.append({
             "bbox": bbox,

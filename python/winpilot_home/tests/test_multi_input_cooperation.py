@@ -678,6 +678,7 @@ def test_blocked_scroll_retry_cannot_be_promoted_by_screen_delta(monkeypatch):
     import numpy as np
 
     from winpilot.action import executor
+    from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
     from winpilot.agent.tools import ToolSession
     from winpilot.utils.screenshot import Region
@@ -714,6 +715,9 @@ def test_blocked_scroll_retry_cannot_be_promoted_by_screen_delta(monkeypatch):
             "error": "user took foreground ownership",
         },
     )
+    # This test isolates the retry/screen-delta contract.  Targetless spatial
+    # input is covered separately and now fails before reaching this layer.
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
     session = ToolSession(task="scroll target")
     session.world_enabled = False
     session._fast_gui_controller = Controller()

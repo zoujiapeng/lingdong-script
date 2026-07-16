@@ -11,6 +11,108 @@ def test_batch_observe_actions_are_allowed_or_internal():
     assert "vlm_describe" not in BATCH_OBSERVE_ACTIONS
 
 
+def test_batch_contract_exposes_real_continuous_input_primitives():
+    from winpilot.fast.action_contract import (
+        ALLOWED_BATCH_ACTIONS,
+        BATCH_MUTATING_ACTIONS,
+        validate_batch_actions,
+    )
+
+    assert {"mouse_down", "mouse_up", "hold_key"} <= ALLOWED_BATCH_ACTIONS
+    assert {"mouse_down", "mouse_up", "hold_key"} <= BATCH_MUTATING_ACTIONS
+    assert validate_batch_actions([
+        {"action": "move_mouse", "x": 100, "y": 120},
+        {"action": "mouse_down", "button": "left"},
+        {"action": "move_mouse", "x": 220, "y": 180},
+        {"action": "mouse_up", "button": "left"},
+        {"action": "hold_key", "keys": ["shift"], "duration_ms": 250},
+    ]) == []
+
+
+def test_batch_contract_rejects_unbalanced_or_unbounded_continuous_input():
+    from winpilot.fast.action_contract import validate_batch_actions
+
+    assert any("no matching mouse_up" in item for item in validate_batch_actions([
+        {"action": "mouse_down", "button": "left", "x": 10, "y": 20},
+        {"action": "move_mouse", "x": 30, "y": 40},
+    ]))
+    assert any("releases right" in item for item in validate_batch_actions([
+        {"action": "mouse_down", "button": "left", "x": 10, "y": 20},
+        {"action": "mouse_up", "button": "right", "x": 30, "y": 40},
+    ]))
+    assert any("duration_ms in 1..30000" in item for item in validate_batch_actions([
+        {"action": "hold_key", "keys": ["shift"], "duration_ms": 30_001},
+    ]))
+
+
+def test_controller_releases_held_pointer_when_transaction_aborts(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    cleanups = iter(([], ["left"]))
+    monkeypatch.setattr(
+        controller_mod.action_executor,
+        "release_held_mouse_buttons",
+        lambda: next(cleanups),
+    )
+
+    class Session:
+        hwnd = 17
+        run_id = "aborted-continuous-input"
+        snapshot = None
+        _screen_epoch = 1
+
+        def dispatch(self, name, _args):
+            if name == "move_mouse":
+                return ToolResult('{"ok": false, "error": "target moved"}')
+            return ToolResult('{"ok": true}')
+
+    result = FastGuiController(Session()).execute([
+        {"action": "mouse_down", "button": "left", "x": 100, "y": 120},
+        {"action": "move_mouse", "x": 220, "y": 180},
+        {"action": "mouse_up", "button": "left", "x": 220, "y": 180},
+    ], sync=False)
+
+    assert result["ok"] is False
+    assert result["failure_type"] == "CONTINUOUS_INPUT_ABORTED"
+    assert result["input_cleanup"]["released_mouse_buttons"] == ["left"]
+
+
+def test_controller_executes_continuous_input_sequence_in_one_batch(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    calls = []
+
+    class Session:
+        hwnd = 17
+        run_id = "continuous-input-batch"
+        snapshot = None
+        _screen_epoch = 1
+
+        def dispatch(self, name, args):
+            calls.append((name, dict(args)))
+            return ToolResult('{"ok": true}')
+
+    result = FastGuiController(Session()).execute([
+        {"action": "move_mouse", "x": 100, "y": 120},
+        {"action": "mouse_down", "button": "left"},
+        {"action": "move_mouse", "x": 220, "y": 180},
+        {"action": "mouse_up", "button": "left"},
+        {"action": "hold_key", "keys": ["shift"], "duration_ms": 250},
+    ], sync=False)
+
+    assert result["ok"] is True
+    assert [name for name, _args in calls] == [
+        "move_mouse", "mouse_down", "move_mouse", "mouse_up", "hold_key",
+    ]
+
+
 def test_changed_regions_are_screen_space():
     from winpilot.fast.vision import changed_regions, roi_point_to_screen, screen_point_to_roi
     from winpilot.utils.screenshot import Region
@@ -2041,6 +2143,31 @@ def test_fast_controller_fails_a_draw_action_when_pixels_do_not_change():
     assert out["controller_state"]["phase"] == "blocked"
     assert out["metrics"]["failed_at"] == 1
     assert out["results"][0]["error"] == "visual action produced no pixel change in its intended region"
+    assert out["results"][0]["data"]["failure_type"] == "DRAW_NO_VISIBLE_CHANGE"
+
+
+def test_fast_controller_classifies_no_effect_drag_as_generic_visual_failure():
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    class Session:
+        snapshot = None
+
+        def dispatch(self, name, _args):
+            if name == "drag":
+                return ToolResult(
+                    '{"ok": true, "verified": false, '
+                    '"visual_change_detected": false, "visual_change_ratio": 0.0}'
+                )
+            return ToolResult('{"ok": true}')
+
+    out = FastGuiController(Session()).execute([
+        {"drag": {"x1": 100, "y1": 100, "x2": 200, "y2": 200}},
+    ], sync=False)
+
+    assert out["ok"] is False
+    assert out["results"][0]["data"]["failure_type"] == "VISUAL_ACTION_NO_EFFECT"
+    assert out["results"][0]["data"]["failure_subtype"] == "source_or_target_not_confirmed"
 
 
 def test_batch_scope_guard_runs_before_controller_local_select_color(monkeypatch):
@@ -3344,6 +3471,13 @@ def test_input_locator_infers_custom_chat_composer_after_target_conversation_ope
         label="message",
         expected_region="bottom-right",
         task=f"use chat to talk with {target}",
+        communication_context={"active": True, "recipient": target},
+    )
+    untyped = locate_input(
+        snapshot,
+        label="message",
+        expected_region="bottom-right",
+        task=f"use chat to talk with {target}",
     )
 
     assert result.found is True
@@ -3351,6 +3485,57 @@ def test_input_locator_infers_custom_chat_composer_after_target_conversation_ope
     assert result.candidate.source == "synthetic_chat_composer"
     assert result.candidate.center[0] > 900
     assert result.candidate.center[1] > 850
+    assert all(
+        candidate.source != "synthetic_chat_composer"
+        for candidate in untyped.candidates
+    )
+
+
+def test_legacy_controller_communication_context_comes_from_typed_intent():
+    from winpilot.agent.tools import ToolSession
+
+    first = ToolSession(task="\u53d1\u7ed9\u6d4b\u8bd5\u8054\u7cfb\u4eba")
+    second = ToolSession(task="\u53d1\u9001\u7ed9\u6d4b\u8bd5\u8054\u7cfb\u4eba")
+    non_communication = ToolSession(task="\u6253\u5f00\u8bb0\u4e8b\u672c")
+    try:
+        assert first.communication_context == second.communication_context
+        assert first.communication_context["active"] is True
+        assert first.communication_context["recipient"] == "\u6d4b\u8bd5\u8054\u7cfb\u4eba"
+        assert non_communication.communication_context["active"] is False
+    finally:
+        first.close()
+        second.close()
+        non_communication.close()
+
+
+def test_tool_session_consumes_injected_contract_intent_without_reparsing(monkeypatch):
+    from winpilot.agent.runtime_profile import RuntimeProfile
+    from winpilot.agent.tools import ToolSession
+    from winpilot.tasking.intent import TaskIntentParser
+
+    monkeypatch.setattr(
+        TaskIntentParser,
+        "parse",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("typed ToolSession must not reparse raw task text")
+        ),
+    )
+    session = ToolSession(
+        task="this contradictory raw text says send to somebody else",
+        runtime_profile=RuntimeProfile(desktop=True, coding=False),
+        task_intent={
+            "original_text": "compiler-owned intent",
+            "operation": ["open"],
+            "channel": "",
+            "recipient": "",
+            "send_mode": "send",
+        },
+    )
+    try:
+        assert session.task_intent["original_text"] == "compiler-owned intent"
+        assert session.communication_context["active"] is False
+    finally:
+        session.close()
 
 
 def test_chat_composer_beats_old_message_text_that_says_input_box():
@@ -3375,6 +3560,7 @@ def test_chat_composer_beats_old_message_text_that_says_input_box():
         snapshot,
         label="input box",
         task=f"send a message to {target} and verify it in chat history",
+        communication_context={"active": True, "recipient": target},
     )
 
     assert result.found is True
@@ -7590,8 +7776,9 @@ def test_agent_tool_message_compacts_execute_subgoal_result():
     assert "[[1, 2], [3, 4]" not in content
 
 
-def test_fast_controller_select_color_clicks_visible_palette_swatch():
+def test_fast_controller_select_color_clicks_visible_palette_swatch(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent import scope_guard
     from winpilot.fast.controller import FastGuiController
     from winpilot.perception.fusion import Snapshot
     from winpilot.utils.screenshot import Region
@@ -7625,6 +7812,7 @@ def test_fast_controller_select_color_clicks_visible_palette_swatch():
             clicks.append(args)
             return ToolResult('{"ok": true}')
 
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
     controller = FastGuiController(Session(), capture_fn=lambda region: image)
     out = controller.execute([{"action": "select_color", "color": "blue"}], sync=False)
 
@@ -8536,11 +8724,13 @@ def test_typed_draw_colors_drive_palette_without_aesthetic_keyword_policy(monkey
 
 def test_select_color_prefers_target_hwnd_region_over_stale_snapshot(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent import scope_guard
     from winpilot.fast import controller as controller_mod
     from winpilot.fast.controller import FastGuiController
     from winpilot.perception.fusion import Snapshot
     from winpilot.utils.screenshot import Region
 
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
     target_region = Region(100, 200, 300, 220)
     monkeypatch.setattr(controller_mod, "window_region", lambda hwnd: target_region)
     image = np.full((220, 300, 3), 96, dtype=np.uint8)
@@ -8576,7 +8766,12 @@ def test_select_color_prefers_target_hwnd_region_over_stale_snapshot(monkeypatch
     out = controller.execute([{"action": "select_color", "color": "blue"}], sync=False)
 
     assert out["ok"] is True
-    assert captured_regions == [Region(100, 200, 300, 180)]
+    assert captured_regions[0] == Region(100, 200, 300, 180)
+    # The controller also captures the selected swatch ROI for local effect
+    # evidence instead of treating unrelated target-window pixels as progress.
+    assert len(captured_regions) == 2
+    assert captured_regions[1].width == 96
+    assert captured_regions[1].height == 96
     assert clicks
 
 
@@ -8747,10 +8942,12 @@ def test_stable_wait_condition_normalizes_to_bounded_screen_wait():
 
 def test_select_color_reuses_cached_palette_button(monkeypatch):
     from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent import scope_guard
     from winpilot.fast import controller as controller_mod
     from winpilot.fast.controller import FastGuiController
     from winpilot.utils.screenshot import Region
 
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
     target_region = Region(100, 200, 300, 220)
     monkeypatch.setattr(controller_mod, "window_region", lambda hwnd: target_region)
     closed_image = np.full((220, 300, 3), 96, dtype=np.uint8)
@@ -8808,6 +9005,89 @@ def test_select_color_reuses_cached_palette_button(monkeypatch):
     assert len(clicks) == 4
     assert clicks[0] == clicks[2]  # cached palette opener reused for red
     assert all(click.get("skip_screen_delta") is True for click in clicks)
+
+
+def test_wait_for_visual_change_uses_exact_explicit_roi():
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.utils.screenshot import Region
+
+    watched = []
+
+    class Watcher:
+        def wait_for_region_change(self, region, timeout_s, min_ratio):
+            watched.append((region, timeout_s, min_ratio))
+            return ScreenDelta(True, 0.12, [region], 4)
+
+        def status(self):
+            return {"running": False}
+
+    class Session:
+        hwnd = 11
+        run_id = "roi-wait"
+        snapshot = None
+
+    roi = {"x": 300, "y": 220, "width": 180, "height": 140}
+    controller = FastGuiController(
+        Session(), watcher=Watcher(),
+        capture_fn=lambda region: np.zeros((region.height, region.width, 3), dtype=np.uint8),
+    )
+    out = controller.execute([{
+        "action": "wait_for_visual_change",
+        "region": roi,
+        "timeout_s": 1.5,
+        "min_ratio": 0.01,
+    }], sync=False)
+
+    assert out["ok"] is True
+    assert watched[0][0] == Region(300, 220, 180, 140)
+    assert out["results"][0]["data"]["change_scope"] == "explicit_or_previous_action_roi"
+    assert out["results"][0]["data"]["wait_kind"] == "visual_change"
+
+
+def test_local_transaction_reuses_preceding_action_roi_for_visual_wait(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.fast.types import ScreenDelta
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    watched = []
+
+    class Watcher:
+        def wait_for_region_change(self, region, timeout_s, min_ratio):
+            watched.append(region)
+            return ScreenDelta(True, 0.2, [region], 2)
+
+        def status(self):
+            return {"running": False}
+
+    class Session:
+        hwnd = 12
+        run_id = "transaction-roi"
+        snapshot = None
+
+        def _t_click(self, _args):
+            return ToolResult('{"ok": true}')
+
+    controller = FastGuiController(
+        Session(), watcher=Watcher(),
+        capture_fn=lambda region: np.zeros((region.height, region.width, 3), dtype=np.uint8),
+    )
+    out = controller.execute([
+        {"action": "click", "x": 500, "y": 400},
+        {"action": "wait_for_visual_change", "timeout_s": 1.0},
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert watched
+    assert watched[0].left < 500 < watched[0].right
+    assert watched[0].top < 400 < watched[0].bottom
+    wait_data = out["results"][1]["data"]
+    assert wait_data["region"] == {
+        "x": watched[0].left, "y": watched[0].top,
+        "width": watched[0].width, "height": watched[0].height,
+    }
 
 
 def test_desktop_icon_drag_adjusts_drop_away_from_existing_icon():

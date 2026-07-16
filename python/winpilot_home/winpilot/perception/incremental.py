@@ -110,19 +110,25 @@ def analyze_changed_regions(
         "ocr" in enabled
         and bool(CONFIG.get("fusion", "predictive_ocr_enabled", default=True))
     ):
-        for image, region in crops:
-            recognized = ocr.recognize(
-                image,
-                origin=(region.left, region.top),
-            )
-            reconstructed = [*recognized, *merge_line_elements(recognized)]
-            for element in reconstructed:
-                for state in ("predictive_ocr", "incremental_perception"):
-                    if state not in element.states:
-                        element.states.append(state)
-                if metadata.get("transient") and "transient_action_evidence" not in element.states:
-                    element.states.append("transient_action_evidence")
-            ocr_elements.extend(reconstructed)
+        cancel_event = metadata.get("cancel_event")
+        with ocr.inference_scope("background", cancel_event=cancel_event):
+            for image, region in crops:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                recognized = ocr.recognize(
+                    image,
+                    origin=(region.left, region.top),
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                reconstructed = [*recognized, *merge_line_elements(recognized)]
+                for element in reconstructed:
+                    for state in ("predictive_ocr", "incremental_perception"):
+                        if state not in element.states:
+                            element.states.append(state)
+                    if metadata.get("transient") and "transient_action_evidence" not in element.states:
+                        element.states.append("transient_action_evidence")
+                ocr_elements.extend(reconstructed)
     snapshot.dim_stats["ocr"] = {
         "count": len(ocr_elements),
         "ms": int((time.monotonic() - started) * 1000),

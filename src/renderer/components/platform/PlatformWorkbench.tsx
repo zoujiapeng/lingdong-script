@@ -43,7 +43,19 @@ import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
-import type { AgentSchedule, ArpGraph, ChatGPTDesktopIntegration, GraphValidation, RunProjection, RuntimeEvent } from '../../platform/contracts';
+import type {
+  AgentSchedule,
+  ArpExecutionSnapshot,
+  ArpGraph,
+  ChatGPTDesktopIntegration,
+  GraphValidation,
+  InteractionActionState,
+  InteractionRuntimeState,
+  RunProjection,
+  RuntimeEvent,
+  StageRuntimeTrace,
+  TaskContract,
+} from '../../platform/contracts';
 import { wpsToFlowScript, type WpsScript } from '../../utils/wpsToFlowScript';
 import {
   automationIrFromFlowScript,
@@ -84,6 +96,11 @@ const EVENT_LABELS: Record<string, string> = {
   arp_child_run: '子任务', arp_evidence: '证据记录', screen_watch: '屏幕观察', screen_delta: '画面变化',
   task_stage_start: '阶段开始', task_stage_done: '阶段完成', task_stage_failed: '阶段失败',
   visual_feedback: '视觉反馈', visual_preflight: '执行前画面检查', done_check: '完成检查', run_state: '运行状态',
+  interaction_session_start: '互动会话开始', interaction_scene_bound: '目标场景已绑定',
+  interaction_protocol_inferred: '互动规则已推断', interaction_action_planned: '本轮动作已规划',
+  interaction_action_executed: '本轮动作已执行', interaction_local_effect_verified: '局部效果已验证',
+  interaction_wait_external_change: '等待外部变化', interaction_external_change: '检测到外部变化',
+  surface_binding: '交互区域绑定',
 };
 const TOOL_LABELS: Record<string, string> = {
   click: '点击', draw_strokes: '连续绘制', type_text: '输入文字', hotkey: '快捷键', scroll: '滚动',
@@ -115,6 +132,434 @@ function displayValue(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'string') return value;
   try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function latestEventWith(
+  events: RuntimeEvent[],
+  runId: string,
+  keys: string[],
+  types: string[] = [],
+): Record<string, unknown> | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (runId && event.run_id && event.run_id !== runId) continue;
+    if (types.length && !types.includes(event.type)) continue;
+    if (keys.some((key) => event[key] != null)) return event;
+  }
+  return null;
+}
+
+/**
+ * Build a backwards-compatible view of the live interaction state.
+ * New runtimes publish interaction_state directly; older/in-flight snapshots
+ * still get a useful view from the typed contract, current stage and events.
+ */
+export function interactionRuntimeView(
+  arp: ArpExecutionSnapshot | null,
+  events: RuntimeEvent[] = [],
+): InteractionRuntimeState | null {
+  const contract = arp?.task_contract;
+  const intent = contract?.intent.interaction;
+  const session = contract?.session;
+  const direct = recordValue(arp?.interaction_state) as InteractionRuntimeState | null;
+  const interactive = Boolean(direct || intent?.active || session);
+  if (!interactive) return null;
+
+  const runId = arp?.run_id || '';
+  const stateEvent = latestEventWith(events, runId, ['interaction_state']);
+  const eventState = recordValue(stateEvent?.interaction_state) as InteractionRuntimeState | null;
+  const state: InteractionRuntimeState = { ...(eventState || {}), ...(direct || {}) };
+  const currentStage = arp?.current_stage || null;
+  const currentParams = currentStage?.parameters || {};
+  const trace = (arp?.stage_trace || []).map(recordValue).filter(Boolean) as Array<Record<string, unknown>>;
+  const latestFailure = [...trace].reverse().find((item) => item.status === 'failed');
+  const latestVerification = [...trace].reverse().find((item) => item.stage_type === 'VerifyLocalEffect');
+  const latestWait = [...trace].reverse().find((item) => item.stage_type === 'WaitForExternalChange');
+
+  const targetEvent = latestEventWith(
+    events, runId, ['target_binding'], ['interaction_scene_bound', 'surface_binding', 'visual_preflight'],
+  );
+  const regionEvent = latestEventWith(
+    events, runId, ['interaction_region', 'region'], ['interaction_scene_bound', 'surface_binding', 'visual_preflight'],
+  );
+  const plannedEvent = latestEventWith(
+    events, runId, ['planned_action', 'action'], ['interaction_action_planned'],
+  );
+  const executedEvent = latestEventWith(
+    events, runId, ['executed_action', 'action'], ['interaction_action_executed'],
+  );
+  const verificationEvent = latestEventWith(
+    events, runId, ['local_verification', 'verified'], ['interaction_local_effect_verified'],
+  );
+  const externalEvent = latestEventWith(
+    events, runId, ['external_change', 'waiting', 'armed', 'changed'],
+    ['interaction_wait_external_change', 'interaction_external_change'],
+  );
+
+  const targetBinding = state.target_binding
+    || recordValue(targetEvent?.target_binding)
+    || (session?.target || intent?.target || currentParams.target
+      ? { source: String(session?.target || intent?.target || currentParams.target), status: 'declared' }
+      : null);
+  const eventRegion = recordValue(regionEvent?.interaction_region) || recordValue(regionEvent?.region);
+  const interactionRegion = state.interaction_region
+    || eventRegion
+    || (session?.interaction_region_ref || intent?.region_hint || currentParams.interaction_region_ref
+      ? {
+          label: String(session?.interaction_region_ref || currentParams.interaction_region_ref || 'interaction_region'),
+          source: String(intent?.region_hint || 'contract'),
+        }
+      : null);
+  const plannedAction = state.last_mutating_plan
+    ?? state.planned_action
+    ?? plannedEvent?.planned_action
+    ?? plannedEvent?.action
+    ?? null;
+  const executedAction = state.last_executed_action
+    ?? state.executed_action
+    ?? executedEvent?.executed_action
+    ?? executedEvent?.action
+    ?? null;
+  const localVerification = state.last_local_verification
+    || state.local_verification
+    || recordValue(verificationEvent?.local_verification)
+    || (verificationEvent
+      ? {
+          verified: verificationEvent.verified === true,
+          status: String(verificationEvent.status || ''),
+          reason: String(verificationEvent.reason || ''),
+          provider: String(verificationEvent.provider || ''),
+        }
+      : latestVerification
+        ? {
+            verified: latestVerification.status === 'done',
+            status: String(latestVerification.status || ''),
+            reason: String(latestVerification.error || latestVerification.failure_type || ''),
+          }
+        : null);
+  const externalChange = state.external_change
+    || recordValue(externalEvent?.external_change)
+    || (externalEvent
+      ? {
+          armed: externalEvent.armed === true || externalEvent.type === 'interaction_wait_external_change',
+          waiting: externalEvent.waiting === true || externalEvent.type === 'interaction_wait_external_change',
+          changed: externalEvent.changed === true || externalEvent.type === 'interaction_external_change',
+          status: String(externalEvent.status || ''),
+          watch_scope: String(externalEvent.watch_scope || ''),
+        }
+      : latestWait
+        ? {
+            armed: latestWait.status === 'done',
+            waiting: latestWait.status !== 'failed',
+            changed: false,
+            status: String(latestWait.status || ''),
+          }
+        : currentStage?.type === 'WaitForExternalChange'
+          ? { armed: true, waiting: true, changed: false, status: 'waiting' }
+          : null);
+  const directFailure = typeof state.failure_stage === 'string'
+    ? {
+        stage_id: String(state.current_stage_id || currentStage?.id || ''),
+        stage_type: String(currentStage?.type || ''),
+        failure_type: state.failure_stage,
+        error: '',
+      }
+    : state.failure_stage;
+  const failureStage = directFailure || (latestFailure ? {
+    stage_id: String(latestFailure.stage_id || ''),
+    stage_type: String(latestFailure.stage_type || ''),
+    failure_type: String(latestFailure.failure_type || 'stage_failed'),
+    error: String(latestFailure.error || ''),
+    recovery: recordValue(latestFailure.recovery) || String(latestFailure.recovery || ''),
+  } : null);
+  const stageBindings = [
+    ...(currentStage?.state_inputs || []),
+    ...(currentStage?.state_outputs || []),
+  ];
+
+  return {
+    ...state,
+    session_id: state.session_id || session?.session_id,
+    mode: state.mode || session?.mode || intent?.mode,
+    current_stage_id: state.current_stage_id || currentStage?.id,
+    target_binding: targetBinding,
+    interaction_region: interactionRegion,
+    turn_owner: state.turn_owner || intent?.turn_owner || session?.initial_turn_owner || 'unknown',
+    planned_action: plannedAction as InteractionActionState | string | null,
+    executed_action: executedAction as InteractionActionState | string | null,
+    local_verification: localVerification,
+    external_change: externalChange,
+    failure_stage: failureStage,
+    state_bindings: state.state_bindings?.length ? state.state_bindings : stageBindings,
+  };
+}
+
+function interactionActionLabel(value: InteractionActionState | string | null | undefined): string {
+  if (!value) return '待生成';
+  if (typeof value === 'string') return value;
+  const primary = value.summary || value.action || value.modality || value.status;
+  if (primary) {
+    const target = value.target ? ` → ${value.target}` : '';
+    return `${primary}${target}`;
+  }
+  return displayValue(value);
+}
+
+function regionLabel(region: InteractionRuntimeState['interaction_region']): string {
+  if (!region) return '尚未绑定';
+  const bounds = Array.isArray(region.bounds) && region.bounds.length === 4
+    ? `[${region.bounds.join(', ')}]`
+    : '';
+  return [region.label, bounds, region.coordinate_space].filter(Boolean).join(' · ') || '已绑定';
+}
+
+function turnOwnerLabel(owner?: string): string {
+  if (owner === 'agent' || owner === 'assistant') return '代理';
+  if (owner === 'user' || owner === 'human') return '用户';
+  return owner || '待推断';
+}
+
+function stringList(value: unknown, fallback: string[] = []): string[] {
+  if (!Array.isArray(value)) return fallback;
+  return value.map((item) => String(item)).filter(Boolean);
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function runtimeHistoryOutput(
+  arp: ArpExecutionSnapshot,
+  stageId: string,
+): Record<string, unknown> {
+  const record = [...(arp.history || [])].reverse().find((item) => {
+    const output = recordValue(item.output);
+    return item.kind === 'task_stage'
+      && String(output?.stage_id || item.node_id || '') === stageId;
+  });
+  return recordValue(record?.output) || {};
+}
+
+export interface StageRuntimeRow extends StageRuntimeTrace {
+  stage_name: string;
+  current: boolean;
+  evidence_count: number;
+  timing_reported: boolean;
+}
+
+/** Merge the executable contract with live trace/history without inventing success. */
+export function stageRuntimeRows(
+  contract: TaskContract,
+  arp: ArpExecutionSnapshot,
+): StageRuntimeRow[] {
+  const evidence = arp.contract_evidence?.records || [];
+  return contract.stages.map((stage) => {
+    const trace = (arp.stage_trace || []).find((item) => item.stage_id === stage.id);
+    const history = runtimeHistoryOutput(arp, stage.id);
+    const execution = stage.execution;
+    const current = stage.id === (arp.current_stage?.id || arp.current_node_id);
+    const value = (key: keyof StageRuntimeTrace): unknown => (
+      history[key] ?? trace?.[key]
+    );
+    const status = String(value('status') || (current ? 'running' : 'pending'));
+    return {
+      stage_id: stage.id,
+      stage_type: String(value('stage_type') || stage.type),
+      stage_name: stage.name,
+      current,
+      timing_reported: Boolean(trace || Object.keys(history).length),
+      status,
+      attempts: finiteNumber(trace?.attempts, finiteNumber(
+        [...(arp.history || [])].reverse().find((item) => item.node_id === stage.id)?.attempts,
+        0,
+      )),
+      tools: stringList(value('tools'), execution?.tools || []),
+      model_tools: stringList(value('model_tools'), execution?.model_tools || []),
+      controller_tools: stringList(value('controller_tools'), execution?.controller_tools || []),
+      required_capabilities: stringList(
+        value('required_capabilities'), execution?.required_capabilities || stage.required_capabilities,
+      ),
+      verifier_requirements: stringList(
+        value('verifier_requirements'), execution?.verifier_requirements || [],
+      ),
+      exposed_capabilities: stringList(
+        value('exposed_capabilities'), execution?.exposed_capabilities || [],
+      ),
+      missing_capabilities: stringList(
+        value('missing_capabilities'), execution?.missing_capabilities || [],
+      ),
+      satisfiable: value('satisfiable') == null
+        ? Boolean(execution?.satisfiable)
+        : value('satisfiable') === true,
+      adapter: String(value('adapter') || execution?.adapter || ''),
+      model_role: String(value('model_role') || execution?.model_role || 'none'),
+      artifact_id: String(value('artifact_id') || ''),
+      model_calls: finiteNumber(value('model_calls')),
+      model_elapsed_ms: finiteNumber(value('model_elapsed_ms')),
+      controller_elapsed_ms: finiteNumber(value('controller_elapsed_ms')),
+      capture_elapsed_ms: finiteNumber(value('capture_elapsed_ms')),
+      failure_type: String(value('failure_type') || ''),
+      recovery: (value('recovery') || {}) as Record<string, unknown> | string,
+      error: String(value('error') || ''),
+      interaction_state: (value('interaction_state') || {}) as Record<string, unknown>,
+      evidence_count: evidence.filter((item) => item.stage_id === stage.id).length,
+    };
+  });
+}
+
+function capabilityLabel(values: string[]): string {
+  return values.length ? values.join(', ') : '无';
+}
+
+function runtimeBudgetLabel(state: InteractionRuntimeState | null | undefined, contract: TaskContract): string {
+  const budget = state?.budget || {};
+  const session = contract.session;
+  const usedCalls = finiteNumber(budget.model_calls_used, finiteNumber(state?.model_calls));
+  const limitCalls = finiteNumber(budget.model_calls_limit, finiteNumber(session?.max_model_calls));
+  const usedTurns = finiteNumber(budget.semantic_turns_used, finiteNumber(state?.turn_index));
+  const limitTurns = finiteNumber(budget.semantic_turns_limit, finiteNumber(session?.max_semantic_turns));
+  const usedReplans = finiteNumber(budget.replans_used, finiteNumber(state?.replan_count));
+  const limitReplans = finiteNumber(budget.replans_limit, finiteNumber(session?.max_replans));
+  if (!session && !Object.keys(budget).length) return '非持续交互任务';
+  return `模型 ${usedCalls}/${limitCalls || '-'} · 轮次 ${usedTurns}/${limitTurns || '-'} · 重规划 ${usedReplans}/${limitReplans || '-'}`;
+}
+
+export function TaskRuntimeAuditPanel({
+  contract,
+  arp,
+}: {
+  contract: TaskContract;
+  arp: ArpExecutionSnapshot;
+}) {
+  const rows = stageRuntimeRows(contract, arp);
+  const artifacts = arp.artifacts?.artifacts || [];
+  const evidence = arp.contract_evidence?.records || [];
+  const completion = arp.completion_contract;
+  const active = rows.find((row) => row.current)
+    || [...rows].reverse().find((row) => row.status === 'done')
+    || rows[0];
+  const completionLabel = completion
+    ? completion.ok
+      ? `通过 ${completion.obligations.filter((item) => item.satisfied).length}/${completion.obligations.length}`
+      : `未通过 · 缺少 ${completion.missing.length}`
+    : `待验收 · ${contract.final_conditions.length} 项条件`;
+
+  return (
+    <div className="arp-runtime-audit" aria-label="任务运行时审计">
+      <div className="arp-runtime-audit-heading">
+        <div><ShieldCheck size={14} /><strong>执行路径、能力与验收证据</strong></div>
+        <StatusPill
+          status={completion?.ok ? 'done' : arp.status === 'failed' ? 'failed' : 'running'}
+          label={completionLabel}
+        />
+      </div>
+      <div className="arp-runtime-audit-summary">
+        <div><span>当前 typed stage</span><strong>{active ? `${active.stage_type} · ${active.stage_id}` : '无'}</strong></div>
+        <div>
+          <span>当前能力</span>
+          <strong>{active ? `${active.exposed_capabilities.length} 暴露 / ${active.required_capabilities.length + active.verifier_requirements.length} 必需` : '无'}</strong>
+          <small>{active?.missing_capabilities.length ? `缺失：${capabilityLabel(active.missing_capabilities)}` : '运行前可满足性已检查'}</small>
+        </div>
+        <div><span>执行预算</span><strong>{runtimeBudgetLabel(arp.interaction_state, contract)}</strong></div>
+        <div><span>Completion Contract</span><strong>{completionLabel}</strong><small>{completion?.reason || '等待所有 final condition 的精确证据'}</small></div>
+      </div>
+
+      <div className="arp-runtime-stage-list">
+        {rows.map((row) => {
+          const failed = row.status === 'failed' || Boolean(row.failure_type || row.error);
+          const recoveryLabel = typeof row.recovery === 'string'
+            ? row.recovery
+            : Object.keys(row.recovery || {}).length ? displayValue(row.recovery) : '';
+          const timing = row.timing_reported
+            ? `模型 ${row.model_elapsed_ms || 0}ms · Controller ${row.controller_elapsed_ms || 0}ms · Capture ${row.capture_elapsed_ms || 0}ms · ${row.model_calls} 次调用`
+            : '耗时尚未上报';
+          return (
+            <div className={`arp-runtime-stage ${row.current ? 'active' : ''} ${failed ? 'failed' : ''}`} key={row.stage_id}>
+              <div className="arp-runtime-stage-status">
+                {failed ? <XCircle size={14} /> : row.status === 'done' ? <CheckCircle2 size={14} /> : row.current ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}
+                <StatusPill status={failed ? 'failed' : row.status} label={failed ? '失败' : row.status} />
+              </div>
+              <div className="arp-runtime-stage-identity"><strong>{row.stage_name}</strong><code>{row.stage_type} · {row.stage_id}</code></div>
+              <div className="arp-runtime-stage-detail">
+                <span title={capabilityLabel(row.required_capabilities)}>阶段需要：{capabilityLabel(row.required_capabilities)}</span>
+                <span title={capabilityLabel(row.verifier_requirements)}>Verifier 需要：{capabilityLabel(row.verifier_requirements)}</span>
+                <span title={capabilityLabel(row.exposed_capabilities)}>当前暴露：{capabilityLabel(row.exposed_capabilities)}</span>
+                {row.missing_capabilities.length > 0 && <span className="danger">缺失：{capabilityLabel(row.missing_capabilities)}</span>}
+              </div>
+              <div className="arp-runtime-stage-detail">
+                <span>Controller：{row.controller_tools.join(', ') || 'local'}</span>
+                <span>Model：{row.model_tools.join(', ') || row.model_role || 'none'}</span>
+                <span>Adapter：{row.adapter || 'none'}</span>
+              </div>
+              <div className="arp-runtime-stage-detail">
+                <span aria-label={`${row.stage_id} timing`}>{timing}</span>
+                <span>Artifact：{row.artifact_id || '无'} · Evidence：{row.evidence_count}</span>
+                <span>尝试：{row.attempts || 0}</span>
+              </div>
+              {failed && (
+                <div className="arp-runtime-stage-error" role="alert">
+                  {row.failure_type || 'stage_failed'}{row.error ? `：${row.error}` : ''}
+                  {recoveryLabel ? ` · 恢复策略：${recoveryLabel}` : ''}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="arp-runtime-audit-columns">
+        <section aria-label="运行工件">
+          <div className="arp-runtime-subheading"><strong>Artifacts</strong><span>{arp.artifacts?.count ?? artifacts.length}</span></div>
+          {artifacts.length ? artifacts.map((artifact) => (
+            <div className="arp-runtime-record" key={artifact.artifact_id}>
+              <div><code>{artifact.artifact_id}</code><StatusPill status={artifact.sendable ? 'done' : 'provisional'} label={artifact.sendable ? '可发送' : '观察帧'} /></div>
+              <span>{artifact.purpose} · {artifact.mime_type} · {artifact.width}×{artifact.height} · {artifact.size_bytes} B</span>
+              <span>{artifact.source_window || '未知来源窗口'}{artifact.source_scope ? ` · ${artifact.source_scope}` : ''}</span>
+              <small title={artifact.sha256}>sha256 {artifact.sha256.slice(0, 16)}… · {formatTime(artifact.created_at)}</small>
+            </div>
+          )) : <EmptyState icon={Database} title="尚无运行工件" />}
+        </section>
+        <section aria-label="合同证据">
+          <div className="arp-runtime-subheading"><strong>Evidence</strong><span>{arp.contract_evidence?.count ?? evidence.length}</span></div>
+          {evidence.length ? [...evidence].reverse().slice(0, 12).map((item) => (
+            <div className={`arp-runtime-record ${item.verified ? 'verified' : 'rejected'}`} key={item.id}>
+              <div><code>{item.predicate}</code><StatusPill status={item.verified ? 'done' : 'failed'} label={item.verified ? '已验证' : '未验证'} /></div>
+              <span>{item.provider || item.source} · stage {item.stage_id || '-'}</span>
+              <span>artifact {item.artifact_id || '-'}{item.recipient ? ` · recipient ${item.recipient}` : ''}</span>
+              <small>{item.id} · {formatTime(item.captured_at)}</small>
+            </div>
+          )) : <EmptyState icon={ShieldCheck} title="尚无合同证据" />}
+        </section>
+        <section aria-label="完成合同">
+          <div className="arp-runtime-subheading"><strong>Completion Contract</strong><span>{completion?.obligations.length ?? contract.final_conditions.length}</span></div>
+          {(completion?.obligations || contract.obligations).length ? (completion?.obligations || contract.obligations).map((raw, index) => {
+            const item = recordValue(raw) || {};
+            const id = String(item.obligation_id || item.id || contract.final_conditions[index] || `condition-${index + 1}`);
+            const satisfied = item.satisfied === true;
+            const declaredProviders = Array.isArray(item.evidence_providers)
+              ? item.evidence_providers.map((provider) => String(recordValue(provider)?.id || '')).filter(Boolean)
+              : [];
+            return (
+              <div className={`arp-runtime-record ${satisfied ? 'verified' : ''}`} key={id}>
+                <div><code>{id}</code><StatusPill status={satisfied ? 'done' : completion ? 'failed' : 'queued'} label={satisfied ? '满足' : completion ? '缺失' : '待证据'} /></div>
+                <span>{String(item.description || item.predicate || '')}</span>
+                <span>stage {String(item.stage_id || '-')} · provider {String(item.provider || declaredProviders.join(', ') || '-')}</span>
+                <small>evidence {String(item.evidence_id || '-')} · artifact {String(item.artifact_id || item.artifact_ref || '-')}</small>
+              </div>
+            );
+          }) : <EmptyState icon={ShieldCheck} title="合同未声明完成条件" />}
+          {completion?.contract_errors.map((error) => <div className="arp-runtime-contract-error" role="alert" key={error}>{error}</div>)}
+        </section>
+      </div>
+    </div>
+  );
 }
 
 function statusTone(status?: string): string {
@@ -199,6 +644,103 @@ function PhaseRail({ run }: { run: RunProjection | null }) {
   );
 }
 
+export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeState }) {
+  const target = state.target_binding;
+  const region = state.interaction_region;
+  const verification = state.local_verification;
+  const external = state.external_change;
+  const failure = typeof state.failure_stage === 'string'
+    ? { failure_type: state.failure_stage }
+    : state.failure_stage;
+  const targetName = String(target?.title || target?.app || target?.source || '尚未绑定');
+  const targetMeta = [
+    target?.hwnd ? `hwnd ${target.hwnd}` : '',
+    target?.capture_scope ? String(target.capture_scope) : '',
+    target?.frame_id != null ? `frame ${target.frame_id}` : state.frame_id != null ? `frame ${state.frame_id}` : '',
+  ].filter(Boolean).join(' · ');
+  const regionMeta = [
+    region?.policy ? String(region.policy) : '',
+    typeof region?.confidence === 'number' ? `置信度 ${Math.round(region.confidence * 100)}%` : '',
+    region?.generation != null ? `generation ${region.generation}` : '',
+  ].filter(Boolean).join(' · ');
+  const verificationLabel = verification?.verified === true
+    ? '已通过'
+    : verification?.verified === false
+      ? '未通过'
+      : verification?.status || '待验证';
+  const externalLabel = external?.changed
+    ? '已检测到外部变化'
+    : external?.waiting || external?.armed
+      ? '等待外部变化'
+      : external?.status || '尚未布防';
+  const bindingNames = (state.state_bindings || []).map((item) => item.name).join(', ');
+
+  return (
+    <div className="arp-interaction-runtime" aria-label="实时视觉互动闭环">
+      <div className="arp-interaction-heading">
+        <div><Radio size={14} /><strong>实时视觉互动闭环</strong></div>
+        <div>
+          {state.session_id && <code>{state.session_id}</code>}
+          <StatusPill
+            status={failure ? 'failed' : state.status || (external?.waiting ? 'running' : 'provisional')}
+            label={failure ? '阶段失败' : state.status || state.mode || '已编译'}
+          />
+        </div>
+      </div>
+      <div className="arp-interaction-grid">
+        <div className="arp-interaction-card">
+          <span>目标绑定</span><strong>{targetName}</strong>
+          <small>{targetMeta || target?.status || '等待权威目标帧'}</small>
+        </div>
+        <div className="arp-interaction-card">
+          <span>交互区域</span><strong>{regionLabel(region)}</strong>
+          <small>{regionMeta || region?.blocked_reason || '等待局部区域绑定'}</small>
+        </div>
+        <div className="arp-interaction-card">
+          <span>当前轮次</span><strong>{turnOwnerLabel(state.turn_owner)}</strong>
+          <small>{state.mode || '待推断互动模式'}</small>
+        </div>
+        <div className="arp-interaction-card">
+          <span>计划动作</span><strong>{interactionActionLabel(state.planned_action)}</strong>
+          <small>{state.current_stage_id || '等待动作规划'}</small>
+        </div>
+        <div className="arp-interaction-card">
+          <span>已执行动作</span><strong>{interactionActionLabel(state.executed_action)}</strong>
+          <small>{typeof state.executed_action === 'object' && state.executed_action?.transaction_id
+            ? `transaction ${state.executed_action.transaction_id}` : '尚无已验证事务'}</small>
+        </div>
+        <div className={`arp-interaction-card ${verification?.verified === false ? 'danger' : verification?.verified ? 'success' : ''}`}>
+          <span>局部验证</span><strong>{verificationLabel}</strong>
+          <small>{verification?.reason || verification?.provider || '只接受绑定区域内的新鲜证据'}</small>
+        </div>
+        <div className={`arp-interaction-card ${external?.waiting ? 'active' : ''}`}>
+          <span>外部变化</span><strong>{externalLabel}</strong>
+          <small>{external?.watch_scope || '绑定交互区域'}</small>
+        </div>
+        <div className="arp-interaction-card">
+          <span>会话状态</span><strong>{state.status || '已编译'}</strong>
+          <small>{state.model_calls ?? 0} 次模型调用{bindingNames ? ` · ${bindingNames}` : ''}</small>
+        </div>
+      </div>
+      {(state.baseline_artifact_id || state.current_artifact_id) && (
+        <div className="arp-interaction-artifacts">
+          <span>基线帧 <code>{state.baseline_artifact_id || '-'}</code></span>
+          <span>当前帧 <code>{state.current_artifact_id || '-'}</code></span>
+        </div>
+      )}
+      {failure && (
+        <div className="arp-interaction-failure" role="alert">
+          <XCircle size={14} />
+          <div>
+            <strong>{failure.stage_id || '未知阶段'} · {failure.stage_type || 'StageRuntime'}</strong>
+            <span>{failure.failure_type || 'stage_failed'}{failure.error ? `：${failure.error}` : ''}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
@@ -208,8 +750,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const run = plane.currentRun;
   const arp = plane.arpSnapshot;
   const taskContract = arp?.task_contract || null;
-  const managedArtifacts = arp?.artifacts?.artifacts || [];
-  const activeStage = taskContract?.stages.find((stage) => stage.id === (arp?.current_stage?.id || run?.current_node_id));
+  const interactionRuntime = useMemo(() => interactionRuntimeView(arp, plane.events), [arp, plane.events]);
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
   const runtimeIssue = plane.runtimeIssue;
   const modelProfile = (plane.overview?.status as any)?.model_profile;
@@ -307,29 +848,8 @@ function AgentCockpit({ plane }: { plane: Plane }) {
             <span>工件类型</span><code>{taskContract.intent.media_type}</code>
             <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp?.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
           </div>
-          <div className="arp-stage-list">
-            {taskContract.stages.map((stage) => {
-              const current = stage.id === activeStage?.id;
-              const done = Boolean((arp?.history as Array<Record<string, unknown>> | undefined)?.some((item) => item.node_id === stage.id && item.ok === true));
-              return (
-                <div className={`arp-stage-row ${current ? 'active' : ''}`} key={stage.id}>
-                  {done ? <CheckCircle2 size={14} /> : current ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}
-                  <div><strong>{stage.name}</strong><span>{stage.type}</span></div>
-                  <code title={`Controller: ${stage.execution?.controller_tools.join(', ') || 'local'}`}>
-                    {stage.execution?.model_tools.length
-                      ? `LLM: ${stage.execution.model_tools.join(', ')}`
-                      : `Controller: ${stage.execution?.controller_tools.join(', ') || 'local'}`}
-                  </code>
-                  <span>{stage.execution?.adapter || stage.execution?.model_role || 'controller'}</span>
-                </div>
-              );
-            })}
-          </div>
-          {managedArtifacts.length > 0 && <div className="arp-artifact-strip">
-            {managedArtifacts.map((artifact) => (
-              <div key={artifact.artifact_id}><code>{artifact.artifact_id}</code><span>{artifact.mime_type} · {artifact.width}×{artifact.height} · {artifact.size_bytes} B</span><span>{artifact.source_window}</span></div>
-            ))}
-          </div>}
+          {interactionRuntime && <InteractionRuntimePanel state={interactionRuntime} />}
+          {arp && <TaskRuntimeAuditPanel contract={taskContract} arp={arp} />}
           {!taskContract.satisfiable && <div className="arp-inline-error"><XCircle size={14} />{taskContract.missing_capabilities.join(', ')}</div>}
         </section>
       )}

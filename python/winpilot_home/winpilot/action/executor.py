@@ -1441,16 +1441,39 @@ def mouse_down(button: str = "left", hwnd: int | None = None) -> dict:
     cooperative_block = cooperative_input_guard("mouse_down", hwnd)
     if cooperative_block is not None:
         return cooperative_block
-    if button == "left":
-        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_LEFTDOWN)])
-    elif button == "right":
-        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_RIGHTDOWN)])
-    elif button == "middle":
-        _send_inputs([_mouse_input(win32con.MOUSEEVENTF_MIDDLEDOWN)])
-    else:
+    flags = {
+        "left": win32con.MOUSEEVENTF_LEFTDOWN,
+        "right": win32con.MOUSEEVENTF_RIGHTDOWN,
+        "middle": win32con.MOUSEEVENTF_MIDDLEDOWN,
+    }
+    if button not in flags:
         return {"ok": False, "error": f"未知鼠标键: {button}"}
     with _held_mouse_lock:
+        if button in _held_mouse_buttons:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "button": button,
+                "error": "mouse button is already held by this agent transaction",
+            }
+        # Record ownership before injection so an exception immediately after
+        # SendInput can still be recovered by the Controller/session cleanup.
         _held_mouse_buttons.add(button)
+    try:
+        _send_inputs([_mouse_input(flags[button])])
+    except Exception:
+        release_flag = {
+            "left": win32con.MOUSEEVENTF_LEFTUP,
+            "right": win32con.MOUSEEVENTF_RIGHTUP,
+            "middle": win32con.MOUSEEVENTF_MIDDLEUP,
+        }[button]
+        try:
+            _send_inputs([_mouse_input(release_flag)])
+        finally:
+            with _held_mouse_lock:
+                _held_mouse_buttons.discard(button)
+        raise
     press_sampled = _sample_pressed_state()
     BUS.publish("action", action="mouse_down", button=button)
     return {"ok": True, "button": button, "press_sampled": press_sampled}
@@ -1463,16 +1486,16 @@ def mouse_up(button: str = "left") -> dict:
         return {"ok": True, "dry_run": True}
     with _held_mouse_lock:
         owned_by_agent = button in _held_mouse_buttons
-    if multi_input_cooperation_enabled() and not owned_by_agent:
+    if not owned_by_agent:
         return {
             "ok": False,
             "verified": False,
             "blocked": True,
-            "cooperative_input": True,
+            "cooperative_input": multi_input_cooperation_enabled(),
             "action": "mouse_up",
             "error": (
-                "cooperative input will not release a globally held mouse button "
-                "unless this agent previously pressed that button"
+                "mouse_up will not release a globally held mouse button unless "
+                "this agent transaction previously pressed that button"
             ),
         }
     if button == "left":
@@ -1487,6 +1510,12 @@ def mouse_up(button: str = "left") -> dict:
         _held_mouse_buttons.discard(button)
     BUS.publish("action", action="mouse_up", button=button)
     return {"ok": True, "button": button}
+
+
+def agent_holds_mouse_button(button: str = "left") -> bool:
+    """Return whether the current process owns a matching injected press."""
+    with _held_mouse_lock:
+        return str(button or "left") in _held_mouse_buttons
 
 
 def release_held_mouse_buttons() -> list[str]:
@@ -1571,6 +1600,7 @@ def hold_keys(
     keys: list[str],
     duration_ms: int,
     hwnd: int | None = None,
+    stop_event=None,
 ) -> dict:
     """Press and hold a chord for ``duration_ms`` then release.
 
@@ -1579,6 +1609,14 @@ def hold_keys(
     """
     if _dry_run():
         return {"ok": True, "dry_run": True}
+    try:
+        duration_ms = int(duration_ms)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "duration_ms must be an integer in 1..30000"}
+    if not keys:
+        return {"ok": False, "error": "hold_keys requires at least one key"}
+    if not 1 <= duration_ms <= 30_000:
+        return {"ok": False, "error": "duration_ms must be in 1..30000"}
     cooperative_block = cooperative_input_guard("hold_keys", hwnd)
     if cooperative_block is not None:
         return cooperative_block
@@ -1599,6 +1637,9 @@ def hold_keys(
             interval = min(0.025, remaining_s)
             time.sleep(interval)
             remaining_s -= interval
+            if stop_event is not None and stop_event.is_set():
+                interrupted = True
+                break
             if not _cooperative_action_still_owned(hwnd):
                 interrupted = True
                 break
@@ -1610,6 +1651,7 @@ def hold_keys(
             "verified": False,
             "blocked": True,
             "cooperative_input": True,
+            "canceled": bool(stop_event is not None and stop_event.is_set()),
             "keys": keys,
             "duration_ms": duration_ms,
             "error": "key hold stopped because foreground ownership changed",

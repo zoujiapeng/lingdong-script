@@ -39,6 +39,35 @@ def test_observe_reuses_cache_for_same_epoch(monkeypatch):
     assert "cache" in session.snapshot.dim_stats
 
 
+def test_controller_structured_observe_override_reaches_fusion(monkeypatch):
+    session = ToolSession(task="send an artifact through a visual chat client")
+    monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
+    monkeypatch.setattr(session, "_remember_target", lambda hwnd=None, hint="": None)
+    monkeypatch.setattr(session, "_visual_state_summary", lambda hwnd: "")
+    monkeypatch.setattr(session, "_capture_window_b64", lambda hwnd: "")
+    monkeypatch.setattr(session, "_perception_mode", lambda: "visual")
+    monkeypatch.setattr("winpilot.agent.perception_tools.CONFIG.get", lambda *a, **k: 0.0)
+    observed: list[dict] = []
+
+    def fake_observe(_hwnd, **kwargs):
+        observed.append(kwargs)
+        return _snapshot()
+
+    monkeypatch.setattr("winpilot.agent.perception_tools.fusion.observe", fake_observe)
+
+    session._t_observe({
+        "full": True,
+        "include_icons": False,
+        "_controller_perception_mode": "structured_ui",
+    })
+
+    assert observed == [{
+        "include_icons": False,
+        "perception_mode": "structured_ui",
+        "stop_event": session.stop_event,
+    }]
+
+
 def test_observe_includes_fast_screen_bulletin_when_available(monkeypatch):
     session = ToolSession(task="demo")
     monkeypatch.setattr(session, "_resolve_hwnd", lambda args: 123)
@@ -520,6 +549,8 @@ def test_observe_changed_only_uses_recent_roi_after_screen_stabilizes(monkeypatc
 
 
 def test_mutating_dispatch_invalidates_observe_cache(monkeypatch):
+    from winpilot.agent import scope_guard
+
     session = ToolSession(task="demo")
     key = (123, True, "normal", session._screen_epoch)
     session.store_observe_cache(key, _snapshot())
@@ -531,6 +562,9 @@ def test_mutating_dispatch_invalidates_observe_cache(monkeypatch):
         "terminal": None,
         "summary": "",
     })())
+    # Keep this cache test independent from the target-scope precondition;
+    # dedicated scope tests prove that targetless clicks are rejected.
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
 
     session.dispatch("click", {"x": 1, "y": 1, "skip_screen_delta": True})
 

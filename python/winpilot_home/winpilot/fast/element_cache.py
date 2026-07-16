@@ -410,6 +410,13 @@ class ElementCache:
             candidates=[_candidate_trace(e, s) for e, s in candidates[:5]],
         )
 
+    def clear(self) -> None:
+        """Discard every anchor and statistic owned by the current lease."""
+        self._items.clear()
+        self._hits = 0
+        self._misses = 0
+        self._stale = 0
+
     def stats(self) -> dict:
         return {
             "entries": len(self._items),
