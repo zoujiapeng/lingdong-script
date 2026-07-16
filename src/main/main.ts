@@ -1,5 +1,6 @@
 ﻿import { app, BrowserWindow, globalShortcut, ipcMain, dialog, desktopCapturer, Menu, Notification } from 'electron';
 import * as path from 'path';
+import { nativeTheme } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomBytes } from 'crypto';
@@ -303,6 +304,9 @@ function launchTarget(target: string): void {
 
 function createWindow() {
   const startMinimized = process.argv.includes('--minimized');
+  const initialTitleBar = nativeTheme.shouldUseDarkColors
+    ? { color: '#202629', symbolColor: '#edf2f3', height: 36 }
+    : { color: '#ffffff', symbolColor: '#172126', height: 36 };
 
   setMainWindow(new BrowserWindow({
     width: 900,
@@ -312,6 +316,11 @@ function createWindow() {
     center: true,
     title: '灵动脚本',
     backgroundColor: '#eef2f8',
+    ...(process.platform === 'win32' ? {
+      titleBarStyle: 'hidden' as const,
+      titleBarOverlay: initialTitleBar,
+      autoHideMenuBar: true,
+    } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -500,6 +509,15 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 
 ipcMain.on('state:response', (_, state) => {
   _cachedRendererState = state;
+});
+
+ipcMain.handle('window:set-titlebar-theme', (_, theme: 'light' | 'dark') => {
+  const window = mainWindow;
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) return false;
+  window.setTitleBarOverlay(theme === 'dark'
+    ? { color: '#202629', symbolColor: '#edf2f3', height: 36 }
+    : { color: '#ffffff', symbolColor: '#172126', height: 36 });
+  return true;
 });
 
 ipcMain.handle('dialog:openFile', async (_, filters?: { name: string; extensions: string[] }[]) => {

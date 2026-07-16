@@ -370,7 +370,8 @@ export function stageRuntimeRows(
   arp: ArpExecutionSnapshot,
 ): StageRuntimeRow[] {
   const evidence = arp.contract_evidence?.records || [];
-  return contract.stages.map((stage) => {
+  const stages = Array.isArray(contract.stages) ? contract.stages : [];
+  return stages.map((stage) => {
     const trace = (arp.stage_trace || []).find((item) => item.stage_id === stage.id);
     const history = runtimeHistoryOutput(arp, stage.id);
     const execution = stage.execution;
@@ -483,14 +484,18 @@ export function TaskRuntimeAuditPanel({
   const artifacts = arp.artifacts?.artifacts || [];
   const evidence = arp.contract_evidence?.records || [];
   const completion = arp.completion_contract;
+  const completionObligations = Array.isArray(completion?.obligations) ? completion.obligations : [];
+  const completionMissing = Array.isArray(completion?.missing) ? completion.missing : [];
+  const finalConditions = stringList(contract?.final_conditions);
+  const contractErrors = stringList(completion?.contract_errors);
   const active = rows.find((row) => row.current)
     || [...rows].reverse().find((row) => row.status === 'done')
     || rows[0];
   const completionLabel = completion
     ? completion.ok
-      ? `通过 ${completion.obligations.filter((item) => item.satisfied).length}/${completion.obligations.length}`
-      : `未通过 · 缺少 ${completion.missing.length}`
-    : `待验收 · ${contract?.final_conditions.length || 0} 项条件`;
+      ? `通过 ${completionObligations.filter((item) => item.satisfied).length}/${completionObligations.length}`
+      : `未通过 · 缺少 ${completionMissing.length}`
+    : `待验收 · ${finalConditions.length} 项条件`;
 
   return (
     <div className="arp-runtime-audit" aria-label="任务运行时审计">
@@ -513,7 +518,7 @@ export function TaskRuntimeAuditPanel({
       </div>
 
       <div className="arp-runtime-stage-list">
-        {rows.map((row) => {
+        {rows.map((row, rowIndex) => {
           const failed = row.status === 'failed' || Boolean(row.failure_type || row.error);
           const recoveryLabel = typeof row.recovery === 'string'
             ? row.recovery
@@ -525,7 +530,7 @@ export function TaskRuntimeAuditPanel({
             row.selected_evidence_providers || {},
           ).map(([predicate, provider]) => `${predicate} → ${provider}`).join(', ');
           return (
-            <div className={`arp-runtime-stage ${row.current ? 'active' : ''} ${failed ? 'failed' : ''}`} key={row.stage_id}>
+            <div className={`arp-runtime-stage ${row.current ? 'active' : ''} ${failed ? 'failed' : ''}`} key={`${row.stage_id}-${rowIndex}`}>
               <div className="arp-runtime-stage-status">
                 {failed ? <XCircle size={14} /> : row.status === 'done' ? <CheckCircle2 size={14} /> : row.current ? <Loader2 size={14} className="arp-spin" /> : <Clock3 size={14} />}
                 <StatusPill status={failed ? 'failed' : row.status} label={failed ? '失败' : row.status} />
@@ -562,8 +567,8 @@ export function TaskRuntimeAuditPanel({
       <div className="arp-runtime-audit-columns">
         <section aria-label="运行工件">
           <div className="arp-runtime-subheading"><strong>Artifacts</strong><span>{arp.artifacts?.count ?? artifacts.length}</span></div>
-          {artifacts.length ? artifacts.map((artifact) => (
-            <div className="arp-runtime-record" key={artifact.artifact_id}>
+          {artifacts.length ? artifacts.map((artifact, artifactIndex) => (
+            <div className="arp-runtime-record" key={`${artifact.artifact_id}-${artifactIndex}`}>
               {artifactUrl && artifact.mime_type.startsWith('image/') && (
                 <img
                   className="arp-artifact-thumbnail"
@@ -581,8 +586,8 @@ export function TaskRuntimeAuditPanel({
         </section>
         <section aria-label="合同证据">
           <div className="arp-runtime-subheading"><strong>Evidence</strong><span>{arp.contract_evidence?.count ?? evidence.length}</span></div>
-          {evidence.length ? [...evidence].reverse().slice(0, 12).map((item) => (
-            <div className={`arp-runtime-record ${item.verified ? 'verified' : 'rejected'}`} key={item.id}>
+          {evidence.length ? [...evidence].reverse().slice(0, 12).map((item, evidenceIndex) => (
+            <div className={`arp-runtime-record ${item.verified ? 'verified' : 'rejected'}`} key={`${item.id}-${evidenceIndex}`}>
               <div><code>{item.predicate}</code><StatusPill status={item.verified ? 'done' : 'failed'} label={item.verified ? '已验证' : '未验证'} /></div>
               <span>{item.provider || item.source} · stage {item.stage_id || '-'}</span>
               <span>artifact {item.artifact_id || '-'}{item.recipient ? ` · recipient ${item.recipient}` : ''}</span>
@@ -591,16 +596,16 @@ export function TaskRuntimeAuditPanel({
           )) : <EmptyState icon={ShieldCheck} title="尚无合同证据" />}
         </section>
         <section aria-label="完成合同">
-          <div className="arp-runtime-subheading"><strong>Completion Contract</strong><span>{completion?.obligations.length ?? contract?.final_conditions.length ?? 0}</span></div>
-          {(completion?.obligations || contract?.obligations || []).length ? (completion?.obligations || contract?.obligations || []).map((raw, index) => {
+          <div className="arp-runtime-subheading"><strong>Completion Contract</strong><span>{completionObligations.length || finalConditions.length}</span></div>
+          {(completionObligations.length ? completionObligations : contract?.obligations || []).length ? (completionObligations.length ? completionObligations : contract?.obligations || []).map((raw, index) => {
             const item = recordValue(raw) || {};
-            const id = String(item.obligation_id || item.id || contract?.final_conditions[index] || `condition-${index + 1}`);
+            const id = String(item.obligation_id || item.id || finalConditions[index] || `condition-${index + 1}`);
             const satisfied = item.satisfied === true;
             const declaredProviders = Array.isArray(item.evidence_providers)
               ? item.evidence_providers.map((provider) => String(recordValue(provider)?.id || '')).filter(Boolean)
               : [];
             return (
-              <div className={`arp-runtime-record ${satisfied ? 'verified' : ''}`} key={id}>
+              <div className={`arp-runtime-record ${satisfied ? 'verified' : ''}`} key={`${id}-${index}`}>
                 <div><code>{id}</code><StatusPill status={satisfied ? 'done' : completion ? 'failed' : 'queued'} label={satisfied ? '满足' : completion ? '缺失' : '待证据'} /></div>
                 <span>{String(item.description || item.predicate || '')}</span>
                 <span>stage {String(item.stage_id || '-')} · provider {String(item.provider || declaredProviders.join(', ') || '-')}</span>
@@ -608,7 +613,7 @@ export function TaskRuntimeAuditPanel({
               </div>
             );
           }) : <EmptyState icon={ShieldCheck} title="合同未声明完成条件" />}
-          {completion?.contract_errors.map((error) => <div className="arp-runtime-contract-error" role="alert" key={error}>{error}</div>)}
+          {contractErrors.map((error, errorIndex) => <div className="arp-runtime-contract-error" role="alert" key={`${error}-${errorIndex}`}>{error}</div>)}
         </section>
       </div>
     </div>
@@ -804,10 +809,16 @@ function TaskContractRuntimeSection({
   artifactUrl?: (artifactId: string) => string;
 }) {
   const taskContract = arp.task_contract;
+  const taskIntent = recordValue(taskContract?.intent) || {};
+  const operations = stringList(taskIntent.operation);
+  const missingCapabilities = stringList(taskContract?.missing_capabilities);
+  const contractSatisfiable = Boolean(taskContract)
+    && taskContract?.satisfiable !== false
+    && missingCapabilities.length === 0;
   const hasPersistedAudit = Boolean(
     arp.stage_trace?.length
-    || arp.artifacts?.artifacts.length
-    || arp.contract_evidence?.records.length
+    || arp.artifacts?.artifacts?.length
+    || arp.contract_evidence?.records?.length
     || arp.completion_contract,
   );
   const interactionRuntime = useMemo(
@@ -821,16 +832,16 @@ function TaskContractRuntimeSection({
       <div className="arp-panel-heading">
         <div><Network size={15} /><strong>{taskContract ? '任务合同与阶段运行时' : '历史阶段运行时与证据'}</strong></div>
         <StatusPill
-          status={taskContract ? (taskContract.satisfiable ? 'done' : 'failed') : arp.completion_contract?.ok ? 'done' : arp.status}
-          label={taskContract ? (taskContract.satisfiable ? '能力可满足' : '能力缺失') : '由持久化 trace 恢复'}
+          status={taskContract ? (contractSatisfiable ? 'done' : 'failed') : arp.completion_contract?.ok ? 'done' : arp.status}
+          label={taskContract ? (contractSatisfiable ? '能力可满足' : '能力缺失') : '由持久化 trace 恢复'}
         />
       </div>
       {taskContract ? (
         <div className="arp-contract-summary">
-          <span>意图</span><code>{taskContract.intent.operation.join(' → ') || 'semantic'}</code>
-          <span>通道</span><code>{taskContract.intent.channel || '-'}</code>
-          <span>接收方</span><code>{taskContract.intent.recipient || '-'}</code>
-          <span>工件类型</span><code>{taskContract.intent.media_type}</code>
+          <span>意图</span><code>{operations.join(' → ') || 'semantic'}</code>
+          <span>通道</span><code>{String(taskIntent.channel || '-')}</code>
+          <span>接收方</span><code>{String(taskIntent.recipient || '-')}</code>
+          <span>工件类型</span><code>{String(taskIntent.media_type || 'unknown')}</code>
           <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
         </div>
       ) : (
@@ -838,7 +849,7 @@ function TaskContractRuntimeSection({
       )}
       {interactionRuntime && <InteractionRuntimePanel state={interactionRuntime} />}
       <TaskRuntimeAuditPanel contract={taskContract || undefined} arp={arp} artifactUrl={artifactUrl} />
-      {taskContract && !taskContract.satisfiable && <div className="arp-inline-error"><XCircle size={14} />{taskContract.missing_capabilities.join(', ')}</div>}
+      {taskContract && !contractSatisfiable && <div className="arp-inline-error"><XCircle size={14} />{missingCapabilities.join(', ') || '任务合同缺少可满足性信息'}</div>}
     </section>
   );
 }
@@ -1702,7 +1713,7 @@ function SystemView({ plane }: { plane: Plane }) {
               return (
                 <div className="arp-runtime-job-row" key={job.job_id}>
                   <div><strong>{title}</strong><code>{job.job_id}</code></div>
-                  <span>{job.kind} · {job.resources.join(', ') || '无独占资源'} · {formatElapsed(job.started_at || job.created_at, job.finished_at)}</span>
+                  <span>{job.kind} · {stringList(job.resources).join(', ') || '无独占资源'} · {formatElapsed(job.started_at || job.created_at, job.finished_at)}</span>
                   <StatusPill status={job.status} />
                   {job.error && <small>{job.error}</small>}
                 </div>
@@ -1773,7 +1784,11 @@ export function PlatformWorkbench() {
 
   return (
     <div className="arp-app">
-      <aside className="arp-sidebar">
+      <div className="arp-window-titlebar" aria-label="灵动脚本窗口标题栏">
+        <div className="arp-window-title"><Bot size={14} /><strong>灵动脚本</strong><span>WinPilot</span></div>
+      </div>
+      <div className="arp-shell">
+        <aside className="arp-sidebar">
         <div className="arp-brand"><div className="arp-brand-mark"><Bot size={18} /></div><div><strong>WinPilot</strong><span>智能代理运行平台</span></div></div>
         <nav>
           {NAV_ITEMS.map((item) => {
@@ -1785,8 +1800,8 @@ export function PlatformWorkbench() {
           <span className={`arp-connection-dot ${plane.connection}`} />
           <div><strong>{plane.connection === 'online' ? '在线' : plane.connection === 'connecting' ? '连接中' : plane.connection === 'degraded' ? '降级' : '离线'}</strong><span>{plane.baseUrl ? new URL(plane.baseUrl).host : '正在启动运行时'}</span></div>
         </div>
-      </aside>
-      <main className="arp-workspace">
+        </aside>
+        <main className="arp-workspace">
         <header className="arp-topbar">
           <div className="arp-breadcrumb"><span>工作区</span><ChevronRight size={13} /><strong>{NAV_ITEMS.find((item) => item.id === currentView)?.label}</strong></div>
           {plane.error && <div className="arp-topbar-error"><XCircle size={13} />{plane.error}</div>}
@@ -1801,7 +1816,8 @@ export function PlatformWorkbench() {
           {currentView === 'assets' && <AssetsView plane={plane} openStudio={() => setView('studio')} />}
           {currentView === 'system' && <SystemView plane={plane} />}
         </div>
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

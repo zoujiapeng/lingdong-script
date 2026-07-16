@@ -56,6 +56,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restartWinpilot: () =>
     ipcRenderer.invoke('winpilot:restart'),
 
+  // Keep the native Windows caption buttons visually aligned with the renderer theme.
+  setTitleBarTheme: (theme: 'light' | 'dark') =>
+    ipcRenderer.invoke('window:set-titlebar-theme', theme),
+
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg);

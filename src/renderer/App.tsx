@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { PlatformWorkbench } from './components/platform/PlatformWorkbench';
+import { AppErrorBoundary } from './components/common/AppErrorBoundary';
 import { useStore } from './store';
 import { automationDocumentToFlowScript } from './utils/automationIR';
 import './styles/globals.css';
@@ -13,6 +14,7 @@ export default function App() {
     const apply = () => {
       const dark = themeMode === 'dark' || (themeMode === 'system' && media.matches);
       document.documentElement.classList.toggle('dark', dark);
+      void window.electronAPI?.setTitleBarTheme?.(dark ? 'dark' : 'light');
       if (useStore.getState().ui.dark_mode !== dark) useStore.getState().setUI({ dark_mode: dark });
     };
     apply();
@@ -65,5 +67,5 @@ export default function App() {
     if (action === 'save') void useStore.getState().saveScript();
   }), [openAutomation]);
 
-  return <PlatformWorkbench />;
+  return <AppErrorBoundary><PlatformWorkbench /></AppErrorBoundary>;
 }
