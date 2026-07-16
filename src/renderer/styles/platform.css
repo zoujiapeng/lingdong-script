@@ -57,13 +57,56 @@
 .arp-app {
   width: 100vw;
   height: 100vh;
-  display: grid;
-  grid-template-columns: 214px minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   color: var(--arp-text);
   background: var(--arp-bg);
   user-select: none;
 }
+
+.arp-window-titlebar {
+  height: 36px;
+  flex: 0 0 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 142px 0 12px;
+  color: var(--arp-text);
+  background: var(--arp-surface);
+  border-bottom: 1px solid var(--arp-line);
+  -webkit-app-region: drag;
+}
+
+.arp-window-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.arp-window-title strong { font-size: 11px; font-weight: 700; }
+.arp-window-title span { font-size: 9px; color: var(--arp-text-muted); }
+
+.arp-shell {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 214px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.arp-crash-fallback {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  color: var(--arp-text);
+  background: var(--arp-bg);
+  text-align: center;
+}
+.arp-crash-fallback h1 { margin: 0; font-size: 18px; }
+.arp-crash-fallback p { margin: 0; color: var(--arp-text-soft); font-size: 12px; }
+.arp-crash-fallback code { max-width: min(680px, 90vw); padding: 8px 10px; color: var(--arp-red); background: var(--arp-red-soft); border-radius: 5px; overflow-wrap: anywhere; }
+.arp-crash-fallback button { height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border: 1px solid var(--arp-line); border-radius: 5px; color: var(--arp-text); background: var(--arp-surface); cursor: pointer; }
 
 .arp-sidebar {
   min-width: 0;

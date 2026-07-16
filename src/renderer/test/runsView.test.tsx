@@ -57,6 +57,33 @@ function historicalContract(): TaskContract {
 }
 
 describe('RunsView historical runtime detail', () => {
+  it('renders an incomplete legacy intent without crashing the renderer', async () => {
+    const run = historicalRun();
+    const contract = historicalContract();
+    delete (contract.intent as unknown as Record<string, unknown>).operation;
+    delete (contract as unknown as Record<string, unknown>).missing_capabilities;
+    const arp: ArpExecutionSnapshot = {
+      run_id: run.run_id,
+      graph_id: 'graph-history-incomplete',
+      graph_name: run.goal,
+      status: 'done',
+      task_contract: contract,
+      artifacts: { run_id: run.run_id, count: 0, artifacts: [] },
+      contract_evidence: { run_id: run.run_id, count: 0, records: [] },
+      stage_trace: [],
+    };
+    const client = { run: vi.fn(async () => ({ ok: true, run, arp })), artifactUrl: vi.fn() };
+    const plane = {
+      runs: [run], baseUrl: 'http://runtime/', currentRun: null, arpSnapshot: null,
+      events: [], refresh: vi.fn(async () => undefined), getClient: () => client,
+    };
+
+    render(<RunsView plane={plane as never} />);
+
+    expect(await screen.findByText('semantic')).toBeInTheDocument();
+    expect(screen.getByLabelText('任务运行时审计')).toBeInTheDocument();
+  });
+
   it('loads the selected run contract instead of showing only its projection', async () => {
     const run = historicalRun();
     const arp: ArpExecutionSnapshot = {
