@@ -27,6 +27,24 @@ STATE: dict[str, Any] = {
 }
 
 
+def _safe_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep bounded JSON evidence without trusting arbitrary browser payloads."""
+    if depth > 4:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:240]
+    if isinstance(value, list):
+        return [_safe_value(item, depth=depth + 1) for item in value[:64]]
+    if isinstance(value, dict):
+        return {
+            str(key)[:80]: _safe_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:64]
+        }
+    return str(value)[:240]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "WinPilotVisualE2E/1"
 
@@ -72,29 +90,30 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
             return
-        safe = {
+        safe: dict[str, Any] = {
             key: event.get(key)
             for key in (
-                "case_id", "type", "trusted", "pointer_type", "client_x", "client_y",
-                "screen_x", "screen_y", "move_count", "succeeded", "token_center_x",
-                "token_center_y", "token_left", "token_top", "token_right", "token_bottom",
-                "target_left", "target_top", "target_right", "target_bottom",
-                "viewport_width", "viewport_height",
+                "case_id", "scenario", "seed", "type", "trusted", "pointer_type",
+                "client_x", "client_y", "screen_x", "screen_y", "move_count",
+                "succeeded",
             )
         }
+        safe["details"] = _safe_value(event.get("details") or {})
         safe["received_at"] = time.time()
         with STATE_LOCK:
             STATE["events"].append(safe)
-            STATE["events"] = STATE["events"][-100:]
+            STATE["events"] = STATE["events"][-240:]
             if (
-                safe.get("type") == "pointerup"
+                safe.get("type") == "scenario_success"
                 and safe.get("trusted") is True
                 and safe.get("succeeded") is True
-                and int(safe.get("move_count") or 0) >= 2
             ):
                 STATE["success"] = True
                 STATE["completed_at"] = time.time()
                 STATE["case_id"] = str(safe.get("case_id") or "")
+                STATE["scenario"] = str(safe.get("scenario") or "")
+                STATE["seed"] = int(safe.get("seed") or 0)
+                STATE["success_event"] = safe
         self._send_json(200, {"ok": True})
 
 

@@ -41,7 +41,9 @@ _BOUNDED_CHAT = re.compile(
 )
 
 # Interaction expressions are only candidate signals.  Shared sessions require
-# actor/turn relations plus independent evidence of an evolving visual state.
+# multiple grammatical relations.  An explicit actor + session + turn handoff
+# is itself enough to request scene observation: users should not have to name
+# the already-visible application or restate its rules before the runtime looks.
 # Bounded visual commands use grammatical relations (imperative predicate with
 # an object, or object -> spatial operation -> destination), rather than a list
 # of application names, object names, games, or screen coordinates.
@@ -68,8 +70,19 @@ _USER_STARTED = re.compile(
     r"I\s+(?:went|go)\s+first",
     re.IGNORECASE,
 )
-_AGENT_TURN = re.compile(r"轮到你|该你了?|你先(?:来|开始|走|下|操作)?|your\s+turn|you\s+go\s+first", re.IGNORECASE)
-_USER_TURN = re.compile(r"轮到我|该我了?|我先来|等我(?:先)?|my\s+turn|wait\s+for\s+me", re.IGNORECASE)
+_TURN_SUFFIX = r"(?=$|[\s，,。.!！？；;])"
+_AGENT_TURN = re.compile(
+    rf"(?:(?:现在|接下来|这(?:一)?轮)\s*)?(?:轮到|到|该)\s*你"
+    rf"(?:了|来|操作|走|下)?{_TURN_SUFFIX}|"
+    r"你先(?:来|开始|走|下|操作)?|your\s+turn|you\s+go\s+first",
+    re.IGNORECASE,
+)
+_USER_TURN = re.compile(
+    rf"(?:(?:现在|接下来|这(?:一)?轮)\s*)?(?:轮到|到|该)\s*我"
+    rf"(?:了|来|操作|走|下)?{_TURN_SUFFIX}|"
+    r"我先来|等我(?:先)?|my\s+turn|wait\s+for\s+me",
+    re.IGNORECASE,
+)
 _TURN_BASED = re.compile(r"轮流|回合|一人一次|take\s+turns?|turn[- ]based|your\s+turn|my\s+turn", re.IGNORECASE)
 _CONTINUOUS_INTERACTION = re.compile(r"同时|实时|跟着我|连续配合|simultaneous|real[- ]time|follow\s+me", re.IGNORECASE)
 _DRAG_ACTION = re.compile(
@@ -468,10 +481,13 @@ def _interaction_candidate(text: str, source: str) -> InteractionIntent:
             signals.append(name)
 
     # Turn words also occur in prose, documents, and physical activities.  A
-    # persistent visual session therefore requires independent live-surface
-    # or direct-manipulation grounding; one "your turn" phrase is not enough.
+    # lone "your turn" remains insufficient.  Actor relation + session relation
+    # + explicit handoff, however, is a complete shared-session speech act.  It
+    # deliberately compiles to ObserveScene first instead of requiring the user
+    # to redundantly describe the visible surface.
     shared_session = bool(
         ((agent_turn or user_turn) and (visual_grounding or direct_manipulation))
+        or (actor_relation and session_cue and (agent_turn or user_turn))
         or (
             actor_relation
             and (

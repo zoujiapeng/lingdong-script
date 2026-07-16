@@ -76,6 +76,9 @@ _NATIVE_JUDGE_CERTIFIED_EVIDENCE_PREFIXES = (
 )
 _NATIVE_JUDGE_GEOMETRY_KEYS = frozenset({
     "frame_strokes",
+    "local_strokes",
+    "resolved_frame_strokes",
+    "stroke_coordinate_space",
     "normalized_strokes",
     "strokes",
     "frame_points",

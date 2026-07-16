@@ -17,6 +17,11 @@ import cv2
 import numpy as np
 
 from .interaction import InteractionDecision
+from .visual_path import GuidedPathError, refine_guided_drag_path
+from .visual_regions import (
+    resolve_visible_bounded_region,
+    resolve_visible_subregion_at_anchor,
+)
 
 
 class VisualGeometryError(RuntimeError):
@@ -28,10 +33,42 @@ _PROVIDER_FAMILY = {
     "local_contrast": "photometric",
     "local_luminance": "photometric",
     "local_edges": "boundary",
+    "local_circle": "boundary",
 }
 _MIN_PROVIDER_SCORE = 0.52
 _MIN_CONSENSUS_SCORE = 0.62
 _MIN_CANDIDATE_MARGIN = 0.08
+_MIN_CORRECTION_PROVIDER_SCORE = 0.42
+_MIN_CORRECTION_SCORE = 0.49
+_MAX_UNIQUE_CORRECTION_DISPLACEMENT = 1.25
+_MIN_UNIQUE_TARGET_SCORE = 0.80
+_MIN_UNIQUE_TARGET_IOU = 0.75
+_MIN_UNIQUE_TARGET_MARGIN = 0.20
+_MAX_UNIQUE_TARGET_DISPLACEMENT = 0.30
+_MIN_UNIQUE_FILLED_SCORE = 0.75
+_MIN_UNIQUE_FILLED_IOU = 0.62
+_MIN_UNIQUE_FILLED_SUPPORT = 0.65
+_MAX_UNIQUE_FILLED_DISPLACEMENT = 0.20
+_MIN_CIRCLE_CANDIDATE_BOUNDARY_SUPPORT = 0.55
+_MIN_TARGET_SHAPE_SCORE = 0.82
+_MIN_TARGET_SHAPE_OVERLAP = 0.60
+_MAX_TARGET_SHAPE_DISPLACEMENT = 0.35
+_MIN_TARGET_SHAPE_MARGIN = 0.08
+_MIN_OFFSET_SHAPE_SCORE = 0.60
+_MIN_OFFSET_SHAPE_MARGIN = 0.10
+_MIN_OFFSET_SHAPE_BOUNDARY_SUPPORT = 0.52
+_MAX_OFFSET_SHAPE_DISPLACEMENT = 0.80
+_MAX_OFFSET_SHAPE_AREA_RATIO = 2.20
+_MIN_ENCLOSING_SHAPE_BOUNDARY_SUPPORT = 0.68
+_MIN_ENCLOSING_SHAPE_BOUNDARY_MARGIN = 0.08
+# The semantic planner supplies a coarse search anchor, not an execution box.
+# A complete destination outline can legitimately extend mostly to one side of
+# that anchor (for example, when text or an arrow occupies the other half of
+# the coarse region).  Forty percent overlap still means the hypothesised
+# boundary intersects the planner anchor substantially; the independent
+# circumference-support and runner-up margin checks below provide uniqueness.
+_MIN_ENCLOSING_SHAPE_OVERLAP = 0.40
+_MAX_ENCLOSING_SHAPE_AREA_RATIO = 5.20
 
 
 def _pixel_box(
@@ -79,6 +116,53 @@ def _iou(first: list[float], second: list[float]) -> float:
         0.0, float(second[3]) - float(second[1]),
     )
     return intersection / max(1e-6, first_area + second_area - intersection)
+
+
+def _intersection_over_smaller(first: list[float], second: list[float]) -> float:
+    """Measure whether two modality masks enclose the same visual object.
+
+    Edge, colour, and contrast masks often produce nested boxes for one
+    outlined/labelled control.  IoU alone penalizes that legitimate nesting
+    and can falsely turn independent provider agreement into two candidates.
+    This containment measure does not merge adjacent or merely overlapping
+    objects because most of the smaller box must be enclosed.
+    """
+    left = max(float(first[0]), float(second[0]))
+    top = max(float(first[1]), float(second[1]))
+    right = min(float(first[2]), float(second[2]))
+    bottom = min(float(first[3]), float(second[3]))
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    first_area = max(0.0, float(first[2]) - float(first[0])) * max(
+        0.0, float(first[3]) - float(first[1]),
+    )
+    second_area = max(0.0, float(second[2]) - float(second[0])) * max(
+        0.0, float(second[3]) - float(second[1]),
+    )
+    return intersection / max(1e-6, min(first_area, second_area))
+
+
+def _nested_same_center(first: list[float], second: list[float]) -> bool:
+    """Require nested modality boxes to share one physical object centre."""
+    if _intersection_over_smaller(first, second) < 0.88:
+        return False
+    first_center = (
+        (float(first[0]) + float(first[2])) / 2.0,
+        (float(first[1]) + float(first[3])) / 2.0,
+    )
+    second_center = (
+        (float(second[0]) + float(second[2])) / 2.0,
+        (float(second[1]) + float(second[3])) / 2.0,
+    )
+    smaller_span = min(
+        float(first[2]) - float(first[0]),
+        float(first[3]) - float(first[1]),
+        float(second[2]) - float(second[0]),
+        float(second[3]) - float(second[1]),
+    )
+    return math.hypot(
+        first_center[0] - second_center[0],
+        first_center[1] - second_center[1],
+    ) <= max(2.0, smaller_span * 0.28)
 
 
 def _odd(value: float, *, minimum: int = 3, maximum: int = 21) -> int:
@@ -152,7 +236,137 @@ def _candidate_masks(roi: np.ndarray, rough_width: int, rough_height: int) -> li
             cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, small_kernel)
             cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, close_kernel)
         masks.append((provider, cleaned))
+
+    # Round controls, handles, dials, and outlined destinations often consist
+    # of separated arcs/dashes.  Connected-component masks fragment them, so
+    # add a generic circle primitive provider.  It is still only boundary
+    # evidence and cannot by itself bind a source; the role-aware acceptance
+    # policy below decides whether an enclosing target is sufficiently exact.
+    min_radius = max(6, int(round(min(rough_width, rough_height) * 0.24)))
+    max_radius = min(
+        max(min_radius + 2, min(roi.shape[:2]) // 2),
+        max(min_radius + 2, int(round(max(rough_width, rough_height) * 2.6))),
+    )
+    if max_radius > min_radius and min(roi.shape[:2]) >= 24:
+        circles = cv2.HoughCircles(
+            cv2.GaussianBlur(gray, (5, 5), 1.2),
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(16, int(round(min(rough_width, rough_height) * 0.75))),
+            param1=100,
+            param2=32,
+            minRadius=min_radius,
+            maxRadius=max_radius,
+        )
+        if circles is not None:
+            for circle_x, circle_y, radius in circles[0][:24]:
+                circle_mask = np.zeros(gray.shape, dtype=np.uint8)
+                cv2.circle(
+                    circle_mask,
+                    (int(round(circle_x)), int(round(circle_y))),
+                    max(1, int(round(radius))),
+                    255,
+                    -1,
+                )
+                masks.append(("local_circle", circle_mask))
     return masks
+
+
+def _anchored_circle_masks(
+    roi: np.ndarray,
+    rough_box: tuple[int, int, int, int],
+) -> list[tuple[str, np.ndarray]]:
+    """Return circle hypotheses constrained by the planner's coarse anchor.
+
+    A broad Hough search is useful for large coordinate corrections, but a
+    surrounding curved panel can dominate a smaller dashed ring, dial, knob,
+    or socket.  This complementary pass searches only near the coarse target
+    and limits radius relative to that target.  Every hypothesis is still
+    subjected to circumference support, uniqueness, displacement, and margin
+    checks in ``_resolve_region``; the coarse box alone never authorizes it.
+    """
+    left, top, right, bottom = rough_box
+    rough_width = max(2, right - left)
+    rough_height = max(2, bottom - top)
+    pad = max(10, int(round(max(rough_width, rough_height) * 0.70)))
+    crop_left = max(0, left - pad)
+    crop_top = max(0, top - pad)
+    crop_right = min(roi.shape[1], right + pad)
+    crop_bottom = min(roi.shape[0], bottom + pad)
+    if crop_right - crop_left < 24 or crop_bottom - crop_top < 24:
+        return []
+
+    crop = roi[crop_top:crop_bottom, crop_left:crop_right]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    min_radius = max(6, int(round(min(rough_width, rough_height) * 0.22)))
+    max_radius = min(
+        min(crop.shape[:2]) // 2,
+        max(min_radius + 2, int(round(max(rough_width, rough_height) * 0.80))),
+    )
+    if max_radius <= min_radius:
+        return []
+    circles = cv2.HoughCircles(
+        cv2.GaussianBlur(gray, (5, 5), 1.2),
+        cv2.HOUGH_GRADIENT,
+        dp=1.0,
+        minDist=max(14, int(round(min(rough_width, rough_height) * 0.50))),
+        param1=100,
+        param2=32,
+        minRadius=min_radius,
+        maxRadius=max_radius,
+    )
+    if circles is None:
+        return []
+
+    masks: list[tuple[str, np.ndarray]] = []
+    for circle_x, circle_y, radius in circles[0][:12]:
+        mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+        cv2.circle(
+            mask,
+            (
+                crop_left + int(round(circle_x)),
+                crop_top + int(round(circle_y)),
+            ),
+            max(1, int(round(radius))),
+            255,
+            -1,
+        )
+        masks.append(("local_circle", mask))
+    return masks
+
+
+def _circle_boundary_support(
+    edge_mask: np.ndarray,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> float:
+    """Return angular edge coverage around a proposed circular primitive."""
+    center_x = float(x) + (float(width) - 1.0) / 2.0
+    center_y = float(y) + (float(height) - 1.0) / 2.0
+    radius = max(1.0, (float(min(width, height)) - 1.0) / 2.0)
+    samples = 144
+    hits = 0
+    for index in range(samples):
+        angle = 2.0 * math.pi * float(index) / float(samples)
+        found = False
+        for radial_delta in range(-4, 5):
+            sample_x = int(round(
+                center_x + (radius + radial_delta) * math.cos(angle),
+            ))
+            sample_y = int(round(
+                center_y + (radius + radial_delta) * math.sin(angle),
+            ))
+            if (
+                0 <= sample_x < edge_mask.shape[1]
+                and 0 <= sample_y < edge_mask.shape[0]
+                and edge_mask[sample_y, sample_x] != 0
+            ):
+                found = True
+                break
+        hits += int(found)
+    return float(hits) / float(samples)
 
 
 def _resolve_region(
@@ -161,14 +375,21 @@ def _resolve_region(
     allowed_bounds: list[float],
     *,
     role: str,
+    role_label: str = "",
 ) -> dict[str, Any]:
+    diagnostic_role = role_label or role
     height, width = image.shape[:2]
     rough = _pixel_box(rough_bounds, width, height)
     allowed = _pixel_box(allowed_bounds, width, height)
     rough_width = max(2, rough[2] - rough[0])
     rough_height = max(2, rough[3] - rough[1])
-    pad_x = max(18, int(round(rough_width * 1.6)))
-    pad_y = max(18, int(round(rough_height * 1.6)))
+    # Vision models commonly describe client-content coordinates while the
+    # authoritative frame also contains title/chrome pixels.  A 1.6x search
+    # pad clipped otherwise-correct objects near the edge of the search ROI.
+    # Search farther, but retain the independent-provider, displacement, and
+    # candidate-margin proofs below before accepting anything.
+    pad_x = max(18, int(round(rough_width * 2.4)))
+    pad_y = max(18, int(round(rough_height * 2.4)))
     search = (
         max(allowed[0], rough[0] - pad_x),
         max(allowed[1], rough[1] - pad_y),
@@ -176,20 +397,49 @@ def _resolve_region(
         min(allowed[3], rough[3] + pad_y),
     )
     if search[2] - search[0] < 12 or search[3] - search[1] < 12:
-        raise VisualGeometryError(f"{role} search region has no usable pixels")
+        raise VisualGeometryError(
+            f"{diagnostic_role} search region has no usable pixels"
+        )
     roi = image[search[1]:search[3], search[0]:search[2]]
+    roi_edges = cv2.Canny(
+        cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (3, 3), 0),
+        40,
+        110,
+    )
     rough_center = ((rough[0] + rough[2]) / 2.0, (rough[1] + rough[3]) / 2.0)
     rough_diagonal = max(1.0, math.hypot(rough_width, rough_height))
 
+    mask_candidates = _candidate_masks(roi, rough_width, rough_height)
+    if role == "target":
+        mask_candidates.extend(_anchored_circle_masks(
+            roi,
+            (
+                rough[0] - search[0], rough[1] - search[1],
+                rough[2] - search[0], rough[3] - search[1],
+            ),
+        ))
+
     candidates: list[dict[str, Any]] = []
-    for provider, mask in _candidate_masks(roi, rough_width, rough_height):
+    for provider, mask in mask_candidates:
+        if provider == "local_circle" and role != "target":
+            continue
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             x, y, candidate_width, candidate_height = cv2.boundingRect(contour)
+            max_size_factor = (
+                3.0 if provider == "local_circle"
+                else (4.5 if role == "target" else 2.6)
+            )
             if not (
-                rough_width * 0.34 <= candidate_width <= rough_width * 2.6
-                and rough_height * 0.34 <= candidate_height <= rough_height * 2.6
+                rough_width * 0.34 <= candidate_width <= rough_width * max_size_factor
+                and rough_height * 0.34 <= candidate_height <= rough_height * max_size_factor
             ):
+                continue
+            size_area_ratio = (
+                candidate_width * candidate_height
+                / max(1, rough_width * rough_height)
+            )
+            if provider == "local_circle" and size_area_ratio > 5.2:
                 continue
             box = (
                 search[0] + int(x), search[1] + int(y),
@@ -221,6 +471,43 @@ def _resolve_region(
                 + 0.12 * min(1.0, overlap_score)
                 + 0.08 * min(1.0, support * 3.0)
             )
+            anchor_containment = _intersection_area(box, rough) / max(
+                1, rough_width * rough_height,
+            )
+            shape_enclosure_score = 0.0
+            circle_boundary_support = 0.0
+            if role == "target" and provider == "local_circle":
+                circle_boundary_support = _circle_boundary_support(
+                    roi_edges, x, y, candidate_width, candidate_height,
+                )
+                # Hough-style circle masks can enclose an entire panel or
+                # background grid.  A circle candidate is usable only when
+                # the current edge image actually supports enough of its
+                # circumference; otherwise ordinary edge/colour candidates
+                # remain eligible instead of being outranked by a phantom.
+                if (
+                    circle_boundary_support
+                    < _MIN_CIRCLE_CANDIDATE_BOUNDARY_SUPPORT
+                ):
+                    continue
+                center_alignment = max(
+                    0.0,
+                    1.0 - distance / max(1.0, rough_diagonal * 1.25),
+                )
+                shape_enclosure_score = (
+                    0.55 * center_alignment
+                    + 0.30 * min(1.0, anchor_containment)
+                    + 0.15 * min(1.0, support)
+                )
+                # Coordinate proximity alone can prefer one dashed arc or an
+                # inner glyph over the complete enclosing destination.  For
+                # circle primitives, angular boundary coverage is the direct
+                # current-pixel proof; weight it strongly while retaining the
+                # coarse semantic enclosure signal.
+                score = (
+                    0.30 * shape_enclosure_score
+                    + 0.70 * circle_boundary_support
+                )
             candidates.append({
                 "provider": provider,
                 "provider_family": _PROVIDER_FAMILY[provider],
@@ -230,6 +517,10 @@ def _resolve_region(
                 "score": float(score),
                 "distance_px": float(distance),
                 "support_ratio": float(support),
+                "anchor_containment": float(anchor_containment),
+                "shape_enclosure_score": float(shape_enclosure_score),
+                "size_area_ratio": float(size_area_ratio),
+                "circle_boundary_support": float(circle_boundary_support),
             })
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
@@ -238,7 +529,12 @@ def _resolve_region(
         normalized = _normalized_box(candidate["pixel_box"], width, height)
         duplicate = next((
             existing for existing in deduplicated
-            if _iou(normalized, existing["normalized_box"]) >= 0.72
+            if (
+                _iou(normalized, existing["normalized_box"]) >= 0.72
+                or _nested_same_center(
+                    candidate["pixel_box"], existing["pixel_box"],
+                )
+            )
         ), None)
         candidate["normalized_box"] = normalized
         if duplicate is None:
@@ -246,9 +542,18 @@ def _resolve_region(
         else:
             providers = sorted(set(duplicate.get("providers") or []))
             provider_scores = dict(duplicate.get("provider_scores") or {})
+            # Retain near-threshold independent evidence for the guarded
+            # unique-correction policy below.  ``providers`` itself remains
+            # the strict set, so standard consensus semantics do not change.
+            for provider, provider_score in (
+                candidate.get("provider_scores") or {}
+            ).items():
+                provider_scores[provider] = max(
+                    float(provider_scores.get(provider, 0.0)),
+                    float(provider_score),
+                )
             if float(candidate["score"]) >= _MIN_PROVIDER_SCORE:
                 providers = sorted(set(providers) | {str(candidate["provider"])})
-                provider_scores.update(candidate.get("provider_scores") or {})
             if candidate["score"] > duplicate["score"]:
                 replacement = dict(candidate)
                 replacement["providers"] = providers
@@ -275,20 +580,164 @@ def _resolve_region(
         float(top["distance_px"]) / rough_diagonal if top else float("inf")
     )
     required_family_count = 3 if displacement_ratio > 0.75 else 2
+    strict_consensus = bool(
+        top is not None
+        and float(top["score"]) >= _MIN_CONSENSUS_SCORE
+        and margin >= _MIN_CANDIDATE_MARGIN
+        and family_count >= required_family_count
+    )
+    correction_providers = [
+        provider for provider, score in (top.get("provider_scores") or {}).items()
+        if float(score) >= _MIN_CORRECTION_PROVIDER_SCORE
+    ] if top else []
+    correction_families = sorted({
+        _PROVIDER_FAMILY.get(str(provider), "unknown")
+        for provider in correction_providers
+    })
+    # A model may use client-content coordinates while the authoritative frame
+    # includes title/chrome pixels.  Permit a larger deterministic correction
+    # only when there is exactly one candidate and colour, photometric, and
+    # boundary evidence independently agree near the strict threshold.  This
+    # does not relax the ambiguous/multiple-object path.
+    unique_multi_family_correction = bool(
+        top is not None
+        and len(deduplicated) == 1
+        and float(top["score"]) >= _MIN_CORRECTION_SCORE
+        and margin >= _MIN_CANDIDATE_MARGIN
+        and len(correction_families) >= 3
+        and displacement_ratio <= _MAX_UNIQUE_CORRECTION_DISPLACEMENT
+    )
+    rough_iou = _iou(top["normalized_box"], rough_bounds) if top else 0.0
+    other_circle_boundary_support = max((
+        float(item.get("circle_boundary_support") or 0.0)
+        for item in deduplicated[1:]
+        if str(item.get("provider") or "") == "local_circle"
+    ), default=0.0)
+    circle_boundary_margin = (
+        float(top.get("circle_boundary_support") or 0.0)
+        - other_circle_boundary_support
+        if top else 0.0
+    )
+    # Empty drop zones, slots, tracks, and other outlined destinations can
+    # legitimately produce only boundary evidence: there is no filled object
+    # for colour/photometric masks to confirm.  A destination is safe to bind
+    # from that single family only when it is the sole candidate and almost
+    # exactly agrees with the semantic planner's coarse target.  This policy is
+    # intentionally target-only; source objects still require independent
+    # evidence because a wrong pickup/click is destructive.
+    unique_high_confidence_target_boundary = bool(
+        top is not None
+        and role == "target"
+        and (len(deduplicated) == 1 or margin >= _MIN_UNIQUE_TARGET_MARGIN)
+        and str(top.get("provider_family") or "") == "boundary"
+        and float(top["score"]) >= _MIN_UNIQUE_TARGET_SCORE
+        and margin >= _MIN_CANDIDATE_MARGIN
+        and rough_iou >= _MIN_UNIQUE_TARGET_IOU
+        and displacement_ratio <= _MAX_UNIQUE_TARGET_DISPLACEMENT
+    )
+    # A solid visual control can be a single coherent colour component while
+    # luminance/edge providers fragment against a textured background.  Treat
+    # that as independent geometric evidence only when the component is dense,
+    # unique, and tightly agrees with the semantic anchor.  No colour value,
+    # control type, application, or coordinate is encoded here.
+    unique_high_confidence_filled_region = bool(
+        top is not None
+        and role in {"source", "target"}
+        and len(deduplicated) == 1
+        and str(top.get("provider_family") or "") == "color"
+        and float(top["score"]) >= _MIN_UNIQUE_FILLED_SCORE
+        and float(top.get("support_ratio") or 0.0) >= _MIN_UNIQUE_FILLED_SUPPORT
+        and margin >= _MIN_CANDIDATE_MARGIN
+        and rough_iou >= _MIN_UNIQUE_FILLED_IOU
+        and displacement_ratio <= _MAX_UNIQUE_FILLED_DISPLACEMENT
+    )
+    semantic_target_shape_anchor = bool(
+        top is not None
+        and role == "target"
+        and str(top.get("provider") or "") == "local_circle"
+        and (
+            (
+                float(top.get("shape_enclosure_score") or 0.0)
+                >= _MIN_TARGET_SHAPE_SCORE
+                and (
+                    float(top.get("anchor_containment") or 0.0)
+                    >= _MIN_TARGET_SHAPE_OVERLAP
+                    or rough_iou >= _MIN_TARGET_SHAPE_OVERLAP
+                )
+                and margin >= _MIN_TARGET_SHAPE_MARGIN
+                and displacement_ratio <= _MAX_TARGET_SHAPE_DISPLACEMENT
+            )
+            or (
+                float(top.get("score") or 0.0) >= _MIN_OFFSET_SHAPE_SCORE
+                and margin >= _MIN_OFFSET_SHAPE_MARGIN
+                and float(top.get("circle_boundary_support") or 0.0)
+                >= _MIN_OFFSET_SHAPE_BOUNDARY_SUPPORT
+                and displacement_ratio <= _MAX_OFFSET_SHAPE_DISPLACEMENT
+                and float(top.get("size_area_ratio") or float("inf"))
+                <= _MAX_OFFSET_SHAPE_AREA_RATIO
+            )
+        )
+    )
+    semantic_enclosing_target_shape = bool(
+        top is not None
+        and role == "target"
+        and str(top.get("provider") or "") == "local_circle"
+        and float(top.get("circle_boundary_support") or 0.0)
+        >= _MIN_ENCLOSING_SHAPE_BOUNDARY_SUPPORT
+        and circle_boundary_margin >= _MIN_ENCLOSING_SHAPE_BOUNDARY_MARGIN
+        and float(top.get("anchor_containment") or 0.0)
+        >= _MIN_ENCLOSING_SHAPE_OVERLAP
+        and float(top.get("size_area_ratio") or float("inf"))
+        <= _MAX_ENCLOSING_SHAPE_AREA_RATIO
+        and displacement_ratio <= _MAX_OFFSET_SHAPE_DISPLACEMENT
+    )
     if (
-        top is None
-        or float(top["score"]) < _MIN_CONSENSUS_SCORE
-        or margin < _MIN_CANDIDATE_MARGIN
-        or family_count < required_family_count
+        not strict_consensus
+        and not unique_multi_family_correction
+        and not unique_high_confidence_target_boundary
+        and not unique_high_confidence_filled_region
+        and not semantic_target_shape_anchor
+        and not semantic_enclosing_target_shape
     ):
         raise VisualGeometryError(
-            f"{role} visual grounding is ambiguous "
+            f"{diagnostic_role} visual grounding is ambiguous "
             f"(best={float(top['score']) if top else 0.0:.3f}, "
             f"margin={margin:.3f}, providers={provider_count}, "
-            f"families={family_count}/{required_family_count})"
+            f"families={family_count}/{required_family_count}, "
+            f"correction_families={len(correction_families)}/3, "
+            f"rough_iou={rough_iou:.3f}, displacement={displacement_ratio:.3f}, "
+            f"anchor_containment={float(top.get('anchor_containment') or 0.0) if top else 0.0:.3f}, "
+            f"circle_support={float(top.get('circle_boundary_support') or 0.0) if top else 0.0:.3f}, "
+            f"circle_margin={circle_boundary_margin:.3f}, "
+            f"candidates={len(deduplicated)})"
         )
+    acceptance_policy = (
+        "strict_consensus" if strict_consensus
+        else (
+            "unique_multi_family_coordinate_correction"
+            if unique_multi_family_correction
+            else (
+                "unique_high_confidence_target_boundary"
+                if unique_high_confidence_target_boundary
+                else (
+                    "unique_high_confidence_filled_region"
+                    if unique_high_confidence_filled_region
+                    else (
+                        "semantic_target_shape_anchor"
+                        if semantic_target_shape_anchor
+                        else "semantic_enclosing_target_shape"
+                    )
+                )
+            )
+        )
+    )
+    if unique_multi_family_correction and not strict_consensus:
+        supporting_providers = correction_providers
+        provider_families = correction_families
+        provider_count = len(supporting_providers)
+        family_count = len(provider_families)
     return {
-        "role": role,
+        "role": diagnostic_role,
         "provider": "local_geometry_consensus",
         "providers": supporting_providers,
         "provider_families": provider_families,
@@ -298,7 +747,21 @@ def _resolve_region(
             if float(score) >= _MIN_PROVIDER_SCORE
         },
         "required_family_count": required_family_count,
+        "acceptance_policy": acceptance_policy,
         "displacement_ratio": round(displacement_ratio, 6),
+        "rough_iou": round(rough_iou, 6),
+        "support_ratio": round(float(top.get("support_ratio") or 0.0), 6),
+        "anchor_containment": round(
+            float(top.get("anchor_containment") or 0.0), 6,
+        ),
+        "shape_enclosure_score": round(
+            float(top.get("shape_enclosure_score") or 0.0), 6,
+        ),
+        "size_area_ratio": round(float(top.get("size_area_ratio") or 0.0), 6),
+        "circle_boundary_support": round(
+            float(top.get("circle_boundary_support") or 0.0), 6,
+        ),
+        "circle_boundary_margin": round(circle_boundary_margin, 6),
         "semantic_anchor": "planner_coarse_region",
         "rough_region": [float(value) for value in rough_bounds],
         "resolved_region": top["normalized_box"],
@@ -321,6 +784,42 @@ def _project_point(
         float(new[0]) + fraction_x * (float(new[2]) - float(new[0])),
         float(new[1]) + fraction_y * (float(new[3]) - float(new[1])),
     )
+
+
+def _typed_spatial_policy_proof(
+    decision: InteractionDecision,
+) -> tuple[InteractionDecision, dict[str, Any]]:
+    return decision, {
+        "verified": True,
+        "applied": False,
+        "provider": "typed_spatial_policy",
+        "reason": "frame_lineage_and_typed_roi_bounds",
+        "action_grounding": [
+            {
+                "action_index": index,
+                "action": action.action,
+                "grounding_mode": action.grounding_mode,
+                **({
+                    "stroke_coordinate_space": (
+                        "target_region_0_1000"
+                        if (
+                            action.local_strokes
+                            or (
+                                action.stroke_paths
+                                and all(
+                                    stroke.coordinate_space
+                                    == "target_region_0_1000"
+                                    for stroke in action.stroke_paths
+                                )
+                            )
+                        ) else "frame_0_1000"
+                    ),
+                    "target_region": list(action.target_region),
+                } if action.action == "draw_strokes" else {}),
+            }
+            for index, action in enumerate(decision.actions)
+        ],
+    }
 
 
 def refine_interaction_geometry(
@@ -360,23 +859,25 @@ def refine_interaction_geometry(
         if action.action in point_action_names
         and action.grounding_mode in {"object_anchor", "semantic_control"}
     ]
-    if not all_drag_indices and not anchored_point_indices:
-        return decision, {
-            "verified": True,
-            "applied": False,
-            "provider": "typed_spatial_policy",
-            "reason": "frame_lineage_and_typed_roi_bounds",
-            "action_grounding": [
-                {
-                    "action_index": index,
-                    "action": action.action,
-                    "grounding_mode": action.grounding_mode,
-                }
-                for index, action in enumerate(decision.actions)
-            ],
-        }
+    bounded_draw_indices = [
+        index for index, action in enumerate(decision.actions)
+        if action.action == "draw_strokes" and action.target_region
+    ]
+    if not all_drag_indices and not anchored_point_indices and not bounded_draw_indices:
+        return _typed_spatial_policy_proof(decision)
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
+        if (
+            bounded_draw_indices
+            and not all_drag_indices
+            and not anchored_point_indices
+            and expected_size is None
+            and frame_region is None
+        ):
+            # Compatibility for offline callers that only request typed-path
+            # validation.  The real StageRuntime always supplies bound frame
+            # dimensions and therefore still fails closed on a corrupt frame.
+            return _typed_spatial_policy_proof(decision)
         raise VisualGeometryError("authoritative frame could not be decoded for geometry grounding")
     image_height, image_width = image.shape[:2]
     if frame_region is not None:
@@ -421,6 +922,17 @@ def refine_interaction_geometry(
                 target_center[0] + (start[0] - source_center[0]),
                 target_center[1] + (start[1] - source_center[1]),
             )
+        elif action.target_anchor:
+            # ``point_inside_target`` describes a point-placement contract.  A
+            # declared target anchor is the planner's semantic choice of that
+            # point, while frame_x2/frame_y2 is only the coarse motor endpoint.
+            # Project both the anchor and endpoint from the same authoritative
+            # target refinement so path planning cannot be driven toward a
+            # stale edge coordinate after the target pixels are regrounded.
+            end = _project_point(
+                (float(action.target_anchor[0]), float(action.target_anchor[1])),
+                list(action.target_region), target_region,
+            )
         else:
             end = _project_point(
                 (float(action.frame_x2), float(action.frame_y2)),
@@ -436,6 +948,22 @@ def refine_interaction_geometry(
                 float(point[0]) + start_delta[0] * (1.0 - fraction) + end_delta[0] * fraction,
                 float(point[1]) + start_delta[1] * (1.0 - fraction) + end_delta[1] * fraction,
             ])
+        path_grounding: dict[str, Any] | None = None
+        if action.path_mode == "guided":
+            try:
+                points, path_grounding = refine_guided_drag_path(
+                    image,
+                    start=start,
+                    end=end,
+                    planner_points=points,
+                    source_region=source_region,
+                    target_region=target_region,
+                    interaction_region=list(decision.interaction_region),
+                )
+            except GuidedPathError as exc:
+                raise VisualGeometryError(
+                    f"guided drag path is not proven by current pixels: {exc}"
+                ) from exc
         action_payload = dict(payload["actions"][index])
         action_payload.update({
             "frame_x1": start[0], "frame_y1": start[1],
@@ -444,6 +972,20 @@ def refine_interaction_geometry(
             "source_region": source_region,
             "target_region": target_region,
         })
+        refined_target_anchor: list[float] = []
+        if action.target_anchor:
+            projected_anchor = _project_point(
+                (
+                    float(action.target_anchor[0]),
+                    float(action.target_anchor[1]),
+                ),
+                list(action.target_region),
+                target_region,
+            )
+            refined_target_anchor = [
+                float(projected_anchor[0]), float(projected_anchor[1]),
+            ]
+            action_payload["target_anchor"] = refined_target_anchor
         effect_binding = action.effect_region_binding
         if action.expected_effect_region:
             if effect_binding == "target_region":
@@ -475,12 +1017,137 @@ def refine_interaction_geometry(
             "refined_start": [round(start[0], 3), round(start[1], 3)],
             "original_end": [float(action.frame_x2), float(action.frame_y2)],
             "refined_end": [round(end[0], 3), round(end[1], 3)],
+            "original_target_anchor": list(action.target_anchor),
+            "refined_target_anchor": [
+                round(value, 3) for value in refined_target_anchor
+            ],
             "correction_distance": round(math.hypot(*start_delta) + math.hypot(*end_delta), 3),
             "effect_region_binding": effect_binding,
             "refined_effect_region": list(
                 action_payload.get("expected_effect_region") or []
             ),
             "grounding_mode": action.grounding_mode,
+            "path_mode": action.path_mode,
+            "path_grounding": path_grounding or {},
+        })
+
+    # A freehand path may be semantically correct while still missing the
+    # exact borders of a visible cell, signature box, canvas pane, or other
+    # bounded surface.  Resolve those borders from the current frame before
+    # target-relative strokes are converted to physical pixels.  When no
+    # unique boundary exists (for example a deliberately unbounded canvas),
+    # retain the semantic ROI but record that no boundary correction was
+    # claimed.
+    for index in bounded_draw_indices:
+        action = decision.actions[index]
+        boundary = (
+            resolve_visible_subregion_at_anchor(
+                image,
+                list(action.target_region),
+                list(action.target_anchor),
+                list(decision.interaction_region),
+            )
+            if action.target_anchor
+            else None
+        )
+        if boundary is None:
+            boundary = resolve_visible_bounded_region(
+                image,
+                list(action.target_region),
+                list(decision.interaction_region),
+            )
+        if boundary is None:
+            refinements.append({
+                "action_index": index,
+                "action": action.action,
+                "grounding_mode": action.grounding_mode,
+                "applied": False,
+                "provider": "typed_semantic_free_path",
+                "reason": "no_unique_visible_boundary",
+                "target_region": list(action.target_region),
+            })
+            continue
+        target_region = list(boundary["resolved_region"])
+        action_payload = dict(payload["actions"][index])
+        action_payload["target_region"] = target_region
+        if action.target_anchor:
+            action_payload["target_anchor"] = [
+                (target_region[0] + target_region[2]) / 2.0,
+                (target_region[1] + target_region[3]) / 2.0,
+            ]
+        if action.frame_strokes:
+            action_payload["frame_strokes"] = [
+                [
+                    list(_project_point(
+                        (float(point[0]), float(point[1])),
+                        list(action.target_region),
+                        target_region,
+                    ))
+                    for point in stroke
+                ]
+                for stroke in action.frame_strokes
+            ]
+        elif action.stroke_paths:
+            action_payload["stroke_paths"] = [
+                {
+                    "coordinate_space": stroke.coordinate_space,
+                    "points": (
+                        [
+                            list(_project_point(
+                                (float(point[0]), float(point[1])),
+                                list(action.target_region),
+                                target_region,
+                            ))
+                            for point in stroke.points
+                        ]
+                        if stroke.coordinate_space == "frame_0_1000"
+                        else [list(point) for point in stroke.points]
+                    ),
+                }
+                for stroke in action.stroke_paths
+            ]
+        if action.expected_effect_region:
+            if action.effect_region_binding == "target_region":
+                action_payload["expected_effect_region"] = target_region
+            elif action.effect_region_binding == "surface_region":
+                action_payload["expected_effect_region"] = list(
+                    decision.surface_region,
+                )
+        payload["actions"][index] = action_payload
+        global_effect = payload.get("expected_effect", {})
+        if (
+            global_effect.get("region")
+            and int(global_effect.get("binding_action_index", -1)) == index
+        ):
+            global_binding = str(global_effect.get("region_binding") or "")
+            if global_binding == "target_region":
+                global_effect["region"] = target_region
+            elif global_binding == "surface_region":
+                global_effect["region"] = list(decision.surface_region)
+        refinements.append({
+            "action_index": index,
+            "action": action.action,
+            "grounding_mode": action.grounding_mode,
+            "applied": True,
+            "provider": "current_frame_bounded_region",
+            "original_target_region": list(action.target_region),
+            "semantic_target_anchor": list(action.target_anchor),
+            "refined_target_region": target_region,
+            "boundary": boundary,
+            "stroke_coordinate_space": (
+                "target_region_0_1000"
+                if (
+                    action.local_strokes
+                    or (
+                        action.stroke_paths
+                        and all(
+                            stroke.coordinate_space == "target_region_0_1000"
+                            for stroke in action.stroke_paths
+                        )
+                    )
+                )
+                else "frame_0_1000"
+            ),
         })
 
     for index in anchored_point_indices:
@@ -491,7 +1158,8 @@ def refine_interaction_geometry(
             image,
             rough_region,
             list(decision.interaction_region),
-            role=f"action[{index}]_{anchor_field}",
+            role="target" if anchor_field == "target_region" else "source",
+            role_label=f"action[{index}]_{anchor_field}",
         )
         resolved_region = list(anchor["resolved_region"])
         point = _project_point(
@@ -505,6 +1173,27 @@ def refine_interaction_geometry(
             "frame_y": point[1],
             anchor_field: resolved_region,
         })
+        refined_target_anchor: list[float] = []
+        if action.target_anchor:
+            # The semantic anchor and the motor point share the same rough
+            # object coordinate space.  Once current pixels shrink or shift
+            # that object, keeping the old anchor can put it outside the new
+            # typed region even though the projected click itself is valid.
+            # Project both independently through the same affine mapping so
+            # the safety contract remains internally consistent without
+            # silently replacing either semantic choice.
+            projected_anchor = _project_point(
+                (
+                    float(action.target_anchor[0]),
+                    float(action.target_anchor[1]),
+                ),
+                rough_region,
+                resolved_region,
+            )
+            refined_target_anchor = [
+                float(projected_anchor[0]), float(projected_anchor[1]),
+            ]
+            action_payload["target_anchor"] = refined_target_anchor
         other_field = (
             "source_region" if anchor_field == "target_region" else "target_region"
         )
@@ -549,6 +1238,10 @@ def refine_interaction_geometry(
             "anchor": anchor,
             "original_point": [float(action.frame_x), float(action.frame_y)],
             "refined_point": [round(point[0], 3), round(point[1], 3)],
+            "original_target_anchor": list(action.target_anchor),
+            "refined_target_anchor": [
+                round(value, 3) for value in refined_target_anchor
+            ],
             "effect_region_binding": effect_binding,
             "refined_effect_region": list(
                 action_payload.get("expected_effect_region") or []
@@ -562,10 +1255,13 @@ def refine_interaction_geometry(
     refined._canonicalization_repairs = getattr(
         decision, "_canonicalization_repairs", [],
     )
+    applied = any(item.get("applied", True) is True for item in refinements)
     return refined, {
         "verified": True,
-        "applied": True,
-        "provider": "local_visual_geometry",
+        "applied": applied,
+        "provider": (
+            "local_visual_geometry" if applied else "typed_spatial_policy"
+        ),
         "artifact": str(image_path),
         "artifact_dimensions": {
             "width": image_width,

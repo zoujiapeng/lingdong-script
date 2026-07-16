@@ -26,18 +26,32 @@ class RecoveryPolicy:
             "window_not_found", "focus_lost", "stale_frame",
             "stale_authoritative_frame", "target_binding_failed",
             "interaction_region_invalid", "visual_frame_lineage_invalid",
+            "pointer_ownership_lost",
         } and attempt <= 2:
             return RecoveryDecision("rebind_and_retry", failure, True)
         if failure in {
             "interaction_action_empty", "interaction_action_failed",
             "interaction_action_no_effect",
-            "local_effect_missing", "semantic_verification_failed",
+            "local_effect_missing",
+            "visual_geometry_ungrounded",
         }:
             # Never blindly replay a pointer mutation whose outcome is
             # uncertain.  Recovery starts from a new authoritative frame and
             # resumes at the failed semantic turn.
             return RecoveryDecision(
                 "reobserve_then_replan_current_turn", failure, attempt <= 1,
+            )
+        if failure in {
+            "semantic_verification_failed",
+            "gesture_realization_missing",
+            "direct_manipulation_completion_unverified",
+        }:
+            # A visible mutation already occurred.  A new semantic plan would
+            # author more pixels on uncertain state, not retry verification.
+            # Stop precisely at this stage; callers may re-run a verifier on
+            # the captured post frame without replaying input.
+            return RecoveryDecision(
+                "stop_after_uncertain_mutation", failure, False,
             )
         if failure == "external_change_timeout":
             return RecoveryDecision(

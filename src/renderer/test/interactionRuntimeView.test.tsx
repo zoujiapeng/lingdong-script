@@ -269,6 +269,7 @@ describe('interactive task contract runtime view', () => {
         required_capabilities: ['interaction.wait_external'], verifier_requirements: ['visual.change.verify'],
         exposed_capabilities: ['interaction.wait_external', 'visual.change.verify'], missing_capabilities: [],
         satisfiable: true, adapter: '', model_role: 'none', artifact_id: 'frame-after', model_calls: 1,
+        selected_evidence_providers: { 'interaction.external_change_observed': 'persistent_change_watcher' },
         controller_elapsed_ms: 340, failure_type: 'external_change_timeout', recovery: { strategy: 'stop' },
         error: 'no persistent change before timeout',
       }],
@@ -313,6 +314,9 @@ describe('interactive task contract runtime view', () => {
       stage_id: 'stage-wait', status: 'failed', model_elapsed_ms: 1250,
       controller_elapsed_ms: 340, capture_elapsed_ms: 80, evidence_count: 1,
       failure_type: 'external_change_timeout',
+      selected_evidence_providers: {
+        'interaction.external_change_observed': 'persistent_change_watcher',
+      },
     });
 
     render(<TaskRuntimeAuditPanel contract={contract} arp={arp} />);
@@ -331,6 +335,7 @@ describe('interactive task contract runtime view', () => {
     expect(screen.getByText('观察帧')).toBeInTheDocument();
     expect(screen.getAllByText('interaction.external_change_observed').length).toBeGreaterThan(0);
     expect(screen.getByText(/persistent_change_watcher · stage stage-wait/)).toBeInTheDocument();
+    expect(screen.getByText(/interaction.external_change_observed → persistent_change_watcher/)).toBeInTheDocument();
     expect(screen.getAllByText('未通过 · 缺少 1').length).toBeGreaterThan(0);
     expect(screen.getByText(/missing task-contract evidence/)).toBeInTheDocument();
   });

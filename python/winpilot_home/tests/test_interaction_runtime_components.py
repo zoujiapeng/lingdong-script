@@ -54,6 +54,27 @@ def _stage_output(_stage, _started, **payload):
     return payload
 
 
+def test_persistent_stage_graph_accepts_post_action_reobserve_but_not_idle_loop():
+    from winpilot.tasking.interaction import InteractionAction
+    from winpilot.tasking.interaction_stage_runtime import (
+        _persistent_plan_has_causal_continuation,
+    )
+
+    action = InteractionAction(
+        action="click",
+        frame_x=400,
+        frame_y=400,
+        target_region=[350, 350, 450, 450],
+    )
+    assert _persistent_plan_has_causal_continuation(
+        _decision(action=action, continuation="reobserve"),
+    ) is True
+    invalid_idle = _decision(action=None, continuation="finish").model_copy(
+        update={"continuation": "reobserve"},
+    )
+    assert _persistent_plan_has_causal_continuation(invalid_idle) is False
+
+
 def test_click_and_drag_tasks_route_to_bounded_typed_stages_without_external_wait():
     from winpilot.orchestrator.contracts import validate_graph
     from winpilot.tasking.compiler import TaskContractCompiler
@@ -82,6 +103,10 @@ def test_click_and_drag_tasks_route_to_bounded_typed_stages_without_external_wai
 
         infer = next(stage.id for stage in contract.stages if stage.type.value == "InferInteraction")
         verify = next(stage.id for stage in contract.stages if stage.type.value == "VerifyLocalEffect")
+        perform = next(
+            stage.id for stage in contract.stages
+            if stage.type.value == "PerformTurn"
+        )
         routes = {
             (edge.branch, edge.target)
             for edge in graph.edges
@@ -93,13 +118,10 @@ def test_click_and_drag_tasks_route_to_bounded_typed_stages_without_external_wai
         )
         assert routes == {
             ("continue", infer),
+            ("continue_local", perform),
             ("complete", "end"),
             ("recover_reobserve", observe),
         }
-        perform = next(
-            stage.id for stage in contract.stages
-            if stage.type.value == "PerformTurn"
-        )
         assert any(
             edge.source == perform
             and edge.branch == "reobserve"
@@ -396,6 +418,128 @@ def test_visual_planner_derives_external_watch_from_typed_continuation(
     assert decision.observation_artifact_id == "art-current-frame"
 
 
+def test_shared_session_requires_explicit_current_frame_affordance(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        InteractionPlanOutputError,
+    )
+
+    raw = _decision(action=InteractionAction(
+        action="click",
+        frame_x=400,
+        frame_y=400,
+        target_region=[350, 350, 450, 450],
+    )).model_dump(mode="python")
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: dict(raw),
+    )
+    image = tmp_path / "shared-frame.png"
+    image.write_bytes(b"frame")
+
+    with pytest.raises(InteractionPlanOutputError) as missing:
+        interaction.plan_interaction(
+            image,
+            task="continue the visible shared session",
+            intent={"mode": "shared_visual_session"},
+            frame_id=1,
+            observation_artifact_id="shared-artifact",
+        )
+    assert missing.value.code == "interaction_mechanism_missing"
+
+    raw["actions"][0].update({
+        "interaction_mechanism": "click_to_place",
+        "affordance_evidence": "the current frame explicitly labels this as click-to-place",
+    })
+    decision = interaction.plan_interaction(
+        image,
+        task="continue the visible shared session",
+        intent={"mode": "shared_visual_session"},
+        frame_id=2,
+        observation_artifact_id="shared-artifact-2",
+    )
+    assert decision.actions[0].interaction_mechanism == "click_to_place"
+
+
+def test_visual_planner_binds_selected_current_pixel_candidate(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import InteractionAction
+
+    raw = _decision(action=InteractionAction(
+        action="click",
+        frame_x=350,
+        frame_y=350,
+        target_region=[300, 300, 400, 400],
+        target_anchor=[350, 350],
+        grounding_mode="object_anchor",
+        interaction_mechanism="point_selection",
+        affordance_evidence="the chosen visible bounded object",
+        expected_effect_region=[300, 300, 400, 400],
+        effect_region_binding="target_region",
+    )).model_dump(mode="python")
+    raw["actions"][0]["target_candidate_id"] = "visible-region-07"
+    raw["expected_effect"].update({
+        "region": [300, 300, 400, 400],
+        "region_binding": "target_region",
+        "binding_action_index": 0,
+    })
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    inventory = [{
+        "candidate_id": "visible-region-07",
+        "bounds": [600.0, 600.0, 700.0, 700.0],
+        "center": [650.0, 650.0],
+        "shape": "rectangular_boundary",
+        "pixel_size": [80, 80],
+        "peer_group": "peer-set-01",
+        "peer_count": 9,
+        "row_index": 2,
+        "column_index": 3,
+    }]
+    monkeypatch.setattr(
+        interaction, "inventory_visible_regions", lambda _path: inventory,
+    )
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: raw,
+    )
+    image = tmp_path / "candidate-frame.png"
+    image.write_bytes(b"frame")
+
+    decision = interaction.plan_interaction(
+        image,
+        task="activate the semantically selected visible region",
+        intent={},
+        frame_id=21,
+        observation_artifact_id="candidate-frame-artifact",
+        primary_action_modality="click",
+    )
+
+    action = decision.actions[0]
+    assert action.target_candidate_id == "visible-region-07"
+    assert action.target_region == [600.0, 600.0, 700.0, 700.0]
+    assert action.target_anchor == [650.0, 650.0]
+    assert [action.frame_x, action.frame_y] == [650.0, 650.0]
+    assert action.expected_effect_region == action.target_region
+    assert decision.expected_effect.region == action.target_region
+    assert decision.region_inventory == tuple(inventory)
+    assert any(
+        "target_region:bound->visible-region-07" in item
+        for item in decision.canonicalization_repairs
+    )
+
+
 def test_visual_planner_centers_complete_source_in_target_deterministically(
     monkeypatch,
     tmp_path,
@@ -501,6 +645,96 @@ def test_visual_planner_canonicalizes_minor_provider_schema_drift_once(
     assert "continuation:normalized_alias" in decision.canonicalization_repairs
     assert "expected_effect.description:derived_from_grounded_action" in (
         decision.canonicalization_repairs
+    )
+
+
+def test_visual_planner_normalizes_only_omitted_stable_batch_dependencies(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import InteractionAction
+
+    actions = [
+        InteractionAction(
+            action="click",
+            frame_x=x,
+            frame_y=y,
+            target_region=[x - 35, y - 35, x + 35, y + 35],
+            target_anchor=[x, y],
+            grounding_mode="object_anchor",
+            interaction_mechanism="point_selection",
+            affordance_evidence=f"visible target {index}",
+            expected_effect_region=[x - 35, y - 35, x + 35, y + 35],
+        )
+        for index, (x, y) in enumerate(
+            ((320.0, 350.0), (500.0, 500.0), (680.0, 650.0)),
+            start=1,
+        )
+    ]
+    raw = _decision(action=actions[0], continuation="finish").model_dump(
+        mode="python"
+    )
+    raw["actions"] = [item.model_dump(mode="python") for item in actions]
+    for item in raw["actions"]:
+        item.pop("requires_fresh_frame_after", None)
+    raw["expected_effect"].update({
+        "description": "all three visible targets register in order",
+        "region": [280, 300, 720, 700],
+        "region_binding": "independent_region",
+        "binding_action_index": -1,
+    })
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: raw,
+    )
+    image = tmp_path / "stable-batch.png"
+    image.write_bytes(b"frame")
+
+    decision = interaction.plan_interaction(
+        image,
+        task="activate the three simultaneously visible stable targets in order",
+        intent={},
+        frame_id=12,
+        observation_artifact_id="stable-batch-frame",
+    )
+
+    assert [
+        item.requires_fresh_frame_after for item in decision.actions
+    ] == [False, False, True]
+    assert (
+        "actions[0].requires_fresh_frame_after:derived_stable_batch"
+        in decision.canonicalization_repairs
+    )
+    assert (
+        "actions[1].requires_fresh_frame_after:derived_stable_batch"
+        in decision.canonicalization_repairs
+    )
+
+    # An explicit dependency remains semantic and must never be silently
+    # downgraded merely to force a larger transaction. The planner compiler
+    # keeps only the safe prefix and routes it through a fresh frame.
+    raw["actions"][0]["requires_fresh_frame_after"] = True
+    bounded = interaction.plan_interaction(
+        image,
+        task="activate the visible targets",
+        intent={},
+        frame_id=13,
+        observation_artifact_id="explicit-dependency-frame",
+    )
+    assert len(bounded.actions) == 1
+    assert len(bounded.deferred_actions) == 2
+    assert [item.frame_x for item in bounded.deferred_actions] == [500.0, 680.0]
+    assert bounded.program_continuation == "finish"
+    assert bounded.actions[0].requires_fresh_frame_after is True
+    assert bounded.continuation == "reobserve"
+    assert bounded.expected_effect.region == actions[0].expected_effect_region
+    assert (
+        "actions:truncated_at_explicit_fresh_frame_dependency"
+        in bounded.canonicalization_repairs
     )
 
 
@@ -1353,6 +1587,7 @@ def _run_roi_verify(
     *,
     persistent=False,
     task_complete=True,
+    deferred_program=None,
 ):
     from unittest.mock import patch
     from winpilot.tasking.artifacts import ArtifactStore
@@ -1394,6 +1629,8 @@ def _run_roi_verify(
             "executed_action": {"deferred": False},
             "target_binding": {"source": "active_window"},
             "current_artifact_id": baseline.artifact_id,
+            "frame_id": decision.frame_id,
+            "deferred_action_program": deferred_program,
         }},
     }
     engine = InteractionStageEngine(stage_output=_stage_output)
@@ -1407,8 +1644,8 @@ def _run_roi_verify(
             "effect_region": [300, 300, 500, 500],
             "task_complete": task_complete,
         },
-    ):
-        return engine.execute(
+    ) as verifier:
+        result = engine.execute(
             stage,
             contract,
             context,
@@ -1417,6 +1654,9 @@ def _run_roi_verify(
             store=store,
             registry=EvidenceRegistry("run-roi"),
         )
+    if deferred_program is not None:
+        verifier.assert_not_called()
+    return result
 
 
 def test_local_effect_verification_uses_action_roi_not_unrelated_pixels(tmp_path):
@@ -1444,6 +1684,82 @@ def test_local_effect_verification_uses_action_roi_not_unrelated_pixels(tmp_path
     assert result.output["interaction_state"]["budget"]["model_calls_used"] == 1
 
 
+def test_point_selection_can_verify_remote_feedback_on_bound_surface(tmp_path):
+    from unittest.mock import patch
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.tasking.interaction import InteractionAction
+    from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
+
+    baseline_path = tmp_path / "point-before.png"
+    current_path = tmp_path / "point-after.png"
+    _write_frame(baseline_path)
+    # The clicked target is at 30..50, while its visible acknowledgement is a
+    # remote banner at the bottom of the same bound surface.
+    _write_frame(current_path, changed_box=(65, 65, 76, 76))
+    store = ArtifactStore("run-remote-effect", tmp_path / "artifacts")
+    baseline = store.import_file(baseline_path, purpose="observation", sendable=False)
+    current = store.import_file(current_path, purpose="observation", sendable=False)
+    decision = _decision(
+        action=InteractionAction(
+            action="click",
+            frame_x=400,
+            frame_y=400,
+            target_region=[300, 300, 500, 500],
+            expected_effect_region=[300, 300, 500, 500],
+            effect_region_binding="target_region",
+            interaction_mechanism="point_selection",
+            affordance_evidence="unique visible selectable object",
+        ),
+        observation_artifact_id=baseline.artifact_id,
+    )
+    contract = TaskContractCompiler().compile(
+        "click the unique visible target", cold_start=True,
+    )
+    stage = next(
+        item for item in contract.stages
+        if item.type.value == "VerifyLocalEffect"
+    )
+    context = {
+        "run_id": "run-remote-effect",
+        "runtime_state": {"interaction_state": {
+            "planned_action": decision.model_dump(mode="json"),
+            "executed_action": {"deferred": False},
+            "target_binding": {"source": "active_window"},
+            "current_artifact_id": baseline.artifact_id,
+        }},
+    }
+    engine = InteractionStageEngine(stage_output=_stage_output)
+    engine._capture_scene = lambda **_kwargs: current
+    with patch(
+        "winpilot.tasking.interaction_stage_runtime.verify_interaction_effect",
+        return_value={
+            "ok": True,
+            "verified": True,
+            "semantic_visual_verified": True,
+            "effect_region": [650, 650, 760, 760],
+            "task_complete": True,
+        },
+    ) as verifier:
+        result = engine.execute(
+            stage,
+            contract,
+            context,
+            threading.Event(),
+            time.monotonic(),
+            store=store,
+            registry=EvidenceRegistry("run-remote-effect"),
+        )
+
+    assert result.ok is True
+    assert result.branch == "complete"
+    regions = verifier.call_args.kwargs["authoritative_effect_regions"]
+    assert [200.0, 200.0, 800.0, 800.0] in regions
+    verification = result.output["interaction_state"]["local_verification"]
+    assert any(item["changed"] is True for item in verification["local_changes"])
+
+
 def test_persistent_interaction_can_finish_when_semantic_terminal_state_is_proved(tmp_path):
     result = _run_roi_verify(
         tmp_path,
@@ -1461,6 +1777,27 @@ def test_persistent_interaction_can_finish_when_semantic_terminal_state_is_prove
     assert completion["metadata"]["local_effect_evidence_id"]
 
 
+def test_persistent_activation_yields_after_its_verified_agent_turn(tmp_path):
+    result = _run_roi_verify(
+        tmp_path,
+        (32, 32, 48, 48),
+        persistent=True,
+        task_complete=False,
+    )
+
+    assert result.ok is True
+    assert result.branch == "complete"
+    state = result.output["interaction_state"]
+    assert state["session_yield"] == {
+        "reason": "verified_agent_turn_limit_reached",
+        "turn_index": 1,
+        "max_agent_turns_per_activation": 1,
+        "session_remains_resumable": True,
+    }
+    completion = result.output["completion_evidence"]
+    assert completion["metadata"]["proof"] == "verified_activation_turn"
+
+
 def test_verified_nonterminal_continuation_does_not_consume_recovery_budget(tmp_path):
     result = _run_roi_verify(
         tmp_path,
@@ -1473,6 +1810,53 @@ def test_verified_nonterminal_continuation_does_not_consume_recovery_budget(tmp_
     state = result.output["interaction_state"]
     assert state["status"] == "turn_verified_followup"
     assert int(state.get("replan_count") or 0) == 0
+    assert len(state["verified_turn_history"]) == 1
+    progress = state["verified_turn_history"][0]
+    assert progress["turn_index"] == 1
+    assert progress["artifact_id"]
+    assert progress["actions"][0]["action"] == "click"
+    assert progress["task_complete"] is False
+
+
+def test_verified_local_program_step_advances_without_another_model_call(tmp_path):
+    from winpilot.tasking.interaction import InteractionAction
+
+    next_action = InteractionAction(
+        action="click",
+        frame_x=650,
+        frame_y=650,
+        target_region=[600, 600, 700, 700],
+        target_anchor=[650, 650],
+        grounding_mode="object_anchor",
+        interaction_mechanism="point_selection",
+        affordance_evidence="a second stable visible marker",
+        expected_effect_region=[600, 600, 700, 700],
+    )
+    result = _run_roi_verify(
+        tmp_path,
+        (32, 32, 48, 48),
+        task_complete=False,
+        deferred_program={
+            "program_id": "interaction-program-component-test",
+            "origin_frame_id": 1,
+            "next_step_index": 1,
+            "remaining_actions": [next_action.model_dump(mode="json")],
+            "terminal_continuation": "finish",
+        },
+    )
+
+    assert result.ok is True
+    assert result.branch == "continue_local"
+    assert result.output["model_calls"] == 0
+    state = result.output["interaction_state"]
+    assert state["status"] == "local_program_followup"
+    assert state["planned_action"]["actions"][0]["target_anchor"] == [650.0, 650.0]
+    assert state["planned_action"]["observation_artifact_id"] == state["current_artifact_id"]
+    assert state["deferred_action_program"] is None
+    assert state["last_local_verification"]["semantic"]["verify_method"] == (
+        "grounded-local-program-progress"
+    )
+    assert result.output["evidence"]["provider"] == "grounded_transaction_progress"
 
 
 def test_effect_verifier_accepts_task_complete_only_after_strict_effect_proof(monkeypatch):
@@ -1505,11 +1889,190 @@ def test_effect_verifier_accepts_task_complete_only_after_strict_effect_proof(mo
     verified = verify_interaction_effect("unused.png", task="complete the visible task", decision=decision)
     assert verified["verified"] is True
     assert verified["task_complete"] is True
+    assert verified["verifier_contract"]["effect_region_valid"] is True
+    assert verified["raw_verdict"]["passed"] is True
 
     payload["passed"] = False
     rejected = verify_interaction_effect("unused.png", task="complete the visible task", decision=decision)
     assert rejected["verified"] is False
     assert rejected["task_complete"] is False
+
+
+def test_effect_verifier_separates_successful_local_turn_from_terminal_completion(
+    monkeypatch,
+):
+    from winpilot.tasking.interaction import InteractionAction, verify_interaction_effect
+    import winpilot.tasking.interaction as interaction_module
+
+    decision = _decision(
+        action=InteractionAction(
+            action="click",
+            frame_x=400,
+            frame_y=400,
+            target_region=[300, 300, 500, 500],
+            target_anchor=[400, 400],
+            grounding_mode="object_anchor",
+            interaction_mechanism="point_selection",
+            affordance_evidence="visible numbered marker",
+            expected_effect_region=[300, 300, 500, 500],
+        ),
+        continuation="reobserve",
+    )
+    monkeypatch.setattr(
+        interaction_module.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: {
+            "local_effect_passed": True,
+            "task_complete": False,
+            "confidence": 0.98,
+            "observed": ["the selected marker visibly changed state"],
+            "local_effect_issues": [],
+            "completion_issues": ["two requested selections remain"],
+            "effect_region": [320, 320, 480, 480],
+        },
+    )
+
+    result = verify_interaction_effect(
+        "unused.png",
+        task="select all requested visible targets in order",
+        decision=decision,
+    )
+
+    assert result["verified"] is True
+    assert result["task_complete"] is False
+    assert result["issues"] == []
+    assert result["completion_issues"] == ["two requested selections remain"]
+    assert result["verifier_contract"]["verdict_schema"] == (
+        "local-effect-and-terminal-v2"
+    )
+
+
+def test_effect_verifier_never_promotes_terminal_claim_with_completion_issues(
+    monkeypatch,
+):
+    from winpilot.tasking.interaction import InteractionAction, verify_interaction_effect
+    import winpilot.tasking.interaction as interaction_module
+
+    decision = _decision(
+        action=InteractionAction(
+            action="click",
+            frame_x=400,
+            frame_y=400,
+            expected_effect_region=[300, 300, 500, 500],
+        ),
+        continuation="finish",
+    )
+    monkeypatch.setattr(
+        interaction_module.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: {
+            "local_effect_passed": True,
+            "task_complete": True,
+            "confidence": 0.98,
+            "observed": ["the clicked control changed state"],
+            "local_effect_issues": [],
+            "completion_issues": ["the requested final state is not visible"],
+            "effect_region": [320, 320, 480, 480],
+        },
+    )
+
+    result = verify_interaction_effect(
+        "unused.png", task="complete the visible task", decision=decision,
+    )
+
+    assert result["verified"] is True
+    assert result["task_complete"] is False
+    assert result["verifier_contract"]["completion_issues_valid"] is False
+
+
+def test_effect_verifier_can_adjudicate_vlm_spatial_doubt_with_causal_transfer(
+    monkeypatch,
+):
+    from winpilot.tasking.interaction import InteractionAction, verify_interaction_effect
+    import winpilot.tasking.interaction as interaction_module
+
+    decision = _decision(
+        action=InteractionAction(
+            action="drag",
+            frame_x1=260,
+            frame_y1=500,
+            frame_x2=690,
+            frame_y2=500,
+            source_region=[220, 400, 300, 600],
+            target_region=[600, 350, 780, 650],
+            interaction_mechanism="direct_manipulation",
+            affordance_evidence="visible movable object and destination",
+            expected_effect_region=[600, 350, 780, 650],
+            effect_region_binding="target_region",
+        ),
+        continuation="reobserve",
+    )
+    monkeypatch.setattr(
+        interaction_module.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "confidence": 0.95,
+            "observed": ["the object is visibly inside the typed target"],
+            "issues": ["its former position is visually ambiguous"],
+            "effect_region": [610, 360, 770, 640],
+            "task_complete": True,
+        },
+    )
+
+    rejected = verify_interaction_effect(
+        "unused.png", task="move the object", decision=decision,
+    )
+    assert rejected["verified"] is False
+
+    verified = verify_interaction_effect(
+        "unused.png",
+        task="move the object",
+        decision=decision,
+        transition_evidence={
+            "applicable": True,
+            "verified": True,
+            "provider": "local_direct_manipulation_transition",
+            "actions": [{
+                "action_index": 0,
+                "verified": True,
+                "source_change_ratio": 0.3,
+                "target_change_ratio": 0.2,
+                "appearance_histogram_intersection": 0.8,
+                "placement_geometry_valid": True,
+            }],
+        },
+    )
+    assert verified["verified"] is True
+    assert verified["task_complete"] is True
+    assert (
+        verified["verifier_contract"]["issues_adjudicated_by_transition"]
+        is True
+    )
+
+
+def test_model_change_ratio_is_capped_for_causal_detection_not_semantics():
+    from winpilot.tasking.interaction import InteractionAction
+    from winpilot.tasking.interaction_stage_runtime import (
+        _local_causal_change_ratio,
+    )
+
+    decision = _decision(
+        action=InteractionAction(
+            action="click",
+            frame_x=400,
+            frame_y=400,
+            expected_effect_region=[300, 300, 500, 500],
+        ),
+    )
+    decision.expected_effect.minimum_change_ratio = 0.9
+
+    assert _local_causal_change_ratio(
+        decision, remote_feedback=False,
+    ) == 0.05
+    assert _local_causal_change_ratio(
+        decision, remote_feedback=True,
+    ) == 0.0025
 
 
 def test_bounded_no_action_finish_requires_independent_visual_proof(monkeypatch, tmp_path):
@@ -1650,6 +2213,13 @@ def test_interaction_recovery_discards_old_plan_and_consumes_replan_budget():
             "planned_action": {"unsafe": "old coordinates"},
             "executed_action": {"outcome": "uncertain"},
             "local_verification": {"verified": False},
+            "last_local_verification": {"verified": True},
+            "verified_turn_history": [{
+                "turn_index": 1,
+                "artifact_id": "verified-frame",
+                "actions": [{"action": "click"}],
+                "task_complete": False,
+            }],
         }},
     }
     engine = InteractionStageEngine(stage_output=_stage_output)
@@ -1663,7 +2233,10 @@ def test_interaction_recovery_discards_old_plan_and_consumes_replan_budget():
         recovery_action="reobserve_then_replan_current_turn",
         recovery_reason="interaction_action_failed",
         retryable=True,
-        failure_details={"controller_elapsed_ms": 17},
+        failure_details={
+            "controller_elapsed_ms": 17,
+            "error": "the rejected primitive had no visible object anchor",
+        },
     )
 
     assert result is not None
@@ -1673,6 +2246,15 @@ def test_interaction_recovery_discards_old_plan_and_consumes_replan_budget():
     assert state["planned_action"] is None
     assert state["executed_action"] is None
     assert state["local_verification"] is None
+    assert state["last_local_verification"] == {"verified": True}
+    assert state["verified_turn_history"] == [{
+        "turn_index": 1,
+        "artifact_id": "verified-frame",
+        "actions": [{"action": "click"}],
+        "task_complete": False,
+    }]
+    assert state["last_failure"]["failure_type"] == "interaction_action_failed"
+    assert "no visible object anchor" in state["last_failure"]["reason"]
     assert state["replan_count"] == 1
     assert state["budget"]["replans_used"] == 1
     assert result.output["controller_elapsed_ms"] == 17
@@ -1979,6 +2561,9 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     assert result.branch == "changed"
     assert captured_actions[0]["timeout_s"] == 7.0
     assert captured_actions[0]["require_persistent"] is True
+    assert captured_actions[0]["region"] == {
+        "x": 0, "y": 0, "width": 100, "height": 100,
+    }
     assert result.output["controller_elapsed_ms"] == 125
     assert result.output["model_elapsed_ms"] == 0
     records = registry.records()

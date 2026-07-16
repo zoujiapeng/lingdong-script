@@ -97,6 +97,9 @@ def test_stage_trace_preserves_model_capture_and_contract_budget_metrics():
             "model_elapsed_ms": 1234,
             "controller_elapsed_ms": 17,
             "capture_elapsed_ms": 41,
+            "selected_evidence_providers": {
+                "interaction.protocol_inferred": "interaction_protocol_inference",
+            },
             # Deliberately place the budget after a payload larger than the
             # generic history preview budget.  Dedicated runtime_metrics must
             # keep the numbers exact rather than depending on traversal order.
@@ -115,6 +118,9 @@ def test_stage_trace_preserves_model_capture_and_contract_budget_metrics():
     assert trace["model_elapsed_ms"] == 1234
     assert trace["controller_elapsed_ms"] == 17
     assert trace["capture_elapsed_ms"] == 41
+    assert trace["selected_evidence_providers"] == {
+        "interaction.protocol_inferred": "interaction_protocol_inference",
+    }
     assert trace["budget"] == {
         "model_calls_used": 2,
         "model_calls_limit": 8,

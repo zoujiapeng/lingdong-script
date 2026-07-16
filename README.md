@@ -56,7 +56,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |
 | 多输入协同 | 实验开关默认关闭；开启时实行人类优先的焦点/光标仲裁并 fail-closed，不能把它描述成两套真实鼠标键盘并发。 |
 | 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。 |
-| 真实能力 | 计算器、记事本、网页靶场、简单连续指针/拖拽已有回归。2026-07-16 的最终通用拖拽 run `arp-20260716-125004-26bdbb` 和关闭 Skill/Memory 的 QQ 工件发送 run `arp-20260716-130205-5277c2` 均从前端同一 Task Contract/ARP 路径完成，并分别由浏览器 trusted pointer ground truth 与发送后同一 artifact 的可见匹配闭环。测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率，更不是“达到人类通用视觉能力”的证明。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
+| 真实能力 | 计算器、记事本、网页靶场、连续指针/拖拽和真实 Paint→QQ 工件链已有回归。2026-07-16 的 9 场景冷探索视觉矩阵覆盖完整拖入、精确点击、顺序点击、滑块、四个通道方向和无上下文共享回合，`9 passed in 275.30s`，全部由浏览器 trusted pointer ground truth 判定；关闭 Skill/Memory 的 QQ run `arp-20260716-215314-7f98cd` 从同一 Task Contract/ARP 路径创建并发送当前 run 工件。测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率，更不是“达到人类通用视觉能力”的证明。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
 
 ## 快速启动
 
@@ -88,7 +88,7 @@ npx vitest run
 npm run build
 ```
 
-2026-07-16 最终全量验证为 WinPilot `1640 passed, 5 skipped, 1 warning`、根 Python `2508 passed`、Vitest `204/204 passed`，TypeScript typecheck 与 Vite/Electron build 通过。5 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；真实拖拽和 QQ 发送另行显式运行。这不是用 mock 代替 E2E，也不把分散运行记录描述成一次统计评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
+2026-07-16 最终全量验证为 WinPilot `1722 passed, 13 skipped, 1 warning`、根 Python `2508 passed`、Vitest `204/204 passed`，TypeScript typecheck、Vite/Electron、CLI 与 AI build 全部通过。13 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；本轮另行显式运行视觉矩阵 `9/9` 和关闭 Skill/Memory 的 Paint→QQ `1/1`。这不是用 mock 代替 E2E，也不把单机运行记录描述成统计泛化评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
 
 清理生成产物和缓存：
 
@@ -106,13 +106,13 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 
 报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。汇总中的 `verified_success` 只统计同时满足未超时、`status=done`、有外部 ground truth 且通过、policy 通过、性能预算通过并且没有 unverified done 标记的 run；没有检查项的报告记为 `ungrounded`，不再把 agent 自报 done 算成功。
 
-单次手工成功不能换算成“成功率”。2026-07-16 的通用实时交互 opt-in E2E 从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入，而不是直接调用内部 Controller。最终 run `arp-20260716-125004-26bdbb` 的 `ObserveScene → InferInteraction → PerformTurn → VerifyLocalEffect` 全部为 `done`，总耗时 31.650 秒、2 次模型调用；stage trace 记录模型 24,214 ms、Controller 2,572 ms、capture 1,157 ms，0 次 replan/recovery。浏览器 ground truth 记录 page ready、pointerdown、7 次 pointermove 与 pointerup，并确认整个 source token 已位于目标内部；frame lineage、source/target 多族局部视觉 grounding 和 target-bound effect region 均通过，而不只验证鼠标中心点或任意像素变化。
+单次手工成功不能换算成“成功率”。2026-07-16 的通用实时交互 opt-in E2E 从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入，而不是直接调用内部 Controller。最终矩阵 `drag_fit`、`precise_click`、`ordered_clicks`、`slider`、`corridor_drag_v0..v3`、`shared_turn` 为 `9 passed in 275.30s`；对应 run 为 `arp-20260716-214707-f32e2a`、`arp-20260716-214725-04457e`、`arp-20260716-214806-14f2d4`、`arp-20260716-214833-e2fbf8`、`arp-20260716-214849-0d20b6`、`arp-20260716-214905-5eb4dc`、`arp-20260716-214922-d9ea49`、`arp-20260716-214937-5bddd2`、`arp-20260716-214956-261013`。九项均为 `done`、0 次 replan/recovery；合计 12 次模型调用（平均 1.33、最多 2），Controller 平均 2,384 ms。浏览器 ground truth 分别验证完整对象落入、唯一目标点击、严格的 `1→2→3` 顺序、滑块终点、路径合法/clearance 和两笔有效 X 笔画；frame lineage、局部像素 grounding、路径与 effect evidence 同时参与，而不只验证鼠标中心点或任意像素变化。矩阵总时长主要受模型服务影响：共享回合首次推断单次耗时 94,395 ms，本地指针事务不是这一延迟的来源。
 
-同日用户授权的最终真实 QQ E2E run `arp-20260716-130205-5277c2` 用 `cold_start=true` 关闭 Skill/Memory，从同一前端路径在 69.017 秒内完成 2 次模型调用；模型耗时 22,744 ms、Controller 44,979 ms。`DrawArtifact`、`CaptureArtifact`、`OpenConversation`、`SendArtifact`、`VerifyDelivery` 均为 `done`，每一阶段的 preflight 都证明 verifier requirements 是 exposed capabilities 的子集。它创建当前 run 工件 `art-bc0c6f7a309443aa`（SHA-256 `3927a03fc7faa41220c623f3d04ea420755e869338ce65aa3018d76ff09d82e4`，866×413，10,267 bytes），通过 UIA 选择目标联系人，并在正确会话的发送后可见气泡中得到 220 个 good matches / 137 个 homography inliers；匹配区域相对发送前基线确有变化，Completion Contract 全部满足。
+同日用户授权的最终真实 QQ E2E run `arp-20260716-215314-7f98cd` 对“用画板画一头猪然后截图打开QQ发送给我的手机”设置 `cold_start=true`，关闭 Skill/Memory，并从同一前端路径在 69.896 秒内完成 2 次模型调用；模型耗时 17,318 ms、Controller 51,309 ms。`DrawArtifact`、`CaptureArtifact`、`OpenConversation`、`SendArtifact`、`VerifyDelivery` 均为 `done`，0 个 Skill replay，每一阶段的 verifier requirements 都属于 exposed capabilities，trace 还保留实际选择的 evidence provider。它创建当前 run 工件 `art-7cb4d57e14af4211`（SHA-256 `b3e725f49ca3247506dbd7517fd405c9b892b2c7f329060a562316db1c38d01a`，866×413，10,370 bytes），打开“我的手机”，执行真实发送，并在发送后可见图片气泡中得到 209 个 good matches / 163 个 homography inliers；匹配区域相对发送前基线变化率为 0.0597，Completion Contract 全部满足。绘图语义验收认为主体可辨认，但 `detail_level=low`；这不是高审美质量声明。
 
-另外三种通信改写分别由 run `arp-20260716-130503-a61df0`、`arp-20260716-130643-0dbba1`、`arp-20260716-130708-36a212` 完成，三项真实 E2E 合计 `3 passed in 180.34s`。它们编译到等价的 artifact/communication obligations；“发送刚画的工件”通过同一 typed 路径建立真实前置工件后，主 run 为 0 次模型调用，其余两个绘制并发送的 run 各为 2 次。四个 QQ 样本和一个拖拽样本仍不足以报告统计成功率或跨版本稳定性。
+另外三种通信改写分别由 run `arp-20260716-130503-a61df0`、`arp-20260716-130643-0dbba1`、`arp-20260716-130708-36a212` 完成，三项真实 E2E 合计 `3 passed in 180.34s`。它们编译到等价的 artifact/communication obligations；“发送刚画的工件”通过同一 typed 路径建立真实前置工件后，主 run 为 0 次模型调用，其余两个绘制并发送的 run 各为 2 次。这些 QQ 样本与九个受控视觉样本仍不足以报告统计成功率或跨版本稳定性。
 
-上述五个真实 run（一个拖拽、四个 QQ）都记录阶段、当前能力、模型/Controller/capture 耗时、预算、artifact、evidence 和失败/恢复字段，但仍不证明未知软件、移动或遮挡目标、多窗口、高 DPI、长会话及复杂审美任务已经达到人类水平。`structured_ui` 依赖目标应用可提供的 UIA/Win32 结构，scoped OCR 仍可能受自绘控件、动画和遮挡影响；前台 OCR 优先级不能中断已经进入 ONNX 的推理；强 ORB/homography 命中可以提前返回，但稀疏图、重裁切或大形变仍会落入较慢且可能含糊的多尺度 edge-template fallback。后续性能和成功率结论必须来自更大的固定任务集、多次运行、同模型/显示/DPI 配置和外部 ground truth。
+上述真实 run 都记录阶段、当前能力、模型/Controller/capture 耗时、预算、artifact、evidence 和失败/恢复字段，但仍不证明未知软件、移动或遮挡目标、多窗口、高 DPI、长会话及复杂审美任务已经达到人类水平。`structured_ui` 依赖目标应用可提供的 UIA/Win32 结构，scoped OCR 仍可能受自绘控件、动画和遮挡影响；前台 OCR 优先级不能中断已经进入 ONNX 的推理；强 ORB/homography 命中可以提前返回，但稀疏图、重裁切或大形变仍会落入较慢且可能含糊的多尺度 edge-template fallback。后续性能和成功率结论必须来自更大的固定任务集、多次运行、同模型/显示/DPI 配置和外部 ground truth。
 
 网页靶场用于复现输入、按钮、局部变化、弹窗、拖拽和画布任务：
 

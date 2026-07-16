@@ -1,4 +1,4 @@
-"""Opt-in, real Windows E2E for a generic visual drag interaction.
+"""Opt-in real Windows E2E matrix for general visual interactions.
 
 The test uses the same compile and ARP run HTTP endpoints as the native
 frontend.  It does not mock the model, screenshot pipeline, Controller,
@@ -34,6 +34,67 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGET_SERVER = ROOT / "eval_targets" / "visual_interaction_server.py"
 REPORT_ROOT = ROOT.parents[1] / ".e2e" / "real_visual_interaction"
 TERMINAL = {"done", "failed", "canceled"}
+CORRIDOR_TASK = (
+    "In the current visible window, drag the blue disk through the visible "
+    "corridor into the green GOAL without leaving the corridor."
+)
+VISUAL_SCENARIOS: tuple[dict[str, Any], ...] = (
+    {
+        "scenario": "drag_fit",
+        "task": (
+            "In the current visible window, drag the blue MOVE ME circle completely "
+            "inside the green DROP HERE target."
+        ),
+        "expected_actions": {"drag"},
+        "persistent": False,
+    },
+    {
+        "scenario": "precise_click",
+        "task": (
+            "In the current visible window, click the only purple hexagon with a "
+            "white center and ignore every distractor."
+        ),
+        "expected_actions": {"click"},
+        "persistent": False,
+    },
+    {
+        "scenario": "ordered_clicks",
+        "task": (
+            "In the current visible window, click the numbered markers 1, then 2, "
+            "then 3 in ascending order. Ignore the gray letter distractors."
+        ),
+        "expected_actions": {"click"},
+        "persistent": False,
+    },
+    {
+        "scenario": "slider",
+        "task": "In the current visible window, drag the orange knob into the striped green GOAL band.",
+        "expected_actions": {"drag", "mouse_down", "move_mouse", "mouse_up"},
+        "persistent": False,
+    },
+    # Mulberry32 seeds below deterministically cover all four route
+    # orientations.  Random-only coverage repeatedly hid mirror/reversal bugs.
+    *(
+        {
+            "id": f"corridor_drag_v{variant}",
+            "scenario": "corridor_drag",
+            "seed": seed,
+            "expected_variant": variant,
+            "task": CORRIDOR_TASK,
+            "expected_actions": {
+                "drag", "mouse_down", "move_mouse", "mouse_up",
+            },
+            "persistent": False,
+        }
+        for variant, seed in enumerate((7, 12, 1, 4))
+    ),
+    {
+        "scenario": "shared_turn",
+        "task": "跟我玩游戏，现在到你了",
+        "expected_actions": {"draw_strokes"},
+        "persistent": True,
+    },
+)
 
 
 def _headers() -> dict[str, str]:
@@ -191,7 +252,64 @@ def _trace_action_types(events: list[dict[str, Any]]) -> list[str]:
     return action_types
 
 
-def test_real_frontend_api_generic_visual_drag() -> None:
+def _assert_external_scenario(
+    state: dict[str, Any],
+    *,
+    case_id: str,
+    scenario: str,
+    seed: int,
+) -> None:
+    """Validate trusted browser evidence, never the agent's success claim."""
+    assert state.get("success") is True, state
+    assert state.get("case_id") == case_id, state
+    assert state.get("scenario") == scenario, state
+    assert int(state.get("seed") or 0) == seed, state
+    event = state.get("success_event") or {}
+    assert event.get("type") == "scenario_success", event
+    assert event.get("trusted") is True, event
+    assert event.get("succeeded") is True, event
+    details = event.get("details") or {}
+    assert details.get("succeeded") is True, details
+
+    if scenario == "drag_fit":
+        token, target = details.get("token") or {}, details.get("target") or {}
+        assert int(event.get("move_count") or 0) >= 2, event
+        assert token["left"] >= target["left"], details
+        assert token["top"] >= target["top"], details
+        assert token["right"] <= target["right"], details
+        assert token["bottom"] <= target["bottom"], details
+    elif scenario == "precise_click":
+        assert int(details.get("target_index")) >= 0, details
+        assert int(event.get("move_count") or 0) == 0, event
+    elif scenario == "ordered_clicks":
+        assert details.get("required_sequence") == [1, 2, 3], details
+        assert details.get("click_sequence") == [1, 2, 3], details
+        assert int(event.get("move_count") or 0) == 0, event
+        assert len(details.get("targets") or []) == 3, details
+    elif scenario == "slider":
+        goal = details.get("goal") or {}
+        center = int(details.get("center_x"))
+        assert int(event.get("move_count") or 0) >= 2, event
+        assert goal["left"] <= center <= goal["right"], details
+    elif scenario == "corridor_drag":
+        assert int(event.get("move_count") or 0) >= 3, event
+        assert details.get("path_valid") is True, details
+        assert int(details.get("min_clearance") or -1) >= 0, details
+        assert len(details.get("path_points") or []) >= 3, details
+    elif scenario == "shared_turn":
+        assert int(details.get("valid_stroke_count") or 0) >= 2, details
+        assert int(details.get("selected_cell")) >= 0, details
+        assert int(details.get("selected_cell")) != int(details.get("user_cell")), details
+    else:  # pragma: no cover - the matrix is closed above
+        raise AssertionError(f"unknown visual scenario {scenario!r}")
+
+
+@pytest.mark.parametrize(
+    "scenario_case",
+    VISUAL_SCENARIOS,
+    ids=[item.get("id") or item["scenario"] for item in VISUAL_SCENARIOS],
+)
+def test_real_frontend_api_visual_scenario(scenario_case: dict[str, Any]) -> None:
     if sys.platform != "win32":
         pytest.skip("real visual interaction E2E requires Windows")
     if os.environ.get("WINPILOT_REAL_VISUAL_E2E") != "1":
@@ -206,6 +324,17 @@ def test_real_frontend_api_generic_visual_drag() -> None:
 
     port = _free_port()
     case_id = uuid.uuid4().hex[:10]
+    scenario = str(scenario_case["scenario"])
+    replay_seed = os.environ.get("WINPILOT_VISUAL_E2E_SEED", "").strip()
+    seed = (
+        int(replay_seed, 0)
+        if replay_seed
+        else (
+            int(scenario_case["seed"])
+            if "seed" in scenario_case
+            else int(uuid.uuid4().hex[:8], 16)
+        )
+    )
     target_base = f"http://127.0.0.1:{port}"
     target_process = subprocess.Popen(
         [sys.executable, "-u", str(TARGET_SERVER), str(port)],
@@ -222,7 +351,10 @@ def test_real_frontend_api_generic_visual_drag() -> None:
     started_at = time.time()
     try:
         _wait_json(f"{target_base}/state", lambda value: value.get("ready") is True)
-        url = f"{target_base}/visual_interaction_target.html?case={case_id}"
+        url = (
+            f"{target_base}/visual_interaction_target.html?case={case_id}"
+            f"&scenario={scenario}&seed={seed}"
+        )
         # A unique profile prevents an already-running browser from silently
         # ignoring launch flags or reusing a stale per-site zoom/extension
         # state. The evaluation target must be visually deterministic before
@@ -254,29 +386,27 @@ def test_real_frontend_api_generic_visual_drag() -> None:
             f"{target_base}/state",
             lambda value: any(
                 item.get("type") == "page_ready"
-                and int(item.get("viewport_width") or 0) >= 760
-                and int(item.get("viewport_height") or 0) >= 560
-                and 0 <= int(item.get("token_left") or -1)
-                and int(item.get("token_right") or 0) > int(item.get("token_left") or 0)
-                and int(item.get("token_right") or 0) <= int(item.get("viewport_width") or 0)
-                and 0 <= int(item.get("target_left") or -1)
-                and int(item.get("target_right") or 0) > int(item.get("target_left") or 0)
-                and int(item.get("target_right") or 0) <= int(item.get("viewport_width") or 0)
-                and 0 <= int(item.get("token_top") or -1)
-                and int(item.get("token_bottom") or 0) <= int(item.get("viewport_height") or 0)
-                and 0 <= int(item.get("target_top") or -1)
-                and int(item.get("target_bottom") or 0) <= int(item.get("viewport_height") or 0)
+                and item.get("scenario") == scenario
+                and int(((item.get("details") or {}).get("viewport") or {}).get("width") or 0) >= 760
+                and int(((item.get("details") or {}).get("viewport") or {}).get("height") or 0) >= 560
+                and int(((item.get("details") or {}).get("arena") or {}).get("width") or 0) >= 700
+                and int(((item.get("details") or {}).get("arena") or {}).get("height") or 0) >= 300
                 for item in value.get("events") or []
             ),
             timeout_s=10.0,
         )
         assert ready_state.get("success") is False
+        if "expected_variant" in scenario_case:
+            ready_event = next(
+                item for item in reversed(ready_state.get("events") or [])
+                if item.get("type") == "page_ready"
+                and item.get("case_id") == case_id
+            )
+            assert int((ready_event.get("details") or {}).get("variant")) == int(
+                scenario_case["expected_variant"]
+            )
 
-        task = (
-            "In the current visible window, drag the blue circle labeled MOVE ME completely "
-            "into the green outlined DROP HERE target. Finish only after the page visibly "
-            "shows DRAG_SUCCEEDED."
-        )
+        task = str(scenario_case["task"])
         compiled = _request("POST", f"{base}/api/v2/task-contracts/compile", {
             "task": task,
             "max_steps": 12,
@@ -286,13 +416,20 @@ def test_real_frontend_api_generic_visual_drag() -> None:
         graph = compiled["graph"]
         interaction = (contract.get("intent") or {}).get("interaction") or {}
         assert interaction.get("active") is True, interaction
-        assert interaction.get("mode") == "direct_visual_manipulation", interaction
-        assert interaction.get("session_mode") == "bounded", interaction
+        if scenario_case["persistent"]:
+            assert interaction.get("mode") in {"turn_based", "shared_visual_session"}, interaction
+            assert interaction.get("session_mode") == "persistent", interaction
+        else:
+            assert interaction.get("mode") == "direct_visual_manipulation", interaction
+            assert interaction.get("session_mode") == "bounded", interaction
         assert contract.get("satisfiable") is True, contract.get("missing_capabilities")
         stage_types = [stage.get("type") for stage in contract.get("stages") or []]
-        assert stage_types == [
+        expected_stages = [
             "ObserveScene", "InferInteraction", "PerformTurn", "VerifyLocalEffect",
-        ], stage_types
+        ]
+        if scenario_case["persistent"]:
+            expected_stages.append("WaitForExternalChange")
+        assert stage_types == expected_stages, stage_types
         node_kinds = [node.get("kind") for node in graph.get("nodes") or []]
         assert "task_stage" in node_kinds
         assert "agent_goal" not in node_kinds
@@ -333,6 +470,9 @@ def test_real_frontend_api_generic_visual_drag() -> None:
             "kind": "real_windows_visual_interaction_e2e",
             "run_id": run_id,
             "case_id": case_id,
+            "scenario": scenario,
+            "matrix_case": scenario_case.get("id") or scenario,
+            "seed": seed,
             "task": task,
             "status": snapshot.get("status"),
             "error": snapshot.get("error"),
@@ -358,21 +498,14 @@ def test_real_frontend_api_generic_visual_drag() -> None:
         )
 
         assert snapshot.get("status") == "done", snapshot
-        assert target_state.get("case_id") == case_id, target_state
-        trusted = [item for item in target_state.get("events") or [] if item.get("trusted") is True]
-        press = next(item for item in trusted if item.get("type") == "pointerdown")
-        assert any(item.get("type") == "pointermove" for item in trusted), trusted
-        release = next(
-            item for item in reversed(trusted)
-            if item.get("type") == "pointerup" and item.get("succeeded") is True
+        _assert_external_scenario(
+            target_state, case_id=case_id, scenario=scenario, seed=seed,
         )
-        assert int(release.get("move_count") or 0) >= 2, release
-        assert abs(int(release["screen_x"]) - int(press["screen_x"])) >= 250, (press, release)
-        assert release["token_left"] >= release["target_left"], release
-        assert release["token_top"] >= release["target_top"], release
-        assert release["token_right"] <= release["target_right"], release
-        assert release["token_bottom"] <= release["target_bottom"], release
-        assert "drag" in _trace_action_types(events), _trace_action_types(events)
+        action_types = set(_trace_action_types(events))
+        assert action_types & set(scenario_case["expected_actions"]), action_types
+        if scenario == "ordered_clicks":
+            successful_actions = _trace_action_types(events)
+            assert successful_actions.count("click") >= 3, successful_actions
 
         interaction_state = snapshot.get("interaction_state") or {}
         assert int((interaction_state.get("target_binding") or {}).get("hwnd") or 0) == browser_hwnd
@@ -391,10 +524,13 @@ def test_real_frontend_api_generic_visual_drag() -> None:
         # contract stages as an ordered subsequence rather than pretending a
         # real E2E can never take an explicit recovery edge.
         cursor = 0
-        for expected in stage_types:
+        required_stages = [
+            item for item in stage_types if item != "WaitForExternalChange"
+        ]
+        for expected in required_stages:
             cursor = traced_types.index(expected, cursor) + 1
         assert traced_types[0] == "ObserveScene", traced_types
-        assert traced_types[-1] == "VerifyLocalEffect", traced_types
+        assert traced_types[-1] in {"VerifyLocalEffect", "WaitForExternalChange"}, traced_types
         assert all(
             item.get("status") in {"done", "recovering"}
             for item in stage_trace
@@ -415,6 +551,11 @@ def test_real_frontend_api_generic_visual_drag() -> None:
         controller_ms = sum(int(item.get("controller_elapsed_ms") or 0) for item in stage_trace)
         capture_ms = sum(int(item.get("capture_elapsed_ms") or 0) for item in stage_trace)
         assert 1 <= model_calls <= 3, model_calls
+        if scenario == "ordered_clicks":
+            # One semantic plan plus one post-action semantic verification;
+            # the three bound clicks themselves must stay inside one local
+            # Controller transaction instead of paying one model turn each.
+            assert model_calls <= 2, model_calls
         assert controller_ms >= 0
 
     finally:

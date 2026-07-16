@@ -262,6 +262,9 @@ class ArpExecution:
                     "satisfiable": bool(output.get("satisfiable")),
                     "adapter": output.get("adapter") or "",
                     "model_role": output.get("model_role") or "none",
+                    "selected_evidence_providers": (
+                        output.get("selected_evidence_providers") or {}
+                    ),
                     "artifact_id": output.get("artifact_id") or artifact.get("artifact_id") or "",
                     "model_calls": int(runtime_metrics.get("model_calls") or output.get("model_calls") or 0),
                     "model_elapsed_ms": int(runtime_metrics.get("model_elapsed_ms") or output.get("model_elapsed_ms") or 0),
