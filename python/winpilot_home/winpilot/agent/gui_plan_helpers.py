@@ -86,14 +86,24 @@ def _schema_profile_for_task(
     *,
     is_coding: bool,
     native_vision: bool = False,
+    task_intent=None,
+    stage_type: str = "",
 ) -> str:
-    """Choose the model-facing tool schema size for the current run."""
+    """Choose the model-facing tool schema size for the current run.
+
+    A typed stage has already been classified by the Task Contract and must
+    not be sent through the legacy task-string classifiers again.  Direct
+    AgentRunner callers retain the old text fallback for compatibility.
+    """
     configured = str(CONFIG.get("agent", "tool_profile", default="auto") or "auto").strip().lower()
     if configured in {"standard", "full", "lean_gui", "drawing_gui"}:
         return configured
     if is_coding:
         return "standard"
-    if _is_gui_only_task(task) or _is_communication_task(task):
+    if str(stage_type or "").strip():
+        return "lean_gui"
+    communication_source = task_intent if task_intent is not None else task
+    if _is_gui_only_task(task) or _is_communication_task(communication_source):
         return "lean_gui"
     # The broader GUI classifier is useful for both controller modes.  A
     # native-vision model gets the ultra-small frame/action schema downstream;

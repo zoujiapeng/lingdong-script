@@ -240,6 +240,30 @@ def test_schema_profile_auto_uses_lean_for_gui_and_communication_tasks(monkeypat
     assert _schema_profile_for_task("重构这个 Python 项目", is_coding=True) == "standard"
 
 
+def test_typed_stage_schema_profile_does_not_reclassify_generated_goal(monkeypatch):
+    from winpilot.agent import gui_plan_helpers
+
+    monkeypatch.setattr(
+        gui_plan_helpers.CONFIG,
+        "get",
+        lambda *path, default=None: "auto" if path == ("agent", "tool_profile") else default,
+    )
+
+    def unexpected_raw_classifier(_task):
+        raise AssertionError("typed stage must not invoke raw task classifiers")
+
+    monkeypatch.setattr(gui_plan_helpers, "_is_gui_only_task", unexpected_raw_classifier)
+    monkeypatch.setattr(gui_plan_helpers, "_is_communication_task", unexpected_raw_classifier)
+
+    assert gui_plan_helpers._schema_profile_for_task(
+        "generated semantic child goal with misleading repository words",
+        is_coding=False,
+        native_vision=True,
+        task_intent={"operation": ["draw"]},
+        stage_type="DrawArtifact",
+    ) == "lean_gui"
+
+
 def test_native_vision_auto_profile_uses_lean_for_generic_gui_operations(monkeypatch):
     from winpilot.agent.gui_plan_helpers import _schema_profile_for_task
 

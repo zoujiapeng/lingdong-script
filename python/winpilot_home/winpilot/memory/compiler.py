@@ -69,10 +69,18 @@ def _verified_run(runner: Any) -> bool:
 
 
 def ingest_run(runner: Any, *, store: MemoryStore | None = None) -> dict[str, Any]:
-    """Create episode and reusable memory nodes from a finished AgentRunner."""
-    if not _enabled():
+    """Create episode and reusable memory nodes from a finished AgentRunner.
+
+    The process-level experience switch controls *automatic* ingestion.  An
+    explicitly supplied store is an explicit compile/recovery request and must
+    not be short-circuited by mutable local configuration; otherwise a caller
+    cannot idempotently finish a run whose episode was written before the
+    switch changed.  Normal AgentRunner ingestion does not pass a store and is
+    additionally guarded by ``RuntimeProfile.experience_enabled``.
+    """
+    if store is None and not _enabled():
         return {}
-    memory_store = store or MemoryStore(config.MEMORY_DB_PATH)
+    memory_store = store if store is not None else MemoryStore(config.MEMORY_DB_PATH)
     if memory_store.disabled:
         return {}
     migrate_json_if_needed(memory_store, config.MEMORY_PATH)

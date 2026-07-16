@@ -29,7 +29,10 @@ class ContextGuidanceMixin:
 
     def _maybe_plan_upfront(self, client) -> None:
         """Create an upfront plan for clearly multi-step tasks."""
-        if not should_plan_upfront(self.task):
+        if not should_plan_upfront(
+            self.task,
+            task_intent=self.task_intent,
+        ):
             return
         api = CONFIG.get("api", default={})
         model = api.get("model", "deepseek-v4-flash")

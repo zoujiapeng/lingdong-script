@@ -1,4 +1,6 @@
 from winpilot.agent import planner
+from winpilot.agent import context_guidance
+from winpilot.tasking.contracts import TaskIntent
 
 
 def test_plan_drops_button_label_echo_text_check():
@@ -127,6 +129,85 @@ def test_four_explicit_gui_actions_still_use_upfront_plan(monkeypatch):
     assert planner.should_plan_upfront(
         "Open Notepad type the note save it and confirm the saved file"
     ) is True
+
+
+def test_typed_intent_drives_upfront_plan_without_reparsing_task(monkeypatch):
+    monkeypatch.setattr(planner, "planning_enabled", lambda: True)
+
+    def unexpected_parse(*_args, **_kwargs):
+        raise AssertionError("typed planner path must not reparse raw task text")
+
+    from winpilot.tasking.intent import TaskIntentParser
+
+    monkeypatch.setattr(TaskIntentParser, "parse", unexpected_parse)
+    intent = TaskIntent(
+        original_text="send the current image through the selected channel",
+        operation=["capture", "send"],
+        media_type="image",
+        source="active_window",
+        channel="chat",
+    )
+
+    assert planner.should_plan_upfront(
+        "short wording with no sequence markers",
+        task_intent=intent,
+    ) is True
+    assert planner.should_plan_upfront(
+        "another wording",
+        task_intent=intent.model_dump(mode="json"),
+    ) is True
+
+
+def test_context_guidance_passes_runner_typed_intent_to_planner(monkeypatch):
+    typed_intent = {
+        "original_text": "opaque task",
+        "operation": ["capture", "send"],
+        "media_type": "image",
+        "source": "active_window",
+        "channel": "chat",
+    }
+    observed: dict = {}
+
+    def inspect_intent(task, *, task_intent=None):
+        observed["task"] = task
+        observed["task_intent"] = task_intent
+        return False
+
+    monkeypatch.setattr(context_guidance, "should_plan_upfront", inspect_intent)
+
+    class Runner(context_guidance.ContextGuidanceMixin):
+        task = "opaque task"
+        task_intent = typed_intent
+
+    Runner()._maybe_plan_upfront(client=None)
+
+    assert observed == {
+        "task": "opaque task",
+        "task_intent": typed_intent,
+    }
+
+
+def test_should_plan_upfront_keeps_raw_parse_as_legacy_fallback(monkeypatch):
+    monkeypatch.setattr(planner, "planning_enabled", lambda: True)
+    calls: list[str] = []
+
+    class Parser:
+        def parse(self, task):
+            calls.append(task)
+            return TaskIntent(
+                original_text=task,
+                operation=["capture", "send"],
+                media_type="image",
+                source="active_window",
+                channel="chat",
+            )
+
+    from winpilot.tasking import intent as intent_module
+
+    monkeypatch.setattr(intent_module, "TaskIntentParser", Parser)
+
+    assert planner.should_plan_upfront("legacy direct call") is True
+    assert calls == ["legacy direct call"]
 
 
 def test_plan_operations_can_add_update_remove_and_reorder_without_losing_progress():

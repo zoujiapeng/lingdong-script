@@ -2105,8 +2105,21 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 )
         if self._recent_results:
             parts.append("recent_tool_evidence:")
-            for name, text in reversed(self._recent_results[-3:]):
-                one_line = self._folded_tool_evidence_preview(str(text), limit=180)
+            for recency, (name, text) in enumerate(
+                reversed(self._recent_results[-3:])
+            ):
+                # The newest completed tool outcome is the authoritative
+                # continuation checkpoint.  Give its structured conclusions
+                # enough room to survive the second compaction pass; older
+                # results remain useful for chronology but receive a smaller
+                # budget.  A uniform 180-char cap used to keep early booleans
+                # while silently dropping later semantic conclusions,
+                # recovery advice, artifact identities, and other verified
+                # evidence fields.
+                preview_limit = 520 if recency == 0 else 180
+                one_line = self._folded_tool_evidence_preview(
+                    str(text), limit=preview_limit,
+                )
                 parts.append(f"- {name}: {one_line}")
         parts.append(f"folded_item: {folded_summary[:180]}")
         return "\n".join(parts)[:2400]
@@ -9017,7 +9030,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             ctx = session_mod.render_context(self.session_context)
             if ctx:
                 self.messages.append({"role": "user", "content": ctx})
-        is_gui_only_task = _is_gui_only_task(self.task)
+        typed_gui_stage = bool(self.runtime_profile.stage_type) and not self._is_coding
+        is_gui_only_task = typed_gui_stage or _is_gui_only_task(self.task)
         allow_shell_tools = self.allow_shell_tools
         if allow_shell_tools is None:
             allow_shell_tools = not (
@@ -9031,6 +9045,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self.task,
             is_coding=self._is_coding,
             native_vision=_main_model_has_vision(),
+            task_intent=self.task_intent,
+            stage_type=self.runtime_profile.stage_type,
         )
         tools = tool_schemas(
             planning=plan_on,
