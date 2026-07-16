@@ -12,6 +12,38 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture
+def mocked_visual_judge_capability(monkeypatch):
+    """Declare an image-capable judge for tests that submit mocked pixels."""
+    from winpilot.agent import done_verifier as done_mod
+
+    class _Config:
+        _data = {
+            "api": {"model": "mock-vision-judge", "temperature": 0.0},
+            "agent": {
+                "escalation_model": "",
+                "verify_done": True,
+                "done_max_rejects": 2,
+            },
+            "vlm": {"enabled": False, "base_url": "", "model": ""},
+        }
+
+        def get(self, *path, default=None):
+            node = self._data
+            for key in path:
+                if not isinstance(node, dict) or key not in node:
+                    return default
+                node = node[key]
+            return node
+
+    monkeypatch.setattr(done_mod, "_config", lambda: _Config())
+    monkeypatch.setattr(
+        done_mod,
+        "model_supports_vision",
+        lambda model, provider="": model == "mock-vision-judge",
+    )
+
+
 def test_communication_mode_honors_draft_only_instruction():
     from winpilot.agent.task_rules import _communication_mode
 
@@ -408,7 +440,10 @@ def test_comms_done_gate_with_payload_rejects_when_not_on_screen():
     assert runner._done_rejects == 1
 
 
-def test_native_send_uses_fresh_frame_without_forcing_read_text(monkeypatch):
+def test_native_send_uses_fresh_frame_without_forcing_read_text(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     runner = _make_runner('Open QQ and send "HELLO_NATIVE_42" to my phone.')
     runner.session.hwnd = 123
     runner.result_text = "done"

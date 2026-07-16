@@ -6,6 +6,38 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture
+def authoritative_native_vision(monkeypatch):
+    """Provide the native-vision premises exercised by synthetic-frame tests.
+
+    These tests construct authoritative frames with coordinates that can be
+    larger than the interactive desktop exposed by a headless Windows CI
+    runner.  Letting ``Region.clamp_to_screen`` consult that host desktop makes
+    an otherwise coherent synthetic frame stale.  The fixture also makes the
+    image-capable model premise explicit instead of inheriting it from the
+    ignored local ``config.json``.
+    """
+    from winpilot.agent import done_verifier
+    from winpilot.utils import screenshot as screenshot_mod
+    from winpilot.utils.screenshot import Region
+
+    synthetic_desktop = Region(-4096, -2160, 8192, 4320)
+    monkeypatch.setattr(
+        "winpilot.agent.loop._main_model_has_vision",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        done_verifier,
+        "model_supports_vision",
+        lambda _model, _provider="": True,
+    )
+    monkeypatch.setattr(
+        screenshot_mod,
+        "virtual_screen_region",
+        lambda: synthetic_desktop,
+    )
+
+
 def _tool_call(call_id: str, name: str, args: dict):
     return SimpleNamespace(
         id=call_id,
@@ -342,6 +374,7 @@ def test_visual_work_surface_binding_rebinds_for_new_capture_target():
     assert policy == "fresh_target_binding"
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_ambiguous_current_surface_blocks_continuous_input(monkeypatch):
     from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
     from winpilot.utils.screenshot import Region
@@ -788,6 +821,7 @@ def test_low_level_action_requires_fresh_real_frame(monkeypatch):
     assert payload["visual_grounding_required"] is True
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_done_judge_receives_fresh_real_frame(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
@@ -873,6 +907,7 @@ def test_native_done_judge_excludes_self_claim_and_action_geometry(monkeypatch):
     assert "截图若为空白、明显劣化、残缺" in captured["messages"][0]["content"]
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_done_judge_receives_bounded_cross_window_post_action_frame(monkeypatch):
     from winpilot.agent.loop import AgentRunner
 
@@ -1035,6 +1070,7 @@ def test_normalized_frame_coordinates_map_inside_exact_window_bounds(monkeypatch
     assert drag["visual_frame_id"] == 9
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_first_native_frame_hides_only_redundant_observe_tool(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1102,6 +1138,7 @@ def test_blocked_destructive_retry_temporarily_exposes_forward_tools_only(monkey
     assert runner._model_tools_for_step(tools, 5) is tools
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_unwrapped_single_frame_polyline_is_normalized_without_retry(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1130,6 +1167,7 @@ def test_native_unwrapped_single_frame_polyline_is_normalized_without_retry(monk
     assert mapped["frame_stroke_preparation"]["unwrapped_single_polyline"] is True
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_flat_numeric_frame_paths_are_paired_without_model_retry(monkeypatch):
     from winpilot.agent.loop import (
         AgentRunner,
@@ -1186,6 +1224,7 @@ def test_native_flat_numeric_frame_paths_are_paired_without_model_retry(monkeypa
         _normalize_frame_stroke_list_structure([[100, 400, 300]])
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_stringified_frame_strokes_recover_only_complete_numeric_paths(monkeypatch):
     from winpilot.agent.loop import AgentRunner, _normalize_stringified_frame_strokes
     from winpilot.utils.screenshot import Region
@@ -1233,6 +1272,7 @@ def test_native_stringified_frame_strokes_recover_only_complete_numeric_paths(mo
         _normalize_stringified_frame_strokes('[[[1,2],[3,"click"]]]')
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_redundant_array_nesting_is_flattened_without_model_retry(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1285,6 +1325,7 @@ def test_native_frame_stroke_budget_accepts_rich_composition_and_reports_real_ov
         _normalize_frame_stroke_list_structure(too_many)
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_frame_strokes_must_stay_in_grounded_work_surface(monkeypatch):
     from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
     from winpilot.utils.screenshot import Region
@@ -1329,6 +1370,7 @@ def test_native_frame_strokes_must_stay_in_grounded_work_surface(monkeypatch):
     assert ratio_error.value.metadata["inside_point_ratio"] == pytest.approx(4 / 6)
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_long_path_accepts_only_near_detector_edge_drift(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1366,6 +1408,7 @@ def test_native_long_path_accepts_only_near_detector_edge_drift(monkeypatch):
     assert evidence["input_point_count"] == 22
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_surface_safe_inset_rejects_scrollbar_edge_strokes(monkeypatch):
     from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
     from winpilot.utils.screenshot import Region
@@ -1401,6 +1444,7 @@ def test_native_surface_safe_inset_rejects_scrollbar_edge_strokes(monkeypatch):
     assert edge.value.metadata["work_surface_frame_bounds"] == [149, 383, 960, 908]
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_multi_path_composition_rigidly_translates_tiny_safe_edge_miss(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1439,6 +1483,7 @@ def test_native_multi_path_composition_rigidly_translates_tiny_safe_edge_miss(mo
     assert mapped["source_frame_coordinates"]["frame_strokes"] == source
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_multi_path_composition_uniformly_fits_unique_work_surface(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1483,6 +1528,7 @@ def test_native_multi_path_composition_uniformly_fits_unique_work_surface(monkey
     assert 359 <= mapped_top <= mapped_bottom <= 932
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_composition_fit_translates_small_overflow_but_rejects_unsafe_sparse_paths(monkeypatch):
     from winpilot.agent.loop import AgentRunner, NativeFrameCoordinateError
     from winpilot.utils.screenshot import Region
@@ -1567,6 +1613,7 @@ def test_native_composition_fit_translates_small_overflow_but_rejects_unsafe_spa
     assert larger_fit["eligibility"]["repairable_overflow"] is False
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_dense_collinear_frame_path_is_simplified_before_execution(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1604,6 +1651,7 @@ def test_native_dense_collinear_frame_path_is_simplified_before_execution(monkey
     assert evidence["points_simplified"] == 28
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_surface_containment_failure_returns_bounds_without_dispatch(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -1662,6 +1710,7 @@ def test_native_surface_containment_failure_returns_bounds_without_dispatch(monk
     assert "failure_recovery" not in payload
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_repeated_unexecuted_coordinate_constraint_safely_stops_on_third_category_hit(
     monkeypatch,
 ):
@@ -2060,6 +2109,7 @@ def test_native_semantic_hint_cannot_bypass_physical_coordinate_rejection(
     assert "rejected model-supplied physical" in payload["error"]
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_batch_coordinates_cannot_bypass_frame_mapping(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.tool_result import ToolResult
@@ -2168,6 +2218,7 @@ def test_native_batch_rejects_two_spatial_mutations_before_preflight_or_dispatch
     assert "next real post-action frame" in payload["fast_path_advice"]
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_batch_allows_one_spatial_mutation_plus_keyboard_input(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.tool_result import ToolResult
@@ -2224,6 +2275,7 @@ def test_native_batch_allows_one_spatial_mutation_plus_keyboard_input(monkeypatc
     assert hotkey == {"action": "hotkey", "keys": ["enter"]}
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_batch_maps_balanced_pointer_transaction_from_one_frame(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.utils.screenshot import Region
@@ -2254,6 +2306,7 @@ def test_native_batch_maps_balanced_pointer_transaction_from_one_frame(monkeypat
     ]
 
 
+@pytest.mark.usefixtures("authoritative_native_vision")
 def test_native_batch_allows_controller_rebound_semantic_setup_and_one_raw_gesture(monkeypatch):
     from winpilot.agent.loop import AgentRunner
     from winpilot.agent.tool_result import ToolResult

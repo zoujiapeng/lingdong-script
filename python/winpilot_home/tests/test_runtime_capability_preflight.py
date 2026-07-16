@@ -30,7 +30,10 @@ def test_interaction_runtime_preflight_requires_a_multimodal_provider(monkeypatc
 
 
 def test_static_and_live_capability_checks_are_separate(monkeypatch):
+    from types import SimpleNamespace
+
     from winpilot.perception import vlm
+    from winpilot.tasking import capability as capability_mod
     from winpilot.tasking.capability import CapabilityPlanner
     from winpilot.tasking.compiler import TaskContractCompiler
 
@@ -39,7 +42,21 @@ def test_static_and_live_capability_checks_are_separate(monkeypatch):
         cold_start=True,
     )
     CapabilityPlanner.assert_satisfiable(contract)
+    # The live half of this test needs explicit provider and platform facts.
+    # Never inherit a developer machine's configured model, model metadata, or
+    # the CI host OS when asserting that a fully available runtime has no gaps.
+    monkeypatch.setattr(capability_mod, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(vlm, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        vlm,
+        "_settings",
+        lambda: {
+            "enabled": True,
+            "provider": "hermetic-test",
+            "model": "hermetic-vision-model",
+            "supports_vision": True,
+        },
+    )
     assert CapabilityPlanner.runtime_missing_capabilities(contract) == set()
 
 

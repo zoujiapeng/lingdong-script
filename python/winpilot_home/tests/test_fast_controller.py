@@ -8142,9 +8142,18 @@ def test_each_draw_uses_current_detected_canvas_without_hidden_scene_transform(
 ):
     from winpilot.fast import subgoal as subgoal_mod
     from winpilot.fast.subgoal import SubgoalExecutor, parse_subgoal_request
+    from winpilot.utils import screenshot as screenshot_mod
     from winpilot.utils.screenshot import Region
 
     window = Region(480, 154, 1008, 720)
+    # Region.clamp_to_screen() is part of the production mapping path.  Bind
+    # its desktop authority explicitly so this geometry test does not inherit
+    # the worker's monitor size, DPI layout, or headless virtual display.
+    monkeypatch.setattr(
+        screenshot_mod,
+        "virtual_screen_region",
+        lambda: Region(0, 0, 2560, 1440),
+    )
     image = np.zeros((window.height, window.width, 3), dtype=np.uint8)
     bboxes = iter([
         (126, 258, 992, 671),  # absolute x=606, width=866
