@@ -91,6 +91,10 @@ class InteractionSessionContract(BaseModel):
     interaction_region_ref: str = "interaction_region"
     primary_action_modality: str = "infer_from_scene"
     continuation_policy: str = "wait_for_external_change"
+    # Compatibility name retained in the serialized contract.  Runtime treats
+    # this as the maximum number of consecutive agent turns between two proven
+    # external changes; reaching it routes to WaitForExternalChange instead of
+    # terminating the persistent API run.
     max_agent_turns_per_activation: int = Field(default=1, ge=1, le=8)
     wait_for_external_change: bool = True
     # The frontend/API budget that this contract was compiled from.  Keeping

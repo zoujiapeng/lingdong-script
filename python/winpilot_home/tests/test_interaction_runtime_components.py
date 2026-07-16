@@ -418,6 +418,55 @@ def test_visual_planner_derives_external_watch_from_typed_continuation(
     assert decision.observation_artifact_id == "art-current-frame"
 
 
+def test_visual_planner_schema_rejection_exposes_structured_bounded_feedback(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        InteractionPlanOutputError,
+    )
+
+    raw = _decision(action=InteractionAction(
+        action="click",
+        frame_x=400,
+        frame_y=400,
+        target_region=[350, 350, 450, 450],
+    )).model_dump(mode="python")
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    raw["actions"][0]["unknown_provider_field"] = "x" * 1000
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: raw,
+    )
+    image = tmp_path / "invalid-plan-frame.png"
+    image.write_bytes(b"frame")
+
+    with pytest.raises(InteractionPlanOutputError) as rejected:
+        interaction.plan_interaction(
+            image,
+            task="perform the visible bounded interaction",
+            intent={},
+            frame_id=12,
+            observation_artifact_id="art-invalid-plan",
+        )
+
+    error = rejected.value
+    assert error.code == "schema_validation_failed"
+    assert error.raw_payload is not None
+    assert error.validation_errors == ({
+        "location": ["actions", "0", "unknown_provider_field"],
+        "type": "extra_forbidden",
+        "message": "Extra inputs are not permitted",
+    },)
+    feedback = error.correction_feedback(max_payload_chars=256)
+    assert feedback["previous_payload_json"].endswith("...[truncated]")
+    assert len(feedback["previous_payload_json"]) <= 270
+
+
 def test_shared_session_requires_explicit_current_frame_affordance(
     monkeypatch,
     tmp_path,
@@ -538,6 +587,50 @@ def test_visual_planner_binds_selected_current_pixel_candidate(
         "target_region:bound->visible-region-07" in item
         for item in decision.canonicalization_repairs
     )
+
+
+def test_partition_candidate_binds_locator_and_geometry_as_one_contract():
+    from winpilot.tasking.interaction import _bind_visible_region_candidates
+
+    payload = {
+        "actions": [{
+            "action": "draw_strokes",
+            "target_candidate_id": "partition-region-01-r01-c03",
+            "target_region": [100, 100, 200, 200],
+            "target_anchor": [150, 150],
+            "expected_effect_region": [100, 100, 200, 200],
+            "effect_region_binding": "target_region",
+        }],
+        "expected_effect": {
+            "region": [100, 100, 200, 200],
+            "region_binding": "target_region",
+            "binding_action_index": 0,
+        },
+    }
+    inventory = [{
+        "candidate_id": "partition-region-01-r01-c03",
+        "bounds": [600.0, 300.0, 700.0, 400.0],
+        "center": [650.0, 350.0],
+        "shape": "open_partition_cell",
+        "partition_locator": {
+            "layout": "repeated_partition", "row": 1, "column": 3,
+        },
+    }]
+    repairs = []
+
+    bound = _bind_visible_region_candidates(
+        payload, inventory, repairs=repairs,
+    )
+
+    action = bound["actions"][0]
+    assert action["target_region"] == [600.0, 300.0, 700.0, 400.0]
+    assert action["target_anchor"] == [650.0, 350.0]
+    assert action["partition_locator"] == {
+        "layout": "repeated_partition", "row": 1, "column": 3,
+    }
+    assert action["expected_effect_region"] == action["target_region"]
+    assert bound["expected_effect"]["region"] == action["target_region"]
+    assert "actions[0].partition_locator:candidate_bound" in repairs
 
 
 def test_visual_planner_centers_complete_source_in_target_deterministically(
@@ -1776,7 +1869,141 @@ def test_persistent_interaction_can_finish_when_semantic_terminal_state_is_prove
     assert completion["metadata"]["local_effect_evidence_id"]
 
 
-def test_persistent_activation_yields_after_its_verified_agent_turn(tmp_path):
+def test_persistent_grounded_freehand_turn_skips_second_semantic_model_call(
+    tmp_path,
+    monkeypatch,
+):
+    import cv2
+    import numpy as np
+
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.tasking.interaction import InteractionAction
+    from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
+
+    before_image = np.full((180, 240, 3), 245, dtype=np.uint8)
+    after_image = before_image.copy()
+    action = InteractionAction(
+        action="draw_strokes",
+        target_region=[250, 250, 750, 750],
+        target_anchor=[500, 500],
+        stroke_paths=[
+            {
+                "coordinate_space": "target_region_0_1000",
+                "points": [[180, 180], [820, 820]],
+            },
+            {
+                "coordinate_space": "target_region_0_1000",
+                "points": [[820, 180], [180, 820]],
+            },
+        ],
+        color="red",
+        expected_effect_region=[250, 250, 750, 750],
+        effect_region_binding="target_region",
+        interaction_mechanism="freehand_strokes",
+        affordance_evidence="visible pointer-authored surface",
+    )
+    decision = _decision(
+        action=action,
+        continuation="wait_external",
+        frame_id=4,
+        observation_artifact_id="placeholder",
+    )
+    for path in action.resolved_frame_strokes(inset_fraction=0.04):
+        points = np.asarray([
+            [
+                round(point[0] / 1000 * (after_image.shape[1] - 1)),
+                round(point[1] / 1000 * (after_image.shape[0] - 1)),
+            ]
+            for point in path
+        ], dtype=np.int32)
+        cv2.polylines(after_image, [points], False, (20, 20, 220), 5)
+    before_path = tmp_path / "persistent-before.png"
+    after_path = tmp_path / "persistent-after.png"
+    assert cv2.imwrite(str(before_path), before_image)
+    assert cv2.imwrite(str(after_path), after_image)
+
+    store = ArtifactStore("run-freehand-fast", tmp_path / "artifacts")
+    baseline = store.import_file(
+        before_path, purpose="observation", sendable=False,
+    )
+    current = store.import_file(
+        after_path, purpose="observation", sendable=False,
+    )
+    decision = decision.model_copy(update={
+        "observation_artifact_id": baseline.artifact_id,
+    })
+    contract = TaskContractCompiler().compile(
+        "play with me on this canvas, I already started, your turn",
+        cold_start=True,
+    )
+    stage = next(
+        item for item in contract.stages
+        if item.type.value == "VerifyLocalEffect"
+    )
+    assert any(
+        provider.id == "typed_freehand_turn_completion"
+        for obligation in stage.obligations
+        for provider in obligation.evidence_providers
+    )
+    context = {
+        "run_id": "run-freehand-fast",
+        "runtime_state": {"interaction_state": {
+            "planned_action": decision.model_dump(mode="json"),
+            "executed_action": {"deferred": False},
+            "target_binding": {"source": "active_window"},
+            "current_artifact_id": baseline.artifact_id,
+            "frame_id": 4,
+            "visual_geometry_grounding": {
+                "verified": True,
+                "provider": "local_visual_geometry",
+                "refinements": [{
+                    "action_index": 0,
+                    "applied": True,
+                    "target": {"provider": "current_partition_pixels"},
+                }],
+            },
+            "input_mode_evidence": [{
+                "verified": True,
+                "input_mode": "continuous_freehand",
+                "provider": "accessibility_active_mode",
+            }],
+        }},
+    }
+    engine = InteractionStageEngine(stage_output=_stage_output)
+    monkeypatch.setattr(engine, "_capture_scene", lambda **_kwargs: current)
+    monkeypatch.setattr(
+        "winpilot.tasking.interaction_stage_runtime.verify_interaction_effect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("typed persistent turn must not call semantic verifier")
+        ),
+    )
+    registry = EvidenceRegistry("run-freehand-fast")
+
+    result = engine.execute(
+        stage,
+        contract,
+        context,
+        threading.Event(),
+        time.monotonic(),
+        store=store,
+        registry=registry,
+    )
+
+    assert result.ok is True
+    assert result.branch == "next"
+    assert result.output["model_calls"] == 0
+    verification = result.output["interaction_state"]["local_verification"]
+    assert verification["semantic"]["verify_method"] == (
+        "typed-freehand-turn-completion"
+    )
+    assert result.output["evidence"]["provider"] == (
+        "typed_freehand_turn_completion"
+    )
+
+
+def test_persistent_verified_turn_advances_to_external_wait(tmp_path):
     result = _run_roi_verify(
         tmp_path,
         (32, 32, 48, 48),
@@ -1785,16 +2012,12 @@ def test_persistent_activation_yields_after_its_verified_agent_turn(tmp_path):
     )
 
     assert result.ok is True
-    assert result.branch == "complete"
+    assert result.branch == "next"
     state = result.output["interaction_state"]
-    assert state["session_yield"] == {
-        "reason": "verified_agent_turn_limit_reached",
-        "turn_index": 1,
-        "max_agent_turns_per_activation": 1,
-        "session_remains_resumable": True,
-    }
-    completion = result.output["completion_evidence"]
-    assert completion["metadata"]["proof"] == "verified_activation_turn"
+    assert state["status"] == "waiting_external"
+    assert state["turn_index"] == 1
+    assert state["agent_turns_since_external_change"] == 1
+    assert result.output.get("completion_evidence") is None
 
 
 def test_verified_nonterminal_continuation_does_not_consume_recovery_budget(tmp_path):
@@ -2361,6 +2584,157 @@ def test_extreme_uniform_compositor_frame_is_rejected_before_model_use(
     assert refreshed["reason"] == "extreme_uniform_client"
 
 
+@pytest.mark.parametrize("second_attempt_valid", [True, False])
+def test_infer_stage_retries_invalid_model_schema_once_on_same_authoritative_frame(
+    monkeypatch,
+    tmp_path,
+    second_attempt_valid,
+):
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        InteractionPlanOutputError,
+    )
+    from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
+    import winpilot.tasking.interaction_stage_runtime as runtime_module
+
+    contract = TaskContractCompiler().compile(
+        "continue the visible shared turn-based interface; it is your turn",
+        cold_start=True,
+    )
+    assert contract.session is not None
+    assert contract.session.wait_for_external_change is True
+    stage = next(
+        item for item in contract.stages if item.type.value == "InferInteraction"
+    )
+    image_path = tmp_path / "authoritative-frame.png"
+    _write_frame(image_path, changed_box=(50, 50, 120, 120))
+    store = ArtifactStore("run-schema-retry", tmp_path / "artifacts")
+    artifact = store.import_file(
+        image_path, purpose="observation", sendable=False,
+    )
+    decision = _decision(
+        action=InteractionAction(
+            action="click",
+            frame_x=400,
+            frame_y=400,
+            target_region=[350, 350, 450, 450],
+            target_anchor=[400, 400],
+            grounding_mode="object_anchor",
+            interaction_mechanism="point_selection",
+            affordance_evidence="a bounded selectable target in the current frame",
+            expected_effect_region=[350, 350, 450, 450],
+        ),
+        continuation="wait_external",
+        frame_id=9,
+        observation_artifact_id=artifact.artifact_id,
+    )
+    context = {
+        "run_id": "run-schema-retry",
+        "runtime_state": {"interaction_state": {
+            "frame_id": 9,
+            "current_artifact_id": artifact.artifact_id,
+            "target_binding": {
+                "hwnd": 91,
+                "title": "generic target",
+                "source": "active_window",
+                "frame_region": {
+                    "left": 0, "top": 0, "width": 320, "height": 240,
+                },
+                "client_frame_bounds": [0, 0, 1000, 1000],
+            },
+        }},
+    }
+    calls = []
+
+    def _plan(path, **kwargs):
+        calls.append({"path": str(path), **kwargs})
+        if len(calls) == 1 or not second_attempt_valid:
+            raise InteractionPlanOutputError(
+                "provider placed one field at the wrong schema level",
+                raw_payload={
+                    "actions": [{
+                        "action": "click", "unexpected_schema_field": True,
+                    }],
+                },
+                validation_errors=[{
+                    "location": ["actions", "0", "unexpected_schema_field"],
+                    "type": "extra_forbidden",
+                    "message": "Extra inputs are not permitted",
+                }],
+            )
+        assert kwargs["validation_feedback"]["error_code"] == (
+            "schema_validation_failed"
+        )
+        return decision
+
+    events = []
+    monkeypatch.setattr(runtime_module, "plan_interaction", _plan)
+    monkeypatch.setattr(
+        runtime_module.BUS,
+        "publish",
+        lambda event, **payload: events.append((event, payload)),
+    )
+    engine = InteractionStageEngine(stage_output=_stage_output)
+    engine._ensure_usable_inference_frame = lambda **_kwargs: (
+        artifact, {"usable": True, "reason": "test_frame"}, 0,
+    )
+
+    if second_attempt_valid:
+        result = engine.execute(
+            stage,
+            contract,
+            context,
+            threading.Event(),
+            time.monotonic(),
+            store=store,
+            registry=EvidenceRegistry("run-schema-retry"),
+        )
+        assert result.ok is True
+        assert result.output["model_calls"] == 2
+    else:
+        with pytest.raises(RuntimeError) as rejected:
+            engine.execute(
+                stage,
+                contract,
+                context,
+                threading.Event(),
+                time.monotonic(),
+                store=store,
+                registry=EvidenceRegistry("run-schema-retry"),
+            )
+        assert getattr(rejected.value, "failure_type", "") == (
+            "interaction_plan_invalid"
+        )
+        assert rejected.value.stage_details["model_calls"] == 2
+    assert len(calls) == 2
+    assert calls[0]["path"] == calls[1]["path"] == artifact.managed_path
+    assert calls[0]["observation_artifact_id"] == artifact.artifact_id
+    assert calls[1]["observation_artifact_id"] == artifact.artifact_id
+    state = context["runtime_state"]["interaction_state"]
+    assert state["model_calls"] == 2
+    assert len(state["inference_validation_attempts"]) == (
+        1 if second_attempt_valid else 2
+    )
+    if second_attempt_valid:
+        assert (
+            "schema_validation_feedback_retry:accepted"
+            in state["inference_canonicalization_repairs"]
+        )
+    validation_events = [
+        item for item in events if item[0] == "interaction_plan_validation"
+    ]
+    assert len(validation_events) == (1 if second_attempt_valid else 2)
+    assert validation_events[0][1]["will_retry_same_frame"] is True
+    assert validation_events[-1][1]["will_retry_same_frame"] is (
+        True if second_attempt_valid else False
+    )
+    assert validation_events[-1][1]["artifact_id"] == artifact.artifact_id
+    assert validation_events[-1][1]["frame_id"] == 9
+
+
 def test_blocked_inference_is_fail_fast_not_reobserve_recovery(monkeypatch):
     from winpilot.tasking.compiler import TaskContractCompiler
     from winpilot.tasking.interaction_stage_runtime import _failure
@@ -2469,10 +2843,17 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
     image_path = tmp_path / "external.png"
+    post_path = tmp_path / "external-post.png"
     _write_frame(image_path, changed_box=(20, 20, 30, 30))
+    _write_frame(post_path, changed_box=(55, 55, 90, 90))
     store = ArtifactStore("run-wait-budget", tmp_path / "artifacts")
     artifact = store.import_file(
         image_path,
+        purpose="observation",
+        sendable=False,
+    )
+    post_artifact = store.import_file(
+        post_path,
         purpose="observation",
         sendable=False,
     )
@@ -2544,7 +2925,8 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
         lambda *_args, **_kwargs: runtime_module.Region(0, 0, 100, 100),
     )
     engine = InteractionStageEngine(stage_output=_stage_output)
-    engine._capture_scene = lambda **_kwargs: artifact
+    captures = iter((artifact, post_artifact))
+    engine._capture_scene = lambda **_kwargs: next(captures)
 
     registry = EvidenceRegistry("run-wait-budget")
     result = engine.execute(
@@ -2565,9 +2947,192 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     }
     assert result.output["controller_elapsed_ms"] == 125
     assert result.output["model_elapsed_ms"] == 0
+    assert result.output["interaction_state"]["external_change"][
+        "authoritative_watch_delta"
+    ]["changed"] is True
     records = registry.records()
     assert records[-1]["predicate"] == "interaction.external_change_observed"
     assert records[-1]["verified"] is True
+
+
+def test_external_wait_rearms_after_transient_watcher_without_artifact_delta(
+    monkeypatch,
+    tmp_path,
+):
+    import json
+    from types import SimpleNamespace
+
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
+    import winpilot.tasking.interaction_stage_runtime as runtime_module
+
+    baseline_path = tmp_path / "transient-baseline.png"
+    changed_path = tmp_path / "transient-real-change.png"
+    _write_frame(baseline_path, changed_box=(20, 20, 30, 30))
+    _write_frame(changed_path, changed_box=(55, 55, 90, 90))
+    store = ArtifactStore("run-wait-transient", tmp_path / "artifacts")
+    baseline = store.import_file(
+        baseline_path, purpose="observation", sendable=False,
+    )
+    changed_artifact = store.import_file(
+        changed_path, purpose="observation", sendable=False,
+    )
+    contract = TaskContractCompiler().compile(
+        "play with me in the current window; I have already started",
+        cold_start=True,
+    )
+    assert contract.session is not None
+    contract.session.external_change_timeout_s = 7.0
+    stage = next(
+        item for item in contract.stages
+        if item.type.value == "WaitForExternalChange"
+    )
+    decision = _decision(
+        action=None,
+        turn_owner="user",
+        continuation="wait_external",
+        observation_artifact_id=baseline.artifact_id,
+    )
+    context = {
+        "run_id": "run-wait-transient",
+        "runtime_state": {"interaction_state": {
+            "frame_id": 4,
+            "current_artifact_id": baseline.artifact_id,
+            "planned_action": decision.model_dump(mode="json"),
+            "target_binding": {
+                "hwnd": 99,
+                "title": "target",
+                "source": "active_window",
+                "frame_region": {
+                    "left": 0, "top": 0, "width": 1000, "height": 1000,
+                },
+            },
+        }},
+    }
+    waits = []
+
+    class _Response:
+        text = json.dumps({
+            "ok": True,
+            "results": [{"data": {"changed": True}}],
+        })
+
+    class _Session:
+        def __init__(self, **_kwargs):
+            self.run_id = ""
+
+        def _remember_target(self, *_args):
+            return None
+
+        def dispatch(self, name, payload):
+            assert name == "run_action_batch"
+            waits.extend(payload["actions"])
+            return _Response()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(runtime_module, "ToolSession", _Session)
+    clock = iter((100.0, 100.05, 101.0, 101.075))
+    monkeypatch.setattr(
+        runtime_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock)),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_normalized_roi_screen",
+        lambda *_args, **_kwargs: runtime_module.Region(0, 0, 100, 100),
+    )
+    engine = InteractionStageEngine(stage_output=_stage_output)
+    captures = iter((baseline, baseline, changed_artifact))
+    engine._capture_scene = lambda **_kwargs: next(captures)
+
+    result = engine.execute(
+        stage,
+        contract,
+        context,
+        threading.Event(),
+        time.monotonic(),
+        store=store,
+        registry=EvidenceRegistry("run-wait-transient"),
+    )
+
+    assert result.ok is True
+    assert result.branch == "changed"
+    assert len(waits) == 2
+    assert waits[0]["timeout_s"] == 7.0
+    assert waits[1]["timeout_s"] < waits[0]["timeout_s"]
+    external = result.output["interaction_state"]["external_change"]
+    assert external["wait_result"]["watcher_false_positive_count"] == 1
+    assert external["authoritative_watch_delta"]["changed"] is True
+    assert external["artifact_id"] == changed_artifact.artifact_id
+
+
+def test_external_watch_uses_pixel_surface_bound_by_last_verified_action(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.interaction_stage_runtime import _external_watch_bounds
+    import winpilot.tasking.interaction_stage_runtime as runtime_module
+
+    frame_path = tmp_path / "surface-baseline.png"
+    _write_frame(frame_path)
+    store = ArtifactStore("run-watch-surface", tmp_path / "artifacts")
+    baseline = store.import_file(
+        frame_path,
+        purpose="observation",
+        sendable=False,
+    )
+    decision = _decision(
+        action=None,
+        turn_owner="user",
+        continuation="wait_external",
+        observation_artifact_id=baseline.artifact_id,
+    )
+    detected = {
+        "ok": True,
+        "detected_work_surface_frame_bounds": [100, 300, 900, 900],
+        "work_surface_frame_bounds": [125, 325, 875, 875],
+        "light_ratio": 0.96,
+        "source": "authoritative_frame_pixels",
+    }
+    monkeypatch.setattr(
+        runtime_module.image_capture,
+        "credible_work_surface_frame_bounds",
+        lambda *_args, **_kwargs: dict(detected),
+    )
+    state = {
+        "target_binding": {"client_frame_bounds": [0, 100, 1000, 1000]},
+        "last_executed_action": {
+            "actions": [{"target_region": [200, 400, 350, 550]}],
+        },
+    }
+
+    bounds, proof = _external_watch_bounds(state, decision, baseline)
+
+    assert bounds == [100.0, 300.0, 900.0, 900.0]
+    assert proof["source"] == "current_pixel_surface_bound_by_verified_action"
+    assert state["external_watch_region"]["bounds"] == bounds
+
+    outside_state = {
+        "target_binding": {"client_frame_bounds": [0, 0, 1000, 1000]},
+        "last_executed_action": {
+            "actions": [{"target_region": [5, 5, 50, 50]}],
+        },
+    }
+    fallback, fallback_proof = _external_watch_bounds(
+        outside_state,
+        decision,
+        baseline,
+    )
+    assert fallback == list(decision.interaction_region)
+    assert fallback_proof["reason"] == (
+        "detected_surface_not_bound_by_last_verified_action"
+    )
 
 
 def test_external_wait_detects_change_against_previous_authoritative_frame(
@@ -2666,6 +3231,9 @@ def test_external_wait_detects_change_against_previous_authoritative_frame(
     change = result.output["interaction_state"]["external_change"]
     assert change["detection_source"] == "authoritative_baseline_delta"
     assert change["baseline_delta"]["changed"] is True
+    assert result.output["interaction_state"][
+        "agent_turns_since_external_change"
+    ] == 0
 
 
 def test_controller_no_effect_detection_finds_nested_generic_drag_failure():
@@ -2686,6 +3254,25 @@ def test_controller_no_effect_detection_finds_nested_generic_drag_failure():
     assert _controller_visual_no_effect({
         "ok": False,
         "failure_type": "WINDOW_FOCUS_ERROR",
+    }) is False
+
+
+def test_controller_path_failure_is_recoverable_only_without_mutation_evidence():
+    from winpilot.tasking.interaction_stage_runtime import (
+        _controller_visual_no_effect,
+    )
+
+    assert _controller_visual_no_effect({
+        "ok": False,
+        "failure_type": "DRAW_PATH_NOT_REALIZED",
+        "visual_change_detected": True,
+        "mutation_applied": False,
+    }) is True
+    assert _controller_visual_no_effect({
+        "ok": False,
+        "failure_type": "DRAW_PATH_NOT_REALIZED",
+        "visual_change_detected": True,
+        "mutation_applied": True,
     }) is False
 
 

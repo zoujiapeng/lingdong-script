@@ -977,6 +977,114 @@ class InteractionToolMixin:
             ),
         }
 
+    def _park_pointer_for_draw_verification(
+        self,
+        executor_mod: Any,
+        effect_region: Region,
+    ) -> dict[str, Any]:
+        """Move transient cursor/hover pixels away from a gesture proof ROI.
+
+        Pointer effects can cover a thin authored stroke and can also dominate
+        the changed-pixel denominator.  The Controller therefore parks the
+        pointer at a non-mutating point in the same bound window before taking
+        its post-action frame.  This is not execution evidence: the subsequent
+        current-pixel path proof is still required in full.
+        """
+        move_mouse = getattr(executor_mod, "move_mouse", None)
+        if not callable(move_mouse) or not self.hwnd:
+            return {"attempted": False, "reason": "move_capability_unavailable"}
+        try:
+            window = window_region(int(self.hwnd)).clamp_to_screen()
+        except Exception as exc:
+            return {
+                "attempted": False,
+                "reason": "target_window_geometry_unavailable",
+                "error": str(exc),
+            }
+        if window.width < 80 or window.height < 60:
+            return {"attempted": False, "reason": "target_window_too_small"}
+
+        parking_region = window
+        parking_source = "window_interior_fallback"
+        draw_surface_cache = getattr(self, "_draw_surface_cache", None)
+        cached_surface = (
+            draw_surface_cache.get("surface_region")
+            if isinstance(draw_surface_cache, dict)
+            else None
+        )
+        if isinstance(cached_surface, dict):
+            try:
+                proposed = Region(
+                    int(cached_surface["x"]),
+                    int(cached_surface["y"]),
+                    int(cached_surface["width"]),
+                    int(cached_surface["height"]),
+                ).clamp_to_screen()
+                if proposed.width >= 80 and proposed.height >= 60:
+                    parking_region = proposed
+                    parking_source = "current_pixel_work_surface"
+            except (KeyError, TypeError, ValueError):
+                pass
+        # Prefer the proven work surface.  The fallback deliberately excludes
+        # title bars and window edges, where a non-clicking pointer can still
+        # open snap layouts, tooltips, menus, or resize affordances.
+        horizontal_inset = min(32, max(12, parking_region.width // 10))
+        vertical_inset = min(32, max(12, parking_region.height // 10))
+        if parking_source == "window_interior_fallback":
+            vertical_inset = min(
+                max(56, parking_region.height // 7),
+                max(24, parking_region.height // 3),
+            )
+        left = parking_region.left + horizontal_inset
+        right = parking_region.right - horizontal_inset
+        top = parking_region.top + vertical_inset
+        bottom = parking_region.bottom - vertical_inset
+        candidates = [
+            (left, top), (right, top), (left, bottom), (right, bottom),
+        ]
+        exclusion = 24
+        candidates = [
+            point for point in candidates
+            if not (
+                effect_region.left - exclusion
+                <= point[0]
+                <= effect_region.right + exclusion
+                and effect_region.top - exclusion
+                <= point[1]
+                <= effect_region.bottom + exclusion
+            )
+        ]
+        if not candidates:
+            return {"attempted": False, "reason": "no_safe_window_point"}
+        center_x, center_y = effect_region.center
+        point = max(candidates, key=lambda candidate: (
+            (candidate[0] - center_x) ** 2
+            + (candidate[1] - center_y) ** 2
+        ))
+        try:
+            outcome = _call_with_optional_hwnd(
+                move_mouse, point[0], point[1], hwnd=self.hwnd,
+            )
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "ok": False,
+                "point": {"x": point[0], "y": point[1]},
+                "error": str(exc),
+            }
+        ok = not isinstance(outcome, dict) or outcome.get("ok") is not False
+        if ok:
+            # Let the application's hover state follow the pointer.  This is a
+            # bounded local settle, not another model round.
+            time.sleep(0.08)
+        return {
+            "attempted": True,
+            "ok": bool(ok),
+            "point": {"x": point[0], "y": point[1]},
+            "method": "same-window-nonmutating-pointer-park",
+            "parking_source": parking_source,
+        }
+
     def _prepare_draw_strokes_args(self, args: dict, capture_fn=None) -> dict:
         """Resolve one physical or surface-normalized stroke source exactly once."""
         prepared = dict(args or {})
@@ -1122,19 +1230,47 @@ class InteractionToolMixin:
             result["verify_method"] = "batch-final-visual-verify"
         if before is not None:
             try:
+                if result.get("ok") is not False:
+                    result["verification_cursor_park"] = (
+                        self._park_pointer_for_draw_verification(
+                            executor_mod, region,
+                        )
+                    )
                 time.sleep(0.12)
                 after = capture_fn(region)
                 ratio = vision_cv.diff_ratio(before, after)
                 result["visual_change_ratio"] = round(float(ratio), 5)
                 changed = bool(ratio >= 0.0008)
                 result["visual_change_detected"] = changed
-                if changed:
+                # A broad ROI delta can be only the moving cursor, a hover
+                # highlight, or an unrelated repaint.  Share the deterministic
+                # path provider used by the typed post-action verifier and
+                # require pixels along every declared pointer path.
+                from ..tasking.visual_effects import verify_pointer_paths_in_frames
+
+                local_paths = [
+                    [
+                        [point[0] - region.left, point[1] - region.top]
+                        for point in stroke
+                    ]
+                    for stroke in strokes
+                ]
+                path_realization = verify_pointer_paths_in_frames(
+                    before,
+                    after,
+                    local_paths,
+                )
+                result["path_realization"] = path_realization
+                path_verified = path_realization.get("verified") is True
+                result["path_realization_detected"] = path_verified
+                if path_verified and result.get("ok") is not False:
                     result["verified"] = True
-                    result["verify_method"] = "cv-diff"
+                    result["mutation_applied"] = True
+                    result["verify_method"] = "pointer-path-realization"
                     result["verify_detail"] = (
-                        "visible pixels changed across the requested action region"
+                        "current pixels trace every declared pointer path"
                     )
-                if not changed:
+                if not path_verified:
                     # Device input being accepted is not proof that it landed
                     # on the intended drawable surface.  Keep this fail-closed:
                     # callers must recover focus/tool/canvas grounding instead
@@ -1142,9 +1278,18 @@ class InteractionToolMixin:
                     result.update({
                         "ok": False,
                         "verified": False,
-                        "mutation_applied": False,
-                        "failure_type": "DRAW_NO_VISIBLE_CHANGE",
-                        "error": "draw strokes produced no visible pixel change in the intended region",
+                        "mutation_applied": bool(
+                            path_realization.get("mutation_evidence") is True
+                        ),
+                        "failure_type": (
+                            "DRAW_PATH_NOT_REALIZED"
+                            if changed else "DRAW_NO_VISIBLE_CHANGE"
+                        ),
+                        "error": (
+                            "pixels changed, but they do not trace every requested pointer path"
+                            if changed else
+                            "draw strokes produced no visible pixel change in the intended region"
+                        ),
                     })
                 result["visual_feedback"] = (
                     f"drew {result.get('strokes_drawn', 0)} strokes; "
@@ -1152,10 +1297,10 @@ class InteractionToolMixin:
                        "the strokes landed on the canvas. Re-observe/zoom once if needed; "
                        "when a requested simple visible shape is confirmed, call done "
                        "instead of redrawing for thickness or aesthetics."
-                       if changed else
-                       "the region barely changed; the strokes may have hit toolbar/popup "
-                       "chrome or an inactive surface. Re-observe, ensure a Pencil/Brush "
-                       "tool is selected and the canvas is focused, then retry.")
+                       if path_verified else
+                       "the region barely changed; the paths may have hit interface chrome, "
+                       "an inactive surface, or an incompatible input mode. Re-bind the "
+                       "target surface and prove the required pointer mechanism before retrying.")
                 )
             except Exception as exc:
                 logger.debug("draw_strokes post-capture/diff failed: %s", exc)

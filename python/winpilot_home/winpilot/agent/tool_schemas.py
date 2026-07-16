@@ -214,6 +214,9 @@ def _batch_action_schema(*, native_frame: bool = False) -> dict:
         ),
         variant("drag", drag_fields, (("frame_x1", "frame_y1", "frame_x2", "frame_y2") if native_frame else ("x1", "y1", "x2", "y2"))),
         variant("draw_strokes", draw_fields, (("frame_strokes",) if native_frame else ())),
+        variant("ensure_input_mode", {
+            "mode": {"type": "string", "enum": ["continuous_freehand"]},
+        }, ("mode",)),
         variant("select_color", {
             "color": text, "name": text, "strict": boolean, "required_by_user": boolean,
             "expected_region": text,

@@ -19,6 +19,7 @@ ALLOWED_BATCH_ACTIONS = {
     "hold_key",
     "drag",
     "draw_strokes",
+    "ensure_input_mode",
     "select_color",
     "focus_window",
     "launch",
@@ -48,6 +49,7 @@ BATCH_MUTATING_ACTIONS = {
     "hold_key",
     "drag",
     "draw_strokes",
+    "ensure_input_mode",
     "select_color",
     "focus_window",
     "launch",
@@ -272,6 +274,8 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
         or not 1 <= float(args.get("duration_ms")) <= 30_000
     ):
         return "requires duration_ms in 1..30000"
+    if name == "ensure_input_mode" and not str(args.get("mode") or "").strip():
+        return "requires mode"
     if name in {"mouse_down", "mouse_up"} and str(
         args.get("button") or "left"
     ).casefold() not in {"left", "right", "middle"}:

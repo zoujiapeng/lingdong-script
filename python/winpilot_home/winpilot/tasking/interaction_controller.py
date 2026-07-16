@@ -60,6 +60,8 @@ def controller_actions(
         raise ValueError("semantic interaction region escaped the bound surface")
 
     mapped: list[dict[str, Any]] = []
+    selected_color = ""
+    prepared_input_modes: set[str] = set()
     for item in decision.actions:
         points = item.normalized_points()
         if points and not _inside(decision.region_object(), points):
@@ -75,6 +77,57 @@ def controller_actions(
             stroke.coordinate_space == "target_region_0_1000"
             for stroke in item.stroke_paths
         )
+        requested_color = str(item.color or "").strip()
+        if (
+            item.action == "draw_strokes"
+            and item.interaction_mechanism == "freehand_strokes"
+            and "continuous_freehand" not in prepared_input_modes
+        ):
+            # A continuous path is not executable merely because the pointer
+            # primitive exists.  Bind its input-mode precondition in the same
+            # Controller transaction so a stale selection cannot reinterpret
+            # the path as a shape, selection, fill, or other tool.  Resolution
+            # is accessibility/adapter driven and contains no app coordinates.
+            mapped.append({
+                "action": "ensure_input_mode",
+                "typed_action": "ensure_input_mode",
+                "interaction_mechanism": "semantic_control",
+                "affordance_evidence": (
+                    "continuous pointer paths require a compatible current input mode"
+                ),
+                "visual_frame_id": decision.frame_id,
+                "coordinate_space": "screen_physical_px",
+                "source_frame_coordinates": {},
+                "mode": "continuous_freehand",
+                "synthesized_from": "draw_strokes.interaction_mechanism",
+            })
+            prepared_input_modes.add("continuous_freehand")
+        if (
+            item.action == "draw_strokes"
+            and requested_color
+            and requested_color.casefold() != selected_color
+        ):
+            # ``color`` on a typed draw action is an execution obligation, not
+            # descriptive metadata.  Lower it to the existing semantic colour
+            # selector before the first affected path.  This is deliberately
+            # application-neutral: the Controller resolves the visible colour
+            # affordance from current target pixels and can fail closed when it
+            # is unavailable.
+            mapped.append({
+                "action": "select_color",
+                "typed_action": "select_color",
+                "interaction_mechanism": "semantic_control",
+                "affordance_evidence": (
+                    "typed draw action requires a visible colour selection"
+                ),
+                "visual_frame_id": decision.frame_id,
+                "coordinate_space": "screen_physical_px",
+                "source_frame_coordinates": {},
+                "color": requested_color,
+                "name": requested_color,
+                "synthesized_from": "draw_strokes.color",
+            })
+            selected_color = requested_color.casefold()
         if item.action == "draw_strokes" and target_relative_strokes:
             resolved = item.resolved_frame_strokes(
                 inset_fraction=LOCAL_PATH_INSET_FRACTION,
@@ -167,9 +220,12 @@ def controller_actions(
                 for stroke in frame_strokes
             ]
             payload["duration_ms"] = item.duration_ms or 650
+            if requested_color:
+                payload["requested_color"] = requested_color
         elif item.action == "select_color":
             payload["color"] = item.color
             payload["name"] = item.color
+            selected_color = str(item.color or "").strip().casefold()
         elif item.action == "type_text":
             payload["text"] = item.text
         elif item.action == "hotkey":

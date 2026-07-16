@@ -2200,6 +2200,205 @@ def test_batch_scope_guard_runs_before_controller_local_select_color(monkeypatch
     assert out["results"][0]["data"]["blocked"] is True
 
 
+def test_ensure_input_mode_switches_conflicting_accessible_mode_and_verifies(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    class SelectedPattern:
+        IsSelected = True
+
+    class SelectedControl:
+        @staticmethod
+        def GetSelectionItemPattern():
+            return SelectedPattern()
+
+        @staticmethod
+        def GetTogglePattern():
+            return None
+
+    def element(text, *, selected=False, x=100, live_selected=False):
+        return SimpleNamespace(
+            text=text,
+            role="radio",
+            states=["selected"] if selected else [],
+            source="uia",
+            cx=x,
+            cy=80,
+            extra={"uia_ctrl": SelectedControl()} if live_selected else {},
+        )
+
+    elements = [
+        element("Shapes", selected=True, x=100),
+        element("Brushes", x=180, live_selected=True),
+    ]
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: elements)
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "input-mode-switch"
+
+    controller = FastGuiController(Session())
+    clicks = []
+    monkeypatch.setattr(
+        controller,
+        "_dispatch",
+        lambda name, args: (
+            clicks.append((name, dict(args))) or ToolResult('{"ok": true}')
+        ),
+    )
+
+    out = controller.execute([
+        {"action": "ensure_input_mode", "mode": "continuous_freehand"},
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert out["verified"] is True
+    assert clicks == [("click", {"x": 180, "y": 80, "skip_screen_delta": True})]
+    data = out["results"][0]["data"]
+    assert data["provider"] == "accessibility_post_selection"
+    assert data["postcondition"]["active_matches"][0]["text"] == "Brushes"
+
+
+def test_ensure_input_mode_rechecks_custom_toolbar_without_selection_pattern(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    def element(text, *, selected=False, x=100):
+        return SimpleNamespace(
+            text=text,
+            role="button",
+            states=["selected"] if selected else [],
+            source="uia",
+            cx=x,
+            cy=80,
+            extra={},
+        )
+
+    observations = iter([
+        [element("Shape", selected=True), element("Pen", x=180)],
+        [element("Shape"), element("Pen", selected=True, x=180)],
+    ])
+    monkeypatch.setattr(
+        controller_mod.uia, "collect", lambda _hwnd: next(observations),
+    )
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "custom-mode-switch"
+
+    controller = FastGuiController(Session())
+    monkeypatch.setattr(
+        controller, "_dispatch", lambda _name, _args: ToolResult('{"ok": true}'),
+    )
+
+    out = controller.execute([{
+        "action": "ensure_input_mode", "mode": "continuous_freehand",
+    }], sync=False)
+
+    assert out["ok"] is True
+    data = out["results"][0]["data"]
+    assert data["provider"] == "fresh_accessibility_post_selection"
+    assert data["postcondition"]["verification_source"] == "fresh_accessibility_state"
+    assert data["postcondition"]["active_matches"][0]["text"] == "Pen"
+
+
+def test_ensure_input_mode_does_not_trust_unverified_control_click(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    def element(text, *, selected=False, x=100):
+        return SimpleNamespace(
+            text=text,
+            role="button",
+            states=["selected"] if selected else [],
+            source="uia",
+            cx=x,
+            cy=80,
+            extra={},
+        )
+
+    unchanged = [
+        element("Shape", selected=True), element("Pen", x=180),
+    ]
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: unchanged)
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "unverified-mode-switch"
+
+    controller = FastGuiController(Session())
+    monkeypatch.setattr(
+        controller, "_dispatch", lambda _name, _args: ToolResult('{"ok": true}'),
+    )
+
+    out = controller.execute([{
+        "action": "ensure_input_mode", "mode": "continuous_freehand",
+    }], sync=False)
+
+    assert out["ok"] is False
+    data = out["results"][0]["data"]
+    assert data["failure_type"] == "INPUT_MODE_ACTIVATION_UNVERIFIED"
+    assert data["postcondition"]["active_matches"] == []
+    assert data["postcondition"]["active_conflicts"][0]["text"] == "Shape"
+
+
+def test_ensure_input_mode_blocks_unresolvable_conflicting_mode(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    conflicting = SimpleNamespace(
+        text="Selection", role="radio", states=["selected"], source="uia",
+        cx=100, cy=80,
+    )
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: [conflicting])
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "input-mode-block"
+
+    out = FastGuiController(Session()).execute([
+        {"action": "ensure_input_mode", "mode": "continuous_freehand"},
+    ], sync=False)
+
+    assert out["ok"] is False
+    assert out["failure_type"] == "INPUT_MODE_CONFLICT_UNRESOLVED"
+
+
 def test_batch_scope_recovery_rebinds_and_continues_only_uncommitted_action(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult

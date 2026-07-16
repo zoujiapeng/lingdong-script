@@ -235,7 +235,11 @@ class TaskContractCompiler:
                 ),
                 stage_id=perform_stage.id,
                 evidence_providers=[
-                    _provider("bound_interaction_transaction", "interaction.perform", "controller.transaction"),
+                    _provider(
+                        "bound_interaction_transaction",
+                        "interaction.perform", "interaction.prepare_input_mode",
+                        "controller.transaction",
+                    ),
                 ],
             )
             perform_stage.obligations.append(perform_obligation)
@@ -303,6 +307,15 @@ class TaskContractCompiler:
                         _provider(
                             "local_semantic_effect_verifier",
                             "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+                        ),
+                        *(
+                            [_provider(
+                                "typed_freehand_turn_completion",
+                                "interaction.verify_transition",
+                                "interaction.prepare_input_mode",
+                                "visual.observe",
+                            )]
+                            if session.lifecycle == "persistent" else []
                         ),
                     ]
                 ),

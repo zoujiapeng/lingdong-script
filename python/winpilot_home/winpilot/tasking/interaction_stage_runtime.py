@@ -36,6 +36,7 @@ from .visual_effects import (
     verify_direct_manipulation_transition,
     verify_pointer_gesture_realization,
     verify_typed_direct_manipulation_completion,
+    verify_typed_freehand_turn_completion,
 )
 from .visual_geometry import VisualGeometryError, refine_interaction_geometry
 
@@ -49,6 +50,7 @@ INTERACTION_STAGE_TYPES = {
 }
 
 _MAX_LOCAL_CAUSAL_CHANGE_RATIO = 0.05
+_MAX_SAME_FRAME_PLAN_ATTEMPTS = 2
 
 
 def _local_causal_change_ratio(
@@ -83,12 +85,85 @@ def _controller_visual_no_effect(result: dict[str, Any]) -> bool:
                 "VISUAL_ACTION_NO_EFFECT", "DRAW_NO_VISIBLE_CHANGE",
             }:
                 return True
+            if (
+                failure_type == "DRAW_PATH_NOT_REALIZED"
+                and value.get("mutation_applied") is False
+            ):
+                # A cursor/hover delta without attributable path pixels is a
+                # recoverable no-effect, not an already-applied mutation.  If
+                # the provider reports partial mutation evidence, fail closed
+                # and do not permit an automatic replay.
+                return True
             if value.get("visual_change_detected") is False:
                 return True
             pending.extend(value.values())
         elif isinstance(value, list):
             pending.extend(value)
     return False
+
+
+def _local_resolution_requirement_proofs(
+    decision: InteractionDecision,
+    geometry_grounding: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Bind every typed local-resolution precondition to current-pixel evidence."""
+    requirements = list(decision.resolution_requirements)
+    if not requirements:
+        return []
+    refinements = [
+        item for item in geometry_grounding.get("refinements") or []
+        if isinstance(item, dict)
+    ]
+
+    def provider_names(value: Any) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, dict):
+            provider = str(value.get("provider") or "").strip()
+            if provider:
+                found.append(provider)
+            for nested in value.values():
+                found.extend(provider_names(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.extend(provider_names(nested))
+        return found
+
+    proofs: list[dict[str, Any]] = []
+    for requirement in requirements:
+        index = int(requirement.action_index)
+        candidates = [
+            item for item in refinements
+            if int(item.get("action_index", -1)) == index
+        ]
+        accepted: dict[str, Any] | None = None
+        accepted_providers: list[str] = []
+        for candidate in candidates:
+            providers = list(dict.fromkeys(provider_names(candidate)))
+            current_pixel_providers = [
+                provider for provider in providers
+                if provider not in {
+                    "typed_spatial_policy", "typed_semantic_free_path",
+                }
+            ]
+            if (
+                candidate.get("applied", True) is True
+                and current_pixel_providers
+            ):
+                accepted = candidate
+                accepted_providers = current_pixel_providers
+                break
+        if accepted is None:
+            raise VisualGeometryError(
+                "a declared current_frame_geometry resolution requirement "
+                f"for action {index} has no unique current-pixel provider proof"
+            )
+        proofs.append({
+            **requirement.model_dump(mode="json"),
+            "verified": True,
+            "evidence_providers": accepted_providers,
+            "refinement": accepted,
+        })
+    return proofs
 
 
 def _mutation_signature(decision: InteractionDecision) -> str:
@@ -479,6 +554,102 @@ def _effect_regions(decision: InteractionDecision) -> list[list[float]]:
     return [list(region) for region in unique]
 
 
+def _external_watch_bounds(
+    state: dict[str, Any],
+    decision: InteractionDecision,
+    baseline: Artifact,
+) -> tuple[list[float], dict[str, Any]]:
+    """Bind an external-turn watcher to proven shared-state pixels.
+
+    A model may conservatively describe the whole client as its surface.  That
+    is safe for observation, but unsafe for causal waiting: tool palettes,
+    hover chrome, and transient menus are not another participant's move.  If
+    current pixels expose one credible work surface and the last verified
+    agent action was grounded inside it, narrow the watcher to that surface.
+    Otherwise retain the semantic interaction region and fail neither open nor
+    by application-specific coordinates.
+    """
+    fallback = list(
+        decision.interaction_region
+        if len(decision.interaction_region) == 4
+        else decision.surface_region
+    )
+    target = state.get("target_binding") or {}
+    try:
+        detected = image_capture.credible_work_surface_frame_bounds(
+            base64.b64encode(Path(baseline.managed_path).read_bytes()).decode(),
+            client_frame_bounds=target.get("client_frame_bounds"),
+        )
+    except Exception as exc:
+        return fallback, {
+            "source": "semantic_interaction_region",
+            "reason": "current_pixel_surface_detection_failed",
+            "error": str(exc),
+        }
+    if not isinstance(detected, dict) or detected.get("ok") is not True:
+        return fallback, {
+            "source": "semantic_interaction_region",
+            "reason": "no_unique_current_pixel_work_surface",
+            "detected_surface": detected,
+        }
+    surface = detected.get("detected_work_surface_frame_bounds")
+    if not isinstance(surface, (list, tuple)) or len(surface) != 4:
+        return fallback, {
+            "source": "semantic_interaction_region",
+            "reason": "detected_surface_geometry_invalid",
+            "detected_surface": detected,
+        }
+    outer_left, outer_top, outer_right, outer_bottom = [
+        float(value) for value in surface
+    ]
+    previous = state.get("last_executed_action") or state.get("executed_action") or {}
+    actions = list(previous.get("actions") or []) if isinstance(previous, dict) else []
+    grounding_centres: list[tuple[float, float]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        anchor = action.get("target_anchor")
+        if isinstance(anchor, (list, tuple)) and len(anchor) == 2:
+            try:
+                grounding_centres.append((float(anchor[0]), float(anchor[1])))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        for key in (
+            "source_region", "target_region", "expected_effect_region",
+        ):
+            bounds = action.get(key)
+            if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+                continue
+            try:
+                left, top, right, bottom = [float(value) for value in bounds]
+            except (TypeError, ValueError, OverflowError):
+                continue
+            grounding_centres.append(((left + right) / 2.0, (top + bottom) / 2.0))
+    grounded_inside = any(
+        outer_left <= x <= outer_right and outer_top <= y <= outer_bottom
+        for x, y in grounding_centres
+    )
+    if not grounded_inside:
+        return fallback, {
+            "source": "semantic_interaction_region",
+            "reason": "detected_surface_not_bound_by_last_verified_action",
+            "detected_surface": detected,
+        }
+    bounds = [outer_left, outer_top, outer_right, outer_bottom]
+    state["detected_surface"] = detected
+    state["external_watch_region"] = {
+        "bounds": bounds,
+        "coordinate_space": "frame_0_1000",
+        "source": "current_pixel_surface_bound_by_verified_action",
+        "confidence": float(detected.get("light_ratio") or 0.0),
+    }
+    return bounds, {
+        "source": "current_pixel_surface_bound_by_verified_action",
+        "reason": "last_verified_action_grounded_inside_unique_surface",
+        "detected_surface": detected,
+    }
+
+
 def _is_remote_feedback_region(
     decision: InteractionDecision,
     bounds: list[float],
@@ -623,6 +794,7 @@ class InteractionStageEngine:
         state.setdefault("frame_id", 0)
         state.setdefault("model_calls", 0)
         state.setdefault("turn_index", 0)
+        state.setdefault("agent_turns_since_external_change", 0)
         state.setdefault("replan_count", 0)
         state.setdefault("verified_turn_history", [])
         return state
@@ -1317,61 +1489,157 @@ class InteractionStageEngine:
             )
             if isinstance(client_authority, list) and len(client_authority) == 4:
                 prior["window_client_authority"] = client_authority
-            self._reserve_model_call(
-                state,
-                contract,
-                stage=StageType.INFER_INTERACTION.value,
-            )
             model_started = time.monotonic()
-            try:
-                decision = plan_interaction(
-                    artifact.managed_path,
-                    task=contract.task,
-                    intent=contract.intent.interaction.model_dump(mode="json"),
-                    frame_id=int(state["frame_id"]),
-                    observation_artifact_id=artifact.artifact_id,
-                    prior_state=prior,
-                    immutable_roles=(
-                        contract.session.role_assignments
-                        if contract.session is not None
-                        else contract.intent.interaction.role_assignments
-                    ),
-                    primary_action_modality=(
-                        contract.session.primary_action_modality
-                        if contract.session is not None
-                        else contract.intent.interaction.primary_action_modality
-                    ),
+            model_calls = 0
+            validation_attempts: list[dict[str, Any]] = []
+            validation_feedback: dict[str, Any] | None = None
+            while True:
+                self._reserve_model_call(
+                    state,
+                    contract,
+                    stage=StageType.INFER_INTERACTION.value,
                 )
-            except InteractionPlanOutputError as exc:
-                model_elapsed_ms = int((time.monotonic() - model_started) * 1000)
-                raise _failure(
-                    str(exc),
-                    exc.failure_type,
-                    plan_error_code=exc.code,
-                    canonicalization_repairs=list(exc.repairs),
-                    frame_id=state.get("frame_id"),
-                    artifact_id=artifact.artifact_id,
-                    frame_readiness=frame_readiness,
-                    model_calls=1,
-                    model_elapsed_ms=model_elapsed_ms,
-                    controller_elapsed_ms=readiness_elapsed_ms,
-                    interaction_state=dict(state),
-                ) from exc
-            except Exception as exc:
-                model_elapsed_ms = int((time.monotonic() - model_started) * 1000)
-                raise _failure(
-                    f"interaction protocol inference failed: {exc}",
-                    "interaction_inference_failed",
-                    frame_id=state.get("frame_id"),
-                    artifact_id=artifact.artifact_id,
-                    frame_readiness=frame_readiness,
-                    model_calls=1,
-                    model_elapsed_ms=model_elapsed_ms,
-                    controller_elapsed_ms=readiness_elapsed_ms,
-                    interaction_state=dict(state),
-                ) from exc
+                model_calls += 1
+                try:
+                    decision = plan_interaction(
+                        artifact.managed_path,
+                        task=contract.task,
+                        intent=contract.intent.interaction.model_dump(mode="json"),
+                        frame_id=int(state["frame_id"]),
+                        observation_artifact_id=artifact.artifact_id,
+                        prior_state=prior,
+                        immutable_roles=(
+                            contract.session.role_assignments
+                            if contract.session is not None
+                            else contract.intent.interaction.role_assignments
+                        ),
+                        primary_action_modality=(
+                            contract.session.primary_action_modality
+                            if contract.session is not None
+                            else contract.intent.interaction.primary_action_modality
+                        ),
+                        validation_feedback=validation_feedback,
+                    )
+                    # A typed requirement is part of the execution contract,
+                    # so prove that a local current-pixel provider can satisfy
+                    # it on this exact frame before advancing to PerformTurn.
+                    # This read-only preflight turns planner/provider mismatch
+                    # into one bounded same-frame schema correction instead of
+                    # a late execution failure and a redundant re-observation.
+                    if decision.resolution_requirements:
+                        preview_target = state.get("target_binding") or {}
+                        try:
+                            _preview_decision, preview_grounding = (
+                                refine_interaction_geometry(
+                                    decision,
+                                    artifact.managed_path,
+                                    expected_size=(
+                                        int(preview_target["frame_region"]["width"]),
+                                        int(preview_target["frame_region"]["height"]),
+                                    ),
+                                    frame_region=dict(preview_target["frame_region"]),
+                                )
+                            )
+                            preview_proofs = _local_resolution_requirement_proofs(
+                                _preview_decision,
+                                preview_grounding,
+                            )
+                            state["planning_geometry_preview"] = {
+                                "verified": True,
+                                "frame_id": int(state.get("frame_id") or 0),
+                                "artifact_id": artifact.artifact_id,
+                                "requirements": preview_proofs,
+                                "refinements": list(
+                                    preview_grounding.get("refinements") or []
+                                ),
+                            }
+                        except (KeyError, TypeError, ValueError, VisualGeometryError) as exc:
+                            raise InteractionPlanOutputError(
+                                "current-frame geometry cannot satisfy the "
+                                f"declared resolution requirement: {exc}. "
+                                "Select an applicable current_frame_region_inventory "
+                                "candidate or emit the typed locator supported by "
+                                "the visible pixels; do not repeat coarse coordinates.",
+                                code="local_geometry_requirement_unresolved",
+                                raw_payload=decision.model_dump(mode="json"),
+                                validation_errors=[{
+                                    "location": ["resolution_requirements"],
+                                    "type": "local_geometry_unresolved",
+                                    "message": str(exc),
+                                }],
+                            ) from exc
+                    break
+                except InteractionPlanOutputError as exc:
+                    feedback = exc.correction_feedback()
+                    budget_remaining = bool(
+                        contract.session is not None
+                        and int(state.get("model_calls") or 0)
+                        < int(contract.session.max_model_calls)
+                    )
+                    will_retry = bool(
+                        exc.retryable
+                        and model_calls < _MAX_SAME_FRAME_PLAN_ATTEMPTS
+                        and budget_remaining
+                    )
+                    diagnostic = {
+                        "attempt": model_calls,
+                        "will_retry_same_frame": will_retry,
+                        "frame_id": int(state.get("frame_id") or 0),
+                        "artifact_id": artifact.artifact_id,
+                        **feedback,
+                    }
+                    validation_attempts.append(diagnostic)
+                    state["inference_validation_attempts"] = list(
+                        validation_attempts
+                    )
+                    BUS.publish(
+                        "interaction_plan_validation",
+                        run_id=context["run_id"],
+                        session_id=state.get("session_id"),
+                        **diagnostic,
+                    )
+                    if will_retry:
+                        validation_feedback = feedback
+                        continue
+                    model_elapsed_ms = int(
+                        (time.monotonic() - model_started) * 1000
+                    )
+                    raise _failure(
+                        str(exc),
+                        exc.failure_type,
+                        plan_error_code=exc.code,
+                        canonicalization_repairs=list(exc.repairs),
+                        validation_attempts=validation_attempts,
+                        frame_id=state.get("frame_id"),
+                        artifact_id=artifact.artifact_id,
+                        frame_readiness=frame_readiness,
+                        model_calls=model_calls,
+                        model_elapsed_ms=model_elapsed_ms,
+                        controller_elapsed_ms=readiness_elapsed_ms,
+                        interaction_state=dict(state),
+                    ) from exc
+                except Exception as exc:
+                    model_elapsed_ms = int(
+                        (time.monotonic() - model_started) * 1000
+                    )
+                    raise _failure(
+                        f"interaction protocol inference failed: {exc}",
+                        "interaction_inference_failed",
+                        frame_id=state.get("frame_id"),
+                        artifact_id=artifact.artifact_id,
+                        frame_readiness=frame_readiness,
+                        validation_attempts=validation_attempts,
+                        model_calls=model_calls,
+                        model_elapsed_ms=model_elapsed_ms,
+                        controller_elapsed_ms=readiness_elapsed_ms,
+                        interaction_state=dict(state),
+                    ) from exc
             model_elapsed_ms = int((time.monotonic() - model_started) * 1000)
             canonicalization_repairs = list(decision.canonicalization_repairs)
+            if validation_attempts:
+                canonicalization_repairs.append(
+                    "schema_validation_feedback_retry:accepted"
+                )
             if decision.continuation == "blocked":
                 raise _failure(
                     "the authoritative frame did not ground a causal interaction: "
@@ -1383,7 +1651,7 @@ class InteractionStageEngine:
                     frame_id=state.get("frame_id"),
                     artifact_id=artifact.artifact_id,
                     frame_readiness=frame_readiness,
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1398,7 +1666,7 @@ class InteractionStageEngine:
                     "persistent interaction plan must wait for external change or declare a visible terminal state",
                     "interaction_plan_invalid",
                     canonicalization_repairs=canonicalization_repairs,
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1416,7 +1684,7 @@ class InteractionStageEngine:
                     "bounded interaction plan cannot request an absent external-change watcher",
                     "interaction_plan_invalid",
                     canonicalization_repairs=canonicalization_repairs,
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1425,7 +1693,7 @@ class InteractionStageEngine:
                 raise _failure(
                     "target client authority was lost",
                     "target_binding_failed",
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1442,7 +1710,7 @@ class InteractionStageEngine:
                     "interaction_region_invalid",
                     proposed_region=surface_candidate.to_dict(),
                     client_region=client.to_dict(),
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1467,7 +1735,7 @@ class InteractionStageEngine:
                     contract,
                     reason="surface_layout_displacement_confirmation",
                     activity={
-                        "model_calls": 1,
+                        "model_calls": model_calls,
                         "model_elapsed_ms": model_elapsed_ms,
                         "controller_elapsed_ms": readiness_elapsed_ms,
                         "capture_elapsed_ms": int(
@@ -1498,7 +1766,7 @@ class InteractionStageEngine:
                     output=self.stage_output(
                         stage,
                         started,
-                        model_calls=1,
+                        model_calls=model_calls,
                         model_elapsed_ms=model_elapsed_ms,
                         controller_elapsed_ms=readiness_elapsed_ms,
                         interaction_state=dict(state),
@@ -1510,7 +1778,7 @@ class InteractionStageEngine:
                     binding_result.blocked_reason or "interaction region could not be bound",
                     "interaction_region_invalid",
                     surface_binding=binding_result.to_dict(),
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 )
@@ -1525,7 +1793,7 @@ class InteractionStageEngine:
                     "interaction_region_invalid",
                     surface_binding=binding_result.to_dict(),
                     proposed_action_region=decision.region_object().to_dict(),
-                    model_calls=1,
+                    model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
                 ) from exc
@@ -1546,6 +1814,7 @@ class InteractionStageEngine:
                 "budget": self._budget_snapshot(state, contract),
                 "failure_stage": "",
                 "inference_canonicalization_repairs": canonicalization_repairs,
+                "inference_validation_attempts": list(validation_attempts),
                 "visual_region_inventory": [
                     dict(item) for item in decision.region_inventory
                 ],
@@ -1574,6 +1843,7 @@ class InteractionStageEngine:
                         else contract.intent.interaction.primary_action_modality
                     ),
                     "canonicalization_repairs": canonicalization_repairs,
+                    "validation_attempts": list(validation_attempts),
                     "visual_region_inventory": [
                         dict(item) for item in decision.region_inventory
                     ],
@@ -1590,11 +1860,12 @@ class InteractionStageEngine:
                 frame_id=decision.frame_id,
                 turn_owner=decision.turn_owner,
                 planned_action=decision.model_dump(mode="json"),
+                validation_attempts=list(validation_attempts),
                 visual_region_inventory=state.get("visual_region_inventory"),
                 deferred_action_program=state.get("deferred_action_program"),
             )
             return NodeResult(output=self.stage_output(
-                stage, started, model_calls=1,
+                stage, started, model_calls=model_calls,
                 model_elapsed_ms=model_elapsed_ms,
                 controller_elapsed_ms=readiness_elapsed_ms,
                 interaction_state=dict(state), evidence=record,
@@ -1725,6 +1996,22 @@ class InteractionStageEngine:
                     interaction_state=dict(state), evidence=record,
                 ))
 
+            if (
+                contract.session is not None
+                and contract.session.lifecycle == "persistent"
+                and int(state.get("agent_turns_since_external_change") or 0)
+                >= int(contract.session.max_agent_turns_per_activation)
+            ):
+                raise _failure(
+                    "another agent mutation is forbidden until an independent external change is proved",
+                    "interaction_external_change_required",
+                    agent_turns_since_external_change=int(
+                        state.get("agent_turns_since_external_change") or 0
+                    ),
+                    max_agent_turns_between_external_changes=int(
+                        contract.session.max_agent_turns_per_activation
+                    ),
+                )
             self._assert_mutation_budget(state, contract)
             target = state.get("target_binding") or {}
             hwnd = int(target.get("hwnd") or 0)
@@ -1953,6 +2240,11 @@ class InteractionStageEngine:
                     ),
                     frame_region=dict(target["frame_region"]),
                 )
+                resolution_proofs = _local_resolution_requirement_proofs(
+                    decision,
+                    geometry_grounding,
+                )
+                geometry_grounding["resolution_requirements"] = resolution_proofs
             except VisualGeometryError as exc:
                 raise _failure(
                     f"typed spatial plan has no unique current-pixel grounding: {exc}",
@@ -2063,6 +2355,56 @@ class InteractionStageEngine:
                     controller_elapsed_ms=controller_elapsed_ms,
                     capture_elapsed_ms=capture_elapsed_ms,
                 )
+            required_input_modes = {
+                "continuous_freehand"
+                for item in decision.actions
+                if item.action == "draw_strokes"
+                and item.interaction_mechanism == "freehand_strokes"
+            }
+            input_mode_evidence = [
+                dict(item.get("data") or {})
+                for item in (result.get("results") or [])
+                if isinstance(item, dict)
+                and item.get("action") == "ensure_input_mode"
+                and isinstance(item.get("data"), dict)
+            ]
+            proven_input_modes = {
+                str(item.get("input_mode") or "")
+                for item in input_mode_evidence
+                if item.get("verified") is True
+            }
+            if not required_input_modes <= proven_input_modes:
+                raise _failure(
+                    "controller transaction did not prove its typed input-mode precondition",
+                    "input_mode_precondition_unproven",
+                    required_input_modes=sorted(required_input_modes),
+                    proven_input_modes=sorted(proven_input_modes),
+                    input_mode_evidence=input_mode_evidence,
+                    controller_result=result,
+                    model_calls=0,
+                    model_elapsed_ms=0,
+                    controller_elapsed_ms=controller_elapsed_ms,
+                    capture_elapsed_ms=capture_elapsed_ms,
+                )
+            if input_mode_evidence:
+                state["input_mode_evidence"] = input_mode_evidence
+                for evidence in input_mode_evidence:
+                    mode_record = registry.record(
+                        "interaction.input_mode_prepared",
+                        provider=str(evidence.get("provider") or "controller_input_mode"),
+                        verified=evidence.get("verified") is True,
+                        stage_id=stage.id,
+                        artifact_id=fresh_artifact.artifact_id,
+                        metadata=evidence,
+                    )
+                    BUS.publish(
+                        "interaction_input_mode_prepared",
+                        run_id=context["run_id"],
+                        session_id=state.get("session_id"),
+                        frame_id=int(state["frame_id"]),
+                        input_mode=evidence,
+                        evidence_id=mode_record["id"],
+                    )
             state.update({
                 "status": "turn_executed",
                 "executed_action": {
@@ -2425,6 +2767,26 @@ class InteractionStageEngine:
                 transition_evidence=manipulation_transition,
                 geometry_evidence=state.get("visual_geometry_grounding") or {},
             )
+            typed_freehand_completion = verify_typed_freehand_turn_completion(
+                decision,
+                gesture_evidence=gesture_realization,
+                geometry_evidence=state.get("visual_geometry_grounding") or {},
+                input_mode_evidence=list(state.get("input_mode_evidence") or []),
+                persistent_session=bool(
+                    contract.session is not None
+                    and contract.session.lifecycle == "persistent"
+                ),
+            )
+            allowed_effect_providers = {
+                provider.id
+                for obligation in stage.obligations
+                if obligation.id == "interaction.local_effect_verified"
+                for provider in obligation.evidence_providers
+            }
+            use_typed_freehand_provider = bool(
+                typed_freehand_completion.get("verified") is True
+                and "typed_freehand_turn_completion" in allowed_effect_providers
+            )
             if use_typed_transition_provider:
                 typed_record = registry.record(
                     "interaction.typed_direct_manipulation_completed",
@@ -2441,6 +2803,23 @@ class InteractionStageEngine:
                     artifact_id=current.artifact_id,
                     completion=typed_completion,
                     evidence_id=typed_record["id"],
+                )
+            if typed_freehand_completion.get("applicable") is True:
+                typed_freehand_record = registry.record(
+                    "interaction.typed_freehand_turn_completed",
+                    provider="typed_freehand_turn_completion",
+                    verified=typed_freehand_completion.get("verified") is True,
+                    stage_id=stage.id,
+                    artifact_id=current.artifact_id,
+                    metadata=typed_freehand_completion,
+                )
+                BUS.publish(
+                    "interaction_typed_freehand_verify",
+                    run_id=context["run_id"],
+                    session_id=state.get("session_id"),
+                    artifact_id=current.artifact_id,
+                    completion=typed_freehand_completion,
+                    evidence_id=typed_freehand_record["id"],
                 )
             semantic = {
                 "ok": True,
@@ -2465,6 +2844,31 @@ class InteractionStageEngine:
                             "typed_direct_manipulation_completion"
                         ),
                         "typed_completion": typed_completion,
+                        "model_call_skipped": True,
+                    },
+                }
+            elif use_typed_freehand_provider:
+                semantic = {
+                    "ok": True,
+                    "verified": True,
+                    "semantic_visual_verified": False,
+                    "task_complete": False,
+                    "observed": [
+                        "all declared continuous paths, requested colour, "
+                        "current-pixel geometry, and input mode were locally proven"
+                    ],
+                    "issues": [],
+                    "local_effect_issues": [],
+                    "completion_issues": [
+                        "the persistent interaction remains open for the external actor"
+                    ],
+                    "verify_method": "typed-freehand-turn-completion",
+                    "expected_effect": decision.expected_effect.model_dump(
+                        mode="json"
+                    ),
+                    "verifier_contract": {
+                        "selected_provider": "typed_freehand_turn_completion",
+                        "typed_completion": typed_freehand_completion,
                         "model_call_skipped": True,
                     },
                 }
@@ -2599,6 +3003,9 @@ class InteractionStageEngine:
                 "baseline_artifact_id": current.artifact_id,
                 "current_artifact_id": current.artifact_id,
                 "turn_index": int(state.get("turn_index") or 0) + 1,
+                "agent_turns_since_external_change": int(
+                    state.get("agent_turns_since_external_change") or 0
+                ) + 1,
             })
             state["budget"] = self._budget_snapshot(state, contract)
             record = registry.record(
@@ -2609,7 +3016,11 @@ class InteractionStageEngine:
                     else (
                         "typed_direct_manipulation_completion"
                         if use_typed_transition_provider
-                        else "local_semantic_effect_verifier"
+                        else (
+                            "typed_freehand_turn_completion"
+                            if use_typed_freehand_provider
+                            else "local_semantic_effect_verifier"
+                        )
                     )
                 ),
                 verified=True,
@@ -2657,23 +3068,8 @@ class InteractionStageEngine:
                 session_id=state.get("session_id"),
                 local_verification=verification,
             )
-            activation_turn_limit_reached = bool(
-                contract.session is not None
-                and contract.session.lifecycle == "persistent"
-                and int(state.get("turn_index") or 0)
-                >= int(contract.session.max_agent_turns_per_activation)
-            )
-            if semantic.get("task_complete") is True or activation_turn_limit_reached:
+            if semantic.get("task_complete") is True:
                 state["status"] = "completed"
-                if activation_turn_limit_reached:
-                    state["session_yield"] = {
-                        "reason": "verified_agent_turn_limit_reached",
-                        "turn_index": int(state.get("turn_index") or 0),
-                        "max_agent_turns_per_activation": int(
-                            contract.session.max_agent_turns_per_activation
-                        ),
-                        "session_remains_resumable": True,
-                    }
                 branch = "complete"
             elif has_deferred_program:
                 try:
@@ -2714,6 +3110,10 @@ class InteractionStageEngine:
                 )
                 branch = "continue_local"
             elif contract.session is not None and contract.session.lifecycle == "persistent":
+                # A persistent run stays alive, but the consecutive-turn guard
+                # above prevents it from taking a second turn until the bound
+                # watcher proves an independent external change.
+                state["status"] = "waiting_external"
                 branch = "next"
             elif decision.continuation == "finish":
                 # The action itself was valid, but its terminal claim was not.
@@ -2757,17 +3157,12 @@ class InteractionStageEngine:
                     artifact_id=current.artifact_id,
                     metadata={
                         "proof": (
-                            "verified_activation_turn"
-                            if activation_turn_limit_reached
-                            else (
-                                "typed_direct_manipulation_completion"
-                                if use_typed_transition_provider
-                                else "post_action_terminal_visual_verification"
-                            )
+                            "typed_direct_manipulation_completion"
+                            if use_typed_transition_provider
+                            else "post_action_terminal_visual_verification"
                         ),
                         "local_effect_evidence_id": record["id"],
                         "semantic": semantic,
-                        "session_yield": state.get("session_yield"),
                     },
                 )
                 state["completion_evidence_id"] = completion_record["id"]
@@ -2788,7 +3183,14 @@ class InteractionStageEngine:
             decision = self._decision(state)
             target = state.get("target_binding") or {}
             hwnd = int(target.get("hwnd") or 0)
-            bounds = decision.surface_region
+            baseline = store.get(
+                str(state.get("current_artifact_id") or decision.observation_artifact_id)
+            )
+            bounds, watch_binding = _external_watch_bounds(
+                state,
+                decision,
+                baseline,
+            )
             watch_region = _normalized_roi_screen(bounds, target["frame_region"])
             timeout_s = float(
                 contract.session.external_change_timeout_s
@@ -2796,9 +3198,6 @@ class InteractionStageEngine:
                 else 300.0
             )
             source = str(target.get("source") or contract.intent.source or "active_window")
-            baseline = store.get(
-                str(state.get("current_artifact_id") or decision.observation_artifact_id)
-            )
             artifact, baseline_delta = self._capture_authoritative_delta(
                 context=context, contract=contract, store=store,
                 stop_event=stop_event, baseline=baseline, source=source,
@@ -2816,6 +3215,10 @@ class InteractionStageEngine:
                 "baseline_delta": baseline_delta,
             }
             changed = bool(baseline_delta["changed"])
+            watcher_false_positives: list[dict[str, Any]] = []
+            authoritative_watch_delta: dict[str, Any] | None = (
+                baseline_delta if changed else None
+            )
             if not changed:
                 # The first fresh frame is now the actual watcher baseline.
                 # This closes the former gap where the wait tool established a
@@ -2827,78 +3230,153 @@ class InteractionStageEngine:
                 })
                 state["planned_action"] = decision.model_dump(mode="json")
                 target = state.get("target_binding") or target
-                session = ToolSession(
-                    stop_event=stop_event,
-                    task=contract.task,
-                    runtime_profile=RuntimeProfile(desktop=True, coding=False),
-                    task_intent=contract.intent,
-                    communication_context={"active": False},
-                )
-                session.run_id = context["run_id"]
-                controller_started = time.monotonic()
-                try:
-                    session._remember_target(hwnd, str(target.get("title") or ""))
-                    result = _json(session.dispatch("run_action_batch", {
-                        "actions": [{
-                            "action": "wait_for_visual_change",
-                            "region": _action_rect(watch_region),
-                            "timeout_s": timeout_s,
-                            "min_ratio": 0.0015,
-                            "require_persistent": True,
-                            "stable_ms": 400,
-                            "stable_max_ratio": 0.0008,
-                        }],
-                        "stop_on_error": True,
-                        "subgoal": "wait for a verified external change in the bound interaction region",
-                    }).text)
-                finally:
-                    session.close()
-                controller_elapsed_ms = int(
-                    (time.monotonic() - controller_started) * 1000
-                )
-                if stop_event.is_set():
-                    return NodeResult(ok=False, branch="canceled", error="run canceled")
-                changed = bool(
-                    result.get("ok") is True
-                    and (
-                        result.get("changed") is True
-                        or any(
-                            isinstance(item, dict)
-                            and (
-                                item.get("data", {}).get("changed") is True
-                                or item.get("data", {}).get("visual_change_detected") is True
+                remaining_timeout_s = timeout_s
+                while remaining_timeout_s > 0.0:
+                    session = ToolSession(
+                        stop_event=stop_event,
+                        task=contract.task,
+                        runtime_profile=RuntimeProfile(desktop=True, coding=False),
+                        task_intent=contract.intent,
+                        communication_context={"active": False},
+                    )
+                    session.run_id = context["run_id"]
+                    controller_started = time.monotonic()
+                    try:
+                        session._remember_target(
+                            hwnd, str(target.get("title") or ""),
+                        )
+                        result = _json(session.dispatch("run_action_batch", {
+                            "actions": [{
+                                "action": "wait_for_visual_change",
+                                "region": _action_rect(watch_region),
+                                "timeout_s": remaining_timeout_s,
+                                "min_ratio": 0.0015,
+                                "require_persistent": True,
+                                "stable_ms": 400,
+                                "stable_max_ratio": 0.0008,
+                            }],
+                            "stop_on_error": True,
+                            "subgoal": (
+                                "wait for a verified external change in the "
+                                "bound interaction region"
+                            ),
+                        }).text)
+                    finally:
+                        session.close()
+                    attempt_elapsed_ms = int(
+                        (time.monotonic() - controller_started) * 1000
+                    )
+                    controller_elapsed_ms += attempt_elapsed_ms
+                    remaining_timeout_s = max(
+                        0.0,
+                        remaining_timeout_s - attempt_elapsed_ms / 1000.0,
+                    )
+                    if stop_event.is_set():
+                        return NodeResult(
+                            ok=False, branch="canceled", error="run canceled",
+                        )
+                    watcher_changed = bool(
+                        result.get("ok") is True
+                        and (
+                            result.get("changed") is True
+                            or any(
+                                isinstance(item, dict)
+                                and (
+                                    item.get("data", {}).get("changed") is True
+                                    or item.get("data", {}).get(
+                                        "visual_change_detected"
+                                    ) is True
+                                )
+                                for item in result.get("results") or []
                             )
-                            for item in result.get("results") or []
                         )
                     )
-                )
-                if not changed:
+                    if not watcher_changed:
+                        raise _failure(
+                            str(result.get("error") or (
+                                "external visual change was not observed"
+                            )),
+                            "external_change_timeout",
+                            wait_result=result,
+                            watch_region=_rect(watch_region),
+                            baseline_delta=baseline_delta,
+                            watcher_false_positives=watcher_false_positives,
+                            capture_elapsed_ms=capture_elapsed_ms,
+                            controller_elapsed_ms=controller_elapsed_ms,
+                        )
+
+                    # A watcher notification is only a cheap wake-up signal.
+                    # It may be a cursor, tooltip, hover popup, compositor
+                    # repaint, or transient overlay.  Require a second managed
+                    # target-window artifact to differ persistently inside the
+                    # contract watch bounds before granting the user/external
+                    # turn.  False wakes are re-armed locally without an LLM.
+                    post, post_delta = self._capture_authoritative_delta(
+                        context=context,
+                        contract=contract,
+                        store=store,
+                        stop_event=stop_event,
+                        baseline=artifact,
+                        source=source,
+                        bounds=bounds,
+                    )
+                    capture_elapsed_ms += int(
+                        post_delta.get("capture_elapsed_ms") or 0
+                    )
+                    artifact = post
+                    if post_delta.get("changed") is True:
+                        authoritative_watch_delta = post_delta
+                        changed = True
+                        detection_source = (
+                            "bound_visual_change_watcher+"
+                            "authoritative_post_delta"
+                        )
+                        break
+                    watcher_false_positives.append({
+                        "attempt": len(watcher_false_positives) + 1,
+                        "wait_result": result,
+                        "authoritative_post_delta": post_delta,
+                    })
+                    decision = decision.model_copy(update={
+                        "frame_id": int(
+                            state.get("frame_id") or decision.frame_id
+                        ),
+                        "observation_artifact_id": artifact.artifact_id,
+                    })
+                    state["planned_action"] = decision.model_dump(mode="json")
+                if authoritative_watch_delta is None:
                     raise _failure(
-                        str(result.get("error") or "external visual change was not observed"),
+                        "external visual change timeout expired after transient "
+                        "watcher notifications produced no authoritative pixel delta",
                         "external_change_timeout",
                         wait_result=result,
                         watch_region=_rect(watch_region),
                         baseline_delta=baseline_delta,
+                        watcher_false_positives=watcher_false_positives,
                         capture_elapsed_ms=capture_elapsed_ms,
                         controller_elapsed_ms=controller_elapsed_ms,
                     )
-                detection_source = "bound_visual_change_watcher"
-                post = self._capture_scene(
-                    context=context, contract=contract, store=store,
-                    stop_event=stop_event, source=source, focus=False,
-                )
-                capture_elapsed_ms += int(
-                    (state.get("last_capture_timing") or {}).get(
-                        "capture_elapsed_ms", 0,
-                    )
-                )
-                artifact = post
+                result = {
+                    **result,
+                    "watcher_false_positive_count": len(
+                        watcher_false_positives
+                    ),
+                    "authoritative_post_delta": authoritative_watch_delta,
+                }
             external_change = {
                 "verified": True,
+                "baseline_artifact_id": baseline.artifact_id,
+                "watch_bounds": list(bounds),
+                "watch_binding": watch_binding,
                 "watch_region": _rect(watch_region),
                 "wait_result": result,
                 "detection_source": detection_source,
                 "baseline_delta": baseline_delta,
+                "authoritative_watch_delta": (
+                    authoritative_watch_delta
+                    if not baseline_delta["changed"]
+                    else baseline_delta
+                ),
                 "artifact_id": artifact.artifact_id,
                 "frame_id": state["frame_id"],
             }
@@ -2909,6 +3387,7 @@ class InteractionStageEngine:
                 "executed_action": None,
                 "local_verification": None,
                 "failure_stage": "",
+                "agent_turns_since_external_change": 0,
             })
             record = registry.record(
                 "interaction.external_change_observed",

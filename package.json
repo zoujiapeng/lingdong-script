@@ -15,7 +15,7 @@
     "lingdong": "./dist/cli/cli/index.js"
   },
   "scripts": {
-    "predev": "node -e \"try{var cp=require('child_process'),o=cp.execSync('netstat -ano|findstr :5200',{encoding:'utf8',stdio:['pipe','pipe','ignore']}).match(/(\\d+)\\s*$/m);if(o)try{process.kill(+o[1])}catch(e){}}catch(e){}\"",
+    "predev": "node -e \"try{var cp=require('child_process'),s=cp.execSync('netstat -ano|findstr :5200',{encoding:'utf8',stdio:['pipe','pipe','ignore']}),m=s.split(/\\r?\\n/).map(function(x){return x.match(/LISTENING\\s+(\\d+)\\s*$/i)}).find(Boolean),p=m&&+m[1];if(p>0)try{process.kill(p)}catch(e){}}catch(e){}\"",
     "dev": "concurrently --kill-others \"npm run dev:renderer\" \"wait-on http://localhost:5200 && npm run dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "tsc -p tsconfig.main.json && electron .",
