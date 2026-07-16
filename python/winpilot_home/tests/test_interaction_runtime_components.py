@@ -1879,6 +1879,7 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     tmp_path,
 ):
     import json
+    from types import SimpleNamespace
 
     from winpilot.tasking.artifacts import ArtifactStore
     from winpilot.tasking.compiler import TaskContractCompiler
@@ -1944,13 +1945,18 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
         def dispatch(self, name, payload):
             assert name == "run_action_batch"
             captured_actions.extend(payload["actions"])
-            time.sleep(0.002)
             return _Response()
 
         def close(self):
             return None
 
     monkeypatch.setattr(runtime_module, "ToolSession", _Session)
+    controller_clock = iter((100.0, 100.125))
+    monkeypatch.setattr(
+        runtime_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(controller_clock)),
+    )
     monkeypatch.setattr(
         runtime_module,
         "_normalized_roi_screen",
@@ -1973,7 +1979,7 @@ def test_external_wait_uses_contract_timeout_and_reports_controller_time(
     assert result.branch == "changed"
     assert captured_actions[0]["timeout_s"] == 7.0
     assert captured_actions[0]["require_persistent"] is True
-    assert result.output["controller_elapsed_ms"] >= 1
+    assert result.output["controller_elapsed_ms"] == 125
     assert result.output["model_elapsed_ms"] == 0
     records = registry.records()
     assert records[-1]["predicate"] == "interaction.external_change_observed"
