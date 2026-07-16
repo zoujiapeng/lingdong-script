@@ -110,6 +110,29 @@ def test_likely_canvas_bbox_does_not_shrink_after_closed_ink_is_added():
     assert likely_canvas_bbox(image) == [126, 258, 1006, 671]
 
 
+def test_likely_canvas_bbox_keeps_internal_regions_split_by_existing_content():
+    """Long content columns must not redefine the surface as blank space."""
+    from winpilot.perception.vision_cv import likely_canvas_bbox
+
+    image = np.full((720, 1008, 3), 30, dtype=np.uint8)
+    image[258:671, 33:1006] = 255
+    # Generic persistent edge overlay such as a tool palette or navigation rail.
+    image[258:671, 33:126] = 20
+    # Existing structured content has long horizontal and vertical boundaries.
+    # These intentionally split dense white-column runs into differently sized
+    # regions; the right blank region is largest but is not a new work surface.
+    cv2.line(image, (380, 305), (380, 620), (0, 0, 0), 5)
+    cv2.line(image, (470, 305), (470, 620), (0, 0, 0), 5)
+    cv2.line(image, (300, 400), (560, 400), (0, 0, 0), 5)
+    cv2.line(image, (300, 500), (560, 500), (0, 0, 0), 5)
+    cv2.putText(
+        image, "existing content", (180, 580), cv2.FONT_HERSHEY_SIMPLEX,
+        1.1, (0, 0, 0), 3, cv2.LINE_AA,
+    )
+
+    assert likely_canvas_bbox(image) == [126, 258, 1006, 671]
+
+
 def test_credible_light_work_surface_rejects_ambiguous_panels():
     from winpilot.perception.vision_cv import credible_light_work_surface
 

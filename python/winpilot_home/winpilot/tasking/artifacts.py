@@ -261,8 +261,13 @@ class ArtifactStore:
         path = Path(artifact.managed_path)
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError("artifact file no longer exists or is empty")
+        if path.stat().st_size != int(artifact.size_bytes):
+            raise ValueError("artifact size changed after registration")
         if self._hash(path) != artifact.sha256:
             raise ValueError("artifact hash changed after registration")
+        current_dimensions = self._dimensions(path)
+        if current_dimensions != (int(artifact.width), int(artifact.height)):
+            raise ValueError("artifact dimensions changed after registration")
         if require_sendable and not artifact.sendable:
             raise ValueError("perception/observation frames cannot be sent as task artifacts")
         return artifact
@@ -403,6 +408,44 @@ class ArtifactStore:
                             and mostly_inside
                             and (not require_changed or geometric_change[0])
                         )
+
+            # A geometrically consistent homography already proves identity,
+            # scale, placement, and (when required) post-send change.  Do not
+            # pay for fourteen multi-scale template searches after all of the
+            # stronger conditions have passed; sparse images still fall
+            # through to the edge-template path below.
+            if geometric_match and geometric_box is not None:
+                return {
+                    "matched": True,
+                    "good_matches": len(good),
+                    "geometric_inliers": geometric_inliers,
+                    "geometric_match": True,
+                    "geometric_bbox": [
+                        geometric_box[0] + offset_x,
+                        geometric_box[1] + offset_y,
+                        geometric_box[2],
+                        geometric_box[3],
+                    ],
+                    "geometric_change_ratio": round(float(geometric_change[1]), 4),
+                    "geometric_mean_pixel_delta": round(float(geometric_change[2]), 3),
+                    "source_keypoints": len(kp1 or []),
+                    "frame_keypoints": len(kp2 or []),
+                    "template_score": 0.0,
+                    "template_scale": 0.0,
+                    "match_bbox": [
+                        geometric_box[0] + offset_x,
+                        geometric_box[1] + offset_y,
+                        geometric_box[2],
+                        geometric_box[3],
+                    ],
+                    "target_region": dict(target_region or {}),
+                    "min_scale": round(min_scale, 4),
+                    "baseline_frame_id": baseline_frame_id,
+                    "changed_after_send": bool(geometric_change[0]) if baseline is not None else None,
+                    "change_ratio": round(float(geometric_change[1]), 4),
+                    "mean_pixel_delta": round(float(geometric_change[2]), 3),
+                    "method": "orb_homography",
+                }
 
             # Chat clients resize attachments. ORB is strong on textured
             # images but sparse drawings may have too few keypoints, so add a

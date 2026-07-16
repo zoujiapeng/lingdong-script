@@ -13,12 +13,16 @@ flowchart LR
   Jobs --> ARP["ARP Runtime\narp/1 graph"]
   ARP --> Stage["StageRuntime\ndeterministic state machine"]
   Control --> Projection["Unified Run Projection\nmetrics / timeline / evidence"]
-  ARP --> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
+  ARP -. "explicit agent_goal / semantic recovery" .-> Runner["Main LLM Agent\nhigh-level goals + exceptions"]
   ARP --> Controller["Fast GUI Controller\nbatches / anchors / servo"]
-  ARP --> Skills["Automation IR Skill Replay\n0-token fast path"]
+  ARP --> Skills["Parameterized stage Skill\nverified 0-token fast path"]
   Stage --> Artifacts["ArtifactStore\nrun-scoped id / hash / provenance"]
   Stage --> Adapters["DomainAdapterRegistry\nQQ / WeChat"]
-  Stage --> Runner
+  Stage --> Interaction["InteractionStageEngine\ntyped visual turns"]
+  Interaction --> Binding["SurfaceBinding + InteractionRegion\nhwnd / frame / client authority"]
+  Interaction --> Controller
+  Binding --> Frame
+  Stage -. "bounded semantic stage only" .-> Runner
   Runner <--> Frame["Authoritative scoped frame\nverified target-window crop / full desktop"]
   Runner --> Tools["ToolSession + World Model"]
   Tools --> Perception["On-demand structured grounding\nUIA / Win32 / OCR / CV / VLM"]
@@ -43,8 +47,12 @@ flowchart LR
 - `orchestrator/adapters.py`：Agent Goal、Action Batch、Memory-backed Skill Replay、legacy 节点适配和最终运行结果驱动的记忆反馈。
 - `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
 - `tasking/intent.py`、`tasking/compiler.py`：结构化 operation/media/channel/recipient/source/destination，并编译 typed stages、artifact binding 和 completion obligations。
+- typed 主路径只使用 `TaskContractCompiler` 持有的同一个 `TaskIntent`：CapabilityPlanner、StageRuntime、ToolSession/AgentRunner、perception 和 Completion Contract 共享该对象，通信上下文由当前 stage 显式注入；只有没有 Task Contract 的 legacy 直连入口才回退解析原句。
 - `tasking/capability.py`：以阶段要求与选定 evidence provider 要求的并集做运行前可满足性检查，生成阶段动态工具、Controller、Adapter 和 model role。
 - `tasking/stage_runtime.py`、`tasking/artifacts.py`：执行本地状态机并管理 run-scoped 工件；观察帧默认不可发送。
+- 阶段 Skill 按 `stage_type + parameters + app_version` 组合，保存前置条件、输出 artifact、验证条件和失败原因；重放成功仍做当前状态验证，miss/fail 只回到当前 `task_stage`，不会重启整项任务。
+- `tasking/interaction_stage_runtime.py`、`tasking/interaction.py`：执行实时视觉交互阶段，要求模型输出绑定到确切 frame/artifact 的 typed turn，并把合法动作转换为本地 Controller transaction。
+- `perception/surface_binding.py`：用目标 hwnd、capture scope、物理 frame region 和窗口 client authority 维持稳定交互面；检测缺失、初始含糊、陈旧帧、坐标空间变化和未经确认的布局位移均 fail-closed。
 - `tasking/adapters.py`、`tasking/completion.py`：通信领域动作与合同验收；粘贴预览不算送达，图片完成要求同一 artifact 的真实发送和发送后视觉对应证据。
 - `runtime_jobs.py`：统一 Agent、ARP、Replay 和 schedule 的异步生命周期、取消、查询和 `interactive_runtime` 资源租约。
 - `automation_ir.py`：新流程和 Skill 的规范 artifact；WPS/FlowScript 是受检 adapter。
@@ -65,6 +73,21 @@ start -> stage_skill -- hit -----------------------> next typed stage
              | semantic stage                    +-> ArtifactStore / DomainAdapter
              +-> bounded AgentRunner
 ```
+
+实时、共享或状态依赖的界面交互使用独立的 typed 子图，而不是把整句话留给逐点击 Agent：
+
+```text
+ObserveScene -> InferInteraction -> PerformTurn -> VerifyLocalEffect
+                                                       |
+                                                       +-> end (bounded task)
+                                                       +-> WaitForExternalChange (persistent session)
+```
+
+- `ObserveScene` 捕获不可发送的 observation artifact，绑定目标窗口、权威 frame identity 和候选交互面。
+- `InferInteraction` 从原始任务和这张确切画面推断参与者、角色、轮次、规则、`InteractionRegion`、typed actions 与 expected effect。模型不提交物理屏幕坐标。
+- `PerformTurn` 只在已证明 Agent 拥有当前轮次时提交一个语义回合；同一回合可包含不依赖中间未知画面的多个 Controller 事件。
+- `VerifyLocalEffect` 对动作后权威帧做局部像素证据与原始任务条件下的语义核验。最终 `interaction.task_completed` 必须来自最新权威帧上的独立终态核验，不能由 Controller `ok`、`interaction.turn_resolved` 或任意像素变化替代。
+- `WaitForExternalChange` 只用于合同声明的持续会话，watch scope 被限制在已绑定交互区；它不会伪造外部参与者动作，`interaction.external_change_observed` 也只是循环控制/遥测证据，不是最终完成义务。
 
 ## 进程和端口
 
@@ -129,7 +152,7 @@ flowchart TD
 
 ## 状态机
 
-一次任务的状态流：
+一次直接 `/api/chat` 或有界 semantic/recovery stage 的 AgentRunner 子路径状态流：
 
 ```text
 queued
@@ -158,7 +181,7 @@ queued
 - `ToolSession` 使用由 `router.build_runner()` 传入的同一个 profile，避免 runner 和 tools 二次推断不一致。
 - `runtime.to_dict().capabilities` 会列出本轮可用能力，例如 `desktop`、`coding`、`replay`、`scheduler`、`automation_ir`、`desktop_action_queue`；这些是 capability，不是用户可见子 agent。
 
-用户表达仍是一个 Agent：
+产品层仍只表达一个 Agent；但确定性的前端 typed stage 不会为了形式统一而创建 AgentRunner：
 
 - “帮我改这个 Python 项目” -> Coding Runtime。
 - “打开 Photoshop” -> Computer Use / Desktop。
@@ -178,14 +201,23 @@ queued
 - 原生视觉闭环的主路径是 `目标窗口预绑定 → 选择可信画面 scope → 初始真实帧 → 模型决策 → 一笔视觉事务 → 同 scope 动作前重检 → 动作后真实帧 → 下一轮`。`controller.target_window_capture_enabled=true` 默认开启，但只是保守优化：只有目标 hwnd 仍存在、可见、非最小化、就是当前前台、几何可信、至少节省约 8% 桌面面积且任务不要求桌面/多窗口上下文时才裁成目标窗口；否则自动回退完整虚拟桌面。关闭该开关会强制完整桌面，便于 A/B 验证是否负优化。每张模型可见帧都携带 scope/reason/region，坐标始终绑定那一张确切画面。
 - 低层视觉动作只能使用匹配当前 hwnd、screen epoch 和窗口区域的新鲜帧。视觉位置以整帧 0..1000 的 `frame_*` 字段提交，由运行时映射到截图对应的物理区域；native schema 不暴露物理 `x/y`。动作前会重新截图：若能从 frame 坐标或当前结构化目标可靠得到动作 ROI，则在目标四周外扩 `controller.visual_preflight_target_margin`（默认 60/1000），按 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）判断；无法可靠定位目标时才按整窗 `controller.visual_preflight_change_ratio`（默认 `0.0025`）判断。超过对应阈值会取消旧动作并把新帧交回模型。缺帧时返回 `visual_grounding_required`；重复无依据操作会安全暂停。
 - 原生视觉模型处理普通、无 query `observe` 时，当前 scope 的 JPEG 是权威观测，`native_vision_direct` 跳过 UIA/OCR/VLM 的同帧拆解，且不会暴露重复的二次 VLM 工具。query、`full`、`changed_only`、结构化定位、非视觉模型和 fallback 仍走融合感知；结构化元素与规则不能覆盖相反的真实画面。
+- 确定性 Domain Adapter 的观察使用私有 `structured_ui` 模式：先收集 UIA/Win32 结构，跳过全窗 OCR/VLM，再只对收件人栏、确认框、发送按钮或短标签候选区执行 obligation-scoped OCR。这个策略按证据义务缩小感知成本，不把某个应用、联系人或测试坐标写进通用感知层；若目标是自绘/不可访问控件，仍需 scoped OCR、当前帧视觉或显式 fallback。
+- OCR 共享引擎按 foreground/background 排队。StageRuntime 在打开会话、发送和验收事务外取得 foreground lease，使尚未开始的预测 OCR 让位给当前合同义务；已经进入 ONNX 的一次推理不能安全抢占，只能等它结束。PerceptionDaemon lease 释放会设置 generation-scoped cancel event、清空 pending，并丢弃释放后才完成或属于旧 generation 的结果，避免跨 run/重获 lease 污染缓存。
 - `observe` 严格只读。它可以返回一个已落地的 Controller 提案，但不能从感知路径直接点击、输入或发送；任何桌面 mutation 都必须是下一笔显式事务。
+- 实时交互的 `SurfaceBinding` 将视觉候选限制在当前窗口 client authority 内，并把稳定 anchor 与更小的 action ROI 分开：窗口 client region 是安全包络而不是自动可点击区域，中央子集也不会未经连续确认就被当作新的交互面。
+- 每个空间动作先核验 observation artifact 的 current-run、purpose、sendable、source window/HWND、实际 capture region、声明 frame region、尺寸、session 和 frame lineage；`ArtifactStore.get()` 还会从磁盘重新核验文件大小、SHA-256 与图像尺寸。任何一项不一致都在坐标映射和物理输入前 fail-closed。
+- typed `InteractionAction` 覆盖 `click`、`double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。所有空间参数必须落在当前 `InteractionRegion`，并回显当前 frame/artifact identity；Controller 在目标仍为前台且 frame 仍新鲜时才执行本地事务。`mouse_down` / `mouse_up` 只允许作为同一经过平衡校验的 Controller batch 内部动作，与移动/等待组成完整连续事务，不作为独立顶层模型工具。
+- `grounding_mode` 区分 `object_anchor`、`semantic_control`、`free_path`、`relative_gesture` 和 `bounded_coordinates`；有可见锚点的点击、拖拽使用当前像素上的多族局部几何修正，自由路径则记录显式 typed policy proof。`effect_region_binding` / `ExpectedInteractionEffect.region_binding` 明确绑定 source、target、surface 或 independent；几何修正后确定性重绑，`auto` 只接受精确 typed 相等，不做 IoU 猜测。
 - Task Contract 中的应用启动、聚焦、工件捕获/传递、通信投递、等待和确定性验证由 StageRuntime/Controller 连续执行；LLM 处理目标语义、复杂异常、策略切换和绘图质量。
 - `CapabilitySelection` 分别记录 `model_tools` 与 `controller_tools`。绘图模型只提交带语义部件和画布相对几何的场景事务，`draw_strokes` 等原始连续指针能力留在 Controller；每次真实绘图事务后由新鲜目标窗口帧做语义验收，失败只做 forward-only 局部修补。
 - `cold_start=true` 是 run 级经验策略，不是测试词特判：编译器移除所有 `skill_replay`，RuntimeProfile 同时关闭经验提示、会话记忆、复用建议、经验写入和反馈，让 E2E 能证明首次探索路径本身可达。
 - Communication Adapter 只暴露 `open_conversation`、`resolve_composer`、`paste_or_attach_artifact`、`send_current_composer` 和 `verify_latest_outbound` 等领域能力。QQ 实现使用版本化窗口相对布局、UIA/OCR 和视觉工件匹配；收件人、媒体主题和物理屏幕坐标都不是生产常量。低分辨率附件确认缩略图无法可靠保留像素身份时，预发送绑定要求“当前 run 的精确 artifact/hash/尺寸粘贴回执 + 粘贴前后对齐帧的局部变化 + 新出现的正确收件人单附件确认框”；这只允许执行发送动作，不能满足送达合同。附件确认态与会话中的发送后气泡是两个不同状态，只有后者的发送后同工件匹配能满足送达合同。遗留确认框先做可逆取消并复核，不会被下一次任务沿用。
+- 发送后 artifact identity 优先使用 ORB + RANSAC homography，并同时检查匹配框几何、尺度、inlier 比例、目标范围和发送后局部变化；强几何证明成立时直接返回，不再支付 14 组多尺度模板搜索。稀疏线稿、重裁切或大形变缺少足够 keypoint 时才落入 subject-agnostic edge-template fallback；这个 fallback 更慢且可能含糊，不能把“有若干相似边缘”放宽成送达成功。
 - `run_action_batch` / ARP `action_batch` 连续执行多个 GUI 动作；动作可以声明 `require_screen_change`、`require_transient`、`require_match`，缺证据即整批失败。
 - 满足 `require_transient` 的 press 证据会覆盖底层“未提供 expect”的普通未验证状态并提升为节点级 evidence；捕获成功但证据没有上卷不允许到达 `end`。
 - `screen_watch` 持续做便宜帧差；动作前后差分与 watcher 独立，changed-only observe 只理解 ROI。
+- 长拖拽和自由路径的动作前新鲜度检查沿实际路径最多均匀采样 12 个局部 ROI，并保留显式 effect region；不再只比较一个跨越端点的大包围框，避免静态背景把局部变化稀释。
+- 失败动作是否允许再次调用模型只看 source/target/path/effect 的因果 ROI；整帧 SHA 仅作完全相同时的快路径。无关窗口动画不能伪装成新证据，比较不可用时也 fail-closed，并把 `failed_no_effect_evidence_check` 写入 interaction state 与 trace。
 - 鼠标 down 与 up 分离，down 期间同步采样。只在 `delta.changed=true`、press 帧强于 release 后帧时标记 `transient_observed`。
 - 瞬态帧会保存为 trace ROI 图片，携带真实屏幕坐标进入 World State；不是只保留 OCR 文本。
 - watcher 把普通变化和动作差分 ROI 推给共享 PerceptionDaemon；daemon 合并普通抖动、优先动作变化，只做 OCR/Win32 增量分析，下一次 changed-only observe 可直接消费热缓存。
@@ -197,7 +229,7 @@ queued
 - `scope_guard` 在 GUI mutation 前检查前台/目标窗口。若非目标窗口意外抢占前台，Controller 只做有界、应用无关的重新聚焦，要求连续两次前台归属证明，随后废弃旧帧/元素/画布绑定并从 batch 的首个未提交动作继续；已提交动作不会重放，无法恢复则 fail-closed。
 - `input_locator` 为 UIA-off 输入框提供 OCR label、placeholder、搜索语义、附近矩形和 synthetic candidate。
 - `winpilot` 包入口先初始化 Per-Monitor V2，保证只导入 action executor 的进程也不会落入 DPI 虚拟坐标；`coordinate_diagnostics` / `coordinate_click_test` 再核对物理屏幕和真实鼠标路径。
-- `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。
+- `RunProjection` 统一统计 capture、perception、decision、execution、post-verify、replan、VLM 和 skill reuse，并在服务启动时从 trace 恢复历史。typed `stage_trace` 从节点 `runtime_metrics` 保留 `model_calls`、model/Controller/capture 三类耗时和 interaction budget，避免展示摘要截断后丢失审计字段。
 - `action/desktop_queue.py` 提供公平资源租约。`physical` 输入全局单写；后台安全的 PostMessage 窗口动作按 `window:<hwnd>` 隔离，不同 hwnd 可并行；同一 hwnd、剪贴板及未知物理目标仍串行。Controller batch 取得一次组合 lease，内部 public action 不重复排队。
 - `controller.multi_input_cooperation=false` 是默认关闭的实验开关，不会制造 Windows 并不存在的第二个物理鼠标。开启后优先 UIA/PostMessage 等后台安全输入；物理键盘只在目标就是前台时执行，长按/拖拽/笔画期间持续复核前台和光标，用户移动光标或切走窗口就 fail-closed，中止并由用户取得控制权。`controller.cooperative_cursor_tolerance_px=12` 控制光标所有权容差。
 - `action/raw_device.py` 让常见 batch 子动作绕过递归 `ToolSession.dispatch()`；外层权限、scope、trace 和 evidence 仍只执行一次。
@@ -214,6 +246,8 @@ queued
 - 常规动作可在 Controller/Skill 内环完成，失败回到 Agent/ARP；“所有常规动作都不经 LLM”还不是对任意软件成立的承诺。
 - 网页靶场已覆盖真实物理按压的瞬态状态：DOM 收据、非零 ROI、持久化 press 帧、predictive OCR、changed-only 命中和 0 VLM 同时通过。
 - 复杂消费软件、远程桌面、游戏和高 DPI 多显示器仍需要更大的 E2E 基准矩阵。
+- 当前视觉语义规划与核验仍各需要一次模型调用；快速物理动作并不意味着整项任务低于网络模型延迟。移动目标、遮挡、动画、跨显示器缩放和长会话终止条件仍需单独基准化。
+- `structured_ui` 的收益取决于应用暴露的 UIA/Win32 质量；foreground OCR 只能优先排队而不能抢占已经运行的 ONNX 调用；lease cancellation 保证旧结果不进入当前状态，但不等于强杀底层推理。ORB early return 也只适用于通过完整几何与因果变化门槛的强匹配，稀疏或严重变形工件仍需 fallback 与更多耗时。
 
 仍未完成：
 
@@ -228,6 +262,12 @@ queued
 Eval 汇总按闭环结果 fail-closed：`verified_success` 必须同时满足未超时、`status=done`、policy 通过、性能预算通过、有外部 ground truth 且通过，并且不存在 unverified done。没有 ground-truth 检查项的报告标记为 `ungrounded`，不能进入成功率；报告同时记录 Git、模型、视觉配置 hash 与 display/DPI provenance，便于比较真实回归。
 
 2026-07-14 的一次真实前端冷启动画板样本（空白 Paint，目标“用画板画一只猫”）约 55.3 秒，执行 2 次点击和 1 次 `draw_strokes`，没有 undo/clear 死循环；输出只能评价为可辨认但粗糙、语义仍有歧义，不能称为“好看”。这是单次链路基线，只证明前端路径能完成连续指针事务，不是统计成功率，也不能替代跨任务、多次、带外部 ground truth 的 E2E 结果。
+
+2026-07-16 的通用实时交互 opt-in Windows E2E 通过相同的 `/api/v2/task-contracts/compile → /api/v2/arp/runs` 前端路径执行真实拖动。最终 run `arp-20260716-094321-92fca7` 的 `ObserveScene`、`InferInteraction`、`PerformTurn`、`VerifyLocalEffect` 四阶段全部 `done`，2 次模型调用，总耗时 23.936 秒；stage trace 记录模型 17,835 ms、Controller 2,440 ms、capture 1,058 ms、0 次 replan/recovery。浏览器 ground truth 收到 pointerdown、31 次 move 与 pointerup，并确认整个 source token 位于 target 内部；同一 observation artifact 的 run/session/frame/HWND/capture-region lineage、source/target 多族局部视觉 grounding 与 target-bound effect region 都参与执行和核验。该靶场是可重复的输入真实性、路径坐标映射与 whole-object placement 检查，不代表真实桌面软件或任意视觉任务的统计泛化能力。
+
+同日用户授权的最终真实 QQ 冷启动 E2E run `arp-20260716-094506-386988` 在 61.810 秒内完成 2 次模型调用，`experience_policy=disabled` 且没有 Skill replay；模型耗时 15,907 ms、Controller 44,382 ms。`DrawArtifact`、`CaptureArtifact`、`OpenConversation`、`SendArtifact`、`VerifyDelivery` 五阶段全部 `done`，每阶段 capability preflight 的 `missing_capabilities` 都为空。当前 run 工件 `art-935d98ac042142ef` 的 SHA-256 为 `2a23e1397fd0c8f447b4239f92d344b01b5101775ef7367b95e6aaff73f7bd8f`（866×413，10,245 bytes）；联系人选择证据来自 UIA，正确会话的发送后可见气泡匹配得到 149 个 good matches / 111 个 homography inliers，并且匹配区域相对发送前基线发生变化，Completion Contract 全部通过。
+
+另外三种通信改写的真实 run 为 `arp-20260716-095433-2ded05`、`arp-20260716-095616-19a25e`、`arp-20260716-095641-520a84`，合计 `3 passed in 192.54s`，均产生等价的 artifact/communication obligations 并在正确会话取得发送后证据。测试中的对象、应用和收件人只是合同参数；这些同机样本不能推导跨机器、跨客户端版本的稳定加速或统计成功率。
 
 ## Replay / Skill
 

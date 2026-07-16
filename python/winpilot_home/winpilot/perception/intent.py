@@ -15,6 +15,8 @@ Perception modes:
 """
 from __future__ import annotations
 
+from typing import Any
+
 # Drawing / canvas: the meaningful output is painted pixels, invisible to UIA.
 _DRAWING_TERMS = (
     "draw", "drawing", "paint", "sketch", "canvas", "whiteboard", "doodle",
@@ -52,7 +54,7 @@ _PIXEL_TEXT_TERMS = (
 )
 
 
-def perception_mode(task: str, window_title: str = "") -> str:
+def perception_mode(task: Any, window_title: str = "", *, runtime_mode: str = "") -> str:
     """Return the perception strategy mode for a task.
 
     "normal"  — default; skip OCR/VLM on UIA-rich windows for speed.
@@ -66,6 +68,32 @@ def perception_mode(task: str, window_title: str = "") -> str:
     follow-up like "继续" still keeps the right mode while a QQ/Paint window
     is in focus.
     """
+    if runtime_mode in {"normal", "pixel_text", "visual", "vlm_first"}:
+        return runtime_mode
+    if hasattr(task, "model_dump"):
+        structured = task.model_dump(mode="json")
+    elif isinstance(task, dict):
+        structured = dict(task)
+    else:
+        structured = None
+    if structured is not None:
+        operations_raw = structured.get("operation") or []
+        if isinstance(operations_raw, str):
+            operations_raw = [operations_raw]
+        operations = {str(item).casefold() for item in operations_raw}
+        interaction = structured.get("interaction") or {}
+        if (
+            bool(interaction.get("active"))
+            or operations.intersection({"draw", "capture", "send", "interact"})
+        ):
+            return "visual"
+        # Application/window identity is live runtime state, not a second task
+        # classifier.  It remains a useful hint for custom-rendered Office
+        # surfaces when the contract itself does not demand visual perception.
+        title = str(window_title or "").casefold()
+        if any(term in title for term in _PIXEL_TEXT_TERMS):
+            return "pixel_text"
+        return "normal"
     text = f"{task or ''} {window_title or ''}".casefold()
     if any(term in text for term in (*_DRAWING_TERMS, *_CHAT_TERMS, *_MIRROR_TERMS)):
         return "visual"
@@ -74,7 +102,7 @@ def perception_mode(task: str, window_title: str = "") -> str:
     return "normal"
 
 
-def vision_priority_task(task: str, window_title: str = "") -> bool:
+def vision_priority_task(task: Any, window_title: str = "") -> bool:
     """Legacy bool accessor — True when perception_mode returns 'visual'.
 
     Kept for call-sites that haven't migrated yet. New code should call

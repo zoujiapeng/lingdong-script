@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from ..agent.router import build_runner
-from ..agent.runtime_profile import build_runtime_profile
+from ..agent.runtime_profile import RuntimeProfile, build_runtime_profile
 from ..agent.tools import ToolSession
 from ..orchestrator.contracts import ArpNode
 from ..orchestrator.runtime import NodeResult
@@ -19,6 +19,10 @@ from .capability import CapabilityPlanner
 from .completion import CompletionContractVerifier
 from .contracts import StageType, TaskContract, TaskStage
 from .evidence import EvidenceRegistry
+from .interaction_stage_runtime import (
+    INTERACTION_STAGE_TYPES,
+    InteractionStageEngine,
+)
 from .recovery import RecoveryPolicy
 
 
@@ -41,6 +45,34 @@ class StageRuntime:
     def __init__(self) -> None:
         self.capabilities = CapabilityPlanner()
         self.recovery = RecoveryPolicy()
+        self.interactions = InteractionStageEngine(stage_output=self._stage_output)
+
+    @staticmethod
+    def _recovery_attempt(
+        context: dict[str, Any],
+        stage: TaskStage,
+        failure_type: str,
+    ) -> int:
+        """Persist failure attempts across graph revisits of the same stage."""
+        attempts = context["runtime_state"].setdefault(
+            "stage_recovery_attempts", {},
+        )
+        key = f"{stage.id}:{str(failure_type or 'unknown').casefold()}"
+        attempt = int(attempts.get(key) or 0) + 1
+        attempts[key] = attempt
+        return attempt
+
+    @staticmethod
+    def _clear_recovery_attempts(
+        context: dict[str, Any],
+        stage: TaskStage,
+    ) -> None:
+        attempts = context["runtime_state"].get("stage_recovery_attempts")
+        if not isinstance(attempts, dict):
+            return
+        prefix = f"{stage.id}:"
+        for key in [item for item in attempts if str(item).startswith(prefix)]:
+            attempts.pop(key, None)
 
     @staticmethod
     def _contract(context: dict[str, Any]) -> TaskContract:
@@ -159,9 +191,19 @@ class StageRuntime:
                 "semantic_visual_verified": False,
                 "error": "draw stage has no bound target window for boundary verification",
             }
-        session = ToolSession(stop_event=stop_event, task=goal)
+        session = ToolSession(
+            stop_event=stop_event,
+            task=goal,
+            runtime_profile=RuntimeProfile(desktop=True, coding=False),
+            task_intent={
+                "original_text": goal,
+                "operation": ["verify"],
+                "send_mode": "send",
+            },
+            communication_context={"active": False},
+        )
         session.run_id = run_id
-        started = time.monotonic()
+        elapsed_ms = 0
         try:
             session._remember_target(hwnd, app)
             verify_args: dict[str, Any] = {
@@ -171,10 +213,25 @@ class StageRuntime:
                 key in region for key in ("left", "top", "width", "height")
             ):
                 verify_args.update({key: int(region[key]) for key in ("left", "top", "width", "height")})
-            verdict = _json(session.dispatch("vlm_verify", verify_args).text)
+            model_started = time.monotonic()
+            try:
+                try:
+                    verdict = _json(session.dispatch("vlm_verify", verify_args).text)
+                finally:
+                    elapsed_ms = max(
+                        0,
+                        int((time.monotonic() - model_started) * 1000),
+                    )
+            except BaseException as exc:
+                # Preserve failed/cancelled verifier time for the stage-level
+                # failure trace without converting the original exception.
+                try:
+                    exc.model_elapsed_ms = elapsed_ms
+                except Exception:
+                    pass
+                raise
         finally:
             session.close()
-        elapsed_ms = int((time.monotonic() - started) * 1000)
         verdict["elapsed_ms"] = elapsed_ms
         BUS.publish(
             "task_stage_boundary_verify",
@@ -209,6 +266,7 @@ class StageRuntime:
             store=self._store(context),
             evidence=self._evidence(context),
             stop_event=stop_event,
+            task_intent=contract.intent,
         )
         state["communication_adapter"] = adapter
         return adapter
@@ -234,6 +292,33 @@ class StageRuntime:
             **values,
         }
 
+    @staticmethod
+    def _semantic_stage_metrics(
+        started: float,
+        runner: Any,
+        *,
+        boundary_elapsed_ms: int = 0,
+    ) -> dict[str, int]:
+        """Split semantic-stage wall time into model wait and local work.
+
+        ``runner.model_elapsed_ms`` already contains both main-model turns and
+        inline semantic VLM calls.  Only the independent boundary verifier is
+        added here; reading its verdict again must never double-charge an
+        inline verdict.
+        """
+        model_elapsed_ms = max(
+            0,
+            int(getattr(runner, "model_elapsed_ms", 0) or 0),
+        ) + max(0, int(boundary_elapsed_ms or 0))
+        total_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        return {
+            "model_elapsed_ms": model_elapsed_ms,
+            "controller_elapsed_ms": max(
+                0,
+                total_elapsed_ms - model_elapsed_ms,
+            ),
+        }
+
     def execute(self, node: ArpNode, context: dict[str, Any], stop_event) -> NodeResult:
         started = time.monotonic()
         stage = TaskStage.model_validate(node.config.get("stage") or {})
@@ -253,8 +338,114 @@ class StageRuntime:
             result = self._execute(stage, contract, context, stop_event, started)
         except Exception as exc:
             failure_type = getattr(exc, "failure_type", "stage_exception")
-            decision = self.recovery.decide(stage.type.value, failure_type)
+            recovery_attempt = self._recovery_attempt(
+                context, stage, str(failure_type),
+            )
+            decision = self.recovery.decide(
+                stage.type.value, failure_type, attempt=recovery_attempt,
+            )
             stage_details = getattr(exc, "stage_details", {})
+            if stage.type in {
+                StageType.DRAW_ARTIFACT,
+                StageType.CREATE_OR_EDIT_ARTIFACT,
+            }:
+                stage_details = (
+                    dict(stage_details)
+                    if isinstance(stage_details, dict)
+                    else {}
+                )
+                model_elapsed_ms = max(
+                    0,
+                    int(stage_details.get("model_elapsed_ms") or 0),
+                )
+                stage_details.update({
+                    "model_elapsed_ms": model_elapsed_ms,
+                    "controller_elapsed_ms": max(
+                        0,
+                        int((time.monotonic() - started) * 1000)
+                        - model_elapsed_ms,
+                    ),
+                })
+            if stage.type in INTERACTION_STAGE_TYPES:
+                try:
+                    recovered = self.interactions.recover_failure(
+                        stage,
+                        contract,
+                        context,
+                        started,
+                        failure_type=str(failure_type),
+                        recovery_action=decision.action,
+                        recovery_reason=decision.reason,
+                        retryable=decision.retryable,
+                        failure_details=(
+                            stage_details
+                            if isinstance(stage_details, dict)
+                            else {}
+                        ),
+                    )
+                except Exception as recovery_exc:
+                    # Budget exhaustion while scheduling recovery is terminal;
+                    # preserve that precise failure instead of reporting the
+                    # earlier, recoverable symptom.
+                    exc = recovery_exc
+                    failure_type = getattr(
+                        recovery_exc, "failure_type", "stage_exception",
+                    )
+                    stage_details = getattr(recovery_exc, "stage_details", {})
+                    decision = self.recovery.decide(
+                        stage.type.value,
+                        failure_type,
+                        attempt=recovery_attempt,
+                    )
+                    recovered = None
+                if recovered is not None:
+                    recovered_output = (
+                        recovered.output
+                        if isinstance(recovered.output, dict)
+                        else {}
+                    )
+                    BUS.publish(
+                        "task_stage_recovery",
+                        run_id=context["run_id"],
+                        node_id=node.id,
+                        stage_id=stage.id,
+                        stage_type=stage.type.value,
+                        failure_type=failure_type,
+                        recovery=decision.__dict__,
+                        recovery_attempt=recovery_attempt,
+                        branch=recovered.branch,
+                        error=str(exc),
+                    )
+                    BUS.publish(
+                        "task_stage_done",
+                        run_id=context["run_id"],
+                        node_id=node.id,
+                        stage_id=stage.id,
+                        stage_type=stage.type.value,
+                        status="recovering",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        controller_elapsed_ms=int(
+                            recovered_output.get("controller_elapsed_ms") or 0
+                        ),
+                        model_elapsed_ms=int(
+                            recovered_output.get("model_elapsed_ms") or 0
+                        ),
+                        artifact_ids=[],
+                        evidence_ids=[],
+                        model_calls=int(
+                            recovered_output.get("model_calls") or 0
+                        ),
+                    )
+                    return recovered
+                interaction_state = context["runtime_state"].setdefault(
+                    "interaction_state", {},
+                )
+                interaction_state.update({
+                    "status": "failed",
+                    "failure_stage": stage.id,
+                    "failure_type": failure_type,
+                    "error": str(exc),
+                })
             BUS.publish(
                 "task_stage_failed",
                 run_id=context["run_id"],
@@ -263,6 +454,7 @@ class StageRuntime:
                 stage_type=stage.type.value,
                 failure_type=failure_type,
                 recovery=decision.__dict__,
+                recovery_attempt=recovery_attempt,
                 error=str(exc),
             )
             return NodeResult(
@@ -270,7 +462,9 @@ class StageRuntime:
                 branch="fail",
                 output=self._stage_output(
                     stage, started, status="failed", failure_type=failure_type,
-                    recovery=decision.__dict__, error=str(exc),
+                    recovery=decision.__dict__,
+                    recovery_attempt=recovery_attempt,
+                    error=str(exc),
                     **(stage_details if isinstance(stage_details, dict) else {}),
                 ),
                 error=f"{stage.id} ({stage.type.value}) failed: {exc}",
@@ -280,8 +474,14 @@ class StageRuntime:
         if not result.ok:
             output = result.output if isinstance(result.output, dict) else {}
             failure_type = str(output.get("failure_type") or "stage_failed")
-            decision = self.recovery.decide(stage.type.value, failure_type)
+            recovery_attempt = self._recovery_attempt(
+                context, stage, failure_type,
+            )
+            decision = self.recovery.decide(
+                stage.type.value, failure_type, attempt=recovery_attempt,
+            )
             output["recovery"] = decision.__dict__
+            output["recovery_attempt"] = recovery_attempt
             result.output = output
             BUS.publish(
                 "task_stage_failed",
@@ -294,6 +494,7 @@ class StageRuntime:
                 error=result.error,
             )
             return result
+        self._clear_recovery_attempts(context, stage)
         BUS.publish(
             "task_stage_done",
             run_id=context["run_id"],
@@ -301,6 +502,12 @@ class StageRuntime:
             stage_id=stage.id,
             stage_type=stage.type.value,
             elapsed_ms=int((time.monotonic() - started) * 1000),
+            controller_elapsed_ms=int(
+                (result.output or {}).get("controller_elapsed_ms") or 0
+            ) if isinstance(result.output, dict) else 0,
+            model_elapsed_ms=int(
+                (result.output or {}).get("model_elapsed_ms") or 0
+            ) if isinstance(result.output, dict) else 0,
             artifact_ids=[item.get("artifact_id") for item in records if item.get("artifact_id")],
             evidence_ids=[item.get("id") for item in records],
             model_calls=int((result.output or {}).get("model_calls") or 0) if isinstance(result.output, dict) else 0,
@@ -319,9 +526,28 @@ class StageRuntime:
         store = self._store(context)
         params = stage.parameters
 
+        if stage.type in INTERACTION_STAGE_TYPES:
+            return self.interactions.execute(
+                stage,
+                contract,
+                context,
+                stop_event,
+                started,
+                store=store,
+                registry=registry,
+            )
+
         if stage.type == StageType.OPEN_APPLICATION:
             app = str(params.get("app") or "").strip()
-            session = ToolSession(stop_event=stop_event, task=contract.task)
+            session = ToolSession(
+                stop_event=stop_event,
+                task=contract.task,
+                runtime_profile=build_runtime_profile(
+                    contract.task, task_contract=contract, stage=stage,
+                ),
+                task_intent=contract.intent,
+                communication_context={"active": False},
+            )
             session.run_id = context["run_id"]
             try:
                 data = _json(session.dispatch("open_app", {"name": app}).text)
@@ -336,7 +562,15 @@ class StageRuntime:
             app = str(params.get("app") or "").strip()
             bound_hwnd = 0
             if app:
-                session = ToolSession(stop_event=stop_event, task=contract.task)
+                session = ToolSession(
+                    stop_event=stop_event,
+                    task=contract.task,
+                    runtime_profile=build_runtime_profile(
+                        contract.task, task_contract=contract, stage=stage,
+                    ),
+                    task_intent=contract.intent,
+                    communication_context={"active": False},
+                )
                 session.run_id = context["run_id"]
                 try:
                     opened = _json(session.dispatch("open_app", {"name": app}).text)
@@ -391,7 +625,7 @@ class StageRuntime:
                 goal,
                 stop_event=stop_event,
                 max_steps_override=(
-                    2
+                    3
                     if stage.type == StageType.DRAW_ARTIFACT
                     else min(24, max(4, int(params.get("max_steps") or 40)))
                 ),
@@ -399,7 +633,22 @@ class StageRuntime:
             )
             if bound_hwnd:
                 runner.bind_target_window(bound_hwnd, app)
-            result = runner.run()
+            try:
+                result = runner.run()
+            except Exception as exc:
+                metrics = self._semantic_stage_metrics(started, runner)
+                details = getattr(exc, "stage_details", {})
+                exc.stage_details = {
+                    **(details if isinstance(details, dict) else {}),
+                    "child_run_id": runner.run_id,
+                    "child_status": getattr(runner, "status", "error"),
+                    "usage": dict(runner.usage_total),
+                    "model_calls": int(
+                        getattr(runner, "model_request_count", 0) or 0
+                    ),
+                    **metrics,
+                }
+                raise
             successful_draw_mutation = self._has_successful_draw_mutation(
                 list(getattr(runner, "_tool_history", []) or [])
             )
@@ -413,6 +662,7 @@ class StageRuntime:
             )
             boundary_verdict: dict[str, Any] = {}
             boundary_calls = 0
+            boundary_elapsed_ms = 0
             if (
                 not runner_verified
                 and stage.type == StageType.DRAW_ARTIFACT
@@ -420,20 +670,57 @@ class StageRuntime:
                 and not bool(getattr(runner, "_inline_stage_semantic_attempted", False))
             ):
                 boundary_calls = 1
-                boundary_verdict = self._verify_draw_boundary(
-                    goal=goal,
-                    subject=subject,
-                    quality=quality,
-                    app=app,
-                    hwnd=bound_hwnd,
-                    run_id=context["run_id"],
-                    stop_event=stop_event,
-                    stage_id=stage.id,
-                    region=(
-                        getattr(runner.session, "_last_canvas_region", None)
-                        if isinstance(getattr(runner.session, "_last_canvas_region", None), dict)
-                        else None
-                    ),
+                try:
+                    boundary_verdict = self._verify_draw_boundary(
+                        goal=goal,
+                        subject=subject,
+                        quality=quality,
+                        app=app,
+                        hwnd=bound_hwnd,
+                        run_id=context["run_id"],
+                        stop_event=stop_event,
+                        stage_id=stage.id,
+                        region=(
+                            getattr(runner.session, "_last_canvas_region", None)
+                            if isinstance(getattr(runner.session, "_last_canvas_region", None), dict)
+                            else None
+                        ),
+                    )
+                except Exception as exc:
+                    boundary_elapsed_ms = max(
+                        0,
+                        int(getattr(exc, "model_elapsed_ms", 0) or 0),
+                    )
+                    metrics = self._semantic_stage_metrics(
+                        started,
+                        runner,
+                        boundary_elapsed_ms=boundary_elapsed_ms,
+                    )
+                    details = getattr(exc, "stage_details", {})
+                    exc.failure_type = getattr(
+                        exc,
+                        "failure_type",
+                        "semantic_boundary_verification_failed",
+                    )
+                    exc.stage_details = {
+                        **(details if isinstance(details, dict) else {}),
+                        "child_run_id": runner.run_id,
+                        "child_status": runner.status,
+                        "usage": dict(runner.usage_total),
+                        "model_calls": int(
+                            getattr(runner, "model_request_count", 0) or 0
+                        ) + boundary_calls,
+                        "boundary_verification": {
+                            "ok": False,
+                            "error": str(exc),
+                            "elapsed_ms": boundary_elapsed_ms,
+                        },
+                        **metrics,
+                    }
+                    raise
+                boundary_elapsed_ms = max(
+                    0,
+                    int(boundary_verdict.get("elapsed_ms") or 0),
                 )
                 runner_verified = bool(
                     boundary_verdict.get("ok") is True
@@ -441,6 +728,11 @@ class StageRuntime:
                     and boundary_verdict.get("semantic_visual_verified") is True
                 )
             if not runner_verified:
+                metrics = self._semantic_stage_metrics(
+                    started,
+                    runner,
+                    boundary_elapsed_ms=boundary_elapsed_ms,
+                )
                 failure = RuntimeError(runner.result_text or f"semantic stage ended with {runner.status}")
                 failure.failure_type = "semantic_stage_failed"
                 failure.stage_details = {
@@ -454,6 +746,7 @@ class StageRuntime:
                     ),
                     "successful_draw_mutation": successful_draw_mutation,
                     "boundary_verification": boundary_verdict,
+                    **metrics,
                 }
                 raise failure
             record = registry.record(
@@ -494,10 +787,16 @@ class StageRuntime:
                 # Memory enrichment must not change the stage result.
                 pass
             model_calls = int(getattr(runner, "model_request_count", 0) or 0) + boundary_calls
+            metrics = self._semantic_stage_metrics(
+                started,
+                runner,
+                boundary_elapsed_ms=boundary_elapsed_ms,
+            )
             return NodeResult(output=self._stage_output(
                 stage, started, child_run_id=runner.run_id, result=result,
                 usage=dict(runner.usage_total), model_calls=model_calls,
                 boundary_verification=boundary_verdict, evidence=record,
+                **metrics,
             ))
 
         if stage.type in {StageType.CAPTURE_ARTIFACT, StageType.SAVE_ARTIFACT}:

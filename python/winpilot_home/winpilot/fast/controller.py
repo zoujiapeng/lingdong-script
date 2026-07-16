@@ -13,6 +13,7 @@ import win32gui
 import win32process
 
 from ..agent.tool_result import ToolResult
+from ..action import executor as action_executor
 from ..action.desktop_queue import DESKTOP_ACTION_QUEUE
 from ..action.raw_device import RawDeviceExecutor
 from ..config import CONFIG
@@ -25,6 +26,7 @@ from .action_contract import (
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
     build_action_envelope,
+    validate_batch_actions,
 )
 from .element_cache import ElementCache, LocateResult, anchor_from_dict
 from .input_locator import locate_input
@@ -1978,6 +1980,9 @@ class FastGuiController:
                 expected_region=str(anchor_data.get("expected_region") or ""),
                 fallback_text=tuple(str(item) for item in fallback if item),
                 task=str(getattr(self.session, "task", "") or ""),
+                communication_context=getattr(
+                    self.session, "communication_context", None,
+                ),
             )
             input_locator_data = located_input.to_dict()
             candidate = located_input.candidate if located_input.found else None
@@ -2003,6 +2008,9 @@ class FastGuiController:
                         expected_region=str(anchor_data.get("expected_region") or ""),
                         fallback_text=tuple(str(item) for item in fallback if item),
                         task=str(getattr(self.session, "task", "") or ""),
+                        communication_context=getattr(
+                            self.session, "communication_context", None,
+                        ),
                     )
                     input_locator_data = located_input.to_dict()
                     candidate = located_input.candidate if located_input.found else None
@@ -2248,36 +2256,108 @@ class FastGuiController:
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
     def _wait_change(self, action: dict[str, Any]) -> ToolResult:
-        delta = self.watcher.wait_for_change(
-            timeout_s=float(action.get("timeout_s", 3.0)),
-            min_ratio=float(action.get("min_ratio", 0.0005)),
-        )
+        region = self._region_from_value(action.get("region") or action.get("effect_region"))
+        stop_event = getattr(self.session, "stop_event", None)
+        require_persistent = _truthy(action.get("require_persistent", False))
+        if region is not None:
+            kwargs = {
+                "timeout_s": float(action.get("timeout_s", 3.0)),
+                "min_ratio": float(action.get("min_ratio", 0.0005)),
+            }
+            if require_persistent or stop_event is not None:
+                kwargs.update({
+                    "stop_event": stop_event,
+                    "require_persistent": require_persistent,
+                    "stable_ms": int(action.get("stable_ms", 350)),
+                    "stable_max_ratio": float(action.get("stable_max_ratio", 0.0008)),
+                })
+            try:
+                delta = self.watcher.wait_for_region_change(region, **kwargs)
+            except TypeError as exc:
+                # Preserve compatibility with injected legacy watcher doubles.
+                # Production ScreenWatcher supports the cancellation protocol;
+                # never hide an internal TypeError from that implementation.
+                if isinstance(self.watcher, ScreenWatcher):
+                    raise
+                delta = self.watcher.wait_for_region_change(
+                    region,
+                    timeout_s=kwargs["timeout_s"],
+                    min_ratio=kwargs["min_ratio"],
+                )
+        else:
+            kwargs = {
+                "timeout_s": float(action.get("timeout_s", 3.0)),
+                "min_ratio": float(action.get("min_ratio", 0.0005)),
+            }
+            if stop_event is not None:
+                kwargs["stop_event"] = stop_event
+            try:
+                delta = self.watcher.wait_for_change(**kwargs)
+            except TypeError:
+                if isinstance(self.watcher, ScreenWatcher):
+                    raise
+                delta = self.watcher.wait_for_change(
+                    timeout_s=kwargs["timeout_s"],
+                    min_ratio=kwargs["min_ratio"],
+                )
         required = _truthy(action.get("required", True))
-        return ToolResult(json.dumps({
-            "ok": bool(delta.changed) or not required,
+        canceled = bool(
+            stop_event is not None
+            and getattr(stop_event, "is_set", lambda: False)()
+        )
+        payload = {
+            "ok": not canceled and (bool(delta.changed) or not required),
             "changed": delta.changed,
             "required": required,
             "needs_observe": not delta.changed,
             "delta": delta.to_dict(),
             "screen_watch": self.watcher.status(),
-        }, ensure_ascii=False))
+            "change_scope": "explicit_or_previous_action_roi" if region is not None else "bound_target_window",
+            "require_persistent": require_persistent,
+            "stable_after_change": bool(require_persistent and delta.changed),
+            "canceled": canceled,
+        }
+        if canceled:
+            payload["error"] = "visual change wait canceled"
+        if region is not None:
+            payload["region"] = self._region_payload(region)
+        return ToolResult(json.dumps(payload, ensure_ascii=False))
+
+    def _wait_for_visual_change(self, action: dict[str, Any]) -> ToolResult:
+        result = self._wait_change(action)
+        payload = _json_dict(result.text)
+        payload["wait_kind"] = "visual_change"
+        payload["semantic_completion_evidence"] = False
+        return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
     def _wait_stable(self, action: dict[str, Any]) -> ToolResult:
-        result = self.watcher.wait_for_stable(
-            stable_ms=int(action.get("stable_ms", 500)),
-            timeout_s=float(action.get("timeout_s", 5.0)),
-            max_ratio=float(action.get("max_ratio", 0.0008)),
-        )
+        region = self._region_from_value(action.get("region") or action.get("effect_region"))
+        if region is not None:
+            result = self.watcher.wait_for_region_stable(
+                region,
+                stable_ms=int(action.get("stable_ms", 500)),
+                timeout_s=float(action.get("timeout_s", 5.0)),
+                max_ratio=float(action.get("max_ratio", 0.0008)),
+            )
+        else:
+            result = self.watcher.wait_for_stable(
+                stable_ms=int(action.get("stable_ms", 500)),
+                timeout_s=float(action.get("timeout_s", 5.0)),
+                max_ratio=float(action.get("max_ratio", 0.0008)),
+            )
         stable = bool(result.get("stable"))
         required = _truthy(action.get("required"))
-        return ToolResult(json.dumps({
+        payload = {
             "ok": stable or not required,
             "stable": stable,
             "required": required,
             "needs_observe": not stable,
             "delta": result.get("delta", {}),
             "screen_watch": self.watcher.status(),
-        }, ensure_ascii=False))
+        }
+        if region is not None:
+            payload["region"] = self._region_payload(region)
+        return ToolResult(json.dumps(payload, ensure_ascii=False))
 
     @staticmethod
     def _document_editor_ready(title: str, visible_text: str) -> bool:
@@ -2478,6 +2558,28 @@ class FastGuiController:
             max(1, max(ys) - min(ys) + 2 * pad),
         ).clamp_to_screen()
 
+    @staticmethod
+    def _region_payload(region: Region) -> dict[str, int]:
+        return {
+            "x": int(region.left), "y": int(region.top),
+            "width": int(region.width), "height": int(region.height),
+        }
+
+    @staticmethod
+    def _region_from_value(value: Any) -> Region | None:
+        if not isinstance(value, dict):
+            return None
+        try:
+            left = int(value.get("x", value.get("left")))
+            top = int(value.get("y", value.get("top")))
+            width = int(value.get("width"))
+            height = int(value.get("height"))
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return Region(left, top, width, height).clamp_to_screen()
+
     def _map_canvas_relative_draw(self, args: dict[str, Any]) -> dict[str, Any]:
         # Resolve at the concrete input boundary so direct tools and controller
         # batches share the same strict contract. In particular, never trust a
@@ -2505,8 +2607,17 @@ class FastGuiController:
 
     @staticmethod
     def _action_region(name: str, args: dict[str, Any]) -> Region | None:
+        explicit = FastGuiController._region_from_value(
+            args.get("effect_region") or args.get("region")
+        )
+        if explicit is not None:
+            return explicit
         coords: list[tuple[int, int]] = []
         try:
+            if name in {"click", "scroll", "move_mouse"}:
+                return FastGuiController._coords_region(
+                    [(int(args["x"]), int(args["y"]))], pad=48,
+                )
             if name == "draw_strokes":
                 for stroke in args.get("strokes") or []:
                     for point in stroke or []:
@@ -2520,6 +2631,33 @@ class FastGuiController:
                 return FastGuiController._coords_region(coords, pad=56)
         except (TypeError, ValueError, IndexError, KeyError):
             return None
+        return None
+
+    @staticmethod
+    def _action_region_from_result(data: dict[str, Any]) -> Region | None:
+        point = data.get("point")
+        if isinstance(point, dict) and point.get("x") is not None and point.get("y") is not None:
+            try:
+                return FastGuiController._coords_region(
+                    [(int(point["x"]), int(point["y"]))], pad=48,
+                )
+            except (TypeError, ValueError):
+                pass
+        resolved = data.get("resolved_element")
+        bbox = resolved.get("bbox") if isinstance(resolved, dict) else None
+        if isinstance(bbox, dict):
+            return FastGuiController._region_from_value(bbox)
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                left, top, third, fourth = [int(value) for value in bbox]
+                # Perception bboxes are commonly l/t/r/b.  If the final pair
+                # cannot be edges, treat them as width/height.
+                width = third - left if third > left else third
+                height = fourth - top if fourth > top else fourth
+                if width > 0 and height > 0:
+                    return Region(left, top, width, height).clamp_to_screen()
+            except (TypeError, ValueError):
+                pass
         return None
 
     @staticmethod
@@ -2607,6 +2745,43 @@ class FastGuiController:
         subgoal: str = "",
     ) -> dict[str, Any]:
         actions = _stable_batch_actions(actions, subgoal)
+        stale_buttons = action_executor.release_held_mouse_buttons()
+        if stale_buttons:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "STALE_CONTINUOUS_INPUT_RECOVERED",
+                "input_cleanup": {
+                    "released_mouse_buttons": stale_buttons,
+                    "reason": "button hold cannot cross controller transactions",
+                },
+                "error": (
+                    "A mouse button from an earlier transaction was still held. "
+                    "It was released safely; re-observe before retrying."
+                ),
+            }
+        validation_errors = validate_batch_actions(actions)
+        if validation_errors:
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "INVALID_ACTION_TRANSACTION",
+                "metrics": {
+                    "failed_at": 1,
+                    "action_count": len(actions),
+                    "validation_failed": True,
+                },
+                "results": [{
+                    "index": 1,
+                    "ok": False,
+                    "preview": validation_errors[0],
+                    "error": validation_errors[0],
+                }],
+                "validation_errors": validation_errors,
+                "error": "; ".join(validation_errors),
+            }
         has_mutation = False
         has_clipboard = False
         for action in actions:
@@ -2618,12 +2793,45 @@ class FastGuiController:
                 has_mutation = True
             if name in BATCH_CLIPBOARD_ACTIONS:
                 has_clipboard = True
-        execute = lambda: self._execute_in_lease(
-            actions,
-            stop_on_error=stop_on_error,
-            sync=sync,
-            subgoal=subgoal,
-        )
+        def execute() -> dict[str, Any]:
+            payload: dict[str, Any] | None = None
+            released: list[str] = []
+            try:
+                payload = self._execute_in_lease(
+                    actions,
+                    stop_on_error=stop_on_error,
+                    sync=sync,
+                    subgoal=subgoal,
+                )
+                return payload
+            finally:
+                released = action_executor.release_held_mouse_buttons()
+                if released:
+                    BUS.publish(
+                        "input_cleanup",
+                        run_id=getattr(self.session, "run_id", None),
+                        released_mouse_buttons=released,
+                        reason="controller_transaction_exit",
+                    )
+                    if payload is not None:
+                        payload["ok"] = False
+                        payload["verified"] = False
+                        payload["failure_type"] = "CONTINUOUS_INPUT_ABORTED"
+                        payload["input_cleanup"] = {
+                            "released_mouse_buttons": released,
+                            "reason": "controller transaction exited while input was held",
+                        }
+                        payload["error"] = (
+                            "The continuous pointer transaction ended before its "
+                            "matching mouse_up; the Controller released it safely."
+                        )
+                        state = payload.get("controller_state")
+                        if isinstance(state, dict):
+                            state.update({
+                                "phase": "blocked",
+                                "verified": False,
+                                "needs_observe": True,
+                            })
         if not has_mutation and not has_clipboard:
             return execute()
         target = getattr(self.session, "hwnd", None)
@@ -2673,7 +2881,20 @@ class FastGuiController:
             name, normalised_args = _normalise_action(action)
             name, normalised_args, upgraded_from = _upgrade_semantic_action(name, normalised_args)
             normalised_args = _with_batch_expect_defaults(name, normalised_args)
+            if (
+                name in {"wait_change", "wait_for_visual_change", "wait_stable"}
+                and normalised_args.get("region") is None
+                and normalised_args.get("effect_region") is None
+                and last_visual_region is not None
+            ):
+                # Bind an immediately following wait to the action that caused
+                # it, rather than unrelated animation elsewhere in the target
+                # window. Callers can supply a broader interaction ROI when
+                # waiting for a human/opponent response.
+                normalised_args["region"] = self._region_payload(last_visual_region)
+                normalised_args["region_source"] = "previous_action_roi"
             optional_action = bool(normalised_args.pop("optional", False))
+            prior_mutation_seen = mutating_seen
             last_action = name
             if name in BATCH_MUTATING_ACTIONS:
                 mutating_seen = True
@@ -2702,6 +2923,22 @@ class FastGuiController:
                 # successful refocus invalidates the surface cache above, so
                 # this binds the uncommitted primitive from fresh target pixels.
                 normalised_args = self._map_canvas_relative_draw(normalised_args)
+            force_semantic_rebind = bool(normalised_args.pop("_rebind_after_mutation", False))
+            if (
+                prior_mutation_seen
+                and force_semantic_rebind
+                and scope_blocked is None
+                and name in {"click_element", "type_into_element"}
+            ):
+                # A semantic child after a mutation is safe only if it is
+                # rebound from current target pixels/UIA.  Discard the prior
+                # snapshot locally; _click_element/_type_into_element will
+                # perform a deterministic observe without an LLM round trip.
+                try:
+                    self.session.snapshot = None
+                    self.session._observe_cache = None
+                except Exception:
+                    pass
             epoch_before = int(getattr(self.session, "_screen_epoch", 0) or 0)
             started = _now_ms()
             action_envelope = self._publish_child_start(
@@ -2741,6 +2978,8 @@ class FastGuiController:
                 result = self._pause(normalised_args)
             elif name == "wait_change":
                 result = self._wait_change(normalised_args)
+            elif name == "wait_for_visual_change":
+                result = self._wait_for_visual_change(normalised_args)
             elif name == "wait_stable":
                 result = self._wait_stable(normalised_args)
             elif name == "ensure_document_surface":
@@ -2758,7 +2997,7 @@ class FastGuiController:
                 metrics.observe_count += 1
             if isinstance(normalised_args.get("expect"), dict) or name == "wait":
                 metrics.verify_count += 1
-            if name in {"wait_change", "wait_stable"}:
+            if name in {"wait_change", "wait_for_visual_change", "wait_stable"}:
                 metrics.screen_wait_count += 1
             item = {
                 "index": index,
@@ -2892,7 +3131,18 @@ class FastGuiController:
             ) or evidence_requirement_failed or visual_no_progress
             if visual_no_progress and not data.get("error"):
                 data["error"] = "visual action produced no pixel change in its intended region"
-                data["failure_type"] = "DRAW_NO_VISIBLE_CHANGE"
+                if name == "draw_strokes":
+                    data["failure_type"] = "DRAW_NO_VISIBLE_CHANGE"
+                    data["failure_subtype"] = "effect_not_observed"
+                else:
+                    # A drag is not necessarily drawing.  Classifying every
+                    # no-effect drag as a canvas/tool failure sent recovery
+                    # down an application-specific path and repeated the same
+                    # bad geometry.  Preserve the drawing code for the
+                    # dedicated drawing primitive, but keep generic spatial
+                    # interaction failures application-neutral.
+                    data["failure_type"] = "VISUAL_ACTION_NO_EFFECT"
+                    data["failure_subtype"] = "source_or_target_not_confirmed"
             if failed and optional_action:
                 item["optional_failed"] = True
                 failed = False
@@ -2941,7 +3191,10 @@ class FastGuiController:
                 last_visual_data = {}
                 semantic_observe_after_visual = True
             elif name in BATCH_MUTATING_ACTIONS:
-                region = self._action_region(name, normalised_args)
+                region = (
+                    self._action_region(name, normalised_args)
+                    or self._action_region_from_result(data)
+                )
                 if region is not None:
                     last_visual_region = region
                     last_visual_action = name

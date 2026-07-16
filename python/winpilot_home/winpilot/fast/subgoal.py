@@ -4505,6 +4505,9 @@ class SubgoalExecutor:
             task=getattr(self.session, "task", ""),
             query=request.subgoal,
             recent_changes=recent_changes,
+            communication_context=getattr(
+                self.session, "communication_context", None,
+            ),
         ) if snapshot is not None else {}
         actions = self._build_actions(request)
         if spreadsheet_spec is None and any(

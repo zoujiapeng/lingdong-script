@@ -40,6 +40,141 @@ def test_perception_daemon_reuses_watcher_and_cache_per_hwnd(monkeypatch):
     assert first.watcher.stopped is True
 
 
+def test_perception_daemon_does_not_analyze_released_window_changes(monkeypatch):
+    from winpilot.fast import perception_daemon as daemon_mod
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.utils.screenshot import Region
+
+    calls = []
+    monkeypatch.setattr(daemon_mod, "ScreenWatcher", _EmittingWatcher)
+    monkeypatch.setattr(daemon_mod, "window_region", lambda hwnd: Region(0, 0, 800, 600))
+    daemon = daemon_mod.PerceptionDaemon(
+        idle_ttl_s=60,
+        analyze_fn=lambda *args: calls.append(args) or _snapshot_for_change(*args),
+        debounce_ms=0,
+    )
+    lease = daemon.acquire(109, run_id="released-run")
+    daemon.release(lease)
+    region = Region(20, 30, 80, 40)
+    lease.watcher.emit(
+        ScreenDelta(True, 0.02, [region], 1),
+        [(np.zeros((40, 80, 3), dtype=np.uint8), region)],
+        action_delta=True,
+    )
+    time.sleep(0.05)
+
+    incremental = daemon.status()["targets"][0]["incremental"]
+    assert calls == []
+    assert incremental["scheduled"] == 0
+    assert incremental["skipped_inactive"] == 1
+    daemon.shutdown()
+
+
+def test_perception_daemon_discards_inflight_result_after_final_release(monkeypatch):
+    import threading
+
+    from winpilot.fast import perception_daemon as daemon_mod
+    from winpilot.fast.types import ScreenDelta
+    from winpilot.utils.screenshot import Region
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    def analyze(hwnd, crops, metadata):
+        started.set()
+        assert finish.wait(timeout=1.0)
+        return _snapshot_for_change(hwnd, crops, metadata)
+
+    monkeypatch.setattr(daemon_mod, "ScreenWatcher", _EmittingWatcher)
+    monkeypatch.setattr(daemon_mod, "window_region", lambda hwnd: Region(0, 0, 800, 600))
+    daemon = daemon_mod.PerceptionDaemon(idle_ttl_s=60, analyze_fn=analyze, debounce_ms=0)
+    lease = daemon.acquire(119, run_id="cancel-inflight")
+    region = Region(20, 30, 80, 40)
+    lease.watcher.emit(
+        ScreenDelta(True, 0.02, [region], 1),
+        [(np.zeros((40, 80, 3), dtype=np.uint8), region)],
+        action_delta=True,
+    )
+    assert started.wait(timeout=1.0)
+    daemon.release(lease)
+    finish.set()
+    assert _wait_until(
+        lambda: daemon.status()["targets"][0]["incremental"]["running"] is False
+    )
+
+    incremental = daemon.status()["targets"][0]["incremental"]
+    assert incremental["history"] == 0
+    assert incremental["superseded"] >= 1
+    daemon.shutdown()
+
+
+def test_perception_daemon_reacquire_clears_prior_history_and_anchor_cache(monkeypatch):
+    from winpilot.fast import perception_daemon as daemon_mod
+    from winpilot.fast.types import ScreenDelta, VisualAnchor
+    from winpilot.perception.fusion import Snapshot
+    from winpilot.perception.model import UIElement
+    from winpilot.utils.screenshot import Region
+
+    monkeypatch.setattr(daemon_mod, "ScreenWatcher", _EmittingWatcher)
+    monkeypatch.setattr(daemon_mod, "window_region", lambda hwnd: Region(0, 0, 800, 600))
+    daemon = daemon_mod.PerceptionDaemon(
+        idle_ttl_s=60,
+        analyze_fn=_snapshot_for_change,
+        debounce_ms=0,
+    )
+    first = daemon.acquire(129, run_id="old-owner")
+    region = Region(20, 30, 80, 40)
+    element = UIElement(
+        source="win32",
+        role="button",
+        text="Continue",
+        cx=60,
+        cy=50,
+        left=20,
+        top=30,
+        width=80,
+        height=40,
+    )
+    first.cache.remember(
+        Snapshot(
+            hwnd=129,
+            title="Lease Target",
+            region=Region(0, 0, 800, 600),
+            elements=[element],
+        ),
+        VisualAnchor(label="Continue", role="button"),
+        element,
+    )
+    first.watcher.emit(
+        ScreenDelta(True, 0.02, [region], 1),
+        [(np.zeros((40, 80, 3), dtype=np.uint8), region)],
+        action_delta=True,
+    )
+    assert _wait_until(
+        lambda: daemon.status()["targets"][0]["incremental"]["completed"] >= 1
+    )
+    assert first.cache.stats()["entries"] == 1
+    assert daemon.latest_snapshot(129) is not None
+
+    daemon.release(first)
+    second = daemon.acquire(129, run_id="new-owner")
+
+    assert second.watcher is first.watcher
+    assert second.cache is first.cache
+    assert second.cache.stats() == {
+        "entries": 0,
+        "hits": 0,
+        "misses": 0,
+        "stale": 0,
+    }
+    assert daemon.latest_snapshot(129) is None
+    incremental = daemon.status()["targets"][0]["incremental"]
+    assert incremental["history"] == 0
+
+    daemon.release(second)
+    daemon.shutdown()
+
+
 class _EmittingWatcher:
     def __init__(self, region_provider=None, event_context_provider=None):
         self.region_provider = region_provider

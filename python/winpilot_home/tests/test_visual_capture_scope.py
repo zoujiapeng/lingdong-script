@@ -23,6 +23,41 @@ def test_credible_work_surface_bounds_use_authoritative_frame_coordinates():
     assert result["detected_work_surface_frame_bounds"] == [125, 359, 984, 932]
     assert result["work_surface_frame_bounds"] == [149, 383, 960, 908]
     assert result["continuous_input_edge_inset"] == 24
+    assert result["interaction_region"]["coordinate_space"] == "frame_0_1000"
+
+
+def test_work_surface_is_clipped_to_window_client_authority():
+    import base64
+
+    import cv2
+    import numpy as np
+
+    from winpilot.utils.image_capture import credible_work_surface_frame_bounds
+
+    image = np.zeros((500, 800, 3), dtype=np.uint8)
+    image[50:480, 20:780] = 255
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok is True
+
+    result = credible_work_surface_frame_bounds(
+        base64.b64encode(encoded.tobytes()).decode("ascii"),
+        client_frame_bounds=[80, 140, 920, 940],
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert result["detected_work_surface_frame_bounds"] == [80, 140, 920, 940]
+    assert result["work_surface_frame_bounds"] == [104, 164, 896, 916]
+
+
+def test_region_frame_bounds_maps_physical_client_into_window_frame():
+    from winpilot.utils.image_capture import region_frame_bounds
+    from winpilot.utils.screenshot import Region
+
+    frame = Region(400, 200, 1001, 701)
+    client = Region(450, 270, 901, 601)
+
+    assert region_frame_bounds(client, frame) == [50, 100, 950, 957]
 
 
 def test_credible_work_surface_bounds_preserve_ambiguous_failure(monkeypatch):

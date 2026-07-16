@@ -46,6 +46,16 @@ def test_structured_intent_extracts_wechat_destination_relation():
     assert intent.recipient == "文件传输助手"
 
 
+def test_structured_intent_owns_chat_execution_mode():
+    from winpilot.tasking.intent import TaskIntentParser
+
+    parser = TaskIntentParser()
+
+    assert parser.parse("keep chatting with Alice continuously").send_mode == "continuous_chat"
+    assert parser.parse("chat with Alice").send_mode == "bounded_chat"
+    assert parser.parse("send a message to Alice").send_mode == "send"
+
+
 def test_text_send_compiles_payload_and_typed_stages():
     contract, _graph = _compile("用QQ给测试联系人发消息“你好”")
     assert [stage.type.value for stage in contract.stages] == [
@@ -206,7 +216,7 @@ def test_draw_boundary_uses_fresh_bound_window_semantic_verifier(monkeypatch):
     observed = {}
 
     class FakeSession:
-        def __init__(self, *, stop_event, task):
+        def __init__(self, *, stop_event, task, **_kwargs):
             observed["task"] = task
             observed["stop_event"] = stop_event
             self.run_id = ""
@@ -359,6 +369,57 @@ def test_failed_inline_semantic_verdict_drives_one_forward_only_repair():
     assert "another complete copy" in hint
     assert "do not clear or redraw" in hint
     assert AgentRunner._inline_stage_repair_hint({"semantic_visual_verified": True}) == ""
+
+
+def test_typed_draw_repair_rejects_whole_scene_overlay_without_executing_it():
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.runtime_profile import RuntimeProfile
+
+    runner = AgentRunner(
+        "Draw the requested visible subject",
+        runtime_profile=RuntimeProfile(
+            inline_semantic_verification=True,
+            stage_type="DrawArtifact",
+        ),
+        max_steps_override=3,
+    )
+    try:
+        base = {
+            "draws": [
+                {"part": f"part-{index}", "shape": "line", "box": [10, 10, 20, 20]}
+                for index in range(12)
+            ],
+        }
+        runner._remember_inline_stage_repair_state(
+            "execute_subgoal",
+            base,
+            {"semantic_visual_verified": False},
+        )
+        blocked = runner._inline_stage_forward_repair_guard(
+            "execute_subgoal",
+            {"draws": list(base["draws"])},
+        )
+        assert blocked is not None
+        assert blocked["blocked"] is True
+        assert blocked["forward_only_repair_required"] is True
+        assert blocked["base_draw_count"] == 12
+        assert blocked["max_repair_draws"] == 4
+        assert blocked["proposed_draw_count"] == 12
+
+        localized = runner._inline_stage_forward_repair_guard(
+            "execute_subgoal",
+            {"draws": list(base["draws"][:3])},
+        )
+        assert localized is None
+
+        runner._remember_inline_stage_repair_state(
+            "execute_subgoal",
+            {"draws": list(base["draws"][:3])},
+            {"semantic_visual_verified": True},
+        )
+        assert runner._inline_stage_repair_pending is False
+    finally:
+        runner.session.close()
 
 
 def test_failed_typed_stage_semantic_verdict_cannot_be_overridden_by_done_judge():
@@ -640,6 +701,8 @@ def test_chat_adapter_causally_binds_new_single_attachment_when_thumbnail_is_los
     assert result["preview_surface"] == "attachment_confirmation"
     assert result["preview_match"]["method"] == "exact_paste_receipt+new_single_attachment_confirmation"
     assert result["preview_match"]["frame_change"]["changed"] is True
+    assert result["preview_match"]["visual_match"]["skipped"] == "causal_attachment_confirmation"
+    assert match_calls == 0
     assert adapter._pending_send_confirmation["recipient"] == "测试联系人"
     assert adapter._pending_send_confirmation["artifact_id"] == artifact.artifact_id
     assert adapter._pending_send_confirmation["artifact_sha256"] == artifact.sha256
@@ -713,6 +776,7 @@ def test_chat_adapter_consumes_only_matching_fresh_confirmation_transaction(tmp_
         "artifact_sha256": artifact.sha256,
         "send_button": {"element_id": 9, "source": "ocr", "bbox": [1, 2, 3, 4]},
     }
+    adapter._pre_paste_frame_id = "clean-pre-paste-frame"
     monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
     try:
         sent = adapter.send_current_composer(artifact_id=artifact.artifact_id, stage_id="stage-send")
@@ -1119,6 +1183,150 @@ def test_completion_requires_same_artifact_across_capture_send_and_delivery(tmp_
     }
 
 
+@pytest.mark.parametrize(
+    ("predicate", "stage_id"),
+    [
+        ("unrelated.verified_claim", "expected-stage"),
+        ("stage.verified_outcome", "different-stage"),
+    ],
+)
+def test_completion_requires_exact_predicate_and_stage(predicate, stage_id):
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.completion import CompletionContractVerifier
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    contract = TaskContractCompiler().compile("Organize the currently visible content")
+    obligation = contract.obligations[0]
+    evidence = EvidenceRegistry("run-exact-evidence")
+    evidence.record(
+        predicate,
+        provider=obligation.evidence_providers[0].id,
+        verified=True,
+        stage_id=obligation.stage_id if stage_id == "expected-stage" else stage_id,
+    )
+
+    verdict = CompletionContractVerifier(contract, evidence, None).verify()
+
+    assert verdict["ok"] is False
+    assert verdict["missing"][0]["obligation_id"] == obligation.id
+    assert verdict["missing"][0]["predicate"] == obligation.evidence_predicate
+
+
+def test_completion_accepts_exact_predicate_stage_and_provider():
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.completion import CompletionContractVerifier
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    contract = TaskContractCompiler().compile("Organize the currently visible content")
+    obligation = contract.obligations[0]
+    evidence = EvidenceRegistry("run-exact-evidence")
+    evidence.record(
+        obligation.evidence_predicate,
+        provider=obligation.evidence_providers[0].id,
+        verified=True,
+        stage_id=obligation.stage_id,
+    )
+
+    verdict = CompletionContractVerifier(contract, evidence, None).verify()
+
+    assert verdict["ok"] is True
+    assert verdict["final_conditions"] == [{
+        "condition": obligation.id,
+        "satisfied": True,
+        "evidence_id": verdict["obligations"][0]["evidence_id"],
+    }]
+
+
+def test_completion_rejects_contract_with_stage_obligations_removed_from_final_contract():
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.completion import CompletionContractVerifier
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    compiled = TaskContractCompiler().compile("Organize the currently visible content")
+    malformed = compiled.model_copy(update={"obligations": [], "final_conditions": []})
+
+    verdict = CompletionContractVerifier(
+        malformed,
+        EvidenceRegistry("run-malformed-contract"),
+        None,
+    ).verify()
+
+    assert verdict["ok"] is False
+    assert "no completion obligations" in verdict["reason"]
+    assert "do not match" in verdict["reason"]
+
+
+def test_arp_end_rejects_arbitrary_verified_evidence_for_task_contract():
+    from winpilot.orchestrator.contracts import ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    contract, graph = TaskContractCompiler().compile_graph(
+        "Open Calculator",
+        cold_start=True,
+    )
+    obligation = contract.obligations[0]
+
+    def stage_handler(_node, context, _stop_event):
+        registry = EvidenceRegistry(context["run_id"])
+        context["runtime_state"]["evidence_registry"] = registry
+        record = registry.record(
+            "unrelated.verified_claim",
+            provider=obligation.evidence_providers[0].id,
+            verified=True,
+            stage_id=obligation.stage_id,
+        )
+        return NodeResult(evidence=[record])
+
+    execution = ArpExecution(
+        graph,
+        {ArpNodeKind.TASK_STAGE: stage_handler},
+        run_id="arp-contract-fail-closed",
+    )
+    result = execution.run()
+
+    assert result["status"] == "failed"
+    assert "missing task-contract evidence" in result["error"]
+    assert result["completion_contract"]["ok"] is False
+    assert result["completion_contract"]["missing"][0]["predicate"] == "application.open"
+
+
+def test_arp_end_marks_done_only_after_exact_contract_completion():
+    from winpilot.orchestrator.contracts import ArpNodeKind
+    from winpilot.orchestrator.runtime import ArpExecution, NodeResult
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    contract, graph = TaskContractCompiler().compile_graph(
+        "Open Calculator",
+        cold_start=True,
+    )
+    obligation = contract.obligations[0]
+
+    def stage_handler(_node, context, _stop_event):
+        registry = EvidenceRegistry(context["run_id"])
+        context["runtime_state"]["evidence_registry"] = registry
+        record = registry.record(
+            obligation.evidence_predicate,
+            provider=obligation.evidence_providers[0].id,
+            verified=True,
+            stage_id=obligation.stage_id,
+        )
+        return NodeResult(evidence=[record])
+
+    result = ArpExecution(
+        graph,
+        {ArpNodeKind.TASK_STAGE: stage_handler},
+        run_id="arp-contract-complete",
+    ).run()
+
+    assert result["status"] == "done"
+    assert result["completion_contract"]["ok"] is True
+    assert result["outputs"]["end"]["final_conditions"][0]["satisfied"] is True
+    assert result["contract_evidence"]["records"][-1]["predicate"] == "contract.complete"
+
+
 def test_capture_scope_distinguishes_canvas_from_explicit_window():
     from winpilot.tasking.contracts import StageType
 
@@ -1188,3 +1396,294 @@ def test_server_upgrades_legacy_frontend_goal_graph(monkeypatch):
         metadata={"source": "agent-cockpit"},
     )
     assert legacy_goal_graph_task(graph) == (TASKS[0], 55)
+
+
+def test_communication_adapter_requests_controller_structured_observation(tmp_path):
+    from types import SimpleNamespace
+
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+
+    adapter = QQCommunicationAdapter(
+        run_id="run-structured-observe",
+        task="send an artifact through a chat client",
+        store=ArtifactStore("run-structured-observe", tmp_path / "artifacts"),
+        evidence=EvidenceRegistry("run-structured-observe"),
+    )
+    adapter.session.close()
+    marker = object()
+
+    class FakeSession:
+        snapshot = None
+
+        def dispatch(self, name, args):
+            assert name == "observe"
+            assert args == {
+                "full": True,
+                "include_icons": False,
+                "_controller_perception_mode": "structured_ui",
+            }
+            self.snapshot = marker
+            return SimpleNamespace(text='{"ok": true}')
+
+        def close(self):
+            return None
+
+    adapter.session = FakeSession()
+    assert adapter._observe_snapshot() is marker
+
+
+def test_resolve_composer_reuses_fresh_verified_navigation_snapshot(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.utils.screenshot import Region
+
+    recipient = SimpleNamespace(
+        elem_id=7, source="uia", role="text", text="target recipient",
+        left=250, top=70, width=120, height=30, cx=310, cy=85,
+    )
+    composer = SimpleNamespace(
+        elem_id=8, source="uia", role="edit", text="",
+        left=320, top=680, width=500, height=70, cx=570, cy=715,
+    )
+    snapshot = SimpleNamespace(
+        region=Region(0, 0, 1000, 800), elements=[recipient, composer],
+    )
+    calls: list[tuple[str, dict]] = []
+
+    class FakeSession:
+        hwnd = 44
+
+        def __init__(self, initial_snapshot):
+            self.snapshot = initial_snapshot
+
+        def dispatch(self, name, args):
+            calls.append((name, args))
+            assert name != "observe"
+            return SimpleNamespace(text=json.dumps({"ok": True}))
+
+        def close(self):
+            return None
+
+    adapter = QQCommunicationAdapter(
+        run_id="run-composer-cache",
+        task="send an artifact through a chat client",
+        store=ArtifactStore("run-composer-cache", tmp_path / "artifacts"),
+        evidence=EvidenceRegistry("run-composer-cache"),
+    )
+    adapter.session.close()
+    adapter.session = FakeSession(snapshot)
+    adapter.recipient = "target recipient"
+
+    result = adapter.resolve_composer()
+
+    assert result["ok"] is True
+    assert result["method"] == "uia_composer"
+    assert calls == [("click", {"element_id": 8})]
+
+
+def test_recipient_proof_is_exact_not_substring(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from winpilot.perception.model import UIElement
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.utils.screenshot import Region
+
+    adapter = QQCommunicationAdapter(
+        run_id="run-exact-recipient",
+        task="send a message to a recipient",
+        store=ArtifactStore("run-exact-recipient", tmp_path / "artifacts"),
+        evidence=EvidenceRegistry("run-exact-recipient"),
+    )
+    adapter.recipient = "Ann"
+    monkeypatch.setattr("winpilot.tasking.adapters.ocr.collect", lambda *_args, **_kwargs: [])
+    wrong = UIElement(
+        elem_id=1, source="uia", role="text", text="Joann",
+        left=250, top=70, width=90, height=30, cx=295, cy=85,
+    )
+    exact = UIElement(
+        elem_id=2, source="uia", role="text", text="Ann",
+        left=250, top=70, width=70, height=30, cx=285, cy=85,
+    )
+    snapshot = SimpleNamespace(region=Region(0, 0, 1000, 800), elements=[wrong])
+    try:
+        assert adapter._recipient_header_context(snapshot)["verified"] is False
+        snapshot.elements.append(exact)
+        context = adapter._recipient_header_context(snapshot)
+    finally:
+        adapter.close()
+
+    assert context["verified"] is True
+    assert context["element"]["text"] == "Ann"
+
+
+def test_artifact_delivery_uses_clean_pre_paste_baseline_not_modal_preview(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from winpilot.tasking import adapters as adapter_module
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.utils.screenshot import Region
+
+    source_path = tmp_path / "artifact.png"
+    frame_path = tmp_path / "conversation.png"
+    Image.new("RGB", (120, 80), "white").save(source_path)
+    Image.new("RGB", (1000, 800), "#202020").save(frame_path)
+    store = ArtifactStore("run-clean-delivery-baseline", tmp_path / "managed")
+    artifact = store.import_file(source_path)
+    frame = store.import_file(
+        frame_path,
+        purpose="observation",
+        sendable=False,
+        metadata={"region": {"left": 0, "top": 0, "width": 1000, "height": 800}},
+    )
+    adapter = QQCommunicationAdapter(
+        run_id="run-clean-delivery-baseline",
+        task="send an artifact",
+        store=store,
+        evidence=EvidenceRegistry("run-clean-delivery-baseline"),
+    )
+    adapter.recipient = "recipient"
+    adapter._send_action_at = time.time() - 1.0
+    adapter._pre_paste_frame_id = "clean-baseline"
+    adapter._preview_frame_id = "modal-contaminated-preview"
+    snapshot = SimpleNamespace(region=Region(0, 0, 1000, 800), elements=[])
+    adapter._observe_snapshot = lambda: snapshot
+    adapter._recipient_header_context = lambda _snapshot: {"verified": True}
+    adapter._capture_observation = lambda _purpose: frame
+    baselines: list[str] = []
+
+    def old_bubble_would_match_only_against_modal(*_args, **kwargs):
+        baseline = str(kwargs.get("baseline_frame_id") or "")
+        baselines.append(baseline)
+        return {
+            "matched": baseline == "modal-contaminated-preview",
+            "match_bbox": [720, 300, 120, 80],
+        }
+
+    monkeypatch.setattr(store, "visual_match", old_bubble_would_match_only_against_modal)
+    ticks = iter((0.0, 0.1, 5.1))
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
+    try:
+        result = adapter.verify_latest_outbound(artifact_id=artifact.artifact_id)
+    finally:
+        adapter.close()
+
+    assert result["ok"] is False
+    assert baselines == ["clean-baseline"]
+
+
+def test_text_delivery_rejects_unchanged_old_outbound_message(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    from PIL import Image, ImageDraw
+
+    from winpilot.perception.model import UIElement
+    from winpilot.tasking import adapters as adapter_module
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.utils.screenshot import Region
+
+    baseline_path = tmp_path / "baseline.png"
+    baseline = Image.new("RGB", (1000, 800), "white")
+    ImageDraw.Draw(baseline).rectangle((710, 290, 850, 340), fill="black")
+    baseline.save(baseline_path)
+    post_path = tmp_path / "post.png"
+    baseline.save(post_path)
+    store = ArtifactStore("run-old-text", tmp_path / "managed")
+    metadata = {"region": {"left": 0, "top": 0, "width": 1000, "height": 800}}
+    before = store.import_file(baseline_path, purpose="observation", sendable=False, metadata=metadata)
+    post = store.import_file(post_path, purpose="observation", sendable=False, metadata=metadata)
+    adapter = QQCommunicationAdapter(
+        run_id="run-old-text", task="send text", store=store,
+        evidence=EvidenceRegistry("run-old-text"),
+    )
+    adapter.recipient = "recipient"
+    adapter._sent_text = "same text"
+    adapter._pre_send_frame_id = before.artifact_id
+    adapter._send_action_at = time.time() - 1.0
+    candidate = UIElement(
+        elem_id=1, source="ocr", role="text", text="same text",
+        left=720, top=300, width=120, height=30, cx=780, cy=315,
+    )
+    snapshot = SimpleNamespace(region=Region(0, 0, 1000, 800), elements=[candidate])
+    adapter._observe_snapshot = lambda: snapshot
+    adapter._recipient_header_context = lambda _snapshot: {"verified": True}
+    adapter._capture_observation = lambda _purpose: post
+    adapter._message_text_matches = lambda _snapshot, _text: [candidate]
+    ticks = iter((0.0, 0.1, 5.1))
+    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
+    try:
+        result = adapter.verify_latest_outbound(text="same text")
+    finally:
+        adapter.close()
+
+    assert result["ok"] is False
+    assert result["candidate_evidence"][0]["outbound"] is True
+    assert result["candidate_evidence"][0]["frame_change"]["changed"] is False
+
+
+def test_text_delivery_accepts_new_changed_outbound_message(tmp_path):
+    import time
+    from types import SimpleNamespace
+
+    from PIL import Image, ImageDraw
+
+    from winpilot.perception.model import UIElement
+    from winpilot.tasking.adapters import QQCommunicationAdapter
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.utils.screenshot import Region
+
+    baseline_path = tmp_path / "baseline.png"
+    Image.new("RGB", (1000, 800), "white").save(baseline_path)
+    post_path = tmp_path / "post.png"
+    post_image = Image.new("RGB", (1000, 800), "white")
+    ImageDraw.Draw(post_image).rectangle((710, 290, 850, 340), fill="black")
+    post_image.save(post_path)
+    store = ArtifactStore("run-new-text", tmp_path / "managed")
+    metadata = {"region": {"left": 0, "top": 0, "width": 1000, "height": 800}}
+    before = store.import_file(baseline_path, purpose="observation", sendable=False, metadata=metadata)
+    post = store.import_file(post_path, purpose="observation", sendable=False, metadata=metadata)
+    adapter = QQCommunicationAdapter(
+        run_id="run-new-text", task="send text", store=store,
+        evidence=EvidenceRegistry("run-new-text"),
+    )
+    adapter.recipient = "recipient"
+    adapter._sent_text = "same text"
+    adapter._pre_send_frame_id = before.artifact_id
+    adapter._send_action_at = time.time() - 1.0
+    candidate = UIElement(
+        elem_id=2, source="ocr", role="text", text="same text",
+        left=720, top=300, width=120, height=30, cx=780, cy=315,
+    )
+    snapshot = SimpleNamespace(region=Region(0, 0, 1000, 800), elements=[candidate])
+    adapter._observe_snapshot = lambda: snapshot
+    adapter._recipient_header_context = lambda _snapshot: {"verified": True}
+    adapter._capture_observation = lambda _purpose: post
+    adapter._message_text_matches = lambda _snapshot, _text: [candidate]
+    try:
+        result = adapter.verify_latest_outbound(text="same text")
+    finally:
+        adapter.close()
+
+    assert result["ok"] is True
+    metadata = result["evidence"]["metadata"]
+    assert metadata["baseline_frame_id"] == before.artifact_id
+    assert metadata["candidate_evidence"][0]["outbound"] is True
+    assert metadata["candidate_evidence"][0]["frame_change"]["changed"] is True

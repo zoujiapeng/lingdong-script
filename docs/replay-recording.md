@@ -32,7 +32,7 @@ Agent/人类操作 -> trace -> automation-ir/1 -> Replayer / ARP / Flow editor
 python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http://127.0.0.1:8765
 ```
 
-脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标入口走 `/api/v2/arp/runs`，会先尝试 Skill，再在 miss/fail 时进入同一个 AgentRunner；两条入口共享 RuntimeJob、ToolSession、Controller、trace 和 done gate，但路由前缀不同。
+脚本走公开 `/api/chat`，不会直接调用内部 runner。当前原生前端目标先由 `/api/v2/task-contracts/compile` 生成 typed contract，再走 `/api/v2/arp/runs`；可复用阶段按 `stage_type + parameters + app_version` 尝试参数化 Skill，miss/fail 只恢复当前阶段。确定性阶段由 StageRuntime、Controller、ArtifactStore 或 DomainAdapter 直接执行，只有语义创建/编辑或异常恢复才进入有界 AgentRunner。两条入口共享 RuntimeJob、桌面资源、trace 和证据规则，但不强制共享同一个 ToolSession/LLM loop。
 
 当前低延迟 GUI 靶场位于 `python/winpilot_home/eval_targets/gui_agent_target.html`。它用于测试 `run_action_batch(subgoal=...)`、自动 `screen_watch`、recent/action ROI、`observe(changed_only=true)` 和 fresh-screen done gate，不是生产功能的专属规则。
 
@@ -94,6 +94,8 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 - `safety` / `fallback`
 
 新保存流程、成功 trace、Apprentice draft 和 Memory Skill 默认写 `.automation.json`。`runtime.kind` 明确选择 `wps_replay` 或 `arp_graph`；Flow editor 将编译后的 graph 和 projection fingerprint 一并放入 IR，后端验证后直接提交 RuntimeJob，不再执行 IR -> Flow -> graph 的往返转换。WPS、FlowScript 和 DSL 继续作为兼容 adapter；只有 `source.kind == "wps"` 的 IR 可回转为 WPS，避免不可等价执行的 Flow 被假装成离线 replay。
+
+Task Contract 的阶段 Skill 不是整句历史任务的模糊 replay。它以 `stage_type + parameters + app_version` 为组合键，保存前置条件、参数、输出 artifact、验证条件和失效原因；命中后仍用当前应用状态做 post-verify。某一阶段 miss 或失效时，只从该 `task_stage` 继续探索，已经验证的前置阶段和 run-scoped artifact 不会被整项丢弃。
 
 ## 人类演示录制
 

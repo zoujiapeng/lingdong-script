@@ -30,6 +30,234 @@ _EXPECT_SCHEMA = {
 _SUPPORTED_CONTROLLER_ACTIONS = list(supported_actions())
 
 
+def _batch_region_schema(description: str = "Physical screen ROI used for local visual change measurement.") -> dict:
+    return {
+        "type": "object",
+        "description": description,
+        "properties": {
+            "x": {"type": "integer"},
+            "y": {"type": "integer"},
+            "width": {"type": "integer", "minimum": 1},
+            "height": {"type": "integer", "minimum": 1},
+        },
+        "required": ["x", "y", "width", "height"],
+    }
+
+
+def _batch_frame_region_schema(description: str) -> dict:
+    coordinate = {"type": "number", "minimum": 0, "maximum": 1000}
+    return {
+        "type": "object",
+        "description": description,
+        "properties": {
+            "x": coordinate, "y": coordinate,
+            "width": coordinate, "height": coordinate,
+        },
+        "required": ["x", "y", "width", "height"],
+    }
+
+
+def _batch_action_schema(*, native_frame: bool = False) -> dict:
+    """Return the typed controller operator union used by run_action_batch.
+
+    Runtime compatibility still accepts historical shorthand, but the model
+    receives a canonical discriminated shape for every supported action.  This
+    prevents useful arguments (notably select_color.color and visual-wait ROI)
+    from disappearing behind an untyped ``params`` object.
+    """
+
+    text = {"type": "string"}
+    boolean = {"type": "boolean"}
+    number = {"type": "number"}
+    integer = {"type": "integer"}
+    string_array = {"type": "array", "items": {"type": "string"}}
+    point = {
+        "type": "array", "minItems": 2, "maxItems": 2,
+        "items": {"type": "number" if native_frame else "integer"},
+    }
+    points = {"type": "array", "items": point}
+    strokes = {"type": "array", "items": points}
+    common = {
+        "optional": boolean,
+        "expect": deepcopy(_EXPECT_SCHEMA),
+        "require_screen_change": boolean,
+        "require_transient": boolean,
+        (
+            "effect_frame_region" if native_frame else "effect_region"
+        ): (
+            _batch_frame_region_schema(
+                "Effect ROI in the current authoritative whole-frame 0..1000 coordinate system."
+            ) if native_frame else _batch_region_schema()
+        ),
+    }
+
+    def variant(name: str, properties: dict | None = None, required: tuple[str, ...] = ()) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "const": name},
+                **common,
+                **(properties or {}),
+            },
+            "required": ["action", *required],
+            "additionalProperties": False,
+        }
+
+    anchor = {
+        "label": text, "text_query": text, "expected_region": text,
+        "visual_anchor": text, "fallback_text": string_array, "role": text,
+        "anchor": {"type": "object"},
+    }
+    click_options = {
+        "button": {"type": "string", "enum": ["left", "right", "middle"]},
+        "double": boolean, "physical": boolean, "prefer_uia_invoke": boolean,
+        "visual_servo": boolean,
+    }
+    if native_frame:
+        direct_click = {
+            "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
+            "element_id": integer,
+            **anchor,
+            **click_options,
+        }
+        scroll_fields = {
+            "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
+            "amount": integer,
+        }
+        pointer_transition_fields = {
+            "frame_x": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_y": {"type": "number", "minimum": 0, "maximum": 1000},
+            "button": {"type": "string", "enum": ["left", "right", "middle"]},
+        }
+        drag_fields = {
+            "frame_x1": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_y1": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_x2": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_y2": {"type": "number", "minimum": 0, "maximum": 1000},
+            "frame_points": points,
+            "duration": number,
+        }
+        draw_fields = {"frame_strokes": strokes, "duration": number}
+    else:
+        direct_click = {"x": integer, "y": integer, "element_id": integer, **anchor, **click_options}
+        scroll_fields = {"x": integer, "y": integer, "amount": integer}
+        pointer_transition_fields = {
+            "x": integer,
+            "y": integer,
+            "button": {"type": "string", "enum": ["left", "right", "middle"]},
+        }
+        drag_fields = {
+            "x1": integer, "y1": integer, "x2": integer, "y2": integer,
+            "points": points, "duration": number,
+        }
+        draw_fields = {
+            "strokes": strokes,
+            "normalized_strokes": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "array", "minItems": 2, "maxItems": 2,
+                        "items": {"type": "number", "minimum": 0, "maximum": 1000},
+                    },
+                },
+            },
+            "duration": number,
+        }
+
+    roi_wait = {
+        ("frame_region" if native_frame else "region"): (
+            _batch_frame_region_schema(
+                "Exact interaction ROI in the current authoritative whole-frame 0..1000 coordinate system."
+            ) if native_frame else _batch_region_schema(
+                "Exact interaction/action ROI to watch. Omit only to reuse the preceding action ROI or bound target window."
+            )
+        ),
+        "timeout_s": number, "min_ratio": number, "required": boolean,
+    }
+    variants = [
+        variant("observe", {
+            "hwnd": integer, "query": text, "max_elements": integer,
+            "full": boolean, "changed_only": boolean, "include_icons": boolean,
+            "require_match": boolean,
+        }),
+        variant("click", direct_click),
+        variant("click_element", {**anchor, **click_options}),
+        variant("type_into_element", {
+            **anchor, "text": text, "clear": boolean, "expect_text": {"oneOf": [boolean, text]},
+        }, ("text",)),
+        variant("type_text", {"text": text, "element_id": integer}, ("text",)),
+        variant("hotkey", {"keys": string_array, "value": string_array}, ("keys",)),
+        variant("scroll", scroll_fields, (("frame_x", "frame_y", "amount") if native_frame else ("x", "y", "amount"))),
+        variant("move_mouse", {
+            key: value for key, value in scroll_fields.items() if key != "amount"
+        }, (("frame_x", "frame_y") if native_frame else ("x", "y"))),
+        variant(
+            "mouse_down",
+            pointer_transition_fields,
+            (("frame_x", "frame_y") if native_frame else ("x", "y")),
+        ),
+        variant(
+            "mouse_up",
+            pointer_transition_fields,
+            (("frame_x", "frame_y") if native_frame else ("x", "y")),
+        ),
+        variant(
+            "hold_key",
+            {
+                "keys": string_array,
+                "duration_ms": {"type": "integer", "minimum": 1, "maximum": 30_000},
+            },
+            ("keys", "duration_ms"),
+        ),
+        variant("drag", drag_fields, (("frame_x1", "frame_y1", "frame_x2", "frame_y2") if native_frame else ("x1", "y1", "x2", "y2"))),
+        variant("draw_strokes", draw_fields, (("frame_strokes",) if native_frame else ())),
+        variant("select_color", {
+            "color": text, "name": text, "strict": boolean, "required_by_user": boolean,
+            "expected_region": text,
+        }, ("color",)),
+        variant("focus_window", {"hwnd": integer, "title": text}),
+        variant("launch", {"command": text}, ("command",)),
+        variant("wait", {
+            "condition": deepcopy(_EXPECT_SCHEMA), "duration_s": number, "seconds": number,
+            "duration_ms": number, "ms": number, "time": number,
+        }),
+        variant("wait_change", roi_wait),
+        variant("wait_for_visual_change", roi_wait),
+        variant("wait_stable", {
+            ("frame_region" if native_frame else "region"): (
+                _batch_frame_region_schema(
+                    "ROI to settle in the current authoritative whole-frame 0..1000 coordinate system."
+                ) if native_frame else _batch_region_schema()
+            ), "stable_ms": integer,
+            "timeout_s": number, "max_ratio": number, "required": boolean,
+        }),
+        variant("ensure_document_surface", {"timeout_s": number, "required": boolean}),
+        variant("read_text", {"hwnd": integer, "query": text, "require_match": boolean}),
+        variant("zoom", {
+            "x": integer, "y": integer, "width": integer, "height": integer,
+        }, ("x", "y", "width", "height")),
+        variant("screenshot", {"path": text, "hwnd": integer}),
+        variant("clipboard_read"),
+        variant("clipboard_write", {"text": text}, ("text",)),
+        variant("clipboard_paste"),
+    ]
+    return {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": _SUPPORTED_CONTROLLER_ACTIONS},
+        },
+        "required": ["action"],
+        "oneOf": variants,
+        "description": (
+            "Canonical typed controller action. Runtime shorthand remains accepted for old scripts, "
+            "but model-generated actions must use the explicit action discriminator and its declared fields."
+        ),
+    }
+
+
 def _tool(
     name: str,
     description: str,
@@ -365,27 +593,19 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
             actions = props.get("actions")
             items = actions.get("items") if isinstance(actions, dict) else None
             if isinstance(items, dict):
-                items["properties"] = {
-                    "action": {
-                        "type": "string",
-                        "enum": _SUPPORTED_CONTROLLER_ACTIONS,
-                        "description": (
-                            "Required canonical controller action name. Native-vision batches "
-                            "never accept shorthand objects with the action field omitted."
-                        ),
-                    },
-                }
-                items["required"] = ["action"]
+                typed_items = _batch_action_schema(native_frame=True)
+                items.clear()
+                items.update(typed_items)
                 items["description"] = (
                     "One canonical {'action': '<name>', ...} entry in a native-vision grounded "
-                    "batch; every entry must include action. Never use shorthand. For one spatial "
-                    "action, call click/scroll/drag/draw_strokes directly instead of creating a "
-                    "one-item batch. The whole batch may contain "
-                    "at most one spatial mutation; click/click_element/type_into_element/scroll/"
-                    "move_mouse/drag/draw_strokes/select_color count whether grounded by frame_*, "
-                    "element_id, or semantic labels/anchors. Keyboard-only type_text/hotkey, waits, "
-                    "and verification may accompany that one mutation. Put the next spatial action "
-                    "in a new turn after the next real post-action frame. Coordinate actions must use "
+                    "batch; every entry must include action and its typed arguments. Never use shorthand. "
+                    "For one spatial action with no deterministic setup, use the direct click/scroll/drag/draw_strokes "
+                    "tool. A transaction has at most one spatial mutation authored in raw frame coordinates; "
+                    "A local transaction may combine deterministic semantic/UIA actions, keyboard input, "
+                    "wait_for_visual_change, and one raw frame-coordinate gesture without another LLM call. "
+                    "Semantic targets may use element_id or Controller-resolved labels/anchors. "
+                    "Do not chain two raw frame-coordinate gestures after the first mutation because the "
+                    "frame may be stale; defer that gesture until the next real post-action frame. Coordinate actions use "
                     "the current whole-frame 0..1000 contract: click/scroll/move_mouse use "
                     "frame_x/frame_y; drag uses frame_x1/frame_y1/frame_x2/frame_y2 and optional "
                     "frame_points; draw_strokes uses frame_strokes. Never send physical x/y, "
@@ -394,11 +614,9 @@ def _native_frame_coordinate_tools(tools: list[dict]) -> list[dict]:
                 )
             fn["description"] = (
                 "Execute a short controller-managed multi-step transaction grounded in the current "
-                "authoritative frame. Every child must include its canonical action field. For a "
-                "single spatial action use the direct click/scroll/drag/draw_strokes tool, not this "
-                "batch. A batch may contain at most one spatial mutation; keyboard-only input, waits, "
-                "and checks may share that transaction; defer every later spatial action until the next real "
-                "post-action frame. Every nested coordinate action must use frame_* values in "
+                "authoritative frame. Every child must include its canonical action field and typed inputs. "
+                "Use this when deterministic Controller steps, keyboard input and ROI-scoped visual waits "
+                "belong to one verified transaction. Every nested coordinate action must use frame_* values in "
                 "0..1000; the runtime maps them through that exact frame and rejects mixed/physical "
                 "coordinates."
             )
@@ -888,37 +1106,7 @@ def tool_schemas(
                 "subgoal": _prop("string", "Optional short label for what this batch should accomplish."),
                 "actions": {
                     "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "action": _prop(
-                                "string",
-                                "Canonical controller action type.",
-                                enum=_SUPPORTED_CONTROLLER_ACTIONS,
-                            ),
-                            "tool": _prop(
-                                "string",
-                                "Compatibility alias for action.",
-                                enum=_SUPPORTED_CONTROLLER_ACTIONS,
-                            ),
-                            "params": {
-                                "type": "object",
-                                "description": "Optional nested action inputs.",
-                            },
-                        },
-                        "description": (
-                            "Allowed canonical action values are projected from the runtime "
-                            "operator contract. "
-                            "Use either {'action':'click','element_id':1} or shorthand "
-                            "{'click': {'element_id':1}}; {'hotkey':['enter']} is OK. click_element accepts "
-                            "label/expected_region/visual_anchor/fallback_text/role "
-                            "and may do one targeted observe(query=label) retry. "
-                            "Use type_into_element for locate+click+optional clear+type."
-                            " For draw_strokes, provide exactly one of already-grounded physical-pixel "
-                            "strokes or normalized_strokes in 0..1000. Normalized paths are mapped only "
-                            "after current target-window pixels reveal one credible light work surface."
-                        ),
-                    },
+                    "items": _batch_action_schema(native_frame=False),
                 },
                 "stop_on_error": _prop("boolean", "Default true."),
                 "sync": {
@@ -1220,10 +1408,6 @@ def tool_schemas(
               {"text": _prop("string")}, ["text"]),
         _tool("clipboard_paste", "Paste the current clipboard content via Ctrl+V."),
         _tool("cursor_position", "Return the current mouse cursor position."),
-        _tool("mouse_down", "Press and hold a mouse button.",
-              {"button": _prop("string", "Default left.", enum=["left", "right", "middle"])}),
-        _tool("mouse_up", "Release a mouse button.",
-              {"button": _prop("string", "Default left.", enum=["left", "right", "middle"])}),
         _tool("move_mouse", "Move the mouse cursor without clicking.",
               {"x": _prop("integer"), "y": _prop("integer")}, ["x", "y"]),
         _tool(
@@ -1282,9 +1466,6 @@ def tool_schemas(
             "Verify post-send visible evidence in the correct conversation. A composer preview alone always fails.",
             {"artifact_id": _prop("string"), "text": _prop("string")},
         ),
-        _tool("hold_key", "Hold keys for a duration in milliseconds, then release.",
-              {"keys": {"type": "array", "items": {"type": "string"}},
-               "duration_ms": _prop("integer")}, ["keys", "duration_ms"]),
         _tool("list_displays", "Enumerate connected monitors."),
         _tool(
             "coordinate_diagnostics",

@@ -82,7 +82,14 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 
 `POST /api/v2/task-contracts/compile` 接受 `task`、`max_steps` 与可选的 `cold_start`。`cold_start=true` 会在合同和图上写入 `experience_policy=disabled`，不生成 `skill_replay` 节点，并禁止该 run 读取或写入阶段 Skill、经验提示和会话记忆；它用于验证首次探索路径，不会改变任务语义或为某个测试对象增加分支。
 
-`GET /api/v2/arp/runs/{run_id}` 的 typed-task 快照包含 `task_contract`、`satisfiability`、`current_stage`、`stage_trace`、`artifacts`、`contract_evidence`、`experience_policy` 与 `skill_replay_node_count`。`stage_trace` 记录阶段状态、能力、模型可见工具、Controller 工具、artifact id、模型调用、Controller 耗时、尝试次数、失败分类和恢复策略；Controller batch 的 transaction trace 还记录 planned/attempted/committed/next-uncommitted、scope recovery 和重新绑定证据。观察帧不会出现在可发送 artifact 集合中。
+当结构化 intent 表明任务依赖当前可见状态、轮次或共享交互面时，编译结果包含 `InteractionSessionContract`，并生成 `ObserveScene → InferInteraction → PerformTurn → VerifyLocalEffect`。只有 `expected_external_change=true` 的持续会话才可能进入 `WaitForExternalChange`；普通一次性拖动、点击或选择任务在语义完成核验后结束。等待阶段发出的 `interaction.external_change_observed` 只是下一轮控制/遥测证据，不是最终 completion obligation；最终必须由最新权威帧上的 `interaction.task_completed` 满足。合同中的 `authoritative_state_ref` 与 `interaction_region_ref` 是 ephemeral state binding，不是可发送 artifact。
+
+`GET /api/v2/arp/runs/{run_id}` 的 typed-task 快照包含 `task_contract`、`satisfiability`、`current_stage`、`stage_trace`、`artifacts`、`contract_evidence`、`experience_policy` 与 `skill_replay_node_count`。`stage_trace` 记录阶段状态、required/verifier/exposed/missing capabilities、模型可见工具、Controller 工具、artifact id、模型调用次数、`model_elapsed_ms`、`controller_elapsed_ms`、`capture_elapsed_ms`、interaction budget、尝试次数、失败分类和恢复策略；这些计时来自节点持久化的 `runtime_metrics`，不能从截断后的展示摘要反推。Controller batch 的 transaction trace 还记录 planned/attempted/committed/next-uncommitted、scope recovery 和重新绑定证据。观察帧不会出现在可发送 artifact 集合中。
+
+实时交互 run 还在有界的 `interaction_state` 中审计 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、`frame_lineage`、`grounding_proof`、`failed_no_effect_evidence_check`、external change 与 `failure_stage`。保留 `last_*` 是为了避免终止用的 no-op plan 覆盖最后一次真实因果动作；前端运行视图优先展示这些字段。窗口标题、hwnd、capture scope、frame region/sha256/epoch 和 client bounds 用于判断 frame authority，不能把旧 frame id 继续带到新窗口动作。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
 | POST | `/api/v2/replay/apprentice/start`、`/api/v2/replay/apprentice/stop` | 开始或停止 Apprentice 录制 |
 | GET | `/api/v2/replay/apprentice/status` | Apprentice 录制状态 |
 | POST | `/api/replay` | 启动 replay job，返回 `replay_id` |
@@ -103,6 +110,10 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 ### 运行语义边界
 
 - 原生视觉模型收到的不是固定全屏图。`controller.target_window_capture_enabled=true` 时，只在目标 hwnd 有效、可见、位于前台、几何可信、任务不要求桌面或多窗口上下文且裁剪确有收益时使用目标窗口；其余情况保守回退完整虚拟桌面。每帧都会给出 `scope`、`reason`、物理 `screen_region` 和 0..1000 坐标空间。关闭该配置可强制全桌面做 A/B 对照。
+- 实时交互在 `SurfaceBinding` 中额外校验目标 hwnd、窗口 client authority、frame identity 和 `InteractionRegion`。client bounds 是安全包络而不是自动 action region；区域含糊、帧陈旧、前台所有权丢失或动作逃逸时请求 fail-closed，不会把全桌面坐标猜成目标坐标。
+- `InteractionAction` 支持 `click`、`double_click`、`hover`、`move_mouse`、`drag`、`draw_strokes`、`scroll`、`select_color`、`type_text`、`hotkey`、`hold_key` 和 `wait_stable`。低层 `mouse_down` / `mouse_up` 仅允许出现在同一个经验证的 Controller batch 中，并且必须与移动/等待形成平衡事务；它们不是独立的顶层模型工具。长拖拽或连续路径的新鲜度 preflight 使用沿路径均匀抽样的多个局部 ROI（当前上限 12），而不是只比较一个容易稀释局部变化的大包围框。
+- 每个空间动作在映射坐标前验证 observation artifact 的 current-run/purpose/sendable/HWND、实际 capture region、声明 frame region、尺寸、session 和 frame lineage；读取 artifact 时重新核验文件大小、SHA-256 与图像尺寸。`grounding_mode` 区分对象锚点、语义控件、自由路径、相对手势与有界坐标，`effect_region_binding` 则显式绑定 source/target/surface/independent。
+- 失败动作后的“新证据”只比较 source/target/path/effect 因果 ROI；整帧 hash 只是完全相同的快路径，无关动画和不可用比较都不能换取额外模型调用。判定写入 `failed_no_effect_evidence_check` 并 fail-closed。
 - `controller.multi_input_cooperation=false` 是默认值。开启后只是在人和 Agent 之间仲裁同一套系统光标/键盘焦点：优先后台安全动作，前台或光标所有权变化时中止物理动作。它不提供两个真实鼠标或两套键盘并发。
 - `agent_plan` WebSocket 事件里的计划可被模型在运行中完全替换、清空，或原子 add/update/remove/move/reopen。客户端应把新快照当作当前状态，不能把旧索引缓存成固定任务清单。
 - 计划完成、Controller 返回 `ok`、`screen_delta.changed=true`、颜色存在或 replay 成功都不是最终任务证据。完成仍由当前目标匹配的新鲜视觉核验或文件/进程等确定性 evidence 决定。
@@ -116,9 +127,9 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 
 ## ChatGPT / Codex 桌面 MCP
 
-WinPilot 的 `POST /mcp` 是 controller-first MCP：读取 runtime/windows/runs/skills，按需观察或捕获视觉帧，执行有作用域的 GUI subgoal/短 batch，并运行或检查 ARP 图。它刻意不暴露任意 shell/file 工具；`run_arp_graph` 也拒绝嵌套 `agent_goal`，因为连接的桌面模型已经是高层规划器。
+WinPilot 的 `POST /mcp` 是 controller-first MCP：读取 runtime/windows/runs/skills，先用 `begin_gui_task` 将完整用户目标绑定到 Task Contract 与 MCP session，再按需观察或捕获视觉帧，执行有作用域的 GUI subgoal/短 batch，并运行或检查 ARP 图。它刻意不暴露任意 shell/file 工具；`run_arp_graph` 也拒绝嵌套 `agent_goal`，因为连接的桌面模型已经是高层规划器。
 
-MCP 的 Controller 动作遵守同一目标窗口、新鲜状态、Desktop queue、多输入仲裁和 evidence 规则。截图入口略有不同：`observe_desktop` 返回结构化目标窗口观察；`capture_visual_fallback` 由高层规划器显式选择完整虚拟桌面或一个完整 ROI，并在 metadata 中报告实际区域，不自动套用 Agent 的目标窗口裁剪器。MCP 工具返回成功只说明该工具调用成立，不自动等于用户任务完成。
+MCP 的 Controller 动作遵守同一目标窗口、新鲜状态、Desktop queue、多输入仲裁和 evidence 规则。`capture_visual_fallback` 返回权威 JPEG，以及 `frame_id`、frame sha256/epoch、目标 hwnd 和物理映射；任何 `frame_*` 动作必须回显该 `source_frame_id`。`execute_visual_transaction` 把一个 typed Controller transaction 与动作后权威 JPEG 放在同一次 MCP 往返中，避免客户端再用动作前图判断结果；一张权威帧最多授权一次 raw coordinate gesture。`observe_desktop` 仍用于结构化目标窗口观察。MCP 工具返回成功只说明该工具调用成立，不自动等于用户任务完成。
 
 本地连接、bearer token、代理绕过和当前外部 HTTPS/OAuth 限制见 [chatgpt-desktop.md](chatgpt-desktop.md)。
 

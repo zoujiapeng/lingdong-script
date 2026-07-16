@@ -68,12 +68,18 @@ def test_perception_reducer_marks_open_chat_and_stops_contact_reclick_loop():
     reduced = reducer.reduce_snapshot(
         snapshot,
         task=f"use chat to talk with {target}",
+        communication_context={"active": True, "recipient": target},
+    )
+    untyped = reducer.reduce_snapshot(
+        snapshot,
+        task=f"use chat to talk with {target}",
     )
 
     assert reduced["screen_stage"] == "chat_conversation"
     assert reduced["top_candidates"][0]["role"] == "synthetic_chat_composer"
     assert reduced["stats"]["input_like"] == 2
     assert "do not click the contact row again" in reduced["recommended_next_controller_actions"][0]
+    assert untyped["chat_context"] == {}
 
 
 def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
@@ -81,8 +87,12 @@ def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
     from winpilot.agent.tool_result import ToolResult
 
     calls = []
+    from winpilot.tasking.intent import TaskIntentParser
+
+    task = 'send "AUTO_SEND_0712" and confirm it in chat history'
     session = SimpleNamespace(
-        task='send "AUTO_SEND_0712" and confirm it in chat history',
+        task=task,
+        task_intent=TaskIntentParser().parse(task).model_dump(mode="json"),
         hwnd=9,
         run_id="test-auto-send",
         _auto_communication_attempted=False,
@@ -120,9 +130,12 @@ def test_grounded_explicit_send_observe_returns_proposal_without_mutation():
 
 def test_grounded_chat_does_not_autogenerate_content_for_open_ended_chat():
     from winpilot.agent.perception_tools import PerceptionToolMixin
+    from winpilot.tasking.intent import TaskIntentParser
 
+    task = "use chat to talk with My Phone"
     session = SimpleNamespace(
-        task="use chat to talk with My Phone",
+        task=task,
+        task_intent=TaskIntentParser().parse(task).model_dump(mode="json"),
         hwnd=9,
         run_id="test-open-chat",
         _auto_communication_attempted=False,

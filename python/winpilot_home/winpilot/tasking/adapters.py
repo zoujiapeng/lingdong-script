@@ -109,6 +109,7 @@ class CommunicationAdapter(ABC):
         store: ArtifactStore,
         evidence: EvidenceRegistry,
         stop_event=None,
+        task_intent: Any | None = None,
     ) -> None:
         self.run_id = run_id
         self.task = task
@@ -118,6 +119,7 @@ class CommunicationAdapter(ABC):
             stop_event=stop_event,
             task=task,
             runtime_profile=RuntimeProfile(desktop=True, coding=False),
+            task_intent=task_intent,
         )
         self.session.run_id = run_id
         self.session.managed_artifact_store = store
@@ -126,8 +128,11 @@ class CommunicationAdapter(ABC):
         self.stage_id = ""
         self._preview_frame_id = ""
         self._pre_paste_frame_id = ""
+        self._pre_send_frame_id = ""
         self._post_send_frame_id = ""
         self._send_action_at = 0.0
+        self._pending_text = ""
+        self._sent_text = ""
         self._conversation_header: dict[str, Any] = {}
         self._composer_binding: dict[str, Any] = {}
         self._pending_send_confirmation: dict[str, Any] = {}
@@ -151,7 +156,16 @@ class CommunicationAdapter(ABC):
             return None
 
     def _observe_snapshot(self):
-        self.session.dispatch("observe", {"full": True})
+        # Communication adapters need UI structure plus OCR only in the exact
+        # recipient/confirmation zones they verify below.  A task-wide visual
+        # profile would otherwise run full-window OCR (and sometimes VLM) for
+        # every local transaction, even though no semantic scene decision is
+        # being delegated to a model here.
+        self.session.dispatch("observe", {
+            "full": True,
+            "include_icons": False,
+            "_controller_perception_mode": "structured_ui",
+        })
         return getattr(self.session, "snapshot", None)
 
     @staticmethod
@@ -178,16 +192,29 @@ class CommunicationAdapter(ABC):
         zone: tuple[float, float, float, float],
         *,
         roles: tuple[str, ...] = (),
+        allow_contains: bool = False,
+        allowed_prefixes: tuple[str, ...] = (),
     ) -> list[Any]:
         window = getattr(snapshot, "region", None)
         if not isinstance(window, Region):
             return []
         region = self.layout_profile.region(window, zone)
         wanted = self._normalized_text(text)
+        if not wanted:
+            return []
+        prefixed_identities = {
+            f"{self._normalized_text(prefix)}{wanted}"
+            for prefix in allowed_prefixes
+            if self._normalized_text(prefix)
+        }
         matches: list[Any] = []
         for element in getattr(snapshot, "elements", []) or []:
             actual = self._normalized_text(getattr(element, "text", ""))
-            if not actual or (actual != wanted and wanted not in actual):
+            if not actual or (
+                actual != wanted
+                and actual not in prefixed_identities
+                and not (allow_contains and wanted in actual)
+            ):
                 continue
             role = str(getattr(element, "role", "") or "").casefold()
             if roles and not any(token in role for token in roles):
@@ -271,6 +298,7 @@ class CommunicationAdapter(ABC):
                 probe,
                 self.recipient,
                 self.layout_profile.attachment_confirmation,
+                allowed_prefixes=("发送给", "发送给：", "发送给:", "Send to", "Send to:", "Send to："),
             )
             send_buttons: list[Any] = []
             for element in elements:
@@ -423,6 +451,105 @@ class CommunicationAdapter(ABC):
             "height": max(0, min(frame.height - top, zoned.height)),
         }
 
+    @staticmethod
+    def _frame_screen_region(frame: Artifact) -> Region | None:
+        capture_region = frame.metadata.get("region") if isinstance(frame.metadata, dict) else None
+        if not isinstance(capture_region, dict):
+            return None
+        try:
+            return Region(
+                int(capture_region.get("left", 0)),
+                int(capture_region.get("top", 0)),
+                int(capture_region.get("width", frame.width)),
+                int(capture_region.get("height", frame.height)),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _frame_local_element_region(
+        self,
+        frame: Artifact,
+        element: Any,
+        *,
+        padding: int = 8,
+    ) -> dict[str, int]:
+        screen_region = self._frame_screen_region(frame)
+        if screen_region is None:
+            return {}
+        try:
+            left = int(getattr(element, "left", 0) or 0)
+            top = int(getattr(element, "top", 0) or 0)
+            width = int(getattr(element, "width", 0) or 0)
+            height = int(getattr(element, "height", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        if width <= 0 or height <= 0:
+            return {}
+        pad = max(0, int(padding))
+        local_left = max(0, left - screen_region.left - pad)
+        local_top = max(0, top - screen_region.top - pad)
+        right = min(frame.width, left - screen_region.left + width + pad)
+        bottom = min(frame.height, top - screen_region.top + height + pad)
+        if right <= local_left or bottom <= local_top:
+            return {}
+        return {
+            "left": local_left,
+            "top": local_top,
+            "width": right - local_left,
+            "height": bottom - local_top,
+        }
+
+    def _element_is_outbound(self, snapshot: Any, element: Any) -> bool:
+        window = getattr(snapshot, "region", None)
+        if not isinstance(window, Region):
+            return False
+        messages = self.layout_profile.region(window, self.layout_profile.messages)
+        try:
+            center_x = int(getattr(element, "cx", 0) or 0)
+            if not center_x:
+                center_x = (
+                    int(getattr(element, "left", 0) or 0)
+                    + int(getattr(element, "width", 0) or 0) // 2
+                )
+        except (TypeError, ValueError):
+            return False
+        return center_x >= messages.left + messages.width // 2
+
+    def _match_bbox_is_outbound(self, frame: Artifact, match_bbox: Any) -> bool:
+        if not isinstance(match_bbox, (list, tuple)) or len(match_bbox) != 4:
+            return False
+        messages = self._frame_local_zone(frame, self.layout_profile.messages)
+        if not messages:
+            return False
+        try:
+            center_x = int(match_bbox[0]) + int(match_bbox[2]) // 2
+        except (TypeError, ValueError):
+            return False
+        return center_x >= int(messages["left"]) + int(messages["width"]) // 2
+
+    def _message_text_matches(self, snapshot: Any, text: str) -> list[Any]:
+        """Read exact text only inside the message obligation ROI."""
+        window = getattr(snapshot, "region", None)
+        if not isinstance(window, Region):
+            return []
+        elements = list(getattr(snapshot, "elements", []) or [])
+        zone = self.layout_profile.region(window, self.layout_profile.messages)
+        try:
+            elements.extend(ocr.collect(zone, min_conf=0.45) or [])
+        except Exception:
+            pass
+        probe = SimpleNamespace(region=window, elements=elements)
+        matches = self._matching_elements(
+            probe,
+            text,
+            self.layout_profile.messages,
+        )
+        return sorted(
+            matches,
+            key=lambda item: int(getattr(item, "cy", 0) or 0),
+            reverse=True,
+        )
+
     def paste_or_attach_artifact(self, artifact_id: str, *, stage_id: str = "") -> dict[str, Any]:
         self.stage_id = stage_id or self.stage_id
         artifact = self.store.get(artifact_id, require_sendable=True)
@@ -444,8 +571,16 @@ class CommunicationAdapter(ABC):
                 "confirmation_context": before_confirmation,
             }
         self._pending_send_confirmation = {}
+        self._sent_text = ""
+        self._pending_text = ""
         before_frame = self._capture_observation("pre_paste_conversation")
         self._pre_paste_frame_id = before_frame.artifact_id if before_frame else ""
+        if not self._pre_paste_frame_id:
+            return {
+                "ok": False,
+                "failure_type": "delivery_baseline_missing",
+                "error": "artifact staging requires a clean pre-paste conversation baseline",
+            }
         result = self.session.dispatch("paste_image_file", {"path": artifact.managed_path})
         if not _ok(result.text):
             return {"ok": False, "failure_type": "artifact_stage_failed", "error": result.text}
@@ -461,25 +596,9 @@ class CommunicationAdapter(ABC):
         frame = self._capture_observation("composer_preview")
         self._preview_frame_id = frame.artifact_id if frame else ""
         composer_region = self._frame_local_zone(frame, self.layout_profile.composer) if frame else {}
-        composer_match = (
-            self.store.visual_match(
-                artifact.artifact_id,
-                frame.artifact_id,
-                target_region=composer_region,
-            )
-            if frame and composer_region else {"matched": False, "reason": "composer preview frame/region missing"}
-        )
         confirmation_region = (
             self._frame_local_zone(frame, self.layout_profile.attachment_preview)
             if frame else {}
-        )
-        confirmation_match = (
-            self.store.visual_match(
-                artifact.artifact_id,
-                frame.artifact_id,
-                target_region=confirmation_region,
-            )
-            if frame and confirmation_region else {"matched": False, "reason": "attachment confirmation frame/region missing"}
         )
         after_snapshot = self._observe_snapshot()
         confirmation_context = self._attachment_confirmation_context(after_snapshot)
@@ -508,6 +627,11 @@ class CommunicationAdapter(ABC):
         preview_surface = ""
         preview_region: dict[str, Any] = {}
         preview_match: dict[str, Any] = {"matched": False}
+        composer_match: dict[str, Any] = {
+            "matched": False,
+            "reason": "not evaluated because a stronger causal attachment proof was available",
+        }
+        confirmation_match: dict[str, Any] = dict(composer_match)
         if causal_confirmation:
             # Structural confirmation evidence outranks a weak match in the
             # underlying composer.  A modal can overlap the composer and tiny
@@ -517,21 +641,47 @@ class CommunicationAdapter(ABC):
             preview_match = {
                 "matched": True,
                 "method": "exact_paste_receipt+new_single_attachment_confirmation",
-                "visual_match": confirmation_match,
+                "visual_match": {
+                    "matched": False,
+                    "skipped": "causal_attachment_confirmation",
+                },
                 "frame_change": confirmation_change,
                 "paste_receipt": paste_receipt,
             }
             self._bind_pending_confirmation(artifact, confirmation_context, paste_receipt)
-        elif confirmation_match.get("matched") is True:
-            preview_surface = "attachment_confirmation"
-            preview_region = confirmation_region
-            preview_match = confirmation_match
-            if confirmation_context.get("verified") is True:
-                self._bind_pending_confirmation(artifact, confirmation_context, paste_receipt)
-        elif composer_match.get("matched") is True:
-            preview_surface = "composer"
-            preview_region = composer_region
-            preview_match = composer_match
+        else:
+            confirmation_match = (
+                self.store.visual_match(
+                    artifact.artifact_id,
+                    frame.artifact_id,
+                    target_region=confirmation_region,
+                )
+                if frame and confirmation_region else {
+                    "matched": False,
+                    "reason": "attachment confirmation frame/region missing",
+                }
+            )
+            composer_match = (
+                self.store.visual_match(
+                    artifact.artifact_id,
+                    frame.artifact_id,
+                    target_region=composer_region,
+                )
+                if frame and composer_region else {
+                    "matched": False,
+                    "reason": "composer preview frame/region missing",
+                }
+            )
+            if confirmation_match.get("matched") is True:
+                preview_surface = "attachment_confirmation"
+                preview_region = confirmation_region
+                preview_match = confirmation_match
+                if confirmation_context.get("verified") is True:
+                    self._bind_pending_confirmation(artifact, confirmation_context, paste_receipt)
+            elif composer_match.get("matched") is True:
+                preview_surface = "composer"
+                preview_region = composer_region
+                preview_match = composer_match
         if preview_match.get("matched") is not True:
             return {
                 "ok": False,
@@ -616,6 +766,12 @@ class CommunicationAdapter(ABC):
                     "failure_type": "artifact_identity_unproven",
                     "error": "pending confirmation artifact hash no longer matches the managed artifact",
                 }
+            if not self._pre_paste_frame_id:
+                return {
+                    "ok": False,
+                    "failure_type": "delivery_baseline_missing",
+                    "error": "refused to send because the clean pre-paste conversation baseline is unavailable",
+                }
 
             # Re-observe immediately before the irreversible send.  Element ids
             # and OCR boxes from the paste frame are not reused across frames.
@@ -672,10 +828,24 @@ class CommunicationAdapter(ABC):
                     "error": "refused to send because the requested recipient is no longer proven in the conversation header",
                     "recipient_context": recipient_context,
                 }
+            if not self._pending_text:
+                baseline = self._capture_observation("pre_send_conversation")
+                self._pre_send_frame_id = baseline.artifact_id if baseline else ""
+            if not self._pre_send_frame_id:
+                return {
+                    "ok": False,
+                    "failure_type": "delivery_baseline_missing",
+                    "error": "refused to send because a causal pre-send conversation baseline could not be captured",
+                }
             result = self.session.dispatch("hotkey", {"keys": ["enter"]})
         if not _ok(result.text):
             return {"ok": False, "failure_type": "send_action_missing", "error": result.text}
         self._send_action_at = time.time()
+        if confirmation_binding:
+            self._sent_text = ""
+        elif self._pending_text:
+            self._sent_text = self._pending_text
+            self._pending_text = ""
         if confirmation_binding:
             time.sleep(0.3)
             after_snapshot = self._observe_snapshot()
@@ -710,6 +880,9 @@ class CommunicationAdapter(ABC):
                 "post_send_recipient_context": post_send_context,
                 "composer_binding": self._composer_binding,
                 "attachment_confirmation": confirmation_binding,
+                "pre_send_frame_id": self._pre_send_frame_id,
+                "pre_paste_frame_id": self._pre_paste_frame_id,
+                "sent_text": self._sent_text,
             },
         )
         time.sleep(0.8)
@@ -718,9 +891,21 @@ class CommunicationAdapter(ABC):
     def send_text(self, text: str, *, stage_id: str = "") -> dict[str, Any]:
         if not text:
             return {"ok": False, "failure_type": "text_missing", "error": "send_text requires text"}
+        self._sent_text = ""
+        self._pending_text = ""
+        self._pre_send_frame_id = ""
+        baseline = self._capture_observation("pre_type_conversation")
+        self._pre_send_frame_id = baseline.artifact_id if baseline else ""
+        if not self._pre_send_frame_id:
+            return {
+                "ok": False,
+                "failure_type": "delivery_baseline_missing",
+                "error": "text send requires a causal conversation baseline before typing",
+            }
         typed = self.session.dispatch("type_text", {"text": text})
         if not _ok(typed.text):
             return {"ok": False, "failure_type": "text_stage_failed", "error": typed.text}
+        self._pending_text = text
         return self.send_current_composer(stage_id=stage_id)
 
     def verify_latest_outbound(
@@ -734,6 +919,25 @@ class CommunicationAdapter(ABC):
         if not self._send_action_at:
             return {"ok": False, "failure_type": "send_action_missing", "error": "no real send action was recorded"}
         artifact = self.store.get(artifact_id, require_sendable=True) if artifact_id else None
+        if artifact is not None and not self._pre_paste_frame_id:
+            return {
+                "ok": False,
+                "failure_type": "delivery_baseline_missing",
+                "error": "artifact delivery has no clean pre-paste conversation baseline",
+            }
+        if artifact is None:
+            if not text or self._normalized_text(text) != self._normalized_text(self._sent_text):
+                return {
+                    "ok": False,
+                    "failure_type": "text_identity_unproven",
+                    "error": "requested delivery text is not bound to the recorded send action",
+                }
+            if not self._pre_send_frame_id:
+                return {
+                    "ok": False,
+                    "failure_type": "delivery_baseline_missing",
+                    "error": "text delivery has no causal pre-send conversation baseline",
+                }
         deadline = time.monotonic() + 5.0
         last: dict[str, Any] = {
             "ok": False,
@@ -761,11 +965,16 @@ class CommunicationAdapter(ABC):
                     artifact.artifact_id,
                     post_frame.artifact_id,
                     target_region=message_region,
-                    baseline_frame_id=self._preview_frame_id,
+                    baseline_frame_id=self._pre_paste_frame_id,
                     require_changed=True,
                     min_scale=0.08,
                 )
-                if recipient_context.get("verified") is True and match.get("matched") is True:
+                outbound_geometry = self._match_bbox_is_outbound(post_frame, match.get("match_bbox"))
+                if (
+                    recipient_context.get("verified") is True
+                    and match.get("matched") is True
+                    and outbound_geometry
+                ):
                     record = self.evidence.record(
                         "delivery.visible_outbound",
                         provider="communication_adapter_visible_outbound",
@@ -776,9 +985,11 @@ class CommunicationAdapter(ABC):
                         metadata={
                             "artifact_sha256": artifact.sha256,
                             "preview_frame_id": self._preview_frame_id,
+                            "baseline_frame_id": self._pre_paste_frame_id,
                             "post_send_frame_id": post_frame.artifact_id,
                             "message_region": message_region,
                             "artifact_match": match,
+                            "outbound_geometry": outbound_geometry,
                             "recipient_context": recipient_context,
                             "send_action_at": self._send_action_at,
                         },
@@ -794,15 +1005,37 @@ class CommunicationAdapter(ABC):
                     "error": "post-send evidence does not prove a newly changed artifact bubble in the requested conversation",
                     "recipient_context": recipient_context,
                     "artifact_match": match,
+                    "outbound_geometry": outbound_geometry,
                     "post_send_frame_id": post_frame.artifact_id,
                 }
             else:
-                text_matches = self._matching_elements(
-                    snapshot,
-                    text,
-                    self.layout_profile.messages,
-                ) if text else []
-                if recipient_context.get("verified") is True and text_matches:
+                text_matches = self._message_text_matches(snapshot, text)
+                candidate_evidence: list[dict[str, Any]] = []
+                changed_match: Any | None = None
+                for candidate in text_matches:
+                    outbound = self._element_is_outbound(snapshot, candidate)
+                    candidate_region = self._frame_local_element_region(post_frame, candidate)
+                    change = (
+                        self.store.frame_change(
+                            self._pre_send_frame_id,
+                            post_frame.artifact_id,
+                            target_region=candidate_region,
+                        )
+                        if candidate_region else {
+                            "changed": False,
+                            "reason": "text candidate has no frame-local geometry",
+                        }
+                    )
+                    candidate_evidence.append({
+                        "element": self._element_metadata(candidate),
+                        "outbound": outbound,
+                        "region": candidate_region,
+                        "frame_change": change,
+                    })
+                    if outbound and change.get("changed") is True:
+                        changed_match = candidate
+                        break
+                if recipient_context.get("verified") is True and changed_match is not None:
                     record = self.evidence.record(
                         "delivery.visible_outbound",
                         provider="communication_adapter_visible_outbound",
@@ -811,7 +1044,9 @@ class CommunicationAdapter(ABC):
                         stage_id=self.stage_id,
                         metadata={
                             "text": text,
-                            "text_element": self._element_metadata(text_matches[0]),
+                            "text_element": self._element_metadata(changed_match),
+                            "baseline_frame_id": self._pre_send_frame_id,
+                            "candidate_evidence": candidate_evidence,
                             "recipient_context": recipient_context,
                             "post_send_frame_id": post_frame.artifact_id,
                             "send_action_at": self._send_action_at,
@@ -828,6 +1063,7 @@ class CommunicationAdapter(ABC):
                     "error": "outbound text is not visible in the message region of the requested conversation",
                     "recipient_context": recipient_context,
                     "text_visible": bool(text_matches),
+                    "candidate_evidence": candidate_evidence,
                     "post_send_frame_id": post_frame.artifact_id,
                 }
             time.sleep(0.35)
@@ -965,6 +1201,7 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                     label,
                     self.layout_profile.search,
                     roles=("edit", "input", "search", "combobox"),
+                    allow_contains=True,
                 ))
             search_field = search_fields[0] if search_fields else None
             if search_field is not None:
@@ -1049,7 +1286,12 @@ class SearchBasedChatAdapter(CommunicationAdapter):
     def resolve_composer(self) -> dict[str, Any]:
         if not self.session.hwnd or not self.recipient:
             return {"ok": False, "failure_type": "composer_not_resolved", "error": "conversation context is not bound"}
-        snapshot = self._observe_snapshot()
+        # open_conversation leaves a freshly verified authoritative snapshot.
+        # Reuse it for this reversible focus click; irreversible paste/send
+        # paths independently revalidate recipient and confirmation state.
+        snapshot = getattr(self.session, "snapshot", None)
+        if snapshot is None:
+            snapshot = self._observe_snapshot()
         context = self._recipient_header_context(snapshot)
         if context.get("verified") is not True:
             return {
@@ -1122,6 +1364,65 @@ class DomainAdapterRegistry:
         "wechat": WeChatCommunicationAdapter,
         "微信": WeChatCommunicationAdapter,
     }
+
+    @staticmethod
+    def _component_id(adapter_type: type[CommunicationAdapter]) -> str:
+        return f"{str(adapter_type.id).strip().casefold()}_adapter"
+
+    @classmethod
+    def component_for_channel(cls, channel: str) -> str:
+        """Resolve a registered adapter component without instantiating it."""
+
+        adapter_type = cls._types.get(str(channel or "").strip().casefold())
+        return cls._component_id(adapter_type) if adapter_type is not None else ""
+
+    @classmethod
+    def probe_registration(
+        cls,
+        *,
+        channel: str = "",
+        component: str = "",
+    ) -> dict[str, Any]:
+        """Perform the only safe fail-before-run adapter probe.
+
+        Registry membership and channel/component agreement are static facts.
+        Constructing an adapter may touch the desktop, while installation,
+        login state, and recipient availability are mutable external state; all
+        three remain explicit stage-time limitations instead of being reported
+        as preflight success.
+        """
+
+        channel_key = str(channel or "").strip().casefold()
+        component_key = str(component or "").strip().casefold()
+        channel_type = cls._types.get(channel_key) if channel_key else None
+        registered_types = set(cls._types.values())
+        component_type = next(
+            (
+                adapter_type
+                for adapter_type in registered_types
+                if cls._component_id(adapter_type) == component_key
+            ),
+            None,
+        ) if component_key else None
+        selected_type = channel_type or component_type
+        registered = bool(
+            selected_type is not None
+            and (not channel_key or channel_type is selected_type)
+            and (not component_key or component_type is selected_type)
+        )
+        return {
+            "registered": registered,
+            "channel": str(channel or "").strip(),
+            "component": (
+                cls._component_id(selected_type) if selected_type is not None else component_key
+            ),
+            "adapter_id": str(selected_type.id) if selected_type is not None else "",
+            "probe_scope": "static_registry_only",
+            "runtime_limitations": [
+                "Static registration does not prove that the application is installed or running.",
+                "Static registration does not prove login/session readiness or recipient availability.",
+            ],
+        }
 
     @classmethod
     def create(cls, channel: str, **kwargs: Any) -> CommunicationAdapter:

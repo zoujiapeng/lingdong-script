@@ -162,6 +162,27 @@ def test_vlm_still_skipped_in_normal_mode_when_uia_rich(monkeypatch):
     assert ran["vlm"] is False
 
 
+def test_structured_ui_mode_skips_full_ocr_vlm_and_empty_rescue(monkeypatch):
+    """Controller structure probes leave visible-text checks to scoped OCR."""
+    from winpilot.perception import fusion, uia
+
+    ran = _fake_observe_env(monkeypatch)
+    monkeypatch.setattr(uia, "collect", lambda _hwnd: [])
+    rescued = {"called": False}
+
+    def rescue(*_args, **_kwargs):
+        rescued["called"] = True
+        return []
+
+    monkeypatch.setattr(fusion, "_escalate_empty", rescue)
+    snapshot = fusion.observe(123, include_icons=False, perception_mode="structured_ui")
+
+    assert ran == {"ocr": False, "vlm": False}
+    assert rescued["called"] is False
+    assert snapshot.dim_stats["ocr"]["skipped"] == "structured_ui_scoped_ocr"
+    assert snapshot.dim_stats["vlm"]["skipped"] == "structured_ui_controller"
+
+
 def test_backward_compat_vision_priority_true(monkeypatch):
     """vision_priority=True must behave identically to perception_mode='visual'."""
     from winpilot.perception import fusion
@@ -243,3 +264,85 @@ def test_visual_observe_does_not_block_on_hung_uia_provider(monkeypatch):
     assert ran["ocr"] is True
     assert snapshot.dim_stats["uia"]["timed_out"] is True
     assert fusion._uia_suppressed(9876) is True
+
+
+def test_structured_ui_observe_does_not_block_on_hung_uia_provider(monkeypatch):
+    import time
+
+    from winpilot.perception import fusion, uia
+
+    ran = _fake_observe_env(monkeypatch)
+    previous_get = fusion.CONFIG.get
+
+    def bounded_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "visual_dimension_timeout_s":
+            return 0.05
+        if section == "fusion" and key == "uia_timeout_cooldown_s":
+            return 1.0
+        return previous_get(section, key, default=default)
+
+    monkeypatch.setattr(fusion.CONFIG, "get", bounded_config_get)
+    monkeypatch.setattr(uia, "collect", lambda _hwnd: (time.sleep(0.4) or []))
+    fusion._UIA_SUPPRESSED_UNTIL.clear()
+
+    started = time.monotonic()
+    snapshot = fusion.observe(
+        9877, include_icons=False, perception_mode="structured_ui",
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.25
+    assert ran == {"ocr": False, "vlm": False}
+    assert snapshot.dim_stats["uia"]["timed_out"] is True
+    assert snapshot.dim_stats["ocr"]["skipped"] == "structured_ui_scoped_ocr"
+    assert snapshot.dim_stats["vlm"]["skipped"] == "structured_ui_controller"
+    assert fusion._uia_suppressed(9877) is True
+
+
+def test_structured_ui_stop_event_interrupts_hung_uia_without_suppression(monkeypatch):
+    import threading
+    import time
+
+    from winpilot.perception import fusion, uia
+
+    ran = _fake_observe_env(monkeypatch)
+    previous_get = fusion.CONFIG.get
+
+    def bounded_config_get(section, key=None, default=None):
+        if section == "fusion" and key == "visual_dimension_timeout_s":
+            return 2.0
+        return previous_get(section, key, default=default)
+
+    monkeypatch.setattr(fusion.CONFIG, "get", bounded_config_get)
+    provider_release = threading.Event()
+    stop_event = threading.Event()
+
+    def blocked_uia(_hwnd):
+        provider_release.wait(1.0)
+        return []
+
+    monkeypatch.setattr(uia, "collect", blocked_uia)
+    fusion._UIA_SUPPRESSED_UNTIL.clear()
+    timer = threading.Timer(0.03, stop_event.set)
+    timer.start()
+
+    try:
+        started = time.monotonic()
+        snapshot = fusion.observe(
+            9878,
+            include_icons=False,
+            perception_mode="structured_ui",
+            stop_event=stop_event,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        provider_release.set()
+        timer.cancel()
+
+    assert elapsed < 0.25
+    assert ran == {"ocr": False, "vlm": False}
+    assert snapshot.dim_stats["uia"]["canceled"] is True
+    assert "timed_out" not in snapshot.dim_stats["uia"]
+    assert "ocr" not in snapshot.dim_stats
+    assert "vlm" not in snapshot.dim_stats
+    assert fusion._uia_suppressed(9878) is False

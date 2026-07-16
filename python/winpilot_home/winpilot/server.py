@@ -743,7 +743,9 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
     if isinstance(contract_data, dict):
         from .tasking.contracts import TaskContract
 
-        CapabilityPlanner.assert_satisfiable(TaskContract.model_validate(contract_data))
+        task_contract = TaskContract.model_validate(contract_data)
+        CapabilityPlanner.assert_satisfiable(task_contract)
+        CapabilityPlanner.assert_runtime_satisfiable(task_contract)
     validation = validate_graph(graph)
     if not validation.valid:
         raise ValueError("; ".join(validation.errors))

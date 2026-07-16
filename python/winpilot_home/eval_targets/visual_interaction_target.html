@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en" translate="no" class="notranslate">
+<head>
+  <meta charset="utf-8">
+  <meta name="google" content="notranslate">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WinPilot Visual Interaction Target</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #eef2f7;
+      color: #152238;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 760px; min-height: 560px; }
+    main {
+      width: min(1000px, calc(100vw - 40px));
+      margin: 20px auto;
+      padding: 24px;
+      border: 1px solid #c9d2df;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: 0 14px 42px rgba(33, 50, 79, .12);
+    }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .instruction { margin: 0; font-size: 17px; color: #4a5870; }
+    .arena {
+      position: relative;
+      height: 390px;
+      margin-top: 22px;
+      overflow: hidden;
+      border: 2px solid #b7c2d1;
+      border-radius: 14px;
+      background:
+        linear-gradient(90deg, rgba(102, 120, 148, .07) 1px, transparent 1px),
+        linear-gradient(rgba(102, 120, 148, .07) 1px, transparent 1px),
+        #f8fafc;
+      background-size: 40px 40px;
+      touch-action: none;
+      user-select: none;
+    }
+    .token {
+      position: absolute;
+      left: 72px;
+      top: 143px;
+      width: 106px;
+      height: 106px;
+      display: grid;
+      place-items: center;
+      border: 5px solid #0a4ea8;
+      border-radius: 50%;
+      background: #2684ff;
+      color: #fff;
+      font-weight: 800;
+      cursor: grab;
+      box-shadow: 0 6px 15px rgba(38, 132, 255, .3);
+      z-index: 3;
+    }
+    .token.dragging { cursor: grabbing; box-shadow: 0 9px 22px rgba(38, 132, 255, .42); }
+    .target {
+      position: absolute;
+      right: 70px;
+      top: 100px;
+      width: 220px;
+      height: 190px;
+      display: grid;
+      place-items: center;
+      border: 5px dashed #169b62;
+      border-radius: 20px;
+      background: rgba(22, 155, 98, .08);
+      color: #087747;
+      font-size: 25px;
+      font-weight: 800;
+    }
+    .target.success { border-style: solid; background: #dff7eb; }
+    .status {
+      min-height: 54px;
+      margin-top: 18px;
+      padding: 13px 16px;
+      border: 2px solid #aeb9c8;
+      border-radius: 10px;
+      background: #f7f9fc;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: .02em;
+    }
+    .status.success { border-color: #169b62; background: #e7f8ef; color: #087747; }
+    .case-id { float: right; color: #65748a; font: 13px ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="case-id" id="caseId"></span>
+    <h1>Visual Interaction Test</h1>
+    <p class="instruction">Drag the blue circle labeled MOVE ME completely into the green DROP HERE target.</p>
+    <section class="arena" id="arena" aria-label="Visual interaction arena">
+      <div class="token" id="token">MOVE ME</div>
+      <div class="target" id="target">DROP HERE</div>
+    </section>
+    <div class="status" id="status" role="status">WAITING_FOR_REAL_POINTER_DRAG</div>
+  </main>
+  <script>
+    const query = new URLSearchParams(location.search);
+    const caseId = query.get('case') || 'manual';
+    document.title = `WinPilot Visual Interaction Target ${caseId}`;
+    document.getElementById('caseId').textContent = `case=${caseId}`;
+
+    const arena = document.getElementById('arena');
+    const token = document.getElementById('token');
+    const target = document.getElementById('target');
+    const status = document.getElementById('status');
+    let activePointer = null;
+    let offsetX = 0;
+    let offsetY = 0;
+    let moveCount = 0;
+
+    function report(type, event, extra = {}) {
+      const payload = {
+        case_id: caseId,
+        type,
+        trusted: Boolean(event && event.isTrusted),
+        pointer_type: event && event.pointerType || '',
+        client_x: event && Math.round(event.clientX) || 0,
+        client_y: event && Math.round(event.clientY) || 0,
+        screen_x: event && Math.round(event.screenX) || 0,
+        screen_y: event && Math.round(event.screenY) || 0,
+        move_count: moveCount,
+        ...extra,
+      };
+      fetch('/event', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+        cache: 'no-store',
+      }).catch(() => {});
+    }
+
+    token.addEventListener('pointerdown', (event) => {
+      if (!event.isTrusted || activePointer !== null) return;
+      activePointer = event.pointerId;
+      const rect = token.getBoundingClientRect();
+      offsetX = event.clientX - rect.left;
+      offsetY = event.clientY - rect.top;
+      moveCount = 0;
+      token.classList.add('dragging');
+      token.setPointerCapture(event.pointerId);
+      report('pointerdown', event);
+      event.preventDefault();
+    });
+
+    token.addEventListener('pointermove', (event) => {
+      if (event.pointerId !== activePointer || !event.isTrusted) return;
+      const arenaRect = arena.getBoundingClientRect();
+      const x = Math.max(0, Math.min(arena.clientWidth - token.offsetWidth, event.clientX - arenaRect.left - offsetX));
+      const y = Math.max(0, Math.min(arena.clientHeight - token.offsetHeight, event.clientY - arenaRect.top - offsetY));
+      token.style.left = `${x}px`;
+      token.style.top = `${y}px`;
+      moveCount += 1;
+      if (moveCount === 1 || moveCount % 5 === 0) report('pointermove', event);
+    });
+
+    function finish(event, canceled) {
+      if (event.pointerId !== activePointer) return;
+      if (token.hasPointerCapture(event.pointerId)) token.releasePointerCapture(event.pointerId);
+      activePointer = null;
+      token.classList.remove('dragging');
+      const tokenRect = token.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const centerX = tokenRect.left + tokenRect.width / 2;
+      const centerY = tokenRect.top + tokenRect.height / 2;
+      const succeeded = !canceled && event.isTrusted && moveCount >= 2 &&
+        tokenRect.left >= targetRect.left && tokenRect.right <= targetRect.right &&
+        tokenRect.top >= targetRect.top && tokenRect.bottom <= targetRect.bottom;
+      if (succeeded) {
+        target.classList.add('success');
+        status.classList.add('success');
+        status.textContent = 'DRAG_SUCCEEDED';
+      } else {
+        status.classList.remove('success');
+        status.textContent = canceled ? 'DRAG_CANCELED' : 'DROP_MISSED_TARGET';
+      }
+      report(canceled ? 'pointercancel' : 'pointerup', event, {
+        succeeded,
+        token_center_x: Math.round(centerX),
+        token_center_y: Math.round(centerY),
+        token_left: Math.round(tokenRect.left),
+        token_top: Math.round(tokenRect.top),
+        token_right: Math.round(tokenRect.right),
+        token_bottom: Math.round(tokenRect.bottom),
+        target_left: Math.round(targetRect.left),
+        target_top: Math.round(targetRect.top),
+        target_right: Math.round(targetRect.right),
+        target_bottom: Math.round(targetRect.bottom),
+      });
+    }
+
+    token.addEventListener('pointerup', event => finish(event, false));
+    token.addEventListener('pointercancel', event => finish(event, true));
+
+    // Let the harness prove that the isolated browser profile has rendered a
+    // usable scene before the agent sees its first authoritative frame. This
+    // setup event is never accepted as interaction success.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const tokenRect = token.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      report('page_ready', null, {
+        succeeded: false,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight,
+        token_left: Math.round(tokenRect.left),
+        token_top: Math.round(tokenRect.top),
+        token_right: Math.round(tokenRect.right),
+        token_bottom: Math.round(tokenRect.bottom),
+        target_left: Math.round(targetRect.left),
+        target_top: Math.round(targetRect.top),
+        target_right: Math.round(targetRect.right),
+        target_bottom: Math.round(targetRect.bottom),
+      });
+    }));
+  </script>
+</body>
+</html>

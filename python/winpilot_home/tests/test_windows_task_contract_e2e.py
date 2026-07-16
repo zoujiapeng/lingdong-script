@@ -10,12 +10,16 @@ import json
 import os
 import subprocess
 import time
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 import pytest
 
 
 pytestmark = [pytest.mark.real, pytest.mark.slow]
+
+ROOT = Path(__file__).resolve().parents[1]
+REPORT_ROOT = ROOT.parents[1] / ".e2e" / "real_task_contract"
 
 TASKS = (
     "用画板画一头猪然后截图打开QQ发送给我的手机",
@@ -55,11 +59,26 @@ def _run_graph(base: str, graph: dict, timeout_s: float) -> dict:
     return snapshot
 
 
+def _assert_runtime_is_current(status: dict) -> None:
+    runtime = status.get("runtime") or {}
+    assert int(runtime.get("contract_version") or 0) == 2, runtime
+    assert Path(str(runtime.get("repo_root") or "")).resolve() == ROOT.parents[1].resolve(), runtime
+    source = runtime.get("source") or {}
+    assert source.get("loaded_stamp"), source
+    assert source.get("loaded_stamp") == source.get("current_stamp"), source
+    assert source.get("drifted") is False, source
+    assert status.get("vlm_configured") is True, status.get("vlm_reason")
+
+
 @pytest.mark.parametrize("task", TASKS, ids=("cold-pig-draw-capture-send", "draw-capture-send", "capture-existing-send", "draw-window-capture-send"))
 def test_real_frontend_path_paint_capture_qq_delivery(task: str):
     if os.environ.get("WINPILOT_REAL_QQ_E2E") != "1":
         pytest.skip("set WINPILOT_REAL_QQ_E2E=1 to authorize a real QQ send")
     base = os.environ.get("WINPILOT_E2E_BASE_URL", "http://127.0.0.1:8765").rstrip("/")
+    status = _get(f"{base}/api/status")
+    _assert_runtime_is_current(status)
+    assert status.get("running") is False, "real QQ E2E requires an idle interactive runtime"
+    started_at = time.time()
     compiled = _post(f"{base}/api/v2/task-contracts/compile", {
         "task": task,
         "max_steps": 80,
@@ -107,7 +126,39 @@ def test_real_frontend_path_paint_capture_qq_delivery(task: str):
         compiled["graph"],
         float(os.environ.get("WINPILOT_REAL_QQ_TIMEOUT_S", "600")),
     )
+    stage_trace = snapshot.get("stage_trace") or []
+    report = {
+        "kind": "real_windows_paint_artifact_qq_e2e",
+        "run_id": snapshot.get("run_id"),
+        "task": task,
+        "status": snapshot.get("status"),
+        "duration_s": round(time.time() - started_at, 3),
+        "experience_policy": snapshot.get("experience_policy"),
+        "skill_replay_node_count": snapshot.get("skill_replay_node_count"),
+        "contract": compiled.get("contract"),
+        "satisfiability": snapshot.get("satisfiability"),
+        "stage_trace": stage_trace,
+        "model_calls": sum(int(item.get("model_calls") or 0) for item in stage_trace),
+        "model_elapsed_ms": sum(int(item.get("model_elapsed_ms") or 0) for item in stage_trace),
+        "controller_elapsed_ms": sum(int(item.get("controller_elapsed_ms") or 0) for item in stage_trace),
+        "capture_elapsed_ms": sum(int(item.get("capture_elapsed_ms") or 0) for item in stage_trace),
+        "artifacts": snapshot.get("artifacts"),
+        "contract_evidence": snapshot.get("contract_evidence"),
+        "completion_contract": snapshot.get("completion_contract"),
+        "error": snapshot.get("error"),
+        "runtime": status.get("runtime"),
+    }
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    report_id = str(snapshot.get("run_id") or f"failed-{int(started_at)}")
+    (REPORT_ROOT / f"{report_id}.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
     assert snapshot["status"] == "done", snapshot
     assert snapshot["artifacts"]["count"] >= 1
+    assert snapshot.get("experience_policy") == "disabled"
+    assert int(snapshot.get("skill_replay_node_count") or 0) == 0
+    assert stage_trace and all(item.get("status") == "done" for item in stage_trace), stage_trace
+    assert all(item.get("satisfiable") is True for item in stage_trace), stage_trace
+    assert all(not item.get("missing_capabilities") for item in stage_trace), stage_trace
     assert any(item.get("predicate") == "delivery.visible_outbound" and item.get("verified") is True for item in snapshot["contract_evidence"]["records"])
     assert all(item.get("kind") != "agent_goal" for item in snapshot["history"])

@@ -34,14 +34,6 @@ _SEARCH_SEMANTIC_TERMS = (
     "检索",
     "查找",
 )
-_CHAT_TASK_RE = re.compile(
-    r"\b(?:chat|message|reply|send)\b|"
-    r"\u804a\u5929|\u53d1\u6d88\u606f|\u53d1\u4fe1\u606f|\u56de\u590d|"
-    r"\u79c1\u4fe1|\u6211\u7684\u624b\u673a|\bqq\b|\bwechat\b",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class InputCandidate:
     element: UIElement | None
@@ -440,9 +432,9 @@ def _nearby_synthetic_candidates(snapshot: Snapshot, label_terms: list[str]) -> 
 def _chat_composer_candidate(
     snapshot: Snapshot,
     *,
-    task: str,
     label_terms: list[str],
     expected_region: str,
+    communication_context: dict[str, Any] | None,
 ) -> InputCandidate | None:
     """Infer a custom-rendered chat composer from split-pane geometry.
 
@@ -451,14 +443,11 @@ def _chat_composer_candidate(
     header is strong evidence that a conversation is already open. Chat apps
     commonly render the composer as an unlabeled custom surface below history.
     """
-    context = " ".join([task or "", *label_terms])
-    expected = (expected_region or "").casefold().replace("_", "-")
-    if not _CHAT_TASK_RE.search(context) and expected not in {
-        "bottom", "lower", "bottom-right", "lower-right",
-    }:
+    facts = communication_context if isinstance(communication_context, dict) else {}
+    if facts.get("active") is not True:
         return None
     window = snapshot.region
-    task_norm = _norm(task)
+    recipient = _norm(facts.get("recipient"))
     by_text: dict[str, list[UIElement]] = {}
     for element in snapshot.elements:
         text = _norm(element.text)
@@ -478,7 +467,10 @@ def _chat_composer_candidate(
             and int(element.cy) <= window.top + int(window.height * 0.16)
             for element in elements
         )
-        requested = text in task_norm or any(text in _norm(term) for term in label_terms)
+        requested = bool(
+            (recipient and (text in recipient or recipient in text))
+            or any(text in _norm(term) for term in label_terms)
+        )
         if left_row and right_header and requested:
             matched_label = text
             break
@@ -517,6 +509,7 @@ def locate_input(
     fallback_text: Iterable[str] = (),
     min_score: float = 0.45,
     task: str = "",
+    communication_context: dict[str, Any] | None = None,
 ) -> InputLocateResult:
     terms = _terms(label, fallback_text)
     strict_label = _requires_concrete_label_match(terms)
@@ -600,9 +593,9 @@ def locate_input(
     scored.extend(_nearby_synthetic_candidates(snapshot, terms))
     chat_composer = _chat_composer_candidate(
         snapshot,
-        task=task,
         label_terms=terms,
         expected_region=expected_region,
+        communication_context=communication_context,
     )
     if chat_composer is not None:
         scored.append(chat_composer)

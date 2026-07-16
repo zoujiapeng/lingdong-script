@@ -11,6 +11,21 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
     previous = "start"
     x = 0.0
     y = 120.0
+    persistent_interaction = False
+    bounded_interaction = False
+    interaction_visit_budget = (
+        max(
+            2,
+            min(
+                1000,
+                int(contract.session.max_model_calls)
+                + int(contract.session.max_replans)
+                + 2,
+            ),
+        )
+        if contract.session is not None
+        else 30
+    )
 
     for stage in contract.stages:
         stage_node = ArpNode(
@@ -30,7 +45,16 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 delay_ms=250,
                 backoff=1.5,
             ),
-            timeout_s=180 if stage.execution and stage.execution.model_role != "none" else 90,
+            timeout_s=(
+                min(
+                    3600.0,
+                    float(contract.session.external_change_timeout_s) + 15.0,
+                )
+                if stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
+                else 180
+                if stage.execution and stage.execution.model_role != "none"
+                else 90
+            ),
             x=x,
             y=y,
         )
@@ -87,7 +111,190 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
 
     nodes.append(ArpNode(id=end_id, kind=ArpNodeKind.END, name="完成", x=0, y=y))
     if contract.stages:
-        edges.append(ArpEdge(id=f"{previous}-end", source=previous, target=end_id))
+        persistent_interaction = bool(
+            contract.session is not None
+            and contract.session.lifecycle == "persistent"
+            and any(
+                stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
+                for stage in contract.stages
+            )
+        )
+        bounded_interaction = bool(
+            contract.session is not None
+            and contract.session.lifecycle == "bounded"
+            and any(
+                stage.type == StageType.INFER_INTERACTION
+                for stage in contract.stages
+            )
+            and any(
+                stage.type == StageType.VERIFY_LOCAL_EFFECT
+                for stage in contract.stages
+            )
+            and not any(
+                stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
+                for stage in contract.stages
+            )
+        )
+        if persistent_interaction or bounded_interaction:
+            observe_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.OBSERVE_SCENE
+            )
+            infer_for_rebind = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.INFER_INTERACTION
+            )
+            edges.append(ArpEdge(
+                id=f"{infer_for_rebind.id}-reobserve-{observe_stage.id}",
+                source=infer_for_rebind.id,
+                target=observe_stage.id,
+                branch="reobserve",
+                label="重新观察以确认界面位移",
+            ))
+            # Recoverable interaction failures must re-enter through a fresh
+            # authoritative observation.  This is deliberately a different
+            # branch from PerformTurn's pre-mutation ``reobserve`` path: after
+            # an uncertain controller outcome we must never replay or plan
+            # from the old coordinates.
+            for recover_stage in (
+                item for item in contract.stages
+                if item.type in {
+                    StageType.OBSERVE_SCENE,
+                    StageType.INFER_INTERACTION,
+                    StageType.PERFORM_TURN,
+                    StageType.VERIFY_LOCAL_EFFECT,
+                }
+            ):
+                edges.append(ArpEdge(
+                    id=f"{recover_stage.id}-recover-reobserve-{observe_stage.id}",
+                    source=recover_stage.id,
+                    target=observe_stage.id,
+                    branch="recover_reobserve",
+                    label="从新权威帧恢复当前语义回合",
+                ))
+        if persistent_interaction:
+            wait_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
+            )
+            infer_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.INFER_INTERACTION
+            )
+            perform_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.PERFORM_TURN
+            )
+            verify_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.VERIFY_LOCAL_EFFECT
+            )
+            edges.append(ArpEdge(
+                id=f"{perform_stage.id}-reobserve-{infer_stage.id}",
+                source=perform_stage.id,
+                target=infer_stage.id,
+                branch="reobserve",
+                label="动作前帧已变化，重新推断",
+            ))
+            # A live session advances only after the target-bound watcher has
+            # proved an external ROI change.  ``complete`` remains a reachable
+            # explicit terminal branch for future protocol/end-state support;
+            # normal sessions stay active until the user stops them.
+            edges.append(ArpEdge(
+                id=f"{wait_stage.id}-changed-{infer_stage.id}",
+                source=wait_stage.id,
+                target=infer_stage.id,
+                branch="changed",
+                label="外部变化后继续",
+            ))
+            edges.append(ArpEdge(
+                id=f"{verify_stage.id}-continue-{infer_stage.id}",
+                source=verify_stage.id,
+                target=infer_stage.id,
+                branch="continue",
+                label="终态未证实，继续推断",
+            ))
+            downstream = next(
+                (
+                    edge for edge in edges
+                    if edge.source == wait_stage.id and edge.branch == "next"
+                ),
+                None,
+            )
+            if downstream is not None:
+                downstream.branch = "complete"
+                downstream.label = "会话结束后继续"
+                verify_complete_target = downstream.target
+            else:
+                edges.append(ArpEdge(
+                    id=f"{wait_stage.id}-complete-{end_id}",
+                    source=wait_stage.id,
+                    target=end_id,
+                    branch="complete",
+                    label="会话结束",
+                ))
+                verify_complete_target = end_id
+            edges.append(ArpEdge(
+                id=f"{verify_stage.id}-complete-{verify_complete_target}",
+                source=verify_stage.id,
+                target=verify_complete_target,
+                branch="complete",
+                label="已验证会话终态",
+            ))
+            if previous != wait_stage.id:
+                edges.append(ArpEdge(id=f"{previous}-end", source=previous, target=end_id))
+        elif bounded_interaction:
+            infer_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.INFER_INTERACTION
+            )
+            perform_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.PERFORM_TURN
+            )
+            verify_stage = next(
+                stage for stage in contract.stages
+                if stage.type == StageType.VERIFY_LOCAL_EFFECT
+            )
+            edges.append(ArpEdge(
+                id=f"{perform_stage.id}-reobserve-{infer_stage.id}",
+                source=perform_stage.id,
+                target=infer_stage.id,
+                branch="reobserve",
+                label="动作前帧已变化，重新推断",
+            ))
+            # The verifier, not the planner alone, selects the terminal route.
+            # Partial but causally verified actions re-enter semantic inference
+            # on the fresh post-action frame without re-running ObserveScene.
+            edges.append(ArpEdge(
+                id=f"{verify_stage.id}-continue-{infer_stage.id}",
+                source=verify_stage.id,
+                target=infer_stage.id,
+                branch="continue",
+                label="基于新帧继续",
+            ))
+            downstream = next(
+                (
+                    edge for edge in edges
+                    if edge.source == verify_stage.id and edge.branch == "next"
+                ),
+                None,
+            )
+            if downstream is not None:
+                downstream.branch = "complete"
+                downstream.label = "交互完成后继续"
+            else:
+                edges.append(ArpEdge(
+                    id=f"{verify_stage.id}-complete-{end_id}",
+                    source=verify_stage.id,
+                    target=end_id,
+                    branch="complete",
+                    label="已验证完成",
+                ))
+            if previous != verify_stage.id:
+                edges.append(ArpEdge(id=f"{previous}-end", source=previous, target=end_id))
+        else:
+            edges.append(ArpEdge(id=f"{previous}-end", source=previous, target=end_id))
     else:
         edges.append(ArpEdge(id="start-end", source="start", target=end_id))
     return ArpGraph(
@@ -98,7 +305,11 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
         edges=edges,
         variables={"task": contract.task},
         policy=ArpPolicy(
-            max_node_visits=30,
+            max_node_visits=(
+                interaction_visit_budget
+                if persistent_interaction or bounded_interaction
+                else 30
+            ),
             fail_fast=True,
             require_evidence_on_done=bool(contract.obligations),
             allow_shell=False,
@@ -114,6 +325,17 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 "satisfiable": contract.satisfiable,
                 "missing_capabilities": contract.missing_capabilities,
             },
+            "interaction_budget": (
+                {
+                    "requested_max_steps": contract.session.requested_max_steps,
+                    "max_semantic_turns": contract.session.max_semantic_turns,
+                    "max_replans": contract.session.max_replans,
+                    "max_model_calls": contract.session.max_model_calls,
+                    "external_change_timeout_s": contract.session.external_change_timeout_s,
+                }
+                if contract.session is not None
+                else None
+            ),
         },
     )
 

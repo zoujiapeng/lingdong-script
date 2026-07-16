@@ -284,7 +284,11 @@ class WorldModel:
         if self._identical_observes >= 2 and self._last_change_line:
             return f"提示：{self._last_change_line}，请确认上一步是否点对了目标。"
         if self._visual_no_progress:
-            return "Visual action did not change its target region. Re-observe focus/tool/canvas before retrying."
+            return (
+                "Visual action did not change its intended region. Re-observe target "
+                "ownership and re-ground the source, path, target, and effect region "
+                "before retrying."
+            )
         return ""
 
     def screen_advisory(self) -> str:

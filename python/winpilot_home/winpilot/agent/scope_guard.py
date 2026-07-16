@@ -28,6 +28,8 @@ GUI_SCOPE_MUTATIONS = {
     "scroll",
     "drag",
     "draw_strokes",
+    "select_color",
+    "ensure_document_surface",
     "clipboard_paste",
     "paste_image_file",
     "mouse_down",
@@ -39,6 +41,89 @@ GUI_SCOPE_MUTATIONS = {
     "execute_subgoal",
 }
 _SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "scan_windows", "list_windows"}
+
+# These operations can physically move/click/drag the pointer or resolve a
+# semantic anchor and then do so.  They must never adopt an arbitrary
+# foreground window merely because the session has not established a target
+# yet.  Keyboard-only compatibility paths remain unchanged for now.
+_SPATIAL_TARGET_REQUIRED = {
+    "click", "click_element", "scroll", "move_mouse", "drag",
+    "draw_strokes", "select_color", "ensure_document_surface",
+    "mouse_down", "mouse_up", "coordinate_click_test", "paste_image_file",
+}
+
+
+def _batch_action_parts(value: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return "", {}
+    name = str(value.get("action") or value.get("tool") or "").strip()
+    if name:
+        nested = value.get("params") if isinstance(value.get("params"), dict) else {}
+        return name, {
+            **nested,
+            **{key: item for key, item in value.items() if key not in {"action", "tool", "params"}},
+        }
+    if len(value) == 1:
+        name, nested = next(iter(value.items()))
+        return str(name), dict(nested) if isinstance(nested, dict) else {"value": nested}
+    return "", {}
+
+
+def _batch_establishes_target_before_spatial(args: dict[str, Any]) -> bool:
+    """Whether a target-less batch establishes scope before its first pointer action."""
+    established = False
+    for value in args.get("actions") or []:
+        name, child = _batch_action_parts(value)
+        if name == "focus_window" and (
+            child.get("hwnd") or str(child.get("title") or "").strip()
+        ):
+            established = True
+            continue
+        if name == "launch" and str(child.get("command") or "").strip():
+            # Launch is allowed, but it does not prove a target until a later
+            # focus_window binds the concrete hwnd/title.
+            continue
+        if name in _SPATIAL_TARGET_REQUIRED:
+            return established
+    return True
+
+
+def _requires_live_target(tool_name: str, args: dict[str, Any]) -> bool:
+    if tool_name in _SPATIAL_TARGET_REQUIRED:
+        return True
+    if tool_name == "run_action_batch":
+        return not _batch_establishes_target_before_spatial(args)
+    if tool_name == "execute_subgoal":
+        return bool(
+            any(isinstance(args.get(key), dict) and args.get(key) for key in ("click", "draw"))
+            or any(isinstance(args.get(key), list) and args.get(key) for key in ("clicks", "draws"))
+        )
+    return False
+
+
+def _missing_target_result(session, tool_name: str) -> ToolResult:
+    before = _context(session)
+    payload = {
+        "ok": False,
+        "verified": False,
+        "blocked": True,
+        "missing_live_target": True,
+        "error": (
+            "A pointer/spatial mutation requires an explicitly established live "
+            "target window. Use open_app/focus_window (or begin a batch with a "
+            "concrete focus_window) before injecting input; the current foreground "
+            "window was not adopted implicitly."
+        ),
+        "tool": tool_name,
+        "scope_guard": {
+            "before": before,
+            "after": before,
+            "recovery_attempted": False,
+            "focus_stolen": False,
+        },
+        "needs_observe": True,
+    }
+    return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 _STRONG_CONTROL_PLANE_TITLES = (
     "灵动脚本",
     "lingdong script",
@@ -222,6 +307,20 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     """
     if tool_name in _SCOPE_RECOVERY_TOOLS or tool_name not in GUI_SCOPE_MUTATIONS:
         return None
+    if tool_name == "mouse_up" and executor.agent_holds_mouse_button(
+        str(args.get("button") or "left"),
+    ):
+        # A release for a press owned by this process is cleanup, not a new
+        # target mutation.  Never leave the global button held merely because
+        # the target closed, moved, or lost foreground during the gesture.
+        return None
+    # FastGuiController is also unit-tested/embeddable with tiny executor
+    # adapters.  Only a real ToolSession exposes the target-context contract;
+    # without it there is no foreground identity for this guard to evaluate.
+    # Production Agent/MCP paths always use ToolSession and therefore remain
+    # fail-closed below.
+    if not callable(getattr(session, "_action_target_context", None)):
+        return None
     cooperative = bool(CONFIG.get(
         "controller", "multi_input_cooperation", default=False,
     ))
@@ -229,6 +328,16 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     # launch/focus/discovery step.  Inferring the first target here would adopt
     # whichever foreground window the human happens to own.
     target = getattr(session, "hwnd", None)
+    explicit_scope = args.get("target_window") if isinstance(args.get("target_window"), dict) else {}
+    if not _window_alive(target) and _window_alive(explicit_scope.get("hwnd")):
+        target = int(explicit_scope["hwnd"])
+        try:
+            session._remember_target(target, str(explicit_scope.get("title") or ""))
+        except Exception:
+            try:
+                session.hwnd = target
+            except Exception:
+                pass
     if cooperative and not _window_alive(target):
         before = _context(session)
         payload = {
@@ -253,9 +362,15 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
         }
         return ToolResult(json.dumps(payload, ensure_ascii=False, default=str))
 
-    # Outside cooperative mode the first GUI action may retain the historical
-    # target-hint recovery behaviour.
+    # Pointer/spatial actions are fail-closed without an explicit binding.  In
+    # particular, do not call _find_target_window here: choosing whichever
+    # foreground/task-hint happens to match is exactly the cross-application
+    # state leak this guard is meant to prevent.
     if not _window_alive(target):
+        if _requires_live_target(tool_name, args):
+            return _missing_target_result(session, tool_name)
+        # Non-spatial compatibility actions may retain the historical
+        # target-hint recovery behaviour.
         try:
             target = session._find_target_window()
         except Exception:

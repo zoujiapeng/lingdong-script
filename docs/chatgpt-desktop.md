@@ -72,14 +72,28 @@ GET /api/v2/integrations/chatgpt
 
 当前 MCP 工具分为四层：
 
-- 状态与目标：`get_gui_agent_state`、`list_desktop_windows`、`focus_desktop_window`、`launch_app`、`reset_gui_context`。
+- 状态与目标：`get_gui_agent_state`、`begin_gui_task`、`list_desktop_windows`、`focus_desktop_window`、`launch_app`、`reset_gui_context`。
 - 感知：`observe_desktop` 走低成本 UIA/OCR/CV；`capture_visual_fallback` 只在复杂或未知像素状态下返回 JPEG。
-- Controller：`execute_gui_subgoal`、`execute_action_batch` 执行短、具体、有作用域的 routine。
+- Controller：`execute_gui_subgoal`、`execute_action_batch` 执行短、具体、有作用域的 routine；`execute_visual_transaction` 执行一个 typed 本地事务，并在同一 MCP 往返中返回真实动作后画面。typed action 覆盖 click/double-click、hover/move、drag/draw、scroll、text/hotkey、bounded hold 和 wait；原始 mouse down/up 只能在一个平衡校验后的 batch 内组成连续事务，不是两个可随意悬空的工具调用。
 - 编排与复用：`validate_arp_graph`、`run_arp_graph`、`get_gui_run`、`cancel_gui_run`、`decide_human_gate`、`list_gui_skills`、`replay_gui_skill`。
 
 这个 MCP 面刻意不暴露任意 shell/file 工具。`run_arp_graph` 拒绝包含 `agent_goal` 的图：当前 ChatGPT/Codex 会话已经是高层规划器，再嵌套 API-backed `AgentRunner` 会重复规划、增加延迟并意外要求另一套模型凭据。
 
 在这种模式下，高层任务列表属于连接的模型会话；它可随时改变自己的计划、取消 run、重建 ARP 图或决定人工门。WinPilot 本地 Agent 的 `revise_plan` 动态 todo 只适用于真正运行 `AgentRunner` 的 `/api/chat` / 前端 `agent_goal` 路径，MCP 不伪造一份第二计划。
+
+推荐的视觉事务顺序是：
+
+```text
+begin_gui_task(完整原始任务)
+  -> list/focus/launch target
+  -> capture_visual_fallback
+  -> 使用返回的 authoritative_frame.frame_id 规划一个 typed turn
+  -> execute_visual_transaction(source_frame_id=...)
+  -> 检查同一返回中的 post_frame 和 Controller evidence
+  -> 完成、重新观察或等待外部变化
+```
+
+`begin_gui_task` 不是一句提示词缓存：它把完整任务绑定到 MCP session 的 Task Contract、RuntimeProfile、目标与 frame 状态，并清除上个任务的陈旧权威帧。连接的模型仍负责语义规划，但不能绕过本地目标、帧新鲜度、坐标映射和 Controller transaction 校验。
 
 ## 截图范围
 
@@ -87,9 +101,9 @@ GET /api/v2/integrations/chatgpt
 
 - WinPilot 原生视觉 Agent 的自动帧由 `controller.target_window_capture_enabled` 控制。只有目标窗口经过前台、可见性、几何、任务语义和收益检查后才裁剪；跨窗口、桌面全局或含糊场景回退完整虚拟桌面。“系统设置”页可关闭优化做 A/B 对照。
 - MCP 的 `observe_desktop` 默认返回结构化目标窗口观察，不返回重复 JPEG。
-- MCP 的 `capture_visual_fallback` 由高层规划器显式选择：不传 ROI 时当前实现捕获完整虚拟桌面，传入完整 `x/y/width/height` 时捕获该物理区域。返回 metadata 会说明实际范围；它不是常规动作内环，也不会自动猜一个裁剪。
+- MCP 的 `capture_visual_fallback` 由高层规划器显式选择：已有可信目标绑定且不传 ROI 时捕获该目标 scope；没有目标时回退完整虚拟桌面；传入完整 `x/y/width/height` 时捕获该物理区域。返回的 `authoritative_frame` 包含 `frame_id`、`screen_epoch`、`hwnd`、物理 region、capture scope、sha256 和创建时间。
 
-无论哪条路径，坐标必须相对本次返回的画面/区域解释。旧图、旧窗口或未声明范围的坐标不能继续用于新动作。
+无论哪条路径，坐标必须相对本次返回的画面/区域解释。任何含 `frame_*` 的动作都必须回显 `source_frame_id`；frame id、screen epoch 或目标 hwnd 不匹配时 fail-closed。一张权威帧最多授权一次 raw coordinate gesture；同一 typed transaction 中可组合不依赖未知中间画面的语义 Controller 动作，之后必须消费新的 post-frame。长拖拽和自由路径的 preflight 沿路径最多均匀采样 12 个局部 ROI，并保留显式 effect region，不用一个大包围框稀释局部变化。
 
 ## 多输入协同
 
@@ -103,8 +117,11 @@ GET /api/v2/integrations/chatgpt
 ## 证据与安全
 
 - 工具返回 `ok`、像素发生变化、skill replay 跑完或 ARP 到达 `end`，都不自动等于用户任务完成。高层规划器必须检查当前 run evidence、目标窗口和必要的新鲜视觉/确定性结果。
-- `capture_visual_fallback` 是观察，不授权 mutation；`execute_gui_subgoal` 和 `execute_action_batch` 才能改变桌面。
+- `execute_visual_transaction` 的 post-frame 只证明观察到了动作后的当前状态；最终完成仍需按原始目标做语义核验。拖动发生了像素变化、按下过鼠标或出现局部动画，都不能单独替代目标状态。
+- `capture_visual_fallback` 是观察，不授权 mutation；只有 `execute_gui_subgoal`、`execute_action_batch` 与 `execute_visual_transaction` 等显式 Controller 工具能改变桌面。
 - 工具 annotations 把桌面 mutation 标为非幂等/可能破坏性操作。
 - `integrations.chatgpt_desktop.allow_desktop_mutation=false` 可把桥接面切成只读。
 - Agent、ARP、Replay 和 MCP Controller 共享 runtime/desktop 资源保护；真实鼠标键盘保持全局单写。
 - `run_arp_graph` 的人工门只能用 `decide_human_gate` 决定当前明确暂停的节点，不能批准另一条旧 run。
+
+换用 ChatGPT/Codex 作为高层规划器可以改变语义理解质量和模型往返延迟，但不会绕过或自动修复本地的窗口绑定、坐标映射、输入所有权、Adapter 和完成证据。连接成功也不等于未知 GUI 已达到人类通用水平；移动/遮挡目标、动画、远程桌面、多显示器缩放和长会话仍需要独立 E2E 基准。

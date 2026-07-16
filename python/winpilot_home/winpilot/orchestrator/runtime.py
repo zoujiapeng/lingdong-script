@@ -98,6 +98,53 @@ def _json_preview(
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _interaction_state_preview(value: Any) -> Any:
+    """Preserve bounded audit-critical interaction fields in run snapshots.
+
+    Interaction plans can be structurally large.  A single shared traversal
+    budget used to consume the whole snapshot before the causal action and
+    verifier fields near the end of the state mapping were reached.  Each
+    critical field receives its own bounded budget; remaining diagnostic state
+    is still included through the normal compact preview.
+    """
+    if not isinstance(value, dict):
+        return _json_preview(value, limit=1800, _budget=[220])
+    critical_keys = (
+        "session_id",
+        "status",
+        "mode",
+        "frame_id",
+        "turn_index",
+        "model_calls",
+        "replan_count",
+        "budget",
+        "target_binding",
+        "interaction_region",
+        "turn_owner",
+        "baseline_artifact_id",
+        "current_artifact_id",
+        "last_mutating_plan",
+        "last_executed_action",
+        "last_local_verification",
+        "planned_action",
+        "executed_action",
+        "local_verification",
+        "external_change",
+        "action_preflight",
+        "completion_evidence_id",
+        "failure_stage",
+    )
+    out: dict[str, Any] = {}
+    for key in critical_keys:
+        if key in value:
+            out[key] = _json_preview(value[key], limit=1800, _budget=[140])
+    remaining = {key: item for key, item in value.items() if key not in out}
+    extras = _json_preview(remaining, limit=1800, _budget=[220])
+    if isinstance(extras, dict):
+        out.update(extras)
+    return out
+
+
 def _typed_snapshot_list(
     snapshot: Any,
     list_key: str,
@@ -190,6 +237,16 @@ class ArpExecution:
                     continue
                 output = record.get("output") if isinstance(record.get("output"), dict) else {}
                 artifact = output.get("artifact") if isinstance(output.get("artifact"), dict) else {}
+                interaction_state = (
+                    output.get("interaction_state")
+                    if isinstance(output.get("interaction_state"), dict)
+                    else {}
+                )
+                runtime_metrics = (
+                    record.get("runtime_metrics")
+                    if isinstance(record.get("runtime_metrics"), dict)
+                    else {}
+                )
                 stage_trace.append({
                     "stage_id": output.get("stage_id") or record.get("node_id"),
                     "stage_type": output.get("stage_type"),
@@ -206,11 +263,15 @@ class ArpExecution:
                     "adapter": output.get("adapter") or "",
                     "model_role": output.get("model_role") or "none",
                     "artifact_id": output.get("artifact_id") or artifact.get("artifact_id") or "",
-                    "model_calls": int(output.get("model_calls") or 0),
-                    "controller_elapsed_ms": int(output.get("controller_elapsed_ms") or 0),
+                    "model_calls": int(runtime_metrics.get("model_calls") or output.get("model_calls") or 0),
+                    "model_elapsed_ms": int(runtime_metrics.get("model_elapsed_ms") or output.get("model_elapsed_ms") or 0),
+                    "controller_elapsed_ms": int(runtime_metrics.get("controller_elapsed_ms") or output.get("controller_elapsed_ms") or 0),
+                    "capture_elapsed_ms": int(runtime_metrics.get("capture_elapsed_ms") or output.get("capture_elapsed_ms") or 0),
+                    "budget": runtime_metrics.get("budget") or output.get("budget") or interaction_state.get("budget") or {},
                     "failure_type": output.get("failure_type") or "",
                     "recovery": output.get("recovery") or {},
                     "error": record.get("error") or output.get("error") or "",
+                    "interaction_state": interaction_state,
                 })
             return {
                 "run_id": self.run_id,
@@ -240,6 +301,9 @@ class ArpExecution:
                 "task_contract": _json_preview(self.graph.metadata.get("task_contract")),
                 "satisfiability": _json_preview(self.graph.metadata.get("satisfiability")),
                 "current_stage": _json_preview(self.runtime_state.get("current_stage")),
+                "interaction_state": _interaction_state_preview(
+                    self.runtime_state.get("interaction_state") or {},
+                ),
                 "artifacts": _typed_snapshot_list(
                     artifact_snapshot,
                     "artifacts",
@@ -251,6 +315,11 @@ class ArpExecution:
                     "records",
                     item_limit=1200,
                     item_budget=180,
+                ),
+                "completion_contract": _json_preview(
+                    self.runtime_state.get("completion_contract"),
+                    limit=1800,
+                    _budget=[240],
                 ),
                 "stage_trace": [
                     _json_preview(item, limit=1800, _budget=[160])
@@ -426,10 +495,108 @@ class ArpExecution:
             ),
         )
 
+    def _task_contract_completion(self, node: ArpNode) -> NodeResult | None:
+        """Evaluate a typed task contract at the only terminal boundary.
+
+        Legacy and user-authored ARP graphs without ``task_contract`` metadata
+        retain the generic evidence policy.  Once a graph declares a task
+        contract, however, reaching END is not completion until every exact
+        predicate/stage/provider obligation has been verified.
+        """
+        if "task_contract" not in self.graph.metadata:
+            return None
+
+        from pydantic import ValidationError
+
+        from ..tasking.artifacts import ArtifactStore
+        from ..tasking.completion import CompletionContractVerifier
+        from ..tasking.contracts import TaskContract
+        from ..tasking.evidence import EvidenceRegistry
+
+        raw_contract = self.graph.metadata.get("task_contract")
+        if not isinstance(raw_contract, dict) or not raw_contract:
+            verdict = {
+                "ok": False,
+                "run_id": self.run_id,
+                "contract_id": "",
+                "obligations": [],
+                "final_conditions": [],
+                "missing": [],
+                "contract_errors": ["task_contract metadata is missing or invalid"],
+                "artifact_refs": {},
+                "primary_artifact_id": "",
+                "reason": "invalid task completion contract: task_contract metadata is missing or invalid",
+            }
+            self.runtime_state["completion_contract"] = verdict
+            return NodeResult(ok=False, branch="fail", output=verdict, error=verdict["reason"])
+        try:
+            contract = TaskContract.model_validate(raw_contract)
+        except (ValidationError, TypeError, ValueError) as exc:
+            verdict = {
+                "ok": False,
+                "run_id": self.run_id,
+                "contract_id": str(raw_contract.get("task_id") or ""),
+                "obligations": [],
+                "final_conditions": [],
+                "missing": [],
+                "contract_errors": [f"task_contract validation failed: {exc}"],
+                "artifact_refs": {},
+                "primary_artifact_id": "",
+                "reason": "invalid task completion contract: task_contract validation failed",
+            }
+            self.runtime_state["completion_contract"] = verdict
+            return NodeResult(ok=False, branch="fail", output=verdict, error=verdict["reason"])
+
+        runtime_errors: list[str] = []
+        registry = self.runtime_state.get("evidence_registry")
+        if not isinstance(registry, EvidenceRegistry):
+            registry = EvidenceRegistry(self.run_id)
+            self.runtime_state["evidence_registry"] = registry
+            if contract.obligations:
+                runtime_errors.append("run-scoped evidence registry was not initialized")
+        elif registry.run_id != self.run_id:
+            runtime_errors.append("evidence registry belongs to a different run")
+            registry = EvidenceRegistry(self.run_id)
+            self.runtime_state["evidence_registry"] = registry
+
+        store = self.runtime_state.get("artifact_store")
+        if not isinstance(store, ArtifactStore) or store.run_id != self.run_id:
+            store = None
+            if any(obligation.artifact_ref for obligation in contract.obligations):
+                runtime_errors.append("run-scoped artifact store is unavailable")
+
+        verdict = CompletionContractVerifier(contract, registry, store).verify()
+        if runtime_errors:
+            verdict["ok"] = False
+            verdict["contract_errors"] = [
+                *runtime_errors,
+                *list(verdict.get("contract_errors") or []),
+            ]
+            verdict["reason"] = "task completion runtime is incomplete: " + "; ".join(runtime_errors)
+        self.runtime_state["completion_contract"] = verdict
+        record = registry.record(
+            "contract.complete",
+            provider="completion_contract_verifier",
+            verified=bool(verdict.get("ok")),
+            stage_id=node.id,
+            value=bool(verdict.get("ok")),
+            metadata=verdict,
+        )
+        return NodeResult(
+            ok=bool(verdict.get("ok")),
+            branch="next" if verdict.get("ok") else "fail",
+            output=verdict,
+            evidence=[record],
+            error="" if verdict.get("ok") else str(verdict.get("reason") or "task contract incomplete"),
+        )
+
     def _execute_builtin(self, node: ArpNode, last: NodeResult | None) -> NodeResult | None:
         if node.kind == ArpNodeKind.START:
             return NodeResult(ok=True)
         if node.kind == ArpNodeKind.END:
+            contract_result = self._task_contract_completion(node)
+            if contract_result is not None:
+                return contract_result
             if self.graph.policy.require_evidence_on_done and not has_verified_evidence(self.evidence):
                 return NodeResult(ok=False, error="run reached end without verified evidence")
             return NodeResult(ok=True)
@@ -611,6 +778,20 @@ class ArpExecution:
                             evidence=evidence,
                             passed=True,
                         )
+                raw_output = result.output if isinstance(result.output, dict) else {}
+                raw_interaction_state = (
+                    raw_output.get("interaction_state")
+                    if isinstance(raw_output.get("interaction_state"), dict)
+                    else {}
+                )
+                raw_budget = raw_output.get("budget") or raw_interaction_state.get("budget")
+                runtime_metrics = {
+                    "model_calls": int(raw_output.get("model_calls") or 0),
+                    "model_elapsed_ms": int(raw_output.get("model_elapsed_ms") or 0),
+                    "controller_elapsed_ms": int(raw_output.get("controller_elapsed_ms") or 0),
+                    "capture_elapsed_ms": int(raw_output.get("capture_elapsed_ms") or 0),
+                    "budget": dict(raw_budget) if isinstance(raw_budget, dict) else {},
+                }
                 record = {
                     "node_id": node.id,
                     "kind": node.kind.value,
@@ -620,6 +801,7 @@ class ArpExecution:
                     "attempts": attempts,
                     "error": result.error,
                     "output": _json_preview(result.output),
+                    "runtime_metrics": runtime_metrics if node.kind == ArpNodeKind.TASK_STAGE else {},
                     "finished_at": time.time(),
                 }
                 self.history.append(record)

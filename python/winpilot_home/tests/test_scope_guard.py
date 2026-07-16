@@ -178,3 +178,38 @@ def test_scope_guard_allows_explicit_control_plane_test(monkeypatch):
     }
 
     assert scope_guard.ensure_scope(session, "click", {"x": 1, "y": 2}) is None
+
+
+def test_scope_guard_fails_closed_for_spatial_mutation_without_target(monkeypatch):
+    session = _Session()
+    session.hwnd = None
+    session.fg = 55
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+
+    result = scope_guard.ensure_scope(session, "drag", {
+        "x1": 10, "y1": 20, "x2": 30, "y2": 40,
+    })
+
+    payload = json.loads(result.text)
+    assert payload["blocked"] is True
+    assert payload["missing_live_target"] is True
+    assert session.hwnd is None
+
+
+def test_scope_guard_batch_must_bind_target_before_first_spatial_action(monkeypatch):
+    session = _Session()
+    session.hwnd = None
+    session.fg = 55
+    monkeypatch.setattr(scope_guard, "_window_alive", lambda hwnd: bool(hwnd))
+    unsafe = scope_guard.ensure_scope(session, "run_action_batch", {
+        "actions": [{"action": "click", "x": 10, "y": 20}],
+    })
+    safe = scope_guard.ensure_scope(session, "run_action_batch", {
+        "actions": [
+            {"action": "focus_window", "hwnd": 77},
+            {"action": "click", "x": 10, "y": 20},
+        ],
+    })
+
+    assert json.loads(unsafe.text)["missing_live_target"] is True
+    assert safe is None

@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+from pathlib import Path
 import re
 
 import cv2
@@ -131,6 +132,69 @@ def describe(region: Region, question: str) -> str:
     except Exception as exc:
         logger.warning("VLM describe 失败: %s", exc)
         return f"VLM 调用失败: {exc}"
+
+
+def structured_json_from_image(
+    image_path: str | Path,
+    prompt: str,
+    *,
+    max_tokens: int = 1800,
+) -> dict:
+    """Return one strict JSON object grounded in an existing image artifact.
+
+    The task runtime persists the authoritative observation before asking for a
+    semantic decision.  Reading that exact file here avoids a second capture
+    silently changing the coordinate frame between perception and planning.
+    This helper is intentionally domain-neutral; callers own their typed
+    schema and must validate the returned object before any mutation.
+    """
+    if not is_configured():
+        raise RuntimeError(configuration_issue() or "VLM is not configured")
+    path = Path(image_path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("authoritative visual artifact is missing or empty")
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        raise ValueError("authoritative visual artifact could not be decoded")
+    height, width = image.shape[:2]
+    scale = min(1.0, 1280.0 / max(1, height, width))
+    if scale < 1.0:
+        image = cv2.resize(
+            image,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, encoded = cv2.imencode(
+        ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88],
+    )
+    if not ok:
+        raise RuntimeError("authoritative visual artifact could not be encoded")
+    b64 = base64.b64encode(encoded.tobytes()).decode()
+    settings = _settings()
+    response = _client().chat.completions.create(
+        model=settings["model"],
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                },
+                {"type": "text", "text": str(prompt or "").strip()},
+            ],
+        }],
+        max_tokens=max(300, min(6000, int(max_tokens))),
+        temperature=0.0,
+        extra_body=_extra_body(),
+    )
+    raw = str(response.choices[0].message.content or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("visual model returned no JSON object")
+    value = json.loads(raw[start : end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("visual model returned a non-object JSON value")
+    return value
 
 
 def verify(region: Region, criteria: str) -> dict:

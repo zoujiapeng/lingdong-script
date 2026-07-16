@@ -14,6 +14,9 @@ ALLOWED_BATCH_ACTIONS = {
     "hotkey",
     "scroll",
     "move_mouse",
+    "mouse_down",
+    "mouse_up",
+    "hold_key",
     "drag",
     "draw_strokes",
     "select_color",
@@ -21,6 +24,7 @@ ALLOWED_BATCH_ACTIONS = {
     "launch",
     "wait",
     "wait_change",
+    "wait_for_visual_change",
     "wait_stable",
     "ensure_document_surface",
     "read_text",
@@ -39,6 +43,9 @@ BATCH_MUTATING_ACTIONS = {
     "hotkey",
     "scroll",
     "move_mouse",
+    "mouse_down",
+    "mouse_up",
+    "hold_key",
     "drag",
     "draw_strokes",
     "select_color",
@@ -157,7 +164,8 @@ def action_reference_system(name: str, args: dict[str, Any]) -> str:
     if args.get("normalized_strokes") is not None:
         return "canvas_normalized_0_1000"
     if name in {
-        "click", "scroll", "move_mouse", "drag", "draw_strokes", "zoom",
+        "click", "scroll", "move_mouse", "mouse_down", "mouse_up",
+        "drag", "draw_strokes", "zoom",
     }:
         return "screen_physical_px"
     return "semantic"
@@ -255,6 +263,23 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
         return "requires text"
     if name == "hotkey" and not (args.get("keys") or args.get("value")):
         return "requires keys"
+    if name == "hold_key" and not (args.get("keys") or args.get("value")):
+        return "requires keys"
+    if name == "hold_key" and not isinstance(args.get("duration_ms"), (int, float)):
+        return "requires duration_ms"
+    if name == "hold_key" and (
+        isinstance(args.get("duration_ms"), bool)
+        or not 1 <= float(args.get("duration_ms")) <= 30_000
+    ):
+        return "requires duration_ms in 1..30000"
+    if name in {"mouse_down", "mouse_up"} and str(
+        args.get("button") or "left"
+    ).casefold() not in {"left", "right", "middle"}:
+        return "requires button left, right, or middle"
+    if name in {"mouse_down", "mouse_up"} and (
+        (args.get("x") is None) != (args.get("y") is None)
+    ):
+        return "requires x and y together when prepositioning the pointer"
     if name in {"scroll", "move_mouse"} and not all(args.get(key) is not None for key in ("x", "y")):
         return "requires x and y"
     if name == "scroll" and args.get("amount") is None:
@@ -268,9 +293,21 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
     condition = args.get("condition")
     if name == "wait" and not (
         (isinstance(condition, dict) and any(value not in (None, "", []) for value in condition.values()))
-        or any(isinstance(args.get(key), (int, float)) for key in ("duration_s", "seconds", "duration_ms", "ms", "value"))
+        or any(
+            isinstance(args.get(key), (int, float))
+            for key in (
+                "duration_s", "seconds", "time", "duration_ms", "ms", "value",
+            )
+        )
     ):
-        return "requires condition or a numeric duration"
+        return "requires condition or duration (numeric)"
+    if name in {"wait_change", "wait_for_visual_change"}:
+        region = args.get("region") or args.get("effect_region")
+        if region is not None and not (
+            isinstance(region, dict)
+            and all(region.get(key) is not None for key in ("x", "y", "width", "height"))
+        ):
+            return "region requires x, y, width, and height"
     return ""
 
 
@@ -292,4 +329,53 @@ def validate_batch_actions(actions: Any) -> list[str]:
             missing = _missing_action_fields(name, batch_action_args(action))
             if missing:
                 errors.append(f"action {index} ({name}) {missing}")
+    # A raw button hold may never cross a Controller/model boundary.  Permit
+    # multiple sequential gestures, but require each one to be balanced in
+    # this exact batch and allow only bounded movement/wait primitives while
+    # the button is held.  Atomic ``drag`` remains the preferred common path.
+    held_button = ""
+    held_at = 0
+    allowed_while_held = {
+        "move_mouse", "wait", "wait_change", "wait_for_visual_change",
+        "wait_stable",
+    }
+    for index, action in enumerate(actions if isinstance(actions, list) else [], start=1):
+        if not isinstance(action, dict):
+            continue
+        name = batch_action_name(action)
+        args = batch_action_args(action)
+        button = str(args.get("button") or "left").casefold()
+        if name == "mouse_down":
+            if held_button:
+                errors.append(
+                    f"action {index} (mouse_down) cannot press {button} while "
+                    f"{held_button} from action {held_at} is still held"
+                )
+            else:
+                held_button = button
+                held_at = index
+            continue
+        if name == "mouse_up":
+            if not held_button:
+                errors.append(
+                    f"action {index} (mouse_up) has no matching mouse_down in this batch"
+                )
+            elif button != held_button:
+                errors.append(
+                    f"action {index} (mouse_up) releases {button}, but action "
+                    f"{held_at} pressed {held_button}"
+                )
+            else:
+                held_button = ""
+                held_at = 0
+            continue
+        if held_button and name and name not in allowed_while_held:
+            errors.append(
+                f"action {index} ({name}) is not allowed while mouse button "
+                f"{held_button} from action {held_at} is held"
+            )
+    if held_button:
+        errors.append(
+            f"action {held_at} (mouse_down) has no matching mouse_up in this batch"
+        )
     return errors

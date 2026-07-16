@@ -8,6 +8,7 @@ runner so all tasks share Trace/BUS/done-gate/memory semantics.
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 from ..utils.log import logger
 from .loop import AgentRunner
@@ -21,6 +22,8 @@ def build_runner(
     max_steps_override: int | None = None,
     allow_shell_tools: bool | None = None,
     runtime_profile=None,
+    task_intent: Any | None = None,
+    communication_context: dict[str, Any] | None = None,
 ) -> AgentRunner:
     """Return the unified AgentRunner for every task.
 
@@ -37,4 +40,6 @@ def build_runner(
         max_steps_override=max_steps_override,
         runtime_profile=profile,
         allow_shell_tools=allow_shell_tools,
+        task_intent=task_intent,
+        communication_context=communication_context,
     )
