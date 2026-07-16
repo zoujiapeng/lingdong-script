@@ -196,10 +196,18 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 branch="reobserve",
                 label="动作前帧已变化，重新推断",
             ))
+            edges.append(ArpEdge(
+                id=f"{verify_stage.id}-continue-local-{perform_stage.id}",
+                source=verify_stage.id,
+                target=perform_stage.id,
+                branch="continue_local",
+                label="local program continuation",
+            ))
             # A live session advances only after the target-bound watcher has
             # proved an external ROI change.  ``complete`` remains a reachable
-            # explicit terminal branch for future protocol/end-state support;
-            # normal sessions stay active until the user stops them.
+            # explicit terminal branch for a verified bounded activation.  A
+            # resumable live session yields after its contracted agent-turn
+            # limit instead of keeping the foreground run blocked indefinitely.
             edges.append(ArpEdge(
                 id=f"{wait_stage.id}-changed-{infer_stage.id}",
                 source=wait_stage.id,
@@ -262,6 +270,13 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 target=infer_stage.id,
                 branch="reobserve",
                 label="动作前帧已变化，重新推断",
+            ))
+            edges.append(ArpEdge(
+                id=f"{verify_stage.id}-continue-local-{perform_stage.id}",
+                source=verify_stage.id,
+                target=perform_stage.id,
+                branch="continue_local",
+                label="local program continuation",
             ))
             # The verifier, not the planner alone, selects the terminal route.
             # Partial but causally verified actions re-enter semantic inference

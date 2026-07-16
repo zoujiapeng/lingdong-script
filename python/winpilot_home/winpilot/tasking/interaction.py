@@ -25,6 +25,7 @@ from pydantic import (
 
 from ..perception import vlm
 from ..perception.surface_binding import InteractionRegion
+from .visual_regions import inventory_visible_regions
 
 
 SpatialActionName = Literal[
@@ -35,6 +36,21 @@ ActionName = Literal[
     "click", "double_click", "hover", "move_mouse", "mouse_down",
     "mouse_up", "drag", "draw_strokes", "scroll", "select_color",
     "type_text", "hotkey", "hold_key", "wait_stable",
+]
+InteractionMechanism = Literal[
+    "auto",
+    "control_activation",
+    "point_selection",
+    "click_to_place",
+    "freehand_strokes",
+    "direct_manipulation",
+    "text_entry",
+    "keyboard_command",
+    "hover_reveal",
+    "scroll_navigation",
+    "pointer_motion",
+    "press_hold",
+    "timed_wait",
 ]
 
 
@@ -133,6 +149,26 @@ def _translated_source_inside_target(
     )
 
 
+class InteractionStroke(BaseModel):
+    """One pointer-down/move/pointer-up path with an explicit coordinate space."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    coordinate_space: Literal[
+        "target_region_0_1000", "frame_0_1000",
+    ]
+    points: list[list[float]] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def validate_points(self) -> "InteractionStroke":
+        for index, point in enumerate(self.points):
+            if not isinstance(point, list) or len(point) != 2:
+                raise ValueError(f"points[{index}] must be [x,y]")
+            _coord(point[0], f"points[{index}][0]")
+            _coord(point[1], f"points[{index}][1]")
+        return self
+
+
 class InteractionAction(BaseModel):
     """One fully typed action grounded in the authoritative frame."""
 
@@ -146,16 +182,43 @@ class InteractionAction(BaseModel):
     frame_x2: float | None = None
     frame_y2: float | None = None
     frame_points: list[list[float]] = Field(default_factory=list)
+    path_mode: Literal["auto", "direct", "guided"] = "auto"
     frame_strokes: list[list[list[float]]] = Field(default_factory=list)
+    # Paths inside a visible bounded surface can be expressed in that
+    # target_region's own 0..1000 space.  The Controller resolves them against
+    # the current bound region immediately before input, so the planner does
+    # not have to guess every sample in whole-frame coordinates.
+    local_strokes: list[list[list[float]]] = Field(default_factory=list)
+    # Canonical model-facing representation.  Each object is exactly one
+    # physical pointer-down/up path, which avoids the ambiguous three-level
+    # array nesting that providers commonly flatten.  The two legacy arrays
+    # above remain accepted for persisted plans and compatibility APIs.
+    stroke_paths: list[InteractionStroke] = Field(default_factory=list)
     # Semantic object/region grounding is deliberately separate from the
     # expected effect ROI.  These bounds describe where the source and target
     # visibly are in the authoritative frame; they are never physical pixels.
     source_region: list[float] = Field(default_factory=list)
     target_region: list[float] = Field(default_factory=list)
+    # Optional references into the runtime-generated current-pixel inventory.
+    # The ids are resolved before validation and remain in the trace so coarse
+    # semantic coordinates are never mistaken for local geometry evidence.
+    source_candidate_id: str = ""
+    target_candidate_id: str = ""
+    # Semantic point identifying the intended child when target_region is a
+    # coarse container.  It is never clicked directly; local current-frame
+    # geometry resolves the deepest unique bounded region at this point.
+    target_anchor: list[float] = Field(default_factory=list)
     grounding_mode: Literal[
         "auto", "object_anchor", "semantic_control", "free_path",
         "relative_gesture", "bounded_coordinates",
     ] = "auto"
+    # The physical primitive and the visible input mechanism are separate.
+    # For example, a click can activate a control, select an item, or place a
+    # value on an explicitly click-to-place surface; it cannot silently stand
+    # in for freehand drawing.  ``auto`` is retained for persisted/programmatic
+    # decisions, while model-authored shared-session plans are checked below.
+    interaction_mechanism: InteractionMechanism = "auto"
+    affordance_evidence: str = ""
     placement_requirement: Literal[
         "point_inside_target", "source_inside_target",
     ] = "point_inside_target"
@@ -199,6 +262,16 @@ class InteractionAction(BaseModel):
             _region(self.target_region, "target_region")
             if self.target_region else None
         )
+        target_anchor: tuple[float, float] | None = None
+        if self.target_anchor:
+            if not isinstance(self.target_anchor, list) or len(self.target_anchor) != 2:
+                raise ValueError("target_anchor must be [x,y]")
+            target_anchor = (
+                _coord(self.target_anchor[0], "target_anchor[0]"),
+                _coord(self.target_anchor[1], "target_anchor[1]"),
+            )
+            if not target_bounds or not _point_in_region(target_anchor, target_bounds):
+                raise ValueError("target_anchor must be inside target_region")
         if self.effect_region_binding == "auto":
             if self.expected_effect_region and target_bounds and all(
                 abs(float(left) - float(right)) <= 1e-6
@@ -265,6 +338,12 @@ class InteractionAction(BaseModel):
                     raise ValueError(f"frame_points[{index}] must be [x,y]")
                 _coord(point[0], f"frame_points[{index}][0]")
                 _coord(point[1], f"frame_points[{index}][1]")
+            if self.path_mode == "auto":
+                self.path_mode = "guided" if self.frame_points else "direct"
+            if self.path_mode == "guided" and not self.frame_points:
+                raise ValueError("guided drag requires intermediate frame_points")
+            if self.path_mode == "direct" and self.frame_points:
+                raise ValueError("direct drag cannot declare intermediate frame_points")
             start = (float(self.frame_x1), float(self.frame_y1))
             end = (float(self.frame_x2), float(self.frame_y2))
             if source_bounds and not _point_in_region(start, source_bounds):
@@ -285,25 +364,57 @@ class InteractionAction(BaseModel):
                         "place the complete source_region inside target_region"
                     )
         elif self.action == "draw_strokes":
-            if not self.frame_strokes:
-                raise ValueError("draw_strokes requires frame_strokes")
+            representation_count = sum((
+                bool(self.frame_strokes),
+                bool(self.local_strokes),
+                bool(self.stroke_paths),
+            ))
+            if representation_count != 1:
+                raise ValueError(
+                    "draw_strokes requires exactly one of frame_strokes, "
+                    "local_strokes, or stroke_paths"
+                )
             if not target_bounds:
                 raise ValueError(
                     "interactive draw_strokes requires target_region so every "
                     "pointer sample is bounded by the visible legal surface"
                 )
-            for stroke_index, stroke in enumerate(self.frame_strokes):
+            if source_bounds:
+                raise ValueError(
+                    "draw_strokes is a free path and cannot declare a source_region"
+                )
+            if self.stroke_paths:
+                stroke_items = [
+                    (stroke.coordinate_space, stroke.points)
+                    for stroke in self.stroke_paths
+                ]
+                field_name = "stroke_paths"
+            else:
+                coordinate_space = (
+                    "frame_0_1000" if self.frame_strokes
+                    else "target_region_0_1000"
+                )
+                stroke_items = [
+                    (coordinate_space, stroke)
+                    for stroke in (self.frame_strokes or self.local_strokes)
+                ]
+                field_name = (
+                    "frame_strokes" if self.frame_strokes else "local_strokes"
+                )
+            for stroke_index, (coordinate_space, stroke) in enumerate(stroke_items):
                 if not isinstance(stroke, list) or len(stroke) < 2:
                     raise ValueError(
-                        f"frame_strokes[{stroke_index}] requires at least two points"
+                        f"{field_name}[{stroke_index}] requires at least two points"
                     )
                 for point_index, point in enumerate(stroke):
                     if not isinstance(point, list) or len(point) != 2:
                         raise ValueError(
-                            f"frame_strokes[{stroke_index}][{point_index}] must be [x,y]"
+                            f"{field_name}[{stroke_index}][{point_index}] must be [x,y]"
                         )
                     _coord(point[0], "stroke x")
                     _coord(point[1], "stroke y")
+                    if coordinate_space == "target_region_0_1000":
+                        continue
                     normalized_point = (float(point[0]), float(point[1]))
                     if source_bounds and not _point_in_region(
                         normalized_point, source_bounds,
@@ -334,6 +445,8 @@ class InteractionAction(BaseModel):
         elif self.action == "wait_stable":
             if self.duration_ms <= 0:
                 self.duration_ms = 300
+        if self.action != "drag" and self.path_mode not in {"auto", "direct"}:
+            raise ValueError("guided path_mode is valid only for drag")
         if (
             self.action != "drag"
             and self.placement_requirement != "point_inside_target"
@@ -341,9 +454,108 @@ class InteractionAction(BaseModel):
             raise ValueError(
                 "source_inside_target placement is valid only for drag"
             )
+        if self.action != "draw_strokes" and self.local_strokes:
+            raise ValueError("local_strokes are valid only for draw_strokes")
+        if self.action != "draw_strokes" and self.frame_strokes:
+            raise ValueError("frame_strokes are valid only for draw_strokes")
+        if self.action != "draw_strokes" and self.stroke_paths:
+            raise ValueError("stroke_paths are valid only for draw_strokes")
+        compatible_mechanisms = {
+            "click": {"control_activation", "point_selection", "click_to_place"},
+            "double_click": {"control_activation", "point_selection"},
+            "hover": {"hover_reveal"},
+            "move_mouse": {"pointer_motion"},
+            "mouse_down": {"press_hold"},
+            "mouse_up": {"press_hold"},
+            "drag": {"direct_manipulation"},
+            "draw_strokes": {"freehand_strokes"},
+            "scroll": {"scroll_navigation"},
+            "select_color": {"control_activation", "point_selection"},
+            "type_text": {"text_entry"},
+            "hotkey": {"keyboard_command"},
+            "hold_key": {"keyboard_command", "press_hold"},
+            "wait_stable": {"timed_wait"},
+        }
+        allowed_mechanisms = compatible_mechanisms.get(self.action, set())
+        if (
+            self.interaction_mechanism != "auto"
+            and self.interaction_mechanism not in allowed_mechanisms
+        ):
+            raise ValueError(
+                f"{self.action} is incompatible with interaction_mechanism="
+                f"{self.interaction_mechanism}"
+            )
         if self.button not in _MOUSE_BUTTONS:
             raise ValueError("unsupported mouse button")
         return self
+
+    def resolved_frame_strokes(
+        self,
+        *,
+        inset_fraction: float = 0.0,
+    ) -> list[list[list[float]]]:
+        """Resolve a draw path into authoritative-frame coordinates.
+
+        A small Controller-owned inset can keep the pointer or brush footprint
+        away from a legal-region border.  This is generic geometry: it has no
+        application, game, shape, colour, or screen-coordinate knowledge.
+        """
+        if self.action != "draw_strokes":
+            return []
+        if self.frame_strokes:
+            return [
+                [[float(point[0]), float(point[1])] for point in stroke]
+                for stroke in self.frame_strokes
+            ]
+        if self.stroke_paths:
+            resolved: list[list[list[float]]] = []
+            for stroke in self.stroke_paths:
+                if stroke.coordinate_space == "frame_0_1000":
+                    resolved.append([
+                        [float(point[0]), float(point[1])]
+                        for point in stroke.points
+                    ])
+                    continue
+                if len(self.target_region) != 4:
+                    return []
+                left, top, right, bottom = _region(
+                    self.target_region, "target_region",
+                )
+                inset = min(0.20, max(0.0, float(inset_fraction)))
+                width = right - left
+                height = bottom - top
+                inner_left = left + width * inset
+                inner_top = top + height * inset
+                inner_width = width * (1.0 - 2.0 * inset)
+                inner_height = height * (1.0 - 2.0 * inset)
+                resolved.append([
+                    [
+                        inner_left + float(point[0]) / 1000.0 * inner_width,
+                        inner_top + float(point[1]) / 1000.0 * inner_height,
+                    ]
+                    for point in stroke.points
+                ])
+            return resolved
+        if not self.local_strokes or len(self.target_region) != 4:
+            return []
+        left, top, right, bottom = _region(self.target_region, "target_region")
+        inset = min(0.20, max(0.0, float(inset_fraction)))
+        width = right - left
+        height = bottom - top
+        inner_left = left + width * inset
+        inner_top = top + height * inset
+        inner_width = width * (1.0 - 2.0 * inset)
+        inner_height = height * (1.0 - 2.0 * inset)
+        return [
+            [
+                [
+                    inner_left + float(point[0]) / 1000.0 * inner_width,
+                    inner_top + float(point[1]) / 1000.0 * inner_height,
+                ]
+                for point in stroke
+            ]
+            for stroke in self.local_strokes
+        ]
 
     def normalized_points(self) -> list[tuple[float, float]]:
         if self.action in _POINT_ACTIONS:
@@ -356,7 +568,7 @@ class InteractionAction(BaseModel):
         if self.action == "draw_strokes":
             return [
                 (float(point[0]), float(point[1]))
-                for stroke in self.frame_strokes
+                for stroke in self.resolved_frame_strokes()
                 for point in stroke
             ]
         return []
@@ -412,6 +624,9 @@ class InteractionDecision(BaseModel):
     frame_id: int = Field(default=0, ge=0)
     observation_artifact_id: str = ""
     _canonicalization_repairs: tuple[str, ...] = PrivateAttr(default=())
+    _deferred_actions: tuple[InteractionAction, ...] = PrivateAttr(default=())
+    _program_continuation: str = PrivateAttr(default="finish")
+    _region_inventory: tuple[dict[str, Any], ...] = PrivateAttr(default=())
 
     @model_validator(mode="after")
     def validate_decision(self) -> "InteractionDecision":
@@ -605,6 +820,18 @@ class InteractionDecision(BaseModel):
     def canonicalization_repairs(self) -> tuple[str, ...]:
         return self._canonicalization_repairs
 
+    @property
+    def deferred_actions(self) -> tuple[InteractionAction, ...]:
+        return self._deferred_actions
+
+    @property
+    def program_continuation(self) -> str:
+        return self._program_continuation
+
+    @property
+    def region_inventory(self) -> tuple[dict[str, Any], ...]:
+        return self._region_inventory
+
     def region_object(self) -> InteractionRegion:
         return InteractionRegion(
             tuple(int(round(value)) for value in self.interaction_region),
@@ -654,13 +881,32 @@ def _planning_prompt(
             "frame_y1": "0..1000 when required",
             "frame_x2": "0..1000 when required",
             "frame_y2": "0..1000 when required",
-            "frame_points": [],
-            "frame_strokes": [],
+            "frame_points": (
+                "ordered intermediate [x,y] waypoints for drag; required at "
+                "every bend when the direct segment is not visibly legal"
+            ),
+            "path_mode": "direct|guided for drag",
+            "stroke_paths": [{
+                "coordinate_space": "target_region_0_1000|frame_0_1000",
+                "points": [[150, 150], [850, 850]],
+            }],
             "source_region": ["left", "top", "right", "bottom"],
             "target_region": ["left", "top", "right", "bottom"],
+            "source_candidate_id": "current-frame inventory id when matched",
+            "target_candidate_id": "current-frame inventory id when matched",
+            "target_anchor": ["semantic target center x", "semantic target center y"],
             "grounding_mode": (
                 "object_anchor|semantic_control|free_path|relative_gesture|"
                 "bounded_coordinates"
+            ),
+            "interaction_mechanism": (
+                "control_activation|point_selection|click_to_place|"
+                "freehand_strokes|direct_manipulation|text_entry|"
+                "keyboard_command|hover_reveal|scroll_navigation|"
+                "pointer_motion|press_hold|timed_wait"
+            ),
+            "affordance_evidence": (
+                "concrete current-frame evidence for this input mechanism"
             ),
             "placement_requirement": "point_inside_target|source_inside_target",
             "button": "left|right|middle",
@@ -674,7 +920,10 @@ def _planning_prompt(
             "effect_region_binding": (
                 "target_region|source_region|surface_region|independent_region"
             ),
-            "requires_fresh_frame_after": True,
+            "requires_fresh_frame_after": (
+                "boolean; false on every non-final action in a safe stable batch, "
+                "true when later geometry must be re-observed"
+            ),
             "rationale": "short reason",
         }],
         "expected_effect": {
@@ -690,6 +939,21 @@ def _planning_prompt(
         "continuation": "finish|reobserve|wait_external|blocked",
         "blocked_reason": "required only when continuation=blocked",
     }
+    has_region_inventory = bool(prior.get("current_frame_region_inventory"))
+    if not has_region_inventory:
+        contract["actions"][0].pop("source_candidate_id", None)
+        contract["actions"][0].pop("target_candidate_id", None)
+    inventory_guidance = (
+        "The current_frame_region_inventory is current-pixel geometry evidence, "
+        "not semantic truth. When a listed candidate is the visible source or target "
+        "you mean, copy its exact candidate_id into source_candidate_id or "
+        "target_candidate_id; the runtime will bind its exact bounds and center. "
+        "Use peer row/column indices to distinguish repeated cells, slots, cards, "
+        "controls, or shapes, while deciding identity from the image itself. Never "
+        "invent a candidate id and never choose one solely because it is nearby. "
+        if has_region_inventory
+        else ""
+    )
     return (
         "You are the semantic planner for a general visual GUI interaction. "
         "The attached image is the exact authoritative target-window frame and all "
@@ -700,8 +964,31 @@ def _planning_prompt(
         "user's role, never fabricate the other actor's turn, and emit no actions when the "
         "agent does not own the turn. Use a semantic Controller action only when it exactly "
         "matches visible evidence and the immutable task constraints. A drag or continuous gesture is one "
-        "action with its complete path. Use double_click only when two clicks are semantically "
+        "action with its complete path. Before emitting a drag, inspect the entire source-to-target "
+        "route, not only its endpoints. If a direct segment would leave a visible track/corridor, "
+        "cross an obstacle, or violate source-footprint clearance, frame_points must trace the "
+        "visible legal route in order with a waypoint at every bend and enough clearance for the "
+        "whole source and path_mode must be guided; ordinary unobstructed drags use path_mode "
+        "direct. Never interpolate directly through an obstacle; return blocked when no "
+        "complete legal route can be grounded. Use double_click only when two clicks are semantically "
         "required, hover when dwell may reveal a state, and move_mouse for cursor placement. "
+        "Choose the primitive from the visible input affordance, not merely from the desired outcome: "
+        "click activates an existing visible control or an explicitly click-to-place surface; it does "
+        "not itself render a line, symbol, signature, or other multi-segment mark. When this actor must "
+        "create a visible mark and the current surface or existing marks show freehand/stroke input, use "
+        "draw_strokes with free_path grounding. Its target_region must be the exact writable bounded "
+        "region for that mark, and stroke_paths must express the mark relative to that region. A blank "
+        "writable region is not an object anchor: do not give it source_region or object_anchor merely "
+        "because it is where the effect should appear. "
+        "For draw_strokes, target_anchor is required and must identify the intended writable child "
+        "inside target_region. If target_region is only a coarse board, table, panel, or grouped "
+        "container, target_anchor must be the center of the one selected child; local vision will bind "
+        "its exact border. Never use a whole container as the execution region without this anchor. "
+        "Every model-authored action must declare interaction_mechanism and concrete "
+        "affordance_evidence from this exact frame. Do not use application/game convention as "
+        "evidence. control_activation requires a visible control, point_selection a visible "
+        "selectable item, and click_to_place an explicit visible click-to-place instruction or "
+        "state. A writable surface or existing freehand marks require freehand_strokes. "
         "For every visible bounded source-to-target object transfer, source_region and "
         "target_region are required and must be the actual visible object and destination "
         "bounds. Ground click/drag endpoints in the visible interior with a safe margin from "
@@ -715,8 +1002,17 @@ def _planning_prompt(
         "declared source_region or target_region must contain the point. Visible controls and objects "
         "must declare an anchor region and use semantic_control or object_anchor so current pixels can "
         "re-ground the final point. bounded_coordinates is only for a position that has no visible object "
-        "anchor and is still protected by frame lineage and ROI bounds. Interactive draw_strokes must declare target_region, "
-        "use free_path, and keep every stroke point inside it. Scroll uses "
+        "anchor and is still protected by frame lineage and ROI bounds. Interactive draw_strokes must declare target_region "
+        "and use free_path. Model output must use stroke_paths. Each stroke_paths object is exactly one "
+        "pointer-down/move/pointer-up path; its points field is one ordered list of [x,y] pairs. Two "
+        "separate pen strokes require two separate objects in the outer list--never flatten strokes into "
+        "one points list and never add a connector between them. Use coordinate_space="
+        "target_region_0_1000 for paths contained by a visible cell, canvas, track, signature box, or "
+        "other bounded surface. 0..1000 is not a percentage: 150 means 15% and 850 means 85%; "
+        "values 10..90 mean only 1%..9%, not 10%..90%. Use frame_0_1000 only when a path "
+        "genuinely spans whole-frame geometry; "
+        "those points must remain inside target_region. local_strokes and frame_strokes are legacy "
+        "compatibility fields and must not be emitted by the model. Scroll uses "
         "relative_gesture bound to the current ROI. Prefer one drag action "
         "for ordinary dragging. Use a same-transaction mouse_down, one or more move_mouse, and "
         "mouse_up sequence only when the interface genuinely requires a custom press/hold path; "
@@ -733,8 +1029,19 @@ def _planning_prompt(
         "action. Expected-effect regions "
         "may extend outside the action ROI but must remain inside surface_region. Multiple spatial actions are allowed only when "
         "their targets remain valid without inspecting an intermediate frame; otherwise "
-        "plan only the first and require a fresh frame. Do not infer success from UI chrome "
-        "or unrelated desktop changes. Prior state may include a CV-detected surface and the "
+        "plan only the first and require a fresh frame. Prefer the longest safe local transaction: "
+        "a complete ordered series of simultaneously visible bounded targets is one semantic "
+        "turn, not several turns, so at-most-one-turn never means at-most-one-action. "
+        "when several requested targets are simultaneously visible, spatially disjoint, and each "
+        "later target keeps the same identity and geometry even if an earlier target changes only "
+        "its own local appearance, emit all of those actions in order and set "
+        "requires_fresh_frame_after=false on every non-final action. A local pressed/selected/color "
+        "change on an already-used target does not by itself invalidate a different bound target. "
+        "Do not batch when a later target is revealed, moved, enabled, relabelled, occluded, or "
+        "otherwise depends on an earlier result. Do not infer success from UI chrome "
+        "or unrelated desktop changes. "
+        f"{inventory_guidance}"
+        "Prior state may also include a CV-detected surface and the "
         "Win32 client authority, both in frame 0..1000; treat them as safety envelopes/hints, "
         "while the attached current pixels remain authoritative. If the current frame does not "
         "contain enough visible evidence to ground any safe action, return no actions, "
@@ -760,11 +1067,30 @@ def _planning_prompt(
 
 
 def _mapping_region(value: Any) -> Any:
-    """Accept the common object spelling without weakening region checks."""
+    """Accept unambiguous provider spellings without weakening region checks.
+
+    Some vision providers serialize one rectangle as ``[[l,t,r,b]]`` even
+    when the requested schema is a flat four-number array.  Unwrapping exactly
+    one numeric rectangle preserves the same geometry; larger/nested
+    collections remain invalid so this never guesses which region was meant.
+    """
     if isinstance(value, dict) and all(
         key in value for key in ("left", "top", "right", "bottom")
     ):
         return [value["left"], value["top"], value["right"], value["bottom"]]
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 1
+        and isinstance(value[0], (list, tuple))
+        and len(value[0]) == 4
+        and all(
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and math.isfinite(float(item))
+            for item in value[0]
+        )
+    ):
+        return list(value[0])
     return value
 
 
@@ -783,6 +1109,58 @@ def _optional_effect_region(value: Any) -> Any:
                 return []
         return list(value)
     return value
+
+
+def _redundant_direct_drag_points(action: dict[str, Any]) -> bool:
+    """Return whether provider points only restate one straight drag.
+
+    Some structured-output providers emit the start and end again in
+    ``frame_points`` even when they correctly classify an unobstructed drag as
+    direct.  Treating those duplicate samples as a constrained route invokes a
+    corridor proof that can never be satisfied on an open surface.  Only
+    monotonic, near-collinear points are removable; a real bend remains guided.
+    """
+    points = action.get("frame_points")
+    if not isinstance(points, list) or not points:
+        return False
+    try:
+        start = (float(action["frame_x1"]), float(action["frame_y1"]))
+        end = (float(action["frame_x2"]), float(action["frame_y2"]))
+        samples = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if isinstance(point, list) and len(point) == 2
+        ]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if len(samples) != len(points):
+        return False
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    length_squared = delta_x * delta_x + delta_y * delta_y
+    if length_squared < 64.0:
+        return False
+    length = math.sqrt(length_squared)
+    tolerance = max(6.0, length * 0.025)
+    previous_projection = -0.04
+    for point_x, point_y in samples:
+        projection = (
+            (point_x - start[0]) * delta_x
+            + (point_y - start[1]) * delta_y
+        ) / length_squared
+        perpendicular = abs(
+            (point_x - start[0]) * delta_y
+            - (point_y - start[1]) * delta_x
+        ) / length
+        if (
+            projection < -0.04
+            or projection > 1.04
+            or projection + 0.04 < previous_projection
+            or perpendicular > tolerance
+        ):
+            return False
+        previous_projection = max(previous_projection, projection)
+    return True
 
 
 def _canonicalize_model_decision(
@@ -815,6 +1193,9 @@ def _canonicalize_model_decision(
         if canonical not in normalized and alias in normalized:
             normalized[canonical] = normalized.pop(alias)
             repairs.append(f"alias:{alias}->{canonical}")
+    if "blocked_reason" in normalized and normalized.get("blocked_reason") is None:
+        normalized["blocked_reason"] = ""
+        repairs.append("blocked_reason:null->empty")
 
     actions = normalized.get("actions")
     if actions is None:
@@ -835,27 +1216,161 @@ def _canonicalize_model_decision(
                 fixed_actions.append(candidate)
                 continue
             action = dict(candidate)
+            if "local_strokes" not in action and "target_relative_strokes" in action:
+                action["local_strokes"] = action.pop("target_relative_strokes")
+                repairs.append(
+                    f"actions[{index}].target_relative_strokes->local_strokes"
+                )
+            if "local_strokes" not in action and "localStrokes" in action:
+                action["local_strokes"] = action.pop("localStrokes")
+                repairs.append(f"actions[{index}].localStrokes->local_strokes")
+            if "stroke_paths" not in action and "strokePaths" in action:
+                action["stroke_paths"] = action.pop("strokePaths")
+                repairs.append(f"actions[{index}].strokePaths->stroke_paths")
+            if "target_anchor" not in action and "targetAnchor" in action:
+                action["target_anchor"] = action.pop("targetAnchor")
+                repairs.append(f"actions[{index}].targetAnchor->target_anchor")
+            if "path_mode" not in action and "pathMode" in action:
+                action["path_mode"] = action.pop("pathMode")
+                repairs.append(f"actions[{index}].pathMode->path_mode")
+            if (
+                "interaction_mechanism" not in action
+                and "interactionMechanism" in action
+            ):
+                action["interaction_mechanism"] = action.pop(
+                    "interactionMechanism"
+                )
+                repairs.append(
+                    f"actions[{index}].interactionMechanism->interaction_mechanism"
+                )
+            if "affordance_evidence" not in action and "affordanceEvidence" in action:
+                action["affordance_evidence"] = action.pop("affordanceEvidence")
+                repairs.append(
+                    f"actions[{index}].affordanceEvidence->affordance_evidence"
+                )
             action_name = str(action.get("action") or "")
             canonical_name = action_name.strip().casefold().replace("-", "_").replace(" ", "_")
             if canonical_name in known_actions and canonical_name != action_name:
                 action["action"] = canonical_name
                 repairs.append(f"actions[{index}].action:normalized")
+            if canonical_name == "draw_strokes" and action.get("source_region"):
+                # A free path has no pickup object.  Some providers duplicate
+                # target_region into source_region even after selecting the
+                # correct primitive.  Removing that unused contradiction does
+                # not invent geometry or alter the pointer path.
+                action["source_region"] = []
+                repairs.append(
+                    f"actions[{index}].source_region:removed_for_free_path"
+                )
+            if (
+                canonical_name == "drag"
+                and action.get("path_mode") == "direct"
+                and isinstance(action.get("frame_points"), list)
+                and action.get("frame_points")
+            ):
+                if _redundant_direct_drag_points(action):
+                    action["frame_points"] = []
+                    repairs.append(
+                        f"actions[{index}].frame_points:removed_redundant_direct_path"
+                    )
+                else:
+                    # A genuine intermediate bend is an explicit routed path.
+                    # Calling that same path "direct" is provider label drift,
+                    # so retain every point and correct only the enum.
+                    action["path_mode"] = "guided"
+                    repairs.append(
+                        f"actions[{index}].path_mode:direct->guided_from_points"
+                    )
+            stroke_paths = action.get("stroke_paths")
+            if canonical_name == "draw_strokes" and isinstance(stroke_paths, list):
+                target_relative_points: list[list[float]] = []
+                structurally_valid = True
+                for stroke in stroke_paths:
+                    if not isinstance(stroke, dict):
+                        structurally_valid = False
+                        break
+                    if stroke.get("coordinate_space") != "target_region_0_1000":
+                        structurally_valid = False
+                        break
+                    points = stroke.get("points")
+                    if not isinstance(points, list):
+                        structurally_valid = False
+                        break
+                    for point in points:
+                        if not (
+                            isinstance(point, list)
+                            and len(point) == 2
+                            and all(
+                                isinstance(value, (int, float))
+                                and not isinstance(value, bool)
+                                and math.isfinite(float(value))
+                                for value in point
+                            )
+                        ):
+                            structurally_valid = False
+                            break
+                        target_relative_points.append(point)
+                    if not structurally_valid:
+                        break
+                values = [
+                    float(value)
+                    for point in target_relative_points
+                    for value in point
+                ]
+                # Repair only the strong whole-plan signature of a provider
+                # that used percent-like values after explicitly declaring the
+                # 0..1000 target coordinate space.  Ambiguous partial ranges
+                # remain untouched and are judged at their literal scale.
+                if (
+                    structurally_valid
+                    and values
+                    and min(values) >= 0.0
+                    and max(values) <= 100.0
+                    and min(values) <= 25.0
+                    and max(values) >= 75.0
+                    and max(values) - min(values) >= 50.0
+                ):
+                    action["stroke_paths"] = [
+                        {
+                            **stroke,
+                            "points": [
+                                [float(point[0]) * 10.0, float(point[1]) * 10.0]
+                                for point in stroke["points"]
+                            ],
+                        }
+                        for stroke in stroke_paths
+                    ]
+                    repairs.append(
+                        f"actions[{index}].stroke_paths:percent_like->0_1000"
+                    )
             for key in (
-                "frame_points", "frame_strokes", "source_region",
-                "target_region", "expected_effect_region", "keys",
+                "frame_points", "frame_strokes", "local_strokes", "stroke_paths", "source_region",
+                "target_region", "target_anchor", "expected_effect_region", "keys",
             ):
                 if action.get(key) is None:
                     action[key] = []
+                    repairs.append(f"actions[{index}].{key}:null->empty")
+            for key in ("source_candidate_id", "target_candidate_id"):
+                if action.get(key) is None:
+                    action[key] = ""
+                    repairs.append(f"actions[{index}].{key}:null->empty")
+            for key in (
+                "affordance_evidence", "color", "text", "direction", "rationale",
+            ):
+                if action.get(key) is None:
+                    action[key] = ""
                     repairs.append(f"actions[{index}].{key}:null->empty")
             for key in ("source_region", "target_region"):
                 mapped = _mapping_region(action.get(key))
                 if mapped is not action.get(key):
                     action[key] = mapped
-                    repairs.append(f"actions[{index}].{key}:object->list")
+                    repairs.append(f"actions[{index}].{key}:shape->flat_region")
             effect_region = _optional_effect_region(action.get("expected_effect_region"))
             if effect_region != action.get("expected_effect_region"):
                 action["expected_effect_region"] = effect_region
-                repairs.append(f"actions[{index}].expected_effect_region:empty->unset")
+                repairs.append(
+                    f"actions[{index}].expected_effect_region:shape->flat_region"
+                )
             if action.get("effect_region_binding") is None:
                 action.pop("effect_region_binding", None)
                 repairs.append(f"actions[{index}].effect_region_binding:null->auto")
@@ -863,6 +1378,37 @@ def _canonicalize_model_decision(
                 action.pop("grounding_mode", None)
                 repairs.append(f"actions[{index}].grounding_mode:null->auto")
             fixed_actions.append(action)
+        # A provider may omit the dependency flag while still returning an
+        # explicit ordered spatial batch.  The ordered list itself asserts
+        # that those later targets belong to this same authoritative frame;
+        # normalize only omitted non-final flags.  An explicit ``true`` is a
+        # semantic dependency and remains fail-closed in InteractionDecision.
+        # This is provider-schema normalization, not a target-specific retry.
+        spatial_indices = [
+            index
+            for index, item in enumerate(fixed_actions)
+            if isinstance(item, dict)
+            and str(item.get("action") or "") in _SPATIAL_ACTIONS
+        ]
+        spatial_names = [
+            str(fixed_actions[index].get("action") or "")
+            for index in spatial_indices
+        ]
+        continuous_pointer_transaction = bool(
+            len(spatial_names) >= 3
+            and spatial_names[0] == "mouse_down"
+            and spatial_names[-1] == "mouse_up"
+            and all(name == "move_mouse" for name in spatial_names[1:-1])
+        )
+        if len(spatial_indices) > 1 and not continuous_pointer_transaction:
+            for index in spatial_indices[:-1]:
+                item = fixed_actions[index]
+                if "requires_fresh_frame_after" not in item:
+                    item["requires_fresh_frame_after"] = False
+                    repairs.append(
+                        f"actions[{index}].requires_fresh_frame_after:"
+                        "derived_stable_batch"
+                    )
         actions = fixed_actions
         normalized["actions"] = actions
 
@@ -920,7 +1466,7 @@ def _canonicalize_model_decision(
         effect = dict(effect)
         effect_region = _optional_effect_region(effect.get("region"))
         if effect_region != effect.get("region"):
-            repairs.append("expected_effect.region:empty->unset")
+            repairs.append("expected_effect.region:shape->flat_region")
         effect["region"] = effect_region
         if effect.get("region_binding") is None:
             effect.pop("region_binding", None)
@@ -928,6 +1474,19 @@ def _canonicalize_model_decision(
         if effect.get("binding_action_index") is None:
             effect.pop("binding_action_index", None)
             repairs.append("expected_effect.binding_action_index:null->default")
+        if isinstance(actions, list) and not actions:
+            if effect.get("region_binding") in {
+                "target_region", "source_region",
+            }:
+                effect["region_binding"] = "independent_region"
+                repairs.append(
+                    "expected_effect.region_binding:unbound_without_actions"
+                )
+            if effect.get("binding_action_index", -1) not in {None, -1}:
+                effect["binding_action_index"] = -1
+                repairs.append(
+                    "expected_effect.binding_action_index:unbound_without_actions"
+                )
         if (
             normalized.get("agent_should_act") is True
             and isinstance(actions, list)
@@ -959,6 +1518,82 @@ def _canonicalize_model_decision(
                 ]
                 repairs.append("expected_effect.region:derived_from_action_effects")
         normalized["expected_effect"] = effect
+
+    # Compile an internally contradictory multi-action proposal into the
+    # longest safe executable prefix. A model can identify several requested
+    # actions yet explicitly state that a fresh authoritative frame is needed
+    # after an earlier one. Rejecting the whole plan loses valid progress;
+    # executing past that boundary is unsafe. The stage graph already owns
+    # re-observation, so retain actions through the first dependency and make
+    # the continuation explicit. Balanced press/move/release gestures remain
+    # indivisible and are validated separately by InteractionDecision.
+    if isinstance(actions, list):
+        spatial_indices = [
+            index
+            for index, item in enumerate(actions)
+            if isinstance(item, dict)
+            and str(item.get("action") or "") in _SPATIAL_ACTIONS
+        ]
+        spatial_names = [
+            str(actions[index].get("action") or "")
+            for index in spatial_indices
+        ]
+        continuous_pointer_transaction = bool(
+            len(spatial_names) >= 3
+            and spatial_names[0] == "mouse_down"
+            and spatial_names[-1] == "mouse_up"
+            and all(name == "move_mouse" for name in spatial_names[1:-1])
+        )
+        dependency_index = next(
+            (
+                index
+                for index in spatial_indices[:-1]
+                if actions[index].get("requires_fresh_frame_after") is True
+            ),
+            None,
+        )
+        if dependency_index is not None and not continuous_pointer_transaction:
+            deferred_actions = actions[dependency_index + 1:]
+            program_continuation = str(
+                normalized.get("continuation") or "reobserve"
+            ).strip().casefold()
+            actions = actions[:dependency_index + 1]
+            normalized["actions"] = actions
+            normalized["_runtime_deferred_actions"] = deferred_actions
+            normalized["_runtime_program_continuation"] = program_continuation
+            normalized["continuation"] = "reobserve"
+            normalized["blocked_reason"] = ""
+            retained_regions: list[tuple[float, float, float, float]] = []
+            for item in actions:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    retained_regions.append(_region(
+                        item.get("expected_effect_region"),
+                        "expected_effect_region",
+                    ))
+                except (TypeError, ValueError):
+                    continue
+            retained_effect = dict(normalized.get("expected_effect") or {})
+            retained_effect.update({
+                "description": (
+                    "the retained stable action prefix produces its declared "
+                    "visible effects before a fresh frame is required"
+                ),
+                "region_binding": "independent_region",
+                "binding_action_index": -1,
+            })
+            if retained_regions:
+                retained_effect["region"] = [
+                    min(region[0] for region in retained_regions),
+                    min(region[1] for region in retained_regions),
+                    max(region[2] for region in retained_regions),
+                    max(region[3] for region in retained_regions),
+                ]
+            normalized["expected_effect"] = retained_effect
+            repairs.append(
+                "actions:truncated_at_explicit_fresh_frame_dependency"
+            )
 
     continuation = str(normalized.get("continuation") or "").strip().casefold()
     continuation_aliases = {
@@ -1150,6 +1785,190 @@ def validate_primary_action_modality(
         )
 
 
+def validate_model_action_affordances(
+    decision: InteractionDecision,
+    intent: dict[str, Any],
+) -> None:
+    """Require an explicit visible mechanism for inferred shared-session input.
+
+    An explicit task contract such as "click the button" already fixes the
+    modality.  A context-only handoff such as "your turn" does not: the model
+    must distinguish a writable surface from a click-to-place control using
+    the authoritative frame.  Keeping this check at the model boundary avoids
+    weakening programmatic/persisted action compatibility.
+    """
+    mode = str(intent.get("mode") or "").strip().casefold()
+    if mode not in {
+        "shared_visual_session", "turn_based", "continuous_cooperation",
+    } or not decision.agent_should_act:
+        return
+    for index, action in enumerate(decision.actions):
+        if action.interaction_mechanism == "auto":
+            raise InteractionPlanOutputError(
+                f"shared-session action {index} omitted the visible input mechanism",
+                code="interaction_mechanism_missing",
+                repairs=decision.canonicalization_repairs,
+            )
+        if not action.affordance_evidence.strip():
+            raise InteractionPlanOutputError(
+                f"shared-session action {index} omitted current-frame affordance evidence",
+                code="affordance_evidence_missing",
+                repairs=decision.canonicalization_repairs,
+            )
+        if action.action == "draw_strokes" and len(action.target_anchor) != 2:
+            raise InteractionPlanOutputError(
+                f"shared-session draw action {index} omitted its semantic target anchor",
+                code="target_anchor_missing",
+                repairs=decision.canonicalization_repairs,
+            )
+
+
+def _bind_visible_region_candidates(
+    payload: dict[str, Any],
+    inventory: list[dict[str, Any]],
+    *,
+    repairs: list[str],
+) -> dict[str, Any]:
+    """Resolve model-selected ids against the immutable current-frame list."""
+    if not inventory:
+        for actions in (
+            payload.get("actions"), payload.get("_runtime_deferred_actions"),
+        ):
+            for action in actions if isinstance(actions, list) else []:
+                if not isinstance(action, dict):
+                    continue
+                if any(
+                    str(action.get(key) or "").strip()
+                    for key in ("source_candidate_id", "target_candidate_id")
+                ):
+                    raise InteractionPlanOutputError(
+                        "visual model selected a region candidate when the "
+                        "current stage exposed no region inventory",
+                        code="interaction_region_candidate_unavailable",
+                        repairs=repairs,
+                    )
+        return payload
+    by_id = {
+        str(item.get("candidate_id") or ""): item
+        for item in inventory
+        if str(item.get("candidate_id") or "")
+    }
+
+    def same_region(first: Any, second: Any) -> bool:
+        return bool(
+            isinstance(first, list)
+            and isinstance(second, list)
+            and len(first) == len(second) == 4
+            and all(
+                abs(float(left) - float(right)) <= 1e-6
+                for left, right in zip(first, second)
+            )
+        )
+
+    def inside(point: Any, bounds: list[float]) -> bool:
+        return bool(
+            isinstance(point, list)
+            and len(point) == 2
+            and bounds[0] <= float(point[0]) <= bounds[2]
+            and bounds[1] <= float(point[1]) <= bounds[3]
+        )
+
+    def bind_action(action: dict[str, Any], label: str) -> None:
+        original_source = list(action.get("source_region") or [])
+        original_target = list(action.get("target_region") or [])
+        selected: dict[str, list[float]] = {}
+        for role in ("source", "target"):
+            candidate_id = str(
+                action.get(f"{role}_candidate_id") or ""
+            ).strip()
+            if not candidate_id:
+                continue
+            candidate = by_id.get(candidate_id)
+            if candidate is None:
+                raise InteractionPlanOutputError(
+                    f"{label} selected unknown current-frame region "
+                    f"{candidate_id!r}",
+                    code="interaction_region_candidate_unknown",
+                    repairs=repairs,
+                )
+            bounds = [float(value) for value in candidate.get("bounds") or []]
+            if len(bounds) != 4:
+                raise InteractionPlanOutputError(
+                    f"{label} selected malformed current-frame region "
+                    f"{candidate_id!r}",
+                    code="interaction_region_candidate_invalid",
+                    repairs=repairs,
+                )
+            action[f"{role}_region"] = bounds
+            selected[role] = bounds
+            repairs.append(
+                f"{label}.{role}_region:bound->{candidate_id}"
+            )
+
+        target = selected.get("target")
+        source = selected.get("source")
+        if target is not None:
+            center = [
+                (target[0] + target[2]) / 2.0,
+                (target[1] + target[3]) / 2.0,
+            ]
+            if not inside(action.get("target_anchor"), target):
+                action["target_anchor"] = center
+                repairs.append(f"{label}.target_anchor:candidate_center")
+            if str(action.get("action") or "") in _POINT_ACTIONS:
+                point = [action.get("frame_x"), action.get("frame_y")]
+                if not inside(point, target):
+                    action["frame_x"], action["frame_y"] = center
+                    repairs.append(f"{label}.point:candidate_center")
+            if str(action.get("action") or "") == "drag":
+                endpoint = [action.get("frame_x2"), action.get("frame_y2")]
+                if not inside(endpoint, target):
+                    action["frame_x2"], action["frame_y2"] = center
+                    repairs.append(f"{label}.drag_end:candidate_center")
+            if same_region(original_source, original_target):
+                action["source_region"] = list(target)
+        if source is not None and str(action.get("action") or "") == "drag":
+            center = [
+                (source[0] + source[2]) / 2.0,
+                (source[1] + source[3]) / 2.0,
+            ]
+            start = [action.get("frame_x1"), action.get("frame_y1")]
+            if not inside(start, source):
+                action["frame_x1"], action["frame_y1"] = center
+                repairs.append(f"{label}.drag_start:candidate_center")
+        binding = str(action.get("effect_region_binding") or "")
+        if binding == "target_region" and action.get("target_region"):
+            action["expected_effect_region"] = list(action["target_region"])
+        elif binding == "source_region" and action.get("source_region"):
+            action["expected_effect_region"] = list(action["source_region"])
+
+    action_lists = [payload.get("actions")]
+    deferred = payload.get("_runtime_deferred_actions")
+    if isinstance(deferred, list):
+        action_lists.append(deferred)
+    for list_index, actions in enumerate(action_lists):
+        if not isinstance(actions, list):
+            continue
+        prefix = "actions" if list_index == 0 else "deferred_actions"
+        for index, action in enumerate(actions):
+            if isinstance(action, dict):
+                bind_action(action, f"{prefix}[{index}]")
+
+    actions = payload.get("actions")
+    effect = payload.get("expected_effect")
+    if isinstance(actions, list) and isinstance(effect, dict):
+        index = int(effect.get("binding_action_index", -1) or -1)
+        if index < 0 and len(actions) == 1:
+            index = 0
+        if 0 <= index < len(actions) and isinstance(actions[index], dict):
+            binding = str(effect.get("region_binding") or "")
+            if binding == "target_region" and actions[index].get("target_region"):
+                effect["region"] = list(actions[index]["target_region"])
+            elif binding == "source_region" and actions[index].get("source_region"):
+                effect["region"] = list(actions[index]["source_region"])
+    return payload
+
+
 def plan_interaction(
     image_path: str | Path,
     *,
@@ -1172,12 +1991,35 @@ def plan_interaction(
         or intent.get("primary_action_modality")
         or "infer_from_scene"
     )
+    # Region candidates materially help bounded click/draw targets, where the
+    # model selects an object or writable child and local pixels own its exact
+    # border.  Guided/continuous manipulation already has typed source, target,
+    # and path geometry; a global object inventory adds distractors there and
+    # must not override those stronger route-specific proofs.
+    region_inventory: list[dict[str, Any]] = []
+    if primary_modality in {"click", "draw"}:
+        region_inventory = inventory_visible_regions(image_path)
+    elif (
+        primary_modality == "infer_from_scene"
+        and str(intent.get("session_mode") or "") == "persistent"
+    ):
+        # In an unknown shared turn, expose only repeated pixel-proven peers
+        # (cells, slots, controls, tokens), not every container in the window.
+        # This supplies local geometry without biasing an unconstrained task
+        # toward an arbitrary isolated rectangle or continuous path endpoint.
+        region_inventory = [
+            item for item in inventory_visible_regions(image_path)
+            if int(item.get("peer_count") or 0) >= 3
+        ]
+    planning_prior = dict(prior)
+    if region_inventory:
+        planning_prior["current_frame_region_inventory"] = region_inventory
     raw = vlm.structured_json_from_image(
         image_path,
         _planning_prompt(
             task,
             intent,
-            prior,
+            planning_prior,
             immutable_roles=contract_roles,
             primary_action_modality=primary_modality,
         ),
@@ -1186,6 +2028,26 @@ def plan_interaction(
     raw, repairs = _canonicalize_model_decision(raw, prior_state=prior)
     raw = _apply_immutable_roles(raw, contract_roles, repairs=repairs)
     raw = _canonicalize_model_action_geometry(raw)
+    raw = _bind_visible_region_candidates(
+        raw, region_inventory, repairs=repairs,
+    )
+    deferred_raw = raw.pop("_runtime_deferred_actions", [])
+    program_continuation = str(
+        raw.pop("_runtime_program_continuation", "finish") or "finish"
+    ).strip().casefold()
+    continuation_aliases = {
+        "complete": "finish", "done": "finish",
+        "continue": "reobserve", "observe": "reobserve",
+        "wait": "wait_external", "wait_for_external": "wait_external",
+    }
+    program_continuation = continuation_aliases.get(
+        program_continuation, program_continuation,
+    )
+    if program_continuation not in {
+        "finish", "reobserve", "wait_external", "blocked",
+    }:
+        program_continuation = "reobserve"
+        repairs.append("program_continuation:invalid->reobserve")
     # `wait_for_external_change` is a compatibility field for persisted decisions,
     # not an independent semantic choice for the model.  Deriving it from the
     # typed continuation prevents a redundant boolean (often copied from a JSON
@@ -1201,40 +2063,50 @@ def plan_interaction(
             f"visual model returned an unsafe interaction plan: {exc}",
             repairs=repairs,
         ) from exc
+    deferred_actions: list[InteractionAction] = []
+    try:
+        for candidate in (
+            deferred_raw if isinstance(deferred_raw, list) else []
+        ):
+            normalized_candidate = _canonicalize_model_action_geometry({
+                "actions": [candidate],
+            }).get("actions", [candidate])[0]
+            action = InteractionAction.model_validate(normalized_candidate)
+            probe = decision.model_dump(mode="python")
+            probe["actions"] = [action.model_dump(mode="python")]
+            effect_region = list(action.expected_effect_region)
+            probe["expected_effect"] = {
+                "description": (
+                    "the next deferred grounded action produces its declared "
+                    "visible effect"
+                ),
+                "region": effect_region,
+                "region_binding": "independent_region",
+                "binding_action_index": -1,
+                "minimum_change_ratio": 0.001,
+                "semantic_verification_required": True,
+            }
+            probe["continuation"] = "reobserve"
+            probe["wait_for_external_change"] = False
+            InteractionDecision.model_validate(probe)
+            deferred_actions.append(action)
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise InteractionPlanOutputError(
+            f"visual model returned an unsafe deferred action program: {exc}",
+            repairs=repairs,
+        ) from exc
+    if len(decision.actions) + len(deferred_actions) > 12:
+        raise InteractionPlanOutputError(
+            "visual model action program exceeds the typed action budget",
+            repairs=repairs,
+        )
     decision._canonicalization_repairs = tuple(repairs)
+    decision._deferred_actions = tuple(deferred_actions)
+    decision._program_continuation = program_continuation
+    decision._region_inventory = tuple(dict(item) for item in region_inventory)
+    validate_model_action_affordances(decision, intent)
     validate_primary_action_modality(decision, primary_modality)
     return decision
-
-
-def _map_point(
-    region: dict[str, int], x: float, y: float,
-) -> tuple[int, int]:
-    left = int(region["left"])
-    top = int(region["top"])
-    width = max(1, int(region["width"]))
-    height = max(1, int(region["height"]))
-    return (
-        left + int(round(float(x) / 1000.0 * max(0, width - 1))),
-        top + int(round(float(y) / 1000.0 * max(0, height - 1))),
-    )
-
-
-def _map_region(
-    frame_region: dict[str, int], bounds: list[float],
-) -> dict[str, int]:
-    left, top, right, bottom = _region(bounds, "grounding_region")
-    physical_left, physical_top = _map_point(frame_region, left, top)
-    physical_right, physical_bottom = _map_point(frame_region, right, bottom)
-    return {
-        "x": physical_left,
-        "y": physical_top,
-        "width": max(1, physical_right - physical_left + 1),
-        "height": max(1, physical_bottom - physical_top + 1),
-    }
-
-
-def _inside(region: InteractionRegion, points: list[tuple[float, float]]) -> bool:
-    return all(region.contains_point(int(round(x)), int(round(y))) for x, y in points)
 
 
 def controller_actions(
@@ -1244,135 +2116,15 @@ def controller_actions(
     bound_region: InteractionRegion,
     frame_epoch: int,
 ) -> list[dict[str, Any]]:
-    """Validate and map one decision to executable physical Controller input."""
-    if not decision.agent_should_act:
-        return []
-    if decision.frame_id != int(frame_epoch):
-        raise ValueError("interaction decision is bound to a stale authoritative frame")
-    if not bound_region.contains(decision.region_object(), tolerance=4):
-        raise ValueError("semantic interaction region escaped the bound surface")
+    """Compatibility import for callers that used the former monolith."""
+    from .interaction_controller import controller_actions as map_actions
 
-    mapped: list[dict[str, Any]] = []
-    for item in decision.actions:
-        points = item.normalized_points()
-        if points and not _inside(decision.region_object(), points):
-            raise ValueError(
-                f"{item.action} contains coordinates outside the semantic interaction region"
-            )
-        payload: dict[str, Any] = {
-            "action": item.action,
-            "typed_action": item.action,
-            "visual_frame_id": decision.frame_id,
-            "coordinate_space": "screen_physical_px",
-            "source_frame_coordinates": {
-                key: value
-                for key, value in item.model_dump(mode="json").items()
-                if key.startswith("frame_") and value not in (None, [], "")
-            },
-        }
-        grounding: dict[str, Any] = {
-            key: list(value)
-            for key, value in {
-                "source_region": item.source_region,
-                "target_region": item.target_region,
-            }.items()
-            if value
-        }
-        if grounding:
-            grounding["placement_requirement"] = item.placement_requirement
-            grounding["grounding_mode"] = item.grounding_mode
-            payload["source_frame_grounding"] = grounding
-        effect_bounds = (
-            item.expected_effect_region
-            or decision.expected_effect.region
-        )
-        if effect_bounds:
-            payload["effect_region"] = _map_region(frame_region, effect_bounds)
-        if item.action in _POINT_ACTIONS:
-            payload["x"], payload["y"] = _map_point(
-                frame_region, float(item.frame_x), float(item.frame_y),
-            )
-            if item.action in {"click", "double_click"}:
-                payload["action"] = "click"
-                payload["button"] = item.button
-                payload["double"] = bool(
-                    item.action == "double_click" or item.double
-                )
-            elif item.action in {"hover", "move_mouse"}:
-                payload["action"] = "move_mouse"
-            elif item.action in {"mouse_down", "mouse_up"}:
-                # The raw press/release primitive acts at the current cursor.
-                # Prepositioning and the button transition stay in one local
-                # Controller transaction, so no model round-trip can split a
-                # continuous gesture or reuse coordinates after a new frame.
-                mapped.append({
-                    **payload,
-                    "action": "move_mouse",
-                    "typed_action": f"{item.action}_preposition",
-                })
-                payload = {
-                    key: value
-                    for key, value in payload.items()
-                    if key not in {"x", "y", "effect_region"}
-                }
-                payload["action"] = item.action
-                payload["typed_action"] = item.action
-                payload["button"] = item.button
-            elif item.action == "scroll":
-                payload["direction"] = item.direction or "down"
-                payload["amount"] = item.amount or 3
-        elif item.action == "drag":
-            payload["x1"], payload["y1"] = _map_point(
-                frame_region, float(item.frame_x1), float(item.frame_y1),
-            )
-            payload["x2"], payload["y2"] = _map_point(
-                frame_region, float(item.frame_x2), float(item.frame_y2),
-            )
-            if item.frame_points:
-                payload["points"] = [
-                    list(_map_point(frame_region, point[0], point[1]))
-                    for point in item.frame_points
-                ]
-            payload["duration_ms"] = item.duration_ms or 700
-        elif item.action == "draw_strokes":
-            payload["strokes"] = [
-                [list(_map_point(frame_region, point[0], point[1])) for point in stroke]
-                for stroke in item.frame_strokes
-            ]
-            payload["duration_ms"] = item.duration_ms or 650
-        elif item.action == "select_color":
-            payload["color"] = item.color
-            payload["name"] = item.color
-        elif item.action == "type_text":
-            payload["text"] = item.text
-        elif item.action == "hotkey":
-            payload["keys"] = item.keys
-        elif item.action == "hold_key":
-            payload["keys"] = item.keys
-            payload["duration_ms"] = item.duration_ms
-        elif item.action == "wait_stable":
-            payload["stable_ms"] = item.duration_ms or 300
-            payload["timeout_s"] = max(
-                1.0, min(5.0, float(payload["stable_ms"]) / 1000.0 + 1.0),
-            )
-        mapped.append(payload)
-        if item.action == "hover":
-            # Moving the pointer is the real input primitive.  A bounded local
-            # stability wait supplies the dwell needed by hover-driven UI and
-            # leaves the authoritative post-frame capture to the next stage.
-            dwell: dict[str, Any] = {
-                "action": "wait_stable",
-                "typed_action": "hover_dwell",
-                "stable_ms": item.duration_ms,
-                "timeout_s": max(
-                    1.0, min(5.0, float(item.duration_ms) / 1000.0 + 1.0),
-                ),
-                "required": False,
-            }
-            if "effect_region" in payload:
-                dwell["effect_region"] = dict(payload["effect_region"])
-            mapped.append(dwell)
-    return mapped
+    return map_actions(
+        decision,
+        frame_region=frame_region,
+        bound_region=bound_region,
+        frame_epoch=frame_epoch,
+    )
 
 
 def verify_interaction_effect(
@@ -1380,8 +2132,18 @@ def verify_interaction_effect(
     *,
     task: str,
     decision: InteractionDecision,
+    authoritative_effect_regions: list[list[float]] | None = None,
+    transition_evidence: dict[str, Any] | None = None,
+    gesture_evidence: dict[str, Any] | None = None,
+    verified_turn_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Semantically verify the post-action frame after causal ROI change."""
+    """Verify one local turn and terminal task completion as separate facts.
+
+    A valid intermediate action is not a failed task merely because more work
+    remains.  Keeping these judgments independent lets the stage graph consume
+    an explicit ``reobserve`` continuation while the final completion contract
+    remains fail-closed.
+    """
     effect_regions = [
         list(item.expected_effect_region)
         for item in decision.actions
@@ -1391,20 +2153,139 @@ def verify_interaction_effect(
         effect_regions.append(list(decision.expected_effect.region))
     if not effect_regions:
         effect_regions.append(list(decision.interaction_region))
+    if authoritative_effect_regions:
+        effect_regions.extend([
+            list(bounds)
+            for bounds in authoritative_effect_regions
+            if isinstance(bounds, list) and len(bounds) == 4
+        ])
+    effect_regions = [
+        list(bounds) for bounds in dict.fromkeys(
+            tuple(float(value) for value in bounds)
+            for bounds in effect_regions
+        )
+    ]
+    typed_actions = [
+        {
+            "action": item.action,
+            "interaction_mechanism": item.interaction_mechanism,
+            "target_region": list(item.target_region),
+            "target_anchor": list(item.target_anchor),
+            "effect_region": list(item.expected_effect_region),
+            "affordance_evidence": item.affordance_evidence,
+            "color": item.color,
+            "text": item.text,
+            "stroke_count": len(item.resolved_frame_strokes()),
+        }
+        for item in decision.actions
+    ]
+    transition = dict(transition_evidence or {})
+    transition_typed_compatible = bool(decision.actions) and all(
+        item.action == "drag"
+        and item.interaction_mechanism == "direct_manipulation"
+        and len(item.source_region) == 4
+        and len(item.target_region) == 4
+        for item in decision.actions
+    )
+    transition_summary = {
+        "applicable": transition.get("applicable") is True,
+        "verified": (
+            transition.get("verified") is True
+            and transition_typed_compatible
+        ),
+        "provider": str(transition.get("provider") or ""),
+        "typed_compatible": transition_typed_compatible,
+        "actions": [
+            {
+                key: item.get(key)
+                for key in (
+                    "action_index", "verified", "source_change_ratio",
+                    "target_change_ratio", "appearance_histogram_intersection",
+                    "placement_geometry_valid",
+                )
+            }
+            for item in (transition.get("actions") or [])
+            if isinstance(item, dict)
+        ],
+    }
+    gesture = dict(gesture_evidence or {})
+    gesture_typed_compatible = bool(decision.actions) and all(
+        item.action == "draw_strokes"
+        and item.interaction_mechanism == "freehand_strokes"
+        for item in decision.actions
+    )
+    gesture_summary = {
+        "applicable": gesture.get("applicable") is True,
+        "verified": (
+            gesture.get("verified") is True
+            and gesture_typed_compatible
+        ),
+        "provider": str(gesture.get("provider") or ""),
+        "typed_compatible": gesture_typed_compatible,
+        "actions": [
+            {
+                key: item.get(key)
+                for key in (
+                    "action_index", "verified", "stroke_count",
+                    "minimum_stroke_coverage", "extent_ratio",
+                    "changed_pixels_in_legal_region",
+                )
+            }
+            for item in (gesture.get("actions") or [])
+            if isinstance(item, dict)
+        ],
+    }
+    prior_verified_turns = [
+        dict(item)
+        for item in (verified_turn_history or [])[-12:]
+        if isinstance(item, dict)
+    ]
     prompt = (
         "You are a strict verifier for one visual GUI interaction turn. Judge only "
         "the attached post-action target-window frame. The runtime separately proves "
-        "causal pixel change, so decide whether the expected local semantic effect is "
-        "visibly present, belongs to the agent's assigned role, and does not include an "
-        "extra fabricated participant turn. Return ONLY JSON with keys passed (boolean), "
-        "confidence (0..1), observed (array of strings), issues (array of strings), "
-        "effect_region ([left,top,right,bottom] in 0..1000 or []), and task_complete "
-        "(boolean). task_complete may be true only when the original user task, not just "
-        "this local action, is visibly complete in this frame.\n"
+        "causal pixel change and exact current-frame geometry. Decide whether the local "
+        "semantic content requested by the original user and the typed role/rule contract "
+        "is visibly present inside the "
+        "typed target/effect region, belongs to the agent's assigned role, and does not "
+        "include an extra fabricated participant turn. Typed regions and target anchors "
+        "are authoritative for WHERE. Planner rationale and free-form expected-effect prose "
+        "are not verifier obligations because they can contain a stale relative-position "
+        "label; judge WHAT from the original task, immutable roles/rules, action type, and "
+        "visible affordance evidence. A verified deterministic transition means current-run "
+        "pixels independently prove the typed source appearance left its source and arrived "
+        "inside its typed target; use it to resolve spatial ambiguity, but still judge the "
+        "task's semantics yourself. A verified deterministic gesture means this current "
+        "run causally authored every declared pointer path inside the typed target. It is "
+        "authoritative for authorship and pre/post causality: do not claim that the visible "
+        "mark pre-existed or was not drawn by this turn when that evidence is verified. "
+        "You still judge whether the resulting content has the requested semantics. "
+        "Make two independent judgments: local_effect_passed says whether every typed "
+        "action in THIS turn produced its requested visible semantic effect in the typed "
+        "region; task_complete says whether the ORIGINAL user task is now terminally "
+        "complete. More work remaining is a completion issue, never a local-effect issue, "
+        "when this turn itself visibly succeeded. Return ONLY JSON with keys "
+        "local_effect_passed (boolean), task_complete (boolean), confidence (0..1), "
+        "observed (array of strings), local_effect_issues (array of strings), "
+        "completion_issues (array of strings), and effect_region "
+        "([left,top,right,bottom] in 0..1000 or []). local_effect_issues MUST be [] "
+        "whenever local_effect_passed is true. completion_issues MUST be [] whenever "
+        "task_complete is true. task_complete may be true only when the original user "
+        "task, not just this local action, is visibly complete in this frame.\n"
+        "Prior verified turns below are current-run evidence emitted only after "
+        "a controller action, authoritative post-frame causal change, and its "
+        "local evidence contract succeeded. Treat those earlier actions as "
+        "facts when judging order and progress; do not call an earlier visibly "
+        "completed step unperformed merely because it is outside this turn's "
+        "effect ROI.\n"
         f"User task: {task}\n"
         f"Roles: {json.dumps(decision.roles, ensure_ascii=False)}\n"
-        f"Expected one-turn effect: {decision.expected_effect.description}\n"
-        f"Expected effect regions: {json.dumps(effect_regions)}"
+        f"Rules: {json.dumps(decision.rules, ensure_ascii=False)}\n"
+        f"Typed executed actions: {json.dumps(typed_actions, ensure_ascii=False)}\n"
+        f"Expected effect regions: {json.dumps(effect_regions)}\n"
+        f"Deterministic transition evidence: {json.dumps(transition_summary)}\n"
+        f"Deterministic gesture evidence: {json.dumps(gesture_summary)}\n"
+        f"Prior current-run verified turns: "
+        f"{json.dumps(prior_verified_turns, ensure_ascii=False)}"
     )
     raw = vlm.structured_json_from_image(image_path, prompt, max_tokens=800)
     confidence = raw.get("confidence")
@@ -1414,7 +2295,22 @@ def verify_interaction_effect(
         and math.isfinite(float(confidence))
         and 0.0 <= float(confidence) <= 1.0
     )
-    issues = raw.get("issues")
+    new_verdict_schema = "local_effect_passed" in raw
+    raw_local_effect_passed = (
+        raw.get("local_effect_passed") is True
+        if new_verdict_schema
+        else raw.get("passed") is True
+    )
+    local_effect_issues = (
+        raw.get("local_effect_issues")
+        if new_verdict_schema
+        else raw.get("issues")
+    )
+    completion_issues = (
+        raw.get("completion_issues")
+        if new_verdict_schema
+        else raw.get("issues")
+    )
     observed = raw.get("observed")
     reported_region = raw.get("effect_region")
     region_valid = False
@@ -1437,27 +2333,95 @@ def verify_interaction_effect(
             )
         except (TypeError, ValueError):
             region_valid = False
+    local_effect_issues_valid = bool(
+        isinstance(local_effect_issues, list)
+        and not any(str(item).strip() for item in local_effect_issues)
+    )
+    completion_issues_valid = bool(
+        isinstance(completion_issues, list)
+        and not any(str(item).strip() for item in completion_issues)
+    )
+    issues_adjudicated_by_transition = bool(
+        not local_effect_issues_valid
+        and transition_summary["applicable"]
+        and transition_summary["verified"]
+        and raw_local_effect_passed
+    )
+    legacy_completion_issue_adjudicated = bool(
+        not new_verdict_schema
+        and issues_adjudicated_by_transition
+    )
     passed = bool(
-        raw.get("passed") is True
+        raw_local_effect_passed
         and confidence_valid
         and float(confidence) >= 0.72
-        and isinstance(issues, list)
-        and not any(str(item).strip() for item in issues)
+        and (
+            local_effect_issues_valid
+            or issues_adjudicated_by_transition
+        )
         and isinstance(observed, list)
         and any(str(item).strip() for item in observed)
         and region_valid
     )
-    task_complete = bool(passed and raw.get("task_complete") is True)
+    task_complete = bool(
+        passed
+        and raw.get("task_complete") is True
+        and (
+            completion_issues_valid
+            or legacy_completion_issue_adjudicated
+        )
+    )
     return {
         "ok": True,
         "verified": passed,
         "semantic_visual_verified": passed,
         "confidence": float(confidence) if confidence_valid else None,
         "observed": observed if isinstance(observed, list) else [],
-        "issues": issues if isinstance(issues, list) else ["invalid verifier payload"],
+        "issues": (
+            local_effect_issues
+            if isinstance(local_effect_issues, list)
+            else ["invalid local-effect verifier payload"]
+        ),
+        "local_effect_issues": (
+            local_effect_issues
+            if isinstance(local_effect_issues, list)
+            else ["invalid local-effect verifier payload"]
+        ),
+        "completion_issues": (
+            completion_issues
+            if isinstance(completion_issues, list)
+            else ["invalid completion verifier payload"]
+        ),
         "effect_region": reported_region if isinstance(reported_region, list) else [],
         "task_complete": task_complete,
         "expected_effect": decision.expected_effect.model_dump(mode="json"),
+        "verifier_contract": {
+            "verdict_schema": (
+                "local-effect-and-terminal-v2"
+                if new_verdict_schema
+                else "legacy-passed-v1"
+            ),
+            "raw_passed": raw_local_effect_passed,
+            "raw_local_effect_passed": raw_local_effect_passed,
+            "confidence_valid": confidence_valid,
+            "issues_valid": local_effect_issues_valid,
+            "local_effect_issues_valid": local_effect_issues_valid,
+            "completion_issues_valid": completion_issues_valid,
+            "legacy_completion_issue_adjudicated": (
+                legacy_completion_issue_adjudicated
+            ),
+            "issues_adjudicated_by_transition": (
+                issues_adjudicated_by_transition
+            ),
+            "observed_valid": isinstance(observed, list)
+            and any(str(item).strip() for item in observed),
+            "effect_region_valid": region_valid,
+            "typed_actions": typed_actions,
+            "transition_evidence": transition_summary,
+            "gesture_evidence": gesture_summary,
+            "prior_verified_turns": prior_verified_turns,
+        },
+        "raw_verdict": raw,
         "verify_method": "interaction-post-frame-vlm",
     }
 

@@ -83,6 +83,11 @@ class TaskContractCompiler:
         if intent.interaction.active:
             interaction = intent.interaction
             target = interaction.target or intent.source or "active_window"
+            typed_direct_manipulation_verifier = bool(
+                interaction.mode == "direct_visual_manipulation"
+                and interaction.session_mode == "bounded"
+                and interaction.primary_action_modality == "drag"
+            )
             session = InteractionSessionContract(
                 session_id=f"session-{task_id.removeprefix('task-')}",
                 mode=interaction.mode,
@@ -244,6 +249,11 @@ class TaskContractCompiler:
                     "verification_scope": "declared_effect_regions_within_bound_surface",
                     "reject_unrelated_desktop_change": True,
                     "accept_verified_defer": True,
+                    "verification_policy": (
+                        "typed_direct_manipulation_completion"
+                        if typed_direct_manipulation_verifier
+                        else "semantic_visual_effect"
+                    ),
                     "original_task": task,
                 },
                 state_inputs=[surface, region, protocol, turn_effect],
@@ -265,12 +275,37 @@ class TaskContractCompiler:
                     "unrelated desktop pixel changes do not count."
                 ),
                 stage_id=verify_stage.id,
-                evidence_providers=[
-                    _provider(
-                        "local_semantic_effect_verifier",
-                        "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                    ),
-                ],
+                evidence_providers=(
+                    [
+                        _provider(
+                            "typed_direct_manipulation_completion",
+                            "interaction.verify_transition", "visual.observe",
+                        ),
+                        _provider(
+                            "grounded_transaction_progress",
+                            "interaction.verify_local_effect",
+                            "interaction.verify_transition",
+                            "controller.transaction", "visual.observe",
+                        ),
+                        _provider(
+                            "local_semantic_effect_verifier",
+                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+                        ),
+                    ]
+                    if typed_direct_manipulation_verifier
+                    else [
+                        _provider(
+                            "grounded_transaction_progress",
+                            "interaction.verify_local_effect",
+                            "interaction.verify_transition",
+                            "controller.transaction", "visual.observe",
+                        ),
+                        _provider(
+                            "local_semantic_effect_verifier",
+                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+                        ),
+                    ]
+                ),
             )
             verify_stage.obligations.append(verify_obligation)
             obligations.append(verify_obligation)
@@ -280,16 +315,30 @@ class TaskContractCompiler:
                 predicate="interaction.task_completed",
                 description=(
                     "An independent semantic check on the latest authoritative frame proves that the "
-                    "original interaction task is terminally complete.  A valid local turn or an armed "
-                    "external-change watcher alone is not task completion."
+                    "original bounded interaction is terminally complete, or the activation's contracted "
+                    "number of agent turns has a verified semantic effect and control is explicitly yielded. "
+                    "An armed external-change watcher alone is not task completion."
                 ),
                 stage_id=verify_stage.id,
-                evidence_providers=[
-                    _provider(
-                        "interaction_terminal_verifier",
-                        "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
-                    ),
-                ],
+                evidence_providers=(
+                    [
+                        _provider(
+                            "typed_direct_manipulation_completion",
+                            "interaction.verify_transition", "visual.observe",
+                        ),
+                        _provider(
+                            "interaction_terminal_verifier",
+                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+                        ),
+                    ]
+                    if typed_direct_manipulation_verifier
+                    else [
+                        _provider(
+                            "interaction_terminal_verifier",
+                            "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+                        ),
+                    ]
+                ),
             )
             verify_stage.obligations.append(terminal_obligation)
             obligations.append(terminal_obligation)

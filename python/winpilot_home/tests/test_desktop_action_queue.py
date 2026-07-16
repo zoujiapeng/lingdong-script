@@ -410,7 +410,9 @@ def test_public_drag_uses_one_outer_queue_event(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_stroke_path",
-        lambda waypoints, duration_s: calls.append(("stroke", waypoints, duration_s)),
+        lambda waypoints, duration_s, **_kwargs: (
+            calls.append(("stroke", waypoints, duration_s)) or True
+        ),
     )
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
@@ -441,7 +443,9 @@ def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
     monkeypatch.setattr(
         executor,
         "_stroke_path",
-        lambda waypoints, duration_s: calls.append(("stroke", waypoints, duration_s)),
+        lambda waypoints, duration_s, **_kwargs: (
+            calls.append(("stroke", waypoints, duration_s)) or True
+        ),
     )
     monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
 
@@ -461,6 +465,62 @@ def test_public_draw_strokes_uses_one_outer_queue_event(monkeypatch):
         ("start", "draw_strokes"),
         ("done", "draw_strokes"),
     ]
+
+
+def test_long_pointer_path_releases_button_when_target_window_is_lost(monkeypatch):
+    target_checks = iter((True, True, False))
+    sent = []
+
+    monkeypatch.setattr(
+        executor,
+        "_target_window_still_foreground",
+        lambda _hwnd: next(target_checks, False),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_cooperative_action_still_owned",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(executor, "_abs_mouse_move", lambda *_args: None)
+    monkeypatch.setattr(executor, "_emit_move", lambda *_args: None)
+    monkeypatch.setattr(executor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        executor,
+        "_mouse_input",
+        lambda flags, **_kwargs: int(flags),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_send_inputs",
+        lambda inputs: sent.extend(inputs),
+    )
+
+    completed = executor._stroke_path([(10, 10), (40, 40)], 0.1, hwnd=123)
+
+    assert completed is False
+    assert sent == [
+        executor.win32con.MOUSEEVENTF_LEFTDOWN,
+        executor.win32con.MOUSEEVENTF_LEFTUP,
+    ]
+
+
+def test_target_window_guard_accepts_same_root_and_rejects_other_app(monkeypatch):
+    foreground = {"hwnd": 456}
+    roots = {123: 10, 456: 10, 789: 20}
+    monkeypatch.setattr(
+        executor.win32gui,
+        "GetForegroundWindow",
+        lambda: foreground["hwnd"],
+    )
+    monkeypatch.setattr(
+        executor.win32gui,
+        "GetAncestor",
+        lambda hwnd, _kind: roots.get(hwnd, hwnd),
+    )
+
+    assert executor._target_window_still_foreground(123) is True
+    foreground["hwnd"] = 789
+    assert executor._target_window_still_foreground(123) is False
 
 
 def test_type_text_newline_uses_raw_enter_without_nested_queue(monkeypatch):

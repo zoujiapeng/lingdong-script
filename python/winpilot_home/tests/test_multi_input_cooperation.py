@@ -840,6 +840,10 @@ def test_stroke_rechecks_ownership_after_final_move(monkeypatch):
 
     ownership = iter((True, True, True, False))
     sent = []
+    # This case isolates cooperative cursor ownership.  Long gestures now
+    # independently fail closed when their bound target window loses focus;
+    # that guard has dedicated coverage in test_desktop_action_queue.py.
+    monkeypatch.setattr(executor, "_target_window_still_foreground", lambda *_args: True)
     monkeypatch.setattr(executor, "_cooperative_action_still_owned", lambda *_args, **_kwargs: next(ownership))
     monkeypatch.setattr(executor, "_abs_mouse_move", lambda *_args: None)
     monkeypatch.setattr(executor, "_emit_move", lambda *_args: None)

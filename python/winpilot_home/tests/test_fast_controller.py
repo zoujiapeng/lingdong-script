@@ -2144,6 +2144,8 @@ def test_fast_controller_fails_a_draw_action_when_pixels_do_not_change():
     assert out["metrics"]["failed_at"] == 1
     assert out["results"][0]["error"] == "visual action produced no pixel change in its intended region"
     assert out["results"][0]["data"]["failure_type"] == "DRAW_NO_VISIBLE_CHANGE"
+    assert out["failure_type"] == "DRAW_NO_VISIBLE_CHANGE"
+    assert out["error"] == "visual action produced no pixel change in its intended region"
 
 
 def test_fast_controller_classifies_no_effect_drag_as_generic_visual_failure():

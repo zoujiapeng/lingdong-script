@@ -389,6 +389,9 @@ class StageRuntime:
             "controller_tools": selection.controller_tools if selection else [],
             "adapter": selection.adapter if selection else "",
             "model_role": selection.model_role if selection else "none",
+            "selected_evidence_providers": (
+                selection.selected_evidence_providers if selection else {}
+            ),
             **values,
         }
 
@@ -445,15 +448,16 @@ class StageRuntime:
                 stage.type.value, failure_type, attempt=recovery_attempt,
             )
             stage_details = getattr(exc, "stage_details", {})
+            stage_details = (
+                dict(stage_details)
+                if isinstance(stage_details, dict)
+                else {}
+            )
+            stage_details.setdefault("error", str(exc))
             if stage.type in {
                 StageType.DRAW_ARTIFACT,
                 StageType.CREATE_OR_EDIT_ARTIFACT,
             }:
-                stage_details = (
-                    dict(stage_details)
-                    if isinstance(stage_details, dict)
-                    else {}
-                )
                 model_elapsed_ms = max(
                     0,
                     int(stage_details.get("model_elapsed_ms") or 0),
@@ -557,6 +561,11 @@ class StageRuntime:
                 recovery_attempt=recovery_attempt,
                 error=str(exc),
             )
+            output_details = dict(stage_details)
+            for reserved_key in (
+                "status", "failure_type", "recovery", "recovery_attempt", "error",
+            ):
+                output_details.pop(reserved_key, None)
             return NodeResult(
                 ok=False,
                 branch="fail",
@@ -565,7 +574,7 @@ class StageRuntime:
                     recovery=decision.__dict__,
                     recovery_attempt=recovery_attempt,
                     error=str(exc),
-                    **(stage_details if isinstance(stage_details, dict) else {}),
+                    **output_details,
                 ),
                 error=f"{stage.id} ({stage.type.value}) failed: {exc}",
             )

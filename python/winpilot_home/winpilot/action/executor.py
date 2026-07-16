@@ -413,6 +413,39 @@ def _cooperative_action_still_owned(
     return False
 
 
+def _target_window_still_foreground(hwnd: int | None) -> bool:
+    """Fail closed when a long physical gesture loses its target window.
+
+    This guard is independent of the optional human/agent cooperation mode.
+    A drag or stroke can span hundreds of input samples; checking scope only
+    before button-down lets a focus change redirect the remaining samples into
+    another application.  Comparing root windows also accepts a bound child
+    control while rejecting unrelated foreground windows.
+    """
+    target = int(hwnd or 0)
+    if not target:
+        return True
+    try:
+        foreground = int(win32gui.GetForegroundWindow() or 0)
+        target_root = int(win32gui.GetAncestor(target, 2) or target)
+        foreground_root = int(
+            win32gui.GetAncestor(foreground, 2) or foreground
+        )
+    except Exception:
+        return False
+    if foreground_root == target_root:
+        return True
+    BUS.publish(
+        "physical_input_guard",
+        state="target_window_lost",
+        target_hwnd=target,
+        target_root=target_root,
+        foreground_hwnd=foreground,
+        foreground_root=foreground_root,
+    )
+    return False
+
+
 # ---------------------------------------------------------------- mouse API
 def _raw_move_mouse(x: int, y: int) -> None:
     user32.SetCursorPos(int(x), int(y))
@@ -622,13 +655,19 @@ def _stroke_path(
 ) -> bool:
     """Press at the first waypoint, move through the path, release at the end.
     Shared by drag() and draw_strokes() so stroke registration is identical."""
-    if not _cooperative_action_still_owned(hwnd):
+    if (
+        not _target_window_still_foreground(hwnd)
+        or not _cooperative_action_still_owned(hwnd)
+    ):
         return False
     _abs_mouse_move(*waypoints[0])  # absolute move so the press lands as real input
     time.sleep(0.04)
     expected_cursor = waypoints[0]
-    if not _cooperative_action_still_owned(
-        hwnd, expected_cursor=expected_cursor,
+    if (
+        not _target_window_still_foreground(hwnd)
+        or not _cooperative_action_still_owned(
+            hwnd, expected_cursor=expected_cursor,
+        )
     ):
         return False
     pressed = False
@@ -645,8 +684,11 @@ def _stroke_path(
             steps = max(1, int(math.ceil(seg / 8.0)))
             seg_dur = duration_s * (seg / total)
             for i in range(1, steps + 1):
-                if not _cooperative_action_still_owned(
-                    hwnd, expected_cursor=expected_cursor,
+                if (
+                    not _target_window_still_foreground(hwnd)
+                    or not _cooperative_action_still_owned(
+                        hwnd, expected_cursor=expected_cursor,
+                    )
                 ):
                     return False
                 expected_cursor = (
@@ -656,8 +698,11 @@ def _stroke_path(
                 _emit_move(*expected_cursor)
                 time.sleep(max(0.002, seg_dur / steps))
         time.sleep(0.015)
-        return _cooperative_action_still_owned(
-            hwnd, expected_cursor=expected_cursor,
+        return bool(
+            _target_window_still_foreground(hwnd)
+            and _cooperative_action_still_owned(
+                hwnd, expected_cursor=expected_cursor,
+            )
         )
     finally:
         if pressed:
@@ -697,11 +742,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
                 continue
     waypoints.append((int(x2), int(y2)))
 
-    completed = (
-        _stroke_path(waypoints, duration_s, hwnd=hwnd)
-        if cooperative_mode
-        else (_stroke_path(waypoints, duration_s) is not False)
-    )
+    completed = _stroke_path(waypoints, duration_s, hwnd=hwnd)
     if saved:
         cursor_restored = _restore_cursor_after_agent_input(
             saved, waypoints[-1], hwnd,
@@ -712,8 +753,10 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration_s: float = 0.4,
     if not completed:
         result.update({
             "blocked": True,
-            "cooperative_input": True,
-            "error": "drag stopped because the user took foreground/cursor ownership",
+            "verified": False,
+            "failure_type": "POINTER_OWNERSHIP_LOST",
+            "cooperative_input": cooperative_mode,
+            "error": "drag stopped because target-window or cursor ownership was lost",
         })
     if saved:
         result["cursor_restored"] = cursor_restored
@@ -762,11 +805,7 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
             interrupted = True
             break
         attempted += 1
-        completed = (
-            _stroke_path(waypoints, duration_s, hwnd=hwnd)
-            if cooperative_mode
-            else (_stroke_path(waypoints, duration_s) is not False)
-        )
+        completed = _stroke_path(waypoints, duration_s, hwnd=hwnd)
         if not completed:
             interrupted = True
             break
@@ -793,8 +832,9 @@ def draw_strokes(strokes: list, duration_s: float = 0.4,
             })
         else:
             result.update({
-                "cooperative_input": True,
-                "error": "drawing stopped because the user took foreground/cursor ownership",
+                "failure_type": "POINTER_OWNERSHIP_LOST",
+                "cooperative_input": cooperative_mode,
+                "error": "drawing stopped because target-window or cursor ownership was lost",
             })
     if saved:
         result["cursor_restored"] = cursor_restored

@@ -3340,6 +3340,30 @@ class FastGuiController:
                 "scope_recovery_count": metrics.scope_recovery_count,
             },
         }
+        if metrics.failed_at is not None:
+            failed_index = max(0, int(metrics.failed_at) - 1)
+            failed_item = (
+                results[failed_index]
+                if failed_index < len(results) and isinstance(results[failed_index], dict)
+                else {}
+            )
+            failed_data = (
+                failed_item.get("data")
+                if isinstance(failed_item.get("data"), dict) else {}
+            )
+            payload["blocked"] = True
+            payload["verified"] = False
+            payload["failure_type"] = str(
+                failed_data.get("failure_type")
+                or failed_item.get("failure_type")
+                or "CONTROLLER_ACTION_FAILED"
+            )
+            payload["error"] = str(
+                failed_data.get("error")
+                or failed_item.get("error")
+                or failed_item.get("preview")
+                or "controller action failed"
+            )
         if current_state_verified and metrics.failed_at is None:
             payload["verified"] = True
         if auto_verified_visual and metrics.failed_at is None:

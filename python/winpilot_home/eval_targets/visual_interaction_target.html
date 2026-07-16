@@ -6,218 +6,282 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WinPilot Visual Interaction Target</title>
   <style>
-    :root {
-      color-scheme: light;
-      font-family: "Segoe UI", system-ui, sans-serif;
-      background: #eef2f7;
-      color: #152238;
-    }
+    :root { color-scheme: light; font-family: "Segoe UI", system-ui, sans-serif; color: #152238; }
     * { box-sizing: border-box; }
-    body { margin: 0; min-width: 760px; min-height: 560px; }
-    main {
-      width: min(1000px, calc(100vw - 40px));
-      margin: 20px auto;
-      padding: 24px;
-      border: 1px solid #c9d2df;
-      border-radius: 16px;
-      background: #fff;
-      box-shadow: 0 14px 42px rgba(33, 50, 79, .12);
-    }
-    h1 { margin: 0 0 8px; font-size: 28px; }
-    .instruction { margin: 0; font-size: 17px; color: #4a5870; }
-    .arena {
-      position: relative;
-      height: 390px;
-      margin-top: 22px;
-      overflow: hidden;
-      border: 2px solid #b7c2d1;
-      border-radius: 14px;
-      background:
-        linear-gradient(90deg, rgba(102, 120, 148, .07) 1px, transparent 1px),
-        linear-gradient(rgba(102, 120, 148, .07) 1px, transparent 1px),
-        #f8fafc;
-      background-size: 40px 40px;
-      touch-action: none;
-      user-select: none;
-    }
-    .token {
-      position: absolute;
-      left: 72px;
-      top: 143px;
-      width: 106px;
-      height: 106px;
-      display: grid;
-      place-items: center;
-      border: 5px solid #0a4ea8;
-      border-radius: 50%;
-      background: #2684ff;
-      color: #fff;
-      font-weight: 800;
-      cursor: grab;
-      box-shadow: 0 6px 15px rgba(38, 132, 255, .3);
-      z-index: 3;
-    }
-    .token.dragging { cursor: grabbing; box-shadow: 0 9px 22px rgba(38, 132, 255, .42); }
-    .target {
-      position: absolute;
-      right: 70px;
-      top: 100px;
-      width: 220px;
-      height: 190px;
-      display: grid;
-      place-items: center;
-      border: 5px dashed #169b62;
-      border-radius: 20px;
-      background: rgba(22, 155, 98, .08);
-      color: #087747;
-      font-size: 25px;
-      font-weight: 800;
-    }
-    .target.success { border-style: solid; background: #dff7eb; }
-    .status {
-      min-height: 54px;
-      margin-top: 18px;
-      padding: 13px 16px;
-      border: 2px solid #aeb9c8;
-      border-radius: 10px;
-      background: #f7f9fc;
-      font-size: 20px;
-      font-weight: 800;
-      letter-spacing: .02em;
-    }
+    body { margin: 0; min-width: 760px; min-height: 560px; background: #eef2f7; }
+    main { width: min(1000px, calc(100vw - 40px)); margin: 20px auto; padding: 24px;
+      border: 1px solid #c9d2df; border-radius: 16px; background: #fff;
+      box-shadow: 0 14px 42px rgba(33, 50, 79, .12); }
+    h1 { margin: 0 0 8px; font-size: 27px; }
+    .instruction { min-height: 25px; margin: 0; font-size: 17px; color: #42516a; font-weight: 600; }
+    .arena { position: relative; height: 390px; margin-top: 18px; overflow: hidden;
+      border: 2px solid #b7c2d1; border-radius: 14px; background:
+      linear-gradient(90deg, rgba(102,120,148,.07) 1px, transparent 1px),
+      linear-gradient(rgba(102,120,148,.07) 1px, transparent 1px), #f8fafc;
+      background-size: 40px 40px; touch-action: none; user-select: none; }
+    .status { min-height: 54px; margin-top: 16px; padding: 13px 16px;
+      border: 2px solid #aeb9c8; border-radius: 10px; background: #f7f9fc;
+      font-size: 19px; font-weight: 800; letter-spacing: .02em; }
     .status.success { border-color: #169b62; background: #e7f8ef; color: #087747; }
-    .case-id { float: right; color: #65748a; font: 13px ui-monospace, monospace; }
+    .status.failure { border-color: #c43d45; background: #fff0f1; color: #a12931; }
+    .case-id { float: right; color: #65748a; font: 12px ui-monospace, monospace; }
+    .token { position: absolute; display: grid; place-items: center; z-index: 5; cursor: grab;
+      border: 5px solid #0a4ea8; border-radius: 50%; background: #2684ff; color: #fff;
+      font-weight: 800; box-shadow: 0 6px 15px rgba(38,132,255,.3); }
+    .token.dragging { cursor: grabbing; box-shadow: 0 9px 22px rgba(38,132,255,.42); }
+    .target { position: absolute; display: grid; place-items: center; border: 5px dashed #169b62;
+      border-radius: 20px; background: rgba(22,155,98,.09); color: #087747;
+      font-size: 20px; font-weight: 800; }
+    .target.success { border-style: solid; background: #dff7eb; }
+    .shape { position: absolute; width: 62px; height: 62px; display: grid; place-items: center;
+      border: 4px solid #33445f; background: #d7dde8; cursor: pointer; }
+    .shape.circle { border-radius: 50%; } .shape.rounded { border-radius: 15px; }
+    .shape.hex { clip-path: polygon(25% 5%,75% 5%,100% 50%,75% 95%,25% 95%,0 50%); }
+    .shape.target-shape { border: 0; background: #7b3ff2; box-shadow: 0 0 0 5px #45209a inset; }
+    .shape.target-shape::after { content: ""; width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+    .sequence-item { position: absolute; width: 68px; height: 68px; display: grid; place-items: center;
+      border-radius: 50%; font-size: 28px; font-weight: 900; cursor: pointer; }
+    .sequence-marker { border: 5px solid #174a8b; background: #2f7ddd; color: #fff;
+      box-shadow: 0 5px 13px rgba(47,125,221,.27); }
+    .sequence-marker.complete { border-color: #148052; background: #24a66d; }
+    .sequence-distractor { border: 4px solid #6d7785; background: #cbd1d9; color: #4b5563; }
+    .slider-track { position: absolute; height: 18px; border-radius: 10px; background: #c8d1df;
+      border: 2px solid #697890; }
+    .goal-band { position: absolute; top: -32px; height: 80px; border: 4px solid #158954;
+      background: repeating-linear-gradient(135deg,#d9f5e7 0 8px,#bce8d2 8px 16px); }
+    .goal-label { position: absolute; top: -62px; color: #087747; font-size: 15px; font-weight: 900; }
+    .slider-knob { position: absolute; width: 54px; height: 54px; top: -20px; border-radius: 50%;
+      border: 5px solid #9c3f00; background: #ff7a19; cursor: grab; z-index: 4; }
+    .corridor { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .corridor-path { fill: none; stroke: #d7e2f0; stroke-width: 124; stroke-linecap: round;
+      stroke-linejoin: round; } .corridor-edge { fill: none; stroke: #476789; stroke-width: 130;
+      stroke-linecap: round; stroke-linejoin: round; opacity: .55; }
+    .corridor-goal { position: absolute; border-radius: 50%; border: 6px dashed #169b62;
+      background: rgba(22,155,98,.12); display: grid; place-items: center; color: #087747;
+      font-size: 14px; font-weight: 900; }
+    .board { position: absolute; background: #fff; box-shadow: 0 0 0 5px #27364a; }
+    .board canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+    .legend { position: absolute; padding: 10px 13px; border-radius: 10px; background: #fff;
+      border: 2px solid #9eabbc; line-height: 1.6; font-weight: 800; }
+    .red { color: #d5222a; } .black { color: #111; }
   </style>
 </head>
 <body>
   <main>
     <span class="case-id" id="caseId"></span>
-    <h1>Visual Interaction Test</h1>
-    <p class="instruction">Drag the blue circle labeled MOVE ME completely into the green DROP HERE target.</p>
-    <section class="arena" id="arena" aria-label="Visual interaction arena">
-      <div class="token" id="token">MOVE ME</div>
-      <div class="target" id="target">DROP HERE</div>
-    </section>
-    <div class="status" id="status" role="status">WAITING_FOR_REAL_POINTER_DRAG</div>
+    <h1 id="heading">Visual Interaction Test</h1>
+    <p class="instruction" id="instruction"></p>
+    <section class="arena" id="arena" aria-label="Visual interaction arena"></section>
+    <div class="status" id="status" role="status">WAITING_FOR_REAL_POINTER_INPUT</div>
   </main>
   <script>
     const query = new URLSearchParams(location.search);
     const caseId = query.get('case') || 'manual';
+    const scenario = query.get('scenario') || 'drag_fit';
+    const seed = Number(query.get('seed') || 1) >>> 0;
     document.title = `WinPilot Visual Interaction Target ${caseId}`;
-    document.getElementById('caseId').textContent = `case=${caseId}`;
-
+    document.getElementById('caseId').textContent = `case=${caseId} scenario=${scenario} seed=${seed}`;
     const arena = document.getElementById('arena');
-    const token = document.getElementById('token');
-    const target = document.getElementById('target');
+    const instruction = document.getElementById('instruction');
+    const heading = document.getElementById('heading');
     const status = document.getElementById('status');
-    let activePointer = null;
-    let offsetX = 0;
-    let offsetY = 0;
+    let readyDetails = {};
     let moveCount = 0;
 
-    function report(type, event, extra = {}) {
-      const payload = {
-        case_id: caseId,
-        type,
-        trusted: Boolean(event && event.isTrusted),
-        pointer_type: event && event.pointerType || '',
+    function rngFactory(value) {
+      let a = value || 0x6d2b79f5;
+      return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    }
+    const rng = rngFactory(seed);
+    const between = (low, high) => low + (high - low) * rng();
+    const box = element => { const r = element.getBoundingClientRect(); return {
+      left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right),
+      bottom: Math.round(r.bottom), width: Math.round(r.width), height: Math.round(r.height),
+    }; };
+    function report(type, event, details = {}) {
+      const payload = { case_id: caseId, scenario, seed, type,
+        trusted: Boolean(event && event.isTrusted), pointer_type: event && event.pointerType || '',
         client_x: event && Math.round(event.clientX) || 0,
         client_y: event && Math.round(event.clientY) || 0,
         screen_x: event && Math.round(event.screenX) || 0,
         screen_y: event && Math.round(event.screenY) || 0,
-        move_count: moveCount,
-        ...extra,
-      };
-      fetch('/event', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload),
-        cache: 'no-store',
-      }).catch(() => {});
+        move_count: moveCount, succeeded: Boolean(details.succeeded), details };
+      fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload), cache:'no-store'}).catch(() => {});
+    }
+    function markSuccess(message, event, details = {}) {
+      status.className = 'status success'; status.textContent = message;
+      report('scenario_success', event, {...details, succeeded:true});
+    }
+    function markFailure(message, event, details = {}) {
+      status.className = 'status failure'; status.textContent = message;
+      report('scenario_failure', event, {...details, succeeded:false});
+    }
+    function place(element, left, top, width, height) {
+      Object.assign(element.style, {left:`${left}px`, top:`${top}px`, width:`${width}px`, height:`${height}px`});
     }
 
-    token.addEventListener('pointerdown', (event) => {
-      if (!event.isTrusted || activePointer !== null) return;
-      activePointer = event.pointerId;
-      const rect = token.getBoundingClientRect();
-      offsetX = event.clientX - rect.left;
-      offsetY = event.clientY - rect.top;
-      moveCount = 0;
-      token.classList.add('dragging');
-      token.setPointerCapture(event.pointerId);
-      report('pointerdown', event);
-      event.preventDefault();
-    });
+    function setupDragFit() {
+      heading.textContent = 'Object Placement';
+      instruction.textContent = 'Drag the blue MOVE ME circle completely inside the green DROP HERE target.';
+      const W = arena.clientWidth, H = arena.clientHeight;
+      const size = Math.round(between(76, 104));
+      const targetW = size + Math.round(between(105, 145));
+      const targetH = size + Math.round(between(85, 125));
+      const token = document.createElement('div'); token.className='token'; token.textContent='MOVE ME';
+      const target = document.createElement('div'); target.className='target'; target.textContent='DROP HERE';
+      arena.append(target, token);
+      place(token, Math.round(between(42, 145)), Math.round(between(55, H-size-55)), size, size);
+      place(target, W-targetW-Math.round(between(45, 95)), Math.round(between(42, H-targetH-42)), targetW, targetH);
+      let pointer = null, ox = 0, oy = 0;
+      token.addEventListener('pointerdown', event => { if (!event.isTrusted || pointer !== null) return;
+        pointer=event.pointerId; const r=token.getBoundingClientRect(); ox=event.clientX-r.left; oy=event.clientY-r.top;
+        moveCount=0; token.classList.add('dragging'); token.setPointerCapture(pointer); report('pointerdown',event); event.preventDefault(); });
+      token.addEventListener('pointermove', event => { if (event.pointerId!==pointer || !event.isTrusted) return;
+        const a=arena.getBoundingClientRect(); const x=Math.max(0,Math.min(arena.clientWidth-token.offsetWidth,event.clientX-a.left-ox));
+        const y=Math.max(0,Math.min(arena.clientHeight-token.offsetHeight,event.clientY-a.top-oy));
+        token.style.left=`${x}px`; token.style.top=`${y}px`; moveCount++; if(moveCount===1||moveCount%5===0) report('pointermove',event); });
+      function finish(event,canceled){ if(event.pointerId!==pointer)return; if(token.hasPointerCapture(pointer))token.releasePointerCapture(pointer);
+        pointer=null; token.classList.remove('dragging'); const tokenRect=token.getBoundingClientRect(); const targetRect=target.getBoundingClientRect();
+        const succeeded=!canceled&&event.isTrusted&&moveCount>=2&&
+          tokenRect.left >= targetRect.left && tokenRect.right <= targetRect.right &&
+          tokenRect.top >= targetRect.top && tokenRect.bottom <= targetRect.bottom;
+        const details={succeeded,token:box(token),target:box(target)};
+        if(succeeded){target.classList.add('success');markSuccess('DRAG_SUCCEEDED',event,details);}else markFailure(canceled?'DRAG_CANCELED':'DROP_MISSED_TARGET',event,details); }
+      token.addEventListener('pointerup',e=>finish(e,false)); token.addEventListener('pointercancel',e=>finish(e,true));
+      readyDetails={token:box(token),target:box(target)};
+    }
 
-    token.addEventListener('pointermove', (event) => {
-      if (event.pointerId !== activePointer || !event.isTrusted) return;
-      const arenaRect = arena.getBoundingClientRect();
-      const x = Math.max(0, Math.min(arena.clientWidth - token.offsetWidth, event.clientX - arenaRect.left - offsetX));
-      const y = Math.max(0, Math.min(arena.clientHeight - token.offsetHeight, event.clientY - arenaRect.top - offsetY));
-      token.style.left = `${x}px`;
-      token.style.top = `${y}px`;
-      moveCount += 1;
-      if (moveCount === 1 || moveCount % 5 === 0) report('pointermove', event);
-    });
-
-    function finish(event, canceled) {
-      if (event.pointerId !== activePointer) return;
-      if (token.hasPointerCapture(event.pointerId)) token.releasePointerCapture(event.pointerId);
-      activePointer = null;
-      token.classList.remove('dragging');
-      const tokenRect = token.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      const centerX = tokenRect.left + tokenRect.width / 2;
-      const centerY = tokenRect.top + tokenRect.height / 2;
-      const succeeded = !canceled && event.isTrusted && moveCount >= 2 &&
-        tokenRect.left >= targetRect.left && tokenRect.right <= targetRect.right &&
-        tokenRect.top >= targetRect.top && tokenRect.bottom <= targetRect.bottom;
-      if (succeeded) {
-        target.classList.add('success');
-        status.classList.add('success');
-        status.textContent = 'DRAG_SUCCEEDED';
-      } else {
-        status.classList.remove('success');
-        status.textContent = canceled ? 'DRAG_CANCELED' : 'DROP_MISSED_TARGET';
+    function setupPreciseClick() {
+      heading.textContent='Precise Visual Selection';
+      instruction.textContent='Click the only purple hexagon with a white center. Ignore all distractors.';
+      const W=arena.clientWidth, cols=6, rows=2, targetIndex=Math.floor(rng()*cols*rows);
+      for(let i=0;i<cols*rows;i++){ const el=document.createElement('div');
+        const target=i===targetIndex; el.className=`shape ${target?'hex target-shape':(i%3===0?'circle':i%3===1?'rounded':'hex')}`;
+        const cellW=W/cols, x=i%cols*cellW+cellW/2-31+between(-12,12), y=Math.floor(i/cols)*155+62+between(-16,16);
+        place(el,Math.round(x),Math.round(y),62,62); if(!target){ el.style.background=['#f0bd2c','#1aa5a8','#e45f76','#92b84c'][i%4]; }
+        el.addEventListener('click',event=>{ if(!event.isTrusted)return; moveCount=0;
+          if(target)markSuccess('CLICK_SUCCEEDED',event,{succeeded:true,target_index:targetIndex,target:box(el)});
+          else markFailure('WRONG_OBJECT_CLICKED',event,{succeeded:false,clicked_index:i,target_index:targetIndex}); }); arena.append(el);
       }
-      report(canceled ? 'pointercancel' : 'pointerup', event, {
-        succeeded,
-        token_center_x: Math.round(centerX),
-        token_center_y: Math.round(centerY),
-        token_left: Math.round(tokenRect.left),
-        token_top: Math.round(tokenRect.top),
-        token_right: Math.round(tokenRect.right),
-        token_bottom: Math.round(tokenRect.bottom),
-        target_left: Math.round(targetRect.left),
-        target_top: Math.round(targetRect.top),
-        target_right: Math.round(targetRect.right),
-        target_bottom: Math.round(targetRect.bottom),
-      });
+      const target=arena.querySelector('.target-shape'); readyDetails={target:box(target),distractor_count:cols*rows-1};
     }
 
-    token.addEventListener('pointerup', event => finish(event, false));
-    token.addEventListener('pointercancel', event => finish(event, true));
-
-    // Let the harness prove that the isolated browser profile has rendered a
-    // usable scene before the agent sees its first authoritative frame. This
-    // setup event is never accepted as interaction success.
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const tokenRect = token.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      report('page_ready', null, {
-        succeeded: false,
-        viewport_width: window.innerWidth,
-        viewport_height: window.innerHeight,
-        token_left: Math.round(tokenRect.left),
-        token_top: Math.round(tokenRect.top),
-        token_right: Math.round(tokenRect.right),
-        token_bottom: Math.round(tokenRect.bottom),
-        target_left: Math.round(targetRect.left),
-        target_top: Math.round(targetRect.top),
-        target_right: Math.round(targetRect.right),
-        target_bottom: Math.round(targetRect.bottom),
+    function setupOrderedClicks() {
+      heading.textContent='Ordered Visual Transaction';
+      instruction.textContent='Click the numbered markers 1, then 2, then 3 in ascending order. Ignore the gray letter distractors.';
+      const W=arena.clientWidth,H=arena.clientHeight,cols=4,rows=2;
+      const slots=[];
+      for(let row=0;row<rows;row++)for(let col=0;col<cols;col++)slots.push({
+        x:Math.round((col+.5)*W/cols-34+between(-18,18)),
+        y:Math.round((row+.5)*H/rows-34+between(-20,20)),
       });
-    }));
+      for(let i=slots.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[slots[i],slots[j]]=[slots[j],slots[i]];}
+      const required=[1,2,3],clicked=[],targets=[];
+      const values=[1,2,3,'A','B','C'];
+      values.forEach((value,index)=>{
+        const marker=document.createElement('div');
+        const numbered=typeof value==='number';
+        marker.className=`sequence-item ${numbered?'sequence-marker':'sequence-distractor'}`;
+        marker.textContent=String(value);place(marker,slots[index].x,slots[index].y,68,68);arena.append(marker);
+        marker.addEventListener('click',event=>{if(!event.isTrusted)return;
+          const expected=required[clicked.length];
+          if(numbered&&value===expected){clicked.push(value);marker.classList.add('complete');
+            report('sequence_click',event,{clicked:[...clicked],expected_next:required[clicked.length]||null});
+            if(clicked.length===required.length)markSuccess('SEQUENCE_SUCCEEDED',event,{
+              succeeded:true,click_sequence:[...clicked],required_sequence:[...required],targets:targets.map(box),
+            });
+          }else markFailure('WRONG_SEQUENCE_CLICK',event,{
+            succeeded:false,click_sequence:[...clicked],clicked:value,expected,
+          });
+        });
+        if(numbered)targets.push(marker);
+      });
+      readyDetails={required_sequence:required,targets:targets.map(box),distractor_count:3};
+    }
+
+    function setupSlider() {
+      heading.textContent='Precision Slider'; instruction.textContent='Drag the orange knob into the striped green GOAL band.';
+      const W=arena.clientWidth, x0=95, width=W-190, y=Math.round(arena.clientHeight/2);
+      const goalFraction=between(.64,.82), startFraction=between(.08,.23), bandWidth=72;
+      const track=document.createElement('div'); track.className='slider-track'; place(track,x0,y,width,18);
+      const band=document.createElement('div'); band.className='goal-band'; place(band,goalFraction*width-bandWidth/2,-32,bandWidth,80);
+      const label=document.createElement('div'); label.className='goal-label'; label.textContent='GOAL'; place(label,goalFraction*width-22,-62,60,24);
+      const knob=document.createElement('div'); knob.className='slider-knob'; place(knob,startFraction*width-27,-20,54,54);
+      track.append(band,label,knob); arena.append(track);
+      let pointer=null;
+      knob.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;moveCount=0;knob.setPointerCapture(pointer);report('pointerdown',event);event.preventDefault();});
+      knob.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const r=track.getBoundingClientRect();
+        const center=Math.max(27,Math.min(width-27,event.clientX-r.left));knob.style.left=`${center-27}px`;moveCount++;if(moveCount===1||moveCount%4===0)report('pointermove',event);});
+      knob.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;knob.releasePointerCapture(pointer);pointer=null;
+        const k=knob.getBoundingClientRect(),g=band.getBoundingClientRect(),cx=(k.left+k.right)/2;
+        const succeeded=event.isTrusted&&moveCount>=2&&cx>=g.left&&cx<=g.right;
+        const details={succeeded,knob:box(knob),goal:box(band),center_x:Math.round(cx)};
+        if(succeeded)markSuccess('SLIDER_SUCCEEDED',event,details);else markFailure('SLIDER_MISSED_GOAL',event,details);});
+      readyDetails={knob:box(knob),goal:box(band)};
+    }
+
+    function distanceToSegment(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy||1;
+      const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/l2));return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy));}
+    function setupCorridor() {
+      heading.textContent='Constrained Pointer Route'; instruction.textContent='Drag the blue disk through the visible corridor into the green GOAL without leaving the corridor.';
+      const W=arena.clientWidth,H=arena.clientHeight,variant=Math.floor(rng()*4),leftToRight=variant<2,lowStart=variant%2===0;
+      const sx=leftToRight?72:W-72, ex=leftToRight?W-72:72, sy=lowStart?H-72:72, ey=lowStart?72:H-72;
+      const elbowX=Math.round(between(W*.38,W*.58)); const points=[{x:sx,y:sy},{x:elbowX,y:sy},{x:elbowX,y:ey},{x:ex,y:ey}];
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','corridor');
+      const d=points.map((p,i)=>`${i?'L':'M'} ${p.x} ${p.y}`).join(' ');
+      for(const cls of ['corridor-edge','corridor-path']){const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('class',cls);path.setAttribute('d',d);svg.append(path);}arena.append(svg);
+      const goal=document.createElement('div');goal.className='corridor-goal';goal.textContent='GOAL';place(goal,ex-55,ey-55,110,110);
+      const token=document.createElement('div');token.className='token';token.textContent='MOVE';place(token,sx-22,sy-22,44,44);arena.append(goal,token);
+      let pointer=null,ox=0,oy=0,pathValid=true,minClearance=999;
+      token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;const r=token.getBoundingClientRect();
+        ox=event.clientX-r.left;oy=event.clientY-r.top;moveCount=0;pathValid=true;minClearance=999;token.setPointerCapture(pointer);report('pointerdown',event);event.preventDefault();});
+      token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const a=arena.getBoundingClientRect();
+        const x=Math.max(0,Math.min(W-token.offsetWidth,event.clientX-a.left-ox));const y=Math.max(0,Math.min(H-token.offsetHeight,event.clientY-a.top-oy));
+        token.style.left=`${x}px`;token.style.top=`${y}px`;const center={x:x+22,y:y+22};let dist=Infinity;
+        for(let i=0;i<points.length-1;i++)dist=Math.min(dist,distanceToSegment(center,points[i],points[i+1]));
+        minClearance=Math.min(minClearance,62-dist-22);if(dist>38)pathValid=false;moveCount++;if(moveCount===1||moveCount%5===0)report('pointermove',event,{path_valid:pathValid});});
+      token.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;token.releasePointerCapture(pointer);pointer=null;
+        const r=token.getBoundingClientRect(),cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2,g=goal.getBoundingClientRect();
+        const succeeded=event.isTrusted&&moveCount>=3&&pathValid&&Math.hypot(cx-(g.left+g.right)/2,cy-(g.top+g.bottom)/2)<=30;
+        const details={succeeded,path_valid:pathValid,min_clearance:Math.round(minClearance),token:box(token),goal:box(goal),path_points:points};
+        if(succeeded)markSuccess('CORRIDOR_SUCCEEDED',event,details);else markFailure(pathValid?'GOAL_MISSED':'LEFT_CORRIDOR',event,details);});
+      readyDetails={token:box(token),goal:box(goal),path_points:points,variant};
+    }
+
+    function setupSharedTurn() {
+      heading.textContent='Shared Visual Turn';
+      instruction.innerHTML='Continue the visible shared drawing game. Draw your move with pointer strokes inside one empty cell. <span class="black">USER: BLACK O</span> &nbsp; <span class="red">YOU: RED X</span>';
+      const W=arena.clientWidth,size=300,left=Math.round(between(55,W-size-190)),top=Math.round(between(42,48));
+      const board=document.createElement('div');board.className='board';place(board,left,top,size,size);
+      const canvas=document.createElement('canvas');canvas.width=size;canvas.height=size;board.append(canvas);arena.append(board);
+      const legend=document.createElement('div');legend.className='legend';legend.innerHTML='<span class="black">USER = BLACK O</span><br><span class="red">YOU = RED X</span><br>Now it is your turn';
+      place(legend,Math.min(W-175,left+size+28),top+65,155,145);arena.append(legend);
+      const ctx=canvas.getContext('2d');ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#20252b';ctx.lineWidth=6;
+      for(const p of [size/3,size*2/3]){ctx.beginPath();ctx.moveTo(p,0);ctx.lineTo(p,size);ctx.stroke();ctx.beginPath();ctx.moveTo(0,p);ctx.lineTo(size,p);ctx.stroke();}
+      const userCell=Math.floor(rng()*9),cell=size/3,uc=userCell%3,ur=Math.floor(userCell/3);
+      ctx.beginPath();ctx.arc((uc+.5)*cell,(ur+.5)*cell,cell*.27,0,Math.PI*2);ctx.stroke();
+      let pointer=null,current=[],strokes=[];
+      function local(event){const r=canvas.getBoundingClientRect();return{x:(event.clientX-r.left)*size/r.width,y:(event.clientY-r.top)*size/r.height};}
+      canvas.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;pointer=event.pointerId;moveCount=0;current=[local(event)];
+        canvas.setPointerCapture(pointer);ctx.strokeStyle='#d5222a';ctx.lineWidth=8;ctx.beginPath();ctx.moveTo(current[0].x,current[0].y);report('pointerdown',event);event.preventDefault();});
+      canvas.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;const p=local(event);current.push(p);ctx.lineTo(p.x,p.y);ctx.stroke();moveCount++;if(moveCount===1||moveCount%5===0)report('pointermove',event);});
+      canvas.addEventListener('pointerup',event=>{if(event.pointerId!==pointer)return;canvas.releasePointerCapture(pointer);pointer=null;const first=current[0],last=current[current.length-1];
+        const cells=current.map(p=>Math.max(0,Math.min(2,Math.floor(p.x/cell)))+3*Math.max(0,Math.min(2,Math.floor(p.y/cell))));
+        const same=cells.every(v=>v===cells[0]),dx=last.x-first.x,dy=last.y-first.y,valid=same&&cells[0]!==userCell&&Math.abs(dx)>=cell*.38&&Math.abs(dy)>=cell*.38;
+        if(valid)strokes.push({cell:cells[0],sign:Math.sign(dx*dy),mid:{x:(first.x+last.x)/2,y:(first.y+last.y)/2}});
+        let selected=-1;for(let i=0;i<strokes.length;i++)for(let j=i+1;j<strokes.length;j++){const a=strokes[i],b=strokes[j];
+          if(a.cell===b.cell&&a.sign!==b.sign&&Math.hypot(a.mid.x-b.mid.x,a.mid.y-b.mid.y)<cell*.34)selected=a.cell;}
+        const succeeded=event.isTrusted&&selected>=0;const details={succeeded,user_cell:userCell,selected_cell:selected,valid_stroke_count:strokes.length,board:box(canvas)};
+        if(succeeded)markSuccess('TURN_SUCCEEDED',event,details);else report('pointerup',event,details);current=[];});
+      readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
+    }
+
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,shared_turn:setupSharedTurn};
+    (setups[scenario]||setupDragFit)();
+    requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
+      viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})));
   </script>
 </body>
 </html>

@@ -32,7 +32,8 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "visual.region_bind": ("observe",),
     "interaction.infer": ("observe", "vlm_describe"),
     "interaction.perform": ("execute_subgoal", "run_action_batch"),
-    "interaction.verify_local_effect": ("observe", "vlm_verify"),
+    "interaction.verify_local_effect": ("observe",),
+    "interaction.verify_transition": ("observe",),
     "interaction.wait_external_change": (
         "wait_for_visual_change", "run_action_batch", "observe",
     ),
@@ -52,7 +53,8 @@ _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
     "interaction_controller": {
         "window.focus", "visual.observe", "visual.bind_target", "visual.region_bind",
         "controller.transaction", "interaction.perform",
-        "interaction.verify_local_effect", "interaction.wait_external_change",
+        "interaction.verify_local_effect", "interaction.verify_transition",
+        "interaction.wait_external_change",
     },
 }
 
@@ -93,7 +95,7 @@ _STAGE_BASE: dict[StageType, set[str]] = {
     StageType.INFER_INTERACTION: {"visual.observe", "interaction.infer"},
     StageType.PERFORM_TURN: {"interaction.perform", "controller.transaction", "visual.observe"},
     StageType.VERIFY_LOCAL_EFFECT: {
-        "interaction.verify_local_effect", "visual.semantic_verify", "visual.observe",
+        "interaction.verify_local_effect", "visual.observe",
     },
     StageType.WAIT_FOR_EXTERNAL_CHANGE: {"interaction.wait_external_change", "visual.observe"},
 }
@@ -134,8 +136,14 @@ class CapabilityPlanner:
             choices.append(ComponentChoice("artifact_store", "managed artifact identity"))
         if stage.type in {
             StageType.DRAW_ARTIFACT, StageType.CREATE_OR_EDIT_ARTIFACT, StageType.VERIFY_ARTIFACT,
-            StageType.INFER_INTERACTION, StageType.VERIFY_LOCAL_EFFECT,
+            StageType.INFER_INTERACTION,
         }:
+            choices.append(ComponentChoice("llm_visual_stage", "semantic content judgement"))
+        if (
+            stage.type == StageType.VERIFY_LOCAL_EFFECT
+            and stage.parameters.get("verification_policy")
+            != "typed_direct_manipulation_completion"
+        ):
             choices.append(ComponentChoice("llm_visual_stage", "semantic content judgement"))
         if stage.type in {
             StageType.OPEN_CONVERSATION, StageType.RESOLVE_RECIPIENT,
@@ -199,7 +207,11 @@ class CapabilityPlanner:
         if stage.type == StageType.INFER_INTERACTION:
             model_role = "interaction_semantic_planner"
         elif stage.type == StageType.VERIFY_LOCAL_EFFECT:
-            model_role = "interaction_semantic_verifier"
+            model_role = (
+                "interaction_semantic_verifier"
+                if "visual.semantic_verify" in combined
+                else "none"
+            )
         elif stage.type == StageType.DRAW_ARTIFACT:
             model_role = "visual_artifact_planner"
         else:

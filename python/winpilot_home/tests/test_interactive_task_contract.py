@@ -170,6 +170,51 @@ def test_shared_visual_interaction_uses_typed_session_stages():
     assert contract.satisfiable is True
 
 
+@pytest.mark.parametrize(
+    "task",
+    (
+        "跟我玩游戏，现在到你了",
+        "和我玩，接下来轮到你了",
+        "陪我互动，这一轮该你了",
+        "Play with me; now it is your turn.",
+    ),
+)
+def test_minimal_shared_turn_handoff_observes_scene_before_acting(task: str):
+    """A live shared turn must not require the user to restate visible rules."""
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    contract, graph = TaskContractCompiler().compile_graph(task, cold_start=True)
+
+    assert contract.intent.interaction.active is True
+    assert contract.intent.interaction.session_mode == "persistent"
+    assert contract.intent.interaction.turn_owner == "agent"
+    assert contract.intent.interaction.primary_action_modality == "infer_from_scene"
+    assert [stage.type.value for stage in contract.stages] == [
+        "ObserveScene",
+        "InferInteraction",
+        "PerformTurn",
+        "VerifyLocalEffect",
+        "WaitForExternalChange",
+    ]
+    assert all(node.kind.value not in {"agent_goal", "skill_replay"} for node in graph.nodes)
+
+
+@pytest.mark.parametrize(
+    "task",
+    (
+        "轮到你写下一段了",
+        "这篇文章写到你了解的部分",
+        "把文件发到你了解的邮箱里",
+    ),
+)
+def test_turn_like_prose_without_complete_shared_session_does_not_activate(task: str):
+    from winpilot.tasking.intent import TaskIntentParser
+
+    intent = TaskIntentParser().parse(task)
+
+    assert intent.interaction.active is False
+
+
 def test_actor_assignments_keep_role_ownership_instead_of_flattening_values():
     from winpilot.tasking.intent import TaskIntentParser
 
@@ -331,3 +376,58 @@ def test_external_turn_is_compiled_as_verified_defer_not_forced_mutation():
     assert perform.parameters["turn_guard"] == "only_when_agent_owns_turn"
     assert perform.parameters["on_external_turn"] == "defer_without_mutation"
     assert verify.parameters["accept_verified_defer"] is True
+
+
+def test_explicit_drag_selects_local_typed_completion_without_vlm_verifier():
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    contract = TaskContractCompiler().compile(
+        "In the current visible window, drag the movable disk through the "
+        "visible route into the destination.",
+        cold_start=True,
+    )
+    verify = next(
+        stage for stage in contract.stages
+        if stage.type.value == "VerifyLocalEffect"
+    )
+
+    assert verify.parameters["verification_policy"] == (
+        "typed_direct_manipulation_completion"
+    )
+    assert verify.execution.selected_evidence_providers == {
+        "interaction.local_effect_verified": (
+            "typed_direct_manipulation_completion"
+        ),
+        "interaction.task_completed": "typed_direct_manipulation_completion",
+    }
+    assert "interaction.verify_transition" in (
+        verify.execution.verifier_requirements
+    )
+    assert "visual.semantic_verify" not in (
+        verify.execution.required_capabilities
+        + verify.execution.verifier_requirements
+    )
+    assert "vlm_verify" not in verify.execution.tools
+    assert verify.execution.model_role == "none"
+
+
+def test_unknown_or_click_interaction_keeps_semantic_completion_provider():
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    contract = TaskContractCompiler().compile(
+        "In the current visible window, click the only control matching the "
+        "visible instruction.",
+        cold_start=True,
+    )
+    verify = next(
+        stage for stage in contract.stages
+        if stage.type.value == "VerifyLocalEffect"
+    )
+
+    assert verify.parameters["verification_policy"] == "semantic_visual_effect"
+    assert set(verify.execution.selected_evidence_providers.values()) == {
+        "local_semantic_effect_verifier", "interaction_terminal_verifier",
+    }
+    assert "visual.semantic_verify" in verify.execution.verifier_requirements
+    assert "vlm_verify" in verify.execution.tools
+    assert verify.execution.model_role == "interaction_semantic_verifier"

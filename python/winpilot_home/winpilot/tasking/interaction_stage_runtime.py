@@ -27,10 +27,15 @@ from .evidence import EvidenceRegistry
 from .interaction import (
     InteractionDecision,
     InteractionPlanOutputError,
-    controller_actions,
     plan_interaction,
     verify_interaction_completion,
     verify_interaction_effect,
+)
+from .interaction_controller import controller_actions
+from .visual_effects import (
+    verify_direct_manipulation_transition,
+    verify_pointer_gesture_realization,
+    verify_typed_direct_manipulation_completion,
 )
 from .visual_geometry import VisualGeometryError, refine_interaction_geometry
 
@@ -42,6 +47,29 @@ INTERACTION_STAGE_TYPES = {
     StageType.VERIFY_LOCAL_EFFECT,
     StageType.WAIT_FOR_EXTERNAL_CHANGE,
 }
+
+_MAX_LOCAL_CAUSAL_CHANGE_RATIO = 0.05
+
+
+def _local_causal_change_ratio(
+    decision: InteractionDecision,
+    *,
+    remote_feedback: bool,
+) -> float:
+    """Bound model sensitivity to the causal pixel-detection contract.
+
+    Geometry and semantic verifiers decide whether the requested result is
+    correct.  This gate only proves that the current transaction caused a
+    visible local change, so a model-provided large percentage cannot make a
+    small but valid object/control transition logically unreachable.
+    """
+    requested = max(
+        0.0,
+        min(1.0, float(decision.expected_effect.minimum_change_ratio)),
+    )
+    if remote_feedback:
+        return min(requested, 0.0025)
+    return min(requested, _MAX_LOCAL_CAUSAL_CHANGE_RATIO)
 
 
 def _controller_visual_no_effect(result: dict[str, Any]) -> bool:
@@ -69,6 +97,34 @@ def _mutation_signature(decision: InteractionDecision) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _failed_visible_mutation(
+    decision: InteractionDecision,
+    artifact: Artifact,
+    *,
+    failure_type: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe an already-applied mutation that must never be blind-replayed."""
+    return {
+        "frame_id": int(decision.frame_id),
+        "artifact_id": artifact.artifact_id,
+        "frame_sha256": artifact.sha256,
+        "action_signature": _mutation_signature(decision),
+        "failure_type": str(failure_type),
+        "relevant_regions": [
+            list(bounds) for bounds in dict.fromkeys(
+                tuple(float(value) for value in bounds)
+                for bounds in (
+                    _action_grounding_regions(decision)
+                    + _effect_regions(decision)
+                )
+            )
+        ],
+        "evidence": dict(evidence),
+        "replay_policy": "forbidden_without_explicit_new_user_or_external_state",
+    }
 
 
 def _failed_no_effect_evidence(
@@ -258,6 +314,16 @@ def _rect(region: Region) -> dict[str, int]:
     }
 
 
+def _action_rect(region: Region) -> dict[str, int]:
+    """Controller action spelling for a physical screen rectangle."""
+    return {
+        "x": int(region.left),
+        "y": int(region.top),
+        "width": int(region.width),
+        "height": int(region.height),
+    }
+
+
 def _normalized_roi_pixels(
     bounds: list[float] | tuple[float, float, float, float],
     artifact: Artifact,
@@ -379,7 +445,15 @@ def _action_grounding_regions(decision: InteractionDecision) -> list[list[float]
 
 
 def _effect_regions(decision: InteractionDecision) -> list[list[float]]:
-    """Return action/global postcondition ROIs, never grounding ROIs."""
+    """Return action/global postcondition ROIs, never grounding ROIs.
+
+    A point-selection/control activation can acknowledge success in a remote
+    banner, dialog, selection panel, or navigation surface while the clicked
+    object itself remains pixel-identical.  For only those visible mechanisms,
+    include the already-bound stable surface as a *secondary causal search
+    region*.  Semantic verification still has to prove that the remote change
+    satisfies the task; a whole-surface delta alone never completes it.
+    """
     regions = [
         list(action.expected_effect_region)
         for action in decision.actions
@@ -389,11 +463,122 @@ def _effect_regions(decision: InteractionDecision) -> list[list[float]]:
         regions.append(list(decision.expected_effect.region))
     if not regions:
         regions.append(list(decision.interaction_region))
+    remote_feedback_mechanisms = {
+        "control_activation", "point_selection", "click_to_place",
+        "text_entry", "keyboard_command",
+    }
+    if any(
+        action.interaction_mechanism in remote_feedback_mechanisms
+        for action in decision.actions
+    ) and len(decision.surface_region) == 4:
+        regions.append(list(decision.surface_region))
     unique = dict.fromkeys(
         tuple(float(value) for value in region)
         for region in regions
     )
     return [list(region) for region in unique]
+
+
+def _is_remote_feedback_region(
+    decision: InteractionDecision,
+    bounds: list[float],
+) -> bool:
+    remote_feedback_mechanisms = {
+        "control_activation", "point_selection", "click_to_place",
+        "text_entry", "keyboard_command",
+    }
+    return bool(
+        len(decision.surface_region) == 4
+        and all(
+            abs(float(left) - float(right)) <= 1e-6
+            for left, right in zip(bounds, decision.surface_region)
+        )
+        and any(
+            action.interaction_mechanism in remote_feedback_mechanisms
+            for action in decision.actions
+        )
+    )
+
+
+def _persistent_plan_has_causal_continuation(
+    decision: InteractionDecision,
+) -> bool:
+    """Let the typed stage graph own post-action verify/wait sequencing."""
+    if decision.continuation in {"wait_external", "finish"}:
+        return True
+    return bool(
+        decision.continuation == "reobserve"
+        and decision.agent_should_act
+        and decision.actions
+    )
+
+
+def _deferred_program(
+    decision: InteractionDecision,
+) -> dict[str, Any] | None:
+    if not decision.deferred_actions:
+        return None
+    serialized = [
+        item.model_dump(mode="json") for item in decision.deferred_actions
+    ]
+    digest = hashlib.sha256(json.dumps(
+        serialized, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:16]
+    return {
+        "program_id": f"interaction-program-{digest}",
+        "origin_frame_id": int(decision.frame_id),
+        "next_step_index": len(decision.actions),
+        "remaining_actions": serialized,
+        "terminal_continuation": decision.program_continuation,
+    }
+
+
+def _next_deferred_decision(
+    decision: InteractionDecision,
+    program: dict[str, Any],
+    *,
+    frame_id: int,
+    artifact_id: str,
+) -> tuple[InteractionDecision, dict[str, Any]]:
+    remaining = list(program.get("remaining_actions") or [])
+    if not remaining:
+        raise ValueError("deferred interaction program has no remaining action")
+    action = dict(remaining[0])
+    future = remaining[1:]
+    continuation = (
+        "reobserve"
+        if future
+        else str(program.get("terminal_continuation") or "finish")
+    )
+    if continuation not in {"finish", "reobserve", "wait_external"}:
+        continuation = "reobserve"
+    effect_region = list(action.get("expected_effect_region") or [])
+    payload = decision.model_dump(mode="python")
+    payload.update({
+        "actions": [action],
+        "expected_effect": {
+            "description": (
+                "the next controller-grounded action in the verified local "
+                "program produces its declared visible effect"
+            ),
+            "region": effect_region,
+            "region_binding": "independent_region",
+            "binding_action_index": -1,
+            "minimum_change_ratio": 0.001,
+            "semantic_verification_required": True,
+        },
+        "continuation": continuation,
+        "blocked_reason": "",
+        "wait_for_external_change": continuation == "wait_external",
+        "frame_id": int(frame_id),
+        "observation_artifact_id": str(artifact_id),
+    })
+    next_decision = InteractionDecision.model_validate(payload)
+    updated = dict(program)
+    updated["remaining_actions"] = future
+    updated["next_step_index"] = int(program.get("next_step_index") or 0) + 1
+    return next_decision, updated
 
 
 def _action_guard_bounds(decision: InteractionDecision) -> list[float]:
@@ -439,6 +624,7 @@ class InteractionStageEngine:
         state.setdefault("model_calls", 0)
         state.setdefault("turn_index", 0)
         state.setdefault("replan_count", 0)
+        state.setdefault("verified_turn_history", [])
         return state
 
     @staticmethod
@@ -953,6 +1139,15 @@ class InteractionStageEngine:
             return None
         state = self._state(context, contract)
         details = failure_details if isinstance(failure_details, dict) else {}
+        audit_details = {
+            key: details[key]
+            for key in (
+                "error", "local_change", "local_changes", "effect_regions",
+                "semantic_verification", "gesture_realization",
+                "expected_effect", "planned_actions", "failed_mutation",
+            )
+            if key in details
+        }
         self._reserve_replan(
             state,
             contract,
@@ -960,6 +1155,11 @@ class InteractionStageEngine:
             activity=details,
         )
         self._binding(context).reset()
+        rejected_plan = state.get("planned_action")
+        rejected_actions = (
+            list(rejected_plan.get("actions") or [])
+            if isinstance(rejected_plan, dict) else []
+        )
         state.update({
             "status": "recovery_reobserve_pending",
             "failure_stage": stage.id,
@@ -972,6 +1172,14 @@ class InteractionStageEngine:
             "planned_action": None,
             "executed_action": None,
             "local_verification": None,
+            "deferred_action_program": None,
+            "last_failure": {
+                "stage_type": stage.type.value,
+                "failure_type": failure_type,
+                "reason": str(details.get("error") or recovery_reason),
+                "rejected_actions": rejected_actions[:4],
+                "details": audit_details,
+            },
             "budget": self._budget_snapshot(state, contract),
         })
         return NodeResult(
@@ -989,6 +1197,7 @@ class InteractionStageEngine:
                     details.get("controller_elapsed_ms") or 0
                 ),
                 capture_elapsed_ms=int(details.get("capture_elapsed_ms") or 0),
+                failure_details=audit_details,
                 interaction_state=dict(state),
             ),
         )
@@ -1096,8 +1305,9 @@ class InteractionStageEngine:
             prior = {
                 key: state.get(key)
                 for key in (
-                    "turn_index", "local_verification", "external_change",
+                    "turn_index", "verified_turn_history", "external_change",
                     "detected_surface", "surface_region", "interaction_region",
+                    "last_failure",
                 )
                 if state.get(key) is not None
             }
@@ -1181,9 +1391,9 @@ class InteractionStageEngine:
                 contract.session is not None
                 and contract.session.wait_for_external_change
             )
-            if expects_external_watch and decision.continuation not in {
-                "wait_external", "finish",
-            }:
+            if expects_external_watch and not _persistent_plan_has_causal_continuation(
+                decision,
+            ):
                 raise _failure(
                     "persistent interaction plan must wait for external change or declare a visible terminal state",
                     "interaction_plan_invalid",
@@ -1191,6 +1401,15 @@ class InteractionStageEngine:
                     model_calls=1,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=readiness_elapsed_ms,
+                )
+            if (
+                expects_external_watch
+                and decision.continuation == "reobserve"
+                and decision.agent_should_act
+                and decision.actions
+            ):
+                canonicalization_repairs.append(
+                    "continuation:post_action_reobserve_owned_by_stage_graph"
                 )
             if not expects_external_watch and decision.continuation == "wait_external":
                 raise _failure(
@@ -1327,7 +1546,11 @@ class InteractionStageEngine:
                 "budget": self._budget_snapshot(state, contract),
                 "failure_stage": "",
                 "inference_canonicalization_repairs": canonicalization_repairs,
+                "visual_region_inventory": [
+                    dict(item) for item in decision.region_inventory
+                ],
             })
+            state["deferred_action_program"] = _deferred_program(decision)
             if decision.agent_should_act:
                 state["last_mutating_plan"] = decision.model_dump(mode="json")
             record = registry.record(
@@ -1351,6 +1574,12 @@ class InteractionStageEngine:
                         else contract.intent.interaction.primary_action_modality
                     ),
                     "canonicalization_repairs": canonicalization_repairs,
+                    "visual_region_inventory": [
+                        dict(item) for item in decision.region_inventory
+                    ],
+                    "deferred_action_program": state.get(
+                        "deferred_action_program"
+                    ),
                     "frame_readiness": frame_readiness,
                 },
             )
@@ -1361,6 +1590,8 @@ class InteractionStageEngine:
                 frame_id=decision.frame_id,
                 turn_owner=decision.turn_owner,
                 planned_action=decision.model_dump(mode="json"),
+                visual_region_inventory=state.get("visual_region_inventory"),
+                deferred_action_program=state.get("deferred_action_program"),
             )
             return NodeResult(output=self.stage_output(
                 stage, started, model_calls=1,
@@ -2060,16 +2291,27 @@ class InteractionStageEngine:
                 )
             )
             effect_regions = _effect_regions(decision)
-            changes = [
-                store.frame_change(
+            changes = []
+            for bounds in effect_regions:
+                remote_feedback = _is_remote_feedback_region(decision, bounds)
+                item = store.frame_change(
                     baseline.artifact_id,
                     current.artifact_id,
                     target_region=_normalized_roi_pixels(bounds, current),
-                    min_change_ratio=decision.expected_effect.minimum_change_ratio,
-                    min_mean_delta=1.0,
+                    min_change_ratio=_local_causal_change_ratio(
+                        decision,
+                        remote_feedback=remote_feedback,
+                    ),
+                    min_mean_delta=0.45 if remote_feedback else 1.0,
                 )
-                for bounds in effect_regions
-            ]
+                changes.append({
+                    **item,
+                    "verification_scope": (
+                        "bound_surface_remote_feedback"
+                        if remote_feedback else "declared_effect_region"
+                    ),
+                    "normalized_region": list(bounds),
+                })
             change = max(
                 changes,
                 key=lambda item: (
@@ -2081,12 +2323,124 @@ class InteractionStageEngine:
             )
             if change.get("changed") is not True:
                 raise _failure(
-                    "interaction transaction produced no causal change in its target ROI",
+                    "interaction transaction produced no causal change in its "
+                    "declared ROI or contract-authorized remote feedback region",
                     "local_effect_missing",
                     local_change=change,
                     local_changes=changes,
                     effect_regions=effect_regions,
                     expected_effect=decision.expected_effect.model_dump(mode="json"),
+                )
+            gesture_realization = verify_pointer_gesture_realization(
+                baseline.managed_path,
+                current.managed_path,
+                decision,
+            )
+            if gesture_realization.get("applicable") is True:
+                gesture_record = registry.record(
+                    "interaction.gesture_realized",
+                    provider="local_gesture_realization",
+                    verified=gesture_realization.get("verified") is True,
+                    stage_id=stage.id,
+                    artifact_id=current.artifact_id,
+                    metadata=gesture_realization,
+                )
+                BUS.publish(
+                    "interaction_gesture_verify",
+                    run_id=context["run_id"],
+                    session_id=state.get("session_id"),
+                    artifact_id=current.artifact_id,
+                    gesture_realization=gesture_realization,
+                    evidence_id=gesture_record["id"],
+                )
+                if gesture_realization.get("verified") is not True:
+                    failed_mutation = _failed_visible_mutation(
+                        decision,
+                        current,
+                        failure_type="gesture_realization_missing",
+                        evidence=gesture_realization,
+                    )
+                    state["failed_visible_mutation"] = failed_mutation
+                    raise _failure(
+                        "post-action pixels changed, but they do not realize all "
+                        "declared pointer paths",
+                        "gesture_realization_missing",
+                        local_change=change,
+                        gesture_realization=gesture_realization,
+                        failed_mutation=failed_mutation,
+                        model_calls=0,
+                        model_elapsed_ms=0,
+                        controller_elapsed_ms=0,
+                        capture_elapsed_ms=capture_elapsed_ms,
+                    )
+            manipulation_transition = verify_direct_manipulation_transition(
+                baseline.managed_path,
+                current.managed_path,
+                decision,
+            )
+            if manipulation_transition.get("applicable") is True:
+                transition_record = registry.record(
+                    "interaction.direct_manipulation_transition_verified",
+                    provider="local_direct_manipulation_transition",
+                    verified=manipulation_transition.get("verified") is True,
+                    stage_id=stage.id,
+                    artifact_id=current.artifact_id,
+                    metadata=manipulation_transition,
+                )
+                BUS.publish(
+                    "interaction_transition_verify",
+                    run_id=context["run_id"],
+                    session_id=state.get("session_id"),
+                    artifact_id=current.artifact_id,
+                    manipulation_transition=manipulation_transition,
+                    evidence_id=transition_record["id"],
+                )
+            selected_providers = (
+                dict(stage.execution.selected_evidence_providers)
+                if stage.execution is not None
+                else {}
+            )
+            selected_effect_provider = str(
+                selected_providers.get("interaction.local_effect_verified") or ""
+            )
+            selected_terminal_provider = str(
+                selected_providers.get("interaction.task_completed") or ""
+            )
+            deferred_program = (
+                dict(state.get("deferred_action_program") or {})
+                if isinstance(state.get("deferred_action_program"), dict)
+                else {}
+            )
+            has_deferred_program = bool(
+                deferred_program.get("remaining_actions")
+            )
+            use_typed_transition_provider = bool(
+                selected_effect_provider
+                == "typed_direct_manipulation_completion"
+                and selected_terminal_provider
+                == "typed_direct_manipulation_completion"
+            )
+            typed_completion = verify_typed_direct_manipulation_completion(
+                decision,
+                transition_evidence=manipulation_transition,
+                geometry_evidence=state.get("visual_geometry_grounding") or {},
+            )
+            if use_typed_transition_provider:
+                typed_record = registry.record(
+                    "interaction.typed_direct_manipulation_completed",
+                    provider="typed_direct_manipulation_completion",
+                    verified=typed_completion.get("verified") is True,
+                    stage_id=stage.id,
+                    artifact_id=current.artifact_id,
+                    metadata=typed_completion,
+                )
+                BUS.publish(
+                    "interaction_typed_completion_verify",
+                    run_id=context["run_id"],
+                    session_id=state.get("session_id"),
+                    artifact_id=current.artifact_id,
+                    completion=typed_completion,
+                    evidence_id=typed_record["id"],
                 )
             semantic = {
                 "ok": True,
@@ -2096,7 +2450,59 @@ class InteractionStageEngine:
             }
             model_calls = 0
             model_elapsed_ms = 0
-            if decision.expected_effect.semantic_verification_required:
+            if use_typed_transition_provider:
+                semantic = {
+                    "ok": True,
+                    "verified": typed_completion.get("verified") is True,
+                    "semantic_visual_verified": False,
+                    "task_complete": typed_completion.get("verified") is True,
+                    "verify_method": "typed-direct-manipulation-completion",
+                    "expected_effect": decision.expected_effect.model_dump(
+                        mode="json"
+                    ),
+                    "verifier_contract": {
+                        "selected_provider": (
+                            "typed_direct_manipulation_completion"
+                        ),
+                        "typed_completion": typed_completion,
+                        "model_call_skipped": True,
+                    },
+                }
+            elif has_deferred_program:
+                semantic = {
+                    "ok": True,
+                    "verified": True,
+                    "semantic_visual_verified": False,
+                    "task_complete": False,
+                    "observed": [
+                        "the controller committed the current typed action "
+                        "and the fresh authoritative frame changed inside "
+                        "its declared effect region"
+                    ],
+                    "issues": [],
+                    "local_effect_issues": [],
+                    "completion_issues": [
+                        f"{len(deferred_program.get('remaining_actions') or [])} "
+                        "controller-grounded action(s) remain in the local program"
+                    ],
+                    "verify_method": "grounded-local-program-progress",
+                    "expected_effect": decision.expected_effect.model_dump(
+                        mode="json"
+                    ),
+                    "verifier_contract": {
+                        "selected_provider": "grounded_transaction_progress",
+                        "program_id": deferred_program.get("program_id"),
+                        "program_step_index": deferred_program.get(
+                            "next_step_index"
+                        ),
+                        "causal_roi_change": change,
+                        "geometry_evidence": state.get(
+                            "visual_geometry_grounding"
+                        ) or {},
+                        "model_call_skipped": True,
+                    },
+                }
+            elif decision.expected_effect.semantic_verification_required:
                 self._reserve_model_call(
                     state,
                     contract,
@@ -2105,16 +2511,34 @@ class InteractionStageEngine:
                 model_started = time.monotonic()
                 try:
                     semantic = verify_interaction_effect(
-                        current.managed_path, task=contract.task, decision=decision,
+                        current.managed_path,
+                        task=contract.task,
+                        decision=decision,
+                        authoritative_effect_regions=effect_regions,
+                        transition_evidence=manipulation_transition,
+                        gesture_evidence=gesture_realization,
+                        verified_turn_history=list(
+                            state.get("verified_turn_history") or []
+                        ),
                     )
                 except Exception as exc:
                     model_elapsed_ms = int(
                         (time.monotonic() - model_started) * 1000
                     )
+                    failed_mutation = _failed_visible_mutation(
+                        decision,
+                        current,
+                        failure_type="semantic_verification_failed",
+                        evidence={"error": str(exc)},
+                    )
+                    state["failed_visible_mutation"] = failed_mutation
                     raise _failure(
                         f"semantic local-effect verification failed: {exc}",
                         "semantic_verification_failed",
                         local_change=change,
+                        gesture_realization=gesture_realization,
+                        manipulation_transition=manipulation_transition,
+                        failed_mutation=failed_mutation,
                         model_calls=1,
                         model_elapsed_ms=model_elapsed_ms,
                         controller_elapsed_ms=0,
@@ -2125,11 +2549,31 @@ class InteractionStageEngine:
                 )
                 model_calls = 1
             if semantic.get("verified") is not True:
+                verification_failure_type = (
+                    "direct_manipulation_completion_unverified"
+                    if use_typed_transition_provider
+                    else "semantic_verification_failed"
+                )
+                failed_mutation = _failed_visible_mutation(
+                    decision,
+                    current,
+                    failure_type=verification_failure_type,
+                    evidence=semantic,
+                )
+                state["failed_visible_mutation"] = failed_mutation
                 raise _failure(
-                    "post-action pixels do not prove the intended semantic effect",
-                    "semantic_verification_failed",
+                    (
+                        "typed direct-manipulation evidence does not prove the "
+                        "contracted completion"
+                        if use_typed_transition_provider
+                        else "post-action pixels do not prove the intended semantic effect"
+                    ),
+                    verification_failure_type,
                     local_change=change,
+                    gesture_realization=gesture_realization,
+                    manipulation_transition=manipulation_transition,
                     semantic_verification=semantic,
+                    failed_mutation=failed_mutation,
                     model_calls=model_calls,
                     model_elapsed_ms=model_elapsed_ms,
                     controller_elapsed_ms=0,
@@ -2143,8 +2587,11 @@ class InteractionStageEngine:
                 "local_change": change,
                 "local_changes": changes,
                 "effect_regions": effect_regions,
+                "gesture_realization": gesture_realization,
+                "manipulation_transition": manipulation_transition,
                 "semantic": semantic,
             }
+            state.pop("failed_visible_mutation", None)
             state.update({
                 "status": "turn_verified",
                 "local_verification": verification,
@@ -2156,21 +2603,116 @@ class InteractionStageEngine:
             state["budget"] = self._budget_snapshot(state, contract)
             record = registry.record(
                 "interaction.local_effect_verified",
-                provider="local_semantic_effect_verifier",
+                provider=(
+                    "grounded_transaction_progress"
+                    if has_deferred_program
+                    else (
+                        "typed_direct_manipulation_completion"
+                        if use_typed_transition_provider
+                        else "local_semantic_effect_verifier"
+                    )
+                ),
                 verified=True,
                 stage_id=stage.id,
                 artifact_id=current.artifact_id,
                 metadata=verification,
             )
+            history = (
+                list(state.get("verified_turn_history") or [])
+                if isinstance(state.get("verified_turn_history"), list)
+                else []
+            )
+            history.append({
+                "turn_index": int(state.get("turn_index") or 0),
+                "artifact_id": current.artifact_id,
+                "evidence_id": record["id"],
+                "actions": [
+                    {
+                        key: value
+                        for key, value in item.model_dump(mode="json").items()
+                        if key in {
+                            "action", "target_region", "target_anchor",
+                            "interaction_mechanism", "affordance_evidence",
+                            "color", "text",
+                        }
+                        and value is not None
+                        and value != ""
+                        and value != []
+                    }
+                    for item in decision.actions
+                ],
+                "observed": list(semantic.get("observed") or [])[:8],
+                "completion_issues": list(
+                    semantic.get("completion_issues") or []
+                )[:8],
+                "task_complete": semantic.get("task_complete") is True,
+            })
+            # This is run-scoped progress memory, not reusable Skill/Memory.
+            # Keep it compact so recovery retains causal history without
+            # inflating every later visual-model request.
+            state["verified_turn_history"] = history[-12:]
             BUS.publish(
                 "interaction_verify",
                 run_id=context["run_id"],
                 session_id=state.get("session_id"),
                 local_verification=verification,
             )
-            if semantic.get("task_complete") is True:
+            activation_turn_limit_reached = bool(
+                contract.session is not None
+                and contract.session.lifecycle == "persistent"
+                and int(state.get("turn_index") or 0)
+                >= int(contract.session.max_agent_turns_per_activation)
+            )
+            if semantic.get("task_complete") is True or activation_turn_limit_reached:
                 state["status"] = "completed"
+                if activation_turn_limit_reached:
+                    state["session_yield"] = {
+                        "reason": "verified_agent_turn_limit_reached",
+                        "turn_index": int(state.get("turn_index") or 0),
+                        "max_agent_turns_per_activation": int(
+                            contract.session.max_agent_turns_per_activation
+                        ),
+                        "session_remains_resumable": True,
+                    }
                 branch = "complete"
+            elif has_deferred_program:
+                try:
+                    next_decision, deferred_program = _next_deferred_decision(
+                        decision,
+                        deferred_program,
+                        frame_id=int(state.get("frame_id") or 0),
+                        artifact_id=current.artifact_id,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _failure(
+                        f"deferred local interaction program became invalid: {exc}",
+                        "interaction_plan_invalid",
+                        deferred_action_program=deferred_program,
+                    ) from exc
+                state.update({
+                    "status": "local_program_followup",
+                    "planned_action": next_decision.model_dump(mode="json"),
+                    "last_mutating_plan": next_decision.model_dump(mode="json"),
+                    "executed_action": None,
+                    "local_verification": None,
+                    "deferred_action_program": (
+                        deferred_program
+                        if deferred_program.get("remaining_actions")
+                        else None
+                    ),
+                })
+                BUS.publish(
+                    "interaction_program_continue",
+                    run_id=context["run_id"],
+                    session_id=state.get("session_id"),
+                    program_id=deferred_program.get("program_id"),
+                    next_step_index=deferred_program.get("next_step_index"),
+                    remaining_action_count=len(
+                        deferred_program.get("remaining_actions") or []
+                    ),
+                    planned_action=state["planned_action"],
+                )
+                branch = "continue_local"
             elif contract.session is not None and contract.session.lifecycle == "persistent":
                 branch = "next"
             elif decision.continuation == "finish":
@@ -2206,14 +2748,26 @@ class InteractionStageEngine:
             if branch == "complete":
                 completion_record = registry.record(
                     "interaction.task_completed",
-                    provider="interaction_terminal_verifier",
+                    provider=(
+                        selected_terminal_provider
+                        or "interaction_terminal_verifier"
+                    ),
                     verified=True,
                     stage_id=stage.id,
                     artifact_id=current.artifact_id,
                     metadata={
-                        "proof": "post_action_terminal_visual_verification",
+                        "proof": (
+                            "verified_activation_turn"
+                            if activation_turn_limit_reached
+                            else (
+                                "typed_direct_manipulation_completion"
+                                if use_typed_transition_provider
+                                else "post_action_terminal_visual_verification"
+                            )
+                        ),
                         "local_effect_evidence_id": record["id"],
                         "semantic": semantic,
+                        "session_yield": state.get("session_yield"),
                     },
                 )
                 state["completion_evidence_id"] = completion_record["id"]
@@ -2287,7 +2841,7 @@ class InteractionStageEngine:
                     result = _json(session.dispatch("run_action_batch", {
                         "actions": [{
                             "action": "wait_for_visual_change",
-                            "region": _rect(watch_region),
+                            "region": _action_rect(watch_region),
                             "timeout_s": timeout_s,
                             "min_ratio": 0.0015,
                             "require_persistent": True,

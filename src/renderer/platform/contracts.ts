@@ -536,6 +536,7 @@ export interface StageRuntimeTrace {
   satisfiable: boolean;
   adapter: string;
   model_role: string;
+  selected_evidence_providers?: Record<string, string>;
   artifact_id: string;
   model_calls: number;
   model_elapsed_ms?: number;

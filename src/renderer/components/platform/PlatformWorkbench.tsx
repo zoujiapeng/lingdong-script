@@ -401,6 +401,11 @@ export function stageRuntimeRows(
         : value('satisfiable') === true,
       adapter: String(value('adapter') || execution?.adapter || ''),
       model_role: String(value('model_role') || execution?.model_role || 'none'),
+      selected_evidence_providers: (
+        recordValue(value('selected_evidence_providers'))
+        || execution?.selected_evidence_providers
+        || {}
+      ) as Record<string, string>,
       artifact_id: String(value('artifact_id') || ''),
       model_calls: finiteNumber(value('model_calls')),
       model_elapsed_ms: finiteNumber(value('model_elapsed_ms')),
@@ -481,6 +486,9 @@ export function TaskRuntimeAuditPanel({
           const timing = row.timing_reported
             ? `模型 ${row.model_elapsed_ms || 0}ms · Controller ${row.controller_elapsed_ms || 0}ms · Capture ${row.capture_elapsed_ms || 0}ms · ${row.model_calls} 次调用`
             : '耗时尚未上报';
+          const selectedProviders = Object.entries(
+            row.selected_evidence_providers || {},
+          ).map(([predicate, provider]) => `${predicate} → ${provider}`).join(', ');
           return (
             <div className={`arp-runtime-stage ${row.current ? 'active' : ''} ${failed ? 'failed' : ''}`} key={row.stage_id}>
               <div className="arp-runtime-stage-status">
@@ -498,6 +506,7 @@ export function TaskRuntimeAuditPanel({
                 <span>Controller：{row.controller_tools.join(', ') || 'local'}</span>
                 <span>Model：{row.model_tools.join(', ') || row.model_role || 'none'}</span>
                 <span>Adapter：{row.adapter || 'none'}</span>
+                <span title={selectedProviders}>Evidence providers：{selectedProviders || 'none'}</span>
               </div>
               <div className="arp-runtime-stage-detail">
                 <span aria-label={`${row.stage_id} timing`}>{timing}</span>
