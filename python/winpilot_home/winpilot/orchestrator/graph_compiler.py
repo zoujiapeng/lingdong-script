@@ -204,10 +204,9 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                 label="local program continuation",
             ))
             # A live session advances only after the target-bound watcher has
-            # proved an external ROI change.  ``complete`` remains a reachable
-            # explicit terminal branch for a verified bounded activation.  A
-            # resumable live session yields after its contracted agent-turn
-            # limit instead of keeping the foreground run blocked indefinitely.
+            # proved an external ROI change.  ``complete`` remains reachable
+            # only for a visibly proved semantic terminal state; a normal
+            # verified turn proceeds to the existing sequential Wait stage.
             edges.append(ArpEdge(
                 id=f"{wait_stage.id}-changed-{infer_stage.id}",
                 source=wait_stage.id,

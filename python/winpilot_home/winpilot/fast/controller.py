@@ -30,6 +30,7 @@ from .action_contract import (
 )
 from .element_cache import ElementCache, LocateResult, anchor_from_dict
 from .input_locator import locate_input
+from .input_mode import inspect_input_mode
 from .types import BatchMetrics
 from .visual_servo import ServoConfig, track_visual_target
 from .watcher import ScreenWatcher
@@ -670,6 +671,7 @@ class FastGuiController:
         ] = {}
         self._persistent_palette_keys: set[tuple[int, int, int, int, int]] = set()
         self._active_color = ""
+        self._live_accessibility_elements: list[Any] = []
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -914,17 +916,35 @@ class FastGuiController:
             region.width,
             max(120, min(region.height, int(region.height * 0.48))),
         ).clamp_to_screen()
-        candidates = list(getattr(getattr(self.session, "snapshot", None), "elements", []) or [])
-        source = "snapshot"
+        candidates = [
+            *list(self._live_accessibility_elements or []),
+            *list(getattr(getattr(self.session, "snapshot", None), "elements", []) or []),
+        ]
+        source = (
+            "controller_accessibility_cache+snapshot"
+            if self._live_accessibility_elements else "snapshot"
+        )
         # A palette/dropdown can create fresh accessible children after the
         # parent control was clicked.  The session snapshot intentionally
         # stays stable during a batch, so refresh this narrow UIA surface
         # before falling back to a costly visual grounding pass.
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
-        if hwnd and "uia" in CONFIG.enabled_dimensions():
+        has_exact_structured_match = any(
+            _norm_text(getattr(element, "text", "")) == wanted
+            and str(getattr(element, "source", "") or "").casefold() in {"uia", "win32"}
+            for element in candidates
+        )
+        if (
+            not has_exact_structured_match
+            and hwnd
+            and "uia" in CONFIG.enabled_dimensions()
+        ):
             try:
-                candidates.extend(uia.collect(hwnd))
-                source = "snapshot+uia"
+                live = list(uia.collect(hwnd))
+                candidates.extend(live)
+                if live:
+                    self._live_accessibility_elements = live
+                source = f"{source}+uia"
             except Exception:
                 pass
         has_exact_structured_match = any(
@@ -1013,7 +1033,9 @@ class FastGuiController:
             max(96, min(region.height, int(region.height * 0.36))),
         ).clamp_to_screen()
         started = _now_ms()
-        label_terms = {"colors", "colour", "color", "颜色", "色彩", "顏色"}
+        label_terms = {
+            "colors", "colour", "color", "颜色", "色彩", "顏色",
+        }
         def is_color_label(element: Any) -> bool:
             text = _norm_text(getattr(element, "text", ""))
             return bool(text) and (
@@ -1025,12 +1047,21 @@ class FastGuiController:
         # OCR/VLM label baseline which may need a conservative offset.
         candidates = [
             element
-            for element in list(getattr(getattr(self.session, "snapshot", None), "elements", []) or [])
+            for element in [
+                *list(self._live_accessibility_elements or []),
+                *list(getattr(getattr(self.session, "snapshot", None), "elements", []) or []),
+            ]
             if is_color_label(element)
             and toolbar.left <= int(getattr(element, "cx", 0) or 0) <= toolbar.right
             and toolbar.top <= int(getattr(element, "cy", 0) or 0) <= toolbar.bottom
         ]
-        locator_source = "snapshot" if candidates else ""
+        locator_source = (
+            (
+                "controller_accessibility_cache+snapshot"
+                if self._live_accessibility_elements else "snapshot"
+            )
+            if candidates else ""
+        )
         ocr_ms = 0
         if not candidates:
             try:
@@ -1106,6 +1137,230 @@ class FastGuiController:
             "point": {"x": x, "y": click_y},
             "click": _json_dict(click.text),
             "preview": click.text[:240],
+        }, ensure_ascii=False, default=str))
+
+    def _ensure_input_mode(self, action: dict[str, Any]) -> ToolResult:
+        """Prove or establish the typed pointer mechanism before mutation.
+
+        The resolver consumes generic accessibility semantics.  It neither
+        knows the target application nor clicks a version-specific coordinate.
+        Interfaces without an explicit mode system remain usable; an observed
+        conflicting active tool, however, must be resolved before the path is
+        allowed to touch the work surface.
+        """
+        mode = str(action.get("mode") or "").strip().casefold()
+        if not mode:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "INPUT_MODE_REQUIREMENT_INVALID",
+                "error": "ensure_input_mode requires a typed mode",
+            }, ensure_ascii=False))
+        hwnd = int(getattr(self.session, "hwnd", 0) or 0)
+        if not hwnd:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "INPUT_MODE_TARGET_UNBOUND",
+                "error": "input-mode preparation requires a bound target window",
+            }, ensure_ascii=False))
+
+        def current_elements() -> list[Any]:
+            live = list(uia.collect(hwnd)) if "uia" in CONFIG.enabled_dimensions() else []
+            snapshot = list(
+                getattr(getattr(self.session, "snapshot", None), "elements", []) or []
+            )
+            # Keep live controls first.  Deduplication is deliberately based on
+            # semantic and physical identity, never on application metadata.
+            seen: set[tuple[str, str, int, int]] = set()
+            merged: list[Any] = []
+            for element in [*live, *snapshot]:
+                key = (
+                    _norm_text(getattr(element, "text", "")),
+                    str(getattr(element, "role", "") or "").casefold(),
+                    int(getattr(element, "cx", 0) or 0),
+                    int(getattr(element, "cy", 0) or 0),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(element)
+            if live:
+                self._live_accessibility_elements = list(merged)
+            return merged
+
+        before, candidates = inspect_input_mode(current_elements(), mode)
+        if before.get("ok") is not True:
+            return ToolResult(json.dumps({
+                **before,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "INPUT_MODE_UNSUPPORTED",
+                "error": f"unsupported typed input mode: {mode}",
+            }, ensure_ascii=False, default=str))
+        if before.get("active_matches"):
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": True,
+                "mutation_applied": False,
+                "input_mode": mode,
+                "provider": "accessibility_active_mode",
+                "precondition": before,
+            }, ensure_ascii=False, default=str))
+        if not candidates:
+            if before.get("active_conflicts"):
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "failure_type": "INPUT_MODE_CONFLICT_UNRESOLVED",
+                    "error": (
+                        "the current interface exposes an incompatible active "
+                        "input mode but no accessible compatible selector"
+                    ),
+                    "precondition": before,
+                }, ensure_ascii=False, default=str))
+            # Many direct-manipulation canvases have no mode selector at all.
+            # Absence of both a selector and a conflicting active tool is a
+            # typed implicit-mode contract, not an application-specific guess.
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": True,
+                "mutation_applied": False,
+                "input_mode": mode,
+                "provider": "implicit_single_mode_surface",
+                "precondition": before,
+            }, ensure_ascii=False, default=str))
+
+        chosen = candidates[0]
+        x = int(getattr(chosen, "cx", 0) or 0)
+        y = int(getattr(chosen, "cy", 0) or 0)
+        if not x or not y:
+            return ToolResult(json.dumps({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "mutation_applied": False,
+                "input_mode": mode,
+                "failure_type": "INPUT_MODE_SELECTOR_UNGROUNDED",
+                "error": "compatible input-mode control has no physical anchor",
+                "precondition": before,
+            }, ensure_ascii=False, default=str))
+        click = self._dispatch(
+            "click", {"x": x, "y": y, "skip_screen_delta": True},
+        )
+        click_data = _json_dict(click.text)
+        if _failed(click):
+            return ToolResult(json.dumps({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "mutation_applied": False,
+                "input_mode": mode,
+                "failure_type": "INPUT_MODE_ACTIVATION_FAILED",
+                "error": str(click_data.get("error") or click.text),
+                "selector": {
+                    "text": str(getattr(chosen, "text", "") or ""),
+                    "role": str(getattr(chosen, "role", "") or ""),
+                    "source": str(getattr(chosen, "source", "") or ""),
+                    "x": x,
+                    "y": y,
+                },
+                "precondition": before,
+            }, ensure_ascii=False, default=str))
+        time.sleep(0.08)
+        source = str(getattr(chosen, "source", "") or "").casefold()
+        structured_activation = source in {"uia", "win32"}
+        selected_control_verified = False
+        control = (
+            (getattr(chosen, "extra", None) or {}).get("uia_ctrl")
+            if isinstance(getattr(chosen, "extra", None), dict)
+            else None
+        )
+        if control is not None:
+            try:
+                pattern = control.GetSelectionItemPattern()
+                selected_control_verified = bool(pattern and pattern.IsSelected)
+            except Exception:
+                selected_control_verified = False
+            if not selected_control_verified:
+                try:
+                    toggle = control.GetTogglePattern()
+                    selected_control_verified = bool(
+                        toggle and int(toggle.ToggleState) == 1
+                    )
+                except Exception:
+                    selected_control_verified = False
+        selector_summary = {
+            "text": str(getattr(chosen, "text", "") or ""),
+            "role": str(getattr(chosen, "role", "") or ""),
+            "source": str(getattr(chosen, "source", "") or ""),
+            "x": x,
+            "y": y,
+        }
+        if selected_control_verified:
+            after = {
+                "ok": True,
+                "requested_mode": mode,
+                "active_matches": [{**selector_summary, "states": ["selected"]}],
+                "active_conflicts": [],
+                "candidates": [selector_summary],
+                "explicit_mode_system": True,
+                "verification_source": "live_uia_selection_pattern",
+            }
+        else:
+            # Invoke/click success is not proof that the interface accepted a
+            # mode transition.  Controls without a readable selection pattern
+            # therefore pay for one fresh semantic read and must expose the
+            # requested mode as active.  This keeps the fast path for controls
+            # with IsSelected/ToggleState while remaining fail-closed on other
+            # applications and custom toolbars.
+            try:
+                after, _after_candidates = inspect_input_mode(
+                    current_elements(), mode,
+                )
+                after["verification_source"] = "fresh_accessibility_state"
+            except Exception as exc:
+                after = {
+                    "ok": False,
+                    "requested_mode": mode,
+                    "active_matches": [],
+                    "active_conflicts": [],
+                    "candidates": [],
+                    "explicit_mode_system": bool(structured_activation),
+                    "verification_source": "fresh_accessibility_state_failed",
+                    "error": str(exc),
+                }
+        verified = bool(
+            after.get("ok") is True
+            and after.get("active_matches")
+            and not after.get("active_conflicts")
+        )
+        provider = (
+            "accessibility_post_selection"
+            if selected_control_verified
+            else "fresh_accessibility_post_selection"
+        )
+        return ToolResult(json.dumps({
+            "ok": verified,
+            "verified": verified,
+            "blocked": not verified,
+            "mutation_applied": True,
+            "input_mode": mode,
+            "provider": provider if verified else "unverified_mode_activation",
+            "failure_type": "" if verified else "INPUT_MODE_ACTIVATION_UNVERIFIED",
+            "error": "" if verified else (
+                "compatible control was activated but the requested input mode "
+                "could not be proven from current interface state"
+            ),
+            "selector": selector_summary,
+            "precondition": before,
+            "postcondition": after,
+            "click": click_data,
         }, ensure_ascii=False, default=str))
 
     def _select_color(self, action: dict[str, Any]) -> ToolResult:
@@ -1243,19 +1498,42 @@ class FastGuiController:
                 if not strict:
                     break
 
-        try:
-            point, summary, elapsed_ms = capture_palette_point()
-            palette_was_visible = point is not None
+        palette_terms = {
+            "colors", "colour", "color", "颜色", "色彩", "顏色",
+        }
+        cached_palette_control = any(
+            _norm_text(getattr(element, "text", "")) in palette_terms
+            and str(getattr(element, "source", "") or "").casefold()
+            in {"uia", "win32"}
+            for element in self._live_accessibility_elements
+        )
+        if cached_palette_control:
+            # A just-collected accessibility tree proves the palette is
+            # collapsed behind a semantic control.  Re-scanning the same
+            # toolbar pixels before opening it adds latency but no evidence.
+            point = None
+            summary = {"skipped": "accessible_palette_control_visible"}
+            palette_was_visible = False
             attempts.append({
                 "action": "scan_color_palette",
-                "ok": point is not None,
+                "ok": False,
                 "summary": summary,
-                "elapsed_ms": elapsed_ms,
+                "elapsed_ms": 0,
             })
-        except Exception as exc:
-            attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
-            point = None
-            palette_was_visible = False
+        else:
+            try:
+                point, summary, elapsed_ms = capture_palette_point()
+                palette_was_visible = point is not None
+                attempts.append({
+                    "action": "scan_color_palette",
+                    "ok": point is not None,
+                    "summary": summary,
+                    "elapsed_ms": elapsed_ms,
+                })
+            except Exception as exc:
+                attempts.append({"action": "capture_palette", "ok": False, "error": str(exc)})
+                point = None
+                palette_was_visible = False
         if point is None and not strict and self._active_color:
             return optional_fallback(
                 f"optional {color} swatch was not already visible; kept active {self._active_color}"
@@ -1284,7 +1562,20 @@ class FastGuiController:
                     "error": "could not open a visible color palette",
                 }, ensure_ascii=False, default=str))
             palette_opened = True
-            scan_after_open("scan_after_open")
+            if strict:
+                point, label_meta = self._visible_color_label_point(
+                    region, color,
+                )
+                attempts.append({
+                    "action": "locate_labeled_color_control_after_open",
+                    "ok": point is not None,
+                    "point": (
+                        {"x": point[0], "y": point[1]} if point else None
+                    ),
+                    **label_meta,
+                })
+            if point is None:
+                scan_after_open("scan_after_open")
             if point is None and opened_data.get("cached") and strict:
                 opened = self._open_color_palette(
                     region,
@@ -2972,6 +3263,8 @@ class FastGuiController:
                 result = self._click_element(normalised_args)
             elif name == "type_into_element":
                 result = self._type_into_element(normalised_args)
+            elif name == "ensure_input_mode":
+                result = self._ensure_input_mode(normalised_args)
             elif name == "select_color":
                 result = self._select_color(normalised_args)
             elif name == "wait" and not isinstance(normalised_args.get("condition"), dict):

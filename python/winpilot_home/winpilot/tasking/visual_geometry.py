@@ -20,6 +20,7 @@ from .interaction import InteractionDecision
 from .visual_path import GuidedPathError, refine_guided_drag_path
 from .visual_regions import (
     resolve_visible_bounded_region,
+    resolve_visible_partition_at_anchor,
     resolve_visible_subregion_at_anchor,
 )
 
@@ -1050,6 +1051,31 @@ def refine_interaction_geometry(
             if action.target_anchor
             else None
         )
+        partition_boundary = None
+        if action.target_anchor:
+            partition_boundary = resolve_visible_partition_at_anchor(
+                image,
+                list(action.target_region),
+                list(action.target_anchor),
+                list(decision.interaction_region),
+                (
+                    action.partition_locator.model_dump(mode="json")
+                    if action.partition_locator is not None else None
+                ),
+            )
+        if partition_boundary is not None and (
+            boundary is None
+            or (
+                boundary.get("contains_anchor") is False
+                and float(partition_boundary.get("score") or 0.0)
+                >= float(boundary.get("score") or 0.0)
+            )
+        ):
+            # A nearest closed contour can be a neighbouring interior child
+            # when the selected outer partition has no closed box.  Prefer the
+            # stronger repeated-divider proof only in that non-containing case;
+            # an exact closed child containing the anchor remains authoritative.
+            boundary = partition_boundary
         if boundary is None:
             boundary = resolve_visible_bounded_region(
                 image,
@@ -1129,9 +1155,15 @@ def refine_interaction_geometry(
             "action": action.action,
             "grounding_mode": action.grounding_mode,
             "applied": True,
-            "provider": "current_frame_bounded_region",
+            "provider": str(
+                boundary.get("provider") or "current_frame_bounded_region"
+            ),
             "original_target_region": list(action.target_region),
             "semantic_target_anchor": list(action.target_anchor),
+            "partition_locator": (
+                action.partition_locator.model_dump(mode="json")
+                if action.partition_locator is not None else None
+            ),
             "refined_target_region": target_region,
             "boundary": boundary,
             "stroke_coordinate_space": (

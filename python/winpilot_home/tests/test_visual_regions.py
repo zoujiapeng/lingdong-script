@@ -60,6 +60,64 @@ def _grid(seed: int):
     return image, target_box, board_box
 
 
+def _open_partition(seed: int, *, target_cell: tuple[int, int] | None = None):
+    """Random repeated dividers with no outer rectangle or domain semantics."""
+    rng = random.Random(seed)
+    width, height = 960, 720
+    image = np.full((height, width, 3), 248, dtype=np.uint8)
+    cell_width = rng.randint(78, 112)
+    cell_height = rng.randint(72, 105)
+    left = rng.randint(220, width - 3 * cell_width - 140)
+    top = rng.randint(150, height - 3 * cell_height - 110)
+    for divider in (1, 2):
+        x = left + divider * cell_width
+        cv2.line(
+            image,
+            (x + rng.randint(-3, 3), top),
+            (x + rng.randint(-4, 4), top + 3 * cell_height),
+            (25, 30, 36),
+            5,
+        )
+    for divider in (1, 2):
+        y = top + divider * cell_height
+        cv2.line(
+            image,
+            (left, y + rng.randint(-3, 3)),
+            (left + 3 * cell_width, y + rng.randint(-4, 4)),
+            (25, 30, 36),
+            5,
+        )
+    # Long unrelated chrome and a short orthogonal mark must not become the
+    # selected partition merely because they are also axis aligned.
+    cv2.line(image, (45, 80), (45, height - 80), (80, 80, 80), 4)
+    cv2.line(image, (80, 95), (160, 95), (80, 80, 80), 4)
+    if target_cell is None:
+        column = rng.randrange(3)
+        row = rng.randrange(3)
+    else:
+        column, row = target_cell
+    target = (
+        left + column * cell_width,
+        top + row * cell_height,
+        left + (column + 1) * cell_width,
+        top + (row + 1) * cell_height,
+    )
+    anchor_x = (target[0] + target[2]) / 2.0 + rng.uniform(-4, 4)
+    anchor_y = (target[1] + target[3]) / 2.0 + rng.uniform(-4, 4)
+    coarse = (
+        anchor_x - cell_width * 0.90,
+        anchor_y - cell_height * 0.85,
+        anchor_x + cell_width * 0.90,
+        anchor_y + cell_height * 0.85,
+    )
+    return (
+        image,
+        target,
+        _normalized(coarse, width, height),
+        [anchor_x / width * 1000.0, anchor_y / height * 1000.0],
+    )
+
+
 def test_visible_region_inventory_exposes_repeated_current_pixel_cells():
     from winpilot.tasking.visual_regions import inventory_visible_regions
 
@@ -91,6 +149,67 @@ def test_visible_region_inventory_exposes_repeated_current_pixel_cells():
         assert int(selected["row_index"]) >= 1
         assert int(selected["column_index"]) >= 1
         assert selected["candidate_id"].startswith("visible-region-")
+
+
+def test_open_partition_inventory_exposes_typed_cells_without_domain_rules():
+    from winpilot.tasking.visual_regions import (
+        inventory_visible_partition_regions,
+    )
+
+    for seed in range(16):
+        image, _target, _coarse, _anchor = _open_partition(seed + 3000)
+        inventory = inventory_visible_partition_regions(image)
+
+        assert len(inventory) == 9
+        assert {
+            (item["row_index"], item["column_index"])
+            for item in inventory
+        } == {(row, column) for row in range(1, 4) for column in range(1, 4)}
+        assert all(
+            item["partition_locator"] == {
+                "layout": "repeated_partition",
+                "row": item["row_index"],
+                "column": item["column_index"],
+            }
+            for item in inventory
+        )
+        assert all(
+            item["provider"] == "current_frame_partition_geometry"
+            for item in inventory
+        )
+
+
+def test_circular_radial_faces_remain_general_closed_region_candidates():
+    from winpilot.tasking.visual_regions import (
+        inventory_visible_partition_regions,
+        inventory_visible_regions,
+    )
+
+    image = np.full((600, 800, 3), 245, dtype=np.uint8)
+    center = (400, 300)
+    radius = 180
+    cv2.circle(image, center, radius, (20, 20, 20), 5)
+    for angle in range(0, 360, 60):
+        radians = np.deg2rad(angle)
+        cv2.line(
+            image,
+            center,
+            (
+                int(round(center[0] + radius * np.cos(radians))),
+                int(round(center[1] + radius * np.sin(radians))),
+            ),
+            (20, 20, 20),
+            5,
+        )
+
+    faces = inventory_visible_regions(image, [100, 100, 900, 900])
+
+    assert len(faces) == 6
+    assert all(item["shape"] == "closed_shape" for item in faces)
+    assert all(item["peer_count"] == 6 for item in faces)
+    assert inventory_visible_partition_regions(
+        image, [100, 100, 900, 900],
+    ) == []
 
 
 def test_visible_bounded_region_randomized_grid_cells_are_contained():
@@ -221,6 +340,299 @@ def test_anchored_subregion_rejects_equidistant_nearby_boundaries():
     ) is None
 
 
+def test_open_repeated_partitions_resolve_anchor_without_outer_box():
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    for seed in range(40):
+        image, target, coarse, anchor = _open_partition(seed)
+        resolved = resolve_visible_partition_at_anchor(
+            image, coarse, anchor, [0, 0, 1000, 1000],
+        )
+
+        assert resolved is not None, seed
+        box = resolved["pixel_box"]
+        center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+        assert target[0] - 8 <= center[0] <= target[2] + 8, (seed, box, target)
+        assert target[1] - 8 <= center[1] <= target[3] + 8, (seed, box, target)
+        assert resolved["provider"] == "current_frame_partition_geometry"
+        assert resolved["intersection_support"] >= 0.75
+
+
+def test_open_partition_coalesces_bent_fragments_at_target_cross_section():
+    """A curved divider must not become two fake adjacent partitions.
+
+    The upper and lower pieces have different Hough extrapolations, but their
+    separation is smaller than any admissible cell.  The resolver must retain
+    the upper piece's position near the target while combining both pieces'
+    intersection spans.
+    """
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    width, height = 900, 650
+    image = np.full((height, width, 3), 248, dtype=np.uint8)
+    left, top = 280, 180
+    cell_width, cell_height = 110, 100
+    # First divider bends after the target row; the second stays nearly
+    # straight.  There is deliberately no outer rectangle.
+    cv2.line(image, (390, top), (388, top + 122), (24, 29, 36), 5)
+    cv2.line(image, (420, top + 130), (438, top + 3 * cell_height), (24, 29, 36), 5)
+    cv2.line(
+        image,
+        (left + 2 * cell_width, top),
+        (left + 2 * cell_width + 8, top + 3 * cell_height),
+        (24, 29, 36),
+        5,
+    )
+    for divider in (1, 2):
+        y = top + divider * cell_height
+        cv2.line(
+            image, (left, y), (left + 3 * cell_width, y + 2),
+            (24, 29, 36), 5,
+        )
+
+    target = (left, top, left + cell_width, top + cell_height)
+    anchor = [
+        (target[0] + target[2]) / 2.0 / width * 1000.0,
+        (target[1] + target[3]) / 2.0 / height * 1000.0,
+    ]
+    coarse = _normalized((
+        target[0] - cell_width * 0.30,
+        target[1] - cell_height * 0.25,
+        target[2] + cell_width * 0.30,
+        target[3] + cell_height * 0.25,
+    ), width, height)
+
+    resolved = resolve_visible_partition_at_anchor(
+        image, coarse, anchor, [0, 0, 1000, 1000],
+    )
+
+    assert resolved is not None
+    box = resolved["pixel_box"]
+    center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    assert target[0] - 10 <= center[0] <= target[2] + 10
+    assert target[1] - 10 <= center[1] <= target[3] + 10
+    assert box[2] <= left + cell_width + 12
+    assert resolved["coalesced_fragment_count"] >= 1
+
+
+def test_typed_partition_index_survives_bad_whole_frame_coordinates():
+    """Semantic row/column identity is stronger than a VLM's rough box."""
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    for column, signed_column in ((0, 1), (2, -1)):
+        image, target, _coarse, _anchor = _open_partition(
+            1800 + column, target_cell=(column, 0),
+        )
+        height, width = image.shape[:2]
+        cell_width = target[2] - target[0]
+        cell_height = target[3] - target[1]
+        # The rough box and anchor are entirely above the selected cell and
+        # substantially wider than it, matching real whole-frame VLM drift.
+        bad_rough_pixels = (
+            target[0] - cell_width * 1.15,
+            target[1] - cell_height * 1.55,
+            target[2] + cell_width * 1.15,
+            target[1] - cell_height * 0.05,
+        )
+        bad_rough = _normalized(bad_rough_pixels, width, height)
+        bad_anchor = [
+            (bad_rough[0] + bad_rough[2]) / 2.0,
+            (bad_rough[1] + bad_rough[3]) / 2.0,
+        ]
+
+        resolved = resolve_visible_partition_at_anchor(
+            image,
+            bad_rough,
+            bad_anchor,
+            [0, 0, 1000, 1000],
+            {
+                "layout": "repeated_partition",
+                "row": 1,
+                "column": signed_column,
+            },
+        )
+
+        assert resolved is not None, (column, bad_rough, target)
+        assert resolved["acceptance_policy"] == "typed_repeated_partition_index"
+        box = resolved["pixel_box"]
+        center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+        assert target[0] - 10 <= center[0] <= target[2] + 10
+        assert target[1] - 10 <= center[1] <= target[3] + 10
+        assert resolved["x_interval"]["cell_count"] == 3
+        assert resolved["y_interval"]["cell_count"] == 3
+
+
+def test_open_partition_recovers_unique_coarse_overlap_when_anchor_is_offset():
+    """Approximate semantic geometry must be corrected by current pixels.
+
+    The anchor is deliberately above the open outer interval while the rough
+    box retains only a modest overlap.  No application, game, mark, or fixed
+    screen coordinate is involved.
+    """
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    for seed in range(30):
+        image, target, _coarse, _anchor = _open_partition(
+            seed + 900, target_cell=(0, 0),
+        )
+        height, width = image.shape[:2]
+        cell_width = target[2] - target[0]
+        cell_height = target[3] - target[1]
+        shifted_coarse = _normalized((
+            target[0] - cell_width * 0.25,
+            target[1] - cell_height * 0.90,
+            target[2] + cell_width * 0.25,
+            target[1] + cell_height * 0.30,
+        ), width, height)
+        shifted_anchor = [
+            (target[0] + target[2]) / 2.0 / width * 1000.0,
+            (target[1] - cell_height * 0.30) / height * 1000.0,
+        ]
+
+        resolved = resolve_visible_partition_at_anchor(
+            image,
+            shifted_coarse,
+            shifted_anchor,
+            [0, 0, 1000, 1000],
+        )
+
+        assert resolved is not None, seed
+        assert resolved["acceptance_policy"] == (
+            "unique_repeated_parallel_partition_near_coarse_anchor"
+        )
+        box = resolved["pixel_box"]
+        center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+        assert target[0] - 8 <= center[0] <= target[2] + 8
+        assert target[1] - 8 <= center[1] <= target[3] + 8
+        assert resolved["y_interval"]["contains_anchor"] is False
+        assert resolved["y_interval"]["rough_overlap"] >= 0.22
+
+
+def test_open_partition_rejects_equal_nearby_overlap_without_unique_geometry():
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    width, height = 900, 650
+    image = np.full((height, width, 3), 248, dtype=np.uint8)
+    left, top = 220, 170
+    cell_width, cell_height = 105, 92
+    for divider in (1, 2, 3):
+        x = left + divider * cell_width
+        cv2.line(image, (x, top), (x, top + 3 * cell_height), (25, 30, 36), 5)
+    for divider in (1, 2):
+        y = top + divider * cell_height
+        cv2.line(image, (left, y), (left + 4 * cell_width, y), (25, 30, 36), 5)
+    # The x anchor lies exactly on the shared divider and the coarse box gives
+    # the two interior intervals identical overlap.  Guessing either would be
+    # a hidden coordinate policy, so the resolver must fail closed.
+    rough = _normalized((
+        left + cell_width,
+        top,
+        left + 3 * cell_width,
+        top + cell_height,
+    ), width, height)
+    anchor = [
+        (left + 2 * cell_width) / width * 1000.0,
+        (top + cell_height * 0.5) / height * 1000.0,
+    ]
+
+    assert resolve_visible_partition_at_anchor(
+        image, rough, anchor, [0, 0, 1000, 1000],
+    ) is None
+
+
+def test_partition_resolver_requires_two_orthogonal_separator_families():
+    from winpilot.tasking.visual_regions import resolve_visible_partition_at_anchor
+
+    image = np.full((500, 700, 3), 246, dtype=np.uint8)
+    cv2.line(image, (350, 100), (350, 420), (25, 30, 38), 5)
+    cv2.line(image, (100, 250), (600, 250), (25, 30, 38), 5)
+
+    assert resolve_visible_partition_at_anchor(
+        image,
+        [300, 300, 700, 700],
+        [500, 500],
+        [0, 0, 1000, 1000],
+    ) is None
+
+
+def test_draw_strokes_refines_open_partition_and_contains_complete_paths(tmp_path):
+    from winpilot.tasking.interaction import (
+        ExpectedInteractionEffect,
+        InteractionAction,
+        InteractionDecision,
+    )
+    from winpilot.tasking.visual_geometry import refine_interaction_geometry
+
+    image, target, coarse, anchor = _open_partition(91)
+    height, width = image.shape[:2]
+    decision = InteractionDecision(
+        scene_summary="a repeated partitioned writable surface",
+        mode="shared_visual_session",
+        turn_owner="agent",
+        agent_should_act=True,
+        surface_region=[0, 0, 1000, 1000],
+        interaction_region=[0, 0, 1000, 1000],
+        roles={},
+        rules=[],
+        confidence=0.95,
+        ambiguity=[],
+        actions=[InteractionAction(
+            action="draw_strokes",
+            stroke_paths=[
+                {
+                    "coordinate_space": "target_region_0_1000",
+                    "points": [[180, 180], [820, 820]],
+                },
+                {
+                    "coordinate_space": "target_region_0_1000",
+                    "points": [[820, 180], [180, 820]],
+                },
+            ],
+            target_region=coarse,
+            target_anchor=anchor,
+            interaction_mechanism="freehand_strokes",
+            affordance_evidence="repeated visible dividers bound writable regions",
+            expected_effect_region=coarse,
+            effect_region_binding="target_region",
+        )],
+        expected_effect=ExpectedInteractionEffect(
+            description="a visible mark appears inside the selected partition",
+            region=coarse,
+            region_binding="target_region",
+            binding_action_index=0,
+        ),
+        continuation="reobserve",
+        frame_id=4,
+        observation_artifact_id="art-current",
+    )
+    path = tmp_path / "open-partitions.png"
+    assert cv2.imwrite(str(path), image)
+
+    refined, proof = refine_interaction_geometry(
+        decision, path, expected_size=(width, height),
+    )
+
+    action = refined.actions[0]
+    resolved = action.target_region
+    center = (
+        (resolved[0] + resolved[2]) / 2.0 / 1000.0 * width,
+        (resolved[1] + resolved[3]) / 2.0 / 1000.0 * height,
+    )
+    assert target[0] - 8 <= center[0] <= target[2] + 8
+    assert target[1] - 8 <= center[1] <= target[3] + 8
+    for stroke in action.resolved_frame_strokes():
+        assert all(
+            resolved[0] <= point[0] <= resolved[2]
+            and resolved[1] <= point[1] <= resolved[3]
+            for point in stroke
+        )
+    assert refined.expected_effect.region == resolved
+    assert proof["applied"] is True
+    assert proof["refinements"][0]["provider"] == (
+        "current_frame_partition_geometry"
+    )
+
+
 def test_draw_strokes_refines_target_relative_path_to_current_boundary(tmp_path):
     from winpilot.tasking.interaction import (
         ExpectedInteractionEffect,
@@ -293,4 +705,6 @@ def test_draw_strokes_refines_target_relative_path_to_current_boundary(tmp_path)
     assert target[1] <= center[1] <= target[3]
     assert refined.expected_effect.region == resolved
     assert proof["applied"] is True
-    assert proof["refinements"][0]["provider"] == "current_frame_bounded_region"
+    assert proof["refinements"][0]["provider"] == (
+        "current_frame_anchored_subregion"
+    )

@@ -32,6 +32,7 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "visual.region_bind": ("observe",),
     "interaction.infer": ("observe", "vlm_describe"),
     "interaction.perform": ("execute_subgoal", "run_action_batch"),
+    "interaction.prepare_input_mode": ("run_action_batch",),
     "interaction.verify_local_effect": ("observe",),
     "interaction.verify_transition": ("observe",),
     "interaction.wait_external_change": (
@@ -53,6 +54,7 @@ _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
     "interaction_controller": {
         "window.focus", "visual.observe", "visual.bind_target", "visual.region_bind",
         "controller.transaction", "interaction.perform",
+        "interaction.prepare_input_mode",
         "interaction.verify_local_effect", "interaction.verify_transition",
         "interaction.wait_external_change",
     },
@@ -93,7 +95,10 @@ _STAGE_BASE: dict[StageType, set[str]] = {
         "window.focus", "visual.observe", "visual.bind_target", "visual.region_bind",
     },
     StageType.INFER_INTERACTION: {"visual.observe", "interaction.infer"},
-    StageType.PERFORM_TURN: {"interaction.perform", "controller.transaction", "visual.observe"},
+    StageType.PERFORM_TURN: {
+        "interaction.perform", "interaction.prepare_input_mode",
+        "controller.transaction", "visual.observe",
+    },
     StageType.VERIFY_LOCAL_EFFECT: {
         "interaction.verify_local_effect", "visual.observe",
     },

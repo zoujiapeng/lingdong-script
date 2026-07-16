@@ -53,6 +53,245 @@ def _mapping(action):
     )
 
 
+def _mapping_many(actions):
+    from winpilot.perception.surface_binding import InteractionRegion
+    from winpilot.tasking.interaction import controller_actions
+
+    decision = _decision(actions[0]).model_copy(update={"actions": actions})
+    return controller_actions(
+        decision,
+        frame_region={"left": 100, "top": 200, "width": 1001, "height": 1001},
+        bound_region=InteractionRegion(
+            (100, 100, 900, 900),
+            coordinate_space="frame_0_1000",
+            label="bound",
+            source="test",
+        ),
+        frame_epoch=7,
+    )
+
+
+def _coloured_draw(color: str = "red"):
+    from winpilot.tasking.interaction import InteractionAction
+
+    return InteractionAction(
+        action="draw_strokes",
+        target_region=[300, 300, 700, 700],
+        target_anchor=[500, 500],
+        stroke_paths=[{
+            "coordinate_space": "target_region_0_1000",
+            "points": [[200, 200], [800, 800]],
+        }],
+        color=color,
+        expected_effect_region=[300, 300, 700, 700],
+        effect_region_binding="target_region",
+        interaction_mechanism="freehand_strokes",
+        affordance_evidence="visible pointer-authored surface",
+    )
+
+
+def test_draw_colour_obligation_lowers_to_controller_selection_before_paths():
+    actions = _mapping(_coloured_draw("red"))
+
+    assert [item["action"] for item in actions] == [
+        "ensure_input_mode", "select_color", "draw_strokes",
+    ]
+    assert actions[0]["mode"] == "continuous_freehand"
+    assert actions[0]["synthesized_from"] == "draw_strokes.interaction_mechanism"
+    assert actions[1]["color"] == "red"
+    assert actions[1]["synthesized_from"] == "draw_strokes.color"
+    assert actions[2]["requested_color"] == "red"
+
+
+def test_explicit_matching_colour_selection_is_not_duplicated():
+    from winpilot.tasking.interaction import InteractionAction
+
+    actions = _mapping_many([
+        InteractionAction(action="select_color", color="Red"),
+        _coloured_draw("red"),
+    ])
+
+    assert [item["action"] for item in actions] == [
+        "select_color", "ensure_input_mode", "draw_strokes",
+    ]
+    assert "synthesized_from" not in actions[0]
+
+
+def test_draw_without_colour_keeps_single_physical_gesture():
+    actions = _mapping(_coloured_draw(""))
+
+    assert [item["action"] for item in actions] == [
+        "ensure_input_mode", "draw_strokes",
+    ]
+
+
+def test_multiple_freehand_paths_share_one_input_mode_precondition():
+    actions = _mapping_many([_coloured_draw(""), _coloured_draw("")])
+
+    assert [item["action"] for item in actions].count("ensure_input_mode") == 1
+    assert [item["action"] for item in actions].count("draw_strokes") == 2
+
+
+def test_tiny_closed_local_draw_path_is_rejected_before_physical_input():
+    from winpilot.tasking.interaction import InteractionAction
+
+    with pytest.raises(ValidationError, match="closed draw_strokes footprint"):
+        InteractionAction(
+            action="draw_strokes",
+            target_region=[300, 300, 700, 700],
+            target_anchor=[500, 500],
+            stroke_paths=[{
+                "coordinate_space": "target_region_0_1000",
+                "points": [
+                    [500, 250], [540, 300], [540, 390], [500, 390],
+                    [460, 340], [460, 280], [500, 250],
+                ],
+            }],
+            interaction_mechanism="freehand_strokes",
+            affordance_evidence="visible writable bounded surface",
+        )
+
+
+def test_visible_closed_local_draw_path_remains_valid():
+    from winpilot.tasking.interaction import InteractionAction
+
+    action = InteractionAction(
+        action="draw_strokes",
+        target_region=[300, 300, 700, 700],
+        target_anchor=[500, 500],
+        stroke_paths=[{
+            "coordinate_space": "target_region_0_1000",
+            "points": [
+                [500, 180], [720, 260], [820, 500], [720, 740],
+                [500, 820], [280, 740], [180, 500], [280, 260],
+                [500, 180],
+            ],
+        }],
+        interaction_mechanism="freehand_strokes",
+        affordance_evidence="visible writable bounded surface",
+    )
+
+    assert action.action == "draw_strokes"
+
+
+def test_long_narrow_open_stroke_is_not_rejected_as_tiny():
+    from winpilot.tasking.interaction import InteractionAction
+
+    action = InteractionAction(
+        action="draw_strokes",
+        target_region=[300, 300, 700, 700],
+        target_anchor=[500, 500],
+        stroke_paths=[{
+            "coordinate_space": "target_region_0_1000",
+            "points": [[150, 500], [500, 505], [850, 500]],
+        }],
+        interaction_mechanism="freehand_strokes",
+        affordance_evidence="visible writable bounded surface",
+    )
+
+    assert action.action == "draw_strokes"
+
+
+def test_blocking_ambiguity_still_forbids_an_acting_plan():
+    from winpilot.tasking.interaction import InteractionDecision
+
+    payload = _decision(_coloured_draw("red")).model_dump(mode="json")
+    payload["ambiguity"] = ["the target identity is not established"]
+
+    with pytest.raises(ValidationError, match="ambiguous interaction"):
+        InteractionDecision.model_validate(payload)
+
+
+def test_typed_spatial_resolution_requirement_is_not_execution_evidence_by_itself():
+    from winpilot.tasking.interaction import InteractionDecision
+    from winpilot.tasking.interaction_stage_runtime import (
+        _local_resolution_requirement_proofs,
+    )
+    from winpilot.tasking.visual_geometry import VisualGeometryError
+
+    payload = _decision(_coloured_draw("red")).model_dump(mode="json")
+    payload["resolution_requirements"] = [{
+        "kind": "spatial_geometry",
+        "resolver": "current_frame_geometry",
+        "action_index": 0,
+        "description": "exact executable boundary needs current-frame proof",
+    }]
+    decision = InteractionDecision.model_validate(payload)
+
+    with pytest.raises(VisualGeometryError, match="no unique current-pixel"):
+        _local_resolution_requirement_proofs(decision, {
+            "verified": True,
+            "refinements": [{
+                "action_index": 0,
+                "applied": False,
+                "provider": "typed_semantic_free_path",
+            }],
+        })
+
+    proofs = _local_resolution_requirement_proofs(decision, {
+        "verified": True,
+        "refinements": [{
+            "action_index": 0,
+            "applied": True,
+            "provider": "current_frame_partition_geometry",
+        }],
+    })
+    assert proofs[0]["verified"] is True
+    assert proofs[0]["evidence_providers"] == [
+        "current_frame_partition_geometry",
+    ]
+
+
+def test_resolution_requirement_rejects_missing_or_unbound_action():
+    from winpilot.tasking.interaction import InteractionDecision
+
+    payload = _decision(_coloured_draw("red")).model_dump(mode="json")
+    payload["resolution_requirements"] = [{
+        "kind": "spatial_geometry",
+        "resolver": "current_frame_geometry",
+        "action_index": 1,
+        "description": "missing action",
+    }]
+    with pytest.raises(ValidationError, match="references a missing action"):
+        InteractionDecision.model_validate(payload)
+
+
+def test_partition_locator_is_typed_semantics_not_coordinate_evidence():
+    from winpilot.tasking.interaction import InteractionAction
+
+    payload = _coloured_draw("red").model_dump(mode="json")
+    payload["partition_locator"] = {
+        "layout": "repeated_partition",
+        "row": 1,
+        "column": -1,
+    }
+    validated = InteractionAction.model_validate(payload)
+
+    assert validated.partition_locator is not None
+    assert validated.partition_locator.row == 1
+    assert validated.partition_locator.column == -1
+
+    payload = validated.model_dump(mode="json")
+    payload["partition_locator"]["row"] = 0
+    with pytest.raises(ValidationError, match="one-based"):
+        InteractionAction.model_validate(payload)
+
+
+def test_partition_locator_requires_local_grounding_inputs():
+    from winpilot.tasking.interaction import InteractionAction
+
+    payload = _coloured_draw("red").model_dump(mode="json")
+    payload["target_anchor"] = []
+    payload["partition_locator"] = {
+        "layout": "repeated_partition",
+        "row": 1,
+        "column": 1,
+    }
+
+    with pytest.raises(ValidationError, match="coarse target_region and target_anchor"):
+        InteractionAction.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "action_name",
     ["key_down", "key_up"],
@@ -354,7 +593,9 @@ def test_target_relative_paths_remain_inside_randomized_regions():
         width = rng.uniform(40, min(240, 900 - left))
         height = rng.uniform(40, min(240, 900 - top))
         target = [left, top, left + width, top + height]
-        local = [
+        # Include an observable footprint; sub-12% model paths are rejected
+        # before mapping because they cannot be robustly verified on screen.
+        local = [[100.0, 100.0], [900.0, 900.0]] + [
             [rng.uniform(0, 1000), rng.uniform(0, 1000)]
             for _ in range(rng.randint(2, 12))
         ]
@@ -465,6 +706,88 @@ def test_flat_points_are_not_guessed_into_multiple_strokes():
             "target_region": [200, 300, 600, 700],
             "stroke_paths": [[100, 100], [900, 900]],
         })
+
+
+def test_model_action_level_stroke_space_moves_to_each_path_without_changing_geometry():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    raw = {
+        "actions": [{
+            "action": "draw_strokes",
+            "coordinate_space": "target_region_0_1000",
+            "target_region": [200, 300, 600, 700],
+            "target_anchor": [400, 500],
+            "stroke_paths": [
+                {"points": [[150, 150], [850, 850]]},
+                {
+                    "coordinate_space": "target_region_0_1000",
+                    "points": [[850, 150], [150, 850]],
+                },
+            ],
+        }],
+    }
+
+    normalized, repairs = _canonicalize_model_decision(raw, prior_state={})
+    action_payload = normalized["actions"][0]
+    action = InteractionAction.model_validate(action_payload)
+
+    assert "coordinate_space" not in action_payload
+    assert [item.coordinate_space for item in action.stroke_paths] == [
+        "target_region_0_1000", "target_region_0_1000",
+    ]
+    assert action.stroke_paths[0].points == [[150.0, 150.0], [850.0, 850.0]]
+    assert (
+        "actions[0].coordinate_space:moved_to_stroke_paths" in repairs
+    )
+
+
+def test_model_conflicting_stroke_spaces_are_not_repaired_or_executed():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "actions": [{
+            "action": "draw_strokes",
+            "coordinate_space": "target_region_0_1000",
+            "target_region": [200, 300, 600, 700],
+            "target_anchor": [400, 500],
+            "stroke_paths": [{
+                "coordinate_space": "frame_0_1000",
+                "points": [[250, 350], [550, 650]],
+            }],
+        }],
+    }, prior_state={})
+
+    assert normalized["actions"][0]["coordinate_space"] == "target_region_0_1000"
+    assert not any("moved_to_stroke_paths" in item for item in repairs)
+    with pytest.raises(ValidationError, match="coordinate_space"):
+        InteractionAction.model_validate(normalized["actions"][0])
+
+
+def test_action_level_coordinate_space_remains_forbidden_for_non_draw_actions():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "actions": [{
+            "action": "click",
+            "coordinate_space": "frame_0_1000",
+            "frame_x": 400,
+            "frame_y": 500,
+            "target_region": [350, 450, 450, 550],
+        }],
+    }, prior_state={})
+
+    assert not any("moved_to_stroke_paths" in item for item in repairs)
+    with pytest.raises(ValidationError, match="coordinate_space"):
+        InteractionAction.model_validate(normalized["actions"][0])
 
 
 def test_model_percent_like_stroke_scale_is_normalized_with_auditable_repair():
@@ -647,6 +970,31 @@ def test_planning_prompt_projects_only_executable_typed_actions_and_grounding():
     assert '"assignment": "red"' in prompt
     assert "Primary action modality constraint: drag" in prompt
     assert "Prefer semantic Controller actions such as select_color" not in prompt
+
+
+def test_planning_prompt_correction_is_same_frame_complete_replacement_not_patch():
+    from winpilot.tasking.interaction import _planning_prompt
+
+    prompt = _planning_prompt(
+        "continue the visible interaction",
+        {},
+        {},
+        validation_feedback={
+            "error_code": "schema_validation_failed",
+            "validation_errors": [{
+                "location": ["actions", "1", "coordinate_space"],
+                "type": "extra_forbidden",
+                "message": "Extra inputs are not permitted",
+            }],
+            "previous_payload_json": '{"actions":[]}',
+        },
+    )
+
+    assert "SCHEMA CORRECTION FOR THIS SAME AUTHORITATIVE FRAME" in prompt
+    assert "before any input occurred" in prompt
+    assert "one complete replacement JSON object" in prompt
+    assert "do not wrap the JSON, explain it, emit a patch" in prompt
+    assert "coordinate_space" in prompt
 
 
 def test_real_drag_eval_target_requires_complete_token_containment():

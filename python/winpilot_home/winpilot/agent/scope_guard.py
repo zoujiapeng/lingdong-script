@@ -28,6 +28,7 @@ GUI_SCOPE_MUTATIONS = {
     "scroll",
     "drag",
     "draw_strokes",
+    "ensure_input_mode",
     "select_color",
     "ensure_document_surface",
     "clipboard_paste",
@@ -48,7 +49,7 @@ _SCOPE_RECOVERY_TOOLS = {"open_app", "launch", "focus_window", "tray_click", "sc
 # yet.  Keyboard-only compatibility paths remain unchanged for now.
 _SPATIAL_TARGET_REQUIRED = {
     "click", "click_element", "scroll", "move_mouse", "drag",
-    "draw_strokes", "select_color", "ensure_document_surface",
+    "draw_strokes", "ensure_input_mode", "select_color", "ensure_document_surface",
     "mouse_down", "mouse_up", "coordinate_click_test", "paste_image_file",
 }
 

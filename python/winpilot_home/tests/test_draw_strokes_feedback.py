@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
@@ -32,7 +33,7 @@ def test_draw_strokes_visual_change_marks_action_verified(monkeypatch):
 
     before = np.full((80, 80, 3), 255, dtype=np.uint8)
     after = before.copy()
-    after[20:60, 20:60] = 0
+    cv2.line(after, (10, 10), (50, 50), (0, 0, 0), 6)
     captures = [before, after]
 
     monkeypatch.setattr(tools, "capture", lambda _region: captures.pop(0))
@@ -57,8 +58,99 @@ def test_draw_strokes_visual_change_marks_action_verified(monkeypatch):
 
     assert data["visual_change_detected"] is True
     assert data["verified"] is True
-    assert data["verify_method"] == "cv-diff"
-    assert "instead of redrawing" in data["visual_feedback"]
+    assert data["verify_method"] == "pointer-path-realization"
+    assert data["path_realization"]["minimum_stroke_coverage"] >= 0.58
+
+
+def test_draw_strokes_rejects_cursor_only_pixel_delta(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+
+    before = np.full((96, 96, 3), 255, dtype=np.uint8)
+    after = before.copy()
+    # The capture ROI starts at physical (2, 2), so this is the local endpoint
+    # of the requested physical path.  It approximates a cursor/hover blob but
+    # deliberately does not trace the path.
+    cv2.circle(after, (68, 68), 9, (20, 180, 220), -1)
+    captures = [before, after]
+    monkeypatch.setattr(tools, "capture", lambda _region: captures.pop(0))
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(draw_strokes=lambda strokes, duration_s, hwnd: {
+            "ok": True,
+            "strokes_drawn": len(strokes),
+        }),
+    )
+
+    session = ToolSession(task="realize a continuous pointer path")
+    session.hwnd = 123
+    data = json.loads(session._t_draw_strokes({
+        "strokes": [[[30, 30], [70, 70]]],
+        "duration": 0.1,
+    }).text)
+
+    assert data["visual_change_detected"] is True
+    assert data["path_realization_detected"] is False
+    assert data["ok"] is False
+    assert data["mutation_applied"] is False
+    assert data["failure_type"] == "DRAW_PATH_NOT_REALIZED"
+
+
+def test_draw_strokes_parks_pointer_before_current_pixel_path_proof(monkeypatch):
+    from winpilot.agent import tools
+    from winpilot.agent.tools import ToolSession
+    from winpilot.utils.screenshot import Region
+
+    before = np.full((96, 96, 3), 255, dtype=np.uint8)
+    after = before.copy()
+    # The physical path is (30,30)->(70,70); the effect ROI starts at (2,2).
+    cv2.line(after, (28, 28), (68, 68), (0, 0, 180), 5)
+    state = {"captures": 0, "parked": False, "point": None}
+
+    def capture_frame(_region):
+        state["captures"] += 1
+        if state["captures"] == 1:
+            return before.copy()
+        # A current-pixel proof is only authoritative after the controller has
+        # moved the transient pointer/hover overlay away from the gesture ROI.
+        assert state["parked"] is True
+        return after.copy()
+
+    def move_mouse(x, y, hwnd=None):
+        state.update({"parked": True, "point": (x, y)})
+        return {"ok": True, "x": x, "y": y, "hwnd": hwnd}
+
+    monkeypatch.setattr(tools, "capture", capture_frame)
+    monkeypatch.setattr(
+        "winpilot.agent.interaction_tools.window_region",
+        lambda _hwnd: Region(0, 0, 320, 220),
+    )
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(
+            draw_strokes=lambda strokes, duration_s, hwnd: {
+                "ok": True,
+                "strokes_drawn": len(strokes),
+            },
+            move_mouse=move_mouse,
+        ),
+    )
+
+    session = ToolSession(task="realize a visible pointer path")
+    session.hwnd = 123
+    data = json.loads(session._t_draw_strokes({
+        "strokes": [[[30, 30], [70, 70]]],
+        "duration": 0.1,
+    }).text)
+
+    assert data["verified"] is True
+    assert data["verify_method"] == "pointer-path-realization"
+    assert data["verification_cursor_park"]["ok"] is True
+    assert state["point"] is not None
+    x, y = state["point"]
+    assert not (2 - 24 <= x <= 98 + 24 and 2 - 24 <= y <= 98 + 24)
 
 
 def test_compacted_pixel_effect_does_not_look_like_goal_verification():

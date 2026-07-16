@@ -55,10 +55,13 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | Memory / Skill | Agent run 只经 `memory/compiler.py` 写入一次；同名候选保留谱系而不删除旧版本。实际复用同时检查任务意图、app/window、stage/parameters/anchors（存在时）和脚本摘要。前端分开展示已验证技能、草稿/无效脚本、长期记忆和进程内 session memory。 |
 | Task Contract / Artifact | 前端自然语言入口先生成 `task-contract/1`：结构化 intent、typed stages、每阶段 capability selection、artifact binding、evidence provider 和 completion obligation。`ArtifactStore` 将用户工件与模型观察帧分离，并以 run-scoped `artifact_id`、哈希、来源、时间贯穿投递和验收。 |
 | 实时视觉交互 | `SurfaceBinding` 将交互面绑定到一个新鲜目标 hwnd、capture scope、窗口 client authority 和 frame identity；`InteractionRegion` 是该帧 0..1000 坐标空间中的显式安全区域。语义模型只提出一个 typed turn，Controller 在本地连续执行并返回动作后权威帧；区域外动作、陈旧帧、目标失焦或含糊表面均 fail-closed。 |
+| 输入机制合同 | 连续路径执行前先满足 `interaction.prepare_input_mode`。Controller 从当前可访问界面证明自由绘制模式，发现选择、形状、文字等冲突模式时按语义控件切换并复核 Selected/Checked 或新鲜界面状态；只点到控件、只有工具返回 `ok` 或缺少后置状态都不能放行。注册表描述输入机制和通用控件语义，不绑定应用名、测试图形或屏幕坐标。 |
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |
 | 多输入协同 | 实验开关默认关闭；开启时实行人类优先的焦点/光标仲裁并 fail-closed，不能把它描述成两套真实鼠标键盘并发。 |
 | 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。运行列表与 job 列表是轻量摘要，详情按 run id 加载；重启后从 trace/manifest 恢复历史阶段、能力、工件、证据和完成合同。节点主列表、搜索与最近入口共享 compiler/catalog 可达性交集。 |
 | 真实能力 | 计算器、记事本、网页靶场、连续指针/拖拽和真实 Paint→QQ 工件链已有回归。2026-07-16 的 9 场景冷探索视觉矩阵覆盖完整拖入、精确点击、顺序点击、滑块、四个通道方向和无上下文共享回合，`9 passed in 275.30s`，全部由浏览器 trusted pointer ground truth 判定；关闭 Skill/Memory 的 QQ run `arp-20260716-215314-7f98cd` 从同一 Task Contract/ARP 路径创建并发送当前 run 工件。测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率，更不是“达到人类通用视觉能力”的证明。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
+
+2026-07-17 的客户端同入口冷启动首回合 `arp-20260717-035253-f61869` 特意从冲突的 Selection 模式开始：系统用 1 次模型调用识别当前共享状态，Controller 自动切换到 Brushes、选择红色并在当前像素解析出的空区域画出 X，typed local verifier 证明输入模式、区域、两条路径和红色像素；用户预先画出的黑色圆圈不计为 Agent 输出。Observe / Infer / Perform / Verify 分别为 0.84 / 13.55 / 7.07 / 0.65 秒，约 22.1 秒的首回合仍不适合实时陪玩，主要瓶颈是首次语义规划。该持续会话随后因测试观察导致目标失焦而失败，因此这里只把它记录为“真实客户端首回合证据”，不冒充终态 E2E 通过。
 
 ## 快速启动
 
