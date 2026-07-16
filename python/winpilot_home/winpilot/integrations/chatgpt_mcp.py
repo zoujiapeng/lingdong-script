@@ -226,7 +226,17 @@ class ChatGPTDesktopBridge:
         self._authoritative_frame_raw: bytes | None = None
         self._last_post_frame_raw: bytes | None = None
 
-    def _new_session(self, task: str = "ChatGPT desktop control") -> ToolSession:
+    def _prepare_session(
+        self,
+        task: str = "ChatGPT desktop control",
+    ) -> tuple[ToolSession, Any, str]:
+        """Build one internally consistent session without mutating bridge state.
+
+        Contract compilation, typed intent derivation, communication context,
+        and RuntimeProfile construction all happen on the candidate before it
+        becomes visible through ``self._session``.  A failed preparation thus
+        leaves the previous session and frame authority untouched.
+        """
         contract = None
         stage = None
         try:
@@ -244,31 +254,78 @@ class ChatGPTDesktopBridge:
             task_intent=(contract.intent if contract is not None else None),
         )
         session._mcp_task_contract = contract
-        self._task_contract = contract
-        self._session_id = f"mcp-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
         session.run_id = None
-        self._frame_sequence = 0
-        self._authoritative_frame = None
-        self._authoritative_frame_raw = None
-        self._last_post_frame_raw = None
+        session_id = f"mcp-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        return session, contract, session_id
+
+    def _replace_session(
+        self,
+        task: str,
+        *,
+        bound_task: str,
+        preserve_target: bool = False,
+    ) -> ToolSession:
+        """Atomically install a freshly prepared semantic session snapshot."""
+        session, contract, session_id = self._prepare_session(task)
+        previous = self._session
+        if preserve_target and previous is not None:
+            # Window identity is OS-owned navigation state, not task semantic
+            # state.  Preserve only the handle/hint for legacy callers that do
+            # not call begin_gui_task; snapshots, caches, worlds, and frame
+            # coordinates remain intentionally invalidated.
+            session.hwnd = getattr(previous, "hwnd", None)
+            session.target_hint = str(getattr(previous, "target_hint", "") or "")
+        (
+            self._session,
+            self._task_contract,
+            self._session_id,
+            self._bound_task,
+            self._frame_sequence,
+            self._authoritative_frame,
+            self._authoritative_frame_raw,
+            self._last_post_frame_raw,
+        ) = (
+            session,
+            contract,
+            session_id,
+            str(bound_task or ""),
+            0,
+            None,
+            None,
+            None,
+        )
+        if previous is not None and previous is not session:
+            try:
+                previous.close()
+            except Exception:
+                pass
         return session
 
     def _get_session(self, task: str = "") -> ToolSession:
+        requested_task = str(task or "").strip()
         if self._session is None:
-            self._session = self._new_session(task or "ChatGPT desktop control")
-        elif task and not self._bound_task:
-            self._session.task = task
+            return self._replace_session(
+                requested_task or "ChatGPT desktop control",
+                bound_task=self._bound_task,
+            )
+        if (
+            requested_task
+            and not self._bound_task
+            and requested_task != str(self._session.task or "").strip()
+        ):
+            return self._replace_session(
+                requested_task,
+                bound_task="",
+                preserve_target=True,
+            )
         return self._session
 
     def reset(self) -> JsonDict:
         with self._lock:
-            if self._session is not None:
-                try:
-                    self._session.close()
-                except Exception:
-                    pass
-            self._bound_task = ""
-            self._session = self._new_session()
+            self._replace_session(
+                "ChatGPT desktop control",
+                bound_task="",
+            )
             return {"ok": True, "session_id": self._session_id}
 
     def bind_task(self, task: str) -> JsonDict:
@@ -277,13 +334,7 @@ class ChatGPTDesktopBridge:
         if not task:
             return {"ok": False, "error": "task is required"}
         with self._lock:
-            if self._session is not None:
-                try:
-                    self._session.close()
-                except Exception:
-                    pass
-            self._bound_task = task
-            self._session = self._new_session(task)
+            self._replace_session(task, bound_task=task)
             contract = self._task_contract
             return {
                 "ok": True,

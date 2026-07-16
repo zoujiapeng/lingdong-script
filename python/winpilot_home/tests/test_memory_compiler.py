@@ -1,6 +1,16 @@
 from types import SimpleNamespace
 
 
+def test_automatic_run_ingestion_still_respects_disabled_switch(monkeypatch):
+    from winpilot.memory import compiler
+
+    monkeypatch.setattr(compiler, "_enabled", lambda: False)
+
+    assert compiler.ingest_run(
+        SimpleNamespace(task="do not persist", run_id="disabled-run")
+    ) == {}
+
+
 def test_run_ingestion_is_idempotent_and_binds_script_hash(tmp_path, monkeypatch):
     from winpilot import config
     from winpilot.memory import compiler
@@ -9,6 +19,9 @@ def test_run_ingestion_is_idempotent_and_binds_script_hash(tmp_path, monkeypatch
 
     monkeypatch.setattr(config, "SCRIPTS_DIR", tmp_path)
     monkeypatch.setattr(config, "MEMORY_PATH", tmp_path / "experience_memory.json")
+    # Explicit compilation/recovery must not depend on a process configured to
+    # disable automatic experience writes for cold-start/no-memory validation.
+    monkeypatch.setattr(compiler, "_enabled", lambda: False)
     path = tmp_path / "run-1.automation.json"
     path.write_text('{"format":"automation-ir/1","steps":[]}', encoding="utf-8")
     monkeypatch.setattr(trace, "export_automation_ir", lambda run_id: path)

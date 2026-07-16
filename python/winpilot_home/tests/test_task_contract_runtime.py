@@ -188,6 +188,110 @@ def test_draw_stage_exposes_controller_transaction_and_bounded_timeout():
     assert node.timeout_s == 180
 
 
+def test_semantic_child_intent_is_scoped_to_its_typed_stage():
+    from winpilot.tasking.stage_runtime import StageRuntime
+
+    contract, _graph = _compile(TASKS[0], cold_start=True)
+    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    goal = "In the already opened Paint, draw the compiler-resolved subject."
+
+    intent = StageRuntime._stage_scoped_intent(contract, stage, goal)
+    communication = StageRuntime._stage_communication_context(stage, intent)
+
+    assert intent.original_text == goal
+    assert intent.operation == ["draw"]
+    assert intent.subject == contract.intent.subject
+    assert intent.quality == contract.intent.quality
+    assert intent.source == stage.parameters["app"]
+    assert intent.channel == ""
+    assert intent.recipient == ""
+    assert intent.destination == ""
+    assert intent.interaction.active is False
+    assert intent.provenance["stage_scope"] == f"{contract.task_id}:{stage.id}"
+    assert communication == {
+        "active": False,
+        "recipient": "",
+        "channel": "",
+        "send_mode": "send",
+    }
+
+
+def test_semantic_child_runner_never_uses_raw_intent_parser_fallback(monkeypatch):
+    import threading
+
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.router import build_runner as real_build_runner
+    from winpilot.tasking.intent import TaskIntentParser
+    from winpilot.tasking.stage_runtime import StageRuntime
+
+    contract, _graph = _compile(TASKS[0], cold_start=True)
+    stage = next(item for item in contract.stages if item.type.value == "DrawArtifact")
+    stage = stage.model_copy(deep=True)
+    # This test exercises only semantic-child construction; application launch
+    # is a separate deterministic stage concern.
+    stage.parameters = {**stage.parameters, "app": ""}
+
+    def parser_fallback_is_a_bug(*_args, **_kwargs):
+        raise AssertionError("semantic child reparsed its generated raw goal")
+
+    monkeypatch.setattr(TaskIntentParser, "parse", parser_fallback_is_a_bug)
+
+    def successful_semantic_run(runner):
+        runner.status = "done"
+        runner.result_text = "semantic child complete"
+        runner._done_verified = True
+        runner._inline_stage_semantic_attempted = True
+        runner._inline_stage_semantic_passed = True
+        runner._tool_history = [
+            ("draw_strokes", {"normalized_strokes": [[[10, 10], [20, 20]]]}, '{"ok": true}'),
+        ]
+        return runner.result_text
+
+    monkeypatch.setattr(AgentRunner, "run", successful_semantic_run)
+    captured = {}
+
+    def capturing_build_runner(task, **kwargs):
+        captured["task"] = task
+        captured["kwargs"] = dict(kwargs)
+        runner = real_build_runner(task, **kwargs)
+        captured["runner"] = runner
+        return runner
+
+    monkeypatch.setattr(
+        "winpilot.tasking.stage_runtime.build_runner",
+        capturing_build_runner,
+    )
+
+    class Registry:
+        def record(self, predicate, **values):
+            return {"id": "evidence-stage-intent", "predicate": predicate, **values}
+
+    runtime = StageRuntime()
+    monkeypatch.setattr(runtime, "_evidence", lambda _context: Registry())
+    monkeypatch.setattr(runtime, "_store", lambda _context: object())
+    context = {"run_id": "run-stage-intent", "runtime_state": {}}
+
+    try:
+        result = runtime._execute(
+            stage,
+            contract,
+            context,
+            threading.Event(),
+            time.monotonic(),
+        )
+        assert result.ok is True
+        scoped = captured["kwargs"]["task_intent"]
+        assert scoped.operation == ["draw"]
+        assert scoped.channel == ""
+        assert scoped.recipient == ""
+        assert captured["kwargs"]["communication_context"]["active"] is False
+        assert captured["runner"].task_intent["operation"] == ["draw"]
+    finally:
+        runner = captured.get("runner")
+        if runner is not None:
+            runner.session.close()
+
+
 def test_draw_boundary_requires_a_real_drawing_mutation():
     from winpilot.tasking.stage_runtime import StageRuntime
 

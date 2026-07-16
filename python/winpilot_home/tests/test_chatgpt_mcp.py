@@ -122,6 +122,100 @@ def test_mutation_guard_blocks_controller_calls_while_runtime_is_busy():
     assert result["retryable"] is True
 
 
+def test_unbound_task_change_atomically_rebuilds_all_semantic_session_state():
+    bridge = ChatGPTDesktopBridge(_hooks())
+    first = bridge._get_session("Click Continue")
+    first_contract = bridge._task_contract
+    first_session_id = bridge._session_id
+    first.hwnd = 91
+    first.target_hint = "Current target"
+    closed = []
+    first.close = lambda: closed.append(True)
+    bridge._frame_sequence = 4
+    bridge._authoritative_frame = {"frame_id": 4}
+    bridge._authoritative_frame_raw = b"old-frame"
+    bridge._last_post_frame_raw = b"old-post-frame"
+
+    task = "Send a message via QQ"
+    second = bridge._get_session(task)
+    contract = bridge._task_contract
+
+    assert second is bridge._session
+    assert second is not first
+    assert closed == [True]
+    assert bridge._bound_task == ""
+    assert bridge._session_id != first_session_id
+    assert contract is not None and contract is not first_contract
+    assert contract.task == task
+    assert second.task == task
+    assert second._mcp_task_contract is contract
+    assert second.task_intent == contract.intent.model_dump(mode="json")
+    assert second.communication_context == {
+        "active": True,
+        "recipient": "",
+        "channel": "QQ",
+        "send_mode": "send",
+    }
+    assert second.runtime_profile.task_contract_id == contract.task_id
+    assert second.runtime_profile.stage_type == contract.stages[0].type.value
+    # Preserve only live navigation compatibility.  Task-dependent perception
+    # and all old frame-coordinate authority are invalidated.
+    assert second.hwnd == 91
+    assert second.target_hint == "Current target"
+    assert second.snapshot is None
+    assert bridge._frame_sequence == 0
+    assert bridge._authoritative_frame is None
+    assert bridge._authoritative_frame_raw is None
+    assert bridge._last_post_frame_raw is None
+
+
+def test_failed_unbound_session_preparation_leaves_previous_snapshot_atomic(
+    monkeypatch,
+):
+    bridge = ChatGPTDesktopBridge(_hooks())
+    session = bridge._get_session("Click Continue")
+    contract = bridge._task_contract
+    session_id = bridge._session_id
+    frame = {"frame_id": 3}
+    bridge._frame_sequence = 3
+    bridge._authoritative_frame = frame
+    bridge._authoritative_frame_raw = b"frame"
+    bridge._last_post_frame_raw = b"post"
+
+    def fail_prepare(_task):
+        raise RuntimeError("synthetic preparation failure")
+
+    monkeypatch.setattr(bridge, "_prepare_session", fail_prepare)
+    with pytest.raises(RuntimeError, match="synthetic preparation failure"):
+        bridge._get_session("Send a message via QQ")
+
+    assert bridge._session is session
+    assert bridge._task_contract is contract
+    assert bridge._session_id == session_id
+    assert bridge._bound_task == ""
+    assert bridge._frame_sequence == 3
+    assert bridge._authoritative_frame is frame
+    assert bridge._authoritative_frame_raw == b"frame"
+    assert bridge._last_post_frame_raw == b"post"
+
+
+def test_bound_task_remains_contract_authority_for_later_subgoal_labels():
+    bridge = ChatGPTDesktopBridge(_hooks())
+    task = "Send a message via QQ"
+    bound = bridge.bind_task(task)
+    session = bridge._session
+    contract = bridge._task_contract
+
+    returned = bridge._get_session("Click the visible Send button")
+
+    assert bound["ok"] is True
+    assert returned is session
+    assert bridge._bound_task == task
+    assert returned.task == task
+    assert returned._mcp_task_contract is contract
+    assert returned.task_intent == contract.intent.model_dump(mode="json")
+
+
 def test_visual_fallback_returns_raw_image_bytes_without_leaking_base64(monkeypatch):
     raw = b"fake-jpeg-bytes"
     monkeypatch.setattr(

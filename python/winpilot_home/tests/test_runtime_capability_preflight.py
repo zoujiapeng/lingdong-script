@@ -131,3 +131,53 @@ def test_adapter_registry_probe_does_not_claim_login_or_installation() -> None:
     limitations = " ".join(probe["runtime_limitations"]).casefold()
     assert "installed" in limitations
     assert "login" in limitations
+
+
+def test_typed_stage_runtime_profile_does_not_reclassify_generated_goal(monkeypatch) -> None:
+    from winpilot.agent import runtime_profile
+    from winpilot.tasking.compiler import TaskContractCompiler
+
+    contract = TaskContractCompiler().compile(
+        "在当前界面拖动可见对象到目标区域",
+        cold_start=True,
+    )
+    stage = next(item for item in contract.stages if item.type.value == "InferInteraction")
+
+    def unexpected_raw_classifier(_task: str) -> bool:
+        raise AssertionError("typed stage must not invoke raw task classifiers")
+
+    monkeypatch.setattr(runtime_profile, "_is_coding_task", unexpected_raw_classifier)
+    monkeypatch.setattr(runtime_profile, "_is_gui_only_task", unexpected_raw_classifier)
+
+    profile = runtime_profile.build_runtime_profile(
+        "inspect and patch repository code",
+        task_contract=contract,
+        stage=stage,
+    )
+
+    assert profile.coding is False
+    assert profile.stage_type == "InferInteraction"
+
+
+def test_legacy_runtime_profile_keeps_raw_classifier_fallback(monkeypatch) -> None:
+    from winpilot.agent import runtime_profile
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        runtime_profile,
+        "_is_coding_task",
+        lambda task: calls.append(("coding", task)) or True,
+    )
+    monkeypatch.setattr(
+        runtime_profile,
+        "_is_gui_only_task",
+        lambda task: calls.append(("gui", task)) or False,
+    )
+
+    profile = runtime_profile.build_runtime_profile("legacy direct coding task")
+
+    assert profile.coding is True
+    assert calls == [
+        ("coding", "legacy direct coding task"),
+        ("gui", "legacy direct coding task"),
+    ]

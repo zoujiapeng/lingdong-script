@@ -17,7 +17,7 @@ from .adapters import CommunicationAdapter, DomainAdapterRegistry
 from .artifacts import ArtifactStore
 from .capability import CapabilityPlanner
 from .completion import CompletionContractVerifier
-from .contracts import StageType, TaskContract, TaskStage
+from .contracts import StageType, TaskContract, TaskIntent, TaskStage
 from .evidence import EvidenceRegistry
 from .interaction_stage_runtime import (
     INTERACTION_STAGE_TYPES,
@@ -97,6 +97,106 @@ class StageRuntime:
             registry = EvidenceRegistry(context["run_id"])
             state["evidence_registry"] = registry
         return registry
+
+    @staticmethod
+    def _stage_scoped_intent(
+        contract: TaskContract,
+        stage: TaskStage,
+        goal: str,
+    ) -> TaskIntent:
+        """Project the compiler-owned task intent onto one executable stage.
+
+        Semantic child runners must not parse their generated stage prompt as a
+        second source of task truth.  They also must not inherit unrelated
+        communication or live-interaction state from a larger cross-application
+        contract.  This projection keeps semantic fields already resolved by
+        the compiler while deriving the active operation from the typed stage.
+        """
+        operation_by_stage = {
+            StageType.OPEN_APPLICATION: "open",
+            StageType.FOCUS_WINDOW: "focus",
+            StageType.CREATE_OR_EDIT_ARTIFACT: "edit",
+            StageType.DRAW_ARTIFACT: "draw",
+            StageType.CAPTURE_ARTIFACT: "capture",
+            StageType.SAVE_ARTIFACT: "save",
+            StageType.OPEN_CONVERSATION: "send",
+            StageType.RESOLVE_RECIPIENT: "send",
+            StageType.SEND_TEXT: "send",
+            StageType.SEND_ARTIFACT: "send",
+            StageType.VERIFY_ARTIFACT: "verify",
+            StageType.VERIFY_DELIVERY: "send",
+            StageType.OBSERVE_SCENE: "interact",
+            StageType.INFER_INTERACTION: "interact",
+            StageType.PERFORM_TURN: "interact",
+            StageType.VERIFY_LOCAL_EFFECT: "interact",
+            StageType.WAIT_FOR_EXTERNAL_CHANGE: "interact",
+        }
+        communication_stages = {
+            StageType.OPEN_CONVERSATION,
+            StageType.RESOLVE_RECIPIENT,
+            StageType.SEND_TEXT,
+            StageType.SEND_ARTIFACT,
+            StageType.VERIFY_DELIVERY,
+        }
+        interaction_stages = {
+            StageType.OBSERVE_SCENE,
+            StageType.INFER_INTERACTION,
+            StageType.PERFORM_TURN,
+            StageType.VERIFY_LOCAL_EFFECT,
+            StageType.WAIT_FOR_EXTERNAL_CHANGE,
+        }
+
+        payload = contract.intent.model_dump(mode="json")
+        parameters = stage.parameters or {}
+        provenance = dict(payload.get("provenance") or {})
+        provenance.update({
+            "stage_scope": f"{contract.task_id}:{stage.id}",
+            "stage_operation": "task_contract_stage",
+        })
+        payload.update({
+            "original_text": str(goal or ""),
+            "operation": [operation_by_stage.get(stage.type, "execute")],
+            "source": str(
+                parameters.get("source")
+                or parameters.get("app")
+                or payload.get("source")
+                or ""
+            ),
+            "subject": str(parameters.get("subject") or payload.get("subject") or ""),
+            "quality": str(parameters.get("quality") or payload.get("quality") or "normal"),
+            "ambiguous_fields": [],
+            "provenance": provenance,
+        })
+        if stage.type not in communication_stages:
+            payload.update({
+                "channel": "",
+                "recipient": "",
+                "destination": "",
+                "send_mode": "send",
+            })
+        if stage.type not in interaction_stages:
+            payload["interaction"] = {"active": False}
+        return TaskIntent.model_validate(payload)
+
+    @staticmethod
+    def _stage_communication_context(
+        stage: TaskStage,
+        intent: TaskIntent,
+    ) -> dict[str, Any]:
+        communication_stages = {
+            StageType.OPEN_CONVERSATION,
+            StageType.RESOLVE_RECIPIENT,
+            StageType.SEND_TEXT,
+            StageType.SEND_ARTIFACT,
+            StageType.VERIFY_DELIVERY,
+        }
+        active = stage.type in communication_stages
+        return {
+            "active": active,
+            "recipient": intent.recipient if active else "",
+            "channel": (intent.channel or intent.destination) if active else "",
+            "send_mode": intent.send_mode if active else "send",
+        }
 
     @staticmethod
     def _resolve_hwnd(source: str) -> int:
@@ -621,6 +721,7 @@ class StageRuntime:
                 ),
                 inline_semantic_verification=stage.type == StageType.DRAW_ARTIFACT,
             )
+            stage_intent = self._stage_scoped_intent(contract, stage, goal)
             runner = build_runner(
                 goal,
                 stop_event=stop_event,
@@ -630,6 +731,10 @@ class StageRuntime:
                     else min(24, max(4, int(params.get("max_steps") or 40)))
                 ),
                 runtime_profile=profile,
+                task_intent=stage_intent,
+                communication_context=self._stage_communication_context(
+                    stage, stage_intent,
+                ),
             )
             if bound_hwnd:
                 runner.bind_target_window(bound_hwnd, app)

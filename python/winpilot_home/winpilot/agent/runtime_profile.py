@@ -157,8 +157,38 @@ def build_runtime_profile(
 ) -> RuntimeProfile:
     """Decide which runtimes are active inside the single AgentRunner."""
     coding_enabled = bool(CONFIG.get("coding", "enabled", default=True))
-    use_coding = coding_enabled and _is_coding_task(task) and not _is_gui_only_task(task)
     stage_execution = getattr(stage, "execution", None)
+    if task_contract is not None and stage is not None:
+        # A typed stage has already been classified and capability-planned.  Do
+        # not let a generated stage goal re-enable Coding Runtime through an
+        # unrelated substring heuristic.  Future typed coding stages can opt in
+        # through explicit capabilities or their selected tools.
+        stage_capabilities = {
+            str(item).casefold()
+            for item in (
+                tuple(getattr(stage_execution, "required_capabilities", ()) or ())
+                + tuple(getattr(stage_execution, "exposed_capabilities", ()) or ())
+            )
+        }
+        stage_tools = {
+            str(item).casefold()
+            for item in tuple(getattr(stage_execution, "tools", ()) or ())
+        }
+        use_coding = coding_enabled and (
+            any(
+                capability.startswith(("coding.", "repository.", "workspace."))
+                for capability in stage_capabilities
+            )
+            or bool(
+                stage_tools.intersection(
+                    {"apply_patch", "read_file", "write_file", "search_text", "run_shell"}
+                )
+            )
+        )
+    else:
+        # Compatibility path for direct AgentRunner/CLI callers that do not yet
+        # provide a TaskContract.
+        use_coding = coding_enabled and _is_coding_task(task) and not _is_gui_only_task(task)
     experience_enabled = str(
         getattr(task_contract, "experience_policy", "allow") or "allow"
     ).casefold() != "disabled"

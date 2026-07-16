@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path, PureWindowsPath
 from typing import Callable, Any
@@ -260,23 +261,59 @@ def planning_enabled() -> bool:
     return bool(CONFIG.get("agent", "planning_enabled", default=True))
 
 
-def should_plan_upfront(task: str) -> bool:
-    """Conservative: only auto-plan tasks that clearly span multiple steps."""
+def _planner_intent_field(task_intent: Any, name: str, default: Any) -> Any:
+    """Read one field from an already compiled TaskIntent representation.
+
+    ``AgentRunner`` keeps its contract-owned intent as a JSON-compatible
+    mapping, while direct callers may still pass the Pydantic ``TaskIntent``.
+    Do not parse the task text again when either representation is present:
+    planner, runtime, tools, and completion checks must share one intent fact.
+    """
+    if isinstance(task_intent, Mapping):
+        return task_intent.get(name, default)
+    if hasattr(task_intent, name):
+        return getattr(task_intent, name)
+    raise TypeError("task_intent must be a TaskIntent or mapping")
+
+
+def should_plan_upfront(task: str, *, task_intent: Any | None = None) -> bool:
+    """Conservative upfront planning using the compiler-owned typed intent.
+
+    Parsing ``task`` here is retained only for legacy/direct callers that do
+    not yet provide a TaskIntent.  The AgentRunner path always supplies its
+    existing typed intent so routing cannot diverge through a second parse.
+    """
     if not planning_enabled():
         return False
     text = (task or "").strip()
     # Structural intent outranks prose-length heuristics.  Any cross-application
     # artifact transfer or communication workflow is long-horizon even when it
     # contains no explicit "first/then/finally" markers.
-    from ..tasking.intent import TaskIntentParser
+    if task_intent is None:
+        from ..tasking.intent import TaskIntentParser
 
-    intent = TaskIntentParser().parse(text)
+        task_intent = TaskIntentParser().parse(text)
+    raw_operations = _planner_intent_field(task_intent, "operation", [])
+    operations = {
+        str(operation).strip().casefold()
+        for operation in (
+            raw_operations
+            if isinstance(raw_operations, (list, tuple, set, frozenset))
+            else [raw_operations]
+        )
+        if str(operation).strip()
+    }
+    media_type = str(
+        _planner_intent_field(task_intent, "media_type", "none") or "none"
+    ).casefold()
+    source = str(_planner_intent_field(task_intent, "source", "") or "")
+    channel = str(_planner_intent_field(task_intent, "channel", "") or "")
     if (
-        "send" in intent.operation
+        "send" in operations
         and (
-            intent.media_type in {"image", "file"}
-            or bool(intent.source and intent.channel and intent.source.casefold() != intent.channel.casefold())
-            or len(intent.operation) >= 2
+            media_type in {"image", "file"}
+            or bool(source and channel and source.casefold() != channel.casefold())
+            or len(operations) >= 2
         )
     ):
         return True
