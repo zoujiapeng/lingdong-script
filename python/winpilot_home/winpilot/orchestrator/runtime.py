@@ -330,6 +330,33 @@ class ArpExecution:
                 ],
             }
 
+    def audit_snapshot(self) -> dict[str, Any]:
+        """Return the bounded, restart-safe subset consumed by run history."""
+        snapshot = self.to_dict()
+        keys = (
+            "run_id",
+            "kind",
+            "graph_id",
+            "graph_name",
+            "status",
+            "current_node_id",
+            "error",
+            "created_at",
+            "started_at",
+            "finished_at",
+            "experience_policy",
+            "skill_replay_node_count",
+            "task_contract",
+            "satisfiability",
+            "current_stage",
+            "interaction_state",
+            "artifacts",
+            "contract_evidence",
+            "completion_contract",
+            "stage_trace",
+        )
+        return {key: snapshot.get(key) for key in keys}
+
     def cancel(self) -> None:
         self.stop_event.set()
         with self._gate_condition:
@@ -715,6 +742,11 @@ class ArpExecution:
             graph_id=self.graph.id,
             graph_name=self.graph.name,
             node_count=len(self.graph.nodes),
+            task_contract=self.graph.metadata.get("task_contract"),
+            satisfiability=self.graph.metadata.get("satisfiability"),
+            experience_policy=str(
+                self.graph.metadata.get("experience_policy") or "allow"
+            ),
         )
 
         try:
@@ -847,6 +879,7 @@ class ArpExecution:
                 result=_json_preview(self.result),
                 error=self.error,
                 evidence_count=len(self.evidence),
+                runtime_snapshot=self.audit_snapshot(),
             )
         return self.to_dict()
 

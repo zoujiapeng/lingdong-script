@@ -3,13 +3,15 @@ import { Search, X, Check, Loader2 } from 'lucide-react';
 import { NodeDefinition, NodeType } from '../../types';
 import { NODE_DEFINITIONS, NODE_CATEGORIES } from '../../utils/nodeDefinitions';
 import { useStore } from '../../store';
-import { unifiedSearch, UnifiedSearchItem, UnifiedSearchResult } from '../../utils/unifiedSearch';
+import { unifiedSearch, UnifiedSearchResult } from '../../utils/unifiedSearch';
 import { llmEnhanceSearch, hasLLMApiKey } from '../../utils/llmSearcher';
 import { itemMarker } from '../../utils/itemMarker';
 import { getNodeIcon } from '../../utils/nodeIconMap';
 import { displaySearchReason, displaySearchToken } from '../../utils/displayLabels';
 import { isRunnableFlowNodeType } from '../../platform/flowToArpGraph';
 import type { CapabilitySpec } from '../../platform/contracts';
+
+const RECENT_NODE_TYPES: NodeType[] = ['mouse_operation', 'wait', 'condition'];
 
 function NodeIcon({ name, size = 14 }: { name: string; size?: number }) {
   const Icon = getNodeIcon(name);
@@ -51,9 +53,9 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
   // Rebuild index + focus input when entering search mode
   useEffect(() => {
     if (showUnifiedSearch) {
-      unifiedSearch.rebuildIndex([]);
+      unifiedSearch.rebuildIndex();
       if (usQuery.trim()) {
-        // Re-run search if we already have a query (e.g. features just loaded)
+        // Re-run search if the query was supplied before the panel opened.
         doUsSearch(usQuery);
       }
     }
@@ -106,7 +108,7 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
     usTimer.current = setTimeout(() => doUsSearch(v), 250);
   };
 
-  const handleUsTested = (id: string, type: 'feature' | 'template' | 'node') => {
+  const handleUsTested = (id: string, type: 'template' | 'node') => {
     itemMarker.toggleTested(id, type);
     unifiedSearch.refreshTestedStatus();
     if (usQuery.trim()) doUsSearch(usQuery);
@@ -142,6 +144,10 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
     const ids = new Set(allItems.map((def) => def.category));
     return NODE_CATEGORIES.filter((category) => ids.has(category.id));
   }, [allItems]);
+
+  const recentItems = useMemo(() => RECENT_NODE_TYPES
+    .map((type) => allItems.find((item) => item.type === type))
+    .filter((item): item is NodeDefinition => Boolean(item)), [allItems]);
 
   const filtered = useMemo(() => {
     return allItems.filter((item) => {
@@ -272,10 +278,10 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                     {/* Type badge */}
                     <div style={{
                       fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4, flexShrink: 0,
-                      background: isTemplate ? '#8b5cf6' : isNode ? '#22c55e' : '#0891b2',
+                      background: isTemplate ? '#8b5cf6' : '#22c55e',
                       color: '#fff', letterSpacing: '0.05em',
                     }}>
-                      {isTemplate ? '模板' : isNode ? '节点' : '功能'}
+                      {isTemplate ? '模板' : '节点'}
                     </div>
                     {/* Name */}
                     <div style={{ flex: 1, fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -316,12 +322,12 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
                             onClick={(e) => { e.stopPropagation(); handleUsUseTemplate(item.id); }}>
                             使用模板
                           </button>
-                        ) : isNode ? (
+                        ) : (
                           <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 10px' }}
                             onClick={(e) => { e.stopPropagation(); handleUsAddNode((item as any).nodeType || item.id); }}>
                             添加到画布
                           </button>
-                        ) : null}
+                        )}
                         <button className="btn btn-ghost" style={{ fontSize: 11, padding: '3px 10px' }}
                           onClick={(e) => { e.stopPropagation(); handleUsTested(item.id, item.type); }}>
                           {tested ? '取消标记' : '标记已测试'}
@@ -427,17 +433,15 @@ export const NodeLibrary = React.memo(function NodeLibrary({ capabilities = [] }
               最近使用
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              {['mouse_operation', 'wait', 'condition'].map((type) => {
-                const def = NODE_DEFINITIONS[type as NodeType];
-                if (!def) return null;
+              {recentItems.map((def) => {
                 return (
                   <div
-                    key={type}
+                    key={def.type}
                     className="node-item"
                     style={{ padding: '5px 8px' }}
                     draggable
                     onDragStart={(e) => {
-                      e.dataTransfer.setData('node-type', type);
+                      e.dataTransfer.setData('node-type', def.type);
                       e.dataTransfer.effectAllowed = 'copy';
                     }}
                     onDoubleClick={() => handleDoubleClick(def)}

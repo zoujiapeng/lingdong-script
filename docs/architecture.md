@@ -40,16 +40,18 @@ flowchart LR
 
 前端 `src/renderer/components/platform/PlatformWorkbench.tsx` 不再嵌入旧 WebUI。智能代理、流程工作台、运行记录、技能与学习、系统设置都读取同一套 `/api/v2` contract 和 WebSocket 事件；主体工作台文案使用中文，API、MCP、VLM、URL、坐标字段等技术标识仍保留原名。
 
+renderer 以 WebSocket 事件驱动当前 run：普通事件在 80 ms 窗口内合并，terminal 事件才刷新完整 platform 与运行列表，`ping` 不触发 REST，5 秒轮询只作断线恢复兜底。`/api/v2/runs` 和平台内的 RuntimeJob 只返回导航摘要；选择 run/job 后按 id 获取完整 timeline、evidence 或 result，避免把多份大型 ARP snapshot 放进每次刷新。
+
 后端核心路径：
 
 - `orchestrator/contracts.py`：版本化 `arp/1` 图、节点、重试、Controller 动作白名单和运行前严格验证契约。
 - `orchestrator/runtime.py`：图运行、条件、证据门、人工门、取消和节点重试；显式失败恢复边优先于 `fail_fast`。
 - `orchestrator/adapters.py`：Agent Goal、Action Batch、Memory-backed Skill Replay、legacy 节点适配和最终运行结果驱动的记忆反馈。
-- `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。
+- `orchestrator/projection.py`：将 ARP、Agent、Controller、Perception、Replay 事件折叠成统一运行视图，并从 JSONL trace 恢复历史。它还从 `arp_node_done(task_stage)`、`arp_evidence` 和 terminal audit snapshot 恢复 stage capabilities、Evidence Registry 与 Completion Contract；运行列表使用同一投影的轻量摘要。
 - `tasking/intent.py`、`tasking/compiler.py`：结构化 operation/media/channel/recipient/source/destination，并编译 typed stages、artifact binding 和 completion obligations。
 - typed 主路径只使用 `TaskContractCompiler` 持有的同一个 `TaskIntent`：CapabilityPlanner、StageRuntime、ToolSession/AgentRunner、perception 和 Completion Contract 共享该对象，通信上下文由当前 stage 显式注入；只有没有 Task Contract 的 legacy 直连入口才回退解析原句。
 - `tasking/capability.py`：以阶段要求与选定 evidence provider 要求的并集做运行前可满足性检查，生成阶段动态工具、Controller、Adapter 和 model role。
-- `tasking/stage_runtime.py`、`tasking/artifacts.py`：执行本地状态机并管理 run-scoped 工件；观察帧默认不可发送。
+- `tasking/stage_runtime.py`、`tasking/artifacts.py`：执行本地状态机并管理 run-scoped 工件；观察帧默认不可发送。ArtifactStore manifest 会在构造时安全恢复，只接受当前 run、路径位于受管理目录内的记录；每次读取仍重新核验大小、SHA-256 和图片尺寸。
 - 阶段 Skill 按 `stage_type + parameters + app_version` 组合，保存前置条件、输出 artifact、验证条件和失败原因；重放成功仍做当前状态验证，miss/fail 只回到当前 `task_stage`，不会重启整项任务。
 - `tasking/interaction_stage_runtime.py`、`tasking/interaction.py`：执行实时视觉交互阶段，要求模型输出绑定到确切 frame/artifact 的 typed turn，并把合法动作转换为本地 Controller transaction。
 - `perception/surface_binding.py`：用目标 hwnd、capture scope、物理 frame region 和窗口 client authority 维持稳定交互面；检测缺失、初始含糊、陈旧帧、坐标空间变化和未经确认的布局位移均 fail-closed。
@@ -58,7 +60,9 @@ flowchart LR
 - Memory verification 也使用同一个 `interactive_runtime` 租约；它不会与 Agent、ARP 或普通 replay 并发争用桌面。
 - `automation_ir.py`：新流程和 Skill 的规范 artifact；WPS/FlowScript 是受检 adapter。
 - `platform/flowToArpGraph.ts`：把可视化 FlowScript 保守编译为 `arp/1`；点击、文字锚点、输入、键盘、拖拽、启动、聚焦、截图、剪贴板和部分组合节点直接编译为 Controller batch；其余旧节点显式标记 `legacy_flow` 并在运行前拒绝。
-- `orchestrator/catalog.py` 的 `CapabilitySpec.flow_node_types` 与 renderer 的 `RUNNABLE_FLOW_NODE_TYPES` 共同形成可见节点目录；只有交集进入节点库和统一搜索。旧定义仍用于打开历史文件，不代表可新建或可运行。
+- `orchestrator/catalog.py` 的 `CapabilitySpec.flow_node_types` 与 renderer 的 `RUNNABLE_FLOW_NODE_TYPES` 共同形成可见节点目录；只有交集进入节点库、统一搜索和最近入口。旧定义仍用于打开历史文件，不代表可新建或可运行。
+
+前端各入口、历史恢复、兼容层和死代码判定见 [frontend.md](frontend.md)。
 
 ### ARP 节点
 
@@ -333,6 +337,7 @@ WinPilot Agent 内部调度不是 Windows Task Scheduler。
 - README 写项目总览。
 - `CLAUDE.md` 写 AI 最短接手说明。
 - `docs/architecture.md` 写结构和边界。
+- `docs/frontend.md` 写原生前端入口、数据刷新、历史审计、节点可达性和兼容/死代码边界。
 - `docs/winpilot-agent.md` 写运行机制和复盘细节。
 - `docs/replay-recording.md` 写 trace / Automation IR / 兼容 WPS / replay / FlowScript 导入。
 - 历史 run id 不继续堆进主文档；需要保留时写 eval 报告或 trace。

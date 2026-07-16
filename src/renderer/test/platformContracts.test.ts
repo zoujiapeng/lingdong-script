@@ -108,6 +108,33 @@ describe('control plane client contracts', () => {
       new ControlPlaneClient('https://example.test/runtime/', 'secret')
         .traceScreenshotUrl('run 1', 'nested\\after 1.jpg'),
     ).toBe('https://example.test/runtime/api/trace/run%201/shot/after%201.jpg?token=secret');
+    expect(
+      new ControlPlaneClient('https://example.test/runtime/', 'secret')
+        .artifactUrl('run 1', 'art/1'),
+    ).toBe('https://example.test/runtime/api/v2/runs/run%201/artifacts/art%2F1?token=secret');
+  });
+
+  it('uses generic run detail and cancel routes for both Agent and ARP runs', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      ok: true,
+      run: null,
+      arp: null,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const client = new ControlPlaneClient('http://127.0.0.1:8765');
+      await client.run('agent run/1');
+      await client.cancelRun('agent run/1');
+
+      expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v2/runs/agent%20run%2F1');
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/api/v2/runs/agent%20run%2F1/cancel');
+      expect(fetchMock.mock.calls[1][1]?.method).toBe('POST');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('keeps the managed control token in the client transport', async () => {

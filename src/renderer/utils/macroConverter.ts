@@ -70,11 +70,9 @@ export function macroEventsToFlow(events: MacroEvent[], name: string): FlowScrip
 
     // Create event node
     const nodeId = nanoid();
-    let nodeType: string;
     let nodeParams: any;
 
     if (ev.type === 'click' && ev.pressed) {
-      nodeType = 'click';
       nodeParams = {
         x: ev.x || 0,
         y: ev.y || 0,
@@ -95,7 +93,6 @@ export function macroEventsToFlow(events: MacroEvent[], name: string): FlowScrip
       // Check if it's a special key
       const specialKeyMatch = ev.key.match(/^Key\.(.+)$/);
       if (specialKeyMatch) {
-        nodeType = 'keyboard';
         nodeParams = {
           keys: [specialKeyMatch[1]],
           modifiers: [],
@@ -113,7 +110,6 @@ export function macroEventsToFlow(events: MacroEvent[], name: string): FlowScrip
         });
       } else if (ev.key.length === 1) {
         // Single character → INPUT_TEXT
-        nodeType = 'input_text';
         nodeParams = {
           text: ev.key,
           click_before: false,
@@ -132,7 +128,6 @@ export function macroEventsToFlow(events: MacroEvent[], name: string): FlowScrip
         });
       } else {
         // Other key → KEYBOARD
-        nodeType = 'keyboard';
         nodeParams = {
           keys: [ev.key],
           modifiers: [],

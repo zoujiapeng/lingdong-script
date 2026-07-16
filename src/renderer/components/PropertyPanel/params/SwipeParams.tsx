@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { SwipeNodeParams } from '../../../types';
 import { Crosshair } from 'lucide-react';
 

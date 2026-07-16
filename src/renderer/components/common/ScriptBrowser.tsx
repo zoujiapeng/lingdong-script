@@ -1,7 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { Search, FileCode, X, AlertTriangle, Library } from 'lucide-react';
 import { useStore } from '../../store';
-import { templateRegistry, TemplateEntry } from '../../utils/templateRegistry';
+import { templateRegistry } from '../../utils/templateRegistry';
 import { unifiedSearch } from '../../utils/unifiedSearch';
 import { displaySearchToken, displaySourceLabel } from '../../utils/displayLabels';
 import { UnifiedSearchDialog } from './UnifiedSearchDialog';

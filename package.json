@@ -19,7 +19,7 @@
     "dev": "concurrently --kill-others \"npm run dev:renderer\" \"wait-on http://localhost:5200 && npm run dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "tsc -p tsconfig.main.json && electron .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.main.json && tsc -p tsconfig.cli.json && tsc -p tsconfig.ai.json",
     "test": "vitest run",
     "build": "npm run typecheck && npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",

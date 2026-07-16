@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -132,6 +133,177 @@ def test_validate_and_run_arp_graph_through_api(client):
     job = next(item for item in jobs if item["metadata"].get("run_id") == run_id)
     assert job["kind"] == "arp"
     assert job["status"] == "done"
+    assert "result" not in job
+
+    platform_jobs = client.get("/api/v2/platform").json()["status"]["runtime_jobs"]
+    platform_job = next(item for item in platform_jobs if item["metadata"].get("run_id") == run_id)
+    assert "result" not in platform_job
+
+
+def test_generic_run_cancel_route_cancels_arp_runtime_job(client):
+    graph = {
+        "format": "arp/1",
+        "id": "cancel-api-graph",
+        "name": "Cancelable API graph",
+        "nodes": [
+            {"id": "start", "kind": "start"},
+            {"id": "delay", "kind": "delay", "config": {"duration_ms": 5000}},
+            {"id": "end", "kind": "end"},
+        ],
+        "edges": [
+            {"id": "e1", "source": "start", "target": "delay"},
+            {"id": "e2", "source": "delay", "target": "end"},
+        ],
+        "policy": {"require_evidence_on_done": False},
+    }
+    created = client.post("/api/v2/arp/runs", json={"graph": graph, "inputs": {}})
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    canceled = client.post(f"/api/v2/runs/{run_id}/cancel")
+    assert canceled.status_code == 200
+    assert canceled.json()["ok"] is True
+
+    deadline = time.time() + 2
+    job = None
+    while time.time() < deadline:
+        jobs = client.get("/api/v2/jobs").json()["jobs"]
+        job = next(item for item in jobs if item["metadata"].get("run_id") == run_id)
+        if job["status"] == "canceled":
+            break
+        time.sleep(0.01)
+    assert job is not None
+    assert job["status"] == "canceled"
+    assert client.post(f"/api/v2/runs/{run_id}/cancel").status_code == 409
+
+
+def test_generic_run_cancel_route_also_cancels_agent_job(client):
+    from winpilot import server
+
+    run_id = "agent-generic-cancel"
+    stop_event = threading.Event()
+    runner = SimpleNamespace(run_id=run_id, stop_event=stop_event)
+
+    def wait_for_cancel(runtime_stop):
+        runtime_stop.wait(2)
+        return {"ok": False, "error": "canceled"}
+
+    job = server.RUNTIME_JOBS.submit(
+        "agent",
+        wait_for_cancel,
+        metadata={"run_id": run_id, "task": "cancel me"},
+        stop_event=stop_event,
+    )
+    server.STATE.register_runner(runner, job.id)
+
+    response = client.post(f"/api/v2/runs/{run_id}/cancel")
+
+    assert response.status_code == 200
+    assert stop_event.is_set()
+    assert response.json()["arp"] is None
+
+
+def test_generic_run_cancel_rejects_stale_active_projection(client, monkeypatch):
+    from winpilot import server
+
+    run_id = "stale-active-projection"
+    monkeypatch.setattr(
+        server.RUN_PROJECTIONS,
+        "get",
+        lambda requested: {
+            "run_id": run_id,
+            "status": "running",
+            "kind": "arp",
+        } if requested == run_id else None,
+    )
+    monkeypatch.setattr(server.ARP_RUNS, "get", lambda _requested: None)
+    monkeypatch.setattr(server.STATE, "job_for_run", lambda _requested: None)
+
+    response = client.post(f"/api/v2/runs/{run_id}/cancel")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "run is not active"
+
+
+def test_run_artifact_endpoint_serves_only_registered_current_run_artifact(client, tmp_path):
+    from winpilot.orchestrator.contracts import ArpGraph
+    from winpilot.orchestrator.runtime import ARP_RUNS, ArpRunStatus
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    execution = ARP_RUNS.prepare(ArpGraph.model_validate(_graph_payload()))
+    execution.status = ArpRunStatus.DONE
+    execution.finished_at = time.time()
+    store = ArtifactStore(execution.run_id, tmp_path / "managed")
+    source = tmp_path / "proof.txt"
+    source.write_text("verified artifact payload", encoding="utf-8")
+    artifact = store.import_file(source)
+    execution.runtime_state["artifact_store"] = store
+
+    response = client.get(
+        f"/api/v2/runs/{execution.run_id}/artifacts/{artifact.artifact_id}",
+    )
+    assert response.status_code == 200
+    assert response.text == "verified artifact payload"
+    assert response.headers["x-winpilot-artifact-id"] == artifact.artifact_id
+    assert client.get(
+        f"/api/v2/runs/{execution.run_id}/artifacts/art-unknown",
+    ).status_code == 404
+
+
+def test_historical_arp_detail_and_artifact_survive_runtime_restart(client, tmp_path, monkeypatch):
+    from winpilot import server
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    run_id = "arp-historical-audit-api"
+    traces = tmp_path / "traces"
+    root = traces / run_id / "artifacts"
+    monkeypatch.setattr(server, "TRACES_DIR", traces)
+    source = tmp_path / "proof.txt"
+    source.write_text("persisted proof", encoding="utf-8")
+    artifact = ArtifactStore(run_id, root).import_file(source)
+
+    server.RUN_PROJECTIONS.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "graph_id": "historical-contract",
+        "graph_name": "Historical typed run",
+    })
+    server.RUN_PROJECTIONS.on_event({
+        "type": "arp_node_done",
+        "ts": 2.0,
+        "run_id": run_id,
+        "node_id": "stage-capture",
+        "kind": "task_stage",
+        "ok": True,
+        "attempts": 1,
+        "output": {
+            "stage_id": "stage-capture",
+            "stage_type": "CaptureArtifact",
+            "status": "done",
+            "tools": ["capture_artifact"],
+            "required_capabilities": ["artifact.capture"],
+            "verifier_requirements": ["artifact.hash"],
+            "exposed_capabilities": ["artifact.capture", "artifact.hash"],
+            "missing_capabilities": [],
+            "satisfiable": True,
+            "artifact_id": artifact.artifact_id,
+        },
+        "runtime_metrics": {"controller_elapsed_ms": 4},
+    })
+    server.RUN_PROJECTIONS.on_event({
+        "type": "arp_run_done", "ts": 3.0, "run_id": run_id, "status": "done",
+    })
+
+    detail = client.get(f"/api/v2/runs/{run_id}")
+    downloaded = client.get(f"/api/v2/runs/{run_id}/artifacts/{artifact.artifact_id}")
+
+    assert detail.status_code == 200
+    assert detail.json()["arp"]["audit_source"] == "trace_projection"
+    assert detail.json()["arp"]["stage_trace"][0]["stage_type"] == "CaptureArtifact"
+    assert detail.json()["arp"]["artifacts"]["count"] == 1
+    assert downloaded.status_code == 200
+    assert downloaded.text == "persisted proof"
 
 
 def test_frontend_run_fails_closed_when_loaded_python_is_stale(client, monkeypatch):

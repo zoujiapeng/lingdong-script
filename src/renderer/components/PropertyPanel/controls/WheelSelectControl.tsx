@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { List } from 'lucide-react';
 
 interface Option {
@@ -22,8 +22,6 @@ interface Props {
 /** 滚轮选择控件：调用 electronAPI.wheelSelect() 让用户通过全屏滚轮选择 */
 export function WheelSelectControl({ options, value, onChange, label = '选择', title }: Props) {
   const [selecting, setSelecting] = useState(false);
-
-  const currentLabel = options.find((o) => o.value === value)?.label || value;
 
   const handleWheelSelect = async () => {
     try {

@@ -1,4 +1,3 @@
-import React from 'react';
 import { SceneConditionNodeParams } from '../../../types';
 
 interface Props {

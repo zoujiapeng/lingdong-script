@@ -33,18 +33,20 @@ class RuntimeJob:
     on_finish: JobFinished | None = None
 
     def snapshot(self, include_result: bool = True) -> dict[str, Any]:
-        return {
+        snapshot = {
             "job_id": self.id,
             "kind": self.kind,
             "status": self.status,
             "resources": list(self.resources),
             "metadata": dict(self.metadata),
-            "result": self.result if include_result else None,
             "error": self.error,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+        if include_result:
+            snapshot["result"] = self.result
+        return snapshot
 
 
 class RuntimeJobManager:
@@ -128,10 +130,18 @@ class RuntimeJobManager:
             ]
             return sorted(jobs, key=lambda item: item.created_at)
 
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list(
+        self,
+        limit: int = 50,
+        *,
+        include_result: bool = True,
+    ) -> list[dict[str, Any]]:
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
-            return [item.snapshot() for item in jobs[:max(1, int(limit))]]
+            return [
+                item.snapshot(include_result=include_result)
+                for item in jobs[:max(1, int(limit))]
+            ]
 
     def clear_finished(self) -> int:
         with self._lock:

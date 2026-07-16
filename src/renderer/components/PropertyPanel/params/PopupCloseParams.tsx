@@ -1,4 +1,3 @@
-import React from 'react';
 import { PopupCloseNodeParams } from '../../../types';
 import { WheelSelectControl } from '../controls/WheelSelectControl';
 

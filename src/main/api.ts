@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { timingSafeEqual } from 'crypto';
 import { ChildProcess } from 'child_process';
-import { callLLM, spawnPython, spawnPythonOneShot } from './engine';
+import { callLLM, spawnPythonOneShot } from './engine';
 import { getBaseDir } from './env';
 import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { handleMCPRequest } from './mcp-handler';

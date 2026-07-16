@@ -16,7 +16,7 @@
 - `store/persistence.ts`：localStorage 持久化 helper。
 - `store/index.ts`：Zustand store；不再复制 defaults/templates/persistence。
 
-`NodeType` 联合类型包含现役节点和历史兼容类型，不等于生产运行能力。节点库只展示 `flowToArpGraph.ts` 的可编译集合与后端 capability catalog 的 `flow_node_types` 交集；后端未声明、前端不能编译或只能走 legacy adapter 的节点不会出现在新流程面板中。
+`NodeType` 联合类型包含现役节点和历史兼容类型，不等于生产运行能力。节点库、统一搜索和“最近使用”都只展示 `flowToArpGraph.ts` 的可编译集合与后端 capability catalog 的 `flow_node_types` 交集；后端未声明、前端不能编译或只能走 legacy adapter 的节点不会出现在任何新建入口中。catalog 尚未加载时交集为空，前端不会用硬编码最近列表绕过运行前可达性。
 
 ## 执行
 
@@ -66,6 +66,8 @@ Flow editor state -> automation-ir/1(runtime.arp_graph + fingerprint) -> validat
 - DSL `tool_call` / 旧集成。
 
 它不再自动生成生产流程图节点。动态 feature 只有在显式进入 capability catalog、获得稳定参数 schema、ARP 映射和失败语义后，才可加入节点库。
+
+renderer 的统一搜索不再维护动态 feature 索引或“功能”结果分支；它只搜索可执行模板与 catalog 允许的新节点。Electron `features:list` 仍为已保存的 legacy `tool_call` 属性面板提供参数 schema，这是一条读取/编辑兼容路径，不是生产节点发现机制。
 
 不要把这套注册表直接暴露给 WinPilot 主 GUI agent。
 

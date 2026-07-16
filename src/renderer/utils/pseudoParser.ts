@@ -962,12 +962,6 @@ function getDefaultParams(type: string): any {
   }
 }
 
-type NodeWithBranch = {
-  id: string;
-  type: string;
-  hasElse?: boolean;
-};
-
 function buildFlowScript(stmts: ParsedStmt[]): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];

@@ -565,10 +565,107 @@ export interface CurrentRunResponse {
   arp: ArpExecutionSnapshot | null;
 }
 
+export interface RuntimeSourceIdentity {
+  loaded_stamp: string;
+  current_stamp: string;
+  drifted: boolean;
+}
+
+export interface RuntimeGitIdentity {
+  branch?: string;
+  commit?: string;
+  loaded_commit: string;
+  current_commit: string;
+  dirty?: boolean;
+}
+
+export interface RuntimeIdentity {
+  contract_version: number;
+  pid?: number;
+  cwd?: string;
+  winpilot_home?: string;
+  repo_root?: string;
+  launcher?: string;
+  host?: string;
+  port?: string;
+  git: RuntimeGitIdentity;
+  source: RuntimeSourceIdentity;
+  capabilities?: Record<string, boolean>;
+}
+
+export interface RuntimeModelProfile {
+  provider: string;
+  model: string;
+  supports_vision: boolean;
+}
+
+export interface RuntimeJobSnapshot {
+  job_id: string;
+  kind: string;
+  status: string;
+  resources: string[];
+  metadata: Record<string, unknown>;
+  error: string;
+  created_at: number;
+  started_at?: number | null;
+  finished_at?: number | null;
+  result?: unknown;
+}
+
+export interface DesktopActionQueueStatus {
+  submitted: number;
+  completed: number;
+  failed: number;
+  async_submitted?: number;
+  async_completed?: number;
+  async_failed?: number;
+  async_canceled?: number;
+  last_job_id?: string;
+  last_action?: string;
+  last_elapsed_ms?: number;
+  last_wait_ms?: number;
+  parallel_peak?: number;
+  resource_waiters?: number;
+  active_resources?: string[];
+  async_status?: Record<string, number>;
+  [key: string]: unknown;
+}
+
+export interface PerceptionDaemonStatus {
+  entries: number;
+  active_leases: number;
+  targets: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface PlatformStatus {
+  running?: boolean;
+  busy?: Record<string, boolean>;
+  agent_running?: boolean;
+  replay_running?: boolean;
+  arp_running?: boolean;
+  human_recording?: boolean;
+  run_id?: string | null;
+  run_status?: string | null;
+  ocr_provider?: string;
+  vlm_configured?: boolean;
+  vlm_reason?: string | null;
+  enabled_dimensions?: string[];
+  is_admin?: boolean;
+  shell_enabled?: boolean;
+  runtime?: RuntimeIdentity;
+  model_profile?: RuntimeModelProfile;
+  desktop_action_queue?: DesktopActionQueueStatus;
+  runtime_jobs?: RuntimeJobSnapshot[];
+  perception_daemon?: PerceptionDaemonStatus;
+  current_run?: RunProjection | null;
+  [key: string]: unknown;
+}
+
 export interface PlatformOverview {
   api_version: string;
   product: string;
-  status: Record<string, unknown>;
+  status: PlatformStatus;
   current_run: RunProjection | null;
   capabilities: CapabilitySpec[];
   contracts: Record<string, string>;

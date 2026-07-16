@@ -1038,6 +1038,92 @@ def test_run_projection_counts_arp_evidence_as_done_check():
     assert run["evidence"][-1]["type"] == "controller"
 
 
+def test_run_projection_rebuilds_historical_arp_audit_and_summarizes_lists():
+    from winpilot.orchestrator.projection import RunProjectionStore
+
+    store = RunProjectionStore()
+    run_id = "persisted-arp-audit"
+    store.on_event({
+        "type": "arp_run_start",
+        "ts": 1.0,
+        "run_id": run_id,
+        "graph_id": "task-contract-id",
+        "graph_name": "Cross app artifact task",
+        "task_contract": {"format": "task-contract/1", "stages": []},
+        "satisfiability": {"satisfiable": True, "missing_capabilities": []},
+    })
+    store.on_event({
+        "type": "arp_node_done",
+        "ts": 2.0,
+        "run_id": run_id,
+        "node_id": "stage-01-capture",
+        "kind": "task_stage",
+        "ok": True,
+        "attempts": 1,
+        "output": {
+            "stage_id": "stage-01-capture",
+            "stage_type": "CaptureArtifact",
+            "status": "done",
+            "tools": ["capture_artifact"],
+            "controller_tools": ["capture_artifact"],
+            "required_capabilities": ["artifact.capture"],
+            "verifier_requirements": ["artifact.hash"],
+            "exposed_capabilities": ["artifact.capture", "artifact.hash"],
+            "missing_capabilities": [],
+            "satisfiable": True,
+            "artifact_id": "art-persisted",
+        },
+        "runtime_metrics": {"controller_elapsed_ms": 21, "model_calls": 0},
+    })
+    store.on_event({
+        "type": "arp_evidence",
+        "ts": 3.0,
+        "run_id": run_id,
+        "node_id": "end",
+        "passed": True,
+        "evidence": {
+            "id": "evidence-complete",
+            "predicate": "contract.complete",
+            "source": "completion_contract_verifier",
+            "verified": True,
+            "captured_at": 3.0,
+            "run_id": run_id,
+            "node_id": "end",
+            "metadata": {
+                "ok": True,
+                "run_id": run_id,
+                "contract_id": "task-contract-id",
+                "obligations": [],
+                "final_conditions": [],
+                "missing": [],
+                "contract_errors": [],
+                "artifact_refs": {},
+                "primary_artifact_id": "art-persisted",
+                "reason": "all conditions satisfied",
+            },
+        },
+    })
+    store.on_event({
+        "type": "arp_run_done", "ts": 4.0, "run_id": run_id, "status": "done",
+    })
+
+    audit = store.arp_snapshot(run_id)
+    detail = store.get(run_id)
+    summary = store.list(1)[0]
+
+    assert audit is not None
+    assert audit["audit_source"] == "trace_projection"
+    assert audit["task_contract"]["format"] == "task-contract/1"
+    assert audit["stage_trace"][0]["stage_type"] == "CaptureArtifact"
+    assert audit["stage_trace"][0]["controller_elapsed_ms"] == 21
+    assert audit["contract_evidence"]["records"][0]["provider"] == "completion_contract_verifier"
+    assert audit["completion_contract"]["ok"] is True
+    assert detail is not None and detail["timeline"]
+    assert summary["timeline"] == []
+    assert summary["evidence"] == []
+    assert summary["result"] is None
+
+
 def test_run_projection_hydrates_persisted_trace_once(tmp_path):
     import json
 

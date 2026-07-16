@@ -73,11 +73,47 @@ class ArtifactStore:
 
     def __init__(self, run_id: str, root: str | Path | None = None) -> None:
         self.run_id = str(run_id)
-        self.root = Path(root) if root else TRACES_DIR / self.run_id / "artifacts"
+        self.root = (Path(root) if root else TRACES_DIR / self.run_id / "artifacts").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._artifacts: dict[str, Artifact] = {}
         self._lock = threading.RLock()
         self._manifest = self.root / "manifest.json"
+        self._load_manifest()
+
+    def _load_manifest(self) -> None:
+        """Restore a persisted run store without trusting arbitrary file paths.
+
+        Artifacts outlive the Python process so the history UI and completion
+        audit can still inspect them after a restart.  The manifest is treated
+        as untrusted input: records for another run, malformed records, and
+        paths escaping this run's managed directory are ignored.  ``get``
+        performs the expensive size/hash/dimension verification on access.
+        """
+        if not self._manifest.is_file():
+            return
+        try:
+            payload = json.loads(self._manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if (
+            not isinstance(payload, dict)
+            or payload.get("format") != "artifact-store/1"
+            or str(payload.get("run_id") or "") != self.run_id
+        ):
+            return
+        loaded: dict[str, Artifact] = {}
+        for raw in payload.get("artifacts") or []:
+            try:
+                artifact = Artifact.model_validate(raw)
+                if artifact.run_id != self.run_id:
+                    continue
+                managed_path = Path(artifact.managed_path).resolve()
+                managed_path.relative_to(self.root)
+                artifact.managed_path = str(managed_path)
+                loaded[artifact.artifact_id] = artifact
+            except (OSError, TypeError, ValueError):
+                continue
+        self._artifacts = loaded
 
     @staticmethod
     def _hash(path: Path) -> str:
@@ -120,6 +156,10 @@ class ArtifactStore:
         metadata: dict[str, Any] | None = None,
     ) -> Artifact:
         path = path.resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError("artifact path must stay inside the run-scoped store") from exc
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError(f"artifact file is missing or empty: {path}")
         aid = artifact_id or f"art-{uuid.uuid4().hex[:16]}"
@@ -258,7 +298,11 @@ class ArtifactStore:
             raise KeyError(f"unknown artifact_id for current run: {artifact_id}")
         if artifact.run_id != self.run_id:
             raise ValueError("artifact does not belong to the current run")
-        path = Path(artifact.managed_path)
+        path = Path(artifact.managed_path).resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError("artifact path escaped the run-scoped store") from exc
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError("artifact file no longer exists or is empty")
         if path.stat().st_size != int(artifact.size_bytes):

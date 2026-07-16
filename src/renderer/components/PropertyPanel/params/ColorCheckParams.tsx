@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ColorCheckNodeParams } from '../../../types';
 import { Crosshair } from 'lucide-react';
 

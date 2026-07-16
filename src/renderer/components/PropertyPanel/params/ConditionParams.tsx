@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ConditionNodeParams, ConditionType } from '../../../types';
 
 interface Props {

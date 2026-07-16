@@ -7,7 +7,7 @@ import type {
   LogEntry, FeatureDefinition, ToolCallEntry,
   MacroEvent, MacroInfo, RecordingState,
   LearnedTarget, ParamPromptItem, AgentRunRecord,
-  PlanNodeState, PlanDAGState, SubFlowNavState,
+  SubFlowNavState,
 } from '../types';
 import { NODE_DEFINITIONS } from '../utils/nodeDefinitions';
 import { getNodeDimensions } from '../utils/constants';

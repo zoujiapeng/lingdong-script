@@ -9,7 +9,6 @@
  */
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn } from 'child_process';
 import { runPythonCollect } from './engine';
 import { getBaseDir } from './env';
 

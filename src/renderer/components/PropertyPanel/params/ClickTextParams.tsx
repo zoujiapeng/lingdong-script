@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ClickTextNodeParams, ClickMethod } from '../../../types';
 import { Crosshair, X } from 'lucide-react';
 

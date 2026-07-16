@@ -94,20 +94,6 @@ export async function runPythonCollect(
 /** Buffer for partial lines across stdout chunks (engine) */
 let _engineLineBuffer = '';
 
-/** 通过 spawnPython 执行 DSL (main.ts 有自己的本地版本) */
-async function runDsl(dsl: string): Promise<{ success: boolean; error?: string }> {
-  const scriptPath = path.join(getBaseDir(), 'python', 'tools', 'run_dsl.py');
-  const result = await runPythonCollect([scriptPath], {
-    cwd: getBaseDir(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }, dsl);
-  try {
-    return JSON.parse(result.stdout.trim());
-  } catch {
-    return { success: false, error: result.stderr?.trim() || '执行失败' };
-  }
-}
-
 /** 启动 Python 自动化引擎 */
 export function startPythonEngine(scriptJson: string) {
   const proc = spawnPython(

@@ -1,4 +1,3 @@
-import React from 'react';
 import { VariableSetNodeParams } from '../../../types';
 
 interface Props {
