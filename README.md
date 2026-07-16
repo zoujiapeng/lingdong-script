@@ -88,7 +88,7 @@ npx vitest run
 npm run build
 ```
 
-2026-07-16 最终全量验证为 WinPilot `1639 passed, 5 skipped, 1 warning`、根 Python `2508 passed`、Vitest `204/204 passed`，TypeScript typecheck 与 Vite/Electron build 通过。5 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；真实拖拽和 QQ 发送另行显式运行。这不是用 mock 代替 E2E，也不把分散运行记录描述成一次统计评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
+2026-07-16 最终全量验证为 WinPilot `1640 passed, 5 skipped, 1 warning`、根 Python `2508 passed`、Vitest `204/204 passed`，TypeScript typecheck 与 Vite/Electron build 通过。5 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；真实拖拽和 QQ 发送另行显式运行。这不是用 mock 代替 E2E，也不把分散运行记录描述成一次统计评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
 
 清理生成产物和缓存：
 

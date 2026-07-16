@@ -3,6 +3,79 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture
+def mocked_visual_judge_capability(monkeypatch):
+    """Declare an image-capable judge for tests that submit mocked pixels."""
+    from winpilot.agent import done_verifier as done_mod
+
+    class _Config:
+        _data = {
+            "api": {"model": "mock-vision-judge", "temperature": 0.0},
+            "agent": {
+                "escalation_model": "",
+                "verify_done": True,
+                "done_max_rejects": 2,
+            },
+            "vlm": {"enabled": False, "base_url": "", "model": ""},
+        }
+
+        def get(self, *path, default=None):
+            node = self._data
+            for key in path:
+                if not isinstance(node, dict) or key not in node:
+                    return default
+                node = node[key]
+            return node
+
+    monkeypatch.setattr(done_mod, "_config", lambda: _Config())
+    monkeypatch.setattr(
+        done_mod,
+        "model_supports_vision",
+        lambda model, provider="": model == "mock-vision-judge",
+    )
+
+
+def test_visual_done_without_declared_vision_judge_fails_closed(monkeypatch):
+    from winpilot.agent import done_verifier as done_mod
+    from winpilot.agent.loop import AgentRunner
+
+    class _Config:
+        _data = {
+            "api": {"model": "mock-text-judge"},
+            "agent": {"escalation_model": ""},
+            "vlm": {"enabled": False, "base_url": "", "model": ""},
+        }
+
+        def get(self, *path, default=None):
+            node = self._data
+            for key in path:
+                if not isinstance(node, dict) or key not in node:
+                    return default
+                node = node[key]
+            return node
+
+    monkeypatch.setattr(done_mod, "_config", lambda: _Config())
+    monkeypatch.setattr(
+        done_mod,
+        "model_supports_vision",
+        lambda _model, provider="": False,
+    )
+    runner = AgentRunner("inspect the current visual state")
+    runner.session.hwnd = 123
+    runner.result_text = "done"
+    runner._fresh_done_image_b64 = "mock-fresh-frame"
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*_args, **_kwargs):
+                    raise AssertionError("text-only judge must not receive image content")
+
+    assert runner._call_done_judge(_Client(), "", "", "") is False
+    assert "no configured vision model" in runner._last_done_reject_reason
+
+
 @pytest.mark.parametrize(
     "invalid_verified",
     ["true", "false", "1", "yes", 1, -1, 0, 1.0, [], {}],
@@ -266,7 +339,10 @@ def test_done_rejects_missing_distinctive_literal_even_when_other_state_changed(
     assert "FAST_WRAP_OK_071" in runner._last_done_reject_reason
 
 
-def test_done_defers_missing_literal_to_fresh_native_judge(monkeypatch):
+def test_done_defers_missing_literal_to_fresh_native_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner(
@@ -317,7 +393,10 @@ def test_done_defers_missing_literal_to_fresh_native_judge(monkeypatch):
     assert "return done=false" in prompt
 
 
-def test_done_rejects_when_native_judge_cannot_see_pending_literal(monkeypatch):
+def test_done_rejects_when_native_judge_cannot_see_pending_literal(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("Confirm FAST_WRAP_OK_071 is visible in the target window.")
@@ -347,7 +426,10 @@ def test_done_rejects_when_native_judge_cannot_see_pending_literal(monkeypatch):
     assert "not visible" in runner._last_done_reject_reason
 
 
-def test_done_defers_missing_visible_payload_to_fresh_native_judge(monkeypatch):
+def test_done_defers_missing_visible_payload_to_fresh_native_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("Type the requested sentence into the visible editor.")
@@ -2403,7 +2485,10 @@ def test_drawing_done_requires_requested_colors(monkeypatch, tmp_path):
     assert runner._done_rejects == 1
 
 
-def test_simple_drawing_done_requires_fresh_goal_conditioned_visual_judge(monkeypatch):
+def test_simple_drawing_done_requires_fresh_goal_conditioned_visual_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("draw a house outline on the canvas")
@@ -2441,7 +2526,10 @@ def test_simple_drawing_done_requires_fresh_goal_conditioned_visual_judge(monkey
     assert isinstance(calls[0]["messages"][1]["content"], list)
 
 
-def test_simple_drawing_pixel_change_does_not_bypass_visual_judge(monkeypatch):
+def test_simple_drawing_pixel_change_does_not_bypass_visual_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("draw a triangle on the canvas")
@@ -2476,7 +2564,10 @@ def test_simple_drawing_pixel_change_does_not_bypass_visual_judge(monkeypatch):
     assert "not a triangle" in runner._last_done_reject_reason
 
 
-def test_simple_drawing_compacted_action_evidence_still_requires_fresh_judge(monkeypatch):
+def test_simple_drawing_compacted_action_evidence_still_requires_fresh_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     import json
 
     from winpilot.agent.loop import AgentRunner
@@ -2567,7 +2658,10 @@ def test_simple_drawing_without_fresh_or_semantic_frame_fails_closed(monkeypatch
     assert "pixel change alone" in runner._last_done_reject_reason
 
 
-def test_saved_drawing_metadata_does_not_bypass_fresh_semantic_judge(monkeypatch):
+def test_saved_drawing_metadata_does_not_bypass_fresh_semantic_judge(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("draw a triangle on the canvas")
@@ -3004,7 +3098,10 @@ def test_done_gate_sees_nested_execute_subgoal_draw_strokes():
     assert runner._history_mentions_action("draw_strokes") is True
 
 
-def test_spatial_done_uses_fresh_goal_judge_not_color_counters(monkeypatch):
+def test_spatial_done_uses_fresh_goal_judge_not_color_counters(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     import json
 
     from winpilot.agent.loop import AgentRunner
@@ -3737,7 +3834,10 @@ def test_drawing_task_does_not_force_accept_after_rejects():
     assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
-def test_done_reject_cap_reopens_after_causal_repair_and_fresh_frame(monkeypatch):
+def test_done_reject_cap_reopens_after_causal_repair_and_fresh_frame(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent.loop import AgentRunner
 
     runner = AgentRunner("inspect the repaired target window and report its state")
@@ -3935,7 +4035,10 @@ def test_generic_task_never_force_accepts_after_repeated_rejects():
     assert "cannot be force-accepted" in runner._last_done_reject_reason
 
 
-def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(monkeypatch):
+def test_desktop_drag_done_uses_fresh_frame_when_structured_name_is_truncated(
+    monkeypatch,
+    mocked_visual_judge_capability,
+):
     from winpilot.agent import planner
     from winpilot.agent.loop import AgentRunner
 
