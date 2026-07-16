@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { PlatformWorkbench } from './components/platform/PlatformWorkbench';
 import { useStore } from './store';
 import { automationDocumentToFlowScript } from './utils/automationIR';

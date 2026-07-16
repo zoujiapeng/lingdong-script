@@ -61,8 +61,19 @@ class TestParseTime:
         assert r["triggers"][0]["cron_expr"].startswith("0 21")
 
     def test_tonight_11pm(self):
-        r = parse("今晚11点提醒我睡觉")
-        assert r["confidence"] >= 60
+        # Keep the assertion independent from the wall clock: after 23:00 the
+        # parser intentionally treats "tonight 11pm" as an expired target.
+        import engine.nlp_schedule_parser as _nsp
+        _orig_dt = _nsp.datetime
+        class _Frozen:
+            @classmethod
+            def now(cls): return datetime(2026, 5, 16, 22, 0)
+        _nsp.datetime = _Frozen
+        try:
+            r = parse("今晚11点提醒我睡觉")
+            assert r["confidence"] >= 60
+        finally:
+            _nsp.datetime = _orig_dt
         assert r["triggers"][0]["type"] == "cron"
         assert r["triggers"][0]["cron_expr"].startswith("0 23")
 

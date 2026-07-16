@@ -27,6 +27,7 @@ import {
   Radio,
   RefreshCw,
   Save,
+  Search,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
@@ -49,6 +50,7 @@ import type {
   ArpExecutionSnapshot,
   ArpGraph,
   ChatGPTDesktopIntegration,
+  CurrentRunResponse,
   GraphValidation,
   InteractionActionState,
   InteractionRuntimeState,
@@ -125,6 +127,13 @@ function formatTime(value?: number | null): string {
 function formatDuration(run: RunProjection): string {
   const end = run.finished_at || Date.now() / 1000;
   const seconds = Math.max(0, Math.round(end - run.started_at));
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+function formatElapsed(startedAt?: number | null, finishedAt?: number | null): string {
+  if (!startedAt) return '尚未开始';
+  const seconds = Math.max(0, Math.round((finishedAt || Date.now() / 1000) - startedAt));
   if (seconds < 60) return `${seconds} 秒`;
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
@@ -420,13 +429,37 @@ export function stageRuntimeRows(
   });
 }
 
+/** Render persisted stage traces even when an older run predates contract snapshots. */
+function projectedStageRuntimeRows(arp: ArpExecutionSnapshot): StageRuntimeRow[] {
+  const evidence = arp.contract_evidence?.records || [];
+  return (arp.stage_trace || []).map((trace) => ({
+    ...trace,
+    stage_name: trace.stage_type || trace.stage_id,
+    current: trace.stage_id === arp.current_node_id,
+    timing_reported: true,
+    tools: stringList(trace.tools),
+    model_tools: stringList(trace.model_tools),
+    controller_tools: stringList(trace.controller_tools),
+    required_capabilities: stringList(trace.required_capabilities),
+    verifier_requirements: stringList(trace.verifier_requirements),
+    exposed_capabilities: stringList(trace.exposed_capabilities),
+    missing_capabilities: stringList(trace.missing_capabilities),
+    selected_evidence_providers: trace.selected_evidence_providers || {},
+    model_calls: finiteNumber(trace.model_calls),
+    model_elapsed_ms: finiteNumber(trace.model_elapsed_ms),
+    controller_elapsed_ms: finiteNumber(trace.controller_elapsed_ms),
+    capture_elapsed_ms: finiteNumber(trace.capture_elapsed_ms),
+    evidence_count: evidence.filter((item) => item.stage_id === trace.stage_id).length,
+  }));
+}
+
 function capabilityLabel(values: string[]): string {
   return values.length ? values.join(', ') : '无';
 }
 
-function runtimeBudgetLabel(state: InteractionRuntimeState | null | undefined, contract: TaskContract): string {
+function runtimeBudgetLabel(state: InteractionRuntimeState | null | undefined, contract?: TaskContract): string {
   const budget = state?.budget || {};
-  const session = contract.session;
+  const session = contract?.session;
   const usedCalls = finiteNumber(budget.model_calls_used, finiteNumber(state?.model_calls));
   const limitCalls = finiteNumber(budget.model_calls_limit, finiteNumber(session?.max_model_calls));
   const usedTurns = finiteNumber(budget.semantic_turns_used, finiteNumber(state?.turn_index));
@@ -440,11 +473,13 @@ function runtimeBudgetLabel(state: InteractionRuntimeState | null | undefined, c
 export function TaskRuntimeAuditPanel({
   contract,
   arp,
+  artifactUrl,
 }: {
-  contract: TaskContract;
+  contract?: TaskContract;
   arp: ArpExecutionSnapshot;
+  artifactUrl?: (artifactId: string) => string;
 }) {
-  const rows = stageRuntimeRows(contract, arp);
+  const rows = contract ? stageRuntimeRows(contract, arp) : projectedStageRuntimeRows(arp);
   const artifacts = arp.artifacts?.artifacts || [];
   const evidence = arp.contract_evidence?.records || [];
   const completion = arp.completion_contract;
@@ -455,7 +490,7 @@ export function TaskRuntimeAuditPanel({
     ? completion.ok
       ? `通过 ${completion.obligations.filter((item) => item.satisfied).length}/${completion.obligations.length}`
       : `未通过 · 缺少 ${completion.missing.length}`
-    : `待验收 · ${contract.final_conditions.length} 项条件`;
+    : `待验收 · ${contract?.final_conditions.length || 0} 项条件`;
 
   return (
     <div className="arp-runtime-audit" aria-label="任务运行时审计">
@@ -471,7 +506,7 @@ export function TaskRuntimeAuditPanel({
         <div>
           <span>当前能力</span>
           <strong>{active ? `${active.exposed_capabilities.length} 暴露 / ${active.required_capabilities.length + active.verifier_requirements.length} 必需` : '无'}</strong>
-          <small>{active?.missing_capabilities.length ? `缺失：${capabilityLabel(active.missing_capabilities)}` : '运行前可满足性已检查'}</small>
+          <small>{active?.missing_capabilities.length ? `缺失：${capabilityLabel(active.missing_capabilities)}` : active?.satisfiable ? '运行前可满足性已检查' : '历史 trace 未报告能力缺口'}</small>
         </div>
         <div><span>执行预算</span><strong>{runtimeBudgetLabel(arp.interaction_state, contract)}</strong></div>
         <div><span>Completion Contract</span><strong>{completionLabel}</strong><small>{completion?.reason || '等待所有 final condition 的精确证据'}</small></div>
@@ -529,6 +564,14 @@ export function TaskRuntimeAuditPanel({
           <div className="arp-runtime-subheading"><strong>Artifacts</strong><span>{arp.artifacts?.count ?? artifacts.length}</span></div>
           {artifacts.length ? artifacts.map((artifact) => (
             <div className="arp-runtime-record" key={artifact.artifact_id}>
+              {artifactUrl && artifact.mime_type.startsWith('image/') && (
+                <img
+                  className="arp-artifact-thumbnail"
+                  src={artifactUrl(artifact.artifact_id)}
+                  alt={`${artifact.sendable ? '任务工件' : '观察帧'} ${artifact.artifact_id}`}
+                  loading="lazy"
+                />
+              )}
               <div><code>{artifact.artifact_id}</code><StatusPill status={artifact.sendable ? 'done' : 'provisional'} label={artifact.sendable ? '可发送' : '观察帧'} /></div>
               <span>{artifact.purpose} · {artifact.mime_type} · {artifact.width}×{artifact.height} · {artifact.size_bytes} B</span>
               <span>{artifact.source_window || '未知来源窗口'}{artifact.source_scope ? ` · ${artifact.source_scope}` : ''}</span>
@@ -548,10 +591,10 @@ export function TaskRuntimeAuditPanel({
           )) : <EmptyState icon={ShieldCheck} title="尚无合同证据" />}
         </section>
         <section aria-label="完成合同">
-          <div className="arp-runtime-subheading"><strong>Completion Contract</strong><span>{completion?.obligations.length ?? contract.final_conditions.length}</span></div>
-          {(completion?.obligations || contract.obligations).length ? (completion?.obligations || contract.obligations).map((raw, index) => {
+          <div className="arp-runtime-subheading"><strong>Completion Contract</strong><span>{completion?.obligations.length ?? contract?.final_conditions.length ?? 0}</span></div>
+          {(completion?.obligations || contract?.obligations || []).length ? (completion?.obligations || contract?.obligations || []).map((raw, index) => {
             const item = recordValue(raw) || {};
-            const id = String(item.obligation_id || item.id || contract.final_conditions[index] || `condition-${index + 1}`);
+            const id = String(item.obligation_id || item.id || contract?.final_conditions[index] || `condition-${index + 1}`);
             const satisfied = item.satisfied === true;
             const declaredProviders = Array.isArray(item.evidence_providers)
               ? item.evidence_providers.map((provider) => String(recordValue(provider)?.id || '')).filter(Boolean)
@@ -751,6 +794,55 @@ export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeSt
   );
 }
 
+function TaskContractRuntimeSection({
+  arp,
+  events = [],
+  artifactUrl,
+}: {
+  arp: ArpExecutionSnapshot;
+  events?: RuntimeEvent[];
+  artifactUrl?: (artifactId: string) => string;
+}) {
+  const taskContract = arp.task_contract;
+  const hasPersistedAudit = Boolean(
+    arp.stage_trace?.length
+    || arp.artifacts?.artifacts.length
+    || arp.contract_evidence?.records.length
+    || arp.completion_contract,
+  );
+  const interactionRuntime = useMemo(
+    () => interactionRuntimeView(arp, events),
+    [arp, events],
+  );
+  if (!taskContract && !hasPersistedAudit) return null;
+
+  return (
+    <section className="arp-panel arp-contract-panel">
+      <div className="arp-panel-heading">
+        <div><Network size={15} /><strong>{taskContract ? '任务合同与阶段运行时' : '历史阶段运行时与证据'}</strong></div>
+        <StatusPill
+          status={taskContract ? (taskContract.satisfiable ? 'done' : 'failed') : arp.completion_contract?.ok ? 'done' : arp.status}
+          label={taskContract ? (taskContract.satisfiable ? '能力可满足' : '能力缺失') : '由持久化 trace 恢复'}
+        />
+      </div>
+      {taskContract ? (
+        <div className="arp-contract-summary">
+          <span>意图</span><code>{taskContract.intent.operation.join(' → ') || 'semantic'}</code>
+          <span>通道</span><code>{taskContract.intent.channel || '-'}</code>
+          <span>接收方</span><code>{taskContract.intent.recipient || '-'}</code>
+          <span>工件类型</span><code>{taskContract.intent.media_type}</code>
+          <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
+        </div>
+      ) : (
+        <div className="arp-detail-note"><History size={14} />该运行早于合同快照持久化；阶段、能力、工件与证据直接由原始 trace 和受管理工件清单恢复，不重新推断或改写原任务意图。</div>
+      )}
+      {interactionRuntime && <InteractionRuntimePanel state={interactionRuntime} />}
+      <TaskRuntimeAuditPanel contract={taskContract || undefined} arp={arp} artifactUrl={artifactUrl} />
+      {taskContract && !taskContract.satisfiable && <div className="arp-inline-error"><XCircle size={14} />{taskContract.missing_capabilities.join(', ')}</div>}
+    </section>
+  );
+}
+
 function AgentCockpit({ plane }: { plane: Plane }) {
   const [goal, setGoal] = useState(() => localStorage.getItem('arp-last-goal') || '');
   const [maxSteps, setMaxSteps] = useState(40);
@@ -759,11 +851,9 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const [actionError, setActionError] = useState('');
   const run = plane.currentRun;
   const arp = plane.arpSnapshot;
-  const taskContract = arp?.task_contract || null;
-  const interactionRuntime = useMemo(() => interactionRuntimeView(arp, plane.events), [arp, plane.events]);
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
   const runtimeIssue = plane.runtimeIssue;
-  const modelProfile = (plane.overview?.status as any)?.model_profile;
+  const modelProfile = plane.overview?.status.model_profile;
   const metrics = run?.metrics;
   const latestScreenEvent = [...plane.events].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type))
     || [...(run?.timeline || [])].reverse().find((event) => ['screen_watch', 'screen_delta', 'perception'].includes(event.type));
@@ -845,23 +935,12 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         <div className="arp-runtime-focus"><span>节点</span><code>{run?.current_node_id || '-'}</code><span>工具</span><code>{TOOL_LABELS[run?.current_tool || ''] || run?.current_tool || '-'}</code></div>
       </section>
 
-      {taskContract && (
-        <section className="arp-panel arp-contract-panel">
-          <div className="arp-panel-heading">
-            <div><Network size={15} /><strong>任务合同与阶段运行时</strong></div>
-            <StatusPill status={taskContract.satisfiable ? 'done' : 'failed'} label={taskContract.satisfiable ? '能力可满足' : '能力缺失'} />
-          </div>
-          <div className="arp-contract-summary">
-            <span>意图</span><code>{taskContract.intent.operation.join(' → ') || 'semantic'}</code>
-            <span>通道</span><code>{taskContract.intent.channel || '-'}</code>
-            <span>接收方</span><code>{taskContract.intent.recipient || '-'}</code>
-            <span>工件类型</span><code>{taskContract.intent.media_type}</code>
-            <span>经验策略</span><code>{taskContract.experience_policy === 'disabled' || arp?.experience_policy === 'disabled' ? '冷启动' : '允许阶段技能'}</code>
-          </div>
-          {interactionRuntime && <InteractionRuntimePanel state={interactionRuntime} />}
-          {arp && <TaskRuntimeAuditPanel contract={taskContract} arp={arp} />}
-          {!taskContract.satisfiable && <div className="arp-inline-error"><XCircle size={14} />{taskContract.missing_capabilities.join(', ')}</div>}
-        </section>
+      {arp && (
+        <TaskContractRuntimeSection
+          arp={arp}
+          events={plane.events}
+          artifactUrl={(artifactId) => plane.getClient().artifactUrl(arp.run_id, artifactId)}
+        />
       )}
 
       <section className="arp-metrics-row">
@@ -1018,17 +1097,76 @@ function Studio({ plane }: { plane: Plane }) {
   );
 }
 
-function RunsView({ plane }: { plane: Plane }) {
+export function RunsView({ plane }: { plane: Plane }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = plane.runs.find((run) => run.run_id === selectedId) || plane.runs[0] || null;
-  useEffect(() => { if (!selectedId && plane.runs[0]) setSelectedId(plane.runs[0].run_id); }, [plane.runs, selectedId]);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'success' | 'failed'>('all');
+  const [detail, setDetail] = useState<CurrentRunResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [detailRevision, setDetailRevision] = useState(0);
+  const visibleRuns = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return plane.runs.filter((run) => {
+      const status = String(run.status || '').toLowerCase();
+      const statusMatches = statusFilter === 'all'
+        || (statusFilter === 'active' && ACTIVE_STATUSES.has(status))
+        || (statusFilter === 'success' && ['done', 'completed', 'success'].includes(status))
+        || (statusFilter === 'failed' && ['failed', 'error', 'canceled'].includes(status));
+      const textMatches = !needle
+        || `${run.goal} ${run.run_id} ${run.kind}`.toLocaleLowerCase().includes(needle);
+      return statusMatches && textMatches;
+    });
+  }, [plane.runs, query, statusFilter]);
+  const selected = visibleRuns.find((run) => run.run_id === selectedId) || visibleRuns[0] || null;
+
+  useEffect(() => {
+    if (selected?.run_id !== selectedId) setSelectedId(selected?.run_id || null);
+  }, [selected?.run_id, selectedId]);
+
+  useEffect(() => {
+    if (!selected?.run_id || !plane.baseUrl) {
+      setDetail(null);
+      return;
+    }
+    let disposed = false;
+    setDetail(null);
+    setDetailLoading(true);
+    setDetailError('');
+    plane.getClient().run(selected.run_id)
+      .then((next) => { if (!disposed) setDetail(next); })
+      .catch((error) => { if (!disposed) setDetailError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!disposed) setDetailLoading(false); });
+    return () => { disposed = true; };
+  }, [selected?.run_id, plane.baseUrl, detailRevision]);
+
+  const liveDetail = selected?.run_id === plane.currentRun?.run_id
+    ? { ok: true, run: plane.currentRun, arp: plane.arpSnapshot } satisfies CurrentRunResponse
+    : null;
+  const resolved = liveDetail || detail;
+  const detailRun = resolved?.run || selected;
+  const detailArp = resolved?.arp || null;
+  const refresh = async () => {
+    await plane.refresh();
+    setDetailRevision((value) => value + 1);
+  };
+
   return (
     <div className="arp-page arp-runs-page">
-      <div className="arp-page-title"><div><span className="arp-kicker">历史记录</span><h2>运行记录</h2></div><button className="arp-button" onClick={plane.refresh}><RefreshCw size={14} />刷新</button></div>
+      <div className="arp-page-title"><div><span className="arp-kicker">历史记录</span><h2>运行记录</h2></div><button className="arp-button" onClick={refresh}><RefreshCw size={14} />刷新</button></div>
       <div className="arp-runs-layout">
         <section className="arp-run-list">
+          <div className="arp-run-filters">
+            <label><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索目标或 run id" /></label>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} aria-label="运行状态筛选">
+              <option value="all">全部状态</option>
+              <option value="active">进行中</option>
+              <option value="success">已完成</option>
+              <option value="failed">失败/取消</option>
+            </select>
+          </div>
           <div className="arp-list-header"><span>任务</span><span>状态</span><span>耗时</span></div>
-          {plane.runs.map((run) => (
+          {visibleRuns.map((run) => (
             <button key={run.run_id} className={`arp-run-list-row ${selected?.run_id === run.run_id ? 'selected' : ''}`} onClick={() => setSelectedId(run.run_id)}>
               <div><strong>{run.goal || run.run_id}</strong><span>{RUN_KIND_LABELS[run.kind] || run.kind} · {formatTime(run.started_at)}</span></div>
               <StatusPill status={run.status} />
@@ -1036,22 +1174,35 @@ function RunsView({ plane }: { plane: Plane }) {
             </button>
           ))}
           {!plane.runs.length && <EmptyState icon={History} title="暂无运行记录" />}
+          {plane.runs.length > 0 && !visibleRuns.length && <EmptyState icon={Search} title="没有匹配的运行记录" detail="请调整关键词或状态筛选" />}
         </section>
         <section className="arp-run-detail">
-          {selected ? (
+          {detailRun ? (
             <>
-              <div className="arp-run-detail-head"><div><span className="arp-kicker">{selected.kind}</span><h3>{selected.goal || selected.run_id}</h3><code>{selected.run_id}</code></div><StatusPill status={selected.status} /></div>
+              <div className="arp-run-detail-head"><div><span className="arp-kicker">{RUN_KIND_LABELS[detailRun.kind] || detailRun.kind}</span><h3>{detailRun.goal || detailRun.run_id}</h3><code>{detailRun.run_id}</code></div><StatusPill status={detailRun.status} /></div>
+              {detailLoading && <div className="arp-detail-loading"><Loader2 size={14} className="arp-spin" />正在加载合同、工件与证据…</div>}
+              {detailError && <div className="arp-inline-error"><XCircle size={14} />运行详情加载失败：{detailError}</div>}
               <div className="arp-metrics-row compact">
-                <Metric label="耗时" value={formatDuration(selected)} />
-                <Metric label="决策次数" value={selected.metrics.decision_count} />
-                <Metric label="工具次数" value={selected.metrics.tool_count} />
-                <Metric label="视觉模型调用" value={selected.metrics.vlm_call_count} />
-                <Metric label="锚点命中" value={`${Math.round((selected.metrics.anchor_cache_hit_rate || 0) * 100)}%`} />
-                <Metric label="视觉伺服修正" value={selected.metrics.visual_servo_correction_count || 0} />
+                <Metric label="耗时" value={formatDuration(detailRun)} />
+                <Metric label="决策次数" value={detailRun.metrics.decision_count} />
+                <Metric label="工具次数" value={detailRun.metrics.tool_count} />
+                <Metric label="视觉模型调用" value={detailRun.metrics.vlm_call_count} />
+                <Metric label="锚点命中" value={`${Math.round((detailRun.metrics.anchor_cache_hit_rate || 0) * 100)}%`} />
+                <Metric label="视觉伺服修正" value={detailRun.metrics.visual_servo_correction_count || 0} />
               </div>
-              {selected.error && <div className="arp-inline-error"><XCircle size={14} />{selected.error}</div>}
-              <div className="arp-panel-heading"><div><Activity size={15} /><strong>时间线</strong></div><span>{selected.timeline.length} 个事件</span></div>
-              <RunTimeline run={selected} />
+              {detailRun.error && <div className="arp-inline-error"><XCircle size={14} />{detailRun.error}</div>}
+              {detailArp && (
+                <TaskContractRuntimeSection
+                  arp={detailArp}
+                  events={selected?.run_id === plane.currentRun?.run_id ? plane.events : []}
+                  artifactUrl={(artifactId) => plane.getClient().artifactUrl(detailArp.run_id, artifactId)}
+                />
+              )}
+              {!detailLoading && !detailArp && detailRun.kind === 'agent' && (
+                <div className="arp-detail-note"><Bot size={14} />该记录来自兼容 Agent 运行，没有 ARP typed contract；时间线与证据仍按运行投影展示。</div>
+              )}
+              <div className="arp-panel-heading"><div><Activity size={15} /><strong>时间线</strong></div><span>{detailRun.timeline.length} 个事件</span></div>
+              <RunTimeline run={detailRun} />
             </>
           ) : <EmptyState icon={History} title="请选择一条运行记录" />}
         </section>
@@ -1422,6 +1573,12 @@ function SystemView({ plane }: { plane: Plane }) {
   const [scheduleDelayMinutes, setScheduleDelayMinutes] = useState(10);
   const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState(0);
   const [scheduleSaving, setScheduleSaving] = useState(false);
+  const platformStatus = plane.overview?.status;
+  const runtime = platformStatus?.runtime;
+  const runtimeJobs = platformStatus?.runtime_jobs || [];
+  const activeRuntimeJobs = runtimeJobs.filter((job) => ['queued', 'waiting_resources', 'running', 'canceling'].includes(job.status));
+  const desktopQueue = platformStatus?.desktop_action_queue;
+  const perceptionDaemon = platformStatus?.perception_daemon;
 
   useEffect(() => {
     if (!plane.baseUrl) return;
@@ -1521,15 +1678,38 @@ function SystemView({ plane }: { plane: Plane }) {
             <div><dt>API 协议</dt><dd>{plane.overview?.contracts?.arp || '-'}</dd></div>
             <div><dt>能力数量</dt><dd>{plane.capabilities.length}</dd></div>
             <div><dt>当前任务</dt><dd>{plane.currentRun?.run_id || '空闲'}</dd></div>
-            <div><dt>加载提交</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.loaded_commit || '-')}</dd></div>
-            <div><dt>工作提交</dt><dd>{String((plane.overview?.status as any)?.runtime?.git?.current_commit || '-')}</dd></div>
-            <div><dt>运行时协议</dt><dd>{String((plane.overview?.status as any)?.runtime?.contract_version || '-')}</dd></div>
+            <div><dt>加载提交</dt><dd>{runtime?.git.loaded_commit || '-'}</dd></div>
+            <div><dt>工作提交</dt><dd>{runtime?.git.current_commit || '-'}</dd></div>
+            <div><dt>运行时协议</dt><dd>{runtime?.contract_version ?? '-'}</dd></div>
             <div><dt>源码状态</dt><dd>{plane.runtimeIssue || '加载版本与当前版本一致'}</dd></div>
-            <div><dt>主模型视觉能力</dt><dd>{String((plane.overview?.status as any)?.model_profile?.supports_vision ?? '-')}</dd></div>
-            <div><dt>世界模型</dt><dd>{String((plane.overview?.status as any)?.world_model ?? config?.agent?.world_model ?? '-')}</dd></div>
-            <div><dt>视觉模型状态</dt><dd>{String((plane.overview?.status as any)?.vlm_configured ?? '-')}</dd></div>
+            <div><dt>主模型视觉能力</dt><dd>{platformStatus?.model_profile ? (platformStatus.model_profile.supports_vision ? '支持' : '不支持') : '-'}</dd></div>
+            <div><dt>世界模型</dt><dd>{config ? (config.agent?.world_model !== false ? '启用' : '停用') : '-'}</dd></div>
+            <div><dt>视觉模型状态</dt><dd>{platformStatus ? (platformStatus.vlm_configured ? '已配置' : platformStatus.vlm_reason || '未配置') : '-'}</dd></div>
           </dl>
           <div className="arp-theme-control"><span>主题</span><div>{(['light', 'dark', 'system'] as const).map((mode) => <button key={mode} className={themeMode === mode ? 'active' : ''} onClick={() => setUI({ themeMode: mode })}>{mode === 'light' ? <Sun size={13} /> : mode === 'dark' ? <Moon size={13} /> : <Settings size={13} />}{mode === 'light' ? '浅色' : mode === 'dark' ? '深色' : '跟随系统'}</button>)}</div></div>
+        </section>
+        <section className="arp-panel arp-config-panel arp-runtime-health-panel">
+          <div className="arp-panel-heading"><div><Activity size={15} /><strong>执行运行时</strong></div><StatusPill status={activeRuntimeJobs.length ? 'running' : 'idle'} label={activeRuntimeJobs.length ? `${activeRuntimeJobs.length} 个活动任务` : '空闲'} /></div>
+          <div className="arp-runtime-health-grid">
+            <div><span>Runtime jobs</span><strong>{activeRuntimeJobs.length}/{runtimeJobs.length}</strong><small>活动 / 最近摘要</small></div>
+            <div><span>桌面动作队列</span><strong>{desktopQueue?.completed ?? 0}/{desktopQueue?.submitted ?? 0}</strong><small>{desktopQueue?.failed ?? 0} 失败 · {desktopQueue?.resource_waiters ?? 0} 等待资源</small></div>
+            <div><span>异步桌面动作</span><strong>{desktopQueue?.async_status?.running ?? 0}</strong><small>{(desktopQueue?.async_status?.queued ?? 0) + (desktopQueue?.async_status?.waiting_resources ?? 0)} 排队</small></div>
+            <div><span>感知缓存</span><strong>{perceptionDaemon?.entries ?? 0}</strong><small>{perceptionDaemon?.active_leases ?? 0} 活动租约 · {perceptionDaemon?.targets.length ?? 0} 目标</small></div>
+          </div>
+          <div className="arp-runtime-job-list">
+            {runtimeJobs.slice(0, 8).map((job) => {
+              const title = displayValue(job.metadata.task || job.metadata.graph_name || job.metadata.script || job.kind);
+              return (
+                <div className="arp-runtime-job-row" key={job.job_id}>
+                  <div><strong>{title}</strong><code>{job.job_id}</code></div>
+                  <span>{job.kind} · {job.resources.join(', ') || '无独占资源'} · {formatElapsed(job.started_at || job.created_at, job.finished_at)}</span>
+                  <StatusPill status={job.status} />
+                  {job.error && <small>{job.error}</small>}
+                </div>
+              );
+            })}
+            {!runtimeJobs.length && <EmptyState icon={Activity} title="暂无运行时任务" detail="任务启动后会在这里显示队列、资源和失败原因" />}
+          </div>
         </section>
         <section className="arp-panel arp-config-panel arp-schedule-panel">
           <div className="arp-panel-heading"><div><Clock3 size={15} /><strong>代理计划</strong></div><span>{schedules.filter((item) => item.enabled).length} 个启用</span></div>

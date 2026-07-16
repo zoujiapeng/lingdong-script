@@ -66,6 +66,7 @@ from .orchestrator.projection import RUN_PROJECTIONS
 from .orchestrator.runtime import ARP_RUNS, ArpExecution
 from .orchestrator.graph_compiler import legacy_goal_graph_task
 from .tasking.capability import CapabilityPlanner
+from .tasking.artifacts import ArtifactStore
 from .tasking.compiler import TaskContractCompiler
 from .tasking.contracts import ContractCompileRequest
 
@@ -637,7 +638,10 @@ def status() -> dict[str, Any]:
             "supports_vision": model_profile.supports_vision,
         },
         "desktop_action_queue": DESKTOP_ACTION_QUEUE.status(),
-        "runtime_jobs": RUNTIME_JOBS.list(20),
+        # The platform status is polled by the workbench.  Never duplicate a
+        # completed job's full ARP/result payload here; selected run/job detail
+        # has dedicated endpoints.
+        "runtime_jobs": RUNTIME_JOBS.list(20, include_result=False),
         "perception_daemon": PERCEPTION_DAEMON.status(),
         "current_run": RUN_PROJECTIONS.current(),
     }
@@ -677,7 +681,13 @@ def platform_runs(limit: int = 50) -> dict[str, Any]:
 
 @app.get("/api/v2/jobs")
 def platform_jobs(limit: int = 50) -> dict[str, Any]:
-    return {"ok": True, "jobs": RUNTIME_JOBS.list(max(1, min(limit, 200)))}
+    return {
+        "ok": True,
+        "jobs": RUNTIME_JOBS.list(
+            max(1, min(limit, 200)),
+            include_result=False,
+        ),
+    }
 
 
 @app.get("/api/v2/jobs/{job_id}")
@@ -686,6 +696,36 @@ def platform_job(job_id: str) -> dict[str, Any]:
     if not job:
         raise HTTPException(404, "runtime job not found")
     return {"ok": True, "job": job.snapshot()}
+
+
+def _artifact_store_for_run(
+    run_id: str,
+    execution: ArpExecution | None = None,
+) -> ArtifactStore | None:
+    if execution is not None:
+        live_store = execution.runtime_state.get("artifact_store")
+        if isinstance(live_store, ArtifactStore):
+            return live_store
+    root = TRACES_DIR / run_id / "artifacts"
+    if not (root / "manifest.json").is_file():
+        return None
+    try:
+        return ArtifactStore(run_id, root)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _arp_detail_snapshot(
+    run_id: str,
+    execution: ArpExecution | None = None,
+) -> dict[str, Any] | None:
+    snapshot = execution.to_dict() if execution else RUN_PROJECTIONS.arp_snapshot(run_id)
+    if snapshot is None:
+        return None
+    store = _artifact_store_for_run(run_id, execution)
+    if store is not None:
+        snapshot["artifacts"] = store.snapshot()
+    return snapshot
 
 
 @app.post("/api/v2/jobs/{job_id}/cancel")
@@ -702,10 +742,15 @@ def cancel_platform_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/v2/runs/current")
 def platform_current_run() -> dict[str, Any]:
+    projection = RUN_PROJECTIONS.current()
+    execution = ARP_RUNS.current()
+    run_id = str((projection or {}).get("run_id") or "")
+    if execution is not None and execution.run_id != run_id:
+        execution = None
     return {
         "ok": True,
-        "run": RUN_PROJECTIONS.current(),
-        "arp": ARP_RUNS.current().to_dict() if ARP_RUNS.current() else None,
+        "run": projection,
+        "arp": _arp_detail_snapshot(run_id, execution) if run_id else None,
     }
 
 
@@ -718,8 +763,73 @@ def platform_run(run_id: str) -> dict[str, Any]:
     return {
         "ok": True,
         "run": projection,
-        "arp": arp.to_dict() if arp else None,
+        "arp": _arp_detail_snapshot(run_id, arp),
     }
+
+
+@app.post("/api/v2/runs/{run_id}/cancel")
+def cancel_platform_run(run_id: str) -> dict[str, Any]:
+    """Cancel either an Agent or ARP run through one frontend-safe route."""
+    projection = RUN_PROJECTIONS.get(run_id)
+    execution = ARP_RUNS.get(run_id)
+    job = STATE.job_for_run(run_id)
+    with STATE.lock:
+        runner = STATE.runners.get(run_id)
+
+    if not any((projection, execution, job, runner)):
+        raise HTTPException(404, "run not found")
+
+    execution_active = bool(
+        execution
+        and execution.status.value in {"queued", "running", "paused"}
+    )
+    job_active = bool(job and job.status in RUNTIME_JOBS.ACTIVE)
+    runner_stop_event = getattr(runner, "stop_event", None)
+    runner_active = bool(runner_stop_event and not runner_stop_event.is_set())
+    if not any((execution_active, job_active, runner_active)):
+        raise HTTPException(409, "run is not active")
+
+    if execution_active:
+        execution.cancel()
+    if job:
+        RUNTIME_JOBS.cancel(job.id)
+    if runner_stop_event:
+        runner_stop_event.set()
+
+    return {
+        "ok": True,
+        "run": RUN_PROJECTIONS.get(run_id),
+        "arp": _arp_detail_snapshot(run_id, execution),
+    }
+
+
+@app.get("/api/v2/runs/{run_id}/artifacts/{artifact_id}")
+def platform_run_artifact(run_id: str, artifact_id: str):
+    """Serve only a hash-verified artifact registered to the requested run."""
+    execution = ARP_RUNS.get(run_id)
+    projection = RUN_PROJECTIONS.get(run_id)
+    if not execution and (
+        not projection or str(projection.get("kind") or "") != "arp"
+    ):
+        raise HTTPException(404, "run not found")
+    store = _artifact_store_for_run(run_id, execution)
+    if store is None:
+        raise HTTPException(404, "artifact store not found")
+    try:
+        artifact = store.get(artifact_id)
+    except (KeyError, ValueError, OSError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if artifact.run_id != run_id:
+        raise HTTPException(404, "artifact does not belong to the requested run")
+    return FileResponse(
+        artifact.managed_path,
+        media_type=artifact.mime_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "ETag": f'"{artifact.sha256}"',
+            "X-WinPilot-Artifact-Id": artifact.artifact_id,
+        },
+    )
 
 
 @app.post("/api/v2/arp/validate")

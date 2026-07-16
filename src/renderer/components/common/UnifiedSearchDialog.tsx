@@ -50,7 +50,7 @@ export function UnifiedSearchDialog({
   const [llmLoading, setLlmLoading] = useState(false);
   const [llmEnhanced, setLlmEnhanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [, forceRefresh] = useState(0);
   const [selectedItem, setSelectedItem] = useState<UnifiedSearchItem | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout>>();
@@ -90,7 +90,7 @@ export function UnifiedSearchDialog({
       // LLM enhancement if low confidence
       if (offline.length === 0 || offline[0].score < 60) {
         const apiKey = (window as any).__llmApiKey || localStorage.getItem('lingdong-llm-api-key') || '';
-        if (apiKey) {
+        if (hasLLMApiKey() && apiKey) {
           setLlmLoading(true);
           const llmResult = await llmEnhanceSearch(q, offline, apiKey);
           setLlmLoading(false);
@@ -124,10 +124,10 @@ export function UnifiedSearchDialog({
   };
 
   // Toggle tested mark
-  const toggleTested = (id: string, type: 'feature' | 'template' | 'node') => {
+  const toggleTested = (id: string, type: 'template' | 'node') => {
     itemMarker.toggleTested(id, type);
     unifiedSearch.refreshTestedStatus();
-    setRefreshKey(k => k + 1);
+    forceRefresh(k => k + 1);
   };
 
   // Use a template (load into canvas)
@@ -140,7 +140,7 @@ export function UnifiedSearchDialog({
     onClose();
   };
 
-  // Show feature detail
+  // Show template detail
   const handleShowDetail = (item: UnifiedSearchItem) => {
     setSelectedItem(selectedItem?.id === item.id ? null : item);
   };

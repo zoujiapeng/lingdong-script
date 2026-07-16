@@ -1338,8 +1338,9 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
     from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
     import winpilot.tasking.interaction_stage_runtime as runtime_module
 
-    baseline_path = tmp_path / "planned-noise.png"
-    fresh_path = tmp_path / "fresh-noise.png"
+    store = ArtifactStore("run-small-noise", tmp_path / "artifacts-noise")
+    baseline_path = store.root / "planned-noise.png"
+    fresh_path = store.root / "fresh-noise.png"
     _write_frame(baseline_path)
     _write_frame(fresh_path, changed_box=(40, 40, 40, 40))
     contract = TaskContractCompiler().compile(
@@ -1356,8 +1357,6 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
         "client_frame_bounds": [10, 50, 990, 987],
         "foreground_verified": True,
     }
-    store = ArtifactStore("run-small-noise", tmp_path / "artifacts-noise")
-
     def observation_frame(path, frame_id):
         # This fixture represents a real target-window observation, not an
         # externally selected file.  Keep the full provenance required by the

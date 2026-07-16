@@ -1,5 +1,4 @@
 import { UnifiedSearchResult } from './unifiedSearch';
-import { itemMarker } from './itemMarker';
 
 export interface LLMSearchResult {
   enhanced: boolean;

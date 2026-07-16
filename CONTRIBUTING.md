@@ -51,6 +51,7 @@ bearer token。
 
 - 默认值变化时同步 `config.py`、`config.example.json`、设置界面和相关文档。
 - API 或事件契约变化时同步 `docs/apis.md` 和测试。
+- 原生前端入口、刷新、历史 run、节点可达性或兼容层变化时同步 `docs/frontend.md`；run/job 集合接口保持摘要，完整审计按 id 加载。
 - 架构、模型能力、运行边界变化时同步 README、`CLAUDE.md` 和 `docs/`。
 - 面向用户的前端文字使用中文；API、MCP、VLM、URL、坐标名和协议标识可保留
   其技术原名。
@@ -63,6 +64,7 @@ bearer token。
 
 ```powershell
 npm test
+npm run typecheck
 npm run build
 python -m pytest python/winpilot_home/tests -q
 python -m pytest tests -q

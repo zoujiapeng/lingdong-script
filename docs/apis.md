@@ -49,10 +49,12 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 | GET | `/api/status` | 当前任务、队列、Desktop queue、Perception daemon、模型与 runtime 身份 |
 | GET | `/api/v2/platform` | 原生工作台聚合视图与版本化 contracts |
 | GET | `/api/v2/capabilities` | ARP/Controller capability catalog |
-| GET | `/api/v2/runs` | 统一运行投影列表 |
-| GET | `/api/v2/runs/current` | 当前运行投影 |
-| GET | `/api/v2/runs/{run_id}` | 单次运行投影 |
-| GET | `/api/v2/jobs` | 统一 Agent/ARP/Replay/Schedule job 列表 |
+| GET | `/api/v2/runs` | 统一运行导航摘要；不内嵌 timeline/evidence/result |
+| GET | `/api/v2/runs/current` | 当前运行投影与活跃/恢复的 ARP audit |
+| GET | `/api/v2/runs/{run_id}` | 单次完整运行投影与 ARP typed/historical audit |
+| POST | `/api/v2/runs/{run_id}/cancel` | 统一取消 Agent 或 ARP run；不存在返回 404，已终止返回 409 |
+| GET | `/api/v2/runs/{run_id}/artifacts/{artifact_id}` | 读取该 run 登记且重新通过大小/哈希/尺寸验证的受管理工件 |
+| GET | `/api/v2/jobs` | 统一 Agent/ARP/Replay/Schedule job 摘要列表；不内嵌 result |
 | GET | `/api/v2/jobs/{job_id}` | 单个 runtime job |
 | POST | `/api/v2/jobs/{job_id}/cancel` | 取消任意 runtime job |
 | POST | `/api/v2/arp/validate` | 校验 `arp/1` 图 |
@@ -85,6 +87,12 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 当结构化 intent 表明任务依赖当前可见状态、轮次或共享交互面时，编译结果包含 `InteractionSessionContract`，并生成 `ObserveScene → InferInteraction → PerformTurn → VerifyLocalEffect`。只有 `expected_external_change=true` 的持续会话才可能进入 `WaitForExternalChange`；普通一次性拖动、点击或选择任务在语义完成核验后结束。等待阶段发出的 `interaction.external_change_observed` 只是下一轮控制/遥测证据，不是最终 completion obligation；最终必须由最新权威帧上的 `interaction.task_completed` 满足。合同中的 `authoritative_state_ref` 与 `interaction_region_ref` 是 ephemeral state binding，不是可发送 artifact。
 
 `GET /api/v2/arp/runs/{run_id}` 的 typed-task 快照包含 `task_contract`、`satisfiability`、`current_stage`、`stage_trace`、`artifacts`、`contract_evidence`、`experience_policy` 与 `skill_replay_node_count`。`stage_trace` 记录阶段状态、required/verifier/exposed/missing capabilities、模型可见工具、Controller 工具、`selected_evidence_providers`、artifact id、模型调用次数、`model_elapsed_ms`、`controller_elapsed_ms`、`capture_elapsed_ms`、interaction budget、尝试次数、失败分类和恢复策略；这些计时来自节点持久化的 `runtime_metrics`，不能从截断后的展示摘要反推。Controller batch 的 transaction trace 还记录 planned/attempted/committed/next-uncommitted、scope recovery 和重新绑定证据。观察帧不会出现在可发送 artifact 集合中。
+
+面向前端历史页应优先使用通用 `GET /api/v2/runs/{run_id}`。运行结束时 terminal trace 持久化有界 audit snapshot，启动事件持久化原始 Task Contract；服务重启后，Run Projection 还能从 task-stage node output 与 `arp_evidence` 恢复阶段能力、Evidence Registry 和 Completion Contract，并从 ArtifactStore manifest 恢复工件。旧 trace 若没有合同 snapshot，会返回 `arp.audit_source=trace_projection` 且省略 `task_contract`；客户端必须明确标注这是事件恢复，不能用当前 parser 补猜历史合同。
+
+`GET /api/v2/runs` 与 `/api/v2/jobs` 是轻量集合接口。前者保留状态、时间和聚合 metrics，但将 `timeline/evidence` 置为空、`result` 置为 null；后者省略 `result` 字段。需要完整内容时分别请求 run detail 或 job detail，不能依赖列表携带隐式大对象。
+
+artifact endpoint 同时支持进程内 execution 和重启后的 manifest。manifest 记录本身不构成信任：路径必须位于该 run 的 `traces/<run_id>/artifacts`，run id 必须一致；响应前 `ArtifactStore.get()` 再验证文件非空、大小、SHA-256 和图片尺寸。未知、跨 run、被修改或已删除的工件均返回 404。
 
 实时交互 run 还在有界的 `interaction_state` 中审计 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、`frame_lineage`、`grounding_proof`、`failed_no_effect_evidence_check`、external change 与 `failure_stage`。保留 `last_*` 是为了避免终止用的 no-op plan 覆盖最后一次真实因果动作；前端运行视图优先展示这些字段。窗口标题、hwnd、capture scope、frame region/sha256/epoch 和 client bounds 用于判断 frame authority，不能把旧 frame id 继续带到新窗口动作。
 

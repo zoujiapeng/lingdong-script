@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ProgressWaitNodeParams } from '../../../types';
 import { Crosshair } from 'lucide-react';
 

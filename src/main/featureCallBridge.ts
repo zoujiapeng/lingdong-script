@@ -5,7 +5,6 @@
  */
 import { ChildProcess } from 'child_process';
 import * as path from 'path';
-import * as fs from 'fs';
 import { spawnPython } from './engine';
 import { getBaseDir } from './env';
 

@@ -1,7 +1,7 @@
 import React, { useCallback, useState, useRef, useEffect } from 'react';
 import {
   Maximize2, LayoutGrid, Grid, Magnet,
-  Copy, Clipboard, Scissors, Trash2, Lock, Unlock
+  Copy, Clipboard, Scissors, Trash2,
 } from 'lucide-react';
 import { useStore } from '../../store';
 import { getNodeDimensions } from '../../utils/constants';
@@ -47,9 +47,7 @@ export const CanvasControls = React.memo(function CanvasControls() {
 // ============================================================
 export const MiniMap = React.memo(function MiniMap() {
   const nodes = useStore(s => s.script.nodes);
-  const canvas_transform = useStore(s => s.ui.canvas_transform);
   const dragging_node = useStore(s => s.ui.dragging_node);
-  const setCanvasTransform = useStore(s => s.setCanvasTransform);
   const [visible, setVisible] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -161,7 +159,7 @@ export function ContextMenu({ x, y, canvasX, canvasY, onClose }: ContextMenuProp
     ui, script, addNode,
     copySelected, cutSelected, paste,
     deleteNodes, duplicateNodes,
-    selectAll, clearSelection,
+    selectAll,
     autoLayout,
   } = useStore();
 

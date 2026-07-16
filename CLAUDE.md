@@ -106,6 +106,7 @@ scripts/gui_eval_run.py -> /api/chat -> RuntimeJob -> AgentRunner
 - QQ、微信、Steam、抖音、网易云等真实复杂软件需要非破坏性 E2E：打开、聚焦正确窗口、定位输入框/搜索框、输入草稿或搜索词、观察结果、清理草稿；未经用户明确允许不要真实发送消息或发布内容。
 - 通信任务的 `click/type_text/hotkey ok` 不是成功证据。必须看到目标会话、目标联系人、消息文本出现在输入框或聊天记录中；真实发送还要看到发送后的聊天记录证据。
 - 前端目前是中文原生 `PlatformWorkbench`：主导航为“智能代理、流程工作台、运行记录、技能与学习、系统设置”；没有 Agent iframe。API/MCP/VLM/URL/模型名等技术标识可保留原文。改前端时必须保留真实 FlowCanvas、Run/trace、Skill/Replay、计划任务和配置入口。
+- 运行列表与 RuntimeJob 列表必须保持轻量；完整 timeline/evidence/result 和 ARP audit 只在选中 run/job 后读取。历史 ARP 从 terminal snapshot、task-stage/evidence trace 和 ArtifactStore manifest 恢复；旧 trace 没有合同原文时明确标注 `trace_projection`，不能用当前 parser 补猜。节点主列表、统一搜索和最近入口必须共享 compiler/catalog 可达性交集。具体前端边界见 `docs/frontend.md`。
 
 ## Replay / FlowScript 边界
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { RegionWaitNodeParams } from '../../../types';
 import { Crosshair } from 'lucide-react';
 

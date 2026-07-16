@@ -603,6 +603,70 @@ def test_artifact_is_current_run_nonempty_hashed_and_source_bound(tmp_path, monk
     assert store.get(artifact.artifact_id).sha256 == artifact.sha256
 
 
+def test_artifact_manifest_restores_hash_verified_run_store(tmp_path):
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    source = tmp_path / "source.txt"
+    source.write_text("persisted artifact", encoding="utf-8")
+    root = tmp_path / "managed"
+    created = ArtifactStore("run-persisted", root).import_file(source)
+
+    restored = ArtifactStore("run-persisted", root)
+    artifact = restored.get(created.artifact_id)
+
+    assert artifact.artifact_id == created.artifact_id
+    assert artifact.sha256 == created.sha256
+    assert restored.snapshot()["count"] == 1
+
+
+def test_artifact_manifest_rejects_path_escape(tmp_path):
+    import json
+
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    root = tmp_path / "managed"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must not be exposed", encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps({
+        "format": "artifact-store/1",
+        "run_id": "run-secure",
+        "artifacts": [{
+            "artifact_id": "art-escaped",
+            "run_id": "run-secure",
+            "managed_path": str(outside),
+            "sha256": "0" * 64,
+            "mime_type": "text/plain",
+            "size_bytes": outside.stat().st_size,
+            "source_window": "",
+            "created_at": time.time(),
+            "purpose": "user_output",
+            "sendable": True,
+        }],
+    }), encoding="utf-8")
+
+    restored = ArtifactStore("run-secure", root)
+
+    assert restored.snapshot()["count"] == 0
+    with pytest.raises(KeyError):
+        restored.get("art-escaped")
+
+
+def test_artifact_get_rechecks_run_store_boundary(tmp_path):
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    source = tmp_path / "source.txt"
+    source.write_text("registered payload", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must not be exposed", encoding="utf-8")
+    store = ArtifactStore("run-access-check", tmp_path / "managed")
+    artifact = store.import_file(source)
+    artifact.managed_path = str(outside)
+
+    with pytest.raises(ValueError, match="escaped the run-scoped store"):
+        store.get(artifact.artifact_id)
+
+
 def test_explicit_artifact_source_never_falls_back_to_foreground(monkeypatch):
     from winpilot.tasking.stage_runtime import StageRuntime
 

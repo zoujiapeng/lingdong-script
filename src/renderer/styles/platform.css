@@ -328,6 +328,7 @@
 .arp-runtime-record > div { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 5px; }
 .arp-runtime-record code { color: var(--arp-blue); font-size: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-runtime-record > span, .arp-runtime-record > small { color: var(--arp-text-muted); font-size: 8px; line-height: 1.35; overflow-wrap: anywhere; }
+.arp-artifact-thumbnail { width: 100%; max-height: 170px; border: 1px solid var(--arp-line); border-radius: 4px; object-fit: contain; background: #101516; }
 .arp-runtime-contract-error { padding: 6px 7px; border: 1px solid color-mix(in srgb, var(--arp-red) 40%, var(--arp-line)); border-radius: 5px; color: var(--arp-red); background: var(--arp-red-soft); font-size: 8px; overflow-wrap: anywhere; }
 .arp-stage-list { display: grid; gap: 6px; margin-top: 10px; }
 .arp-stage-row { display: grid; grid-template-columns: 18px minmax(150px, .8fr) minmax(220px, 1.5fr) minmax(90px, .4fr); gap: 8px; align-items: center; min-height: 42px; padding: 7px 9px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-soft); }
@@ -425,6 +426,10 @@
 
 .arp-runs-layout { min-height: 400px; height: calc(100% - 45px); display: grid; grid-template-columns: minmax(330px, 0.8fr) minmax(440px, 1.2fr); border: 1px solid var(--arp-line); border-radius: 7px; background: var(--arp-surface); overflow: hidden; }
 .arp-run-list { min-height: 0; overflow: auto; border-right: 1px solid var(--arp-line); }
+.arp-run-filters { position: sticky; top: 0; z-index: 2; min-height: 43px; padding: 6px 8px; display: grid; grid-template-columns: minmax(0, 1fr) 98px; gap: 6px; border-bottom: 1px solid var(--arp-line); background: var(--arp-surface); }
+.arp-run-filters label { min-width: 0; height: 30px; padding: 0 7px; display: flex; align-items: center; gap: 5px; border: 1px solid var(--arp-line); border-radius: 5px; color: var(--arp-text-muted); background: var(--arp-surface-subtle); }
+.arp-run-filters input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--arp-text); background: transparent; font-size: 9px; }
+.arp-run-filters select { min-width: 0; height: 30px; padding: 0 6px; border: 1px solid var(--arp-line); border-radius: 5px; color: var(--arp-text-soft); background: var(--arp-surface-subtle); font-size: 9px; }
 .arp-list-header { height: 32px; padding: 0 10px; display: grid; grid-template-columns: minmax(0, 1fr) 85px 60px; align-items: center; border-bottom: 1px solid var(--arp-line); background: var(--arp-surface-subtle); color: var(--arp-text-muted); font-size: 8px; text-transform: uppercase; }
 .arp-run-list-row { width: 100%; min-height: 59px; padding: 9px 10px; display: grid; grid-template-columns: minmax(0, 1fr) 85px 60px; align-items: center; gap: 7px; border: 0; border-bottom: 1px solid var(--arp-line); color: var(--arp-text); background: transparent; text-align: left; cursor: pointer; }
 .arp-run-list-row:hover { background: var(--arp-surface-subtle); }
@@ -433,11 +438,14 @@
 .arp-run-list-row strong { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-run-list-row > div span { color: var(--arp-text-muted); font-size: 8px; }
 .arp-run-list-row > code { color: var(--arp-text-soft); font-size: 9px; }
-.arp-run-detail { min-width: 0; min-height: 0; padding: 14px; }
+.arp-run-detail { min-width: 0; min-height: 0; padding: 14px; overflow: auto; }
 .arp-run-detail-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .arp-run-detail-head > div { min-width: 0; }
 .arp-run-detail-head h3 { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .arp-run-detail-head code { display: block; margin-top: 4px; color: var(--arp-text-muted); font-size: 8px; }
+.arp-detail-loading, .arp-detail-note { min-height: 32px; margin-top: 9px; padding: 7px 9px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--arp-line); border-radius: 5px; color: var(--arp-text-muted); background: var(--arp-surface-subtle); font-size: 9px; }
+.arp-run-detail > .arp-contract-panel { flex: 0 0 auto; }
+.arp-run-detail > .arp-timeline { min-height: 180px; flex: 0 0 auto; }
 
 .arp-replay-toolbar { min-height: 39px; margin-bottom: 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .arp-replay-modes { height: 31px; display: inline-grid; grid-template-columns: repeat(3, auto); padding: 2px; border: 1px solid var(--arp-line); border-radius: 6px; background: var(--arp-surface-subtle); }
@@ -488,6 +496,19 @@
 .arp-diagnostics > div { min-height: 32px; display: grid; grid-template-columns: 120px minmax(0, 1fr); align-items: center; border-bottom: 1px solid var(--arp-line); }
 .arp-diagnostics dt { font-size: 9px; color: var(--arp-text-muted); }
 .arp-diagnostics dd { font: 9px "Cascadia Code", Consolas, monospace; color: var(--arp-text-soft); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arp-runtime-health-grid { padding: 9px 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; border-bottom: 1px solid var(--arp-line); }
+.arp-runtime-health-grid > div { min-width: 0; min-height: 58px; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--arp-line); border-radius: 5px; background: var(--arp-surface-subtle); }
+.arp-runtime-health-grid span, .arp-runtime-health-grid small { color: var(--arp-text-muted); font-size: 8px; }
+.arp-runtime-health-grid strong { font: 650 14px "Cascadia Code", Consolas, monospace; color: var(--arp-text); }
+.arp-runtime-job-list { max-height: 315px; overflow: auto; }
+.arp-runtime-job-row { min-height: 61px; padding: 8px 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; border-bottom: 1px solid var(--arp-line); }
+.arp-runtime-job-row > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.arp-runtime-job-row strong, .arp-runtime-job-row code, .arp-runtime-job-row > span, .arp-runtime-job-row > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arp-runtime-job-row strong { font-size: 9px; }
+.arp-runtime-job-row code, .arp-runtime-job-row > span, .arp-runtime-job-row > small { color: var(--arp-text-muted); font-size: 8px; }
+.arp-runtime-job-row > span { grid-column: 1; }
+.arp-runtime-job-row > .arp-status { grid-column: 2; grid-row: 1 / span 2; }
+.arp-runtime-job-row > small { grid-column: 1 / -1; color: var(--arp-red); }
 .arp-bridge-toggles { border-top: 1px solid var(--arp-line); }
 .arp-theme-control { margin: 3px 11px; padding-top: 8px; display: flex; align-items: center; justify-content: space-between; font-size: 9px; color: var(--arp-text-muted); }
 .arp-theme-control > div { display: flex; border: 1px solid var(--arp-line); border-radius: 5px; overflow: hidden; }

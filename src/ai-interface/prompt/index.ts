@@ -127,5 +127,11 @@ export function generateMCPConfig(serverPath: string, mode: 'stdio' | 'http' = '
       },
     };
   }
-  return {};
+  return {
+    mcpServers: {
+      'lingdong-script': {
+        url: `http://127.0.0.1:${port}/mcp`,
+      },
+    },
+  };
 }

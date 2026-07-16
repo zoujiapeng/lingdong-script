@@ -1030,7 +1030,7 @@ export function createFlowExecutor(
   }
 
   // Start execution
-  const runPromise = (async () => {
+  void (async () => {
     try {
       log('info', '🔄 脚本开始执行（浏览器模拟模式）');
 

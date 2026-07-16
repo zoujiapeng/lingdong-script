@@ -7,6 +7,7 @@
 | [../README.md](../README.md) | 项目总览、安装启动、测试、成熟度和目录边界 |
 | [../CLAUDE.md](../CLAUDE.md) | AI / 开发者接手最短说明 |
 | [architecture.md](architecture.md) | 当前架构、状态机、模块边界 |
+| [frontend.md](frontend.md) | 原生前端五入口、运行详情/历史恢复、刷新策略、节点可达性与兼容/死代码边界 |
 | [winpilot-agent.md](winpilot-agent.md) | WinPilot agent 运行机制、工具复盘、done gate |
 | [model-providers.md](model-providers.md) | 模型 provider、原生视觉路由、thinking、cache、usage/cost |
 | [apis.md](apis.md) | Electron HTTP API、WinPilot REST、runtime contract、IPC、MCP |
@@ -24,6 +25,7 @@
 - 流程图/DSL 体系以 `src/renderer/`、`python/engine/`、`python/features/` 为准。
 - Runtime、低延迟 GUI、记忆、上下文折叠以 `CLAUDE.md`、`architecture.md`、`winpilot-agent.md` 为准。
 - 原生工作台当前可见入口是“智能代理、流程工作台、运行记录、技能与学习、系统设置”；API、MCP、VLM、URL、模型名和坐标字段等技术标识保留原文。
+- 运行列表和 RuntimeJob 列表只承载导航摘要；完整 timeline/evidence/result 与 typed ARP audit 按 run/job id 加载。历史 ARP 阶段、证据和 ArtifactStore manifest 可在重启后恢复，缺失的旧合同原文不得靠当前 parser 补猜。
 - 运行中的 Python 服务必须满足 runtime contract v2，且启动时源码指纹、当前源码指纹和 Git revision 一致；前端发现漂移会禁止提交新任务并要求重启，旧进程的状态不能冒充当前代码事实。
 - 原生视觉帧可能是经过验证的前台目标窗口裁剪，也可能是完整虚拟桌面。`controller.target_window_capture_enabled` 只是可关闭的性能优化；跨窗口、全局、目标含糊或几何不可信时必须回退全桌面。
 - 模型可随时通过 `revise_plan` 替换、清空、增删、移动或重新打开任务项；计划是可变工作状态，不是完成证据。

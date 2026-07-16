@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Native frontend audit, reachability, and performance (2026-07-16)
+
+- Rebuilt the Run History view around `GET /api/v2/runs/{run_id}`. Selecting a run now shows its typed stages, required/verifier/exposed/missing capabilities, model and Controller tools, artifacts, evidence providers, Completion Contract, timing, retries, and exact failure stage instead of only a flattened timeline.
+- Persisted bounded ARP audit snapshots and original start-time Task Contracts, reconstructed older stage/evidence/completion data from JSONL trace events after restart, and restored ArtifactStore manifests without reparsing old natural-language tasks. Older traces that predate contract snapshots are explicitly labeled as trace projections.
+- Added a hash-verified, run-scoped artifact endpoint for live and historical records. Manifest paths are constrained to the managed run directory; file size, SHA-256, and image dimensions are revalidated before serving. The UI distinguishes sendable artifacts from observation frames and renders image thumbnails.
+- Added one generic Agent/ARP cancel endpoint and wired the frontend stop action to it, removing run-kind guessing from the renderer.
+- Reduced control-plane payload and request churn: run/job collection endpoints no longer embed full results/evidence, WebSocket events refresh only the current run in an 80 ms merge window, terminal events refresh full lists, `ping` causes no REST request, and fallback polling is five seconds.
+- Added typed runtime identity/job/desktop-queue/perception contracts and a System view health panel for active jobs, resource waiters, asynchronous desktop actions, daemon leases/targets, duration, and errors.
+- Made every Studio creation surface—main library, unified search, and recent items—use the same frontend-compiler/backend-catalog intersection. Removed the never-populated dynamic-feature search branch while retaining legacy `tool_call` schema editing.
+- Removed unreachable renderer `RegionPickerControl` and `featureRegistry` modules, unused Electron template/schedule context generation, a duplicate legacy engine branch, and unused imports/state/parameters. Enabled `noUnusedLocals` and `noUnusedParameters` for renderer, Electron main, CLI, and AI TypeScript builds.
+- Added frontend component tests, projection/API/artifact persistence tests, and browser visual verification against a real persisted Paint-to-QQ run. Browser verification restored five stages, four image artifacts, ten contract evidence records, and the delivery Completion Contract with no console errors; it did not resend the artifact or claim a new communication E2E.
+- Final local verification: WinPilot `1731 passed, 13 skipped, 1 warning`, root Python `2508 passed`, Vitest `201 passed`, strict TypeScript checks for renderer/main/CLI/AI, and production renderer/Electron plus CLI/AI builds all completed successfully.
+
 ### Native visual GUI closed loop and frontend parity (2026-07)
 
 - Made `mimo-v2.5` an explicitly supported native-image main model and kept `mimo-v2.5-pro` on the text-only route; unsupported screenshot requests are no longer inferred from a provider family name. MiMo/Reasonix tool decisions disable provider thinking by default, while optional continuous-spatial reasoning remains an explicit experiment.

@@ -76,6 +76,17 @@ class RunProjectionStore:
             "usage": None,
             "timeline": [],
             "evidence": [],
+            # Audit data is kept separately from the lightweight run list.
+            # It is rebuilt from persisted ARP events when the runtime starts,
+            # so historical stage/capability/evidence views do not disappear
+            # merely because the in-memory ArpExecution was released.
+            "task_contract": None,
+            "satisfiability": None,
+            "experience_policy": "allow",
+            "stage_trace": [],
+            "contract_evidence": [],
+            "completion_contract": None,
+            "arp_snapshot": None,
             "metrics": {
                 "event_count": 0,
                 "decision_count": 0,
@@ -189,6 +200,24 @@ class RunProjectionStore:
                 run["goal"] = str(event.get("graph_name"))
                 run["graph_id"] = event.get("graph_id")
                 run["kind"] = "arp"
+            if event_type == "arp_run_start":
+                task_contract = event.get("task_contract")
+                if isinstance(task_contract, dict):
+                    run["task_contract"] = copy.deepcopy(task_contract)
+                satisfiability = event.get("satisfiability")
+                if isinstance(satisfiability, dict):
+                    run["satisfiability"] = copy.deepcopy(satisfiability)
+                if event.get("experience_policy"):
+                    run["experience_policy"] = str(event.get("experience_policy"))
+            runtime_snapshot = event.get("runtime_snapshot")
+            if isinstance(runtime_snapshot, dict):
+                run["arp_snapshot"] = copy.deepcopy(runtime_snapshot)
+                if isinstance(runtime_snapshot.get("task_contract"), dict):
+                    run["task_contract"] = copy.deepcopy(runtime_snapshot["task_contract"])
+                if isinstance(runtime_snapshot.get("satisfiability"), dict):
+                    run["satisfiability"] = copy.deepcopy(runtime_snapshot["satisfiability"])
+                if runtime_snapshot.get("experience_policy"):
+                    run["experience_policy"] = str(runtime_snapshot["experience_policy"])
             if event_type in {"agent_step", "agent_plan"}:
                 run["metrics"]["decision_count"] += 1
             if event_type == "agent_decision":
@@ -351,6 +380,58 @@ class RunProjectionStore:
                     "node_id": event.get("node_id"),
                     "ts": event.get("ts"),
                 })
+                if isinstance(evidence, dict):
+                    metadata = evidence.get("metadata")
+                    metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
+                    provider = str(
+                        metadata.get("provider")
+                        or evidence.get("provider")
+                        or evidence.get("source")
+                        or ""
+                    )
+                    stage_id = str(
+                        metadata.get("stage_id")
+                        or evidence.get("stage_id")
+                        or evidence.get("node_id")
+                        or event.get("node_id")
+                        or ""
+                    )
+                    contract_record = {
+                        "id": str(evidence.get("id") or ""),
+                        "predicate": str(evidence.get("predicate") or ""),
+                        "source": str(evidence.get("source") or provider),
+                        "provider": provider,
+                        "verified": bool(evidence.get("verified", passed)),
+                        "value": copy.deepcopy(evidence.get("value")),
+                        "stage_id": stage_id,
+                        "artifact_id": str(
+                            metadata.get("artifact_id")
+                            or evidence.get("artifact_id")
+                            or ""
+                        ),
+                        "recipient": str(
+                            metadata.get("recipient")
+                            or evidence.get("recipient")
+                            or ""
+                        ),
+                        "run_id": str(evidence.get("run_id") or run_id),
+                        "captured_at": float(
+                            evidence.get("captured_at") or event.get("ts") or time.time()
+                        ),
+                        "metadata": metadata,
+                        "text": str(evidence.get("text") or ""),
+                    }
+                    records = run["contract_evidence"]
+                    evidence_id = contract_record["id"]
+                    if evidence_id:
+                        records[:] = [item for item in records if item.get("id") != evidence_id]
+                    records.append(contract_record)
+                    run["contract_evidence"] = records[-100:]
+                    if (
+                        contract_record["predicate"] == "contract.complete"
+                        and isinstance(metadata, dict)
+                    ):
+                        run["completion_contract"] = copy.deepcopy(metadata)
             if event.get("screenshot"):
                 screenshot_path = str(event.get("screenshot") or "")
                 already_projected = any(
@@ -391,6 +472,77 @@ class RunProjectionStore:
                     "recovery": copy.deepcopy(event.get("recovery") or {}),
                     "error": str(event.get("error") or ""),
                 }
+            if event_type == "arp_node_done" and event.get("kind") == "task_stage":
+                output = event.get("output") if isinstance(event.get("output"), dict) else {}
+                artifact = output.get("artifact") if isinstance(output.get("artifact"), dict) else {}
+                interaction_state = (
+                    output.get("interaction_state")
+                    if isinstance(output.get("interaction_state"), dict)
+                    else {}
+                )
+                runtime_metrics = (
+                    event.get("runtime_metrics")
+                    if isinstance(event.get("runtime_metrics"), dict)
+                    else {}
+                )
+                stage_id = str(output.get("stage_id") or event.get("node_id") or "")
+                stage_trace = {
+                    "stage_id": stage_id,
+                    "stage_type": str(output.get("stage_type") or ""),
+                    "status": str(
+                        output.get("status")
+                        or ("done" if event.get("ok") is not False else "failed")
+                    ),
+                    "attempts": int(event.get("attempts") or 0),
+                    "tools": list(output.get("tools") or []),
+                    "model_tools": list(output.get("model_tools") or []),
+                    "controller_tools": list(output.get("controller_tools") or []),
+                    "required_capabilities": list(output.get("required_capabilities") or []),
+                    "verifier_requirements": list(output.get("verifier_requirements") or []),
+                    "exposed_capabilities": list(output.get("exposed_capabilities") or []),
+                    "missing_capabilities": list(output.get("missing_capabilities") or []),
+                    "satisfiable": bool(output.get("satisfiable")),
+                    "adapter": str(output.get("adapter") or ""),
+                    "model_role": str(output.get("model_role") or "none"),
+                    "selected_evidence_providers": copy.deepcopy(
+                        output.get("selected_evidence_providers") or {}
+                    ),
+                    "artifact_id": str(
+                        output.get("artifact_id") or artifact.get("artifact_id") or ""
+                    ),
+                    "model_calls": int(
+                        runtime_metrics.get("model_calls") or output.get("model_calls") or 0
+                    ),
+                    "model_elapsed_ms": int(
+                        runtime_metrics.get("model_elapsed_ms")
+                        or output.get("model_elapsed_ms")
+                        or 0
+                    ),
+                    "controller_elapsed_ms": int(
+                        runtime_metrics.get("controller_elapsed_ms")
+                        or output.get("controller_elapsed_ms")
+                        or 0
+                    ),
+                    "capture_elapsed_ms": int(
+                        runtime_metrics.get("capture_elapsed_ms")
+                        or output.get("capture_elapsed_ms")
+                        or 0
+                    ),
+                    "budget": copy.deepcopy(
+                        runtime_metrics.get("budget")
+                        or output.get("budget")
+                        or interaction_state.get("budget")
+                        or {}
+                    ),
+                    "failure_type": str(output.get("failure_type") or ""),
+                    "recovery": copy.deepcopy(output.get("recovery") or {}),
+                    "error": str(event.get("error") or output.get("error") or ""),
+                    "interaction_state": copy.deepcopy(interaction_state),
+                }
+                traces = run["stage_trace"]
+                traces[:] = [item for item in traces if item.get("stage_id") != stage_id]
+                traces.append(stage_trace)
+                run["stage_trace"] = traces[-100:]
             if event_type == "arp_node_retry":
                 run["metrics"]["retry_count"] += 1
             if event_type == "arp_node_done":
@@ -511,8 +663,25 @@ class RunProjectionStore:
         return hydrated
 
     @staticmethod
-    def _public(run: dict[str, Any]) -> dict[str, Any]:
+    def _public(run: dict[str, Any], *, include_details: bool = True) -> dict[str, Any]:
         data = copy.deepcopy(run)
+        for internal_key in (
+            "task_contract",
+            "satisfiability",
+            "experience_policy",
+            "stage_trace",
+            "contract_evidence",
+            "completion_contract",
+            "arp_snapshot",
+        ):
+            data.pop(internal_key, None)
+        if not include_details:
+            # The list endpoint feeds navigation, not forensic inspection.
+            # Returning every timeline and nested evidence record for up to 200
+            # runs made a single frontend refresh dwarf all control traffic.
+            data["timeline"] = []
+            data["evidence"] = []
+            data["result"] = None
         metrics = data["metrics"]
         tool_samples = metrics.pop("tool_latency_ms", [])
         perception_samples = metrics.pop("perception_latency_ms", [])
@@ -586,10 +755,50 @@ class RunProjectionStore:
         ) if anchor_lookups else 0
         return data
 
+    @staticmethod
+    def _arp_public(run: dict[str, Any]) -> dict[str, Any] | None:
+        if run.get("kind") != "arp":
+            return None
+        persisted = run.get("arp_snapshot")
+        snapshot = copy.deepcopy(persisted) if isinstance(persisted, dict) else {}
+        snapshot.update({
+            "run_id": str(run.get("run_id") or ""),
+            "graph_id": str(run.get("graph_id") or snapshot.get("graph_id") or ""),
+            "graph_name": str(run.get("goal") or snapshot.get("graph_name") or ""),
+            "status": str(run.get("status") or snapshot.get("status") or ""),
+            "current_node_id": run.get("current_node_id"),
+            "error": str(run.get("error") or snapshot.get("error") or ""),
+            "experience_policy": str(
+                run.get("experience_policy") or snapshot.get("experience_policy") or "allow"
+            ),
+            "audit_source": "runtime_snapshot" if isinstance(persisted, dict) else "trace_projection",
+        })
+        if isinstance(run.get("task_contract"), dict):
+            snapshot["task_contract"] = copy.deepcopy(run["task_contract"])
+        if isinstance(run.get("satisfiability"), dict):
+            snapshot["satisfiability"] = copy.deepcopy(run["satisfiability"])
+        if run.get("stage_trace"):
+            snapshot["stage_trace"] = copy.deepcopy(run["stage_trace"])
+        records = copy.deepcopy(run.get("contract_evidence") or [])
+        if records:
+            snapshot["contract_evidence"] = {
+                "run_id": str(run.get("run_id") or ""),
+                "count": len(records),
+                "records": records,
+            }
+        if isinstance(run.get("completion_contract"), dict):
+            snapshot["completion_contract"] = copy.deepcopy(run["completion_contract"])
+        return snapshot
+
     def get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
             run = self._runs.get(run_id)
             return self._public(run) if run else None
+
+    def arp_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            run = self._runs.get(run_id)
+            return self._arp_public(run) if run else None
 
     def current(self) -> dict[str, Any] | None:
         with self._lock:
@@ -600,7 +809,11 @@ class RunProjectionStore:
         with self._lock:
             ids = list(self._order)[-max(1, limit):]
             ids.reverse()
-            return [self._public(self._runs[run_id]) for run_id in ids if run_id in self._runs]
+            return [
+                self._public(self._runs[run_id], include_details=False)
+                for run_id in ids
+                if run_id in self._runs
+            ]
 
 
 RUN_PROJECTIONS = RunProjectionStore()

@@ -1,4 +1,3 @@
-import React from 'react';
 import type { WaitNodeParams, WaitType } from '../../../types';
 
 interface Props {

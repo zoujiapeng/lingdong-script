@@ -9,25 +9,24 @@ import * as http from 'http';
 import * as https from 'https';
 import { StringDecoder } from 'string_decoder';
 import { SchedulerBridge, getSchedulerScriptPath, getPythonCommand } from './schedulerBridge';
-import { spawnPython, spawnPythonOneShot, runPythonCollect, callLLM, startPythonEngine, stopPythonEngine } from './engine';
+import { spawnPython, spawnPythonOneShot, runPythonCollect, startPythonEngine, stopPythonEngine } from './engine';
 import { getBaseDir, isDev } from './env';
-import { startApiServer, ApiDeps } from './api';
+import { startApiServer } from './api';
 import { resolveMacroPath } from './macroPaths';
-import { callFeature, stopFeatureProcess, isFeatureProcessReady } from './featureCallBridge';
+import { callFeature, stopFeatureProcess } from './featureCallBridge';
 import { startWinpilotServer, getWinpilotConnection, getWinpilotUrl, stopWinpilotServer, ensureWinpilotServer, restartWinpilotServer } from './winpilotServer';
 import {
   mainWindow, setMainWindow,
   pythonProcess,
-  engineRunning, setEngineRunning,
-  lastScript, setLastScript,
+  engineRunning,
+  lastScript,
   agentProcess, setAgentProcess,
-  agentRunning, setAgentRunning,
+  setAgentRunning,
   nextAgentToken, isAgentTokenCurrent,
 } from './state';
 
 // 缓存渲染器状态，通过 IPC 定期更新，避免 executeJavaScript 挂起
 let _cachedRendererState: any = null;
-let _rendererReady = false;
 let apiServer: http.Server | null = null;
 const LOCAL_CONTROL_TOKEN = process.env.LINGDONG_CONTROL_TOKEN || randomBytes(32).toString('base64url');
 const _taskbarNotifiedRuns = new Set<string>();
@@ -86,113 +85,10 @@ function notifyTaskbarAttention(
   }
 }
 
-// ── 模板上下文（供 AI 提示词参考）──
-let _cachedTemplateContext: string = '';
-
-function refreshTemplateContext(): void {
-  try {
-    const templatesDir = getTemplatesDir();
-    if (!fs.existsSync(templatesDir)) { _cachedTemplateContext = ''; return; }
-    const files = fs.readdirSync(templatesDir).filter(f => f.endsWith('.dsl'));
-    if (files.length === 0) { _cachedTemplateContext = ''; return; }
-    let ctx = '\n\n## 可用 DSL 模板\n如果用户描述的流程与以下某个已存在模板匹配，直接使用 CALL 引用该模板，不要重新生成：\n';
-    for (const f of files) {
-      const filePath = path.join(templatesDir, f);
-      try {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const lines = content.split('\n');
-        let name = f.replace('.dsl', '');
-        const aliases: string[] = [];
-        const tags: string[] = [];
-        let desc = '';
-        let stepLines: string[] = [];
-        let inSteps = false;
-        for (const line of lines) {
-          const s = line.trim();
-          if (s.startsWith('# name:')) { name = s.replace('# name:', '').trim(); continue; }
-          if (s.startsWith('# aliases:')) {
-            try { aliases.push(...JSON.parse(s.replace('# aliases:', '').trim())); } catch (e) { console.debug('[templates] parse aliases error:', e); }
-            continue;
-          }
-          if (s.startsWith('# tags:')) {
-            try { tags.push(...JSON.parse(s.replace('# tags:', '').trim())); } catch (e) { console.debug('[templates] parse tags error:', e); }
-            continue;
-          }
-          if (s.startsWith('# ---')) { inSteps = true; continue; }
-          if (s.startsWith('#') && !inSteps) {
-            desc = s.replace('#', '').trim();
-            continue;
-          }
-          if (inSteps && s && !s.startsWith('#')) {
-            stepLines.push(s.length > 80 ? s.slice(0, 77) + '...' : s);
-          }
-        }
-        ctx += `### ${name} (${f})\n`;
-        if (aliases.length) ctx += `  别名: ${aliases.join(', ')}\n`;
-        if (tags.length) ctx += `  标签: ${tags.join(', ')}\n`;
-        ctx += `  用途: ${desc}\n`;
-        if (stepLines.length > 0) {
-          ctx += `  步骤:\n`;
-          for (const sl of stepLines.slice(0, 8)) {
-            ctx += `    ${sl}\n`;
-          }
-          if (stepLines.length > 8) ctx += `    ...（共 ${stepLines.length} 行）\n`;
-        }
-        ctx += `  → 引用: CALL ${name}\n\n`;
-      } catch (e) { console.debug('[templates] load error:', e); }
-    }
-    _cachedTemplateContext = ctx;
-  } catch (e) { console.debug('[templates] build context error:', e); _cachedTemplateContext = ''; }
-}
-
-// ── 调度上下文（供 AI 提示词参考）──
-let _cachedScheduleContext: string = '';
-
-function refreshScheduleContext(): void {
-  try {
-    const sp = path.join(app.getPath('userData'), 'schedules.json');
-    let schedules: any[] = [];
-    try { if (fs.existsSync(sp)) schedules = JSON.parse(fs.readFileSync(sp, 'utf-8')); } catch (e) { console.debug('[schedules] parse error:', e); }
-    if (!Array.isArray(schedules)) schedules = [];
-    if (schedules.length === 0) { _cachedScheduleContext = ''; return; }
-    const active = schedules.filter(s => s.enabled);
-    const ctxParts: string[] = ['\n\n## 当前定时调度'];
-
-    if (active.length > 0) {
-      ctxParts.push(`（${active.length}/${schedules.length} 个启用）\n`);
-      for (const s of active) {
-        const t = s.triggers?.[0] || {};
-        const triggerDesc = t.type === 'cron' ? `Cron: ${t.cron_expr}` :
-          t.type === 'interval' ? `每 ${t.interval_seconds}s` :
-          t.type === 'startup' ? '启动时' :
-          t.type === 'event' ? `事件: ${t.event_type}` : t.type || '';
-        const condCount = s.conditions?.rules?.length || 0;
-        ctxParts.push(`- **${s.name}** (${s.template_name || s.template_id})`);
-        ctxParts.push(`  - 触发: ${triggerDesc}`);
-        if (condCount > 0) ctxParts.push(`  - 条件: ${condCount} 个 ${s.conditions?.operator || 'AND'}`);
-      }
-    } else {
-      ctxParts.push('\n暂无定时调度。用户可以创建调度来自动执行模板。\n');
-    }
-
-    ctxParts.push('\n### 创建调度的 MCP 工具');
-    ctxParts.push('通过 `lobster_scheduler_create` 创建调度，支持 ECA 模型：');
-    ctxParts.push('- 触发器: cron / interval / startup / event');
-    ctxParts.push('- 守卫条件: window_exists / process_running / is_weekday / is_weekend / day_of_week / time_between / image_exists / text_exists / color_match / scene_match');
-    ctxParts.push('  - 条件用 AND/OR 组合，语法: {"operator":"AND","rules":[{"type":"...","params":{...}}]}');
-
-    _cachedScheduleContext = ctxParts.join('\n');
-  } catch (e) { console.debug('[schedules] build context error:', e); _cachedScheduleContext = ''; }
-}
-
 /** 获取模板目录路径 */
 function getTemplatesDir(): string {
   return path.join(getBaseDir(), 'templates');
 }
-
-// Refresh on startup
-refreshTemplateContext();
-refreshScheduleContext();
 
 /** 加载模板 DSL 内容（先查 .dsl，再查 .flow） */
 function loadTemplateContent(templateId: string): string | null {
@@ -441,7 +337,6 @@ function createWindow() {
     if (startMinimized) {
       mainWindow?.minimize();
     }
-    _rendererReady = true;
     // Only non-secret model metadata is exposed to the renderer. API keys stay
     // in the main process / managed WinPilot configuration.
     const envKey = process.env.ANTHROPIC_API_KEY || '';
@@ -603,66 +498,8 @@ h1{font-size:22px;color:#fff;margin:0 0 4px;font-weight:600}
 }
 
 
-interface IncompleteParam {
-  node_id: string;
-  node_type: string;
-  node_label: string;
-  param: string;
-  param_label: string;
-  hint: string;
-  tool: 'region_picker' | 'screenshot' | 'file_picker' | 'text_input' | 'coordinate_picker' | 'wheel_select' | 'none';
-}
-
-function findIncompleteParams(nodes: any[]): IncompleteParam[] {
-  const results: IncompleteParam[] = [];
-  for (const node of nodes) {
-    const p = node.params || {};
-    switch (node.type) {
-      case 'image_click':
-        if (!p.targets || p.targets.length === 0 || (typeof p.targets === 'string' && p.targets === '') || (Array.isArray(p.targets) && p.targets.every((t: any) => !t?.path)))
-          results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'targets', param_label: '目标图片', hint: '请截取屏幕区域来选择目标图片(会弹出全屏截图工具,拖拽选择包含目标图片的区域)', tool: 'screenshot' });
-        break;
-      case 'click_text':
-        if (!p.text) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'text', param_label: '识别文字', hint: '请输入屏幕上要识别的文字内容,程序会自动找到匹配的文字并点击(例如:确定、提交、下一步、关闭等)', tool: 'text_input' });
-        break;
-      case 'input_text':
-        if (!p.text) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'text', param_label: '输入文字', hint: '请输入要在输入框中填写的文本内容(例如用户名、密码、搜索关键词、文件路径等)', tool: 'text_input' });
-        break;
-      case 'click':
-        if ((!p.x || p.x === 0) && (!p.y || p.y === 0)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'x', param_label: '点击坐标', hint: '请输入点击的坐标值(x,y)或使用坐标拾取工具在屏幕上选择点击位置(会弹出选框,选择后自动取选框中心点)', tool: 'coordinate_picker' });
-        break;
-      case 'color_check':
-        if (!p.expected_color) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'expected_color', param_label: '检测颜色', hint: '请输入要检测的颜色值(支持格式:#FF0000、rgb(255,0,0)、或颜色名称如red,green,blue等)', tool: 'text_input' });
-        break;
-      case 'progress_wait':
-        if (!p.region || (!p.region.x && p.region.w === undefined)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'region', param_label: '进度条区域', hint: '请在屏幕上框选进度条所在的矩形区域(会弹出全屏选框工具,拖拽选择进度条范围,程序会监控该区域的颜色填充变化来检测进度完成)', tool: 'region_picker' });
-        break;
-      case 'region_wait':
-        if (!p.region || (!p.region.x && p.region.w === undefined)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'region', param_label: '监控区域', hint: '请在屏幕上框选要持续监控的矩形区域(会弹出全屏选框工具,拖拽选择监控范围,程序会检测该区域的画面变化或稳定性)', tool: 'region_picker' });
-        break;
-      case 'scene_condition':
-        if (!p.scene_name) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'scene_name', param_label: '场景名称', hint: '请输入要识别的场景名称,程序会通过OCR或图像匹配判断当前屏幕是否属于该场景(例如:登录界面、主界面、设置页面等)', tool: 'text_input' });
-        break;
-      case 'tool_call':
-        if (!p.feature_name) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'feature_name', param_label: '工具名称', hint: '请从滚轮列表中选择要调用的功能工具(转动滚轮找到目标选项,按下确认即可)', tool: 'wheel_select' });
-        break;
-      case 'popup_close':
-        if (!p.strategies || p.strategies.length === 0) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'strategies', param_label: '关闭策略', hint: '请从滚轮列表中选择弹窗关闭策略(例如:点击确定、点击取消、按Esc、点击关闭按钮、按回车等)', tool: 'wheel_select' });
-        break;
-      case 'wait':
-        if (p.wait_type === 'image' && (!p.template_path && !p.template_base64)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'template_path', param_label: '等待图片', hint: '请选择要等待在屏幕上出现的图片文件,程序会持续检测直到图片出现或超时。可以使用截图工具截取或文件选择器选取目标图片', tool: 'file_picker' });
-        break;
-      case 'condition':
-        if (p.condition_type === 'image_exists' && (!p.template_path && !p.template_base64)) results.push({ node_id: node.id, node_type: node.type, node_label: node.label || node.type, param: 'template_path', param_label: '条件图片', hint: '请选择用于判断条件的参考图片,程序会检测该图片是否出现在当前屏幕上。可以使用截图工具截取或文件选择器选取参考图片', tool: 'file_picker' });
-        break;
-    }
-  }
-  return results;
-}
-
 ipcMain.on('state:response', (_, state) => {
   _cachedRendererState = state;
-  _rendererReady = true;
 });
 
 ipcMain.handle('dialog:openFile', async (_, filters?: { name: string; extensions: string[] }[]) => {
@@ -930,7 +767,6 @@ async function _captureScreenshot(): Promise<any> {
     const { screen } = require('electron');
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width: sw, height: sh } = primaryDisplay.size;
-    const dpr = primaryDisplay.scaleFactor;
 
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
@@ -1186,7 +1022,7 @@ async function _wheelSelect(params: { options: string[]; values?: string[]; titl
   proc.stdin!.write(JSON.stringify(params) + '\n');
   proc.stdin!.end();
   return new Promise((resolve) => {
-    proc.on('close', (code) => {
+    proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
@@ -1210,15 +1046,12 @@ async function _ocrRegion(region: { x: number; y: number; w: number; h: number }
   });
 
   const _out: Buffer[] = [];
-  const _err: Buffer[] = [];
   proc.stdout!.on('data', (chunk: Buffer) => _out.push(chunk));
-  proc.stderr!.on('data', (chunk: Buffer) => _err.push(chunk));
   proc.stdin!.write(JSON.stringify(region) + '\n');
   proc.stdin!.end();
   return new Promise((resolve) => {
     proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
-          const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
         try { resolve(JSON.parse(stdout)); }
         catch { resolve([]); }
@@ -1246,7 +1079,7 @@ ipcMain.handle('dsl:toFlow', async (_, dslText: string) => {
   proc.stdin!.write(dslText + '\n');
   proc.stdin!.end();
   return new Promise((resolve) => {
-    proc.on('close', (code) => {
+    proc.on('close', () => {
           const stdout = Buffer.concat(_out).toString('utf8');
           const stderr = Buffer.concat(_err).toString('utf8');
       if (stdout.trim()) {
@@ -1557,7 +1390,6 @@ ipcMain.handle('schedule:create', async (_, entry: any) => {
   schedules.push(newEntry);
   await writeSchedules(schedules);
   scheduler.reload();
-  refreshScheduleContext();
   return newEntry;
 });
 
@@ -1568,7 +1400,6 @@ ipcMain.handle('schedule:update', async (_, id: string, updates: any) => {
   schedules[idx] = { ...schedules[idx], ...updates };
   await writeSchedules(schedules);
   scheduler.reload();
-  refreshScheduleContext();
   return schedules[idx];
 });
 
@@ -1578,7 +1409,6 @@ ipcMain.handle('schedule:delete', async (_, id: string) => {
   if (filtered.length === schedules.length) return false;
   await writeSchedules(filtered);
   scheduler.reload();
-  refreshScheduleContext();
   return true;
 });
 

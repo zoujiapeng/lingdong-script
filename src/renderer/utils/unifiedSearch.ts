@@ -1,10 +1,10 @@
-import { FlowScript, FeatureDefinition, NodeType } from '../types';
+import { FlowScript, NodeType } from '../types';
 import { templateRegistry, TemplateEntry } from './templateRegistry';
 import { itemMarker } from './itemMarker';
 import { NODE_DEFINITIONS } from './nodeDefinitions';
 import { isRunnableFlowNodeType } from '../platform/flowToArpGraph';
 
-export type SearchItemType = 'feature' | 'template' | 'node';
+export type SearchItemType = 'template' | 'node';
 
 export interface UnifiedSearchItem {
   id: string;
@@ -15,10 +15,6 @@ export interface UnifiedSearchItem {
   keywords: string[];
   tags: string[];
   category: string;
-  // Feature-specific
-  featureName?: string;
-  params?: import('../types').FeatureParam[];
-  dslKeyword?: string;
   // Template-specific
   source?: 'preset' | 'custom' | 'dsl' | 'flow';
   hasScript?: boolean;
@@ -55,7 +51,7 @@ class UnifiedSearchEngine {
   private built = false;
 
   /** Rebuild from executable templates and compiler-supported nodes only. */
-  rebuildIndex(_features?: FeatureDefinition[]): void {
+  rebuildIndex(): void {
     const index: UnifiedSearchItem[] = [];
 
     // 1. Add template registry entries
@@ -114,7 +110,7 @@ class UnifiedSearchEngine {
   /** Force re-check tested status on existing items without full rebuild */
   refreshTestedStatus(): void {
     for (const item of this.index) {
-      item.tested = itemMarker.isTested(item.id, item.type as 'feature' | 'template' | 'node');
+      item.tested = itemMarker.isTested(item.id, item.type);
     }
   }
 

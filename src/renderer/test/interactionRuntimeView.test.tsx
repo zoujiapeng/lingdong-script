@@ -319,7 +319,13 @@ describe('interactive task contract runtime view', () => {
       },
     });
 
-    render(<TaskRuntimeAuditPanel contract={contract} arp={arp} />);
+    render(
+      <TaskRuntimeAuditPanel
+        contract={contract}
+        arp={arp}
+        artifactUrl={(artifactId) => `http://runtime.test/artifacts/${artifactId}`}
+      />,
+    );
     expect(screen.getByLabelText('任务运行时审计')).toBeInTheDocument();
     expect(screen.getAllByText(/WaitForExternalChange · stage-wait/).length).toBeGreaterThan(0);
     expect(screen.getByText('2 暴露 / 2 必需')).toBeInTheDocument();
@@ -333,6 +339,10 @@ describe('interactive task contract runtime view', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('恢复策略：{"strategy":"stop"}');
     expect(screen.getByText('frame-after')).toBeInTheDocument();
     expect(screen.getByText('观察帧')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '观察帧 frame-after' })).toHaveAttribute(
+      'src',
+      'http://runtime.test/artifacts/frame-after',
+    );
     expect(screen.getAllByText('interaction.external_change_observed').length).toBeGreaterThan(0);
     expect(screen.getByText(/persistent_change_watcher · stage stage-wait/)).toBeInTheDocument();
     expect(screen.getByText(/interaction.external_change_observed → persistent_change_watcher/)).toBeInTheDocument();

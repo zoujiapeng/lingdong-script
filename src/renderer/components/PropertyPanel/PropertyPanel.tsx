@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { MousePointer2, Settings, Info } from 'lucide-react';
+import { useState } from 'react';
+import { MousePointer2, Info } from 'lucide-react';
 import { useStore } from '../../store';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 import { FlowNode } from '../../types';

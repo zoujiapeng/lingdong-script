@@ -1,22 +1,19 @@
 import React, { useRef, useCallback, useEffect, useState, useMemo } from 'react';
-import { shallow } from 'zustand/shallow';
 import { useStore } from '../../store';
 import { FlowNode as FlowNodeComp } from './FlowNode';
 import { EdgeLayer } from './EdgeLayer';
 import { CanvasControls, MiniMap, ContextMenu } from './CanvasControls';
 import { NODE_DEFINITIONS } from '../../utils/nodeDefinitions';
 import { getNodeDimensions } from '../../utils/constants';
-import { NodeType, FlowNode } from '../../types';
+import { NodeType } from '../../types';
 import { SubFlowBreadcrumb } from './SubFlowBreadcrumb';
 
 export function FlowCanvas() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   // Targeted selectors — only subscribe to what's actually used
   const nodes = useStore(s => s.script.nodes);
-  const edges = useStore(s => s.script.edges);
   const canvas_transform = useStore(s => s.ui.canvas_transform);
   const connecting = useStore(s => s.ui.connecting);
-  const selection = useStore(s => s.ui.selection, shallow);
   const show_grid = useStore(s => s.ui.show_grid);
   const grid_size = useStore(s => s.ui.grid_size);
   const subFlowStackLen = useStore(s => s.subFlowNav.stack.length);
@@ -25,12 +22,9 @@ export function FlowCanvas() {
   const addNode = useStore(s => s.addNode);
   const clearSelection = useStore(s => s.clearSelection);
   const selectNodes = useStore(s => s.selectNodes);
-  const deleteNodes = useStore(s => s.deleteNodes);
-  const deleteEdges = useStore(s => s.deleteEdges);
   const startConnecting = useStore(s => s.startConnecting);
   const stopConnecting = useStore(s => s.stopConnecting);
   const addEdge = useStore(s => s.addEdge);
-  const setHoveredNode = useStore(s => s.setHoveredNode);
 
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });

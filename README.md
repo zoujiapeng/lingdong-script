@@ -32,6 +32,8 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - 模型可随时用 `revise_plan` 替换或清空任务列表，也可原子执行 add/update/remove/move/reopen；任务列表是可变工作状态，不是完成证据。
 - `controller.multi_input_cooperation` 是默认关闭的实验开关。开启后优先后台安全的窗口消息/UIA 动作，不抢占其他前台窗口的键盘焦点；长物理动作中若用户移动鼠标或切换前台，用户取得控制权，Agent 安全停止该动作。Windows 仍只有一个系统鼠标和一个键盘焦点，这不是虚拟出第二套硬件。
 - 前端主工作台已中文化；API、MCP、VLM、URL、坐标和模型名等技术标识保留原文。Electron 与 Python 使用 runtime contract v2、进程启动时源码指纹和 Git revision 校验；源码漂移或旧进程不兼容时禁止启动新前端任务并要求重启。
+- “运行记录”先读取轻量 run 摘要，选择后再加载单次 typed contract/stage/capability/artifact/evidence/completion 详情；ARP audit snapshot、stage trace 和 ArtifactStore manifest 会持久化。较老 trace 缺少合同原文时只恢复事件可以证明的阶段与证据，不用当前 parser 重猜历史意图。图片工件通过 run-scoped、哈希复验的 artifact API 展示。
+- 前端以 WebSocket 事件驱动刷新当前 run（80 ms 合并），terminal 才刷新完整平台/列表，5 秒轮询只作恢复兜底；`ping` 不再触发 REST。系统设置页同时显示 RuntimeJob、Desktop Action Queue、异步动作与 Perception daemon 健康摘要。
 - 像素变化、颜色存在和 Controller 的 `auto_visual_verify` 只说明发生了视觉效果，不是任务完成证据；当前尚未内置带正式权重的常驻学习型 UI detector。
 - 长期记忆以 `python/winpilot_home/memory.db` 的 SQLite Memory Graph 为主；`python/winpilot_home/experience_memory.json` 只保留迁移兼容。Memory Pack 作为有界 user message 注入，不能覆盖当前截图或确定性证据。
 - Studio 只展示同时被前端编译器和后端 capability catalog 声明可执行的节点。历史 FlowScript 节点定义仍可用于读取旧文件，但不会再从节点库或动态 `@feature` 搜索中创建；兼容浏览器执行器强制禁止模拟成功。
@@ -55,7 +57,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | 实时视觉交互 | `SurfaceBinding` 将交互面绑定到一个新鲜目标 hwnd、capture scope、窗口 client authority 和 frame identity；`InteractionRegion` 是该帧 0..1000 坐标空间中的显式安全区域。语义模型只提出一个 typed turn，Controller 在本地连续执行并返回动作后权威帧；区域外动作、陈旧帧、目标失焦或含糊表面均 fail-closed。 |
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |
 | 多输入协同 | 实验开关默认关闭；开启时实行人类优先的焦点/光标仲裁并 fail-closed，不能把它描述成两套真实鼠标键盘并发。 |
-| 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。 |
+| 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。运行列表与 job 列表是轻量摘要，详情按 run id 加载；重启后从 trace/manifest 恢复历史阶段、能力、工件、证据和完成合同。节点主列表、搜索与最近入口共享 compiler/catalog 可达性交集。 |
 | 真实能力 | 计算器、记事本、网页靶场、连续指针/拖拽和真实 Paint→QQ 工件链已有回归。2026-07-16 的 9 场景冷探索视觉矩阵覆盖完整拖入、精确点击、顺序点击、滑块、四个通道方向和无上下文共享回合，`9 passed in 275.30s`，全部由浏览器 trusted pointer ground truth 判定；关闭 Skill/Memory 的 QQ run `arp-20260716-215314-7f98cd` 从同一 Task Contract/ARP 路径创建并发送当前 run 工件。测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率，更不是“达到人类通用视觉能力”的证明。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
 
 ## 快速启动
@@ -86,9 +88,10 @@ python -m pytest python/winpilot_home/tests -q
 python -m pytest tests -q
 npx vitest run
 npm run build
+npm run build:all
 ```
 
-2026-07-16 最终全量验证为 WinPilot `1722 passed, 13 skipped, 1 warning`、根 Python `2508 passed`、Vitest `204/204 passed`，TypeScript typecheck、Vite/Electron、CLI 与 AI build 全部通过。13 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；本轮另行显式运行视觉矩阵 `9/9` 和关闭 Skill/Memory 的 Paint→QQ `1/1`。这不是用 mock 代替 E2E，也不把单机运行记录描述成统计泛化评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
+2026-07-16 当前提交的最终全量验证为 WinPilot `1731 passed, 13 skipped, 1 warning`、根 Python `2508 passed`、Vitest `201/201 passed`，TypeScript typecheck、Vite/Electron、CLI 与 AI build 全部通过。13 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；此前本日另行显式运行视觉矩阵 `9/9` 和关闭 Skill/Memory 的 Paint→QQ `1/1`，本轮前端审计只读取该真实持久化 run，没有再次发送。这里不使用 mock 代替 E2E，也不把单机运行记录描述成统计泛化评测；GitHub 是否可发布还要看当前提交的 Actions 结果。
 
 清理生成产物和缓存：
 
@@ -143,6 +146,7 @@ python -m http.server 8877 --bind 127.0.0.1
 - [CLAUDE.md](CLAUDE.md)：给 AI/开发者的最短接手说明。
 - [docs/README.md](docs/README.md)：文档索引。
 - [docs/architecture.md](docs/architecture.md)：当前架构、状态机和边界。
+- [docs/frontend.md](docs/frontend.md)：原生五入口、刷新/历史审计、节点可达性、兼容与死代码边界。
 - [docs/winpilot-agent.md](docs/winpilot-agent.md)：WinPilot agent 运行机制和 trace 复盘方法。
 - [docs/model-providers.md](docs/model-providers.md)：模型 provider、cache、usage/cost。
 - [docs/apis.md](docs/apis.md)：Electron HTTP、WinPilot REST、IPC 与 MCP 契约。

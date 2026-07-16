@@ -20,12 +20,12 @@ export const EXPECTED_RUNTIME_CONTRACT_VERSION = 2;
 
 export function runtimeCompatibilityError(overview: PlatformOverview | null | undefined): string {
   if (!overview) return '控制器运行时身份尚未加载。';
-  const runtime = overview.status?.runtime as Record<string, any> | undefined;
+  const runtime = overview.status?.runtime;
   if (!runtime || Number(runtime.contract_version) !== EXPECTED_RUNTIME_CONTRACT_VERSION) {
     return '托管的 Python 控制器使用了不兼容的运行时协议。';
   }
-  const source = runtime.source as Record<string, any> | undefined;
-  const git = runtime.git as Record<string, any> | undefined;
+  const source = runtime.source;
+  const git = runtime.git;
   if (
     !source
     || !Object.prototype.hasOwnProperty.call(source, 'loaded_stamp')
@@ -150,6 +150,10 @@ export class ControlPlaneClient {
 
   currentRun(): Promise<CurrentRunResponse> {
     return this.request('api/v2/runs/current');
+  }
+
+  run(runId: string): Promise<CurrentRunResponse> {
+    return this.request(`api/v2/runs/${encodeURIComponent(runId)}`);
   }
 
   async runs(limit = 50): Promise<RunProjection[]> {
@@ -350,6 +354,15 @@ export class ControlPlaneClient {
     return url.toString();
   }
 
+  artifactUrl(runId: string, artifactId: string): string {
+    const url = new URL(
+      `api/v2/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      this.baseUrl,
+    );
+    if (this.token) url.searchParams.set('token', this.token);
+    return url.toString();
+  }
+
   validateGraph(graph: ArpGraph): Promise<GraphValidation> {
     return this.request('api/v2/arp/validate', { method: 'POST', body: JSON.stringify(graph) });
   }
@@ -398,14 +411,8 @@ export class ControlPlaneClient {
     return response.run;
   }
 
-  async arpRun(runId: string): Promise<ArpExecutionSnapshot> {
-    const response = await this.request<{ ok: boolean; run: ArpExecutionSnapshot }>(`api/v2/arp/runs/${encodeURIComponent(runId)}`);
-    return response.run;
-  }
-
-  async cancelRun(runId: string): Promise<ArpExecutionSnapshot> {
-    const response = await this.request<{ ok: boolean; run: ArpExecutionSnapshot }>(`api/v2/arp/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
-    return response.run;
+  cancelRun(runId: string): Promise<CurrentRunResponse> {
+    return this.request(`api/v2/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
   }
 
   gate(runId: string, nodeId: string, approved: boolean, comment = ''): Promise<{ ok: boolean }> {

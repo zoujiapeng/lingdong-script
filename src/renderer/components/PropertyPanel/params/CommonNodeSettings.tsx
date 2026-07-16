@@ -1,4 +1,3 @@
-import React from 'react';
 import { FlowNode } from '../../../types';
 
 interface Props {

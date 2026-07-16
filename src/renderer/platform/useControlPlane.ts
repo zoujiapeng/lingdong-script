@@ -4,11 +4,14 @@ import {
   resolveControlPlaneConnection,
   runtimeCompatibilityError,
 } from './client';
-import type { ArpExecutionSnapshot, ArpGraph, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
+import type { ArpExecutionSnapshot, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
 
 export type ConnectionState = 'connecting' | 'online' | 'degraded' | 'offline';
+
+export const CONTROL_PLANE_FALLBACK_REFRESH_MS = 5_000;
+export const CONTROL_PLANE_EVENT_REFRESH_MS = 80;
 
 export function useControlPlane() {
   const clientRef = useRef<ControlPlaneClient | null>(null);
@@ -76,6 +79,20 @@ export function useControlPlane() {
     }
   }, []);
 
+  const refreshLiveRun = useCallback(async () => {
+    const client = clientRef.current;
+    if (!client) return;
+    try {
+      const current = await client.currentRun();
+      setCurrentRun(current.run);
+      setArpSnapshot(current.arp);
+      setConnection((state) => state === 'offline' ? 'degraded' : state);
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+      setConnection('offline');
+    }
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let disconnect: (() => void) | undefined;
@@ -102,11 +119,20 @@ export function useControlPlane() {
               String(event.run_id || ''),
             );
           }
-          if (event.type !== 'ping') setEvents((items) => [...items.slice(-199), event]);
+          if (event.type === 'ping') return;
+          setEvents((items) => [...items.slice(-199), event]);
           if (refreshTimer.current) clearTimeout(refreshTimer.current);
-          refreshTimer.current = setTimeout(refresh, 60);
+          const terminal = (
+            event.type === 'agent_done'
+            || event.type === 'arp_run_done'
+            || ['done', 'failed', 'canceled'].includes(String(event.status || event.state || '').toLowerCase())
+          );
+          refreshTimer.current = setTimeout(
+            terminal ? refresh : refreshLiveRun,
+            CONTROL_PLANE_EVENT_REFRESH_MS,
+          );
         }, (connected) => setConnection(connected ? 'online' : 'degraded'));
-        interval = setInterval(refresh, 1000);
+        interval = setInterval(refresh, CONTROL_PLANE_FALLBACK_REFRESH_MS);
       } catch (connectError) {
         if (!disposed) {
           setError(connectError instanceof Error ? connectError.message : String(connectError));
@@ -121,7 +147,7 @@ export function useControlPlane() {
       if (interval) clearInterval(interval);
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
     };
-  }, [refresh]);
+  }, [refresh, refreshLiveRun]);
 
   useEffect(() => {
     if (!currentRun) return;
@@ -168,14 +194,6 @@ export function useControlPlane() {
     return run;
   }, [refresh]);
 
-  const startGraph = useCallback(async (graph: ArpGraph, inputs: Record<string, unknown> = {}) => {
-    const run = await requireCompatibleClient().startGraph(graph, inputs);
-    await refresh();
-    return run;
-  }, [refresh]);
-
-  const validateGraph = useCallback((graph: ArpGraph): Promise<GraphValidation> => requireClient().validateGraph(graph), []);
-
   const startAutomation = useCallback(async (
     automation: AutomationIR,
     inputs: Record<string, unknown> = {},
@@ -218,8 +236,6 @@ export function useControlPlane() {
     runtimeIssue,
     refresh,
     startGoal,
-    startGraph,
-    validateGraph,
     startAutomation,
     validateAutomation,
     cancelCurrent,

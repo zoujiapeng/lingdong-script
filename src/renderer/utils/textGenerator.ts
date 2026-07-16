@@ -4,7 +4,7 @@
  * Traversal logic is shared; only per-node text generation differs.
  */
 
-import { FlowScript, FlowNode, FlowEdge, FeatureDefinition } from '../types';
+import { FlowScript, FlowNode, FlowEdge } from '../types';
 
 export type TextMode = 'pseudocode' | 'dsl';
 

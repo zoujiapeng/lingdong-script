@@ -16,6 +16,8 @@
 
 原生 `PlatformWorkbench` 的主体导航、表单、状态、设置和运行视图使用中文；API、MCP、VLM、URL、JSON、X/Y 等不可翻译的技术标识保留。前端期望 runtime contract v2，并比较进程加载/当前 commit 与源码 stamp；不兼容或源码漂移时禁止启动新任务，空闲后自动请求替换控制器。
 
+运行视图使用 WebSocket 驱动的合并刷新和 5 秒 fallback，不会每秒下载所有 RuntimeJob result 与完整 run timeline。`/api/v2/runs` 是轻量摘要，`/api/v2/runs/{run_id}` 才返回选中记录的完整详情。ARP 起止事件持久化 Task Contract、能力可满足性与有界 audit snapshot；重启后 projection 只从 trace/ArtifactStore manifest 恢复可证明的 stage、capability、artifact、evidence 与 Completion Contract。旧记录缺少原始合同时，前端明确显示 trace-derived 历史审计，不重新解析旧 goal。前端各入口、死代码边界与检查表见 `docs/frontend.md`。
+
 ## 主循环
 
 直接 `/api/chat` 仍运行完整 AgentRunner；原生前端自然语言目标改为 Task Contract + Stage Runtime，只在语义阶段创建有界 AgentRunner：
@@ -335,7 +337,8 @@ WinPilot Agent 内部计划任务：
 
 1. 确认 runtime：`/api/status.runtime` 或前端“系统设置 → 运行时”。必须同时核对 contract v2、`loaded_commit/current_commit` 与 `source.loaded_stamp/current_stamp/drifted`；当前 Git HEAD 相同不代表长驻 Python 解释器已加载新源码。
 2. 找 `run_id`。
-3. 看 `python/winpilot_home/traces/<run_id>.jsonl`：
+3. 先在前端“运行记录”选择该 run，核对 typed stage、当前/缺失 capability、artifact、evidence provider、失败阶段和 Completion Contract；服务重启后的记录应明确标注 snapshot 或 trace projection 来源。
+4. 看 `python/winpilot_home/traces/<run_id>.jsonl`：
    - `agent_start`
    - `agent_step`
    - `agent_tool_start`
@@ -343,10 +346,10 @@ WinPilot Agent 内部计划任务：
    - `agent_batch_action*`
    - `done_check`
    - `agent_done`
-4. 打开截图，优先核对 `batch_after_NNN.jpg` 和 `after_NNN.jpg`。
-5. 看 `NNN_llm_request.json` 和 `NNN_llm_response.json`，确认模型实际看见了什么。
-6. 看 `NNN_tool_result.json` 获取完整原始工具结果；LLM history 里的 tool result 可能已被 compact。
-7. 如果截图和工具结果不一致，按工具名定位 mixin：
+5. 打开截图，优先核对 `batch_after_NNN.jpg` 和 `after_NNN.jpg`。任务工件则必须通过对应 run 的 ArtifactStore manifest 和 `/api/v2/runs/{run_id}/artifacts/{artifact_id}` 复验，不能把 observation frame 当成可发送 artifact。
+6. 看 `NNN_llm_request.json` 和 `NNN_llm_response.json`，确认模型实际看见了什么。
+7. 看 `NNN_tool_result.json` 获取完整原始工具结果；LLM history 里的 tool result 可能已被 compact。
+8. 如果截图和工具结果不一致，按工具名定位 mixin：
    - 窗口：`window_tools.py`
    - 感知：`perception_tools.py`
    - 输入动作：`interaction_tools.py`

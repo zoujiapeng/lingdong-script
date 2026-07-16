@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { FolderOpen, ZoomIn } from 'lucide-react';
 import { SubScriptNodeParams } from '../../../types';
 import { ScriptBrowser } from '../../common/ScriptBrowser';

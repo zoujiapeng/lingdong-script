@@ -1,4 +1,3 @@
-import React from 'react';
 import { LoopNodeParams, LoopType } from '../../../types';
 
 interface Props {
