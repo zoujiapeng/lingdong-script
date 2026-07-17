@@ -44,12 +44,102 @@ def _inside(region: InteractionRegion, points: list[tuple[float, float]]) -> boo
     return all(region.contains_point(int(round(x)), int(round(y))) for x, y in points)
 
 
+def controller_preparation_actions(
+    decision: InteractionDecision,
+) -> list[dict[str, Any]]:
+    """Lower state-changing input preconditions without spatial payloads.
+
+    Mode and colour preparation may change toolbar pixels, selection state, or
+    even the work surface.  The StageRuntime executes this list first, captures
+    a new authoritative frame, and only then maps spatial actions.  Keeping the
+    preparation list semantic prevents a pre-change physical coordinate from
+    leaking into the post-change gesture.
+    """
+    if not decision.agent_should_act:
+        return []
+    mapped: list[dict[str, Any]] = []
+    selected_color = ""
+    prepared_input_modes: set[str] = set()
+    has_draw = any(item.action == "draw_strokes" for item in decision.actions)
+    if not has_draw:
+        return []
+    for item in decision.actions:
+        if item.action == "select_color":
+            requested = str(item.color or "").strip()
+            mapped.append({
+                "action": "select_color",
+                "typed_action": "select_color",
+                "interaction_mechanism": item.interaction_mechanism,
+                "affordance_evidence": item.affordance_evidence,
+                "visual_frame_id": decision.frame_id,
+                "coordinate_space": "screen_physical_px",
+                "source_frame_coordinates": {},
+                "color": requested,
+                "name": requested,
+            })
+            selected_color = requested.casefold()
+            continue
+        if item.action != "draw_strokes":
+            continue
+        if (
+            item.interaction_mechanism == "freehand_strokes"
+            and "continuous_freehand" not in prepared_input_modes
+        ):
+            mapped.append({
+                "action": "ensure_input_mode",
+                "typed_action": "ensure_input_mode",
+                "interaction_mechanism": "semantic_control",
+                "affordance_evidence": (
+                    "continuous pointer paths require a compatible current input mode"
+                ),
+                # This is untrusted semantic context for the independent
+                # exact-frame proof, not proof by itself.  It tells the visual
+                # resolver which bounded surface and visible affordance to
+                # inspect without carrying any physical coordinates across a
+                # mode-changing preparation transaction.
+                "surface_affordance_evidence": item.affordance_evidence,
+                "target_region": list(item.target_region),
+                "target_anchor": list(item.target_anchor),
+                "requested_gesture": item.action,
+                "requested_color": str(item.color or "").strip(),
+                "visual_frame_id": decision.frame_id,
+                "coordinate_space": "screen_physical_px",
+                "source_frame_coordinates": {},
+                "mode": "continuous_freehand",
+                "synthesized_from": "draw_strokes.interaction_mechanism",
+            })
+            prepared_input_modes.add("continuous_freehand")
+        requested_color = str(item.color or "").strip()
+        if requested_color and requested_color.casefold() != selected_color:
+            mapped.append({
+                "action": "select_color",
+                "typed_action": "select_color",
+                "interaction_mechanism": "semantic_control",
+                "affordance_evidence": (
+                    "typed draw action requires a visible colour selection"
+                ),
+                "surface_affordance_evidence": item.affordance_evidence,
+                "target_region": list(item.target_region),
+                "target_anchor": list(item.target_anchor),
+                "requested_gesture": item.action,
+                "visual_frame_id": decision.frame_id,
+                "coordinate_space": "screen_physical_px",
+                "source_frame_coordinates": {},
+                "color": requested_color,
+                "name": requested_color,
+                "synthesized_from": "draw_strokes.color",
+            })
+            selected_color = requested_color.casefold()
+    return mapped
+
+
 def controller_actions(
     decision: InteractionDecision,
     *,
     frame_region: dict[str, int],
     bound_region: InteractionRegion,
     frame_epoch: int,
+    include_preparation: bool = True,
 ) -> list[dict[str, Any]]:
     """Validate and map one decision to executable physical Controller input."""
     if not decision.agent_should_act:
@@ -59,9 +149,12 @@ def controller_actions(
     if not bound_region.contains(decision.region_object(), tolerance=4):
         raise ValueError("semantic interaction region escaped the bound surface")
 
-    mapped: list[dict[str, Any]] = []
+    mapped: list[dict[str, Any]] = (
+        controller_preparation_actions(decision)
+        if include_preparation else []
+    )
     selected_color = ""
-    prepared_input_modes: set[str] = set()
+    has_draw = any(item.action == "draw_strokes" for item in decision.actions)
     for item in decision.actions:
         points = item.normalized_points()
         if points and not _inside(decision.region_object(), points):
@@ -78,56 +171,12 @@ def controller_actions(
             for stroke in item.stroke_paths
         )
         requested_color = str(item.color or "").strip()
-        if (
-            item.action == "draw_strokes"
-            and item.interaction_mechanism == "freehand_strokes"
-            and "continuous_freehand" not in prepared_input_modes
-        ):
-            # A continuous path is not executable merely because the pointer
-            # primitive exists.  Bind its input-mode precondition in the same
-            # Controller transaction so a stale selection cannot reinterpret
-            # the path as a shape, selection, fill, or other tool.  Resolution
-            # is accessibility/adapter driven and contains no app coordinates.
-            mapped.append({
-                "action": "ensure_input_mode",
-                "typed_action": "ensure_input_mode",
-                "interaction_mechanism": "semantic_control",
-                "affordance_evidence": (
-                    "continuous pointer paths require a compatible current input mode"
-                ),
-                "visual_frame_id": decision.frame_id,
-                "coordinate_space": "screen_physical_px",
-                "source_frame_coordinates": {},
-                "mode": "continuous_freehand",
-                "synthesized_from": "draw_strokes.interaction_mechanism",
-            })
-            prepared_input_modes.add("continuous_freehand")
-        if (
-            item.action == "draw_strokes"
-            and requested_color
-            and requested_color.casefold() != selected_color
-        ):
-            # ``color`` on a typed draw action is an execution obligation, not
-            # descriptive metadata.  Lower it to the existing semantic colour
-            # selector before the first affected path.  This is deliberately
-            # application-neutral: the Controller resolves the visible colour
-            # affordance from current target pixels and can fail closed when it
-            # is unavailable.
-            mapped.append({
-                "action": "select_color",
-                "typed_action": "select_color",
-                "interaction_mechanism": "semantic_control",
-                "affordance_evidence": (
-                    "typed draw action requires a visible colour selection"
-                ),
-                "visual_frame_id": decision.frame_id,
-                "coordinate_space": "screen_physical_px",
-                "source_frame_coordinates": {},
-                "color": requested_color,
-                "name": requested_color,
-                "synthesized_from": "draw_strokes.color",
-            })
-            selected_color = requested_color.casefold()
+        if has_draw and item.action == "select_color":
+            # The explicit colour action is represented by the preparation
+            # transaction (either returned above or executed separately by
+            # StageRuntime). Replaying it beside the spatial action would both
+            # duplicate a mutation and stale the following draw again.
+            continue
         if item.action == "draw_strokes" and target_relative_strokes:
             resolved = item.resolved_frame_strokes(
                 inset_fraction=LOCAL_PATH_INSET_FRACTION,

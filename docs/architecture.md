@@ -93,7 +93,7 @@ ObserveScene -> InferInteraction -> PerformTurn -> VerifyLocalEffect
 - `InferInteraction` 从原始任务和这张确切画面推断参与者、角色、轮次、规则、`InteractionRegion`、typed actions 与 expected effect。模型不提交物理屏幕坐标。
 - `PerformTurn` 只在已证明 Agent 拥有当前轮次时提交一个语义回合；同一回合可包含不依赖中间未知画面的多个 Controller 事件。
 - `VerifyLocalEffect` 对动作后权威帧做局部像素证据与原始任务条件下的语义核验。最终 `interaction.task_completed` 必须来自最新权威帧上的独立终态核验，不能由 Controller `ok`、`interaction.turn_resolved` 或任意像素变化替代。
-- `WaitForExternalChange` 只用于合同声明的持续会话，watch scope 被限制在已绑定交互区；它不会伪造外部参与者动作，`interaction.external_change_observed` 也只是循环控制/遥测证据，不是最终完成义务。
+- `WaitForExternalChange` 只用于合同显式声明 `requires_external_participant` 的持续会话，watch scope 被限制在已绑定交互区。Agent 自己的回合通过后进入非终态 `waiting_external`，并记录 baseline artifact、scope、timeout 和 `agent_turn_verified`；用户未继续时分类为 `external_participant_absent`，不会倒推 Agent 动作为失败，也不会把等待冒充整个会话完成。普通自主任务不能进入该状态。`interaction.external_change_observed` 仍只是循环控制/遥测证据，不是最终完成义务。
 
 ## 进程和端口
 
@@ -271,7 +271,7 @@ Eval 汇总按闭环结果 fail-closed：`verified_success` 必须同时满足�
 
 2026-07-14 的一次真实前端冷启动画板样本（空白 Paint，目标“用画板画一只猫”）约 55.3 秒，执行 2 次点击和 1 次 `draw_strokes`，没有 undo/clear 死循环；输出只能评价为可辨认但粗糙、语义仍有歧义，不能称为“好看”。这是单次链路基线，只证明前端路径能完成连续指针事务，不是统计成功率，也不能替代跨任务、多次、带外部 ground truth 的 E2E 结果。
 
-2026-07-16 的通用实时交互 opt-in Windows E2E 通过相同的 `/api/v2/task-contracts/compile → /api/v2/arp/runs` 前端路径执行真实鼠标事务。最终矩阵覆盖 `drag_fit`、`precise_click`、`ordered_clicks`、`slider`、四种镜像/反向 corridor 和 `shared_turn`，结果为 `9 passed in 275.30s`。九个 run 全部 `done`、0 次 replan/recovery，合计 12 次模型调用（平均 1.33、最多 2），Controller 平均 2,384 ms；通道任务的 Controller 从当前像素证明 source/target、source footprint、可通行路径、minimum clearance 和终点 overlay，不依赖模型给出的静态折线直接开环执行。显式 bounded drag 的完成证据由 terminal-grade source→target transition、当前像素 grounding 和 guided path proof 组合，避免语义 VLM 把已经完成的移动误判为失败；顺序点击由一次语义计划编译为带后置验证的本地连续事务，点击、绘图和未知交互仍保留必要的语义验收。该矩阵是可重复的输入真实性、路径坐标映射与外部 ground truth 检查，不代表真实桌面软件或任意视觉任务的统计泛化能力。共享回合首次推断耗时 94,395 ms，也说明当前尾延迟仍由外部模型服务主导。
+2026-07-17 的通用实时交互 opt-in Windows E2E 通过相同的 `/api/v2/task-contracts/compile → /api/v2/arp/runs` 前端路径执行真实鼠标事务。最终自主矩阵覆盖 `drag_fit`、`precise_click`、`ordered_clicks`、`slider` 和四种镜像/反向 corridor，结果为 `8 passed, 1 deselected in 155.79s`。八个 run 全部 `done`，浏览器外部 ground truth 全部通过，0 次 replan/recovery，合计 10 次模型调用（平均 1.25、最多 2），Controller 平均 2,377 ms；调用次数只作为性能遥测，不是固定验收上限。通道任务的 Controller 从当前像素证明 source/target、source footprint、源对象周围表面颜色、可通行路径、minimum clearance 和终点 overlay；语义 waypoint 只提供路径意图，局部 A* 与全分辨率 footprint 棚栏决定可执行路径。显式 bounded drag 的完成证据由 terminal-grade source→target transition、当前像素 grounding 和 guided path proof 组合；顺序点击由一次语义计划编译为带后置验证的本地连续事务。需要真人继续的 `shared_turn` 被有意排除出自主终态矩阵，只记录 Agent 回合完成后的 `waiting_external` 检查点。该矩阵是可重复的输入真实性、路径坐标映射与外部 ground truth 检查，不代表真实桌面软件或任意视觉任务的统计泛化能力。
 
 同日用户授权的最终真实 QQ 冷启动 E2E run `arp-20260716-215314-7f98cd` 在 69.896 秒内完成“用画板画一头猪然后截图打开QQ发送给我的手机”，执行 2 次模型调用，`experience_policy=disabled` 且没有 Skill replay；模型耗时 17,318 ms、Controller 51,309 ms。`DrawArtifact`、`CaptureArtifact`、`OpenConversation`、`SendArtifact`、`VerifyDelivery` 五阶段全部 `done`，每阶段 capability preflight 的 `missing_capabilities` 都为空，stage trace 记录所选 evidence provider。当前 run 工件 `art-7cb4d57e14af4211` 的 SHA-256 为 `b3e725f49ca3247506dbd7517fd405c9b892b2c7f329060a562316db1c38d01a`（866×413，10,370 bytes）；正确会话执行真实发送后，可见气泡得到 209 个 good matches / 163 个 homography inliers，匹配区域相对发送前基线变化率为 0.0597，Completion Contract 全部通过。附件确认预览只授权发送动作，不能独立满足送达义务；绘图验收的 `detail_level=low` 也保留在证据里。
 

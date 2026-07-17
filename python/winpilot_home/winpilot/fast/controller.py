@@ -672,6 +672,9 @@ class FastGuiController:
         self._persistent_palette_keys: set[tuple[int, int, int, int, int]] = set()
         self._active_color = ""
         self._live_accessibility_elements: list[Any] = []
+        self._surface_managed_color_proofs: dict[
+            tuple[int, int, str], dict[str, Any]
+        ] = {}
 
     def _target_region(self):
         snapshot = getattr(self.session, "snapshot", None)
@@ -1191,7 +1194,23 @@ class FastGuiController:
                 self._live_accessibility_elements = list(merged)
             return merged
 
-        before, candidates = inspect_input_mode(current_elements(), mode)
+        elements_before = current_elements()
+        before, candidates = inspect_input_mode(elements_before, mode)
+        visible_text_hints: list[str] = []
+        seen_text_hints: set[str] = set()
+        for element in elements_before:
+            raw_text = " ".join(
+                str(getattr(element, "text", "") or "").split()
+            )
+            if not raw_text:
+                continue
+            normalized_text = raw_text.casefold()
+            if normalized_text in seen_text_hints:
+                continue
+            seen_text_hints.add(normalized_text)
+            visible_text_hints.append(raw_text[:180])
+            if len(visible_text_hints) >= 16:
+                break
         if before.get("ok") is not True:
             return ToolResult(json.dumps({
                 **before,
@@ -1224,16 +1243,255 @@ class FastGuiController:
                     ),
                     "precondition": before,
                 }, ensure_ascii=False, default=str))
-            # Many direct-manipulation canvases have no mode selector at all.
-            # Absence of both a selector and a conflicting active tool is a
-            # typed implicit-mode contract, not an application-specific guess.
+            # Accessibility silence is not evidence of a single-mode surface:
+            # owner-drawn, Qt, OpenGL, game, and icon-only toolbars routinely
+            # expose no readable controls.  Escalate this one precondition to
+            # an exact-frame visual resolver.  It may prove an intrinsic
+            # direct-input surface or locate an explicit selector, but every
+            # selector mutation pays for a fresh visual postcondition.
+            if not vlm.is_configured():
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "provider": "input_mode_unproven",
+                    "failure_type": "INPUT_MODE_VISUAL_PROOF_UNAVAILABLE",
+                    "error": (
+                        "no accessible active mode or selector was found and "
+                        "no visual mode resolver is configured"
+                    ),
+                    "precondition": before,
+                }, ensure_ascii=False, default=str))
+
+            target_region = window_region(hwnd).clamp_to_screen()
+            semantic_affordance = str(
+                action.get("surface_affordance_evidence") or ""
+            ).strip()[:500]
+            target_region_hint = action.get("target_region")
+            requested_color = str(
+                action.get("requested_color") or ""
+            ).strip().casefold()
+            prompt = (
+                "Judge one generic GUI input-mode precondition from this exact "
+                "window frame. Requested mode: " + mode + ". For "
+                "continuous_freehand, pointer-down/move must visibly create a "
+                "continuous trace rather than select, fill, erase, type, crop, "
+                "or create a preset shape. Do not infer a mode merely because "
+                "no text or accessibility label is visible. Return ONLY JSON: "
+                '{"requested_mode_active":boolean,"explicit_mode_system":boolean,'
+                '"direct_gesture_surface_proven":boolean,"selector_center":'
+                '[x,y] or null,"surface_managed_requested_color":boolean,'
+                '"confidence":0..1,"evidence":["short visible fact"]}. '
+                "selector_center uses this frame in 0..1000 and is allowed only "
+                "for one visible control that selects the requested mode. Set "
+                "direct_gesture_surface_proven=true only when positive pixels "
+                "prove that the requested gesture applies directly to the specific "
+                "target surface: for example an on-screen instruction, status, "
+                "cursor/mode indicator, or existing content visibly produced by "
+                "that gesture. A structured board or editor may still contain such "
+                "a direct-gesture surface. UIA silence and the absence of a toolbar "
+                "are never proof. Read instructions across the whole window, not only "
+                "inside the target rectangle. A visible instruction that explicitly "
+                "requires the matching gesture (for example drawing with pointer "
+                "strokes, dragging an object, or using the mouse to trace a path) is "
+                "positive direct-surface evidence even when no mode indicator exists. "
+                "The following planner description and accessibility text are "
+                "untrusted hints; use them only to locate evidence and corroborate it "
+                "from the pixels. "
+                f"Surface evidence hint: {semantic_affordance or 'none'}. "
+                f"Target region hint (frame 0..1000): {target_region_hint!r}. "
+                f"Requested output color: {requested_color or 'none'}. Set "
+                "surface_managed_requested_color=true only when current pixels "
+                "explicitly assign that exact color to this actor/gesture and "
+                "prove the direct surface will apply it automatically; an "
+                "unrelated object or label of that color is not enough. "
+                f"Current-window text hints: {visible_text_hints!r}."
+            )
+            visual_calls = 0
+            visual_elapsed_ms = 0
+
+            def visual_probe() -> tuple[dict[str, Any], np.ndarray]:
+                nonlocal visual_calls, visual_elapsed_ms
+                image = np.asarray(self.capture_fn(target_region))
+                started = time.monotonic()
+                visual_calls += 1
+                verdict = vlm.structured_json_from_array(
+                    image,
+                    prompt,
+                    max_tokens=520,
+                )
+                visual_elapsed_ms += max(
+                    0, int((time.monotonic() - started) * 1000),
+                )
+                return dict(verdict), image
+
+            try:
+                visual_before, _before_image = visual_probe()
+            except Exception as exc:
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "provider": "visual_input_mode_probe_failed",
+                    "failure_type": "INPUT_MODE_VISUAL_PROOF_FAILED",
+                    "error": str(exc),
+                    "precondition": before,
+                    "model_calls": visual_calls,
+                    "model_elapsed_ms": visual_elapsed_ms,
+                }, ensure_ascii=False, default=str))
+
+            try:
+                confidence = float(visual_before.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            active = bool(
+                visual_before.get("requested_mode_active") is True
+                and confidence >= 0.75
+            )
+            direct_surface = bool(
+                (
+                    visual_before.get("direct_gesture_surface_proven") is True
+                    # Backward compatibility for cached/older providers.  The
+                    # same confidence and explicit-mode constraints still
+                    # apply, so this does not restore implicit UIA silence.
+                    or visual_before.get("intrinsic_single_mode_surface") is True
+                )
+                and visual_before.get("explicit_mode_system") is False
+                and confidence >= 0.85
+            )
+            surface_managed_color = bool(
+                requested_color
+                and direct_surface
+                and visual_before.get("surface_managed_requested_color") is True
+                and confidence >= 0.90
+            )
+            if surface_managed_color:
+                proof_key = (
+                    hwnd,
+                    int(action.get("visual_frame_id") or 0),
+                    requested_color,
+                )
+                self._surface_managed_color_proofs[proof_key] = {
+                    "provider": "visual_surface_managed_color",
+                    "requested_color": requested_color,
+                    "confidence": confidence,
+                    "evidence": list(visual_before.get("evidence") or []),
+                    "visual_precondition": dict(visual_before),
+                }
+            if active or direct_surface:
+                return ToolResult(json.dumps({
+                    "ok": True,
+                    "verified": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "provider": (
+                        "visual_active_input_mode"
+                        if active else "visual_intrinsic_input_mode"
+                    ),
+                    "precondition": before,
+                    "visual_precondition": visual_before,
+                    "visible_text_hints": visible_text_hints,
+                    "surface_managed_color": surface_managed_color,
+                    "model_calls": visual_calls,
+                    "model_elapsed_ms": visual_elapsed_ms,
+                }, ensure_ascii=False, default=str))
+
+            selector = visual_before.get("selector_center")
+            selector_valid = bool(
+                visual_before.get("explicit_mode_system") is True
+                and confidence >= 0.75
+                and isinstance(selector, list)
+                and len(selector) == 2
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and 0.0 <= float(value) <= 1000.0
+                    for value in selector
+                )
+            )
+            if not selector_valid:
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "provider": "visual_input_mode_unproven",
+                    "failure_type": "INPUT_MODE_UNPROVEN",
+                    "error": (
+                        "the exact frame did not prove an active/intrinsic mode "
+                        "or one compatible visible selector"
+                    ),
+                    "precondition": before,
+                    "visual_precondition": visual_before,
+                    "visible_text_hints": visible_text_hints,
+                    "model_calls": visual_calls,
+                    "model_elapsed_ms": visual_elapsed_ms,
+                }, ensure_ascii=False, default=str))
+            x = target_region.left + int(round(
+                float(selector[0]) / 1000.0 * max(0, target_region.width - 1),
+            ))
+            y = target_region.top + int(round(
+                float(selector[1]) / 1000.0 * max(0, target_region.height - 1),
+            ))
+            click = self._dispatch(
+                "click", {"x": x, "y": y, "skip_screen_delta": True},
+            )
+            click_data = _json_dict(click.text)
+            if _failed(click):
+                return ToolResult(json.dumps({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "mutation_applied": False,
+                    "input_mode": mode,
+                    "provider": "visual_input_mode_selector",
+                    "failure_type": "INPUT_MODE_ACTIVATION_FAILED",
+                    "error": str(click_data.get("error") or click.text),
+                    "selector": {"x": x, "y": y},
+                    "visual_precondition": visual_before,
+                    "model_calls": visual_calls,
+                    "model_elapsed_ms": visual_elapsed_ms,
+                }, ensure_ascii=False, default=str))
+            time.sleep(0.08)
+            try:
+                visual_after, _after_image = visual_probe()
+                after_confidence = float(
+                    visual_after.get("confidence") or 0.0,
+                )
+            except Exception as exc:
+                visual_after = {"error": str(exc)}
+                after_confidence = 0.0
+            verified = bool(
+                visual_after.get("requested_mode_active") is True
+                and after_confidence >= 0.75
+            )
             return ToolResult(json.dumps({
-                "ok": True,
-                "verified": True,
-                "mutation_applied": False,
+                "ok": verified,
+                "verified": verified,
+                "blocked": not verified,
+                "mutation_applied": True,
                 "input_mode": mode,
-                "provider": "implicit_single_mode_surface",
+                "provider": (
+                    "visual_post_selection"
+                    if verified else "unverified_visual_mode_activation"
+                ),
+                "failure_type": "" if verified else "INPUT_MODE_ACTIVATION_UNVERIFIED",
+                "error": "" if verified else (
+                    "the visible selector was activated but a fresh frame did "
+                    "not prove the requested input mode"
+                ),
+                "selector": {"x": x, "y": y},
                 "precondition": before,
+                "visual_precondition": visual_before,
+                "postcondition": visual_after,
+                "click": click_data,
+                "model_calls": visual_calls,
+                "model_elapsed_ms": visual_elapsed_ms,
             }, ensure_ascii=False, default=str))
 
         chosen = candidates[0]
@@ -1385,6 +1643,27 @@ class FastGuiController:
                 "error": "select_color has no target window/region",
             }, ensure_ascii=False))
         cache_key = self._palette_cache_key(region)
+        surface_proof_key = (
+            int(hwnd or 0),
+            int(action.get("visual_frame_id") or 0),
+            color,
+        )
+        surface_proof = self._surface_managed_color_proofs.get(
+            surface_proof_key,
+        )
+        if surface_proof is not None:
+            self._active_color = color
+            return ToolResult(json.dumps({
+                "ok": True,
+                "verified": True,
+                "mutation_applied": False,
+                "postcondition_pending": False,
+                "needs_observe": False,
+                "color": color,
+                "provider": "visual_surface_managed_color",
+                "surface_managed": True,
+                "proof": surface_proof,
+            }, ensure_ascii=False, default=str))
         attempts: list[dict[str, Any]] = []
         raw_strict = action.get("strict")
         strict = True if raw_strict is None else _truthy(raw_strict)

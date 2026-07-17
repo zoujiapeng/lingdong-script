@@ -4,6 +4,7 @@ import {
   resolveControlPlaneConnection,
   runtimeCompatibilityError,
 } from './client';
+import { buildClientRunInputs } from './executionContext';
 import type { ArpExecutionSnapshot, CapabilitySpec, GraphValidation, PlatformOverview, RunProjection, RuntimeEvent } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 import { taskbarNotificationForTransition, type TaskbarRunState } from './taskbarNotification';
@@ -189,7 +190,12 @@ export function useControlPlane() {
   const startGoal = useCallback(async (goal: string, maxSteps = 30, coldStart = false) => {
     const client = requireCompatibleClient();
     const compiled = await client.compileTask(goal, maxSteps, coldStart);
-    const run = await client.startGraph(compiled.graph);
+    const inputs = await buildClientRunInputs(
+      compiled.contract,
+      Date.now(),
+      (handoff) => client.captureDesktopContext(handoff.control_surface_pid),
+    );
+    const run = await client.startGraph(compiled.graph, inputs);
     await refresh();
     return run;
   }, [refresh]);

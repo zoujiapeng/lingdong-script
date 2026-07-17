@@ -153,7 +153,7 @@ ObserveScene -> InferInteraction -> PerformTurn -> VerifyLocalEffect
 
 长拖拽、连续笔画和自由路径的动作前检查不会只取一个跨越首尾的大矩形。运行时保留显式 effect region，并沿实际路径最多均匀抽样 12 个小 ROI 来验证当前权威帧；这样局部 token、光标或路径端点发生变化时，不会被大面积静态背景稀释。
 
-运行快照的 `interaction_state` 保留 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、external change、`failure_stage` 和 model-call/semantic-turn/replan budget。节点持久化的 `runtime_metrics` 会进入 `stage_trace`，分别保留 `model_elapsed_ms`、`controller_elapsed_ms`、`capture_elapsed_ms` 与模型调用数；前端运行视图据此显示当前能力、artifact、证据、预算、耗时和失败阶段。`last_*` 字段用于在终止 no-op plan 之后继续展示最后一次真实因果链。
+运行快照的 `interaction_state` 保留 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、external change、`waiting_external`、`failure_stage` 和 model-call/semantic-turn/replan budget。`waiting_external` 只在合同要求真人继续时出现，包含 watch scope、baseline artifact、timeout、`requires_external_participant` 和 `agent_turn_verified`；它是非终态，不等于成功。节点持久化的 `runtime_metrics` 会进入 `stage_trace`，分别保留 `model_elapsed_ms`、`controller_elapsed_ms`、`capture_elapsed_ms` 与模型调用数；前端运行视图据此显示当前能力、artifact、证据、预算、耗时和具体失败阶段。`last_*` 字段用于在终止 no-op plan 之后继续展示最后一次真实因果链。
 
 ## 低延迟 GUI Controller
 
@@ -238,7 +238,7 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 
 汇总只把严格核验的 run 计入 `verified_success`：必须未超时、`status=done`、policy 和性能预算通过、外部 ground truth 存在且通过，并且没有 unverified done。没有检查项的报告标记为 `ungrounded`，不计成功；报告的 Git、模型、视觉配置 hash、display/DPI provenance 用来保证不同运行可比。
 
-通用实时交互的 opt-in 测试是 `python/winpilot_home/tests/test_windows_visual_interaction_e2e.py`。它启动真实受控浏览器目标，从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入生产路径，由浏览器记录 trusted pointer events；测试不 monkeypatch Controller，也不把内部函数调用冒充 E2E。2026-07-16 的最终矩阵覆盖完整拖入、精确点击、严格顺序点击、滑块、四个确定性 corridor 方向和无上下文共享回合，结果 `9 passed in 275.30s`。九个 run 全部 `done`、0 次 replan/recovery，合计 12 次模型调用（平均 1.33、最多 2），Controller 平均 2,384 ms。ground truth 分别检查 whole-object placement、唯一目标、`1→2→3`、slider band、path validity/minimum clearance 与两笔有效 X；执行还要求 observation artifact lineage、局部视觉 grounding、路径证明和 effect evidence 成立。该可控靶场只验证物理输入、坐标映射、阶段闭环和审计字段，不代表未知软件、移动目标、遮挡、动画、多显示器、高 DPI 或长会话的统计成功率。共享回合首次模型推断耗时 94,395 ms，仍是本轮最大的尾延迟。
+通用实时交互的 opt-in 测试是 `python/winpilot_home/tests/test_windows_visual_interaction_e2e.py`。它启动真实受控浏览器目标，从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入生产路径，由浏览器记录 trusted pointer events；测试不 monkeypatch Controller，也不把内部函数调用冒充 E2E。2026-07-17 的最终自主矩阵覆盖完整拖入、精确点击、严格顺序点击、滑块和四个确定性 corridor 方向，结果 `8 passed, 1 deselected in 155.79s`。八个 run 全部 `done`、外部 ground truth 全部通过、0 次 replan/recovery，合计 10 次模型调用（平均 1.25、最多 2），Controller 平均 2,377 ms。ground truth 分别检查 whole-object placement、唯一目标、`1→2→3`、slider band 和 path validity/minimum clearance；执行还要求 observation artifact lineage、局部视觉 grounding、source footprint、路径证明和 effect evidence 成立。模型调用数和分阶段耗时保留为比较指标，但不以“必须两次”替代正确性；复杂歧义与恢复允许额外调用。`shared_turn` 需要真人继续，因此只验证 Agent 自己的两笔有效路径和随后 `waiting_external` 状态，不计入自主终态通过。该可控靶场只验证物理输入、坐标映射、阶段闭环和审计字段，不代表未知软件、移动目标、遮挡、动画、多显示器、高 DPI 或长会话的统计成功率。
 
 当前已复盘的本地诚实基线之一是 2026-07-14 的单次真实前端冷启动：空白 Paint 收到“用画板画一只猫”，约 55.3 秒，2 次点击、1 次 `draw_strokes`，没有进入 undo/clear 循环。结果可辨认但粗糙且语义有歧义，不能称为“好看”。对应 trace/eval、模型、显示/DPI 和配置没有作为公开基准提交，所以这只是链路/延迟样本，不是可复现的统计成功率；必须积累带完整 provenance 的固定任务、多次运行与外部 ground truth 后才能报告成功率。
 

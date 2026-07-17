@@ -60,6 +60,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setTitleBarTheme: (theme: 'light' | 'dark') =>
     ipcRenderer.invoke('window:set-titlebar-theme', theme),
 
+  // Desktop agents need the target application, not this control surface, to
+  // own the foreground when the first authoritative frame is captured.
+  prepareDesktopHandoff: () =>
+    ipcRenderer.invoke('window:prepare-desktop-handoff'),
+
   // Agent messages (from main process)
   onAgentMessage: (callback: (msg: any) => void) => {
     const handler = (_: any, msg: any) => callback(msg);

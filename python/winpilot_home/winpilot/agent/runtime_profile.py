@@ -49,7 +49,13 @@ class RuntimeProfile:
 
     @property
     def label(self) -> str:
-        return "coding+desktop" if self.coding else "desktop"
+        if self.coding and self.desktop:
+            return "coding+desktop"
+        if self.coding:
+            return "coding"
+        if self.desktop:
+            return "desktop"
+        return "semantic"
 
     @property
     def capabilities(self) -> tuple[str, ...]:
@@ -163,6 +169,13 @@ def build_runtime_profile(
         # not let a generated stage goal re-enable Coding Runtime through an
         # unrelated substring heuristic.  Future typed coding stages can opt in
         # through explicit capabilities or their selected tools.
+        required_stage_capabilities = {
+            str(item).casefold()
+            for item in (
+                tuple(getattr(stage_execution, "required_capabilities", ()) or ())
+                + tuple(getattr(stage_execution, "verifier_requirements", ()) or ())
+            )
+        }
         stage_capabilities = {
             str(item).casefold()
             for item in (
@@ -174,6 +187,14 @@ def build_runtime_profile(
             str(item).casefold()
             for item in tuple(getattr(stage_execution, "tools", ()) or ())
         }
+        desktop_required = any(
+            capability.startswith((
+                "app.", "window.", "controller.", "visual.", "drawing.",
+                "artifact.", "interaction.", "conversation.", "recipient.",
+                "communication.", "delivery.",
+            ))
+            for capability in required_stage_capabilities
+        )
         use_coding = coding_enabled and (
             any(
                 capability.startswith(("coding.", "repository.", "workspace."))
@@ -189,6 +210,7 @@ def build_runtime_profile(
         # Compatibility path for direct AgentRunner/CLI callers that do not yet
         # provide a TaskContract.
         use_coding = coding_enabled and _is_coding_task(task) and not _is_gui_only_task(task)
+        desktop_required = True
     experience_enabled = str(
         getattr(task_contract, "experience_policy", "allow") or "allow"
     ).casefold() != "disabled"
@@ -206,14 +228,14 @@ def build_runtime_profile(
     }
     if not use_coding:
         return RuntimeProfile(
-            desktop=True,
+            desktop=desktop_required,
             coding=False,
             replay=experience_enabled,
             **stage_values,
         )
     max_steps = int(CONFIG.get("coding", "max_steps", default=30))
     return RuntimeProfile(
-        desktop=True,
+        desktop=desktop_required,
         coding=True,
         replay=experience_enabled,
         coding_workspace=coding_workspace_dir(),

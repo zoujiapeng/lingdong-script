@@ -192,9 +192,11 @@ export interface ArpExecutionSnapshot {
 export type TaskStageType =
   | 'OpenApplication' | 'FocusWindow' | 'CreateOrEditArtifact' | 'DrawArtifact'
   | 'CaptureArtifact' | 'SaveArtifact' | 'OpenConversation' | 'ResolveRecipient'
+  | 'GenerateMessageContent' | 'ReviewOrAuthorize'
   | 'SendText' | 'SendArtifact' | 'VerifyArtifact' | 'VerifyDelivery'
   | 'ObserveScene' | 'InferInteraction' | 'PerformTurn' | 'VerifyLocalEffect'
-  | 'WaitForExternalChange';
+  | 'WaitForExternalChange' | 'ExecuteWorkspaceTask' | 'ResearchInformation'
+  | 'TransformData' | 'ManageAutomation' | 'ExecuteSemanticTask';
 
 export interface InteractionActor {
   id: string;
@@ -246,6 +248,8 @@ export interface InteractionSessionContract {
 export interface TaskIntent {
   original_text: string;
   operation: string[];
+  domain?: 'desktop' | 'communication' | 'workspace' | 'web_research' | 'data' | 'automation' | 'general';
+  resource_types?: string[];
   media_type: string;
   channel: string;
   recipient: string;
@@ -255,6 +259,8 @@ export interface TaskIntent {
   send_mode: string;
   subject: string;
   quality: string;
+  message_text?: string;
+  message_content_source?: 'none' | 'explicit' | 'generate';
   confidence: number;
   ambiguous_fields: string[];
   provenance: Record<string, string>;
@@ -563,6 +569,20 @@ export interface CurrentRunResponse {
   ok: boolean;
   run: RunProjection | null;
   arp: ArpExecutionSnapshot | null;
+}
+
+export interface DesktopTargetContext {
+  format: 'desktop-target/1';
+  hwnd: number;
+  title: string;
+  process_id: number;
+  class_name: string;
+  rect: number[];
+  captured_at: number;
+  foreground_verified: boolean;
+  usable: boolean;
+  failure_type: string;
+  reason: string;
 }
 
 export interface RuntimeSourceIdentity {

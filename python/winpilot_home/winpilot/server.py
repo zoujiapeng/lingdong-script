@@ -69,6 +69,7 @@ from .tasking.capability import CapabilityPlanner
 from .tasking.artifacts import ArtifactStore
 from .tasking.compiler import TaskContractCompiler
 from .tasking.contracts import ContractCompileRequest
+from .tasking.execution_context import capture_foreground_window_context
 
 WEBUI_DIR = ROOT_DIR / "webui"
 _RECIPE_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
@@ -686,6 +687,17 @@ def platform_jobs(limit: int = 50) -> dict[str, Any]:
         "jobs": RUNTIME_JOBS.list(
             max(1, min(limit, 200)),
             include_result=False,
+        ),
+    }
+
+
+@app.get("/api/v2/desktop-context")
+def desktop_context(exclude_process_id: int = 0) -> dict[str, Any]:
+    """Bind the external foreground window after the native client yields."""
+    return {
+        "ok": True,
+        "target": capture_foreground_window_context(
+            max(0, int(exclude_process_id or 0)),
         ),
     }
 

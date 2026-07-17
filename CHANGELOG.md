@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### General visual interaction reachability and control loop (2026-07-17)
+
+- Added a renderer-to-runtime execution-context handoff so a task submitted from the native client preserves the intended foreground window instead of losing it when Electron focuses its own UI.
+- Made mutation authorization fail closed: model actions never imply a missing `agent_should_act` decision. Harmless provider-shape drift is canonicalized only when it preserves explicitly supplied geometry; semantic uncertainty still requires a bounded correction or fails before input.
+- Separated input-mode preparation, colour selection, and spatial execution into fresh-frame Controller transactions. UIA silence no longer proves a single-mode surface, and an old frame cannot authorize both a mode switch and subsequent drawing coordinates.
+- Generalized current-pixel region, repeated-partition, complete-object placement, source-footprint, surrounding-surface, guided-path and A* clearance proofs. The implementation contains no object template, application name, recipient alias, or fixed screen coordinate branch.
+- Added explicit autonomous and external-participant session semantics. Only contracts that require a participant may enter non-terminal `waiting_external`; an absent participant is classified separately from an Agent action failure and never counts as task completion.
+- Expanded task intent and stage compilation for non-GUI domains and generated message content, retained current-run ArtifactStore provenance, and kept capability/verifier satisfiability as a pre-execution invariant.
+- Updated the native run view to show execution context, current stage capabilities, artifact/evidence lineage, `waiting_external`, exact failure classification, and model/Controller/capture timing.
+- Final local verification: WinPilot `1827 passed, 13 skipped, 1 warning`, root Python `2508 passed`, Vitest `209 passed`, and renderer/main/CLI/AI typechecks and builds all passed. The opt-in autonomous Windows visual matrix completed `8 passed, 1 deselected in 155.79s` with trusted browser pointer ground truth, 10 total model calls, and no replans or recoveries. The deselected shared-turn case requires a live participant and is reported only as an Agent-turn checkpoint.
+
 ### Native frontend audit, reachability, and performance (2026-07-16)
 
 - Rebuilt the Run History view around `GET /api/v2/runs/{run_id}`. Selecting a run now shows its typed stages, required/verifier/exposed/missing capabilities, model and Controller tools, artifacts, evidence providers, Completion Contract, timing, retries, and exact failure stage instead of only a flattened timeline.

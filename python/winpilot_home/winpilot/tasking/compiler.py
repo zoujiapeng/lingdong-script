@@ -441,11 +441,81 @@ class TaskContractCompiler:
             obligations.append(obligation)
 
         if "send" in intent.operation:
-            quoted = [
-                next((part for part in groups if part), "").strip()
-                for groups in re.findall(r'"([^"]{1,500})"|“([^”]{1,500})”|「([^」]{1,500})」', task)
-            ]
-            text_payload = next((item for item in quoted if item and item != intent.recipient), "")
+            text_payload = str(intent.message_text or "").strip()
+            authorized_message = StateBinding(
+                name="authorized_outbound_message",
+                state_type="authorized_message_content",
+                source=task_id,
+                scope="current_run",
+            )
+            if intent.media_type not in {"image", "file"}:
+                draft_inputs: list[StateBinding] = []
+                if intent.message_content_source == "generate":
+                    draft = StateBinding(
+                        name="outbound_message_draft",
+                        state_type="generated_message_content",
+                        source=task_id,
+                        scope="current_run",
+                    )
+                    generate_stage = add(
+                        StageType.GENERATE_MESSAGE_CONTENT,
+                        "生成待发送文本",
+                        {
+                            "instruction": task,
+                            "app": intent.channel,
+                            "recipient": intent.recipient,
+                            "message_ref": draft.name,
+                        },
+                        state_outputs=[draft],
+                        stage_max_steps=1,
+                    )
+                    generate_obligation = CompletionObligation(
+                        id="message.content_generated",
+                        predicate="message.content_generated",
+                        description=(
+                            "A non-empty outbound draft is grounded in the user's instruction "
+                            "without inventing unavailable personal or current facts."
+                        ),
+                        stage_id=generate_stage.id,
+                        evidence_providers=[
+                            _provider("text_message_generator", "message.generate"),
+                        ],
+                    )
+                    generate_stage.obligations.append(generate_obligation)
+                    obligations.append(generate_obligation)
+                    draft_inputs = [draft]
+
+                review_stage = add(
+                    StageType.REVIEW_OR_AUTHORIZE,
+                    "审查并授权待发送文本",
+                    {
+                        "text": text_payload,
+                        "content_source": intent.message_content_source,
+                        "draft_ref": "outbound_message_draft",
+                        "message_ref": authorized_message.name,
+                        "recipient": intent.recipient,
+                        "app": intent.channel,
+                    },
+                    state_inputs=draft_inputs,
+                    state_outputs=[authorized_message],
+                    stage_max_steps=1,
+                )
+                review_obligation = CompletionObligation(
+                    id="message.content_authorized",
+                    predicate="message.content_authorized",
+                    description=(
+                        "The exact non-empty outbound text is current-run content and was "
+                        "authorized by the user's send request before any communication mutation."
+                    ),
+                    stage_id=review_stage.id,
+                    recipient=intent.recipient,
+                    evidence_providers=[
+                        _provider("message_contract_review", "message.authorize"),
+                    ],
+                )
+                review_stage.obligations.append(review_obligation)
+                obligations.append(review_obligation)
+
             open_stage = add(
                 StageType.OPEN_CONVERSATION,
                 "打开目标会话",
@@ -482,7 +552,15 @@ class TaskContractCompiler:
                 send_stage = add(
                     StageType.SEND_TEXT,
                     "发送文本",
-                    {"app": intent.channel, "recipient": intent.recipient, "text": text_payload, "send_mode": intent.send_mode, "original_task": task},
+                    {
+                        "app": intent.channel,
+                        "recipient": intent.recipient,
+                        "text": text_payload,
+                        "message_ref": authorized_message.name,
+                        "send_mode": intent.send_mode,
+                        "original_task": task,
+                    },
+                    state_inputs=[authorized_message],
                 )
                 send_obligation = CompletionObligation(
                     id="delivery.real_send_action",
@@ -538,22 +616,62 @@ class TaskContractCompiler:
                 stage.obligations.append(obligation)
                 obligations.append(obligation)
             else:
+                stage_type, stage_name, required = {
+                    "desktop": (
+                        StageType.CREATE_OR_EDIT_ARTIFACT,
+                        "执行可见界面语义任务",
+                        ("artifact.create_edit", "visual.semantic_verify"),
+                    ),
+                    "workspace": (
+                        StageType.EXECUTE_WORKSPACE_TASK,
+                        "执行工作区任务",
+                        ("workspace.execute",),
+                    ),
+                    "web_research": (
+                        StageType.RESEARCH_INFORMATION,
+                        "检索并核验公开信息",
+                        ("research.web",),
+                    ),
+                    "data": (
+                        StageType.TRANSFORM_DATA,
+                        "处理结构化数据",
+                        ("data.transform",),
+                    ),
+                    "automation": (
+                        StageType.MANAGE_AUTOMATION,
+                        "管理计划任务",
+                        ("automation.manage",),
+                    ),
+                }.get(
+                    intent.domain,
+                    (
+                        StageType.EXECUTE_SEMANTIC_TASK,
+                        "执行通用语义任务",
+                        ("semantic.execute",),
+                    ),
+                )
                 stage = add(
-                    StageType.CREATE_OR_EDIT_ARTIFACT,
-                    "执行语义任务阶段",
+                    stage_type,
+                    stage_name,
                     {
                         "goal": task,
                         "original_task": task,
-                        "app": intent.source,
-                        "source": intent.source or "active_window",
+                        "domain": intent.domain,
+                        "resource_types": list(intent.resource_types),
+                        "app": intent.source if intent.domain == "desktop" else "",
+                        "source": (
+                            intent.source or "active_window"
+                            if intent.domain == "desktop" else ""
+                        ),
                     },
                 )
+                stage.required_capabilities.extend(required)
                 obligation = CompletionObligation(
                     id="stage.verified_outcome",
                     predicate="stage.verified_outcome",
                     description="The bounded semantic stage produced independently verified evidence.",
                     stage_id=stage.id,
-                    evidence_providers=[_provider("semantic_stage_done", "artifact.create_edit", "visual.semantic_verify")],
+                    evidence_providers=[_provider("semantic_stage_done", *required)],
                 )
                 stage.obligations.append(obligation)
                 obligations.append(obligation)
@@ -567,7 +685,7 @@ class TaskContractCompiler:
             final_conditions=[item.id for item in obligations],
             session=session,
             experience_policy="disabled" if cold_start else "allow",
-            compiler_version="typed-stage-3",
+            compiler_version="typed-stage-4",
         )
         return self.planner.plan_contract(contract)
 

@@ -80,7 +80,19 @@ def _route_surface_colour(
             candidate for candidate in samples
             if float(np.linalg.norm(candidate - seed)) <= cluster_radius
         ]
+        # A seed near the edge of the dominant colour cluster can include one
+        # transitive outlier that is within radius of the seed but outside the
+        # radius of the resulting median.  Trim against the robust centre and
+        # recompute once; otherwise a single anti-aliased bend sample rejects
+        # an otherwise coherent route, often only in one mirrored direction.
         center = np.median(np.stack(cluster), axis=0)
+        centered = [
+            candidate for candidate in cluster
+            if float(np.linalg.norm(candidate - center)) <= cluster_radius
+        ]
+        if centered:
+            cluster = centered
+            center = np.median(np.stack(cluster), axis=0)
         spread = max(
             float(np.linalg.norm(candidate - center)) for candidate in cluster
         )
@@ -100,6 +112,132 @@ def _route_surface_colour(
         len(samples),
         best_spread,
     )
+
+
+def infer_guided_surface_colour(
+    image: np.ndarray,
+    frame_points: list[list[float]],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Infer one coherent route-surface signature from semantic waypoints.
+
+    This is used before endpoint grounding so a boundary candidate can be
+    checked against the same visible surface that the guided drag follows.
+    It remains a non-authorizing observation: the full source-footprint route
+    proof in :func:`refine_guided_drag_path` is still required before input.
+    """
+    if image is None or image.size == 0:
+        raise GuidedPathError("guided surface signature requires a current frame")
+    height, width = image.shape[:2]
+    anchors = _deduplicate([
+        _pixel_point(point, width, height) for point in frame_points
+    ])
+    if len(anchors) < 3:
+        raise GuidedPathError(
+            "guided surface signature requires at least three ordered points"
+        )
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    colour, cluster_count, sample_count, spread = _route_surface_colour(
+        lab, anchors,
+    )
+    return colour, {
+        "provider": "guided_route_surface_sampling",
+        "cluster_samples": int(cluster_count),
+        "total_samples": int(sample_count),
+        "colour_spread": round(float(spread), 3),
+    }
+
+
+def infer_surrounding_surface_colour(
+    image: np.ndarray,
+    source_region: list[float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Infer the surface immediately surrounding one grounded source.
+
+    Semantic waypoints can cross the wrong side of a bend. Samples just
+    outside an already grounded draggable object are a stronger local clue to
+    the surface on which it rests. This is non-authorizing context: endpoint
+    grounding, connected-component membership, footprint erosion and the
+    full-resolution route proof still run before input.
+    """
+    if image is None or image.size == 0:
+        raise GuidedPathError("source-surface signature requires a current frame")
+    if not isinstance(source_region, list) or len(source_region) != 4:
+        raise GuidedPathError("source-surface signature requires one source region")
+    height, width = image.shape[:2]
+    left, top, right, bottom = _pixel_box(source_region, width, height)
+    source_width = max(2, right - left)
+    source_height = max(2, bottom - top)
+    offsets: list[tuple[float, float]] = []
+    for fraction in (0.25, 0.5, 0.75):
+        offsets.extend((
+            (fraction, -0.30),
+            (fraction, 1.30),
+            (-0.30, fraction),
+            (1.30, fraction),
+        ))
+    points = _deduplicate([
+        (
+            int(round(left + x_fraction * source_width)),
+            int(round(top + y_fraction * source_height)),
+        )
+        for x_fraction, y_fraction in offsets
+        if (
+            4 <= left + x_fraction * source_width < width - 4
+            and 4 <= top + y_fraction * source_height < height - 4
+        )
+    ])
+    if len(points) < 6:
+        raise GuidedPathError(
+            "grounded source has too little visible surrounding surface"
+        )
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    samples = [_patch_median(lab, point) for point in points]
+    cluster_radius = 16.0
+    clusters: list[tuple[list[np.ndarray], np.ndarray, float]] = []
+    for seed in samples:
+        cluster = [
+            candidate for candidate in samples
+            if float(np.linalg.norm(candidate - seed)) <= cluster_radius
+        ]
+        center = np.median(np.stack(cluster), axis=0)
+        cluster = [
+            candidate for candidate in cluster
+            if float(np.linalg.norm(candidate - center)) <= cluster_radius
+        ]
+        if not cluster:
+            continue
+        center = np.median(np.stack(cluster), axis=0)
+        spread = max(
+            float(np.linalg.norm(candidate - center)) for candidate in cluster
+        )
+        if any(
+            float(np.linalg.norm(center - known_center)) <= cluster_radius
+            for _known, known_center, _spread in clusters
+        ):
+            continue
+        clusters.append((cluster, center, spread))
+    clusters.sort(key=lambda item: (-len(item[0]), item[2]))
+    if not clusters:
+        raise GuidedPathError("source-surface sampling found no coherent colour")
+    best_cluster, colour, spread = clusters[0]
+    second_count = len(clusters[1][0]) if len(clusters) > 1 else 0
+    required = max(4, int(math.ceil(len(samples) * 0.50)))
+    if (
+        len(best_cluster) < required
+        or spread > cluster_radius
+        or (second_count and len(best_cluster) - second_count < 2)
+    ):
+        raise GuidedPathError(
+            "surface around the grounded source is visually ambiguous"
+        )
+    return colour, {
+        "provider": "grounded_source_surrounding_surface",
+        "cluster_samples": len(best_cluster),
+        "second_cluster_samples": second_count,
+        "total_samples": len(samples),
+        "colour_spread": round(float(spread), 3),
+        "sample_points": [[int(x), int(y)] for x, y in points],
+    }
 
 
 def _nearest_enabled(
@@ -257,6 +395,8 @@ def refine_guided_drag_path(
     source_region: list[float],
     target_region: list[float],
     interaction_region: list[float],
+    surface_colour: np.ndarray | None = None,
+    surface_sampling: dict[str, Any] | None = None,
 ) -> tuple[list[list[float]], dict[str, Any]]:
     """Return safe intermediate frame waypoints plus an auditable pixel proof."""
     height, width = image.shape[:2]
@@ -268,8 +408,40 @@ def refine_guided_drag_path(
         raise GuidedPathError("guided drag requires a visible non-direct route")
 
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
-    route_colour, cluster_count, sample_count, colour_spread = (
-        _route_surface_colour(lab, anchors)
+    semantic_surface_colour: np.ndarray | None = None
+    semantic_surface_error = ""
+    try:
+        semantic_surface_colour, semantic_cluster_count, semantic_sample_count, (
+            semantic_colour_spread
+        ) = _route_surface_colour(lab, anchors)
+    except GuidedPathError as exc:
+        semantic_cluster_count = 0
+        semantic_sample_count = 0
+        semantic_colour_spread = 0.0
+        semantic_surface_error = str(exc)
+    if surface_colour is None:
+        if semantic_surface_colour is None:
+            raise GuidedPathError(semantic_surface_error)
+        route_colour = semantic_surface_colour
+        surface_provider = "guided_route_surface_sampling"
+        cluster_count = semantic_cluster_count
+        sample_count = semantic_sample_count
+        colour_spread = semantic_colour_spread
+    else:
+        supplied = np.asarray(surface_colour, dtype=np.float32).reshape(-1)
+        if supplied.size != 3 or not np.isfinite(supplied).all():
+            raise GuidedPathError("supplied route-surface signature is malformed")
+        route_colour = supplied
+        sampling = surface_sampling or {}
+        surface_provider = str(
+            sampling.get("provider") or "grounded_source_surrounding_surface"
+        )
+        cluster_count = int(sampling.get("cluster_samples") or 0)
+        sample_count = int(sampling.get("total_samples") or 0)
+        colour_spread = float(sampling.get("colour_spread") or 0.0)
+    semantic_surface_distance = (
+        float(np.linalg.norm(semantic_surface_colour - route_colour))
+        if semantic_surface_colour is not None else None
     )
     colour_distance = np.linalg.norm(lab - route_colour, axis=2)
     route_mask = np.where(colour_distance <= 16.0, 255, 0).astype(np.uint8)
@@ -468,6 +640,12 @@ def refine_guided_drag_path(
         "surface_cluster_samples": cluster_count,
         "surface_total_samples": sample_count,
         "surface_colour_spread": round(colour_spread, 3),
+        "surface_provider": surface_provider,
+        "semantic_waypoint_surface_distance": (
+            round(semantic_surface_distance, 3)
+            if semantic_surface_distance is not None else None
+        ),
+        "semantic_waypoint_surface_error": semantic_surface_error,
         "route_mask_ratio": round(mask_ratio, 6),
         "source_radius_px": round(source_radius, 3),
         "required_clearance_px": round(required_clearance, 3),

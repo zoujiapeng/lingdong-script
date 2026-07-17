@@ -962,6 +962,85 @@ def test_anchored_circle_pass_finds_dashed_target_inside_larger_curved_surface()
     assert proof["circle_boundary_support"] >= 0.52
 
 
+@pytest.mark.parametrize("mirror_y", [False, True])
+def test_guided_surface_context_disambiguates_off_route_round_distractor(
+    mirror_y: bool,
+):
+    import winpilot.tasking.visual_geometry as geometry_module
+    from winpilot.tasking.visual_path import infer_guided_surface_colour
+
+    height, width = 620, 960
+    image = np.full((height, width, 3), 244, dtype=np.uint8)
+
+    def orient(point: tuple[int, int]) -> tuple[int, int]:
+        return (
+            point[0], height - point[1] if mirror_y else point[1],
+        )
+
+    centerline = [
+        orient(point)
+        for point in ((835, 465), (470, 465), (470, 205), (145, 205))
+    ]
+    cv2.polylines(
+        image, [np.array(centerline, np.int32)], False,
+        (145, 165, 190), 164, lineType=cv2.LINE_AA,
+    )
+    cv2.polylines(
+        image, [np.array(centerline, np.int32)], False,
+        (214, 224, 236), 150, lineType=cv2.LINE_AA,
+    )
+    goal = centerline[-1]
+    for angle in range(0, 360, 28):
+        cv2.ellipse(
+            image, goal, (58, 58), 0, angle, angle + 16,
+            (35, 155, 85), 7,
+        )
+    # A complete but off-route round object competes inside the model's coarse
+    # target search. Geometry alone may find both; only one encloses the
+    # coherent surface sampled by the guided path.
+    distractor = orient((145, 72))
+    cv2.circle(image, distractor, 49, (60, 75, 95), 6)
+
+    frame_points = [
+        [point[0] / width * 1000.0, point[1] / height * 1000.0]
+        for point in centerline
+    ]
+    surface_colour, _sampling = infer_guided_surface_colour(
+        image, frame_points,
+    )
+    rough_top = min(goal[1], distractor[1]) - 20
+    rough_bottom = max(goal[1], distractor[1]) + 20
+    rough = [
+        85 / width * 1000.0,
+        rough_top / height * 1000.0,
+        205 / width * 1000.0,
+        rough_bottom / height * 1000.0,
+    ]
+    proof = geometry_module._resolve_region(
+        image,
+        rough,
+        [0, 0, 1000, 1000],
+        role="target",
+        context_surface_colour=surface_colour,
+    )
+    resolved = proof["resolved_region"]
+    resolved_center = (
+        (resolved[0] + resolved[2]) / 2.0 / 1000.0 * width,
+        (resolved[1] + resolved[3]) / 2.0 / 1000.0 * height,
+    )
+
+    assert resolved_center == pytest.approx(goal, abs=16)
+    assert proof["acceptance_policy"] in {
+        "guided_surface_endpoint_consensus",
+        "strict_consensus",
+        "semantic_target_shape_anchor",
+        "semantic_enclosing_target_shape",
+    }
+    if proof["acceptance_policy"] == "guided_surface_endpoint_consensus":
+        assert proof["context_surface_support"] >= 0.55
+        assert proof["context_surface_margin"] >= 0.30
+
+
 def test_shape_anchor_rejects_incomplete_arc_with_weak_unique_evidence():
     image = np.full((500, 800, 3), 242, dtype=np.uint8)
     cv2.ellipse(image, (600, 330), (55, 55), 0, 20, 190, (40, 40, 40), 6)

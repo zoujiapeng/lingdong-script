@@ -103,6 +103,41 @@ def test_draw_colour_obligation_lowers_to_controller_selection_before_paths():
     assert actions[2]["requested_color"] == "red"
 
 
+def test_draw_preparation_can_be_committed_before_spatial_mapping():
+    from winpilot.perception.surface_binding import InteractionRegion
+    from winpilot.tasking.interaction_controller import (
+        controller_actions,
+        controller_preparation_actions,
+    )
+
+    decision = _decision(_coloured_draw("red"))
+    preparation = controller_preparation_actions(decision)
+    spatial = controller_actions(
+        decision,
+        frame_region={"left": 100, "top": 200, "width": 1001, "height": 1001},
+        bound_region=InteractionRegion(
+            (100, 100, 900, 900),
+            coordinate_space="frame_0_1000",
+            label="bound",
+            source="test",
+        ),
+        frame_epoch=7,
+        include_preparation=False,
+    )
+
+    assert [item["action"] for item in preparation] == [
+        "ensure_input_mode", "select_color",
+    ]
+    assert preparation[0]["surface_affordance_evidence"] == (
+        "visible pointer-authored surface"
+    )
+    assert preparation[0]["target_region"] == [300.0, 300.0, 700.0, 700.0]
+    assert preparation[0]["target_anchor"] == [500.0, 500.0]
+    assert preparation[0]["source_frame_coordinates"] == {}
+    assert [item["action"] for item in spatial] == ["draw_strokes"]
+    assert spatial[0]["visual_frame_id"] == 7
+
+
 def test_explicit_matching_colour_selection_is_not_duplicated():
     from winpilot.tasking.interaction import InteractionAction
 
@@ -464,6 +499,67 @@ def test_drag_rejects_center_only_drop_and_accepts_complete_source_footprint():
     assert overlap_drop.frame_x2 == 620
 
 
+def test_model_coarse_drop_box_becomes_a_local_geometry_hypothesis_only():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_action_geometry,
+    )
+
+    raw = {
+        "interaction_region": [0, 0, 1000, 1000],
+        "resolution_requirements": [],
+        "actions": [{
+            "action": "drag",
+            "frame_x1": 250,
+            "frame_y1": 250,
+            "frame_x2": 620,
+            "frame_y2": 620,
+            "source_region": [200, 200, 300, 300],
+            "target_region": [605, 605, 635, 635],
+            "target_anchor": [620, 620],
+            "placement_requirement": "source_inside_target",
+            "effect_region_binding": "target_region",
+            "expected_effect_region": [605, 605, 635, 635],
+        }],
+        "expected_effect": {
+            "region": [605, 605, 635, 635],
+            "region_binding": "target_region",
+            "binding_action_index": 0,
+        },
+    }
+    repairs: list[str] = []
+    normalized = _canonicalize_model_action_geometry(
+        raw,
+        allow_local_resolution=True,
+        repairs=repairs,
+    )
+
+    action = InteractionAction.model_validate(normalized["actions"][0])
+    assert action.target_region == pytest.approx(
+        [562.5, 562.5, 677.5, 677.5],
+    )
+    assert normalized["expected_effect"]["region"] == pytest.approx(
+        action.target_region,
+    )
+    assert normalized["resolution_requirements"] == [{
+        "kind": "spatial_geometry",
+        "resolver": "current_frame_geometry",
+        "action_index": 0,
+        "description": (
+            "resolve the exact bounded destination because the coarse model "
+            "box cannot contain the complete source"
+        ),
+    }]
+    assert any("expanded_local_search_hypothesis" in item for item in repairs)
+
+    # Direct/programmatic actions retain the strict schema gate. Only the VLM
+    # ingestion path that also installs a current-frame resolver may create the
+    # non-authorizing search hypothesis.
+    unchanged = _canonicalize_model_action_geometry(raw)
+    with pytest.raises(ValidationError, match="complete source_region"):
+        InteractionAction.model_validate(unchanged["actions"][0])
+
+
 def test_action_grounding_regions_cannot_escape_semantic_interaction_region():
     from winpilot.tasking.interaction import InteractionAction
 
@@ -715,6 +811,7 @@ def test_model_action_level_stroke_space_moves_to_each_path_without_changing_geo
     )
 
     raw = {
+        "agent_should_act": True,
         "actions": [{
             "action": "draw_strokes",
             "coordinate_space": "target_region_0_1000",
@@ -744,6 +841,29 @@ def test_model_action_level_stroke_space_moves_to_each_path_without_changing_geo
     )
 
 
+def test_model_actions_never_imply_missing_mutation_authorization():
+    from winpilot.tasking.interaction import (
+        InteractionPlanOutputError,
+        _canonicalize_model_decision,
+    )
+
+    with pytest.raises(InteractionPlanOutputError) as rejected:
+        _canonicalize_model_decision({
+            "turn_owner": "agent",
+            "actions": [{
+                "action": "click",
+                "frame_x": 400,
+                "frame_y": 400,
+                "target_region": [350, 350, 450, 450],
+            }],
+        }, prior_state={})
+
+    assert rejected.value.code == "mutation_authorization_missing"
+    assert not any(
+        "derived_from_actions" in item for item in rejected.value.repairs
+    )
+
+
 def test_model_conflicting_stroke_spaces_are_not_repaired_or_executed():
     from winpilot.tasking.interaction import (
         InteractionAction,
@@ -751,6 +871,7 @@ def test_model_conflicting_stroke_spaces_are_not_repaired_or_executed():
     )
 
     normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
         "actions": [{
             "action": "draw_strokes",
             "coordinate_space": "target_region_0_1000",
@@ -776,6 +897,7 @@ def test_action_level_coordinate_space_remains_forbidden_for_non_draw_actions():
     )
 
     normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
         "actions": [{
             "action": "click",
             "coordinate_space": "frame_0_1000",
@@ -794,6 +916,7 @@ def test_model_percent_like_stroke_scale_is_normalized_with_auditable_repair():
     from winpilot.tasking.interaction import _canonicalize_model_decision
 
     raw = {
+        "agent_should_act": True,
         "actions": [{
             "action": "draw_strokes",
             "source_region": [200, 200, 400, 400],
@@ -826,6 +949,7 @@ def test_model_single_nested_regions_are_unwrapped_without_guessing_geometry():
     from winpilot.tasking.interaction import _canonicalize_model_decision
 
     raw = {
+        "agent_should_act": True,
         "actions": [{
             "action": "draw_strokes",
             "target_region": [[200, 200, 400, 400]],
@@ -855,11 +979,72 @@ def test_model_single_nested_regions_are_unwrapped_without_guessing_geometry():
     assert "expected_effect.region:shape->flat_region" in repairs
 
 
+def test_model_point_target_region_can_copy_identical_explicit_target_bound_effect_roi():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "click",
+            "frame_x": 250,
+            "frame_y": 350,
+            "target_region": None,
+            "expected_effect_region": [200, 300, 300, 400],
+            "effect_region_binding": "target_region",
+        }],
+    }, prior_state={})
+
+    action_payload = normalized["actions"][0]
+    assert action_payload["target_region"] == [200, 300, 300, 400]
+    assert (
+        "actions[0].target_region:copied_from_"
+        "explicit_target_bound_effect_region" in repairs
+    )
+    assert InteractionAction.model_validate(action_payload).target_region == [
+        200.0, 300.0, 300.0, 400.0,
+    ]
+
+
+@pytest.mark.parametrize("binding,point", [
+    ("independent_region", (250, 350)),
+    ("target_region", (450, 550)),
+])
+def test_model_point_target_region_is_not_invented_without_matching_bound_geometry(
+    binding,
+    point,
+):
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "click",
+            "frame_x": point[0],
+            "frame_y": point[1],
+            "expected_effect_region": [200, 300, 300, 400],
+            "effect_region_binding": binding,
+        }],
+    }, prior_state={})
+
+    assert normalized["actions"][0]["target_region"] == []
+    assert not any("copied_from_explicit_target_bound" in item for item in repairs)
+    if binding == "target_region":
+        with pytest.raises(ValidationError, match="requires target_region"):
+            InteractionAction.model_validate(normalized["actions"][0])
+
+
 def test_model_multiple_nested_regions_remain_invalid_and_are_not_selected():
     from winpilot.tasking.interaction import _canonicalize_model_decision
 
     value = [[100, 100, 200, 200], [300, 300, 400, 400]]
     normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
         "actions": [{
             "action": "click",
             "frame_x": 150,
@@ -876,6 +1061,7 @@ def test_model_drag_points_make_contradictory_direct_label_guided():
     from winpilot.tasking.interaction import _canonicalize_model_decision
 
     normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
         "actions": [{
             "action": "drag",
             "path_mode": "direct",
@@ -894,6 +1080,7 @@ def test_model_direct_drag_discards_only_redundant_collinear_samples():
     from winpilot.tasking.interaction import _canonicalize_model_decision
 
     normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
         "actions": [{
             "action": "drag",
             "path_mode": "direct",
@@ -956,17 +1143,23 @@ def test_planning_prompt_projects_only_executable_typed_actions_and_grounding():
         "interaction_mechanism", "affordance_evidence",
     ):
         assert field in schema
-    assert "must declare target_region" in prompt
+    # Keep the model protocol small enough that weak/fast models can spend
+    # their context on the actual frame.  The deterministic Pydantic/runtime
+    # validators continue to own the detailed fail-closed invariants.
+    assert len(prompt) < 7000
+    assert "agent_should_act is mandatory and explicit" in prompt
+    assert "Freehand input uses draw_strokes" in prompt
     assert "target_region_0_1000" in prompt
-    assert "Two separate pen strokes require two separate objects" in prompt
+    assert "one separate down/move/up path" in prompt
     for unavailable in ("key_down", "key_up"):
         assert unavailable not in schema
         assert f"Do not emit {unavailable}" in prompt or unavailable in prompt
     assert "finish|reobserve|wait_external|blocked" in schema
-    assert "Never use reobserve" in prompt
-    assert "continuation=blocked" in prompt
-    assert "surface_region is the stable outer task surface" in prompt
-    assert "only this turn's legal action ROI" in prompt
+    assert "Never reobserve an unchanged frame" in prompt
+    assert "blocked with a reason" in prompt
+    assert "surface_region is the stable task surface" in prompt
+    assert "emit the complete ordered batch now" in prompt
+    assert "interaction_region is this turn's contained legal ROI" in prompt
     assert '"assignment": "red"' in prompt
     assert "Primary action modality constraint: drag" in prompt
     assert "Prefer semantic Controller actions such as select_color" not in prompt

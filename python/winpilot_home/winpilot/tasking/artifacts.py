@@ -590,6 +590,7 @@ class ArtifactStore:
         pixel_threshold: int = 18,
         min_change_ratio: float = 0.025,
         min_mean_delta: float = 2.0,
+        allow_coherent_region: bool = False,
     ) -> dict[str, Any]:
         """Prove that a stage-owned screen region changed between two frames.
 
@@ -630,8 +631,21 @@ class ArtifactStore:
             mean_delta = float(np.mean(delta))
             ratio_floor = max(0.0, min(1.0, float(min_change_ratio)))
             mean_floor = max(0.0, float(min_mean_delta))
+            coherent_change = self._coherent_frame_change(
+                delta,
+                threshold=threshold,
+                ratio_floor=ratio_floor,
+            )
+            globally_changed = ratio >= ratio_floor and mean_delta >= mean_floor
             return {
-                "changed": ratio >= ratio_floor and mean_delta >= mean_floor,
+                "changed": bool(
+                    globally_changed
+                    or (
+                        allow_coherent_region
+                        and ratio >= ratio_floor
+                        and coherent_change.get("detected") is True
+                    )
+                ),
                 "change_ratio": round(ratio, 4),
                 "mean_pixel_delta": round(mean_delta, 3),
                 "pixel_threshold": threshold,
@@ -645,6 +659,8 @@ class ArtifactStore:
                 },
                 "baseline_frame_id": baseline_frame_id,
                 "current_frame_id": current_frame_id,
+                "coherent_change": coherent_change,
+                "coherent_region_allowed": bool(allow_coherent_region),
                 "method": "aligned_frame_delta",
             }
         except Exception as exc:
@@ -655,6 +671,74 @@ class ArtifactStore:
                 "reason": str(exc),
                 "method": "unavailable",
             }
+
+    @staticmethod
+    def _coherent_frame_change(
+        delta: Any,
+        *,
+        threshold: int,
+        ratio_floor: float,
+    ) -> dict[str, Any]:
+        """Find a spatially coherent changed patch inside a larger ROI.
+
+        Remote UI acknowledgement often changes a compact banner, dialog, or
+        status label while the rest of a full-window search region remains
+        identical.  A whole-ROI mean dilutes that evidence.  Conversely,
+        scattered capture noise must not become causal proof, so this detector
+        requires a connected component with both absolute pixel support and
+        meaningful density inside its own bounding box.
+        """
+        import cv2
+        import numpy as np
+
+        mask = (delta >= threshold).astype(np.uint8)
+        region_pixels = max(1, int(mask.size))
+        minimum_pixels = max(
+            24,
+            int(np.ceil(region_pixels * max(0.00035, ratio_floor * 0.25))),
+        )
+        component_count, _labels, stats, _centroids = (
+            cv2.connectedComponentsWithStats(mask, connectivity=8)
+        )
+        candidates: list[dict[str, Any]] = []
+        for index in range(1, component_count):
+            left, top, width, height, pixels = [
+                int(value) for value in stats[index]
+            ]
+            if pixels < minimum_pixels or width <= 0 or height <= 0:
+                continue
+            component_region = delta[top:top + height, left:left + width]
+            component_mask = mask[top:top + height, left:left + width]
+            density = float(np.mean(component_mask))
+            local_mean = float(np.mean(component_region))
+            if density < 0.025 or local_mean < 2.0:
+                continue
+            candidates.append({
+                "bounds": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                },
+                "changed_pixels": pixels,
+                "density": round(density, 4),
+                "mean_pixel_delta": round(local_mean, 3),
+            })
+        best = max(
+            candidates,
+            key=lambda item: (
+                int(item["changed_pixels"]),
+                float(item["density"]),
+                float(item["mean_pixel_delta"]),
+            ),
+            default=None,
+        )
+        return {
+            "detected": best is not None,
+            "minimum_changed_pixels": minimum_pixels,
+            "candidate_count": len(candidates),
+            "best": best,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         items = self.artifacts()

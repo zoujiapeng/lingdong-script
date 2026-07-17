@@ -19,6 +19,8 @@ class StageType(str, Enum):
     SAVE_ARTIFACT = "SaveArtifact"
     OPEN_CONVERSATION = "OpenConversation"
     RESOLVE_RECIPIENT = "ResolveRecipient"
+    GENERATE_MESSAGE_CONTENT = "GenerateMessageContent"
+    REVIEW_OR_AUTHORIZE = "ReviewOrAuthorize"
     SEND_TEXT = "SendText"
     SEND_ARTIFACT = "SendArtifact"
     VERIFY_ARTIFACT = "VerifyArtifact"
@@ -28,6 +30,11 @@ class StageType(str, Enum):
     PERFORM_TURN = "PerformTurn"
     VERIFY_LOCAL_EFFECT = "VerifyLocalEffect"
     WAIT_FOR_EXTERNAL_CHANGE = "WaitForExternalChange"
+    EXECUTE_WORKSPACE_TASK = "ExecuteWorkspaceTask"
+    RESEARCH_INFORMATION = "ResearchInformation"
+    TRANSFORM_DATA = "TransformData"
+    MANAGE_AUTOMATION = "ManageAutomation"
+    EXECUTE_SEMANTIC_TASK = "ExecuteSemanticTask"
 
 
 class InteractionActor(BaseModel):
@@ -113,6 +120,11 @@ class InteractionSessionContract(BaseModel):
 class TaskIntent(BaseModel):
     original_text: str
     operation: list[str] = Field(default_factory=list)
+    domain: Literal[
+        "desktop", "communication", "workspace", "web_research",
+        "data", "automation", "general",
+    ] = "general"
+    resource_types: list[str] = Field(default_factory=list)
     media_type: str = "none"
     channel: str = ""
     recipient: str = ""
@@ -124,6 +136,8 @@ class TaskIntent(BaseModel):
     ] = "send"
     subject: str = ""
     quality: str = "normal"
+    message_text: str = ""
+    message_content_source: Literal["none", "explicit", "generate"] = "none"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     ambiguous_fields: list[str] = Field(default_factory=list)
     provenance: dict[str, str] = Field(default_factory=dict)

@@ -88,6 +88,7 @@ const STATUS_LABELS: Record<string, string> = {
   queued: '排队中', running: '运行中', paused: '已暂停', done: '已完成', completed: '已完成',
   success: '成功', failed: '失败', error: '错误', canceled: '已取消', idle: '就绪',
   provisional: '待验证', active: '有效', verified: '已验证', rejected: '已拒绝', inactive: '未启用',
+  waiting_external: '等待外部参与者', external_change_observed: '已检测到外部变化',
 };
 const RUN_KIND_LABELS: Record<string, string> = {
   agent: '智能代理', arp: '流程', replay: '重放', schedule: '计划任务', controller: '控制器', automation: '自动化',
@@ -624,7 +625,7 @@ function statusTone(status?: string): string {
   if (status === 'done' || status === 'completed' || status === 'success') return 'success';
   if (status === 'failed' || status === 'error' || status === 'canceled') return 'danger';
   if (status === 'paused') return 'warning';
-  if (status === 'running' || status === 'queued') return 'active';
+  if (status === 'running' || status === 'queued' || status === 'waiting_external') return 'active';
   return 'neutral';
 }
 
@@ -729,8 +730,18 @@ export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeSt
   const externalLabel = external?.changed
     ? '已检测到外部变化'
     : external?.waiting || external?.armed
-      ? '等待外部变化'
+      ? '等待外部参与者操作'
       : external?.status || '尚未布防';
+  const waitingForExternal = Boolean(
+    state.status === 'waiting_external' || external?.waiting || external?.armed,
+  );
+  const statusLabel = failure
+    ? failure.failure_type === 'external_change_timeout'
+      ? '外部参与者未响应'
+      : '阶段失败'
+    : waitingForExternal
+      ? '等待外部参与者'
+      : STATUS_LABELS[state.status || ''] || state.status || state.mode || '已编译';
   const bindingNames = (state.state_bindings || []).map((item) => item.name).join(', ');
 
   return (
@@ -740,8 +751,8 @@ export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeSt
         <div>
           {state.session_id && <code>{state.session_id}</code>}
           <StatusPill
-            status={failure ? 'failed' : state.status || (external?.waiting ? 'running' : 'provisional')}
-            label={failure ? '阶段失败' : state.status || state.mode || '已编译'}
+            status={failure ? 'failed' : waitingForExternal ? 'waiting_external' : state.status || 'provisional'}
+            label={statusLabel}
           />
         </div>
       </div>
@@ -756,7 +767,7 @@ export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeSt
         </div>
         <div className="arp-interaction-card">
           <span>当前轮次</span><strong>{turnOwnerLabel(state.turn_owner)}</strong>
-          <small>{state.mode || '待推断互动模式'}</small>
+          <small>{waitingForExternal ? 'Agent 本回合已验证，轮到外部参与者' : state.mode || '待推断互动模式'}</small>
         </div>
         <div className="arp-interaction-card">
           <span>计划动作</span><strong>{interactionActionLabel(state.planned_action)}</strong>
@@ -777,7 +788,7 @@ export function InteractionRuntimePanel({ state }: { state: InteractionRuntimeSt
         </div>
         <div className="arp-interaction-card">
           <span>会话状态</span><strong>{state.status || '已编译'}</strong>
-          <small>{state.model_calls ?? 0} 次模型调用{bindingNames ? ` · ${bindingNames}` : ''}</small>
+          <small>{waitingForExternal ? '持续会话尚未终结' : `${state.model_calls ?? 0} 次模型调用`}{bindingNames ? ` · ${bindingNames}` : ''}</small>
         </div>
       </div>
       {(state.baseline_artifact_id || state.current_artifact_id) && (

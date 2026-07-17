@@ -19,6 +19,12 @@ _COMMUNICATION_VERB = re.compile(
     re.IGNORECASE,
 )
 _CHAT_OPERATION = re.compile(r"聊天|聊(?:天|聊|一下|一聊)?|回复|私信|消息|信息|chat\s+with|reply|message", re.IGNORECASE)
+_MESSAGE_SPEECH_ACT_RELATION = re.compile(
+    r"(?:给|向)\s*[^，,。.!！？；;]{1,40}?\s*(?:说|告诉|解释|询问|问候|回复)|"
+    r"(?:回复)\s*(?:他|她|对方|联系人|收件人)?\s*(?:说)?|"
+    r"\b(?:tell|explain|ask|reply\s+to|message)\s+[^,.;!?]{1,40}",
+    re.IGNORECASE,
+)
 _CAPTURE_VERB = re.compile(r"截图|截取|捕获|capture|screenshot", re.IGNORECASE)
 _DRAW_VERB = re.compile(r"绘制|(?<!刚)(?<!已)画(?!图(?:里|中|应用|窗口|软件)|板|好)|draw|paint|sketch", re.IGNORECASE)
 _SAVE_VERB = re.compile(r"保存|另存为|导出|save|export", re.IGNORECASE)
@@ -27,6 +33,50 @@ _IMAGE_MEDIA = re.compile(r"截图|截取|图片|照片|图像|image|photo|scree
 _FILE_MEDIA = re.compile(r"文件|附件|文档|file|attachment|document", re.IGNORECASE)
 _DRAFT = re.compile(r"不要发送|别发送|只输入|草稿|draft\s+only|do\s+not\s+send", re.IGNORECASE)
 _SHARE = re.compile(r"分享|share", re.IGNORECASE)
+
+# Domain candidates are grammatical predicate/resource pairs.  They are not
+# final routing facts until the parser has ruled out a more specific visual or
+# communication contract.  Keeping the resource half mandatory prevents a
+# bare word such as "test", "search", or "plan" in prose from selecting a
+# runtime by itself.
+_WORKSPACE_TASK_RELATION = re.compile(
+    r"(?:(?:分析|检查|审查|修复|修改|重构|实现|构建|编译|运行|执行|调试|测试)"
+    r"[^，,。.!！？；;]{0,48}(?:代码|源码|仓库|项目|GitHub|测试|构建|脚本|程序)|"
+    r"(?:代码|源码|仓库|项目|GitHub|测试|构建|脚本|程序)"
+    r"[^，,。.!！？；;]{0,48}(?:分析|检查|审查|修复|修改|重构|实现|构建|编译|运行|执行|调试|测试)|"
+    r"\b(?:analy[sz]e|inspect|review|fix|modify|refactor|implement|build|compile|run|debug|test)\b"
+    r"[^,.;!?]{0,64}\b(?:code|source|repository|repo|project|github|tests?|build|script|program)\b|"
+    r"\b(?:code|source|repository|repo|project|github|tests?|build|script|program)\b"
+    r"[^,.;!?]{0,64}\b(?:analy[sz]e|inspect|review|fix|modify|refactor|implement|build|compile|run|debug|test)\b)",
+    re.IGNORECASE,
+)
+_WEB_RESEARCH_RELATION = re.compile(
+    r"(?:(?:搜索|检索|查找|查询|调研|研究|搜集|收集|查一下|了解)"
+    r"[^，,。.!！？；;]{0,48}(?:最新|资料|信息|新闻|网页|网站|来源|文献|公开)|"
+    r"(?:最新|资料|信息|新闻|网页|网站|来源|文献|公开)"
+    r"[^，,。.!！？；;]{0,48}(?:搜索|检索|查找|查询|调研|研究|搜集|收集)|"
+    r"\b(?:search|research|look\s+up|find|collect)\b[^,.;!?]{0,64}"
+    r"\b(?:latest|current|information|news|web|website|sources?|papers?|public)\b)",
+    re.IGNORECASE,
+)
+_DATA_TASK_RELATION = re.compile(
+    r"(?:(?:处理|分析|清洗|转换|整理|合并|拆分|统计|汇总)"
+    r"[^，,。.!！？；;]{0,48}(?:CSV|Excel|XLSX|表格|数据集|JSON|数据)|"
+    r"(?:CSV|Excel|XLSX|表格|数据集|JSON|数据)"
+    r"[^，,。.!！？；;]{0,48}(?:处理|分析|清洗|转换|整理|合并|拆分|统计|汇总)|"
+    r"\b(?:process|analy[sz]e|clean|convert|organize|merge|split|summari[sz]e)\b"
+    r"[^,.;!?]{0,64}\b(?:csv|xlsx?|spreadsheet|dataset|json|data)\b)",
+    re.IGNORECASE,
+)
+_AUTOMATION_TASK_RELATION = re.compile(
+    r"(?:(?:创建|新建|添加|设置|管理|取消|删除|列出|查看)"
+    r"[^，,。.!！？；;]{0,48}(?:计划任务|定时任务|提醒|自动化|调度任务)|"
+    r"(?:计划任务|定时任务|提醒|自动化|调度任务)"
+    r"[^，,。.!！？；;]{0,48}(?:创建|新建|添加|设置|管理|取消|删除|列出|查看)|"
+    r"\b(?:create|add|set|manage|cancel|delete|list|show)\b[^,.;!?]{0,64}"
+    r"\b(?:scheduled\s+task|schedule|reminder|automation)\b)",
+    re.IGNORECASE,
+)
 
 _CONTINUOUS_CHAT = re.compile(
     r"continuous\s+chat|keep\s+chatting|chat\s+continuously|"
@@ -144,6 +194,17 @@ _POINTER_LOCATIVE_RELATION = re.compile(
 _EXPLICIT_LIVE_SURFACE_CUE = re.compile(
     r"界面|窗口|屏幕|页面|画面|可见|已打开|"
     r"\b(?:visible|on[- ]screen|screen|window|page|interface|canvas)\b",
+    re.IGNORECASE,
+)
+_CURRENT_LIVE_SURFACE_RELATION = re.compile(
+    r"(?:(?:当前|已打开|现在|眼前|可见|这个|该)"
+    r"[^，,。.!！？；;]{0,24}(?:界面|窗口|屏幕|页面|画面|内容)|"
+    r"(?:界面|窗口|屏幕|页面|画面|内容)"
+    r"[^，,。.!！？；;]{0,24}(?:当前|已打开|现在|眼前|可见)|"
+    r"\b(?:current(?:ly)?|visible|already\s+open)\b"
+    r"[^,.;!?]{0,24}\b(?:interface|window|screen|page|view|content)\b|"
+    r"\b(?:interface|window|screen|page|view|content)\b"
+    r"[^,.;!?]{0,24}\b(?:current(?:ly)?|visible|already\s+open)\b)",
     re.IGNORECASE,
 )
 _CONTEXTUAL_VISUAL_GOAL_RELATION = re.compile(
@@ -289,6 +350,13 @@ _NON_APPLICATION_OPEN_TARGET = re.compile(
     r"https?://|\.[A-Za-z0-9]{1,8}$)",
     re.IGNORECASE,
 )
+_OPEN_RESOURCE_RELATION = re.compile(
+    r"^\s*(?:(?:请|麻烦)(?:你)?\s*)?(?:打开\s*|open\s+)"
+    r"[^\r\n]{1,120}(?:https?://|\.[A-Za-z0-9]{1,8}|文件|文档|附件|图片|照片|"
+    r"\b(?:file|document|attachment|image|photo|url|web\s*page)\b)"
+    r"[^\r\n]*$",
+    re.IGNORECASE,
+)
 
 
 def _strip_recipient(value: str) -> str:
@@ -296,6 +364,56 @@ def _strip_recipient(value: str) -> str:
     value = value.strip("'\"“”‘’「」『』")
     value = re.split(r"(?:然后|并且|并|后|，|。|,|\.|截图|图片|照片)", value, maxsplit=1)[0]
     return value.strip(" \t\r\n，。,.：:;；的'\"“”‘’「」『』")[:80]
+
+
+def _quoted_message_segments(text: str) -> list[str]:
+    """Extract balanced quoted spans without assigning their semantic role."""
+    pairs = (("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"), ('"', '"'), ("'", "'"))
+    found: list[tuple[int, str]] = []
+    for opener, closer in pairs:
+        pattern = re.compile(
+            re.escape(opener) + r"([^\r\n]{1,500}?)" + re.escape(closer)
+        )
+        found.extend((match.start(), match.group(1).strip()) for match in pattern.finditer(text))
+    return [value for _position, value in sorted(found) if value]
+
+
+def _explicit_message_text(text: str, recipient: str) -> str:
+    """Return literal outbound content only when the utterance supplies it.
+
+    A quoted span or the complement of an explicit reply/say predicate is
+    literal content.  Requests such as "发一句问候" remain generative rather
+    than being mistaken for the exact message text.
+    """
+    for candidate in _quoted_message_segments(text):
+        if candidate and candidate != recipient:
+            return candidate
+    complement_patterns = (
+        r"(?:回复)\s*(?:他|她|对方|联系人|收件人)?\s*(?:说)?\s*[：:,，]?\s*([^，。.!！？；;]{1,500})$",
+        r"(?:告诉|跟)\s*[^，,。.!！？；;]{1,40}?\s*(?:说)?\s*[：:,，]\s*([^，。.!！？；;]{1,500})$",
+        r"\breply(?:\s+to\s+[^,.;!?]{1,40})?\s*(?:saying|that|:)\s*([^.;!?]{1,500})$",
+    )
+    for pattern in complement_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip(" \t\r\n'\"“”‘’「」『』")
+            if candidate:
+                return candidate
+    return ""
+
+
+def _execution_domain(text: str) -> tuple[str, list[str], str]:
+    """Return a structural domain candidate, typed resources, and provenance."""
+    matches = [
+        ("workspace", _WORKSPACE_TASK_RELATION, ("repository", "code")),
+        ("web_research", _WEB_RESEARCH_RELATION, ("public_information",)),
+        ("data", _DATA_TASK_RELATION, ("structured_data",)),
+        ("automation", _AUTOMATION_TASK_RELATION, ("scheduled_task",)),
+    ]
+    for domain, pattern, resources in matches:
+        if pattern.search(text):
+            return domain, list(resources), "predicate_resource_relation"
+    return "general", [], "default_general_domain"
 
 
 def _recipient_after_channel(text: str, channel: str) -> str:
@@ -323,7 +441,11 @@ def _recipient_from_relation(text: str) -> str:
     patterns = (
         r"(?:发给|发送给|传给|分享到)\s*([^，。,.]{1,40})",
         r"给\s*([^，。,.]{1,30})\s*(?:发|发送|传|分享)",
+        r"(?:给|向)\s*([^，。,.]{1,30}?)\s*(?:说|告诉|解释|询问|问候|回复)",
+        r"(?:回复)\s*(他|她|对方|联系人|收件人)",
         r"(?:send|share)\s+(?:it\s+|the\s+(?:image|file|screenshot)\s+)?to\s+([^,.;]{1,40})",
+        r"(?:tell|explain|ask|reply\s+to)\s+([^,.;]{1,40})",
+        r"message\s+(?!via\b|through\b|using\b)([^,.;]{1,40})",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -705,7 +827,17 @@ class TaskIntentParser:
             except Exception:
                 extracted = {}
         operations: list[str] = []
-        launch_target = _application_launch_target(text)
+        candidate_domain, candidate_resources, candidate_domain_provenance = (
+            _execution_domain(text)
+        )
+        # "运行测试/构建脚本" is an execution predicate over a workspace
+        # resource, not an application name.  Resolve that relation before the
+        # otherwise open-ended launch grammar.
+        launch_target = (
+            _application_launch_target(text)
+            if candidate_domain == "general"
+            else ""
+        )
         if launch_target:
             operations.append("open")
         if _DRAW_VERB.search(text):
@@ -716,10 +848,11 @@ class TaskIntentParser:
             operations.append("save")
         communication_relation = _COMMUNICATION_VERB.search(text)
         chat_relation = _CHAT_OPERATION.search(text)
+        speech_act_relation = _MESSAGE_SPEECH_ACT_RELATION.search(text)
         continuous_chat_relation = _CONTINUOUS_CHAT.search(text)
         bounded_chat_relation = _BOUNDED_CHAT.search(text)
         if (
-            communication_relation or chat_relation
+            communication_relation or chat_relation or speech_act_relation
             or continuous_chat_relation or bounded_chat_relation
         ):
             operations.append("send")
@@ -763,7 +896,10 @@ class TaskIntentParser:
             media_type = "image"
         elif _FILE_MEDIA.search(text):
             media_type = "file"
-        elif _TEXT_MEDIA.search(text) or communication_relation or chat_relation:
+        elif (
+            _TEXT_MEDIA.search(text) or communication_relation
+            or chat_relation or speech_act_relation
+        ):
             media_type = "text"
         else:
             media_type = "none"
@@ -783,6 +919,58 @@ class TaskIntentParser:
             send_mode = "send"
         subject = _drawing_subject(text)
         quality = "detailed" if re.search(r"好看|精细|细致|漂亮|detailed|beautiful|polished", text, re.IGNORECASE) else "normal"
+        message_text = (
+            _explicit_message_text(text, recipient)
+            if "send" in operations and media_type == "text"
+            else ""
+        )
+        message_content_source = (
+            "explicit" if message_text else
+            "generate" if "send" in operations and media_type == "text" else
+            "none"
+        )
+
+        domain = candidate_domain
+        resource_types = candidate_resources
+        domain_provenance = candidate_domain_provenance
+        if interaction.active or bool(source) or any(
+            operation in operations for operation in ("draw", "capture", "save", "open")
+        ):
+            domain = "desktop"
+            domain_provenance = "typed_desktop_operation"
+        elif domain == "general" and (
+            _CURRENT_LIVE_SURFACE_RELATION.search(text)
+            or _OPEN_RESOURCE_RELATION.fullmatch(text)
+        ):
+            # Read/edit requests over an explicitly visible surface and
+            # open-file/URL requests still need the desktop semantic runtime,
+            # even though they are not live pointer sessions.
+            domain = "desktop"
+            domain_provenance = "explicit_desktop_resource_relation"
+        if "send" in operations:
+            domain = "communication"
+            domain_provenance = "typed_communication_relation"
+        semantic_domain = str(extracted.get("domain") or "").strip()
+        if domain == "general" and semantic_domain in {
+            "desktop", "communication", "workspace", "web_research",
+            "data", "automation", "general",
+        }:
+            domain = semantic_domain
+            domain_provenance = "semantic_extractor"
+            raw_resources = extracted.get("resource_types")
+            if isinstance(raw_resources, list):
+                resource_types = [
+                    str(item).strip() for item in raw_resources if str(item).strip()
+                ]
+
+        domain_operation = {
+            "workspace": "workspace",
+            "web_research": "research",
+            "data": "transform_data",
+            "automation": "automation",
+        }.get(domain)
+        if domain_operation:
+            operations.append(domain_operation)
 
         ambiguous: list[str] = []
         if "send" in operations and not channel:
@@ -794,6 +982,7 @@ class TaskIntentParser:
 
         provenance = {
             "operation": "structural_operation_relation",
+            "domain": domain_provenance,
             "media_type": "media_role",
             "channel": "destination_entity",
             "recipient": "communication_relation",
@@ -824,6 +1013,8 @@ class TaskIntentParser:
         return TaskIntent(
             original_text=text,
             operation=list(dict.fromkeys(operations)),
+            domain=domain,
+            resource_types=resource_types,
             media_type=media_type,
             channel=channel,
             recipient=recipient,
@@ -833,6 +1024,8 @@ class TaskIntentParser:
             send_mode=send_mode,
             subject=subject,
             quality=quality,
+            message_text=message_text,
+            message_content_source=message_content_source,
             confidence=max(0.0, confidence),
             ambiguous_fields=ambiguous,
             provenance=provenance,

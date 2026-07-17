@@ -2399,6 +2399,256 @@ def test_ensure_input_mode_blocks_unresolvable_conflicting_mode(monkeypatch):
     assert out["failure_type"] == "INPUT_MODE_CONFLICT_UNRESOLVED"
 
 
+def test_ensure_input_mode_does_not_treat_accessibility_silence_as_proof(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: [])
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(controller_mod.vlm, "is_configured", lambda: False)
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "mode-silence"
+
+    out = FastGuiController(Session()).execute([{
+        "action": "ensure_input_mode", "mode": "continuous_freehand",
+    }], sync=False)
+
+    assert out["ok"] is False
+    assert out["failure_type"] == "INPUT_MODE_VISUAL_PROOF_UNAVAILABLE"
+    data = out["results"][0]["data"]
+    assert data["verified"] is False
+    assert data["provider"] != "implicit_single_mode_surface"
+
+
+def test_ensure_input_mode_accepts_positive_intrinsic_visual_proof(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.screenshot import Region
+
+    monkeypatch.setattr(
+        controller_mod.uia,
+        "collect",
+        lambda _hwnd: [SimpleNamespace(
+            text="Draw with pointer strokes inside the target",
+            role="text",
+            states=[],
+            source="uia",
+            cx=200,
+            cy=100,
+        )],
+    )
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(controller_mod.vlm, "is_configured", lambda: True)
+    prompts = []
+
+    def prove_direct_surface(_image, prompt, **_kwargs):
+        prompts.append(prompt)
+        return {
+            "requested_mode_active": False,
+            "explicit_mode_system": False,
+            "direct_gesture_surface_proven": True,
+            "selector_center": None,
+            "surface_managed_requested_color": False,
+            "confidence": 0.94,
+            "evidence": ["visible instructions require direct pointer strokes"],
+        }
+
+    monkeypatch.setattr(
+        controller_mod.vlm,
+        "structured_json_from_array",
+        prove_direct_surface,
+    )
+    monkeypatch.setattr(
+        controller_mod, "window_region", lambda _hwnd: Region(10, 20, 500, 400),
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "intrinsic-mode-proof"
+
+    out = FastGuiController(
+        Session(),
+        capture_fn=lambda _region: np.zeros((400, 500, 3), dtype=np.uint8),
+    ).execute([{
+        "action": "ensure_input_mode", "mode": "continuous_freehand",
+        "surface_affordance_evidence": "bounded surface accepts pointer strokes",
+        "target_region": [250, 300, 500, 600],
+    }], sync=False)
+
+    assert out["ok"] is True
+    data = out["results"][0]["data"]
+    assert data["verified"] is True
+    assert data["provider"] == "visual_intrinsic_input_mode"
+    assert data["model_calls"] == 1
+    assert "direct_gesture_surface_proven" in prompts[0]
+    assert "bounded surface accepts pointer strokes" in prompts[0]
+    assert "[250, 300, 500, 600]" in prompts[0]
+    assert "Draw with pointer strokes inside the target" in prompts[0]
+    assert data["visible_text_hints"] == [
+        "Draw with pointer strokes inside the target",
+    ]
+
+
+def test_mode_proof_can_verify_surface_managed_color_without_palette(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.screenshot import Region
+
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: [])
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(controller_mod.vlm, "is_configured", lambda: True)
+    calls = []
+
+    def prove_surface_style(_image, prompt, **_kwargs):
+        calls.append(prompt)
+        return {
+            "requested_mode_active": True,
+            "explicit_mode_system": False,
+            "direct_gesture_surface_proven": True,
+            "selector_center": None,
+            "surface_managed_requested_color": True,
+            "confidence": 0.96,
+            "evidence": [
+                "the visible participant legend assigns red to this gesture",
+            ],
+        }
+
+    monkeypatch.setattr(
+        controller_mod.vlm, "structured_json_from_array", prove_surface_style,
+    )
+    monkeypatch.setattr(
+        controller_mod, "window_region", lambda _hwnd: Region(10, 20, 500, 400),
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None,
+    )
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 4
+        run_id = "surface-managed-color"
+
+    controller = FastGuiController(
+        Session(),
+        capture_fn=lambda _region: np.zeros((400, 500, 3), dtype=np.uint8),
+    )
+    out = controller.execute([
+        {
+            "action": "ensure_input_mode",
+            "mode": "continuous_freehand",
+            "visual_frame_id": 4,
+            "requested_color": "red",
+        },
+        {
+            "action": "select_color",
+            "color": "red",
+            "visual_frame_id": 4,
+        },
+    ], sync=False)
+
+    assert out["ok"] is True
+    assert len(calls) == 1
+    assert "Requested output color: red" in calls[0]
+    color_result = out["results"][1]["data"]
+    assert color_result["verified"] is True
+    assert color_result["mutation_applied"] is False
+    assert color_result["provider"] == "visual_surface_managed_color"
+
+
+def test_visual_mode_selector_requires_fresh_post_selection_proof(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+    from winpilot.utils.screenshot import Region
+
+    monkeypatch.setattr(controller_mod.uia, "collect", lambda _hwnd: [])
+    monkeypatch.setattr(
+        controller_mod.CONFIG, "enabled_dimensions", lambda: {"uia"},
+    )
+    monkeypatch.setattr(controller_mod.vlm, "is_configured", lambda: True)
+    verdicts = iter([
+        {
+            "requested_mode_active": False,
+            "explicit_mode_system": True,
+            "intrinsic_single_mode_surface": False,
+            "selector_center": [250, 125],
+            "confidence": 0.91,
+            "evidence": ["one visible compatible mode control"],
+        },
+        {
+            "requested_mode_active": True,
+            "explicit_mode_system": True,
+            "intrinsic_single_mode_surface": False,
+            "selector_center": [250, 125],
+            "confidence": 0.93,
+            "evidence": ["the compatible mode is visibly active"],
+        },
+    ])
+    monkeypatch.setattr(
+        controller_mod.vlm,
+        "structured_json_from_array",
+        lambda *_args, **_kwargs: next(verdicts),
+    )
+    monkeypatch.setattr(
+        controller_mod, "window_region", lambda _hwnd: Region(10, 20, 500, 400),
+    )
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scope_guard, "take_scope_recovery", lambda *_args, **_kwargs: None)
+
+    class Session:
+        hwnd = 77
+        snapshot = None
+        _screen_epoch = 1
+        run_id = "visual-mode-switch"
+
+    captures = []
+    controller = FastGuiController(
+        Session(),
+        capture_fn=lambda region: captures.append(region)
+        or np.zeros((400, 500, 3), dtype=np.uint8),
+    )
+    clicks = []
+    monkeypatch.setattr(
+        controller,
+        "_dispatch",
+        lambda name, args: clicks.append((name, dict(args)))
+        or ToolResult('{"ok": true}'),
+    )
+
+    out = controller.execute([{
+        "action": "ensure_input_mode", "mode": "continuous_freehand",
+    }], sync=False)
+
+    assert out["ok"] is True
+    data = out["results"][0]["data"]
+    assert data["provider"] == "visual_post_selection"
+    assert data["model_calls"] == 2
+    assert len(captures) == 2
+    assert clicks == [("click", {"x": 135, "y": 70, "skip_screen_delta": True})]
+
+
 def test_batch_scope_recovery_rebinds_and_continues_only_uncommitted_action(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult

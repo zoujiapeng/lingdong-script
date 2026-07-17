@@ -147,6 +147,83 @@ def test_guided_path_rejects_uniform_unbounded_background():
         )
 
 
+def test_route_surface_sampling_trims_one_transitive_colour_outlier():
+    from winpilot.tasking.visual_path import _route_surface_colour
+
+    # A is the dominant surface. B is within the cluster radius of A and C,
+    # while C is outside the radius of A. A seed at B therefore creates a
+    # transitive A-B-C cluster whose robust median is A; C must be trimmed
+    # instead of making the whole coherent route fail.
+    lab = np.empty((140, 520, 3), dtype=np.float32)
+    lab[:] = np.array([228.0, 127.0, 120.0], dtype=np.float32)
+    anchors = [(40, 70), (130, 70), (220, 70), (310, 70), (400, 70), (480, 70)]
+    for point, colour in (
+        (anchors[1], [218.0, 120.0, 123.0]),
+        (anchors[2], [215.0, 113.0, 123.0]),
+        (anchors[3], [218.0, 120.0, 123.0]),
+    ):
+        x, y = point
+        lab[y - 5:y + 6, x - 5:x + 6] = np.array(colour, dtype=np.float32)
+
+    colour, cluster_count, sample_count, spread = _route_surface_colour(
+        lab, anchors,
+    )
+
+    assert sample_count >= 10
+    assert cluster_count == sample_count - 1
+    assert spread < 16.0
+    assert colour == pytest.approx([228.0, 127.0, 120.0])
+
+
+def test_grounded_source_surface_overrides_off_route_semantic_waypoints():
+    from winpilot.tasking.visual_path import infer_surrounding_surface_colour
+
+    height, width = 700, 1000
+    image = np.full((height, width, 3), 245, dtype=np.uint8)
+    centerline = [(850, 550), (560, 550), (560, 200), (150, 200)]
+    cv2.polylines(
+        image, [np.array(centerline, np.int32)], False,
+        (70, 90, 110), 150, lineType=cv2.LINE_AA,
+    )
+    cv2.polylines(
+        image, [np.array(centerline, np.int32)], False,
+        (240, 226, 215), 140, lineType=cv2.LINE_AA,
+    )
+    cv2.circle(image, centerline[0], 30, (230, 110, 30), -1)
+    cv2.circle(image, centerline[-1], 58, (35, 155, 85), 6)
+    source_region = [820, 743, 880, 829]
+    target_region = [92, 203, 208, 369]
+    surface_colour, sampling = infer_surrounding_surface_colour(
+        image, source_region,
+    )
+
+    # The semantic path crosses the empty side of the bend. Current-pixel
+    # source context must drive segmentation; A* then independently proves the
+    # actual connected route and its complete-source clearance.
+    bad_semantic_points = [
+        _normalized((850, 350), width, height),
+        _normalized((400, 350), width, height),
+        _normalized((400, 200), width, height),
+    ]
+    points, proof = refine_guided_drag_path(
+        image,
+        start=tuple(_normalized(centerline[0], width, height)),
+        end=tuple(_normalized(centerline[-1], width, height)),
+        planner_points=bad_semantic_points,
+        source_region=source_region,
+        target_region=target_region,
+        interaction_region=[0, 0, 1000, 1000],
+        surface_colour=surface_colour,
+        surface_sampling=sampling,
+    )
+
+    assert points
+    assert sampling["provider"] == "grounded_source_surrounding_surface"
+    assert sampling["cluster_samples"] >= 6
+    assert proof["surface_provider"] == "grounded_source_surrounding_surface"
+    assert proof["sampled_min_clearance_px"] >= proof["required_clearance_px"]
+
+
 def test_guided_path_retries_authoritative_resolution_when_coarse_grid_disconnects(
     monkeypatch,
 ):

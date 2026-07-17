@@ -59,10 +59,187 @@ def test_structured_intent_owns_chat_execution_mode():
 def test_text_send_compiles_payload_and_typed_stages():
     contract, _graph = _compile("用QQ给测试联系人发消息“你好”")
     assert [stage.type.value for stage in contract.stages] == [
-        "OpenConversation", "SendText", "VerifyDelivery",
+        "ReviewOrAuthorize", "OpenConversation", "SendText", "VerifyDelivery",
     ]
-    send = contract.stages[1]
+    send = contract.stages[2]
     assert send.parameters["text"] == "你好"
+    assert send.parameters["message_ref"] == "authorized_outbound_message"
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_source", "expected_text"),
+    [
+        ("帮我用QQ给他发一句问候", "generate", ""),
+        ("用QQ回复他说我晚点到", "explicit", "我晚点到"),
+        ("用QQ给我的手机解释一下今天的安排", "generate", ""),
+    ],
+)
+def test_text_send_never_compiles_an_empty_unowned_payload(
+    task: str,
+    expected_source: str,
+    expected_text: str,
+):
+    contract, _graph = _compile(task)
+    types = [stage.type.value for stage in contract.stages]
+    if expected_source == "generate":
+        assert types[:2] == ["GenerateMessageContent", "ReviewOrAuthorize"]
+    else:
+        assert types[0] == "ReviewOrAuthorize"
+        assert "GenerateMessageContent" not in types
+    assert types[-3:] == ["OpenConversation", "SendText", "VerifyDelivery"]
+    review = next(stage for stage in contract.stages if stage.type.value == "ReviewOrAuthorize")
+    send = next(stage for stage in contract.stages if stage.type.value == "SendText")
+    assert review.parameters["content_source"] == expected_source
+    assert review.parameters["text"] == expected_text
+    assert send.parameters["message_ref"] == "authorized_outbound_message"
+    assert send.state_inputs[0].state_type == "authorized_message_content"
+
+
+@pytest.mark.parametrize(
+    ("task", "stage_type", "required_tool", "coding"),
+    [
+        ("分析这个GitHub项目并修复代码", "ExecuteWorkspaceTask", "apply_patch", True),
+        ("搜索最新资料", "ResearchInformation", "web_search", False),
+        ("处理这个CSV", "TransformData", "read_file", True),
+        ("运行测试", "ExecuteWorkspaceTask", "run_shell", True),
+        ("创建一个计划任务", "ManageAutomation", "schedule_task", False),
+    ],
+)
+def test_non_gui_tasks_compile_to_capability_typed_runtimes(
+    task: str,
+    stage_type: str,
+    required_tool: str,
+    coding: bool,
+):
+    from winpilot.agent.runtime_profile import build_runtime_profile
+
+    contract, graph = _compile(task)
+    assert [stage.type.value for stage in contract.stages] == [stage_type]
+    assert "CreateOrEditArtifact" not in [stage.type.value for stage in contract.stages]
+    stage = contract.stages[0]
+    assert stage.execution is not None
+    assert required_tool in stage.execution.tools
+    assert stage.execution.missing_capabilities == []
+    profile = build_runtime_profile(task, task_contract=contract, stage=stage)
+    assert profile.coding is coding
+    assert profile.desktop is False
+    assert graph.metadata["routing"] == "typed-stage-runtime"
+
+
+def test_message_authorization_fails_closed_for_empty_or_missing_context():
+    from winpilot.tasking.message_content import (
+        MessageDraft,
+        authorize_message_content,
+    )
+
+    assert authorize_message_content(
+        text="", content_source="explicit",
+    )["failure_type"] == "empty_message_content"
+    missing = MessageDraft(
+        text="",
+        confidence=0.95,
+        grounded=False,
+        requires_user_input=True,
+        missing_information=["today's schedule"],
+    )
+    verdict = authorize_message_content(
+        text="", content_source="generate", generated_draft=missing,
+    )
+    assert verdict["ok"] is False
+    assert verdict["failure_type"] == "message_context_missing"
+    greeting = MessageDraft(
+        text="你好，祝你今天愉快！",
+        confidence=0.9,
+        grounded=True,
+    )
+    verdict = authorize_message_content(
+        text="", content_source="generate", generated_draft=greeting,
+    )
+    assert verdict == {
+        "ok": True,
+        "text": "你好，祝你今天愉快！",
+        "content_source": "generate",
+        "confidence": 0.9,
+    }
+
+
+def test_message_stage_runtime_passes_one_current_run_body_to_adapter(monkeypatch):
+    import threading
+
+    from winpilot.tasking.message_content import MessageDraft
+    from winpilot.tasking.stage_runtime import StageRuntime
+
+    contract, _graph = _compile("帮我用QQ给他发一句问候", cold_start=True)
+    generate, review, _open, send, _verify = contract.stages
+    runtime = StageRuntime()
+    records = []
+
+    class Registry:
+        def record(self, predicate, **values):
+            record = {"id": f"evidence-{len(records)}", "predicate": predicate, **values}
+            records.append(record)
+            return record
+
+    sent = []
+
+    class Adapter:
+        def send_text(self, text, *, stage_id):
+            sent.append((text, stage_id))
+            return {"ok": True, "send_action": True}
+
+    registry = Registry()
+    monkeypatch.setattr(runtime, "_evidence", lambda _context: registry)
+    monkeypatch.setattr(runtime, "_store", lambda _context: object())
+    monkeypatch.setattr(runtime, "_adapter", lambda *_args, **_kwargs: Adapter())
+    monkeypatch.setattr(
+        "winpilot.tasking.stage_runtime.generate_message_content",
+        lambda **_kwargs: MessageDraft(
+            text="你好，祝你今天愉快！",
+            confidence=0.92,
+            grounded=True,
+            model_elapsed_ms=8,
+        ),
+    )
+    context = {"run_id": "run-message-stages", "runtime_state": {}}
+    stop = threading.Event()
+
+    for stage in (generate, review, send):
+        result = runtime._execute(stage, contract, context, stop, time.monotonic())
+        assert result.ok is True
+
+    assert sent == [("你好，祝你今天愉快！", send.id)]
+    assert context["runtime_state"]["sent_text"] == "你好，祝你今天愉快！"
+    assert [item["predicate"] for item in records] == [
+        "message.content_generated",
+        "message.content_authorized",
+        "delivery.real_send_action",
+    ]
+
+
+def test_send_text_never_calls_adapter_without_current_task_authorization(monkeypatch):
+    import threading
+
+    from winpilot.tasking.stage_runtime import StageRuntime
+
+    contract, _graph = _compile("用QQ给测试联系人发消息“你好”", cold_start=True)
+    send = next(stage for stage in contract.stages if stage.type.value == "SendText")
+    runtime = StageRuntime()
+    monkeypatch.setattr(runtime, "_evidence", lambda _context: object())
+    monkeypatch.setattr(runtime, "_store", lambda _context: object())
+    monkeypatch.setattr(
+        runtime,
+        "_adapter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("adapter must not be reached")
+        ),
+    )
+    context = {"run_id": "run-no-auth", "runtime_state": {}}
+
+    with pytest.raises(RuntimeError) as caught:
+        runtime._execute(
+            send, contract, context, threading.Event(), time.monotonic(),
+        )
+    assert caught.value.failure_type == "message_authorization_missing"
 
 
 def test_cross_application_artifact_tasks_compile_to_typed_stages():
@@ -756,6 +933,63 @@ def test_frame_change_proves_only_a_changed_stage_owned_region(tmp_path):
     assert unchanged["changed"] is False, unchanged
 
 
+def test_frame_change_accepts_coherent_remote_feedback_without_accepting_noise(
+    tmp_path,
+):
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    from winpilot.tasking.artifacts import ArtifactStore
+
+    before_path = tmp_path / "remote-before.png"
+    Image.new("L", (1200, 800), 238).save(before_path)
+    coherent_path = tmp_path / "remote-coherent.png"
+    coherent = Image.open(before_path).copy()
+    draw = ImageDraw.Draw(coherent)
+    draw.rectangle((300, 610, 900, 650), outline=45, width=3)
+    draw.rectangle((330, 622, 560, 640), fill=80)
+    coherent.save(coherent_path)
+
+    noise_path = tmp_path / "remote-noise.png"
+    noisy = np.asarray(Image.open(before_path), dtype=np.uint8).copy()
+    rng = np.random.default_rng(20260717)
+    indices = rng.choice(noisy.size, size=2200, replace=False)
+    noisy.flat[indices] = 45
+    Image.fromarray(noisy).save(noise_path)
+
+    store = ArtifactStore("run-coherent-change", tmp_path / "managed-coherent")
+    before = store.import_file(before_path, purpose="observation", sendable=False)
+    coherent_frame = store.import_file(
+        coherent_path, purpose="observation", sendable=False,
+    )
+    noise_frame = store.import_file(
+        noise_path, purpose="observation", sendable=False,
+    )
+    region = {"left": 0, "top": 0, "width": 1200, "height": 800}
+    coherent_change = store.frame_change(
+        before.artifact_id,
+        coherent_frame.artifact_id,
+        target_region=region,
+        min_change_ratio=0.001,
+        min_mean_delta=0.45,
+        allow_coherent_region=True,
+    )
+    assert coherent_change["changed"] is True, coherent_change
+    assert coherent_change["coherent_change"]["detected"] is True
+
+    scattered_noise = store.frame_change(
+        before.artifact_id,
+        noise_frame.artifact_id,
+        target_region=region,
+        min_change_ratio=0.001,
+        min_mean_delta=0.45,
+        allow_coherent_region=True,
+    )
+    assert scattered_noise["change_ratio"] >= 0.001
+    assert scattered_noise["coherent_change"]["detected"] is False
+    assert scattered_noise["changed"] is False, scattered_noise
+
+
 def test_chat_adapter_causally_binds_new_single_attachment_when_thumbnail_is_lossy(tmp_path):
     import json
     from types import SimpleNamespace
@@ -882,7 +1116,6 @@ def test_chat_adapter_consumes_only_matching_fresh_confirmation_transaction(tmp_
 
     from PIL import Image
 
-    from winpilot.tasking import adapters as adapter_module
     from winpilot.tasking.adapters import QQCommunicationAdapter
     from winpilot.tasking.artifacts import ArtifactStore
     from winpilot.tasking.evidence import EvidenceRegistry
@@ -945,7 +1178,7 @@ def test_chat_adapter_consumes_only_matching_fresh_confirmation_transaction(tmp_
         "send_button": {"element_id": 9, "source": "ocr", "bbox": [1, 2, 3, 4]},
     }
     adapter._pre_paste_frame_id = "clean-pre-paste-frame"
-    monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
+    adapter._sleep = lambda _seconds: None
     try:
         sent = adapter.send_current_composer(artifact_id=artifact.artifact_id, stage_id="stage-send")
     finally:
@@ -1704,7 +1937,6 @@ def test_artifact_delivery_uses_clean_pre_paste_baseline_not_modal_preview(tmp_p
 
     from PIL import Image
 
-    from winpilot.tasking import adapters as adapter_module
     from winpilot.tasking.adapters import QQCommunicationAdapter
     from winpilot.tasking.artifacts import ArtifactStore
     from winpilot.tasking.evidence import EvidenceRegistry
@@ -1748,8 +1980,8 @@ def test_artifact_delivery_uses_clean_pre_paste_baseline_not_modal_preview(tmp_p
 
     monkeypatch.setattr(store, "visual_match", old_bubble_would_match_only_against_modal)
     ticks = iter((0.0, 0.1, 5.1))
-    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
+    adapter._monotonic = lambda: next(ticks)
+    adapter._sleep = lambda _seconds: None
     try:
         result = adapter.verify_latest_outbound(artifact_id=artifact.artifact_id)
     finally:
@@ -1766,7 +1998,6 @@ def test_text_delivery_rejects_unchanged_old_outbound_message(tmp_path, monkeypa
     from PIL import Image, ImageDraw
 
     from winpilot.perception.model import UIElement
-    from winpilot.tasking import adapters as adapter_module
     from winpilot.tasking.adapters import QQCommunicationAdapter
     from winpilot.tasking.artifacts import ArtifactStore
     from winpilot.tasking.evidence import EvidenceRegistry
@@ -1800,8 +2031,8 @@ def test_text_delivery_rejects_unchanged_old_outbound_message(tmp_path, monkeypa
     adapter._capture_observation = lambda _purpose: post
     adapter._message_text_matches = lambda _snapshot, _text: [candidate]
     ticks = iter((0.0, 0.1, 5.1))
-    monkeypatch.setattr(adapter_module.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(adapter_module.time, "sleep", lambda _seconds: None)
+    adapter._monotonic = lambda: next(ticks)
+    adapter._sleep = lambda _seconds: None
     try:
         result = adapter.verify_latest_outbound(text="same text")
     finally:

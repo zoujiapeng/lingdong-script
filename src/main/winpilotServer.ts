@@ -21,7 +21,16 @@ const _stderrTail: string[] = [];
 
 const HOST = '127.0.0.1';
 const RUNTIME_CONTRACT_VERSION = 2;
+// Chromium rejects a fixed list of historically sensitive ports before a
+// request reaches CORS or the server. The highest currently blocked port is
+// 10080, so renderer-facing managed services deliberately use a high port.
+// This keeps the allocation valid even when Chromium's exact list evolves.
+export const MIN_RENDERER_SAFE_PORT = 12_000;
 const CONTROL_TOKEN = process.env.WINPILOT_CONTROL_TOKEN || randomBytes(32).toString('base64url');
+
+export function isRendererSafePort(port: number): boolean {
+  return Number.isInteger(port) && port >= MIN_RENDERER_SAFE_PORT && port <= 65_535;
+}
 
 export function runtimeCompatibilityProblem(payload: any): string {
   const runtime = payload?.runtime;
@@ -62,18 +71,30 @@ function pushStderr(line: string): void {
   while (_stderrTail.length > 25) _stderrTail.shift();
 }
 
-/** Find a free TCP port on the loopback interface. */
-function findFreePort(): Promise<number> {
+function requestEphemeralPort(): Promise<number> {
   return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, HOST, () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error('未找到可用端口'))));
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, HOST, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (port) resolve(port);
+        else reject(new Error('未找到可用端口'));
+      });
     });
   });
+}
+
+/** Find a free loopback port that an Electron renderer is allowed to fetch. */
+async function findFreePort(): Promise<number> {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const port = await requestEphemeralPort();
+    if (isRendererSafePort(port)) return port;
+  }
+  throw new Error('未找到浏览器可访问的本地端口');
 }
 
 /** Poll until the managed child exposes the runtime contract this app expects. */

@@ -17,7 +17,12 @@ import cv2
 import numpy as np
 
 from .interaction import InteractionDecision
-from .visual_path import GuidedPathError, refine_guided_drag_path
+from .visual_path import (
+    GuidedPathError,
+    infer_guided_surface_colour,
+    infer_surrounding_surface_colour,
+    refine_guided_drag_path,
+)
 from .visual_regions import (
     resolve_visible_bounded_region,
     resolve_visible_partition_at_anchor,
@@ -35,6 +40,7 @@ _PROVIDER_FAMILY = {
     "local_luminance": "photometric",
     "local_edges": "boundary",
     "local_circle": "boundary",
+    "guided_surface_context": "photometric",
 }
 _MIN_PROVIDER_SCORE = 0.52
 _MIN_CONSENSUS_SCORE = 0.62
@@ -377,6 +383,9 @@ def _resolve_region(
     *,
     role: str,
     role_label: str = "",
+    context_surface_colour: np.ndarray | None = None,
+    minimum_contained_pixel_size: tuple[int, int] | None = None,
+    allow_guided_path_confirmation: bool = False,
 ) -> dict[str, Any]:
     diagnostic_role = role_label or role
     height, width = image.shape[:2]
@@ -406,6 +415,11 @@ def _resolve_region(
         cv2.GaussianBlur(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), (3, 3), 0),
         40,
         110,
+    )
+    frame_lab = (
+        cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+        if context_surface_colour is not None
+        else None
     )
     rough_center = ((rough[0] + rough[2]) / 2.0, (rough[1] + rough[3]) / 2.0)
     rough_diagonal = max(1.0, math.hypot(rough_width, rough_height))
@@ -448,6 +462,20 @@ def _resolve_region(
                 search[1] + int(y + candidate_height),
             )
             if (
+                role == "target"
+                and minimum_contained_pixel_size is not None
+                and (
+                    candidate_width < int(minimum_contained_pixel_size[0])
+                    or candidate_height < int(minimum_contained_pixel_size[1])
+                )
+            ):
+                # A target for a complete-object placement cannot be a text
+                # glyph, dashed fragment, or hotspot smaller than the already
+                # grounded source. Filtering this impossible geometry before
+                # candidate ranking is stronger than accepting it and trying
+                # to repair the endpoint later.
+                continue
+            if (
                 box[0] < allowed[0] or box[1] < allowed[1]
                 or box[2] > allowed[2] or box[3] > allowed[3]
             ):
@@ -477,6 +505,25 @@ def _resolve_region(
             )
             shape_enclosure_score = 0.0
             circle_boundary_support = 0.0
+            context_surface_support = 0.0
+            if frame_lab is not None and context_surface_colour is not None:
+                inset_x = max(1, int(round(candidate_width * 0.15)))
+                inset_y = max(1, int(round(candidate_height * 0.15)))
+                inner = frame_lab[
+                    min(box[3] - 1, box[1] + inset_y):max(
+                        box[1] + inset_y + 1, box[3] - inset_y,
+                    ),
+                    min(box[2] - 1, box[0] + inset_x):max(
+                        box[0] + inset_x + 1, box[2] - inset_x,
+                    ),
+                ]
+                if inner.size:
+                    context_surface_support = float(np.mean(
+                        np.linalg.norm(
+                            inner - context_surface_colour,
+                            axis=2,
+                        ) <= 16.0
+                    ))
             if role == "target" and provider == "local_circle":
                 circle_boundary_support = _circle_boundary_support(
                     roi_edges, x, y, candidate_width, candidate_height,
@@ -522,6 +569,7 @@ def _resolve_region(
                 "shape_enclosure_score": float(shape_enclosure_score),
                 "size_area_ratio": float(size_area_ratio),
                 "circle_boundary_support": float(circle_boundary_support),
+                "context_surface_support": float(context_surface_support),
             })
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
@@ -564,6 +612,36 @@ def _resolve_region(
                 duplicate["providers"] = providers
                 duplicate["provider_scores"] = provider_scores
     deduplicated.sort(key=lambda item: item["score"], reverse=True)
+    # Endpoint identity is a joint geometry problem for guided drags.  When
+    # exactly one sufficiently supported circular boundary encloses the
+    # coherent route surface, promote it ahead of a visually stronger but
+    # off-route circle.  The promotion is unavailable without the independent
+    # route signature and a large contextual margin, so ordinary target
+    # ranking and ambiguous same-surface targets remain fail-closed.
+    if role == "target" and context_surface_colour is not None:
+        contextual = sorted(
+            (
+                item for item in deduplicated
+                if str(item.get("provider") or "") == "local_circle"
+                and float(item.get("circle_boundary_support") or 0.0) >= 0.65
+            ),
+            key=lambda item: float(
+                item.get("context_surface_support") or 0.0
+            ),
+            reverse=True,
+        )
+        if contextual:
+            best_context = float(
+                contextual[0].get("context_surface_support") or 0.0
+            )
+            next_context = (
+                float(contextual[1].get("context_surface_support") or 0.0)
+                if len(contextual) > 1 else 0.0
+            )
+            if best_context >= 0.55 and best_context - next_context >= 0.30:
+                selected = contextual[0]
+                deduplicated.remove(selected)
+                deduplicated.insert(0, selected)
     top = deduplicated[0] if deduplicated else None
     second = deduplicated[1] if len(deduplicated) > 1 else None
     margin = float(top["score"] - second["score"]) if top and second else float(top["score"] if top else 0.0)
@@ -617,6 +695,15 @@ def _resolve_region(
     circle_boundary_margin = (
         float(top.get("circle_boundary_support") or 0.0)
         - other_circle_boundary_support
+        if top else 0.0
+    )
+    other_context_surface_support = max((
+        float(item.get("context_surface_support") or 0.0)
+        for item in deduplicated[1:]
+    ), default=0.0)
+    context_surface_margin = (
+        float(top.get("context_surface_support") or 0.0)
+        - other_context_surface_support
         if top else 0.0
     )
     # Empty drop zones, slots, tracks, and other outlined destinations can
@@ -692,6 +779,61 @@ def _resolve_region(
         <= _MAX_ENCLOSING_SHAPE_AREA_RATIO
         and displacement_ratio <= _MAX_OFFSET_SHAPE_DISPLACEMENT
     )
+    # For a constrained guided drag, a target boundary is not independent of
+    # the route: its usable interior must lie on the same coherent visible
+    # surface sampled by the semantic waypoints.  This joint proof resolves a
+    # true endpoint ring from nearby text, chrome, or decorative arcs without
+    # weakening single-frame boundary thresholds for ordinary clicks/drags.
+    guided_surface_endpoint_consensus = bool(
+        top is not None
+        and role == "target"
+        and context_surface_colour is not None
+        and str(top.get("provider") or "") == "local_circle"
+        and float(top.get("circle_boundary_support") or 0.0) >= 0.65
+        and float(top.get("context_surface_support") or 0.0) >= 0.55
+        and context_surface_margin >= 0.30
+        and float(top.get("anchor_containment") or 0.0) >= 0.20
+        and float(top.get("size_area_ratio") or float("inf"))
+        <= _MAX_ENCLOSING_SHAPE_AREA_RATIO
+        and displacement_ratio <= _MAX_OFFSET_SHAPE_DISPLACEMENT
+    )
+    # Strong agreement between an endpoint boundary and the current-pixel
+    # surface surrounding the already grounded source can nominate a guided
+    # endpoint even when a nearby enclosing contour keeps the raw score margin
+    # small. The caller must still prove one connected, footprint-safe route to
+    # this endpoint before any pointer input is emitted.
+    guided_surface_endpoint_joint_candidate = bool(
+        top is not None
+        and role == "target"
+        and context_surface_colour is not None
+        and str(top.get("provider") or "") == "local_circle"
+        and float(top.get("circle_boundary_support") or 0.0) >= 0.70
+        and float(top.get("context_surface_support") or 0.0) >= 0.85
+        and context_surface_margin >= 0.15
+        and float(top.get("anchor_containment") or 0.0) >= 0.20
+        and float(top.get("size_area_ratio") or float("inf"))
+        <= _MAX_ENCLOSING_SHAPE_AREA_RATIO
+        and displacement_ratio <= _MAX_OFFSET_SHAPE_DISPLACEMENT
+    )
+    # Some targets contain several concentric or nested contours (text,
+    # dashed ring, shadow and route end-cap). If a guided complete-object drag
+    # has already grounded the source, a strong same-surface circular candidate
+    # may be nominated without pretending the endpoint evidence is final. This
+    # policy is available only to callers that immediately run the connected
+    # component and complete-footprint path proof below.
+    guided_path_deferred_candidate = bool(
+        allow_guided_path_confirmation
+        and minimum_contained_pixel_size is not None
+        and top is not None
+        and role == "target"
+        and context_surface_colour is not None
+        and str(top.get("provider") or "") == "local_circle"
+        and float(top.get("circle_boundary_support") or 0.0) >= 0.68
+        and float(top.get("context_surface_support") or 0.0) >= 0.90
+        and float(top.get("anchor_containment") or 0.0) >= 0.15
+        and float(top.get("size_area_ratio") or float("inf")) <= 5.2
+        and displacement_ratio <= 1.05
+    )
     if (
         not strict_consensus
         and not unique_multi_family_correction
@@ -699,6 +841,9 @@ def _resolve_region(
         and not unique_high_confidence_filled_region
         and not semantic_target_shape_anchor
         and not semantic_enclosing_target_shape
+        and not guided_surface_endpoint_consensus
+        and not guided_surface_endpoint_joint_candidate
+        and not guided_path_deferred_candidate
     ):
         raise VisualGeometryError(
             f"{diagnostic_role} visual grounding is ambiguous "
@@ -710,45 +855,85 @@ def _resolve_region(
             f"anchor_containment={float(top.get('anchor_containment') or 0.0) if top else 0.0:.3f}, "
             f"circle_support={float(top.get('circle_boundary_support') or 0.0) if top else 0.0:.3f}, "
             f"circle_margin={circle_boundary_margin:.3f}, "
+            f"route_surface_support={float(top.get('context_surface_support') or 0.0) if top else 0.0:.3f}, "
+            f"route_surface_margin={context_surface_margin:.3f}, "
             f"candidates={len(deduplicated)})"
         )
-    acceptance_policy = (
-        "strict_consensus" if strict_consensus
-        else (
-            "unique_multi_family_coordinate_correction"
-            if unique_multi_family_correction
-            else (
-                "unique_high_confidence_target_boundary"
-                if unique_high_confidence_target_boundary
-                else (
-                    "unique_high_confidence_filled_region"
-                    if unique_high_confidence_filled_region
-                    else (
-                        "semantic_target_shape_anchor"
-                        if semantic_target_shape_anchor
-                        else "semantic_enclosing_target_shape"
-                    )
-                )
-            )
-        )
+    acceptance_candidates = (
+        (strict_consensus, "strict_consensus"),
+        (
+            unique_multi_family_correction,
+            "unique_multi_family_coordinate_correction",
+        ),
+        (
+            unique_high_confidence_target_boundary,
+            "unique_high_confidence_target_boundary",
+        ),
+        (
+            unique_high_confidence_filled_region,
+            "unique_high_confidence_filled_region",
+        ),
+        (semantic_target_shape_anchor, "semantic_target_shape_anchor"),
+        (
+            semantic_enclosing_target_shape,
+            "semantic_enclosing_target_shape",
+        ),
+        (
+            guided_surface_endpoint_consensus,
+            "guided_surface_endpoint_consensus",
+        ),
+        (
+            guided_surface_endpoint_joint_candidate,
+            "guided_surface_endpoint_joint_candidate",
+        ),
+        (
+            guided_path_deferred_candidate,
+            "guided_path_deferred_candidate",
+        ),
+    )
+    acceptance_policy = next(
+        name for accepted, name in acceptance_candidates if accepted
     )
     if unique_multi_family_correction and not strict_consensus:
         supporting_providers = correction_providers
         provider_families = correction_families
         provider_count = len(supporting_providers)
         family_count = len(provider_families)
+    if (
+        guided_surface_endpoint_consensus
+        or guided_surface_endpoint_joint_candidate
+        or guided_path_deferred_candidate
+    ):
+        supporting_providers = sorted(set(supporting_providers) | {
+            "guided_surface_context",
+        })
+        provider_families = sorted(set(provider_families) | {"photometric"})
+        provider_count = len(supporting_providers)
+        family_count = len(provider_families)
+    provider_scores = {
+        provider: score
+        for provider, score in (top.get("provider_scores") or {}).items()
+        if float(score) >= _MIN_PROVIDER_SCORE
+    }
+    if (
+        guided_surface_endpoint_consensus
+        or guided_surface_endpoint_joint_candidate
+        or guided_path_deferred_candidate
+    ):
+        provider_scores["guided_surface_context"] = round(
+            float(top.get("context_surface_support") or 0.0), 6,
+        )
     return {
         "role": diagnostic_role,
         "provider": "local_geometry_consensus",
         "providers": supporting_providers,
         "provider_families": provider_families,
-        "provider_scores": {
-            provider: score
-            for provider, score in (top.get("provider_scores") or {}).items()
-            if float(score) >= _MIN_PROVIDER_SCORE
-        },
+        "provider_scores": provider_scores,
         "required_family_count": required_family_count,
         "acceptance_policy": acceptance_policy,
+        "requires_guided_path_confirmation": bool(
+            guided_path_deferred_candidate
+        ),
         "displacement_ratio": round(displacement_ratio, 6),
         "rough_iou": round(rough_iou, 6),
         "support_ratio": round(float(top.get("support_ratio") or 0.0), 6),
@@ -763,6 +948,10 @@ def _resolve_region(
             float(top.get("circle_boundary_support") or 0.0), 6,
         ),
         "circle_boundary_margin": round(circle_boundary_margin, 6),
+        "context_surface_support": round(
+            float(top.get("context_surface_support") or 0.0), 6,
+        ),
+        "context_surface_margin": round(context_surface_margin, 6),
         "semantic_anchor": "planner_coarse_region",
         "rough_region": [float(value) for value in rough_bounds],
         "resolved_region": top["normalized_box"],
@@ -901,9 +1090,83 @@ def refine_interaction_geometry(
         source = _resolve_region(
             image, list(action.source_region), list(decision.interaction_region), role="source",
         )
-        target = _resolve_region(
-            image, list(action.target_region), list(decision.interaction_region), role="target",
+        context_surface_colour = None
+        context_surface_sampling: dict[str, Any] = {}
+        if action.path_mode == "guided":
+            source_surface_colour = None
+            source_surface_sampling: dict[str, Any] = {}
+            try:
+                source_surface_colour, source_surface_sampling = (
+                    infer_surrounding_surface_colour(
+                        image,
+                        list(source["resolved_region"]),
+                    )
+                )
+            except GuidedPathError:
+                source_surface_colour = None
+            guided_surface_colour = None
+            guided_surface_sampling: dict[str, Any] = {}
+            try:
+                guided_surface_colour, guided_surface_sampling = (
+                    infer_guided_surface_colour(
+                        image,
+                        [
+                            [float(action.frame_x1), float(action.frame_y1)],
+                            *[
+                                [float(point[0]), float(point[1])]
+                                for point in action.frame_points
+                            ],
+                            [float(action.frame_x2), float(action.frame_y2)],
+                        ],
+                    )
+                )
+            except GuidedPathError:
+                guided_surface_colour = None
+            # The current pixels immediately surrounding a grounded source are
+            # not vulnerable to a coarse semantic waypoint crossing the wrong
+            # side of a bend. Prefer that signature while retaining any
+            # waypoint disagreement in the audit record.
+            if source_surface_colour is not None:
+                context_surface_colour = source_surface_colour
+                context_surface_sampling = dict(source_surface_sampling)
+                context_surface_sampling["semantic_waypoint_provider"] = str(
+                    guided_surface_sampling.get("provider") or ""
+                )
+                context_surface_sampling["semantic_waypoint_distance"] = (
+                    round(float(np.linalg.norm(
+                        guided_surface_colour - source_surface_colour
+                    )), 3)
+                    if guided_surface_colour is not None else None
+                )
+            elif guided_surface_colour is not None:
+                context_surface_colour = guided_surface_colour
+                context_surface_sampling = guided_surface_sampling
+        source_pixel_box = list(source.get("pixel_box") or [])
+        minimum_contained_pixel_size = (
+            (
+                int(source_pixel_box[2]) - int(source_pixel_box[0]),
+                int(source_pixel_box[3]) - int(source_pixel_box[1]),
+            )
+            if (
+                action.placement_requirement == "source_inside_target"
+                and len(source_pixel_box) == 4
+            )
+            else None
         )
+        target = _resolve_region(
+            image,
+            list(action.target_region),
+            list(decision.interaction_region),
+            role="target",
+            context_surface_colour=context_surface_colour,
+            minimum_contained_pixel_size=minimum_contained_pixel_size,
+            allow_guided_path_confirmation=bool(
+                action.path_mode == "guided"
+                and action.placement_requirement == "source_inside_target"
+            ),
+        )
+        if context_surface_sampling:
+            target["context_surface_sampling"] = context_surface_sampling
         source_region = list(source["resolved_region"])
         target_region = list(target["resolved_region"])
         start = _project_point(
@@ -960,6 +1223,14 @@ def refine_interaction_geometry(
                     source_region=source_region,
                     target_region=target_region,
                     interaction_region=list(decision.interaction_region),
+                    surface_colour=context_surface_colour,
+                    surface_sampling=context_surface_sampling,
+                )
+                path_grounding["endpoint_candidate_policy"] = str(
+                    target.get("acceptance_policy") or ""
+                )
+                path_grounding["confirmed_deferred_endpoint"] = bool(
+                    target.get("requires_guided_path_confirmation") is True
                 )
             except GuidedPathError as exc:
                 raise VisualGeometryError(
