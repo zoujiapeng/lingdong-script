@@ -1235,7 +1235,13 @@ def resolve_visible_partition_at_anchor(
     x_candidate_max = container[2] + container_width * 1.75
     y_candidate_min = container[1] - container_height * 1.75
     y_candidate_max = container[3] + container_height * 1.75
-    for raw_line in lines[:, 0]:
+    # OpenCV 4 commonly returns N x 1 x 4 while OpenCV 5 may return N x 4.
+    # Both encode the same four coordinates per segment.  Normalize by total
+    # scalar count instead of indexing one version-specific singleton axis.
+    line_values = np.asarray(lines)
+    if line_values.size == 0 or line_values.size % 4 != 0:
+        return None
+    for raw_line in line_values.reshape(-1, 4):
         x1, y1, x2, y2 = [int(value) for value in raw_line]
         x1 += search[0]
         x2 += search[0]
