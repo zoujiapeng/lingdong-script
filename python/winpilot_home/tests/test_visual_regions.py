@@ -509,6 +509,32 @@ def test_open_repeated_partitions_resolve_anchor_without_outer_box():
         assert resolved["intersection_support"] >= 0.75
 
 
+def test_open_partition_accepts_flat_opencv5_hough_segments(monkeypatch):
+    """The resolver accepts both OpenCV 4 and OpenCV 5 line layouts."""
+    import winpilot.tasking.visual_regions as visual_regions
+
+    original_hough = visual_regions.cv2.HoughLinesP
+
+    def flat_hough(*args, **kwargs):
+        lines = original_hough(*args, **kwargs)
+        if lines is None:
+            return None
+        return np.asarray(lines).reshape(-1, 4)
+
+    monkeypatch.setattr(visual_regions.cv2, "HoughLinesP", flat_hough)
+    image, target, coarse, anchor = _open_partition(17)
+
+    resolved = visual_regions.resolve_visible_partition_at_anchor(
+        image, coarse, anchor, [0, 0, 1000, 1000],
+    )
+
+    assert resolved is not None
+    box = resolved["pixel_box"]
+    center = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    assert target[0] - 8 <= center[0] <= target[2] + 8
+    assert target[1] - 8 <= center[1] <= target[3] + 8
+
+
 def test_open_partition_coalesces_bent_fragments_at_target_cross_section():
     """A curved divider must not become two fake adjacent partitions.
 
