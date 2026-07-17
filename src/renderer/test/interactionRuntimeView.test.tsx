@@ -142,9 +142,36 @@ describe('interactive task contract runtime view', () => {
     expect(screen.getByText('drag the visible token → open slot')).toBeInTheDocument();
     expect(screen.getByText('drag completed')).toBeInTheDocument();
     expect(screen.getByText('已通过')).toBeInTheDocument();
-    expect(screen.getByText('等待外部变化')).toBeInTheDocument();
+    expect(screen.getByText('等待外部参与者操作')).toBeInTheDocument();
+    expect(screen.getByText('Agent 本回合已验证，轮到外部参与者')).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('stage-perform · PerformTurn');
     expect(screen.getByRole('alert')).toHaveTextContent('target_moved：target window changed');
+  });
+
+  it('distinguishes a verified agent turn awaiting a participant from terminal success', () => {
+    const view = interactionRuntimeView(snapshot({
+      interaction_state: {
+        status: 'waiting_external',
+        local_verification: { verified: true, reason: 'agent turn committed' },
+        external_change: {
+          armed: true,
+          waiting: true,
+          changed: false,
+          requires_external_participant: true,
+          watch_scope: 'interaction_region',
+        },
+      },
+    }), []);
+
+    render(<InteractionRuntimePanel state={view!} />);
+
+    expect(screen.getByText('等待外部参与者')).toBeInTheDocument();
+    expect(screen.getByText('等待外部参与者操作')).toBeInTheDocument();
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'SMALL'
+      && element.textContent?.includes('持续会话尚未终结') === true
+    ))).toBeInTheDocument();
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument();
   });
 
   it('derives a compatible live view from typed stages and runtime events when the snapshot is old', () => {

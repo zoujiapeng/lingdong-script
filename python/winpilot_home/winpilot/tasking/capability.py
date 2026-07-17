@@ -38,6 +38,21 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
     "interaction.wait_external_change": (
         "wait_for_visual_change", "run_action_batch", "observe",
     ),
+    "message.generate": (),
+    "message.authorize": (),
+    "message.consume": (),
+    "workspace.execute": (
+        "list_dir", "read_file", "search_text", "write_file", "apply_patch",
+        "run_shell", "github_search",
+    ),
+    "research.web": ("web_search",),
+    "data.transform": (
+        "list_dir", "read_file", "search_text", "write_file", "run_shell",
+    ),
+    "automation.manage": (
+        "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
+    ),
+    "semantic.execute": (),
 }
 
 _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
@@ -58,6 +73,13 @@ _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
         "interaction.verify_local_effect", "interaction.verify_transition",
         "interaction.wait_external_change",
     },
+    "message_contract": {"message.authorize", "message.consume"},
+    "message_text_model": {"message.generate"},
+    "semantic_text_model": {"semantic.execute"},
+    "coding_runtime": {"workspace.execute"},
+    "web_runtime": {"research.web"},
+    "data_runtime": {"data.transform"},
+    "automation_runtime": {"automation.manage"},
 }
 
 _COMMUNICATION_ADAPTER_CAPABILITIES = {
@@ -80,7 +102,11 @@ _STAGE_BASE: dict[StageType, set[str]] = {
     StageType.SAVE_ARTIFACT: {"artifact.save", "artifact.hash"},
     StageType.OPEN_CONVERSATION: {"conversation.open", "recipient.resolve", "visual.read_text"},
     StageType.RESOLVE_RECIPIENT: {"recipient.resolve", "visual.read_text"},
-    StageType.SEND_TEXT: {"communication.send_text", "delivery.send_action"},
+    StageType.GENERATE_MESSAGE_CONTENT: {"message.generate"},
+    StageType.REVIEW_OR_AUTHORIZE: {"message.authorize"},
+    StageType.SEND_TEXT: {
+        "message.consume", "communication.send_text", "delivery.send_action",
+    },
     # Keep capture/verify available in this stage as recovery capabilities.  A
     # stale or absent upstream artifact can be recaptured without restarting
     # the task, and a send implementation can immediately produce the same
@@ -103,6 +129,11 @@ _STAGE_BASE: dict[StageType, set[str]] = {
         "interaction.verify_local_effect", "visual.observe",
     },
     StageType.WAIT_FOR_EXTERNAL_CHANGE: {"interaction.wait_external_change", "visual.observe"},
+    StageType.EXECUTE_WORKSPACE_TASK: {"workspace.execute", "semantic.execute"},
+    StageType.RESEARCH_INFORMATION: {"research.web", "semantic.execute"},
+    StageType.TRANSFORM_DATA: {"data.transform", "semantic.execute"},
+    StageType.MANAGE_AUTOMATION: {"automation.manage", "semantic.execute"},
+    StageType.EXECUTE_SEMANTIC_TASK: {"semantic.execute"},
 }
 
 
@@ -127,7 +158,40 @@ class CapabilityPlanner:
         return set(_COMPONENT_CAPABILITIES.get(component, set()))
 
     def _components_for(self, stage: TaskStage, channel: str) -> list[ComponentChoice]:
-        choices = [ComponentChoice("local_controller", "deterministic desktop operations")]
+        non_desktop_stages = {
+            StageType.GENERATE_MESSAGE_CONTENT,
+            StageType.REVIEW_OR_AUTHORIZE,
+            StageType.EXECUTE_WORKSPACE_TASK,
+            StageType.RESEARCH_INFORMATION,
+            StageType.TRANSFORM_DATA,
+            StageType.MANAGE_AUTOMATION,
+            StageType.EXECUTE_SEMANTIC_TASK,
+        }
+        choices = (
+            []
+            if stage.type in non_desktop_stages
+            else [ComponentChoice("local_controller", "deterministic desktop operations")]
+        )
+        if stage.type == StageType.GENERATE_MESSAGE_CONTENT:
+            choices.append(ComponentChoice("message_text_model", "grounded outbound text drafting"))
+        if stage.type in {
+            StageType.EXECUTE_WORKSPACE_TASK,
+            StageType.RESEARCH_INFORMATION,
+            StageType.TRANSFORM_DATA,
+            StageType.MANAGE_AUTOMATION,
+            StageType.EXECUTE_SEMANTIC_TASK,
+        }:
+            choices.append(ComponentChoice("semantic_text_model", "bounded semantic reasoning"))
+        if stage.type in {StageType.REVIEW_OR_AUTHORIZE, StageType.SEND_TEXT}:
+            choices.append(ComponentChoice("message_contract", "run-scoped outbound content authorization"))
+        if stage.type == StageType.EXECUTE_WORKSPACE_TASK:
+            choices.append(ComponentChoice("coding_runtime", "workspace-confined repository execution"))
+        if stage.type == StageType.RESEARCH_INFORMATION:
+            choices.append(ComponentChoice("web_runtime", "public information retrieval"))
+        if stage.type == StageType.TRANSFORM_DATA:
+            choices.append(ComponentChoice("data_runtime", "structured data processing"))
+        if stage.type == StageType.MANAGE_AUTOMATION:
+            choices.append(ComponentChoice("automation_runtime", "scheduled task management"))
         if stage.type in {
             StageType.OBSERVE_SCENE, StageType.INFER_INTERACTION,
             StageType.PERFORM_TURN, StageType.VERIFY_LOCAL_EFFECT,
@@ -211,6 +275,8 @@ class CapabilityPlanner:
         adapter_choice = next((choice.name for choice in choices if choice.name.endswith("_adapter")), "")
         if stage.type == StageType.INFER_INTERACTION:
             model_role = "interaction_semantic_planner"
+        elif stage.type == StageType.GENERATE_MESSAGE_CONTENT:
+            model_role = "message_content_generator"
         elif stage.type == StageType.VERIFY_LOCAL_EFFECT:
             model_role = (
                 "interaction_semantic_verifier"
@@ -219,6 +285,14 @@ class CapabilityPlanner:
             )
         elif stage.type == StageType.DRAW_ARTIFACT:
             model_role = "visual_artifact_planner"
+        elif stage.type in {
+            StageType.EXECUTE_WORKSPACE_TASK,
+            StageType.RESEARCH_INFORMATION,
+            StageType.TRANSFORM_DATA,
+            StageType.MANAGE_AUTOMATION,
+            StageType.EXECUTE_SEMANTIC_TASK,
+        }:
+            model_role = "semantic_stage"
         else:
             model_role = (
                 "semantic_stage"
@@ -360,6 +434,34 @@ class CapabilityPlanner:
             elif not supports_vision:
                 missing.add("runtime.multimodal_vision_support")
 
+        text_model_required = any(
+            stage.execution is not None
+            and stage.execution.model_role in {
+                "semantic_stage", "message_content_generator",
+            }
+            for stage in contract.stages
+        )
+        main_model: dict[str, object] = {
+            "required": text_model_required,
+            "configured": False,
+            "model": "",
+        }
+        if text_model_required:
+            from ..config import CONFIG
+
+            api = dict(CONFIG.get("api", default={}) or {})
+            configured = bool(
+                str(api.get("base_url") or "").strip()
+                and str(api.get("model") or "").strip()
+                and str(api.get("api_key") or "").strip()
+            )
+            main_model.update({
+                "configured": configured,
+                "model": str(api.get("model") or ""),
+            })
+            if not configured:
+                missing.add("runtime.text_model")
+
         communication_required = any(
             capability.startswith(("conversation.", "recipient.", "communication.", "delivery."))
             for capability in required
@@ -404,6 +506,7 @@ class CapabilityPlanner:
             "missing_capabilities": sorted(missing),
             "runtime_limitations": sorted(limitations),
             "visual_model": visual_model,
+            "main_model": main_model,
             "adapter_probes": adapter_probes,
         }
 

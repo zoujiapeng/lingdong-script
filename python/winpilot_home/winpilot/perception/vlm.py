@@ -17,6 +17,7 @@ import json
 import math
 from pathlib import Path
 import re
+from typing import Any
 
 import cv2
 
@@ -134,26 +135,14 @@ def describe(region: Region, question: str) -> str:
         return f"VLM 调用失败: {exc}"
 
 
-def structured_json_from_image(
-    image_path: str | Path,
+def _structured_json_from_array(
+    image: Any,
     prompt: str,
     *,
-    max_tokens: int = 1800,
+    max_tokens: int,
 ) -> dict:
-    """Return one strict JSON object grounded in an existing image artifact.
-
-    The task runtime persists the authoritative observation before asking for a
-    semantic decision.  Reading that exact file here avoids a second capture
-    silently changing the coordinate frame between perception and planning.
-    This helper is intentionally domain-neutral; callers own their typed
-    schema and must validate the returned object before any mutation.
-    """
     if not is_configured():
         raise RuntimeError(configuration_issue() or "VLM is not configured")
-    path = Path(image_path)
-    if not path.is_file() or path.stat().st_size <= 0:
-        raise ValueError("authoritative visual artifact is missing or empty")
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
         raise ValueError("authoritative visual artifact could not be decoded")
     height, width = image.shape[:2]
@@ -195,6 +184,50 @@ def structured_json_from_image(
     if not isinstance(value, dict):
         raise ValueError("visual model returned a non-object JSON value")
     return value
+
+
+def structured_json_from_array(
+    image: Any,
+    prompt: str,
+    *,
+    max_tokens: int = 900,
+) -> dict:
+    """Return strict JSON from the exact caller-owned in-memory frame.
+
+    Local controller resolvers use this for small semantic preconditions where
+    writing a perception frame as a user-sendable artifact would conflate two
+    lifecycles.  The caller still owns frame lineage and postcondition checks.
+    """
+    return _structured_json_from_array(
+        image,
+        prompt,
+        max_tokens=max_tokens,
+    )
+
+
+def structured_json_from_image(
+    image_path: str | Path,
+    prompt: str,
+    *,
+    max_tokens: int = 1800,
+) -> dict:
+    """Return one strict JSON object grounded in an existing image artifact.
+
+    The task runtime persists the authoritative observation before asking for a
+    semantic decision.  Reading that exact file here avoids a second capture
+    silently changing the coordinate frame between perception and planning.
+    This helper is intentionally domain-neutral; callers own their typed
+    schema and must validate the returned object before any mutation.
+    """
+    path = Path(image_path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("authoritative visual artifact is missing or empty")
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    return _structured_json_from_array(
+        image,
+        prompt,
+        max_tokens=max_tokens,
+    )
 
 
 def verify(region: Region, criteria: str) -> dict:

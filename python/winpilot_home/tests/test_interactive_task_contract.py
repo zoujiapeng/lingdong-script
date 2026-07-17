@@ -110,7 +110,12 @@ def test_action_words_in_descriptive_text_do_not_route_to_visual_interaction(tas
     assert contract.intent.interaction.active is False
     assert "interact" not in contract.intent.operation
     assert contract.session is None
-    assert [stage.type.value for stage in contract.stages] == ["CreateOrEditArtifact"]
+    expected_stage = (
+        "CreateOrEditArtifact"
+        if contract.intent.domain == "desktop"
+        else "ExecuteSemanticTask"
+    )
+    assert [stage.type.value for stage in contract.stages] == [expected_stage]
     assert all(node.kind.value != "agent_goal" for node in graph.nodes)
 
 

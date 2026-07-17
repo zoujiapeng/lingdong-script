@@ -100,6 +100,12 @@ export interface ElectronAPI {
   ensureWinpilot: () => Promise<{ url: string | null; token?: string; starting: boolean; error: string | null }>;
   restartWinpilot: () => Promise<{ url: string | null; token?: string; starting: boolean; error: string | null }>;
   setTitleBarTheme: (theme: 'light' | 'dark') => Promise<boolean>;
+  prepareDesktopHandoff: () => Promise<{
+    yielded: boolean;
+    control_surface_pid: number;
+    prepared_at: number;
+    reason?: string;
+  }>;
 
   // Agent messages
   onAgentMessage: (callback: (msg: any) => void) => () => void;

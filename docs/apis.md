@@ -94,7 +94,7 @@ Electron 托管启动和 renderer 都会校验这些字段。契约缺失、源�
 
 artifact endpoint 同时支持进程内 execution 和重启后的 manifest。manifest 记录本身不构成信任：路径必须位于该 run 的 `traces/<run_id>/artifacts`，run id 必须一致；响应前 `ArtifactStore.get()` 再验证文件非空、大小、SHA-256 和图片尺寸。未知、跨 run、被修改或已删除的工件均返回 404。
 
-实时交互 run 还在有界的 `interaction_state` 中审计 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、`frame_lineage`、`grounding_proof`、`failed_no_effect_evidence_check`、external change 与 `failure_stage`。保留 `last_*` 是为了避免终止用的 no-op plan 覆盖最后一次真实因果动作；前端运行视图优先展示这些字段。窗口标题、hwnd、capture scope、frame region/sha256/epoch 和 client bounds 用于判断 frame authority，不能把旧 frame id 继续带到新窗口动作。
+实时交互 run 还在有界的 `interaction_state` 中审计 `session_id`、`mode`、`frame_id`、`turn_index`、`model_calls`、`target_binding`、`interaction_region`、`turn_owner`、baseline/current observation artifact、`last_mutating_plan`、`last_executed_action`、`last_local_verification`、`frame_lineage`、`grounding_proof`、`failed_no_effect_evidence_check`、external change、`waiting_external` 与 `failure_stage`。只有合同声明需要外部参与者时才允许 `waiting_external`；其中包含 watch scope、baseline artifact、timeout、`requires_external_participant` 和 `agent_turn_verified`。它是非终态运行状态，外部超时的稳定分类为 `external_participant_absent`，普通自主任务不能用它规避完成验证。保留 `last_*` 是为了避免终止用的 no-op plan 覆盖最后一次真实因果动作；前端运行视图优先展示这些字段。窗口标题、hwnd、capture scope、frame region/sha256/epoch 和 client bounds 用于判断 frame authority，不能把旧 frame id 继续带到新窗口动作。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |

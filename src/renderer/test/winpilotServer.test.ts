@@ -4,7 +4,11 @@ vi.mock('electron', () => ({
   app: { isPackaged: false },
 }));
 
-import { runtimeCompatibilityProblem } from '../../main/winpilotServer';
+import {
+  isRendererSafePort,
+  MIN_RENDERER_SAFE_PORT,
+  runtimeCompatibilityProblem,
+} from '../../main/winpilotServer';
 
 function compatibleRuntime() {
   return {
@@ -17,6 +21,14 @@ function compatibleRuntime() {
 }
 
 describe('WinPilot 托管服务兼容性提示', () => {
+  it('启动前拒绝 Chromium 禁止和无效的端口', () => {
+    expect(isRendererSafePort(6665)).toBe(false);
+    expect(isRendererSafePort(10080)).toBe(false);
+    expect(isRendererSafePort(MIN_RENDERER_SAFE_PORT)).toBe(true);
+    expect(isRendererSafePort(49152)).toBe(true);
+    expect(isRendererSafePort(65536)).toBe(false);
+  });
+
   it('使用中文说明运行时协议过期', () => {
     expect(runtimeCompatibilityProblem({ runtime: { contract_version: 1 } }))
       .toBe('托管的 Python 运行时协议已过期。');

@@ -51,9 +51,9 @@ def inventory_visible_regions(
     median = float(np.median(blurred))
     low = max(24, min(96, int(round(median * 0.28))))
     high = max(low + 28, min(192, int(round(median * 0.64))))
-    edges = cv2.Canny(blurred, low, high)
+    raw_edges = cv2.Canny(blurred, low, high)
     edges = cv2.morphologyEx(
-        edges, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8),
+        raw_edges, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8),
     )
     contours, _ = cv2.findContours(
         edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
@@ -135,14 +135,34 @@ def inventory_visible_regions(
             "circularity": float(circularity),
         })
 
-    # Edge contours commonly describe both sides of the same border.  Keep a
-    # single current-pixel object without collapsing genuinely nested regions.
+    # Drop zones, selection frames, crop boxes, and many direct-manipulation
+    # surfaces deliberately use dashed or otherwise interrupted borders.  A
+    # contour of each individual dash cannot prove the containing region, so
+    # bridge short collinear gaps in both axes and then require the proposed
+    # rectangle to be supported on *all four sides by the original pixels*.
+    # The bridge only proposes geometry; it is never accepted as evidence by
+    # itself.  This remains application-, colour-, label-, and task-neutral.
+    candidates.extend(_fragmented_rectangular_boundaries(
+        raw_edges,
+        allowed=allowed,
+        allowed_width=allowed_width,
+        allowed_height=allowed_height,
+    ))
+
+    # Edge contours commonly describe both sides of the same thick border.
+    # Keep one physical object without collapsing a genuinely smaller child
+    # control at the same centre.
     candidates.sort(key=lambda item: item["score"], reverse=True)
     unique: list[dict[str, Any]] = []
     for candidate in candidates:
         duplicate = next((
             item for item in unique
-            if _iou(item["pixel_box"], candidate["pixel_box"]) >= 0.82
+            if (
+                _iou(item["pixel_box"], candidate["pixel_box"]) >= 0.82
+                or _same_outline_object(
+                    item["pixel_box"], candidate["pixel_box"],
+                )
+            )
         ), None)
         if duplicate is None:
             unique.append(candidate)
@@ -296,6 +316,34 @@ def _iou(
     return intersection / max(1.0, first_area + second_area - intersection)
 
 
+def _same_outline_object(
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int],
+) -> bool:
+    """Recognize inner/outer contours of one similarly sized outline."""
+    first_width = max(1, first[2] - first[0])
+    first_height = max(1, first[3] - first[1])
+    second_width = max(1, second[2] - second[0])
+    second_height = max(1, second[3] - second[1])
+    width_ratio = min(first_width, second_width) / max(first_width, second_width)
+    height_ratio = min(first_height, second_height) / max(first_height, second_height)
+    if width_ratio < 0.72 or height_ratio < 0.72:
+        return False
+    intersection = float(_intersection_area(first, second))
+    smaller_area = float(min(
+        first_width * first_height,
+        second_width * second_height,
+    ))
+    if intersection / max(1.0, smaller_area) < 0.90:
+        return False
+    first_center = ((first[0] + first[2]) / 2.0, (first[1] + first[3]) / 2.0)
+    second_center = ((second[0] + second[2]) / 2.0, (second[1] + second[3]) / 2.0)
+    return math.hypot(
+        first_center[0] - second_center[0],
+        first_center[1] - second_center[1],
+    ) <= max(2.0, min(first_width, first_height, second_width, second_height) * 0.20)
+
+
 def _line_coverage(
     edge_mask: np.ndarray,
     *,
@@ -321,6 +369,100 @@ def _line_coverage(
                 break
         hits += int(found)
     return float(hits) / float(samples)
+
+
+def _fragmented_rectangular_boundaries(
+    edge_mask: np.ndarray,
+    *,
+    allowed: tuple[int, int, int, int],
+    allowed_width: int,
+    allowed_height: int,
+) -> list[dict[str, Any]]:
+    """Propose interrupted rectangular boundaries with raw-edge proof.
+
+    Morphological bridging makes separated collinear segments discoverable,
+    while four-sided coverage measured against ``edge_mask`` prevents the
+    synthetic bridge from turning text, a single divider, or scattered marks
+    into an interaction region.
+    """
+    shorter_axis = max(1, min(int(allowed_width), int(allowed_height)))
+    bridge_gap = max(9, min(31, int(round(shorter_axis * 0.015))))
+    if bridge_gap % 2 == 0:
+        bridge_gap += 1
+    horizontal = cv2.morphologyEx(
+        edge_mask,
+        cv2.MORPH_CLOSE,
+        np.ones((3, bridge_gap), dtype=np.uint8),
+    )
+    vertical = cv2.morphologyEx(
+        edge_mask,
+        cv2.MORPH_CLOSE,
+        np.ones((bridge_gap, 3), dtype=np.uint8),
+    )
+    bridged = cv2.bitwise_or(horizontal, vertical)
+    bridged = cv2.morphologyEx(
+        bridged, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8),
+    )
+    contours, _ = cv2.findContours(
+        bridged, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
+    )
+    result: list[dict[str, Any]] = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if (
+            width < 22
+            or height < 22
+            or width > allowed_width * 0.96
+            or height > allowed_height * 0.94
+            or width * height > allowed_width * allowed_height * 0.35
+        ):
+            continue
+        aspect = float(width) / max(1.0, float(height))
+        if not 0.35 <= aspect <= 3.0:
+            continue
+        right = x + width - 1
+        bottom = y + height - 1
+        side_coverage = [
+            _line_coverage(
+                edge_mask, horizontal=True, fixed=y, start=x, end=x + width,
+            ),
+            _line_coverage(
+                edge_mask, horizontal=True, fixed=bottom,
+                start=x, end=x + width,
+            ),
+            _line_coverage(
+                edge_mask, horizontal=False, fixed=x,
+                start=y, end=y + height,
+            ),
+            _line_coverage(
+                edge_mask, horizontal=False, fixed=right,
+                start=y, end=y + height,
+            ),
+        ]
+        boundary_support = float(sum(side_coverage) / len(side_coverage))
+        minimum_side = float(min(side_coverage))
+        if boundary_support < 0.50 or minimum_side < 0.42:
+            continue
+        box = (
+            allowed[0] + x,
+            allowed[1] + y,
+            allowed[0] + x + width,
+            allowed[1] + y + height,
+        )
+        result.append({
+            "pixel_box": box,
+            "shape": "fragmented_boundary",
+            # Keep a fully solid rectangle's native contour preferred during
+            # deduplication, while still ranking stronger fragmented outlines
+            # above weak proposals.
+            "score": float(
+                0.50 * boundary_support + 0.35 * minimum_side + 0.05
+            ),
+            "boundary_support": boundary_support,
+            "fill_ratio": 0.0,
+            "circularity": 0.0,
+        })
+    return result
 
 
 def resolve_visible_bounded_region(
@@ -1332,7 +1474,7 @@ def inventory_visible_partition_regions(
         cv2.MORPH_CLOSE,
         np.ones((3, 3), dtype=np.uint8),
     )
-    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
         dark,
         connectivity=8,
     )
@@ -1349,6 +1491,64 @@ def inventory_visible_partition_regions(
             or area < 180
             or component_width > allowed_width * 0.92
             or component_height > allowed_height * 0.92
+        ):
+            continue
+        # The seed component itself must contain at least two long supports in
+        # each axis.  Without this check an unrelated closed mark inside a
+        # nearby repeated surface can become the search anchor; the resolver's
+        # deliberately generous recovery radius may then find the surrounding
+        # dividers and assign the mark's position as row/column one.  Projection
+        # support is measured only on pixels belonging to this connected
+        # component, so nearby geometry cannot satisfy the seed proof.
+        component = (
+            labels[y:y + component_height, x:x + component_width] == label
+        )
+
+        def long_axis_supports(projection: np.ndarray) -> int:
+            indices = np.flatnonzero(projection >= 0.62)
+            if not len(indices):
+                return 0
+            groups = 1
+            for previous, current in zip(indices[:-1], indices[1:]):
+                if int(current) > int(previous) + 1:
+                    groups += 1
+            return groups
+
+        if (
+            long_axis_supports(component.mean(axis=0)) < 2
+            or long_axis_supports(component.mean(axis=1)) < 2
+        ):
+            continue
+        # This provider is intentionally limited to *open* divider networks.
+        # A closed repeated surface has an outer boundary on all four sides;
+        # treating those outer edges as interior dividers adds one synthetic
+        # cell before and after the real layout and shifts every typed index.
+        # Measure the original current-frame pixels at the component perimeter
+        # and leave four-sided components to ``inventory_visible_regions``.
+        # Open crosses still have only sparse hits where their divider lines
+        # meet the component box, so this does not depend on an application,
+        # board size, colour, or fixed coordinates.
+        perimeter_coverage = [
+            _line_coverage(
+                dark, horizontal=True, fixed=y,
+                start=x, end=x + component_width, tolerance=3,
+            ),
+            _line_coverage(
+                dark, horizontal=True, fixed=y + component_height - 1,
+                start=x, end=x + component_width, tolerance=3,
+            ),
+            _line_coverage(
+                dark, horizontal=False, fixed=x,
+                start=y, end=y + component_height, tolerance=3,
+            ),
+            _line_coverage(
+                dark, horizontal=False, fixed=x + component_width - 1,
+                start=y, end=y + component_height, tolerance=3,
+            ),
+        ]
+        if (
+            min(perimeter_coverage) >= 0.72
+            and float(np.mean(perimeter_coverage)) >= 0.82
         ):
             continue
         containers.append(_normalized_box((

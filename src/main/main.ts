@@ -520,6 +520,41 @@ ipcMain.handle('window:set-titlebar-theme', (_, theme: 'light' | 'dark') => {
   return true;
 });
 
+ipcMain.handle('window:prepare-desktop-handoff', async () => {
+  const window = mainWindow;
+  const preparedAt = Date.now();
+  if (!window || window.isDestroyed()) {
+    return {
+      yielded: false,
+      control_surface_pid: process.pid,
+      prepared_at: preparedAt,
+      reason: 'control_surface_unavailable',
+    };
+  }
+
+  try {
+    // Minimizing lets Windows restore the application that was in front before
+    // the user opened the workbench.  The renderer remains alive and submits
+    // the already-compiled graph while the external target owns foreground.
+    if (!window.isMinimized()) window.minimize();
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    const yielded = !window.isFocused();
+    return {
+      yielded,
+      control_surface_pid: process.pid,
+      prepared_at: preparedAt,
+      ...(yielded ? {} : { reason: 'control_surface_still_focused' }),
+    };
+  } catch (error) {
+    return {
+      yielded: false,
+      control_surface_pid: process.pid,
+      prepared_at: preparedAt,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
 ipcMain.handle('dialog:openFile', async (_, filters?: { name: string; extensions: string[] }[]) => {
   const result = await dialog.showOpenDialog(mainWindow!, {
     properties: ['openFile'],

@@ -284,6 +284,9 @@ class ArpExecution:
                 "status": self.status.value,
                 "current_node_id": self.current_node_id,
                 "variables": dict(self.variables),
+                "execution_context": _json_preview(
+                    self.inputs.get("execution_context") or {},
+                ),
                 "outputs": {key: _json_preview(value) for key, value in self.outputs.items()},
                 "evidence": [_json_preview(item) for item in self.evidence[-30:]],
                 "history": list(self.history[-200:]),
@@ -345,6 +348,7 @@ class ArpExecution:
             "started_at",
             "finished_at",
             "experience_policy",
+            "execution_context",
             "skill_replay_node_count",
             "task_contract",
             "satisfiability",

@@ -123,7 +123,21 @@ def test_selected_unregistered_communication_adapter_fails_before_run(monkeypatc
         "用QQ给测试联系人发送消息",
         cold_start=True,
     )
-    assert {stage.execution.adapter for stage in contract.stages} == {"qq_adapter"}
+    communication_adapters = {
+        stage.execution.adapter
+        for stage in contract.stages
+        if stage.execution
+        and any(
+            capability.startswith((
+                "conversation.", "recipient.", "communication.", "delivery.",
+            ))
+            for capability in (
+                stage.execution.required_capabilities
+                + stage.execution.verifier_requirements
+            )
+        )
+    }
+    assert communication_adapters == {"qq_adapter"}
     monkeypatch.setattr(DomainAdapterRegistry, "_types", {})
 
     report = CapabilityPlanner.runtime_provider_report(contract)

@@ -13,7 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,6 +25,45 @@ STATE: dict[str, Any] = {
     "events": [],
     "started_at": time.time(),
 }
+
+
+def _state_snapshot(case_id: str = "") -> dict[str, Any]:
+    """Return ground truth scoped to one independently executing case.
+
+    Keeping the compatibility-wide event log is useful for diagnostics, but a
+    real E2E assertion must never inherit another case's success bit.
+    """
+    normalized_case = str(case_id or "")[:120]
+    with STATE_LOCK:
+        snapshot = json.loads(json.dumps(STATE))
+    if not normalized_case:
+        return snapshot
+
+    events = [
+        item for item in snapshot.get("events") or []
+        if str(item.get("case_id") or "") == normalized_case
+    ]
+    success_event = next((
+        item for item in reversed(events)
+        if item.get("type") == "scenario_success"
+        and item.get("trusted") is True
+        and item.get("succeeded") is True
+    ), None)
+    latest = success_event or (events[-1] if events else {})
+    result: dict[str, Any] = {
+        "ready": snapshot.get("ready") is True,
+        "success": success_event is not None,
+        "events": events,
+        "started_at": snapshot.get("started_at"),
+        "case_id": normalized_case,
+    }
+    if latest:
+        result["scenario"] = str(latest.get("scenario") or "")
+        result["seed"] = int(latest.get("seed") or 0)
+    if success_event is not None:
+        result["success_event"] = success_event
+        result["completed_at"] = success_event.get("received_at")
+    return result
 
 
 def _safe_value(value: Any, *, depth: int = 0) -> Any:
@@ -46,7 +85,7 @@ def _safe_value(value: Any, *, depth: int = 0) -> Any:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "WinPilotVisualE2E/1"
+    server_version = "WinPilotVisualE2E/2"
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return
@@ -61,11 +100,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        path = urlsplit(self.path).path
+        parsed = urlsplit(self.path)
+        path = parsed.path
         if path == "/state":
-            with STATE_LOCK:
-                snapshot = json.loads(json.dumps(STATE))
-            self._send_json(200, snapshot)
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            case_id = str((query.get("case") or [""])[0] or "")
+            self._send_json(200, _state_snapshot(case_id))
             return
         if path in {"/", "/visual_interaction_target.html"}:
             data = TARGET.read_bytes()

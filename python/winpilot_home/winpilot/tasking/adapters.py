@@ -136,6 +136,11 @@ class CommunicationAdapter(ABC):
         self._conversation_header: dict[str, Any] = {}
         self._composer_binding: dict[str, Any] = {}
         self._pending_send_confirmation: dict[str, Any] = {}
+        # Instance clock seams keep delivery polling deterministic in tests and
+        # prevent a patched module-global clock from corrupting unrelated
+        # perception/background threads in the same process.
+        self._monotonic = time.monotonic
+        self._sleep = time.sleep
 
     @abstractmethod
     def open_conversation(self, recipient: str, *, stage_id: str = "") -> dict[str, Any]: ...
@@ -381,7 +386,7 @@ class CommunicationAdapter(ABC):
         attempts: list[dict[str, Any]] = []
         escaped = self.session.dispatch("hotkey", {"keys": ["esc"]})
         attempts.append({"method": "escape", "ok": _ok(escaped.text)})
-        time.sleep(0.15)
+        self._sleep(0.15)
         refreshed = self._observe_snapshot()
         remaining = self._attachment_confirmation_context(refreshed)
         if remaining.get("verified") is not True:
@@ -414,7 +419,7 @@ class CommunicationAdapter(ABC):
                 "height": zone.height,
             },
         })
-        time.sleep(0.2)
+        self._sleep(0.2)
         after = self._observe_snapshot()
         remaining = self._attachment_confirmation_context(after)
         if remaining.get("verified") is True:
@@ -592,7 +597,7 @@ class CommunicationAdapter(ABC):
                 "error": "clipboard paste receipt does not bind to the requested current-run artifact",
                 "paste_receipt": paste_receipt,
             }
-        time.sleep(0.5)
+        self._sleep(0.5)
         frame = self._capture_observation("composer_preview")
         self._preview_frame_id = frame.artifact_id if frame else ""
         composer_region = self._frame_local_zone(frame, self.layout_profile.composer) if frame else {}
@@ -847,7 +852,7 @@ class CommunicationAdapter(ABC):
             self._sent_text = self._pending_text
             self._pending_text = ""
         if confirmation_binding:
-            time.sleep(0.3)
+            self._sleep(0.3)
             after_snapshot = self._observe_snapshot()
             remaining = self._attachment_confirmation_context(after_snapshot)
             if remaining.get("verified") is True:
@@ -885,7 +890,7 @@ class CommunicationAdapter(ABC):
                 "sent_text": self._sent_text,
             },
         )
-        time.sleep(0.8)
+        self._sleep(0.8)
         return {"ok": True, "send_action": evidence}
 
     def send_text(self, text: str, *, stage_id: str = "") -> dict[str, Any]:
@@ -938,13 +943,13 @@ class CommunicationAdapter(ABC):
                     "failure_type": "delivery_baseline_missing",
                     "error": "text delivery has no causal pre-send conversation baseline",
                 }
-        deadline = time.monotonic() + 5.0
+        deadline = self._monotonic() + 5.0
         last: dict[str, Any] = {
             "ok": False,
             "failure_type": "delivery_not_visible",
             "error": "post-send evidence is not visible yet",
         }
-        while time.monotonic() < deadline:
+        while self._monotonic() < deadline:
             snapshot = self._observe_snapshot()
             recipient_context = self._recipient_header_context(snapshot)
             post_frame = self._capture_observation("post_send_conversation")
@@ -956,7 +961,7 @@ class CommunicationAdapter(ABC):
                     "error": "no post-send frame newer than the send action",
                     "recipient_context": recipient_context,
                 }
-                time.sleep(0.35)
+                self._sleep(0.35)
                 continue
 
             if artifact is not None:
@@ -1066,7 +1071,7 @@ class CommunicationAdapter(ABC):
                     "candidate_evidence": candidate_evidence,
                     "post_send_frame_id": post_frame.artifact_id,
                 }
-            time.sleep(0.35)
+            self._sleep(0.35)
         return last
 
     def _capture_observation(self, purpose: str) -> Artifact | None:
@@ -1121,7 +1126,7 @@ class SearchBasedChatAdapter(CommunicationAdapter):
         # previously interrupted run.  Escape is a reversible, app-scoped
         # cancellation; it never confirms or sends pending content.
         self.session.dispatch("hotkey", {"keys": ["esc"]})
-        time.sleep(0.15)
+        self._sleep(0.15)
         snapshot = self._observe_snapshot()
         stale = self._dismiss_stale_attachment_confirmation(snapshot)
         if stale.get("ok") is not True:
@@ -1217,7 +1222,7 @@ class SearchBasedChatAdapter(CommunicationAdapter):
             typed = self.session.dispatch("type_text", {"text": recipient})
             if not _ok(typed.text):
                 return {"ok": False, "failure_type": "recipient_not_resolved", "error": typed.text}
-            time.sleep(0.45)
+            self._sleep(0.45)
             snapshot = self._observe_snapshot()
             candidates = self._matching_elements(
                 snapshot,
@@ -1238,10 +1243,10 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                 if not _ok(selected.text):
                     return {"ok": False, "failure_type": "recipient_not_resolved", "error": selected.text}
 
-        deadline = time.monotonic() + 4.0
+        deadline = self._monotonic() + 4.0
         context: dict[str, Any] = {}
-        while time.monotonic() < deadline:
-            time.sleep(0.3)
+        while self._monotonic() < deadline:
+            self._sleep(0.3)
             snapshot = self._observe_snapshot()
             context = self._recipient_header_context(snapshot)
             if context.get("verified") is True:

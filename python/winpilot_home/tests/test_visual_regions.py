@@ -151,6 +151,74 @@ def test_visible_region_inventory_exposes_repeated_current_pixel_cells():
         assert selected["candidate_id"].startswith("visible-region-")
 
 
+def test_visible_region_inventory_merges_inner_and_outer_outline_contours():
+    from winpilot.tasking.visual_regions import inventory_visible_regions
+
+    image = np.full((520, 900, 3), 248, dtype=np.uint8)
+    centers: list[tuple[int, int]] = []
+    for row in range(2):
+        for column in range(6):
+            center = (180 + column * 105, 180 + row * 150)
+            centers.append(center)
+            cv2.rectangle(
+                image,
+                (center[0] - 28, center[1] - 28),
+                (center[0] + 28, center[1] + 28),
+                (40, 130, 170),
+                6,
+            )
+
+    inventory = inventory_visible_regions(image)
+    peers = [item for item in inventory if int(item.get("peer_count") or 0) >= 12]
+
+    assert len(peers) == 12
+    assert {(item["row_index"], item["column_index"]) for item in peers} == {
+        (row, column) for row in (1, 2) for column in range(1, 7)
+    }
+
+
+def test_visible_region_inventory_recovers_fragmented_four_sided_boundary():
+    from winpilot.tasking.visual_regions import inventory_visible_regions
+
+    width, height = 1000, 640
+    image = np.full((height, width, 3), 248, dtype=np.uint8)
+    target = (610, 155, 855, 430)
+    dash, gap = 15, 9
+    for x in range(target[0], target[2], dash + gap):
+        end = min(target[2], x + dash)
+        cv2.line(image, (x, target[1]), (end, target[1]), (55, 80, 95), 4)
+        cv2.line(image, (x, target[3]), (end, target[3]), (55, 80, 95), 4)
+    for y in range(target[1], target[3], dash + gap):
+        end = min(target[3], y + dash)
+        cv2.line(image, (target[0], y), (target[0], end), (55, 80, 95), 4)
+        cv2.line(image, (target[2], y), (target[2], end), (55, 80, 95), 4)
+
+    # A closed source, a long divider, and partial chrome are competing
+    # geometry.  None supplies four fragmented sides around the target.
+    cv2.circle(image, (225, 300), 48, (30, 120, 180), -1)
+    cv2.line(image, (50, 520), (950, 520), (90, 90, 90), 3)
+    cv2.line(image, (50, 520), (50, 555), (90, 90, 90), 3)
+
+    inventory = inventory_visible_regions(image)
+    fragmented = [
+        item for item in inventory
+        if item.get("shape") == "fragmented_boundary"
+    ]
+
+    assert fragmented
+    selected = min(fragmented, key=lambda item: (
+        item["center"][0] - (target[0] + target[2]) / width * 500.0
+    ) ** 2 + (
+        item["center"][1] - (target[1] + target[3]) / height * 500.0
+    ) ** 2)
+    left, top, right, bottom = selected["bounds"]
+    assert abs(left / 1000.0 * width - target[0]) <= 8
+    assert abs(top / 1000.0 * height - target[1]) <= 8
+    assert abs(right / 1000.0 * width - target[2]) <= 8
+    assert abs(bottom / 1000.0 * height - target[3]) <= 8
+    assert float(selected["boundary_support"]) >= 0.50
+
+
 def test_open_partition_inventory_exposes_typed_cells_without_domain_rules():
     from winpilot.tasking.visual_regions import (
         inventory_visible_partition_regions,
@@ -177,6 +245,89 @@ def test_open_partition_inventory_exposes_typed_cells_without_domain_rules():
             item["provider"] == "current_frame_partition_geometry"
             for item in inventory
         )
+
+
+def test_closed_repeated_faces_do_not_become_shifted_open_partitions():
+    """Four-sided peers keep exact faces while retaining typed relations.
+
+    A closed matrix contains both outer edges and internal dividers.  The open
+    partition provider must not extrapolate synthetic cells beyond those outer
+    edges, because doing so shifts semantic row/column selection.  The merged
+    inventory instead exposes the current-pixel closed faces with the same
+    application-neutral locator contract.
+    """
+    from winpilot.tasking.interaction import _merge_current_region_inventories
+    from winpilot.tasking.visual_regions import (
+        inventory_visible_partition_regions,
+        inventory_visible_regions,
+    )
+
+    for seed in range(12):
+        image, _target, board = _grid(seed + 4100)
+        bounded = inventory_visible_regions(image)
+        partitions = inventory_visible_partition_regions(image)
+
+        assert partitions == [], seed
+        merged = _merge_current_region_inventories(bounded, partitions)
+        cells = [
+            item for item in merged
+            if item.get("provider") == "current_frame_closed_peer_geometry"
+        ]
+        expected_count = int(cells[0]["peer_count"]) if cells else 0
+        assert expected_count >= 9, seed
+        assert len(cells) == expected_count, seed
+        rows = max(int(item["row_index"]) for item in cells)
+        columns = max(int(item["column_index"]) for item in cells)
+        assert len(cells) == rows * columns
+        assert {
+            tuple(item["partition_locator"][key] for key in ("row", "column"))
+            for item in cells
+        } == {
+            (row, column)
+            for row in range(1, rows + 1)
+            for column in range(1, columns + 1)
+        }
+        board_left, board_top, board_right, board_bottom = board
+        height, width = image.shape[:2]
+        for item in cells:
+            center_x = float(item["center"][0]) / 1000.0 * width
+            center_y = float(item["center"][1]) / 1000.0 * height
+            assert board_left < center_x < board_right
+            assert board_top < center_y < board_bottom
+
+
+def test_closed_child_cannot_seed_nearby_open_partition_inventory():
+    """A mark near dividers is not evidence that the mark is their container."""
+    from winpilot.tasking.visual_regions import (
+        inventory_visible_partition_regions,
+    )
+
+    image = np.full((720, 960, 3), 248, dtype=np.uint8)
+    left, top, cell = 280, 180, 105
+    for offset in range(4):
+        cv2.line(
+            image,
+            (left + offset * cell, top),
+            (left + offset * cell, top + 3 * cell),
+            (28, 32, 38),
+            5,
+        )
+        cv2.line(
+            image,
+            (left, top + offset * cell),
+            (left + 3 * cell, top + offset * cell),
+            (28, 32, 38),
+            5,
+        )
+    cv2.circle(
+        image,
+        (left + 2 * cell + cell // 2, top + 2 * cell + cell // 2),
+        29,
+        (28, 32, 38),
+        5,
+    )
+
+    assert inventory_visible_partition_regions(image) == []
 
 
 def test_circular_radial_faces_remain_general_closed_region_candidates():

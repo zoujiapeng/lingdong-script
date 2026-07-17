@@ -526,14 +526,14 @@ def test_visual_planner_binds_selected_current_pixel_candidate(
 
     raw = _decision(action=InteractionAction(
         action="click",
-        frame_x=350,
-        frame_y=350,
-        target_region=[300, 300, 400, 400],
-        target_anchor=[350, 350],
+        frame_x=650,
+        frame_y=650,
+        target_region=[550, 550, 750, 750],
+        target_anchor=[650, 650],
         grounding_mode="object_anchor",
         interaction_mechanism="point_selection",
         affordance_evidence="the chosen visible bounded object",
-        expected_effect_region=[300, 300, 400, 400],
+        expected_effect_region=[550, 550, 750, 750],
         effect_region_binding="target_region",
     )).model_dump(mode="python")
     raw["actions"][0]["target_candidate_id"] = "visible-region-07"
@@ -589,6 +589,70 @@ def test_visual_planner_binds_selected_current_pixel_candidate(
     )
 
 
+def test_infer_from_scene_keeps_candidates_for_declared_spatial_modalities(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import InteractionAction
+
+    raw = _decision(action=InteractionAction(
+        action="click",
+        frame_x=600,
+        frame_y=330,
+        target_region=[550, 280, 650, 380],
+        target_anchor=[600, 330],
+        grounding_mode="object_anchor",
+        interaction_mechanism="point_selection",
+        affordance_evidence="the semantically selected current-frame object",
+        expected_effect_region=[550, 280, 650, 380],
+        effect_region_binding="target_region",
+    )).model_dump(mode="python")
+    raw["actions"][0]["target_candidate_id"] = "visible-region-03"
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    inventory = [{
+        "candidate_id": "visible-region-03",
+        "bounds": [580.0, 300.0, 620.0, 355.0],
+        "center": [600.0, 327.5],
+        "shape": "closed_shape",
+        "pixel_size": [52, 50],
+        "peer_group": "peer-set-01",
+        "peer_count": 12,
+        "row_index": 1,
+        "column_index": 5,
+    }]
+    monkeypatch.setattr(
+        interaction, "inventory_visible_regions", lambda *_args, **_kwargs: inventory,
+    )
+    monkeypatch.setattr(
+        interaction, "inventory_visible_partition_regions", lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        interaction.vlm, "structured_json_from_image",
+        lambda *_args, **_kwargs: dict(raw),
+    )
+    image = tmp_path / "inferred-spatial-frame.png"
+    image.write_bytes(b"frame")
+
+    decision = interaction.plan_interaction(
+        image,
+        task="perform the selected visible interaction",
+        intent={
+            "mode": "direct_visual_manipulation",
+            "session_mode": "bounded",
+            "action_modalities": ["click", "type"],
+        },
+        frame_id=22,
+        observation_artifact_id="inferred-spatial-artifact",
+        primary_action_modality="infer_from_scene",
+    )
+
+    assert decision.actions[0].target_candidate_id == "visible-region-03"
+    assert decision.actions[0].target_region == [580.0, 300.0, 620.0, 355.0]
+    assert decision.region_inventory == tuple(inventory)
+
+
 def test_partition_candidate_binds_locator_and_geometry_as_one_contract():
     from winpilot.tasking.interaction import _bind_visible_region_candidates
 
@@ -596,13 +660,13 @@ def test_partition_candidate_binds_locator_and_geometry_as_one_contract():
         "actions": [{
             "action": "draw_strokes",
             "target_candidate_id": "partition-region-01-r01-c03",
-            "target_region": [100, 100, 200, 200],
-            "target_anchor": [150, 150],
-            "expected_effect_region": [100, 100, 200, 200],
+            "target_region": [560, 260, 740, 440],
+            "target_anchor": [650, 350],
+            "expected_effect_region": [560, 260, 740, 440],
             "effect_region_binding": "target_region",
         }],
         "expected_effect": {
-            "region": [100, 100, 200, 200],
+            "region": [560, 260, 740, 440],
             "region_binding": "target_region",
             "binding_action_index": 0,
         },
@@ -631,6 +695,132 @@ def test_partition_candidate_binds_locator_and_geometry_as_one_contract():
     assert action["expected_effect_region"] == action["target_region"]
     assert bound["expected_effect"]["region"] == action["target_region"]
     assert "actions[0].partition_locator:candidate_bound" in repairs
+
+
+def test_unique_partition_locator_binds_current_pixel_candidate_without_id():
+    from winpilot.tasking.interaction import _bind_visible_region_candidates
+
+    payload = {
+        "actions": [{
+            "action": "draw_strokes",
+            "target_candidate_id": "",
+            # Coarse model geometry is deliberately poor.  The unique typed
+            # row/column locator is a stronger current-frame topology proof.
+            "target_region": [700, 700, 800, 800],
+            "target_anchor": [750, 750],
+            "partition_locator": {
+                "layout": "repeated_partition", "row": 2, "column": 1,
+            },
+            "expected_effect_region": [],
+            "effect_region_binding": "target_region",
+        }],
+    }
+    inventory = [
+        {
+            "candidate_id": "partition-region-01-r01-c01",
+            "bounds": [100.0, 100.0, 200.0, 200.0],
+            "partition_locator": {
+                "layout": "repeated_partition", "row": 1, "column": 1,
+            },
+        },
+        {
+            "candidate_id": "partition-region-01-r02-c01",
+            "bounds": [100.0, 200.0, 200.0, 300.0],
+            "partition_locator": {
+                "layout": "repeated_partition", "row": 2, "column": 1,
+            },
+        },
+    ]
+    repairs = []
+
+    bound = _bind_visible_region_candidates(
+        payload, inventory, repairs=repairs,
+    )
+
+    action = bound["actions"][0]
+    assert action["target_candidate_id"] == "partition-region-01-r02-c01"
+    assert action["target_region"] == [100.0, 200.0, 200.0, 300.0]
+    assert action["target_anchor"] == [150.0, 250.0]
+    assert (
+        "actions[0].target_candidate_id:unique_partition_locator" in repairs
+    )
+
+
+def test_region_inventory_does_not_offer_frame_spanning_structural_band():
+    from winpilot.tasking.interaction import _merge_current_region_inventories
+
+    bounded = [
+        {
+            "candidate_id": "real-object",
+            "bounds": [120.0, 180.0, 240.0, 330.0],
+            "center": [180.0, 255.0],
+            "shape": "closed_shape",
+        },
+        {
+            "candidate_id": "spanning-band",
+            "bounds": [60.0, 760.0, 940.0, 825.0],
+            "center": [500.0, 792.5],
+            "shape": "rectangular_boundary",
+        },
+    ]
+
+    merged = _merge_current_region_inventories(bounded, [])
+
+    assert [item["candidate_id"] for item in merged] == ["real-object"]
+
+
+def test_candidate_binding_rejects_semantically_distant_pixel_candidate():
+    from winpilot.tasking.interaction import (
+        InteractionPlanOutputError,
+        _bind_visible_region_candidates,
+    )
+
+    payload = {
+        "actions": [{
+            "action": "click",
+            "target_candidate_id": "visible-region-01",
+            "target_region": [100, 100, 220, 220],
+            "target_anchor": [160, 160],
+        }],
+    }
+    inventory = [{
+        "candidate_id": "visible-region-01",
+        "bounds": [700.0, 700.0, 800.0, 800.0],
+        "center": [750.0, 750.0],
+    }]
+
+    with pytest.raises(InteractionPlanOutputError) as raised:
+        _bind_visible_region_candidates(payload, inventory, repairs=[])
+
+    assert raised.value.code == "interaction_region_candidate_semantic_conflict"
+
+
+def test_source_inside_target_drag_rejects_one_candidate_for_both_roles():
+    from winpilot.tasking.interaction import (
+        InteractionPlanOutputError,
+        _bind_visible_region_candidates,
+    )
+
+    payload = {
+        "actions": [{
+            "action": "drag",
+            "placement_requirement": "source_inside_target",
+            "source_candidate_id": "visible-region-01",
+            "target_candidate_id": "visible-region-01",
+            "source_region": [100, 100, 200, 200],
+            "target_region": [100, 100, 200, 200],
+        }],
+    }
+    inventory = [{
+        "candidate_id": "visible-region-01",
+        "bounds": [100.0, 100.0, 200.0, 200.0],
+        "center": [150.0, 150.0],
+    }]
+
+    with pytest.raises(InteractionPlanOutputError) as raised:
+        _bind_visible_region_candidates(payload, inventory, repairs=[])
+
+    assert raised.value.code == "interaction_region_candidate_role_conflict"
 
 
 def test_visual_planner_centers_complete_source_in_target_deterministically(
@@ -679,6 +869,84 @@ def test_visual_planner_centers_complete_source_in_target_deterministically(
     assert planned.frame_y2 == pytest.approx(660.0)
 
 
+def test_visual_planner_recomputes_drag_after_current_pixel_candidate_binding(
+    monkeypatch,
+    tmp_path,
+):
+    from winpilot.tasking import interaction
+    from winpilot.tasking.interaction import InteractionAction
+
+    raw = _decision(action=InteractionAction(
+        action="drag",
+        frame_x1=250,
+        frame_y1=250,
+        frame_x2=660,
+        frame_y2=660,
+        source_region=[200, 200, 300, 300],
+        target_region=[600, 600, 720, 720],
+        placement_requirement="source_inside_target",
+        expected_effect_region=[600, 600, 720, 720],
+        effect_region_binding="target_region",
+    )).model_dump(mode="python")
+    raw.pop("frame_id", None)
+    raw.pop("observation_artifact_id", None)
+    raw["actions"][0].update({
+        "source_candidate_id": "visible-region-01",
+        "target_candidate_id": "visible-region-02",
+    })
+    raw["expected_effect"].update({
+        "region_binding": "target_region",
+        "binding_action_index": 0,
+    })
+    inventory = [
+        {
+            "candidate_id": "visible-region-01",
+            "bounds": [220.0, 220.0, 320.0, 320.0],
+            "center": [270.0, 270.0],
+            "shape": "closed_shape",
+            "pixel_size": [90, 90],
+        },
+        {
+            "candidate_id": "visible-region-02",
+            "bounds": [500.0, 500.0, 800.0, 800.0],
+            "center": [650.0, 650.0],
+            "shape": "fragmented_boundary",
+            "pixel_size": [270, 270],
+        },
+    ]
+    monkeypatch.setattr(
+        interaction, "inventory_visible_regions", lambda *_args, **_kwargs: inventory,
+    )
+    monkeypatch.setattr(
+        interaction, "inventory_visible_partition_regions", lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: dict(raw),
+    )
+    image = tmp_path / "candidate-drag-frame.png"
+    image.write_bytes(b"frame")
+
+    decision = interaction.plan_interaction(
+        image,
+        task="move the complete visible object into its visible destination",
+        intent={"action_modalities": ["drag"]},
+        frame_id=9,
+        observation_artifact_id="art-candidate-drag",
+        primary_action_modality="drag",
+    )
+
+    planned = decision.actions[0]
+    assert planned.source_region == [220.0, 220.0, 320.0, 320.0]
+    assert planned.target_region == [500.0, 500.0, 800.0, 800.0]
+    # The start is 20 units above/left of the newly bound source centre, so
+    # the maximum-margin drop preserves that grab offset around target centre.
+    assert planned.frame_x2 == pytest.approx(630.0)
+    assert planned.frame_y2 == pytest.approx(630.0)
+    assert planned.expected_effect_region == planned.target_region
+
+
 def test_visual_planner_canonicalizes_minor_provider_schema_drift_once(
     monkeypatch,
     tmp_path,
@@ -696,6 +964,7 @@ def test_visual_planner_canonicalizes_minor_provider_schema_drift_once(
         "rules": "operate only on the visible target",
         "confidence": 0.93,
         "ambiguity": None,
+        "agentShouldAct": True,
         "actions": {
             "action": "double-click",
             "frame_x": 400,
@@ -1556,6 +1825,182 @@ def test_perform_preflight_tolerates_bounded_pixel_noise(monkeypatch, tmp_path):
     assert preflight["pixel_change"]["byte_identical"] is False
     assert preflight["pixel_change"]["interaction_layout"]["changed"] is False
     assert preflight["pixel_change"]["action_guard"]["changed"] is False
+
+
+def test_input_mode_and_color_prepare_then_rebind_spatial_action_to_fresh_frame(
+    monkeypatch,
+    tmp_path,
+):
+    """Preparation mutations can never share the planner frame with drawing."""
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.perception.surface_binding import InteractionRegion
+    from winpilot.tasking.artifacts import ArtifactStore
+    from winpilot.tasking.compiler import TaskContractCompiler
+    from winpilot.tasking.evidence import EvidenceRegistry
+    from winpilot.tasking.interaction import InteractionAction
+    from winpilot.tasking.interaction_stage_runtime import InteractionStageEngine
+    import winpilot.tasking.interaction_stage_runtime as runtime_module
+
+    contract = TaskContractCompiler().compile(
+        "play with me on the current canvas, use red, your turn",
+        cold_start=True,
+    )
+    stage = next(
+        item for item in contract.stages if item.type.value == "PerformTurn"
+    )
+    store = ArtifactStore("run-preparation-frame", tmp_path / "artifacts")
+    target = {
+        "hwnd": 77,
+        "title": "generic target",
+        "source": "active_window",
+        "capture_scope": "target_window",
+        "frame_region": {"left": 100, "top": 100, "width": 100, "height": 100},
+        "client_region": {"left": 101, "top": 105, "width": 98, "height": 94},
+        "client_frame_bounds": [10, 50, 990, 987],
+        "foreground_verified": True,
+    }
+
+    def observation(name: str, frame_id: int):
+        path = store.root / f"{name}.png"
+        _write_frame(path)
+        return store._register_path(
+            path,
+            source_window="generic target",
+            source_hwnd=77,
+            source_scope="window",
+            purpose="observation",
+            sendable=False,
+            metadata={
+                "session_id": contract.session.session_id,
+                "frame_id": frame_id,
+                "frame_region": dict(target["frame_region"]),
+                "region": dict(target["frame_region"]),
+            },
+        )
+
+    planned = observation("planned", 4)
+    preflight = observation("preflight", 5)
+    prepared = observation("prepared", 6)
+    decision = _decision(
+        action=InteractionAction(
+            action="draw_strokes",
+            target_region=[250, 250, 750, 750],
+            target_anchor=[500, 500],
+            stroke_paths=[{
+                "coordinate_space": "target_region_0_1000",
+                "points": [[180, 180], [820, 820]],
+            }],
+            color="red",
+            interaction_mechanism="freehand_strokes",
+            affordance_evidence="visible writable pointer surface",
+            expected_effect_region=[250, 250, 750, 750],
+        ),
+        continuation="reobserve",
+        frame_id=4,
+        observation_artifact_id=planned.artifact_id,
+    )
+    context = {
+        "run_id": "run-preparation-frame",
+        "runtime_state": {"interaction_state": {
+            "session_id": contract.session.session_id,
+            "frame_id": 4,
+            "current_artifact_id": planned.artifact_id,
+            "baseline_artifact_id": planned.artifact_id,
+            "planned_action": decision.model_dump(mode="json"),
+            "target_binding": dict(target),
+        }},
+    }
+    engine = InteractionStageEngine(stage_output=_stage_output)
+    monkeypatch.setattr(engine, "_foreground", lambda: 77)
+    binding = engine._binding(context)
+    binding.update(
+        InteractionRegion((200, 200, 800, 800), source="component-test"),
+        hwnd=77,
+        frame_region=(100, 100, 100, 100),
+        capture_scope="target_window",
+        client_region=InteractionRegion(
+            (10, 50, 990, 987),
+            label="window_client_authority",
+            source="component-test",
+        ),
+        frame_id=4,
+        initial=True,
+    )
+    captures = iter(((5, preflight), (6, prepared)))
+
+    def capture_fresh(**_kwargs):
+        frame_id, artifact = next(captures)
+        state = context["runtime_state"]["interaction_state"]
+        state.update({
+            "frame_id": frame_id,
+            "current_artifact_id": artifact.artifact_id,
+            "baseline_artifact_id": artifact.artifact_id,
+            "target_binding": dict(target),
+            "last_capture_timing": {"capture_elapsed_ms": 2},
+        })
+        return artifact
+
+    monkeypatch.setattr(engine, "_capture_scene", capture_fresh)
+    monkeypatch.setattr(
+        runtime_module,
+        "refine_interaction_geometry",
+        lambda current, *_args, **_kwargs: (
+            current,
+            {"applied": False, "verified": True, "provider": "identity-test"},
+        ),
+    )
+    batches = []
+
+    class FakeToolSession:
+        def __init__(self, *args, **kwargs):
+            self.run_id = ""
+
+        def _remember_target(self, hwnd, title):
+            self.hwnd = hwnd
+
+        def dispatch(self, name, args):
+            assert name == "run_action_batch"
+            batches.append(args)
+            if len(batches) == 1:
+                return ToolResult(
+                    '{"ok":true,"results":['
+                    '{"action":"ensure_input_mode","data":{'
+                    '"verified":true,"input_mode":"continuous_freehand",'
+                    '"provider":"component-test"}},'
+                    '{"action":"select_color","data":{'
+                    '"verified":true,"color":"red",'
+                    '"provider":"component-test"}}]}'
+                )
+            return ToolResult('{"ok":true,"results":[{"action":"draw_strokes","ok":true}]}')
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(runtime_module, "ToolSession", FakeToolSession)
+    result = engine.execute(
+        stage,
+        contract,
+        context,
+        threading.Event(),
+        time.monotonic(),
+        store=store,
+        registry=EvidenceRegistry("run-preparation-frame"),
+    )
+
+    assert result.ok is True
+    assert len(batches) == 2
+    assert [item["action"] for item in batches[0]["actions"]] == [
+        "ensure_input_mode", "select_color",
+    ]
+    assert [item["action"] for item in batches[1]["actions"]] == [
+        "draw_strokes",
+    ]
+    state = context["runtime_state"]["interaction_state"]
+    assert state["input_preparation"]["verified"] is True
+    assert state["input_preparation"]["planned_artifact_id"] == preflight.artifact_id
+    assert state["input_preparation"]["prepared_artifact_id"] == prepared.artifact_id
+    assert state["planned_action"]["frame_id"] == 6
+    assert state["planned_action"]["observation_artifact_id"] == prepared.artifact_id
 
 
 def test_region_watcher_requires_change_then_stability():

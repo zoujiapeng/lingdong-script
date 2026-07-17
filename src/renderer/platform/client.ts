@@ -10,6 +10,7 @@ import type {
   RuntimeEvent,
   AgentSchedule,
   TaskContract,
+  DesktopTargetContext,
 } from './contracts';
 import type { AutomationIR } from '../utils/automationIR';
 
@@ -150,6 +151,13 @@ export class ControlPlaneClient {
 
   currentRun(): Promise<CurrentRunResponse> {
     return this.request('api/v2/runs/current');
+  }
+
+  async captureDesktopContext(excludeProcessId = 0): Promise<DesktopTargetContext> {
+    const response = await this.request<{ ok: boolean; target: DesktopTargetContext }>(
+      `api/v2/desktop-context?exclude_process_id=${Math.max(0, Math.trunc(excludeProcessId))}`,
+    );
+    return response.target;
   }
 
   run(runId: string): Promise<CurrentRunResponse> {

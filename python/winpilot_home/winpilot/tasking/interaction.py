@@ -1160,9 +1160,12 @@ def _planning_prompt(
         contract["actions"][0].pop("target_candidate_id", None)
     inventory_guidance = (
         "current_frame_region_inventory is pixel geometry, not semantic truth. "
-        "Select a visible source/target by copying its candidate_id; the runtime "
-        "binds its bounds, safe anchor, and any partition_locator. Use peer ranks "
-        "only to express the choice you made from the image. Never invent an id. "
+        "Copy a candidate_id only when that candidate is the semantic source or "
+        "target you selected from the image; the runtime then binds its exact bounds, "
+        "safe anchor, and any partition_locator. The inventory can be incomplete: "
+        "if it lacks your semantic object, omit that candidate_id and retain a coarse "
+        "region grounded directly in the pixels. Never force an unrelated candidate "
+        "or invent an id. Use peer ranks only to express the visible choice. "
         if has_region_inventory
         else ""
     )
@@ -1181,8 +1184,8 @@ def _planning_prompt(
             default=str,
             separators=(",", ":"),
         )
-        if len(correction_json) > 8000:
-            correction_json = correction_json[:8000] + "...[truncated]"
+        if len(correction_json) > 3500:
+            correction_json = correction_json[:3500] + "...[truncated]"
         correction_guidance = (
             "\nSCHEMA CORRECTION FOR THIS SAME AUTHORITATIVE FRAME: The previous "
             "response below was rejected before any input occurred. Return one complete "
@@ -1193,122 +1196,40 @@ def _planning_prompt(
             + correction_json
         )
     return (
-        "You are the semantic planner for a general visual GUI interaction. "
-        "The attached image is the exact authoritative target-window frame and all "
-        "coordinates use that whole frame in 0..1000. Infer the current shared state, "
-        "actors, role ownership, stable task surface, current-turn legal interaction ROI, "
-        "whose turn it is, and at most "
-        "one semantic agent turn. Respect actor assignments literally: never perform the "
-        "user's role, never fabricate the other actor's turn, and emit no actions when the "
-        "agent does not own the turn. Use a semantic Controller action only when it exactly "
-        "matches visible evidence and the immutable task constraints. A drag or continuous gesture is one "
-        "action with its complete path. Before emitting a drag, inspect the entire source-to-target "
-        "route, not only its endpoints. If a direct segment would leave a visible track/corridor, "
-        "cross an obstacle, or violate source-footprint clearance, frame_points must trace the "
-        "visible legal route in order with a waypoint at every bend and enough clearance for the "
-        "whole source and path_mode must be guided; ordinary unobstructed drags use path_mode "
-        "direct. Never interpolate directly through an obstacle; return blocked when no "
-        "complete legal route can be grounded. Use double_click only when two clicks are semantically "
-        "required, hover when dwell may reveal a state, and move_mouse for cursor placement. "
-        "Choose the primitive from the visible input affordance, not merely from the desired outcome: "
-        "click activates an existing visible control or an explicitly click-to-place surface; it does "
-        "not itself render a line, symbol, signature, or other multi-segment mark. When this actor must "
-        "create a visible mark and the current surface or existing marks show freehand/stroke input, use "
-        "draw_strokes with free_path grounding. Its target_region must be the exact writable bounded "
-        "region for that mark, and stroke_paths must express the mark relative to that region. A blank "
-        "writable region is not an object anchor: do not give it source_region or object_anchor merely "
-        "because it is where the effect should appear. "
-        "For draw_strokes, target_anchor is required and must identify the intended writable child "
-        "inside target_region. If target_region is only a coarse board, table, panel, or grouped "
-        "container, target_anchor must be the center of the one selected child; local vision will bind "
-        "its exact border. Never use a whole container as the execution region without this anchor. "
-        "When the selected target is a cell or slot in visibly repeated rows and columns, also set "
-        "partition_locator with layout=repeated_partition. row and column are one-based: positive "
-        "values count from the top/left and negative values count from the bottom/right. For example, "
-        "the upper-left repeated partition is row=1,column=1 and the upper-right is row=1,column=-1. "
-        "Use this only when the current pixels visibly support a repeated two-axis partition; do not "
-        "invent rows or columns for a free canvas or unrelated controls. Numeric target_region and "
-        "target_anchor remain coarse search hints, while the typed locator preserves the semantic "
-        "choice and the runtime must still prove a unique current-pixel divider family. "
-        "Every model-authored action must declare interaction_mechanism and concrete "
-        "affordance_evidence from this exact frame. Do not use application/game convention as "
-        "evidence. control_activation requires a visible control, point_selection a visible "
-        "selectable item, and click_to_place an explicit visible click-to-place instruction or "
-        "state. A writable surface or existing freehand marks require freehand_strokes. "
-        "For every visible bounded source-to-target object transfer, source_region and "
-        "target_region are required and must be the actual visible object and destination "
-        "bounds. Ground click/drag endpoints in the visible interior with a safe margin from "
-        "borders. Set placement_requirement=source_inside_target only when the visible "
-        "instruction or interface requires the complete source to fit inside the target; in "
-        "that mode the endpoint must preserve the pointer's offset so the translated complete "
-        "source_region fits inside target_region. Use point_inside_target for overlap/drop "
-        "interfaces whose visible acceptance area is smaller than the source. For a draggable "
-        "object use its visible "
-        "center unless the interface visibly requires another handle. For point actions, any "
-        "declared source_region or target_region must contain the point. Visible controls and objects "
-        "must declare an anchor region and use semantic_control or object_anchor so current pixels can "
-        "re-ground the final point. bounded_coordinates is only for a position that has no visible object "
-        "anchor and is still protected by frame lineage and ROI bounds. Interactive draw_strokes must declare target_region "
-        "and use free_path. Model output must use stroke_paths. Each stroke_paths object is exactly one "
-        "pointer-down/move/pointer-up path; its points field is one ordered list of [x,y] pairs. Two "
-        "separate pen strokes require two separate objects in the outer list--never flatten strokes into "
-        "one points list and never add a connector between them. Use coordinate_space="
-        "target_region_0_1000 for paths contained by a visible cell, canvas, track, signature box, or "
-        "other bounded surface. 0..1000 is not a percentage: 150 means 15% and 850 means 85%; "
-        "values 10..90 mean only 1%..9%, not 10%..90%. Use frame_0_1000 only when a path "
-        "genuinely spans whole-frame geometry; "
-        "those points must remain inside target_region. local_strokes and frame_strokes are legacy "
-        "compatibility fields and must not be emitted by the model. Scroll uses "
-        "relative_gesture bound to the current ROI. Prefer one drag action "
-        "for ordinary dragging. Use a same-transaction mouse_down, one or more move_mouse, and "
-        "mouse_up sequence only when the interface genuinely requires a custom press/hold path; "
-        "every point still needs current-frame grounding. Use hold_key only for a bounded duration. "
-        "Do not emit standalone key_down or key_up: those are not executable transaction "
-        "capabilities, and uncertainty must fail closed rather than inventing an equivalent action. "
-        "Use ambiguity only for blocking semantic uncertainty such as actor ownership, target "
-        "identity, rule meaning, or whether an action is legal; an acting response must leave it "
-        "empty. If the semantic target is clear but its coarse coordinates or boundary are not "
-        "precise enough for input, declare a spatial_geometry resolution_requirement for that "
-        "action with resolver=current_frame_geometry. This does not authorize input by itself: "
-        "the runtime will fail closed unless a unique current-pixel provider proves it. "
-        "surface_region is the stable outer task surface across turns. interaction_region is "
-        "only this turn's legal action ROI and must be contained by surface_region. Source, "
-        "target, and pointer paths must remain in interaction_region. Every explicit expected-effect "
-        "region must declare whether it is bound to that action's target_region, source_region, the "
-        "stable surface_region, or is an independent_region. A target/source-bound effect follows "
-        "local geometry correction; independent_region never moves by heuristic overlap. The global "
-        "expected_effect must also name region_binding and binding_action_index when it follows an "
-        "action. Expected-effect regions "
-        "may extend outside the action ROI but must remain inside surface_region. Multiple spatial actions are allowed only when "
-        "their targets remain valid without inspecting an intermediate frame; otherwise "
-        "plan only the first and require a fresh frame. Prefer the longest safe local transaction: "
-        "a complete ordered series of simultaneously visible bounded targets is one semantic "
-        "turn, not several turns, so at-most-one-turn never means at-most-one-action. "
-        "when several requested targets are simultaneously visible, spatially disjoint, and each "
-        "later target keeps the same identity and geometry even if an earlier target changes only "
-        "its own local appearance, emit all of those actions in order and set "
-        "requires_fresh_frame_after=false on every non-final action. A local pressed/selected/color "
-        "change on an already-used target does not by itself invalidate a different bound target. "
-        "Do not batch when a later target is revealed, moved, enabled, relabelled, occluded, or "
-        "otherwise depends on an earlier result. Do not infer success from UI chrome "
-        "or unrelated desktop changes. "
+        "You plan one semantic turn from the attached authoritative target-window frame. "
+        "Whole-frame coordinates are 0..1000. Return only the required JSON object and "
+        "omit unused optional action fields; unknown fields fail validation.\n"
+        "SAFETY CONTRACT:\n"
+        "1. agent_should_act is mandatory and explicit. It is true only when the agent "
+        "owns the turn and every action is legal and visibly grounded. Otherwise emit no "
+        "actions, set it false, and use wait_external or blocked with a reason.\n"
+        "2. Copy immutable actor roles. surface_region is the stable task surface; "
+        "interaction_region is this turn's contained legal ROI. Every source, target, "
+        "anchor, and pointer path stays inside that ROI.\n"
+        "3. Choose the primitive from visible affordance evidence, not desired outcome or "
+        "application convention. Every action declares interaction_mechanism and concrete "
+        "affordance_evidence. Visible controls/objects use semantic_control or object_anchor.\n"
+        "4. Point actions use frame_x/frame_y inside any declared region. Drag uses visible "
+        "source_region and target_region; use direct only for a clear straight route, otherwise "
+        "guided frame_points at all bends with source-footprint clearance. Block if no full route "
+        "is proven. source_inside_target means the translated whole source must fit.\n"
+        "5. Freehand input uses draw_strokes, free_path, target_region, target_anchor, and "
+        "stroke_paths. Each stroke_paths item is one separate down/move/up path. Use "
+        "target_region_0_1000 inside a bounded writable child; use frame_0_1000 only for a "
+        "whole-frame path. 150 means 15 percent. Never emit legacy local_strokes/frame_strokes. "
+        "For a visibly repeated two-axis partition, partition_locator row/column are nonzero "
+        "one-based indices; omit it elsewhere.\n"
+        "6. A spatial_geometry resolution_requirement may request local exact-boundary proof "
+        "only after semantic target identity is clear; it does not authorize input. ambiguity is "
+        "only blocking semantic uncertainty and must be empty when acting.\n"
+        "7. Expected-effect regions declare their binding. When the task explicitly orders "
+        "multiple visible targets whose positions remain stable, emit the complete ordered "
+        "batch now and set requires_fresh_frame_after=false on every non-final action. Only "
+        "serialize into later model turns when an earlier effect can change later geometry. "
+        "Never reobserve an unchanged frame. finish requires post-action proof; wait_external "
+        "is only for a real external turn. key_down/key_up are unavailable.\n"
         f"{inventory_guidance}"
         f"{appearance_guidance}"
-        "Prior state may also include a CV-detected surface and the "
-        "Win32 client authority, both in frame 0..1000; treat them as safety envelopes/hints, "
-        "while the attached current pixels remain authoritative. If the current frame does not "
-        "contain enough visible evidence to ground any safe action, return no actions, "
-        "agent_should_act=false, continuation=blocked, and a concrete blocked_reason. Never use "
-        "reobserve as a request to look at the same unchanged frame again. Set "
-        "continuation=finish only "
-        "when the proposed action "
-        "plus its post-action verification can complete the bounded task, continuation=reobserve "
-        "only when one or more actions in this response causally require a fresh frame before "
-        "another action, and continuation=wait_external "
-        "only for a real external participant turn. The runtime derives whether an external-change "
-        "watch is armed from continuation, so do not return a separate wait_for_external_change "
-        "field. Return ONLY one JSON object. Omit every optional "
-        "action field that is not used; unknown keys are rejected.\n"
         f"User task: {task}\n"
         f"Structured intent candidate: {json.dumps(intent, ensure_ascii=False)}\n"
         f"Immutable contract roles (copy exactly; never override): "
@@ -1672,6 +1593,39 @@ def _canonicalize_model_decision(
                 repairs.append(
                     f"actions[{index}].expected_effect_region:shape->flat_region"
                 )
+            # A point action occasionally arrives with one rectangle already
+            # declared as both its target-bound effect ROI and the region
+            # containing the point, while the equivalent ``target_region``
+            # field is omitted.  Copying that exact rectangle is schema
+            # canonicalization, not visual inference: the model explicitly
+            # bound the ROI to the target and the proposed point must already
+            # lie inside it.  Any malformed region, different binding, or
+            # outside point remains untouched and fails closed in Pydantic.
+            if (
+                canonical_name in _POINT_ACTIONS
+                and not action.get("target_region")
+                and action.get("effect_region_binding") == "target_region"
+                and isinstance(effect_region, list)
+                and len(effect_region) == 4
+            ):
+                try:
+                    effect_bounds = _region(
+                        effect_region,
+                        f"actions[{index}].expected_effect_region",
+                    )
+                    point = (
+                        _coord(action.get("frame_x"), f"actions[{index}].frame_x"),
+                        _coord(action.get("frame_y"), f"actions[{index}].frame_y"),
+                    )
+                except ValueError:
+                    pass
+                else:
+                    if _point_in_region(point, effect_bounds):
+                        action["target_region"] = list(effect_region)
+                        repairs.append(
+                            f"actions[{index}].target_region:copied_from_"
+                            "explicit_target_bound_effect_region"
+                        )
             if action.get("effect_region_binding") is None:
                 action.pop("effect_region_binding", None)
                 repairs.append(f"actions[{index}].effect_region_binding:null->auto")
@@ -1713,9 +1667,26 @@ def _canonicalize_model_decision(
         actions = fixed_actions
         normalized["actions"] = actions
 
-    if "agent_should_act" not in normalized and isinstance(actions, list):
-        normalized["agent_should_act"] = bool(actions)
-        repairs.append("agent_should_act:derived_from_actions")
+    if "agent_should_act" not in normalized:
+        # Mutation authorization is a semantic security decision, not harmless
+        # provider-schema drift.  An action list can be present in a malformed
+        # or truncated response, so its mere existence must never authorize
+        # physical input.  The bounded same-frame correction path may ask the
+        # model for the missing explicit decision; execution remains closed.
+        raise InteractionPlanOutputError(
+            "visual model omitted the explicit agent_should_act authorization",
+            code="mutation_authorization_missing",
+            repairs=repairs,
+            raw_payload=raw,
+            validation_errors=[{
+                "location": ["agent_should_act"],
+                "type": "missing_mutation_authorization",
+                "message": (
+                    "agent_should_act must be explicitly true or false; "
+                    "actions do not imply authorization"
+                ),
+            }],
+        )
     if normalized.get("agent_should_act") is True and not normalized.get("turn_owner"):
         normalized["turn_owner"] = "agent"
         repairs.append("turn_owner:derived_agent")
@@ -1929,7 +1900,12 @@ def _canonicalize_model_decision(
     return normalized, list(dict.fromkeys(repairs))
 
 
-def _canonicalize_model_action_geometry(raw: dict[str, Any]) -> dict[str, Any]:
+def _canonicalize_model_action_geometry(
+    raw: dict[str, Any],
+    *,
+    allow_local_resolution: bool = False,
+    repairs: list[str] | None = None,
+) -> dict[str, Any]:
     """Resolve geometry that follows deterministically from typed semantics.
 
     The semantic planner chooses the visible source, destination, and placement
@@ -1941,11 +1917,18 @@ def _canonicalize_model_action_geometry(raw: dict[str, Any]) -> dict[str, Any]:
     normal fail-closed validation still rejects it.
     """
     normalized = dict(raw)
+    if isinstance(raw.get("resolution_requirements"), list):
+        normalized["resolution_requirements"] = [
+            dict(item) if isinstance(item, dict) else item
+            for item in raw["resolution_requirements"]
+        ]
+    if isinstance(raw.get("expected_effect"), dict):
+        normalized["expected_effect"] = dict(raw["expected_effect"])
     actions = normalized.get("actions")
     if not isinstance(actions, list):
         return normalized
     normalized_actions: list[Any] = []
-    for candidate in actions:
+    for action_index, candidate in enumerate(actions):
         if not isinstance(candidate, dict):
             normalized_actions.append(candidate)
             continue
@@ -1971,6 +1954,95 @@ def _canonicalize_model_action_geometry(raw: dict[str, Any]) -> dict[str, Any]:
         target_width = target[2] - target[0]
         target_height = target[3] - target[1]
         if (
+            allow_local_resolution
+            and _point_in_region(start, source)
+            and (source_width > target_width or source_height > target_height)
+        ):
+            # A model can correctly identify a bounded destination yet emit a
+            # text glyph, dashed edge, or other too-small subregion as its
+            # coarse box.  Convert only that internally contradictory box into
+            # a minimum-size search hypothesis and require an explicit
+            # current-pixel geometry proof.  The hypothesis cannot reach the
+            # Controller unless endpoint grounding and the later complete
+            # source-footprint path proof both succeed.
+            try:
+                allowed = _region(
+                    normalized.get("interaction_region")
+                    or [0.0, 0.0, 1000.0, 1000.0],
+                    "interaction_region",
+                )
+            except (TypeError, ValueError):
+                allowed = (0.0, 0.0, 1000.0, 1000.0)
+            anchor_value = action.get("target_anchor")
+            if (
+                isinstance(anchor_value, (list, tuple))
+                and len(anchor_value) == 2
+            ):
+                try:
+                    target_center = (
+                        _coord(anchor_value[0], "target_anchor[0]"),
+                        _coord(anchor_value[1], "target_anchor[1]"),
+                    )
+                except (TypeError, ValueError):
+                    target_center = (
+                        (target[0] + target[2]) / 2.0,
+                        (target[1] + target[3]) / 2.0,
+                    )
+            else:
+                target_center = (
+                    (target[0] + target[2]) / 2.0,
+                    (target[1] + target[3]) / 2.0,
+                )
+            search_width = max(target_width, source_width * 1.15)
+            search_height = max(target_height, source_height * 1.15)
+            allowed_width = allowed[2] - allowed[0]
+            allowed_height = allowed[3] - allowed[1]
+            if search_width <= allowed_width and search_height <= allowed_height:
+                center_x = min(
+                    allowed[2] - search_width / 2.0,
+                    max(allowed[0] + search_width / 2.0, target_center[0]),
+                )
+                center_y = min(
+                    allowed[3] - search_height / 2.0,
+                    max(allowed[1] + search_height / 2.0, target_center[1]),
+                )
+                target = (
+                    center_x - search_width / 2.0,
+                    center_y - search_height / 2.0,
+                    center_x + search_width / 2.0,
+                    center_y + search_height / 2.0,
+                )
+                action["target_region"] = list(target)
+                if action.get("effect_region_binding") == "target_region":
+                    action["expected_effect_region"] = list(target)
+                target_width = search_width
+                target_height = search_height
+                requirements = normalized.setdefault(
+                    "resolution_requirements", [],
+                )
+                if isinstance(requirements, list) and not any(
+                    isinstance(item, dict)
+                    and item.get("kind") == "spatial_geometry"
+                    and str(item.get("action_index", "")) == str(action_index)
+                    for item in requirements
+                ):
+                    requirements.append({
+                        "kind": "spatial_geometry",
+                        "resolver": "current_frame_geometry",
+                        "action_index": action_index,
+                        "description": (
+                            "resolve the exact bounded destination because the "
+                            "coarse model box cannot contain the complete source"
+                        ),
+                    })
+                if repairs is not None:
+                    repairs.extend((
+                        f"actions[{action_index}].target_region:"
+                        "expanded_local_search_hypothesis",
+                        f"resolution_requirements[{action_index}]:"
+                        "current_frame_geometry_injected",
+                    ))
+        if (
             not _point_in_region(start, source)
             or source_width > target_width
             or source_height > target_height
@@ -1987,6 +2059,14 @@ def _canonicalize_model_action_geometry(raw: dict[str, Any]) -> dict[str, Any]:
         )
         action["frame_x2"] = target_center[0] + (start[0] - source_center[0])
         action["frame_y2"] = target_center[1] + (start[1] - source_center[1])
+        global_effect = normalized.get("expected_effect")
+        if (
+            isinstance(global_effect, dict)
+            and global_effect.get("region_binding") == "target_region"
+            and int(global_effect.get("binding_action_index", -1))
+            == action_index
+        ):
+            global_effect["region"] = list(target)
         normalized_actions.append(action)
     normalized["actions"] = normalized_actions
     return normalized
@@ -2174,10 +2254,77 @@ def _bind_visible_region_candidates(
             and bounds[1] <= float(point[1]) <= bounds[3]
         )
 
+    def consistent_with_coarse_region(
+        coarse: Any,
+        candidate: list[float],
+    ) -> bool:
+        """Reject candidate ids that contradict the model's semantic location.
+
+        Candidate ids are optional exact-pixel refinements, not a license to
+        replace a semantically selected object with any detected rectangle.
+        A deliberately broad coarse region can contain a small exact candidate;
+        a candidate in another part of the frame cannot silently override it.
+        """
+        if not (
+            isinstance(coarse, list)
+            and len(coarse) == 4
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in coarse
+            )
+        ):
+            return True
+        left, top, right, bottom = (float(value) for value in coarse)
+        if right <= left or bottom <= top:
+            return True
+        width = right - left
+        height = bottom - top
+        margin_x = max(20.0, width * 0.35)
+        margin_y = max(20.0, height * 0.35)
+        candidate_center = (
+            (candidate[0] + candidate[2]) / 2.0,
+            (candidate[1] + candidate[3]) / 2.0,
+        )
+        if (
+            left - margin_x <= candidate_center[0] <= right + margin_x
+            and top - margin_y <= candidate_center[1] <= bottom + margin_y
+        ):
+            return True
+        overlap_left = max(left, candidate[0])
+        overlap_top = max(top, candidate[1])
+        overlap_right = min(right, candidate[2])
+        overlap_bottom = min(bottom, candidate[3])
+        overlap = max(0.0, overlap_right - overlap_left) * max(
+            0.0, overlap_bottom - overlap_top,
+        )
+        candidate_area = max(1e-6, candidate[2] - candidate[0]) * max(
+            1e-6, candidate[3] - candidate[1],
+        )
+        return overlap / candidate_area >= 0.20
+
     def bind_action(action: dict[str, Any], label: str) -> None:
         original_source = list(action.get("source_region") or [])
         original_target = list(action.get("target_region") or [])
         selected: dict[str, list[float]] = {}
+        target_candidate_id = str(
+            action.get("target_candidate_id") or ""
+        ).strip()
+        locator = action.get("partition_locator")
+        if not target_candidate_id and isinstance(locator, dict):
+            locator_matches = [
+                candidate_id
+                for candidate_id, candidate in by_id.items()
+                if isinstance(candidate.get("partition_locator"), dict)
+                and candidate.get("partition_locator") == locator
+            ]
+            if len(locator_matches) == 1:
+                target_candidate_id = locator_matches[0]
+                action["target_candidate_id"] = target_candidate_id
+                repairs.append(
+                    f"{label}.target_candidate_id:unique_partition_locator"
+                )
         for role in ("source", "target"):
             candidate_id = str(
                 action.get(f"{role}_candidate_id") or ""
@@ -2200,6 +2347,26 @@ def _bind_visible_region_candidates(
                     code="interaction_region_candidate_invalid",
                     repairs=repairs,
                 )
+            original = original_source if role == "source" else original_target
+            locator_proves_target = bool(
+                role == "target"
+                and isinstance(action.get("partition_locator"), dict)
+                and isinstance(candidate.get("partition_locator"), dict)
+                and candidate.get("partition_locator")
+                == action.get("partition_locator")
+            )
+            if (
+                not locator_proves_target
+                and not consistent_with_coarse_region(original, bounds)
+            ):
+                raise InteractionPlanOutputError(
+                    f"{label} selected current-frame region {candidate_id!r} "
+                    f"for {role}, but that candidate contradicts the semantic "
+                    f"{role}_region from the same response; omit the candidate "
+                    "id when the pixel inventory is incomplete",
+                    code="interaction_region_candidate_semantic_conflict",
+                    repairs=repairs,
+                )
             action[f"{role}_region"] = bounds
             selected[role] = bounds
             repairs.append(
@@ -2208,6 +2375,20 @@ def _bind_visible_region_candidates(
 
         target = selected.get("target")
         source = selected.get("source")
+        if (
+            str(action.get("action") or "") == "drag"
+            and str(action.get("placement_requirement") or "")
+            == "source_inside_target"
+            and str(action.get("source_candidate_id") or "").strip()
+            and str(action.get("source_candidate_id") or "").strip()
+            == str(action.get("target_candidate_id") or "").strip()
+        ):
+            raise InteractionPlanOutputError(
+                f"{label} bound a source-inside-target drag source and "
+                "destination to the same current-frame candidate",
+                code="interaction_region_candidate_role_conflict",
+                repairs=repairs,
+            )
         if target is not None:
             target_candidate = by_id.get(str(
                 action.get("target_candidate_id") or ""
@@ -2296,6 +2477,77 @@ def _merge_current_region_inventories(
     limit: int = 36,
 ) -> list[dict[str, Any]]:
     """Merge complementary geometry providers without duplicate faces."""
+    # Closed, individually bounded peers already provide stronger exact-pixel
+    # evidence than extrapolating cells from open divider lines.  When they
+    # form a complete two-dimensional matrix, attach the same semantic
+    # row/column locator used by open partitions.  This lets the planner select
+    # by relation while execution remains bound to each proven closed face.
+    # One-dimensional toolbars and incomplete/mixed peer sets are deliberately
+    # excluded; no application or game semantics are inferred here.
+    def structural_band(item: dict[str, Any]) -> bool:
+        """Hide window-spanning separators/chrome from semantic candidates.
+
+        The geometry remains available to local pixel resolvers; it is merely
+        not offered as a likely object identity.  Extremely elongated bands
+        repeatedly caused a planner to replace a small semantic target with a
+        status strip.  This shape-only filter has no application, label,
+        colour, screen side, or task-specific coordinate assumptions.
+        """
+        bounds = list(item.get("bounds") or [])
+        if len(bounds) != 4:
+            return False
+        width = max(0.0, float(bounds[2]) - float(bounds[0]))
+        height = max(0.0, float(bounds[3]) - float(bounds[1]))
+        longer = max(width, height)
+        shorter = max(1e-6, min(width, height))
+        return bool(
+            item.get("shape") == "rectangular_boundary"
+            and longer >= 720.0
+            and shorter <= 95.0
+            and longer / shorter >= 10.0
+        )
+
+    prepared_bounded = [
+        dict(item) for item in bounded if not structural_band(item)
+    ]
+    peer_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in prepared_bounded:
+        peer_group = str(item.get("peer_group") or "").strip()
+        if peer_group:
+            peer_groups.setdefault(peer_group, []).append(item)
+    for group in peer_groups.values():
+        if not group or any(
+            item.get("shape") != "rectangular_boundary" for item in group
+        ):
+            continue
+        coordinates = {
+            (
+                int(item.get("row_index") or 0),
+                int(item.get("column_index") or 0),
+            )
+            for item in group
+        }
+        rows = {row for row, _column in coordinates if row > 0}
+        columns = {column for _row, column in coordinates if column > 0}
+        complete_matrix = bool(
+            len(rows) >= 2
+            and len(columns) >= 2
+            and len(coordinates) == len(group) == len(rows) * len(columns)
+            and coordinates == {
+                (row, column) for row in rows for column in columns
+            }
+            and all(int(item.get("peer_count") or 0) == len(group) for item in group)
+        )
+        if not complete_matrix:
+            continue
+        for item in group:
+            item["partition_locator"] = {
+                "layout": "repeated_partition",
+                "row": int(item["row_index"]),
+                "column": int(item["column_index"]),
+            }
+            item["provider"] = "current_frame_closed_peer_geometry"
+
     def overlap_over_smaller(first: list[float], second: list[float]) -> float:
         left = max(float(first[0]), float(second[0]))
         top = max(float(first[1]), float(second[1]))
@@ -2311,7 +2563,7 @@ def _merge_current_region_inventories(
         return intersection / max(1e-6, min(first_area, second_area))
 
     retained_bounded = [
-        item for item in bounded
+        item for item in prepared_bounded
         if not any(
             overlap_over_smaller(
                 list(item.get("bounds") or []),
@@ -2356,6 +2608,37 @@ def _compact_region_inventory(
                 key: value for key, value in item.items() if key in fields
             })
     return compact
+
+
+def _region_inventory_mode(
+    intent: dict[str, Any],
+    primary_modality: str,
+) -> str:
+    """Choose geometry exposure from typed interaction semantics.
+
+    ``infer_from_scene`` means the compiler intentionally delegated the exact
+    pointer primitive to the authoritative frame.  It must not also hide the
+    current-frame candidates needed to execute that decision.  The older
+    primary-modality-only gate made bounded click/drag tasks unsatisfiable even
+    when ``action_modalities`` already declared spatial input.
+    """
+    spatial = {
+        "click", "double_click", "hover", "move_mouse", "drag",
+        "mouse_down", "mouse_up", "draw", "draw_strokes",
+    }
+    declared = {
+        str(value or "").strip().casefold()
+        for value in (intent.get("action_modalities") or [])
+        if str(value or "").strip()
+    }
+    primary = str(primary_modality or "").strip().casefold()
+    if primary in spatial or declared & spatial:
+        return "all"
+    if primary == "infer_from_scene" and str(
+        intent.get("session_mode") or ""
+    ).strip().casefold() == "persistent":
+        return "repeated_peers"
+    return "none"
 
 
 def plan_interaction(
@@ -2409,15 +2692,10 @@ def plan_interaction(
         bounded_inventory,
         partition_inventory,
     )
-    if (
-        primary_modality not in {"click", "draw"}
-        and not (
-            primary_modality == "infer_from_scene"
-            and str(intent.get("session_mode") or "") == "persistent"
-        )
-    ):
+    inventory_mode = _region_inventory_mode(intent, primary_modality)
+    if inventory_mode == "none":
         region_inventory = []
-    elif primary_modality == "infer_from_scene":
+    elif inventory_mode == "repeated_peers":
         region_inventory = [
             item for item in region_inventory
             if int(item.get("peer_count") or 0) >= 3
@@ -2450,9 +2728,17 @@ def plan_interaction(
     try:
         raw, repairs = _canonicalize_model_decision(raw, prior_state=prior)
         raw = _apply_immutable_roles(raw, contract_roles, repairs=repairs)
-        raw = _canonicalize_model_action_geometry(raw)
         raw = _bind_visible_region_candidates(
             raw, region_inventory, repairs=repairs,
+        )
+        # Candidate ids replace coarse model regions with current-frame pixel
+        # geometry.  Placement endpoints must therefore be derived only after
+        # that binding; otherwise a safe endpoint can remain centered on the
+        # stale semantic estimate or an unrelated coarse region.
+        raw = _canonicalize_model_action_geometry(
+            raw,
+            allow_local_resolution=True,
+            repairs=repairs,
         )
     except InteractionPlanOutputError as exc:
         exc.attach_payload(model_payload)
@@ -2565,6 +2851,7 @@ def controller_actions(
     frame_region: dict[str, int],
     bound_region: InteractionRegion,
     frame_epoch: int,
+    include_preparation: bool = True,
 ) -> list[dict[str, Any]]:
     """Compatibility import for callers that used the former monolith."""
     from .interaction_controller import controller_actions as map_actions
@@ -2574,6 +2861,7 @@ def controller_actions(
         frame_region=frame_region,
         bound_region=bound_region,
         frame_epoch=frame_epoch,
+        include_preparation=include_preparation,
     )
 
 

@@ -23,7 +23,23 @@ from .interaction_stage_runtime import (
     INTERACTION_STAGE_TYPES,
     InteractionStageEngine,
 )
+from .message_content import (
+    MessageDraft,
+    authorize_message_content,
+    generate_message_content,
+)
 from .recovery import RecoveryPolicy
+
+
+SEMANTIC_EXECUTION_STAGE_TYPES = frozenset({
+    StageType.DRAW_ARTIFACT,
+    StageType.CREATE_OR_EDIT_ARTIFACT,
+    StageType.EXECUTE_WORKSPACE_TASK,
+    StageType.RESEARCH_INFORMATION,
+    StageType.TRANSFORM_DATA,
+    StageType.MANAGE_AUTOMATION,
+    StageType.EXECUTE_SEMANTIC_TASK,
+})
 
 
 def _json(text: str) -> dict[str, Any]:
@@ -121,6 +137,8 @@ class StageRuntime:
             StageType.SAVE_ARTIFACT: "save",
             StageType.OPEN_CONVERSATION: "send",
             StageType.RESOLVE_RECIPIENT: "send",
+            StageType.GENERATE_MESSAGE_CONTENT: "draft_message",
+            StageType.REVIEW_OR_AUTHORIZE: "authorize_message",
             StageType.SEND_TEXT: "send",
             StageType.SEND_ARTIFACT: "send",
             StageType.VERIFY_ARTIFACT: "verify",
@@ -130,6 +148,11 @@ class StageRuntime:
             StageType.PERFORM_TURN: "interact",
             StageType.VERIFY_LOCAL_EFFECT: "interact",
             StageType.WAIT_FOR_EXTERNAL_CHANGE: "interact",
+            StageType.EXECUTE_WORKSPACE_TASK: "workspace",
+            StageType.RESEARCH_INFORMATION: "research",
+            StageType.TRANSFORM_DATA: "transform_data",
+            StageType.MANAGE_AUTOMATION: "automation",
+            StageType.EXECUTE_SEMANTIC_TASK: "execute",
         }
         communication_stages = {
             StageType.OPEN_CONVERSATION,
@@ -454,10 +477,7 @@ class StageRuntime:
                 else {}
             )
             stage_details.setdefault("error", str(exc))
-            if stage.type in {
-                StageType.DRAW_ARTIFACT,
-                StageType.CREATE_OR_EDIT_ARTIFACT,
-            }:
+            if stage.type in SEMANTIC_EXECUTION_STAGE_TYPES:
                 model_elapsed_ms = max(
                     0,
                     int(stage_details.get("model_elapsed_ms") or 0),
@@ -667,7 +687,7 @@ class StageRuntime:
             record = registry.record("application.open", provider="local_controller", verified=True, stage_id=stage.id, value=app, metadata=data)
             return NodeResult(output=self._stage_output(stage, started, evidence=record))
 
-        if stage.type in {StageType.DRAW_ARTIFACT, StageType.CREATE_OR_EDIT_ARTIFACT}:
+        if stage.type in SEMANTIC_EXECUTION_STAGE_TYPES:
             app = str(params.get("app") or "").strip()
             bound_hwnd = 0
             if app:
@@ -715,7 +735,29 @@ class StageRuntime:
                 predicate = "artifact.semantic_visible"
             else:
                 goal = str(params.get("goal") or contract.task)
-                stage_guidance = ""
+                stage_guidance = {
+                    StageType.EXECUTE_WORKSPACE_TASK: (
+                        "Operate on the configured workspace with deterministic file and shell tools. "
+                        "Inspect before changing anything, keep edits scoped to the request, and run "
+                        "the smallest real verification that proves the result."
+                    ),
+                    StageType.RESEARCH_INFORMATION: (
+                        "Use public web retrieval for claims that can change. Compare relevant sources, "
+                        "retain URLs in the result, and do not substitute a desktop browser guess for retrieval."
+                    ),
+                    StageType.TRANSFORM_DATA: (
+                        "Inspect the actual input data, preserve its source, write outputs deliberately, "
+                        "and verify shape/content with deterministic file or shell evidence."
+                    ),
+                    StageType.MANAGE_AUTOMATION: (
+                        "Use the typed scheduler tools. Confirm the returned schedule identity and timing; "
+                        "do not claim success from a prose plan."
+                    ),
+                    StageType.EXECUTE_SEMANTIC_TASK: (
+                        "Answer the bounded user request directly and call done only when the result itself "
+                        "satisfies the request. Do not invent a desktop artifact or GUI target."
+                    ),
+                }.get(stage.type, "")
                 provider = "semantic_stage_done"
                 predicate = "stage.verified_outcome"
             profile = build_runtime_profile(
@@ -949,6 +991,122 @@ class StageRuntime:
             )
             return NodeResult(output=self._stage_output(stage, started, artifact=artifact.model_dump(mode="json"), evidence=record))
 
+        if stage.type == StageType.GENERATE_MESSAGE_CONTENT:
+            draft = generate_message_content(
+                instruction=str(params.get("instruction") or contract.task),
+                recipient=str(params.get("recipient") or contract.intent.recipient),
+                channel=str(params.get("app") or contract.intent.channel),
+            )
+            ref = str(params.get("message_ref") or "outbound_message_draft")
+            context["runtime_state"].setdefault("message_drafts", {})[ref] = (
+                draft.model_dump(mode="json")
+            )
+            if (
+                draft.requires_user_input
+                or not draft.grounded
+                or not draft.text.strip()
+            ):
+                failure = RuntimeError(
+                    "message draft requires missing context"
+                    if draft.requires_user_input
+                    else "message generator did not produce grounded non-empty content"
+                )
+                failure.failure_type = (
+                    "message_context_missing"
+                    if draft.requires_user_input
+                    else "message_content_ungrounded"
+                )
+                failure.stage_details = {
+                    "draft": draft.model_dump(mode="json"),
+                    "model_calls": draft.model_calls,
+                    "model_elapsed_ms": draft.model_elapsed_ms,
+                }
+                raise failure
+            record = registry.record(
+                "message.content_generated",
+                provider="text_message_generator",
+                verified=True,
+                recipient=contract.intent.recipient,
+                stage_id=stage.id,
+                metadata={
+                    "message_ref": ref,
+                    "content_source": draft.source,
+                    "confidence": draft.confidence,
+                    "grounded": draft.grounded,
+                    "length": len(draft.text),
+                },
+            )
+            return NodeResult(output=self._stage_output(
+                stage,
+                started,
+                message_ref=ref,
+                draft={
+                    "text": draft.text,
+                    "confidence": draft.confidence,
+                    "grounded": draft.grounded,
+                    "requires_user_input": draft.requires_user_input,
+                },
+                evidence=record,
+                model_calls=draft.model_calls,
+                model_elapsed_ms=draft.model_elapsed_ms,
+                controller_elapsed_ms=max(
+                    0,
+                    int((time.monotonic() - started) * 1000)
+                    - draft.model_elapsed_ms,
+                ),
+            ))
+
+        if stage.type == StageType.REVIEW_OR_AUTHORIZE:
+            source = str(params.get("content_source") or "none")
+            draft = None
+            if source == "generate":
+                ref = str(params.get("draft_ref") or "outbound_message_draft")
+                payload = context["runtime_state"].get("message_drafts", {}).get(ref)
+                if isinstance(payload, dict):
+                    draft = MessageDraft.model_validate(payload)
+            authorization = authorize_message_content(
+                text=str(params.get("text") or ""),
+                content_source=source,
+                generated_draft=draft,
+            )
+            if authorization.get("ok") is not True:
+                _raise_stage_failure(
+                    authorization,
+                    "message_not_authorized",
+                    "outbound message was not authorized",
+                )
+            ref = str(params.get("message_ref") or "authorized_outbound_message")
+            context["runtime_state"].setdefault("authorized_messages", {})[ref] = {
+                "text": str(authorization["text"]),
+                "content_source": str(authorization["content_source"]),
+                "stage_id": stage.id,
+                "task_id": contract.task_id,
+            }
+            record = registry.record(
+                "message.content_authorized",
+                provider="message_contract_review",
+                verified=True,
+                recipient=contract.intent.recipient,
+                stage_id=stage.id,
+                metadata={
+                    "message_ref": ref,
+                    "content_source": authorization["content_source"],
+                    "length": len(str(authorization["text"])),
+                    "task_id": contract.task_id,
+                },
+            )
+            return NodeResult(output=self._stage_output(
+                stage,
+                started,
+                message_ref=ref,
+                authorization={
+                    "ok": True,
+                    "content_source": authorization["content_source"],
+                    "length": len(str(authorization["text"])),
+                },
+                evidence=record,
+            ))
+
         if stage.type == StageType.OPEN_CONVERSATION:
             adapter = self._adapter(context, contract, stop_event)
             opened = adapter.open_conversation(str(params.get("recipient") or contract.intent.recipient), stage_id=stage.id)
@@ -981,8 +1139,33 @@ class StageRuntime:
             return NodeResult(output=self._stage_output(stage, started, artifact_id=artifact_id, staged=staged, sent=sent, evidence=record))
 
         if stage.type == StageType.SEND_TEXT:
+            message_ref = str(params.get("message_ref") or "")
+            if message_ref:
+                authorized = context["runtime_state"].get(
+                    "authorized_messages", {}
+                ).get(message_ref)
+                if not isinstance(authorized, dict):
+                    failure = RuntimeError(
+                        "authorized outbound message is missing from current run state"
+                    )
+                    failure.failure_type = "message_authorization_missing"
+                    raise failure
+                if str(authorized.get("task_id") or "") != contract.task_id:
+                    failure = RuntimeError(
+                        "authorized outbound message does not belong to this task"
+                    )
+                    failure.failure_type = "message_authorization_scope_mismatch"
+                    raise failure
+                text = str(authorized.get("text") or "").strip()
+            else:
+                # Compatibility for serialized task-contract/1 graphs created
+                # before outbound content became a first-class state binding.
+                text = str(params.get("text") or "").strip()
+            if not text:
+                failure = RuntimeError("outbound message text is empty")
+                failure.failure_type = "empty_message_content"
+                raise failure
             adapter = self._adapter(context, contract, stop_event)
-            text = str(params.get("text") or "")
             sent = adapter.send_text(text, stage_id=stage.id)
             if sent.get("ok") is not True:
                 raise RuntimeError(sent.get("error") or "text send failed")

@@ -24,6 +24,11 @@ from ..utils.screenshot import Region, window_region
 from .artifacts import Artifact, ArtifactStore
 from .contracts import StageType, TaskContract, TaskStage
 from .evidence import EvidenceRegistry
+from .execution_context import (
+    foreground_handoff_conflict,
+    normalize_execution_context,
+    validated_handoff_target,
+)
 from .interaction import (
     InteractionDecision,
     InteractionPlanOutputError,
@@ -31,7 +36,10 @@ from .interaction import (
     verify_interaction_completion,
     verify_interaction_effect,
 )
-from .interaction_controller import controller_actions
+from .interaction_controller import (
+    controller_actions,
+    controller_preparation_actions,
+)
 from .visual_effects import (
     verify_direct_manipulation_transition,
     verify_pointer_gesture_realization,
@@ -797,6 +805,9 @@ class InteractionStageEngine:
         state.setdefault("agent_turns_since_external_change", 0)
         state.setdefault("replan_count", 0)
         state.setdefault("verified_turn_history", [])
+        execution_context = normalize_execution_context(context.get("inputs"))
+        if execution_context:
+            state.setdefault("execution_context", execution_context)
         return state
 
     @staticmethod
@@ -966,10 +977,40 @@ class InteractionStageEngine:
         controller_elapsed_ms = 0
         binding = state.get("target_binding") if isinstance(state.get("target_binding"), dict) else {}
         hwnd = int(binding.get("hwnd") or 0)
+        execution_context = normalize_execution_context(context.get("inputs"))
+        active_source = str(source or "").strip().casefold() in {
+            "", "active_window", "foreground", "current",
+        }
+        if not hwnd and active_source:
+            hwnd, target_issue = validated_handoff_target(execution_context)
+            if target_issue:
+                raise _failure(
+                    str(target_issue.get("reason") or "desktop target handoff failed"),
+                    str(target_issue.get("failure_type") or "target_binding_missing"),
+                    execution_context=execution_context,
+                    **{
+                        key: value for key, value in target_issue.items()
+                        if key not in {"reason", "failure_type"}
+                    },
+                )
         if not hwnd:
             hwnd = self._resolve_hwnd(source)
         if not hwnd:
             raise _failure(f"interaction target window was not found: {source}", "window_not_found")
+        conflict = foreground_handoff_conflict(
+            execution_context,
+            hwnd,
+        ) if active_source else None
+        if conflict:
+            raise _failure(
+                str(conflict.get("reason") or "control surface handoff failed"),
+                str(conflict.get("failure_type") or "control_surface_handoff_failed"),
+                execution_context=execution_context,
+                **{
+                    key: value for key, value in conflict.items()
+                    if key not in {"reason", "failure_type"}
+                },
+            )
         title = next(
             (
                 str(item.get("title") or "")
@@ -1057,6 +1098,13 @@ class InteractionStageEngine:
             "client_region": _rect(client_region) if client_region is not None else None,
             "client_frame_bounds": client_bounds,
             "foreground_verified": self._foreground() == hwnd,
+            "binding_source": (
+                "execution_context_target"
+                if active_source and int(
+                    execution_context.get("target_window", {}).get("hwnd") or 0
+                ) == hwnd
+                else "runtime_resolution"
+            ),
         }
         state.update({
             "status": "observed",
@@ -2203,6 +2251,244 @@ class InteractionStageEngine:
                 "frame_id": int(state["frame_id"]),
                 "observation_artifact_id": fresh_artifact.artifact_id,
             })
+            preparation_actions = controller_preparation_actions(decision)
+            preparation_result: dict[str, Any] = {}
+            preparation_elapsed_ms = 0
+            preparation_model_calls = 0
+            preparation_model_elapsed_ms = 0
+            input_mode_evidence: list[dict[str, Any]] = []
+            color_preparation_evidence: list[dict[str, Any]] = []
+            if preparation_actions:
+                preparation_session = ToolSession(
+                    stop_event=stop_event,
+                    task=contract.task,
+                    runtime_profile=RuntimeProfile(desktop=True, coding=False),
+                    task_intent=contract.intent,
+                    communication_context={"active": False},
+                )
+                preparation_session.run_id = context["run_id"]
+                preparation_started = time.monotonic()
+                try:
+                    preparation_session._remember_target(
+                        hwnd, str(target.get("title") or ""),
+                    )
+                    preparation_session._visual_frame_id = int(state["frame_id"])
+                    preparation_session._visual_frame_epoch = int(state["frame_id"])
+                    preparation_session._screen_epoch = int(state["frame_id"])
+                    preparation_session._visual_frame_scope = "target_window"
+                    preparation_session._visual_frame_region = dict(
+                        target["frame_region"],
+                    )
+                    preparation_result = _json(
+                        preparation_session.dispatch("run_action_batch", {
+                            "actions": preparation_actions,
+                            "stop_on_error": True,
+                            "subgoal": (
+                                "establish typed input preconditions before "
+                                "mapping any spatial mutation"
+                            ),
+                            "sync": {
+                                "wait_stable": True,
+                                "timeout_s": 3.0,
+                            },
+                        }).text,
+                    )
+                finally:
+                    preparation_session.close()
+                preparation_elapsed_ms = int(
+                    (time.monotonic() - preparation_started) * 1000,
+                )
+                for item in preparation_result.get("results") or []:
+                    if not isinstance(item, dict) or not isinstance(
+                        item.get("data"), dict,
+                    ):
+                        continue
+                    data = dict(item["data"])
+                    try:
+                        preparation_model_calls += int(
+                            data.get("model_calls") or 0,
+                        )
+                        preparation_model_elapsed_ms += int(
+                            data.get("model_elapsed_ms") or 0,
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    if item.get("action") == "ensure_input_mode":
+                        input_mode_evidence.append(data)
+                    elif item.get("action") == "select_color":
+                        color_preparation_evidence.append(data)
+                if preparation_result.get("ok") is not True:
+                    raise _failure(
+                        str(
+                            preparation_result.get("error")
+                            or "input preparation transaction failed"
+                        ),
+                        str(
+                            preparation_result.get("failure_type")
+                            or "input_preparation_failed"
+                        ),
+                        preparation_actions=preparation_actions,
+                        preparation_result=preparation_result,
+                        model_calls=preparation_model_calls,
+                        model_elapsed_ms=preparation_model_elapsed_ms,
+                        controller_elapsed_ms=preparation_elapsed_ms,
+                        capture_elapsed_ms=capture_elapsed_ms,
+                    )
+                required_input_modes = {
+                    "continuous_freehand"
+                    for item in decision.actions
+                    if item.action == "draw_strokes"
+                    and item.interaction_mechanism == "freehand_strokes"
+                }
+                proven_input_modes = {
+                    str(item.get("input_mode") or "")
+                    for item in input_mode_evidence
+                    if item.get("verified") is True
+                }
+                if not required_input_modes <= proven_input_modes:
+                    raise _failure(
+                        "input preparation did not prove its typed mode precondition",
+                        "input_mode_precondition_unproven",
+                        required_input_modes=sorted(required_input_modes),
+                        proven_input_modes=sorted(proven_input_modes),
+                        input_mode_evidence=input_mode_evidence,
+                        preparation_result=preparation_result,
+                        model_calls=preparation_model_calls,
+                        model_elapsed_ms=preparation_model_elapsed_ms,
+                        controller_elapsed_ms=preparation_elapsed_ms,
+                        capture_elapsed_ms=capture_elapsed_ms,
+                    )
+
+                # Mode/colour setup is itself a UI mutation.  Never reuse the
+                # pre-setup frame's physical geometry for the subsequent
+                # gesture.  Capture a managed post-setup frame, prove the same
+                # target authority and unchanged action-grounding pixels, then
+                # rebind local geometry without another planner call.
+                preparation_baseline = fresh_artifact
+                preparation_authority = _authority_signature(
+                    state.get("target_binding") or {},
+                )
+                prepared_artifact = self._capture_scene(
+                    context=context,
+                    contract=contract,
+                    store=store,
+                    stop_event=stop_event,
+                    source=source,
+                    focus=False,
+                )
+                preparation_capture_elapsed_ms = int(
+                    (state.get("last_capture_timing") or {}).get(
+                        "capture_elapsed_ms", 0,
+                    )
+                )
+                capture_elapsed_ms += preparation_capture_elapsed_ms
+                prepared_target = state.get("target_binding") or {}
+                prepared_authority = _authority_signature(prepared_target)
+                preparation_regions = _action_grounding_regions(decision)
+                preparation_changes = [
+                    store.frame_change(
+                        preparation_baseline.artifact_id,
+                        prepared_artifact.artifact_id,
+                        target_region=_normalized_roi_pixels(
+                            bounds, prepared_artifact,
+                        ),
+                        pixel_threshold=18,
+                        min_change_ratio=0.035,
+                        min_mean_delta=2.0,
+                    )
+                    for bounds in preparation_regions
+                ]
+                preparation_stale_reasons: list[str] = []
+                if preparation_authority != prepared_authority:
+                    preparation_stale_reasons.append(
+                        "window_or_client_geometry_changed",
+                    )
+                if any(
+                    item.get("method") == "unavailable"
+                    for item in preparation_changes
+                ):
+                    preparation_stale_reasons.append(
+                        "post_preparation_pixel_check_unavailable",
+                    )
+                elif any(
+                    item.get("changed") is True
+                    for item in preparation_changes
+                ):
+                    preparation_stale_reasons.append(
+                        "action_grounding_changed_during_preparation",
+                    )
+                preparation_transition = {
+                    "verified": not preparation_stale_reasons,
+                    "preparation_actions": preparation_actions,
+                    "controller_result": preparation_result,
+                    "planned_frame_id": decision.frame_id,
+                    "prepared_frame_id": int(state.get("frame_id") or 0),
+                    "planned_artifact_id": preparation_baseline.artifact_id,
+                    "prepared_artifact_id": prepared_artifact.artifact_id,
+                    "planned_authority": preparation_authority,
+                    "prepared_authority": prepared_authority,
+                    "grounding_regions": preparation_regions,
+                    "grounding_changes": preparation_changes,
+                    "stale_reasons": preparation_stale_reasons,
+                    "model_calls": preparation_model_calls,
+                    "model_elapsed_ms": preparation_model_elapsed_ms,
+                    "controller_elapsed_ms": preparation_elapsed_ms,
+                    "capture_elapsed_ms": preparation_capture_elapsed_ms,
+                }
+                state["input_preparation"] = preparation_transition
+                if preparation_stale_reasons:
+                    self._reserve_replan(
+                        state,
+                        contract,
+                        reason="post_input_preparation_frame_stale",
+                        activity={
+                            "model_calls": preparation_model_calls,
+                            "model_elapsed_ms": preparation_model_elapsed_ms,
+                            "controller_elapsed_ms": preparation_elapsed_ms,
+                            "capture_elapsed_ms": capture_elapsed_ms,
+                        },
+                    )
+                    state.update({
+                        "status": "input_prepared_reobserve",
+                        "stale_plan": decision.model_dump(mode="json"),
+                        "planned_action": None,
+                        "executed_action": None,
+                        "failure_stage": "PerformTurn.input_preparation",
+                    })
+                    if "window_or_client_geometry_changed" in preparation_stale_reasons:
+                        self._binding(context).reset()
+                    record = registry.record(
+                        "interaction.plan_revalidated",
+                        provider="post_input_preparation_frame",
+                        verified=True,
+                        stage_id=stage.id,
+                        artifact_id=prepared_artifact.artifact_id,
+                        metadata={
+                            **preparation_transition,
+                            "recovery": "infer_from_fresh_authoritative_frame",
+                        },
+                    )
+                    return NodeResult(
+                        ok=True,
+                        branch="reobserve",
+                        output=self.stage_output(
+                            stage,
+                            started,
+                            artifact_id=prepared_artifact.artifact_id,
+                            model_calls=preparation_model_calls,
+                            model_elapsed_ms=preparation_model_elapsed_ms,
+                            controller_elapsed_ms=preparation_elapsed_ms,
+                            capture_elapsed_ms=capture_elapsed_ms,
+                            interaction_state=dict(state),
+                            evidence=record,
+                        ),
+                    )
+                fresh_artifact = prepared_artifact
+                target = prepared_target
+                decision = decision.model_copy(update={
+                    "frame_id": int(state["frame_id"]),
+                    "observation_artifact_id": prepared_artifact.artifact_id,
+                })
             requires_spatial_lineage = any(
                 bool(action.normalized_points()) for action in decision.actions
             )
@@ -2294,6 +2580,7 @@ class InteractionStageEngine:
                 frame_region=target["frame_region"],
                 bound_region=bound,
                 frame_epoch=int(state["frame_id"]),
+                include_preparation=False,
             )
             if not any(item.get("action") != "wait_stable" for item in actions):
                 raise _failure("semantic turn contained no mutation", "interaction_action_empty")
@@ -2321,7 +2608,9 @@ class InteractionStageEngine:
                 }).text)
             finally:
                 session.close()
-            controller_elapsed_ms = int((time.monotonic() - controller_started) * 1000)
+            controller_elapsed_ms = preparation_elapsed_ms + int(
+                (time.monotonic() - controller_started) * 1000,
+            )
             if result.get("ok") is not True:
                 failure_type = str(
                     result.get("failure_type") or "interaction_action_failed"
@@ -2355,37 +2644,6 @@ class InteractionStageEngine:
                     controller_elapsed_ms=controller_elapsed_ms,
                     capture_elapsed_ms=capture_elapsed_ms,
                 )
-            required_input_modes = {
-                "continuous_freehand"
-                for item in decision.actions
-                if item.action == "draw_strokes"
-                and item.interaction_mechanism == "freehand_strokes"
-            }
-            input_mode_evidence = [
-                dict(item.get("data") or {})
-                for item in (result.get("results") or [])
-                if isinstance(item, dict)
-                and item.get("action") == "ensure_input_mode"
-                and isinstance(item.get("data"), dict)
-            ]
-            proven_input_modes = {
-                str(item.get("input_mode") or "")
-                for item in input_mode_evidence
-                if item.get("verified") is True
-            }
-            if not required_input_modes <= proven_input_modes:
-                raise _failure(
-                    "controller transaction did not prove its typed input-mode precondition",
-                    "input_mode_precondition_unproven",
-                    required_input_modes=sorted(required_input_modes),
-                    proven_input_modes=sorted(proven_input_modes),
-                    input_mode_evidence=input_mode_evidence,
-                    controller_result=result,
-                    model_calls=0,
-                    model_elapsed_ms=0,
-                    controller_elapsed_ms=controller_elapsed_ms,
-                    capture_elapsed_ms=capture_elapsed_ms,
-                )
             if input_mode_evidence:
                 state["input_mode_evidence"] = input_mode_evidence
                 for evidence in input_mode_evidence:
@@ -2411,6 +2669,8 @@ class InteractionStageEngine:
                     "deferred": False,
                     "frame_id": decision.frame_id,
                     "actions": [item.model_dump(mode="json") for item in decision.actions],
+                    "input_preparation": preparation_result,
+                    "color_preparation_evidence": color_preparation_evidence,
                     "controller_result": result,
                     "expected_effect": decision.expected_effect.model_dump(mode="json"),
                 },
@@ -2425,7 +2685,9 @@ class InteractionStageEngine:
                 artifact_id=decision.observation_artifact_id,
                 metadata={
                     "frame_id": decision.frame_id,
-                    "action_count": len(actions),
+                    "action_count": len(preparation_actions) + len(actions),
+                    "preparation_action_count": len(preparation_actions),
+                    "preparation_result": preparation_result,
                     "controller_result": result,
                     "expected_effect": decision.expected_effect.model_dump(mode="json"),
                     "action_preflight": preflight,
@@ -2439,6 +2701,8 @@ class InteractionStageEngine:
             )
             return NodeResult(output=self.stage_output(
                 stage, started,
+                model_calls=preparation_model_calls,
+                model_elapsed_ms=preparation_model_elapsed_ms,
                 controller_elapsed_ms=controller_elapsed_ms,
                 capture_elapsed_ms=capture_elapsed_ms,
                 preflight_elapsed_ms=int(
@@ -2645,6 +2909,7 @@ class InteractionStageEngine:
                         remote_feedback=remote_feedback,
                     ),
                     min_mean_delta=0.45 if remote_feedback else 1.0,
+                    allow_coherent_region=remote_feedback,
                 )
                 changes.append({
                     **item,
@@ -3197,6 +3462,41 @@ class InteractionStageEngine:
                 if contract.session is not None
                 else 300.0
             )
+            waiting_external = {
+                "verified": False,
+                "armed": True,
+                "waiting": True,
+                "changed": False,
+                "status": "waiting_external",
+                "watch_scope": str(
+                    params.get("watch_scope") or "bound_interaction_surface"
+                ),
+                "watch_bounds": list(bounds),
+                "watch_binding": watch_binding,
+                "watch_region": _rect(watch_region),
+                "baseline_artifact_id": baseline.artifact_id,
+                "timeout_s": timeout_s,
+                "requires_external_participant": True,
+                "agent_turn_verified": bool(
+                    (state.get("last_local_verification")
+                     or state.get("local_verification")
+                     or {}).get("verified") is True
+                ),
+            }
+            state.update({
+                "status": "waiting_external",
+                "external_change": waiting_external,
+            })
+            BUS.publish(
+                "interaction_wait_external_change",
+                run_id=context["run_id"],
+                session_id=state.get("session_id"),
+                waiting=True,
+                armed=True,
+                changed=False,
+                watch_scope=waiting_external["watch_scope"],
+                external_change=waiting_external,
+            )
             source = str(target.get("source") or contract.intent.source or "active_window")
             artifact, baseline_delta = self._capture_authoritative_delta(
                 context=context, contract=contract, store=store,
@@ -3297,6 +3597,11 @@ class InteractionStageEngine:
                                 "external visual change was not observed"
                             )),
                             "external_change_timeout",
+                            requires_external_participant=True,
+                            agent_turn_verified=waiting_external[
+                                "agent_turn_verified"
+                            ],
+                            wait_outcome="external_participant_absent",
                             wait_result=result,
                             watch_region=_rect(watch_region),
                             baseline_delta=baseline_delta,
@@ -3349,6 +3654,11 @@ class InteractionStageEngine:
                         "external visual change timeout expired after transient "
                         "watcher notifications produced no authoritative pixel delta",
                         "external_change_timeout",
+                        requires_external_participant=True,
+                        agent_turn_verified=waiting_external[
+                            "agent_turn_verified"
+                        ],
+                        wait_outcome="external_participant_absent",
                         wait_result=result,
                         watch_region=_rect(watch_region),
                         baseline_delta=baseline_delta,
