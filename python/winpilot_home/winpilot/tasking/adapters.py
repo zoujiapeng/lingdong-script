@@ -222,7 +222,14 @@ class CommunicationAdapter(ABC):
             ):
                 continue
             role = str(getattr(element, "role", "") or "").casefold()
-            if roles and not any(token in role for token in roles):
+            # OCR cannot reliably infer control roles in custom-rendered
+            # clients.  The versioned ROI is authoritative for supplemental
+            # OCR elements; retain strict roles for structured UI providers.
+            if (
+                roles
+                and str(getattr(element, "source", "") or "") != "ocr"
+                and not any(token in role for token in roles)
+            ):
                 continue
             if self._element_in_region(element, region):
                 matches.append(element)
@@ -554,6 +561,25 @@ class CommunicationAdapter(ABC):
             key=lambda item: int(getattr(item, "cy", 0) or 0),
             reverse=True,
         )
+
+    def _snapshot_with_zone_ocr(
+        self,
+        snapshot: Any,
+        *zones: tuple[float, float, float, float],
+    ) -> Any:
+        """Augment one custom-rendered snapshot with bounded navigation OCR."""
+
+        window = getattr(snapshot, "region", None)
+        if not isinstance(window, Region):
+            return snapshot
+        elements = list(getattr(snapshot, "elements", []) or [])
+        for zone in zones:
+            region = self.layout_profile.region(window, zone)
+            try:
+                elements.extend(ocr.collect(region, min_conf=0.45) or [])
+            except Exception:
+                continue
+        return SimpleNamespace(region=window, elements=elements)
 
     def paste_or_attach_artifact(self, artifact_id: str, *, stage_id: str = "") -> dict[str, Any]:
         self.stage_id = stage_id or self.stage_id
@@ -1133,6 +1159,11 @@ class SearchBasedChatAdapter(CommunicationAdapter):
             return stale
         if stale.get("dismissed") is True:
             snapshot = self._observe_snapshot()
+        navigation_snapshot = self._snapshot_with_zone_ocr(
+            snapshot,
+            self.layout_profile.search,
+            self.layout_profile.contacts,
+        )
         trace: list[dict[str, Any]] = []
         if stale.get("dismissed") is True:
             trace.append({"action": "dismiss_stale_attachment_confirmation", **stale})
@@ -1170,11 +1201,15 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                 "evidence": record,
             }
 
-        def click_element(element: Any) -> bool:
+        def click_element(element: Any, *, action: str = "click_recipient") -> bool:
             metadata = self._element_metadata(element)
             element_id = int(getattr(element, "elem_id", -1))
-            result = self.session.dispatch("click", {"element_id": element_id})
-            ok = _ok(result.text)
+            source = str(getattr(element, "source", "") or "")
+            result = None
+            ok = False
+            if source != "ocr" and element_id >= 0:
+                result = self.session.dispatch("click", {"element_id": element_id})
+                ok = _ok(result.text)
             if not ok:
                 result = self.session.dispatch("click", {
                     "x": int(getattr(element, "cx", 0) or 0),
@@ -1182,12 +1217,12 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                     "physical": True,
                 })
                 ok = _ok(result.text)
-            trace.append({"action": "click_recipient", "element": metadata, "ok": ok})
+            trace.append({"action": action, "element": metadata, "ok": ok})
             return ok
 
         strategy = "visible_contact"
         candidates = self._matching_elements(
-            snapshot,
+            navigation_snapshot,
             recipient,
             self.layout_profile.contacts,
         )
@@ -1202,7 +1237,7 @@ class SearchBasedChatAdapter(CommunicationAdapter):
             search_fields: list[Any] = []
             for label in self.search_labels:
                 search_fields.extend(self._matching_elements(
-                    snapshot,
+                    navigation_snapshot,
                     label,
                     self.layout_profile.search,
                     roles=("edit", "input", "search", "combobox"),
@@ -1210,9 +1245,13 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                 ))
             search_field = search_fields[0] if search_fields else None
             if search_field is not None:
-                clicked = self.session.dispatch("click", {"element_id": int(getattr(search_field, "elem_id", -1))})
-                if not _ok(clicked.text):
-                    return {"ok": False, "failure_type": "recipient_not_resolved", "error": clicked.text}
+                if not click_element(search_field, action="click_search_field"):
+                    return {
+                        "ok": False,
+                        "failure_type": "recipient_not_resolved",
+                        "error": "the visibly grounded search field could not be activated",
+                        "trace": trace,
+                    }
             else:
                 strategy = "keyboard_search_v1"
                 focused = self.session.dispatch("hotkey", {"keys": ["ctrl", "f"]})
@@ -1224,8 +1263,12 @@ class SearchBasedChatAdapter(CommunicationAdapter):
                 return {"ok": False, "failure_type": "recipient_not_resolved", "error": typed.text}
             self._sleep(0.45)
             snapshot = self._observe_snapshot()
-            candidates = self._matching_elements(
+            navigation_snapshot = self._snapshot_with_zone_ocr(
                 snapshot,
+                self.layout_profile.contacts,
+            )
+            candidates = self._matching_elements(
+                navigation_snapshot,
                 recipient,
                 self.layout_profile.contacts,
             )
@@ -1435,6 +1478,36 @@ class DomainAdapterRegistry:
         if adapter_type is None:
             raise KeyError(f"no communication adapter registered for channel: {channel}")
         return adapter_type(**kwargs)
+
+    @classmethod
+    def registered_adapters(cls) -> list[dict[str, Any]]:
+        """Return unique discoverable adapter identities and their aliases.
+
+        This is static capability metadata only.  The desktop runtime still
+        has to prove that an application is installed/running and that the
+        requested recipient can be opened before selecting a route.
+        """
+
+        grouped: dict[type[CommunicationAdapter], set[str]] = {}
+        for channel, adapter_type in cls._types.items():
+            grouped.setdefault(adapter_type, set()).add(str(channel))
+        descriptors = []
+        for adapter_type, channels in grouped.items():
+            adapter_id = str(getattr(adapter_type, "id", "") or "").strip()
+            app_name = str(getattr(adapter_type, "app_name", "") or "").strip()
+            if not adapter_id or not app_name:
+                continue
+            aliases = sorted({adapter_id, app_name, *channels}, key=str.casefold)
+            descriptors.append({
+                "adapter_id": adapter_id,
+                "app_name": app_name,
+                "component": cls._component_id(adapter_type),
+                "channels": aliases,
+            })
+        return sorted(
+            descriptors,
+            key=lambda item: str(item.get("adapter_id") or "").casefold(),
+        )
 
     @classmethod
     def registered_channels(cls) -> list[str]:

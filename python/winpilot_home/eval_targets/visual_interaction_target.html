@@ -59,6 +59,11 @@
     .corridor-goal { position: absolute; border-radius: 50%; border: 6px dashed #169b62;
       background: rgba(22,155,98,.12); display: grid; place-items: center; color: #087747;
       font-size: 14px; font-weight: 900; }
+    .checkpoint { position: absolute; display: grid; place-items: center; border-radius: 50%;
+      border: 6px solid #ba7b00; background: rgba(255,190,36,.22); color: #845400;
+      font-size: 14px; font-weight: 900; }
+    .dynamic-goal { transition: opacity .12s ease; }
+    .dynamic-goal.concealed { visibility: hidden; opacity: 0; }
     .board { position: absolute; background: #fff; box-shadow: 0 0 0 5px #27364a; }
     .board canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
     .legend { position: absolute; padding: 10px 13px; border-radius: 10px; background: #fff;
@@ -107,7 +112,7 @@
         screen_x: event && Math.round(event.screenX) || 0,
         screen_y: event && Math.round(event.screenY) || 0,
         move_count: moveCount, succeeded: Boolean(details.succeeded), details };
-      fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
+      return fetch('/event', {method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload), cache:'no-store'}).catch(() => {});
     }
     function markSuccess(message, event, details = {}) {
@@ -250,6 +255,57 @@
       readyDetails={token:box(token),goal:box(goal),path_points:points,variant};
     }
 
+    function setupDynamicHold() {
+      heading.textContent='Progressive Held-Pointer Steering';
+      instruction.textContent='Press and KEEP HOLDING the blue disk. Move it into the yellow CHECKPOINT. The green GOAL appears only then; without releasing, continue into GOAL and release there.';
+      const W=arena.clientWidth,H=arena.clientHeight,size=54;
+      const start={x:70,y:Math.round(between(70,H-70))};
+      const checkpoint={x:Math.round(W*.46),y:Math.round(between(85,H-85))};
+      const goalPoint={x:W-86,y:checkpoint.y < H/2 ? H-88 : 88};
+      const checkpointEl=document.createElement('div');checkpointEl.className='checkpoint';checkpointEl.textContent='CHECKPOINT';
+      const goal=document.createElement('div');goal.className='target dynamic-goal concealed';goal.textContent='GOAL';
+      const token=document.createElement('div');token.className='token';token.textContent='HOLD';
+      place(checkpointEl,checkpoint.x-58,checkpoint.y-58,116,116);
+      place(goal,goalPoint.x-64,goalPoint.y-64,128,128);
+      place(token,start.x-size/2,start.y-size/2,size,size);
+      arena.append(checkpointEl,goal,token);
+      let pointer=null,ox=0,oy=0,downCount=0,checkpointReached=false,goalRevealedAfterDown=false;
+      token.addEventListener('pointerdown',event=>{if(!event.isTrusted||pointer!==null)return;
+        pointer=event.pointerId;downCount++;moveCount=0;checkpointReached=false;goalRevealedAfterDown=false;
+        const r=token.getBoundingClientRect();ox=event.clientX-r.left;oy=event.clientY-r.top;
+        token.classList.add('dragging');token.setPointerCapture(pointer);
+        report('pointerdown',event,{down_count:downCount});event.preventDefault();});
+      token.addEventListener('pointermove',event=>{if(event.pointerId!==pointer||!event.isTrusted)return;
+        const a=arena.getBoundingClientRect();const x=Math.max(0,Math.min(W-size,event.clientX-a.left-ox));
+        const y=Math.max(0,Math.min(H-size,event.clientY-a.top-oy));token.style.left=`${x}px`;token.style.top=`${y}px`;
+        moveCount++;const center={x:x+size/2,y:y+size/2};
+        if(!checkpointReached&&Math.hypot(center.x-checkpoint.x,center.y-checkpoint.y)<=34){
+          checkpointReached=true;goalRevealedAfterDown=pointer!==null;goal.classList.remove('concealed');checkpointEl.classList.add('success');
+          status.className='status';status.textContent='CHECKPOINT_REACHED — KEEP HOLDING AND STEER TO THE NEW GOAL';
+          report('checkpoint_reached',event,{checkpoint_reached:true,goal_revealed_after_down:goalRevealedAfterDown,down_count:downCount,goal:box(goal)});
+        }else if(moveCount===1||moveCount%4===0){
+          report('pointermove',event,{checkpoint_reached:checkpointReached,goal_revealed_after_down:goalRevealedAfterDown,down_count:downCount});
+        }
+      });
+      token.addEventListener('pointerup',async event=>{if(event.pointerId!==pointer)return;
+        token.releasePointerCapture(pointer);pointer=null;token.classList.remove('dragging');
+        const r=token.getBoundingClientRect(),g=goal.getBoundingClientRect();
+        const cx=(r.left+r.right)/2,cy=(r.top+r.bottom)/2;
+        const inside=cx>=g.left&&cx<=g.right&&cy>=g.top&&cy<=g.bottom;
+        const succeeded=event.isTrusted&&downCount===1&&checkpointReached&&goalRevealedAfterDown&&moveCount>=2&&inside;
+        const details={succeeded,down_count:downCount,checkpoint_reached:checkpointReached,
+          goal_revealed_after_down:goalRevealedAfterDown,token:box(token),checkpoint:box(checkpointEl),goal:box(goal),
+          inside_goal:inside,completion_event:'pointerup'};
+        // Persist the trusted release before publishing scenario_success.  The
+        // server and harness independently require this event, so merely moving
+        // the held disk into GOAL can never satisfy the benchmark.
+        await report('pointerup',event,details);
+        if(succeeded){goal.classList.add('success');markSuccess('DYNAMIC_HOLD_SUCCEEDED',event,details);}
+        else markFailure('DYNAMIC_HOLD_RELEASED_TOO_EARLY_OR_OUTSIDE_GOAL',event,details);
+      });
+      readyDetails={token:box(token),checkpoint:box(checkpointEl),goal_initially_hidden:true};
+    }
+
     function setupSharedTurn() {
       heading.textContent='Shared Visual Turn';
       instruction.innerHTML='Continue the visible shared drawing game. Draw your move with pointer strokes inside one empty cell. <span class="black">USER: BLACK O</span> &nbsp; <span class="red">YOU: RED X</span>';
@@ -278,7 +334,7 @@
       readyDetails={board:box(canvas),user_cell:userCell,cell_size:cell,legend:box(legend)};
     }
 
-    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,shared_turn:setupSharedTurn};
+    const setups={drag_fit:setupDragFit,precise_click:setupPreciseClick,ordered_clicks:setupOrderedClicks,slider:setupSlider,corridor_drag:setupCorridor,dynamic_hold:setupDynamicHold,shared_turn:setupSharedTurn};
     (setups[scenario]||setupDragFit)();
     requestAnimationFrame(()=>requestAnimationFrame(()=>report('page_ready',null,{succeeded:false,
       viewport:{width:window.innerWidth,height:window.innerHeight},arena:box(arena),...readyDetails})));

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+import win32con
 import win32gui
 
 from ..action import executor, shell, verify
@@ -63,6 +65,179 @@ class SystemToolMixin:
             scored.append((score, window))
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored[0][1] if scored else None
+
+    def _credible_hidden_app_windows(self, app_state: dict, name: str) -> list[dict]:
+        """Rank restorable top-level windows already owned by a running app."""
+
+        from ..perception.app_aliases import expand as expand_app_aliases
+
+        aliases = [
+            re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", item.casefold())
+            for item in expand_app_aliases(name)
+            if str(item).strip()
+        ]
+        candidates: list[tuple[float, dict]] = []
+        for raw in app_state.get("windows") or []:
+            if not isinstance(raw, dict) or raw.get("visible"):
+                continue
+            hwnd = int(raw.get("hwnd") or 0)
+            try:
+                live_window = bool(hwnd and win32gui.IsWindow(hwnd))
+            except Exception:
+                live_window = bool(hwnd)
+            if not live_window:
+                continue
+            title = str(raw.get("title") or "").strip()
+            try:
+                title = win32gui.GetWindowText(hwnd).strip() or title
+            except Exception:
+                pass
+            try:
+                class_name = str(win32gui.GetClassName(hwnd) or "")
+            except Exception:
+                class_name = ""
+            folded_system_surface = f"{title} {class_name}".casefold()
+            if any(marker in folded_system_surface for marker in (
+                "default ime", "msctfime", "input method", "tooltips_class32",
+            )):
+                continue
+            try:
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                width, height = max(0, right - left), max(0, bottom - top)
+            except Exception:
+                left = top = right = bottom = 0
+                width = height = 0
+            # Tiny hidden Chromium/helper surfaces are not credible main app
+            # windows.  Retain geometry-less test/provider records so the
+            # caller can still attempt a verified restoration.
+            if width and height and (width < 160 or height < 100):
+                continue
+            compact = re.sub(
+                r"[^0-9a-z\u4e00-\u9fff]+", "", f"{title} {class_name}".casefold()
+            )
+            alias_match = max(
+                (len(alias) for alias in aliases if len(alias) >= 2 and alias in compact),
+                default=0,
+            )
+            if aliases and not alias_match and title:
+                continue
+            area = width * height
+            score = float(alias_match * 20)
+            if title:
+                score += 15.0
+            if area:
+                score += min(50.0, area / 50_000.0)
+            try:
+                if not win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                    score += 8.0
+            except Exception:
+                pass
+            candidates.append((score, {
+                **raw,
+                "hwnd": hwnd,
+                "title": title,
+                "class_name": class_name,
+                "rect": [left, top, right, bottom],
+                "visible": False,
+                "recovery_score": round(score, 3),
+            }))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return [item for _score, item in candidates]
+
+    def _restore_running_background_app(
+        self,
+        app_state: dict,
+        name: str,
+        win32_mod,
+        executor_mod,
+    ) -> dict:
+        """Restore an existing hidden/tray instance before any new launch."""
+
+        candidates = self._credible_hidden_app_windows(app_state, name)
+        attempts: list[dict] = []
+        for candidate in candidates[:5]:
+            hwnd = int(candidate.get("hwnd") or 0)
+            attempt = {
+                "route": "hidden_window",
+                "hwnd": hwnd,
+                "title": str(candidate.get("title") or ""),
+                "recovery_score": candidate.get("recovery_score"),
+            }
+            try:
+                show_mode = (
+                    win32con.SW_RESTORE
+                    if win32gui.IsIconic(hwnd)
+                    else win32con.SW_SHOW
+                )
+                win32gui.ShowWindow(hwnd, show_mode)
+                time.sleep(0.2)
+                focused = executor_mod.focus_window(hwnd)
+                attempt["focus"] = focused
+                visible = bool(win32gui.IsWindowVisible(hwnd))
+                attempt["visible_after_restore"] = visible
+                if focused.get("ok") is True and visible and self._window_alive(hwnd):
+                    title = str(candidate.get("title") or name)
+                    self._remember_target(hwnd, title)
+                    attempts.append(attempt)
+                    return {
+                        "ok": True,
+                        "verified": True,
+                        "route": "existing_hidden_window",
+                        "target_hwnd": hwnd,
+                        "title": title,
+                        "attempts": attempts,
+                        "credible_hidden_window_count": len(candidates),
+                    }
+            except Exception as exc:
+                attempt["error"] = str(exc)
+            attempts.append(attempt)
+
+        tray_mod = _tools_attr("tray", tray)
+        tray_result: dict = {}
+        try:
+            tray_result = tray_mod.click_tray_icon(name, double=True)
+        except Exception as exc:
+            tray_result = {"ok": False, "error": str(exc)}
+        if tray_result.get("ok") is True:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    refreshed = win32_mod.find_app(name)
+                except Exception:
+                    refreshed = {}
+                visible = self._best_visible_app_window(refreshed, name)
+                if visible is None:
+                    try:
+                        visible = win32_mod.find_window(name)
+                    except Exception:
+                        visible = None
+                if isinstance(visible, dict):
+                    hwnd = int(visible.get("hwnd") or 0)
+                    if hwnd and self._window_alive(hwnd):
+                        focused = executor_mod.focus_window(hwnd)
+                        if focused.get("ok") is True:
+                            title = str(visible.get("title") or name)
+                            self._remember_target(hwnd, title)
+                            return {
+                                "ok": True,
+                                "verified": True,
+                                "route": "existing_tray_instance",
+                                "target_hwnd": hwnd,
+                                "title": title,
+                                "attempts": attempts,
+                                "tray": tray_result,
+                                "credible_hidden_window_count": len(candidates),
+                            }
+                time.sleep(0.25)
+        return {
+            "ok": False,
+            "verified": False,
+            "route": "background_recovery_failed",
+            "attempts": attempts,
+            "tray": tray_result,
+            "credible_hidden_window_count": len(candidates),
+            "duplicate_launch_unsafe": bool(candidates),
+        }
 
     @staticmethod
     def _url_launch_terms(command: str, launch_result: dict) -> list[str]:
@@ -169,6 +344,11 @@ class SystemToolMixin:
         do not map to a stable process name, while exe/bare commands usually do.
         """
         candidates = [
+            *(
+                (str(alias), True)
+                for alias in (launch_result.get("aliases") or [])
+                if str(alias).strip()
+            ),
             (str(launch_result.get("target") or ""), True),
             (command, False),
         ]
@@ -534,6 +714,11 @@ class SystemToolMixin:
         win32_mod = _tools_attr("win32", win32)
         executor_mod = _tools_attr("executor", executor)
         resolved_hint = self._resolve_launch_target(name)
+        direct_launchable = bool(
+            Path(name).exists()
+            or shutil.which(name)
+            or re.match(r"^(?:https?://|[A-Za-z][A-Za-z0-9+.-]*:)", name)
+        )
         component_hint = self._resolved_component_title_terms(resolved_hint)
         initial_query = "wps" if component_hint is not None else name
         try:
@@ -586,6 +771,86 @@ class SystemToolMixin:
                 replay={"tool": "open_app", "name": name},
             )
 
+        background_recovery: dict = {}
+        if initial.get("running"):
+            background_recovery = self._restore_running_background_app(
+                initial,
+                name,
+                win32_mod,
+                executor_mod,
+            )
+            if background_recovery.get("ok") is True:
+                payload = {
+                    **background_recovery,
+                    "app": name,
+                    "pre_state": {
+                        "running": True,
+                        "process_count": int(initial.get("process_count") or 0),
+                        "visible_window_count": 0,
+                    },
+                    "needs_observe": True,
+                    "fast_path_advice": (
+                        "A pre-existing background/tray instance was restored and bound. "
+                        "Continue from its newest frame; do not launch another instance."
+                    ),
+                }
+                self._mark_blank_document_surface(payload, component_hint)
+                return ToolResult(
+                    self._fmt(payload),
+                    replay={"tool": "open_app", "name": name},
+                )
+            if background_recovery.get("duplicate_launch_unsafe") is True:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "verified": False,
+                    "blocked": True,
+                    "failure_type": "background_instance_restore_failed",
+                    "app": name,
+                    "pre_state": {
+                        "running": True,
+                        "process_count": int(initial.get("process_count") or 0),
+                        "visible_window_count": 0,
+                    },
+                    "background_recovery": background_recovery,
+                    "error": (
+                        "The application is already running and owns credible hidden windows, "
+                        "but none could be restored or activated. A new launch was refused because "
+                        "it could create an uninitialized duplicate instance."
+                    ),
+                    "needs_llm_reason": True,
+                    "fast_path_advice": (
+                        "Use the returned hidden-window/tray evidence or report the blocker; "
+                        "do not launch another copy of the already-running application."
+                    ),
+                }))
+
+        strict_resolution = bool(
+            args.get("strict_resolution") is True
+            or str(getattr(self, "task_intent", {}).get("source") or "").strip()
+        )
+        if strict_resolution and resolved_hint is None and not direct_launchable:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "application_not_found",
+                "error": (
+                    f'No installed application could be resolved for "{name}". '
+                    "Raw shell fallback is disabled because it can bind the current "
+                    "terminal or an unrelated window. Ask for a clearer app identity "
+                    "or report that the application is unavailable."
+                ),
+                "app": name,
+                "needs_user_input": True,
+                "needs_llm_reason": True,
+                "fast_path_advice": (
+                    "No installed application matched this name. Use one exposed "
+                    "window-list/focus recovery tool if a related visible window exists; "
+                    "otherwise report the unavailable application. Do not invoke an unexposed "
+                    "discovery tool or launch an unverified raw command."
+                ),
+            }))
+
         launch_result = self._t_launch({"command": name})
         try:
             launched = json.loads(launch_result.text or "{}")
@@ -607,6 +872,7 @@ class SystemToolMixin:
                 "visible_window_count": 0,
             },
             "launch": launched,
+            "background_recovery": background_recovery or None,
             "needs_observe": bool(target_hwnd),
         }
         if target_hwnd:
@@ -635,6 +901,35 @@ class SystemToolMixin:
         verify_mod = _tools_attr("verify", verify)
         win32_mod = _tools_attr("win32", win32)
         command = str(args["command"]).strip()
+        intent = getattr(self, "task_intent", {})
+        intent = intent if isinstance(intent, dict) else {}
+        explicit_desktop_app = bool(
+            str(intent.get("source") or "").strip()
+            and str(intent.get("domain") or "") == "desktop"
+        )
+        requested_web_fallback = bool(re.search(
+            r"网页|网站|浏览器|网页版|web\s*(?:site|page|version)|browser|https?://|"
+            r"\bweb\b|客户端.*(?:不行|失败).*(?:网页|browser|web)",
+            str(getattr(self, "task", "") or ""),
+            re.IGNORECASE,
+        ))
+        if (
+            explicit_desktop_app
+            and re.match(r"^(?:https?://|www\.)", command, re.IGNORECASE)
+            and not requested_web_fallback
+        ):
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "failure_type": "application_constraint_violation",
+                "error": (
+                    "The task explicitly targets an installed desktop application; "
+                    "web fallback was not authorized. Re-resolve/focus the local app "
+                    "or report the blocker."
+                ),
+                "requested_app": str(intent.get("source") or ""),
+                "attempted_url": command,
+            }))
         resolved = self._resolve_launch_target(command)
         prior_hwnd = self.hwnd
         cooperative = bool(CONFIG.get(
@@ -808,7 +1103,20 @@ class SystemToolMixin:
         # English names ("WPS Spreadsheets", "Visual Studio Code").
         candidates = apps_mod.resolve(command)
         if candidates:
-            return candidates[0]
+            first = candidates[0]
+            if str(first.get("match_kind") or "") == "fuzzy" and len(candidates) > 1:
+                first_score = int(first.get("match_score") or 0)
+                second_score = int(candidates[1].get("match_score") or 0)
+                # A typo correction is safe only when one installed target is
+                # materially better than the alternatives.  Ambiguous fuzzy
+                # matches must not launch an arbitrary application.
+                same_display_name = (
+                    str(first.get("name") or "").strip().casefold()
+                    == str(candidates[1].get("name") or "").strip().casefold()
+                )
+                if first_score - second_score < 6 and not same_display_name:
+                    return None
+            return first
         base = command.split()[0] if command.isascii() else command
         if command.isascii() and (shutil.which(base) or len(command.split()) > 1):
             return None

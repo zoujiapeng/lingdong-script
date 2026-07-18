@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Iterable
 
-from ..fast.action_contract import batch_action_args, batch_action_name
+from ..fast.action_contract import iter_atomic_actions
 
 
 _DETERMINISTIC_OUTPUT_ACTIONS = {
@@ -156,8 +156,6 @@ def _action_name(value: Any) -> str:
 
 def _flatten_actions(tool_name: str, args: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Return only typed/structured child actions; free-form plans never authorize reset."""
-    root = _action_name(tool_name)
-    flattened: list[tuple[str, dict[str, Any]]] = [(root, dict(args or {}))]
     parent_context = str(
         args.get("subgoal") or args.get("context") or args.get("purpose") or ""
     ).strip()
@@ -171,40 +169,12 @@ def _flatten_actions(tool_name: str, args: dict[str, Any]) -> list[tuple[str, di
             value["_parent_context"] = parent_context
         return value
 
-    children: Iterable[Any] = ()
-    if root == "run_action_batch":
-        children = args.get("actions") or ()
-    elif root == "execute_subgoal":
-        children = args.get("actions") or ()
-        clicks = [args.get("click"), *(args.get("clicks") or [])]
-        for click in clicks:
-            if isinstance(click, dict):
-                flattened.append(("click_element", with_parent_context(click)))
-        if isinstance(args.get("input"), dict):
-            flattened.append(("type_into_element", dict(args["input"])))
-        if isinstance(args.get("draw"), dict):
-            flattened.append(("draw_strokes", dict(args["draw"])))
-        if isinstance(args.get("drag"), dict):
-            flattened.append(("drag", dict(args["drag"])))
-        for value in args.get("draws") or ():
-            if isinstance(value, dict):
-                flattened.append(("draw_strokes", dict(value)))
-        for value in args.get("drags") or ():
-            if isinstance(value, dict):
-                flattened.append(("drag", dict(value)))
-    for child in children:
-        if not isinstance(child, dict):
-            continue
-        name = _action_name(batch_action_name(child) or child.get("name"))
-        if not name:
-            continue
-        payload = batch_action_args(child)
-        if child.get("name") and not payload:
-            payload = {
-                key: value for key, value in child.items()
-                if key not in {"action", "tool", "name", "params"}
-            }
-        flattened.append((name, with_parent_context(payload)))
+    flattened: list[tuple[str, dict[str, Any]]] = []
+    for action in iter_atomic_actions(tool_name, args, include_container=True):
+        payload = dict(action.inputs)
+        if action.source_path == "click" or action.source_path.startswith(("clicks[", "actions[")):
+            payload = with_parent_context(payload)
+        flattened.append((action.name, payload))
     return flattened
 
 

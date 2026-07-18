@@ -51,7 +51,10 @@ def task_contract_to_arp(contract: TaskContract) -> ArpGraph:
                     float(contract.session.external_change_timeout_s) + 15.0,
                 )
                 if stage.type == StageType.WAIT_FOR_EXTERNAL_CHANGE
-                else 180
+                else max(
+                    180,
+                    min(1800, int(stage.parameters.get("max_steps") or 1) * 30),
+                )
                 if stage.execution and stage.execution.model_role != "none"
                 else 90
             ),

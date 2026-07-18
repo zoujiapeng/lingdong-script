@@ -136,6 +136,59 @@ def test_vlm_verify_accepts_consistent_high_confidence_pass(monkeypatch):
     assert result["rejection_reasons"] == []
 
 
+def test_vlm_verify_ignores_aesthetics_not_requested_by_user(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    _mock_vlm_response(monkeypatch, json.dumps({
+        "passed": False,
+        "confidence": 0.94,
+        "subject_present": True,
+        "colorful": False,
+        "detail_level": "low",
+        "observed": ["recognizable flower outline"],
+        "issues": [
+            "drawing is not colorful",
+            "drawing is very basic and lacks detail",
+        ],
+    }))
+
+    result = vlm.verify(
+        Region(0, 0, 100, 100),
+        "the canvas visibly contains a clearly recognizable flower",
+    )
+
+    assert result["verified"] is True
+    assert result["semantic_visual_verified"] is True
+    assert result["aesthetic_only_override"] is True
+    assert result["effective_issues"] == []
+    assert len(result["ignored_unrequested_issues"]) == 2
+
+
+def test_vlm_verify_keeps_explicit_color_and_detail_requirements(monkeypatch):
+    from winpilot.perception import vlm
+    from winpilot.utils.screenshot import Region
+
+    _mock_vlm_response(monkeypatch, json.dumps({
+        "passed": False,
+        "confidence": 0.94,
+        "subject_present": True,
+        "colorful": False,
+        "detail_level": "low",
+        "observed": ["plain flower outline"],
+        "issues": ["not colorful", "lacks requested detail"],
+    }))
+
+    result = vlm.verify(
+        Region(0, 0, 100, 100),
+        "a detailed colorful flower",
+    )
+
+    assert result["verified"] is False
+    assert result["aesthetic_only_override"] is False
+    assert result["effective_issues"] == ["not colorful", "lacks requested detail"]
+
+
 def test_element_locator_uses_perception_confidence():
     from winpilot.fast.element_cache import ElementCache
     from winpilot.fast.types import VisualAnchor

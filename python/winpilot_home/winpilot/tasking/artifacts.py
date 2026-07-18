@@ -316,6 +316,67 @@ class ArtifactStore:
             raise ValueError("perception/observation frames cannot be sent as task artifacts")
         return artifact
 
+    def resolve_sendable(
+        self,
+        artifact_id: str = "",
+        *,
+        purpose: str = "user_output",
+    ) -> tuple[Artifact, dict[str, Any]]:
+        """Resolve a model-facing artifact handle without guessing ambiguously.
+
+        The exact returned ``artifact_id`` remains the primary handle.  A GUI
+        model can, however, lose that opaque token when old tool messages are
+        compacted.  If this run has exactly one valid sendable user artifact,
+        it is deterministic to recover that artifact from a missing or stale
+        alias.  Multiple candidates are never silently collapsed to "latest".
+        """
+
+        requested = str(artifact_id or "").strip()
+        if requested:
+            try:
+                exact = self.get(requested, require_sendable=True)
+            except KeyError:
+                exact = None
+            if exact is not None:
+                return exact, {
+                    "strategy": "exact_current_run_artifact_id",
+                    "requested_artifact_id": requested,
+                    "resolved_artifact_id": exact.artifact_id,
+                    "candidate_count": 1,
+                }
+
+        with self._lock:
+            registered = list(self._artifacts.values())
+        preferred = [
+            item
+            for item in registered
+            if item.sendable and (not purpose or item.purpose == purpose)
+        ]
+        candidates = preferred or [item for item in registered if item.sendable]
+        valid: list[Artifact] = []
+        for candidate in candidates:
+            try:
+                valid.append(self.get(candidate.artifact_id, require_sendable=True))
+            except (KeyError, ValueError):
+                continue
+
+        if len(valid) == 1:
+            resolved = valid[0]
+            return resolved, {
+                "strategy": "sole_current_run_sendable_artifact",
+                "requested_artifact_id": requested,
+                "resolved_artifact_id": resolved.artifact_id,
+                "candidate_count": 1,
+                "alias_recovered": bool(requested and requested != resolved.artifact_id),
+            }
+        if not valid:
+            raise KeyError("no valid sendable artifact exists in the current run")
+        available = [item.artifact_id for item in valid[:8]]
+        raise KeyError(
+            "artifact_id is ambiguous for the current run; use one exact returned id from "
+            f"{available}"
+        )
+
     def latest(self, *, sendable: bool | None = None, purpose: str = "") -> Artifact | None:
         with self._lock:
             items = list(self._artifacts.values())

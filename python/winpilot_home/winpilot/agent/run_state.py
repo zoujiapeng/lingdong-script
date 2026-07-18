@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..fast.action_contract import BATCH_MUTATING_ACTIONS, batch_action_name
+from ..fast.action_contract import BATCH_MUTATING_ACTIONS, iter_atomic_actions
 
 
 ACTION_TOOLS = {
@@ -76,18 +76,8 @@ def _json_dict(text: str) -> dict[str, Any]:
 
 
 def _batch_last_action(args: dict) -> str:
-    actions = args.get("actions")
-    if not isinstance(actions, list) or not actions:
-        return ""
-    last = actions[-1]
-    if not isinstance(last, dict):
-        return ""
-    name = str(last.get("action") or last.get("tool") or "")
-    if name:
-        return name
-    if len(last) == 1:
-        return str(next(iter(last.keys())))
-    return ""
+    actions = tuple(iter_atomic_actions("run_action_batch", args))
+    return actions[-1].name if actions else ""
 
 
 def _batch_has_semantic_observe(args: dict) -> bool:
@@ -96,29 +86,17 @@ def _batch_has_semantic_observe(args: dict) -> bool:
 
 
 def _batch_has_mutation(args: dict) -> bool:
-    actions = args.get("actions")
-    if not isinstance(actions, list):
-        return False
     return any(
-        isinstance(action, dict)
-        and batch_action_name(action) in BATCH_MUTATING_ACTIONS
-        for action in actions
+        action.name in BATCH_MUTATING_ACTIONS
+        for action in iter_atomic_actions("run_action_batch", args)
     )
 
 
 def _batch_has_expect(args: dict) -> bool:
-    actions = args.get("actions")
-    if not isinstance(actions, list):
-        return False
-    for action in actions:
-        if isinstance(action, dict):
-            payload = action
-            if len(action) == 1 and not ("action" in action or "tool" in action):
-                only_args = next(iter(action.values()))
-                payload = only_args if isinstance(only_args, dict) else {}
-            if isinstance(payload.get("expect"), dict):
-                return True
-    return False
+    return any(
+        isinstance(action.inputs.get("expect"), dict)
+        for action in iter_atomic_actions("run_action_batch", args)
+    )
 
 
 def _passive_observe_verifies_pending_actions(data: dict[str, Any]) -> bool:

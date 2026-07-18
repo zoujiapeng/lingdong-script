@@ -152,6 +152,142 @@ def test_resolve_hwnd_recovers_target_by_title_before_foreground(monkeypatch):
     assert session.hwnd == 300
 
 
+def test_recover_bound_target_window_uses_process_identity_when_title_changes(monkeypatch):
+    session = ToolSession()
+    session.hwnd = 100
+    session.target_hint = "Example App"
+    session._target_binding_verified = True
+    session._target_process_id = 10
+    session._target_process_name = "example.exe"
+    session._target_window_class = "OldWindow"
+
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindow",
+        lambda hwnd: hwnd == 300,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindowVisible",
+        lambda hwnd: hwnd == 300,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetForegroundWindow",
+        lambda: 300,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetClassName",
+        lambda _hwnd: "NewWindow",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32process.GetWindowThreadProcessId",
+        lambda _hwnd: (1, 30),
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32._process_name",
+        lambda pid: "example.exe" if pid == 30 else "",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32.list_windows",
+        lambda: [{
+            "hwnd": 300,
+            "pid": 30,
+            "title": "Completely different page title",
+            "class_name": "NewWindow",
+        }],
+    )
+    monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
+    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
+
+    assert session._recover_bound_target_window() == 300
+    assert session.hwnd == 300
+    assert session.target_hint == "Example App"
+    assert session._last_scope_recovery["reason"] == "same_application_window_rebound"
+
+
+def test_refresh_bound_target_follows_matching_foreground_successor(monkeypatch):
+    session = ToolSession()
+    session.hwnd = 100
+    session.target_hint = "Example App"
+    session._target_binding_verified = True
+
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindow",
+        lambda hwnd: hwnd in {100, 300},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindowVisible",
+        lambda hwnd: hwnd in {100, 300},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetForegroundWindow", lambda: 300,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetAncestor", lambda hwnd, _flag: hwnd,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetClassName", lambda _hwnd: "AppWindow",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32._window_text",
+        lambda hwnd: "Example App" if hwnd == 300 else "Starting...",
+    )
+    monkeypatch.setattr(session, "_bind_perception_target", lambda _hwnd: None)
+    monkeypatch.setattr(session, "_ensure_screen_watch", lambda _reason: None)
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32process.GetWindowThreadProcessId",
+        lambda hwnd: (1, hwnd),
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32._process_name", lambda _pid: "example.exe",
+    )
+
+    assert session._refresh_bound_target_window() == 300
+    assert session.hwnd == 300
+    assert session._last_scope_recovery == {
+        "reason": "foreground_application_successor_rebound",
+        "previous_target_hwnd": 100,
+        "target_hwnd": 300,
+        "target_title": "Example App",
+        "target_class": "AppWindow",
+        "hint_match": True,
+        "related_window": False,
+        "same_process": False,
+        "authoritative_frame_required": True,
+    }
+
+
+def test_refresh_bound_target_keeps_live_binding_for_unrelated_foreground(monkeypatch):
+    session = ToolSession()
+    session.hwnd = 100
+    session.target_hint = "Example App"
+    session._target_binding_verified = True
+
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindow",
+        lambda hwnd: hwnd in {100, 400},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.IsWindowVisible",
+        lambda hwnd: hwnd in {100, 400},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetForegroundWindow", lambda: 400,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetAncestor", lambda hwnd, _flag: hwnd,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32gui.GetClassName", lambda _hwnd: "OtherWindow",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.tools.win32._window_text", lambda _hwnd: "Unrelated App",
+    )
+    monkeypatch.setattr(session, "_same_window_process", lambda *_args: False)
+    monkeypatch.setattr(session, "_window_related_to_target", lambda *_args: False)
+
+    assert session._refresh_bound_target_window() == 100
+    assert session.hwnd == 100
+
+
 def test_read_text_merges_forced_ocr(monkeypatch):
     session = ToolSession()
     session.hwnd = 100

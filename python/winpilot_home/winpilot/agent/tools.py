@@ -47,6 +47,7 @@ from .interaction_tools import (
     normalize_key_sequence,
 )
 from .memory_tools import MemoryToolMixin
+from .mcp_tools import McpToolMixin
 from .perception_tools import PerceptionToolMixin
 from .plan_tools import PlanToolMixin
 from .system_tools import SystemToolMixin
@@ -62,6 +63,8 @@ _MUTATING_TOOLS = {
     "write_file", "apply_patch", "clipboard_write", "clipboard_paste", "paste_image_file", "mouse_down",
     "mouse_up", "move_mouse", "hold_key", "run_action_batch", "execute_subgoal",
     "coordinate_click_test",
+    "call_mcp_tool",
+    "open_conversation", "send_text", "send_artifact",
 }
 _ACTION_SCREEN_DELTA_TOOLS = {
     "click",
@@ -79,6 +82,11 @@ _ACTION_SCREEN_DELTA_TOOLS = {
     "coordinate_click_test",
 }
 _HARD_REPEAT_GUARD_TOOLS = {"open_app", "launch", "run_shell", "run_detached"}
+_READ_ONLY_DISCOVERY_TOOLS = {
+    "list_windows", "scan_windows", "find_app", "find_program",
+    "list_installed_apps", "discover_mcp_tools",
+}
+_DISCOVERY_PROGRESS_TOOLS = {"record_facts", "revise_plan", "complete_subgoal"}
 _DRAFT_SEND_MARKERS = (
     "send", "submit", "reply", "\u53d1\u9001", "\u53d1\u51fa", "\u63d0\u4ea4", "\u56de\u590d",
 )
@@ -88,6 +96,7 @@ class ToolSession(
     FileToolMixin,
     WorkingSetToolMixin,
     MemoryToolMixin,
+    McpToolMixin,
     DesktopToolMixin,
     WindowToolMixin,
     PerceptionToolMixin,
@@ -190,6 +199,16 @@ class ToolSession(
         self._pending_visual_advisory = ""
         self._last_visual_advisory = ""
         self.target_hint: str = ""
+        # A top-level HWND is not a durable application identity. Chromium,
+        # Electron, UWP, launchers, and many games replace their visible
+        # window while starting or navigating. Keep the last proven process
+        # identity so a later spatial action can rebind to the same app rather
+        # than either targeting a dead HWND or adopting an unrelated foreground
+        # window.
+        self._target_binding_verified = False
+        self._target_process_id = 0
+        self._target_process_name = ""
+        self._target_window_class = ""
         # World model is fed from dispatch(); read once per run (runs are
         # short-lived, created per task) so a runtime toggle change applies
         # to the next task rather than mid-run.
@@ -219,6 +238,9 @@ class ToolSession(
         # permanent latch and prevent the corrected plan from ever executing.
         self._subgoal_no_progress_contexts: dict[str, str] = {}
         self._research_exploration_actions = 0
+        self._discovery_generation = 0
+        self._discovery_result_history: dict[tuple[int, int, str, str], list[str]] = {}
+        self._empty_mcp_discovery_counts: dict[tuple[int, int], int] = {}
         self._observe_cache: dict[str, Any] | None = None
         self._screen_watch_auto_started = False
         self._predictive_ocr_lock = threading.Lock()
@@ -234,6 +256,94 @@ class ToolSession(
         self.memory_recipe_attempts: list[dict[str, Any]] = []
 
     # ----------------------------------------------------------- dispatch
+    @staticmethod
+    def _discovery_signature(args: dict[str, Any]) -> str:
+        public_args = {
+            str(key): value
+            for key, value in (args or {}).items()
+            if not str(key).startswith("_")
+        }
+        try:
+            return json.dumps(public_args, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return repr(sorted(public_args.items(), key=lambda item: item[0]))
+
+    @staticmethod
+    def _discovery_result_fingerprint(result: ToolResult) -> str:
+        return re.sub(r"\s+", " ", str(result.text or "")).strip()[:12000]
+
+    def _discovery_repeat_block(
+        self,
+        name: str,
+        args: dict[str, Any],
+    ) -> ToolResult | None:
+        if name not in _READ_ONLY_DISCOVERY_TOOLS:
+            return None
+        context = (self._discovery_generation, self._screen_epoch)
+        if (
+            name == "discover_mcp_tools"
+            and self._empty_mcp_discovery_counts.get(context, 0) >= 3
+        ):
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "empty_mcp_discovery_budget_exhausted": True,
+                "empty_discoveries": self._empty_mcp_discovery_counts.get(context, 0),
+                "error": (
+                    "Three MCP discovery queries returned no usable tool without any "
+                    "intervening task progress. Stop varying the query and continue through "
+                    "the local GUI/controller route."
+                ),
+                "gui_fallback_required": True,
+                "needs_replan": True,
+            }))
+        key = (*context, name, self._discovery_signature(args))
+        history = self._discovery_result_history.get(key, [])
+        if len(history) >= 2 and history[-1] == history[-2]:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "discovery_repeat_guard": True,
+                "tool": name,
+                "repeat_count": len(history) + 1,
+                "error": (
+                    "The same read-only discovery call already returned the same result twice "
+                    "without a screen mutation, recorded fact, or plan advance. Use the existing "
+                    "evidence and choose a different route instead of repeating it."
+                ),
+                "needs_replan": True,
+            }))
+        return None
+
+    def _record_discovery_outcome(
+        self,
+        name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+    ) -> None:
+        if name not in _READ_ONLY_DISCOVERY_TOOLS:
+            return
+        context = (self._discovery_generation, self._screen_epoch)
+        key = (*context, name, self._discovery_signature(args))
+        history = self._discovery_result_history.setdefault(key, [])
+        history.append(self._discovery_result_fingerprint(result))
+        if len(history) > 3:
+            del history[:-3]
+        if name != "discover_mcp_tools":
+            return
+        try:
+            payload = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get("tools"):
+            self._empty_mcp_discovery_counts[context] = 0
+        elif isinstance(payload, dict) and payload.get("ok") is True:
+            self._empty_mcp_discovery_counts[context] = (
+                self._empty_mcp_discovery_counts.get(context, 0) + 1
+            )
+
     def dispatch(self, name: str, args: dict[str, Any]) -> ToolResult:
         handler = getattr(self, f"_t_{name}", None)
         if handler is None:
@@ -302,6 +412,9 @@ class ToolSession(
                         ),
                         "needs_replan": True,
                     }))
+        discovery_block = self._discovery_repeat_block(name, args)
+        if discovery_block is not None:
+            return discovery_block
         if self._research_budget_blocks(name, args):
             return ToolResult(self._fmt({
                 "ok": False,
@@ -376,6 +489,7 @@ class ToolSession(
                 result.text = json.dumps(scope_payload, ensure_ascii=False, default=str)
         if screen_delta_context is not None:
             result = self._attach_action_screen_delta(result, screen_delta_context)
+        self._record_discovery_outcome(name, args, result)
         if self.world_enabled:
             try:
                 # Controller-owned recovery probes are causal maintenance, not
@@ -400,6 +514,13 @@ class ToolSession(
         if name in _MUTATING_TOOLS:
             self._screen_epoch += 1
             self._observe_cache = None
+        if name in _DISCOVERY_PROGRESS_TOOLS:
+            try:
+                progress_payload = json.loads(result.text or "{}")
+            except (json.JSONDecodeError, TypeError):
+                progress_payload = {}
+            if not isinstance(progress_payload, dict) or progress_payload.get("ok") is not False:
+                self._discovery_generation += 1
         if name == "execute_subgoal":
             try:
                 payload = json.loads(result.text or "{}")
@@ -1158,6 +1279,22 @@ class ToolSession(
         if hwnd and self._window_alive(hwnd):
             target_changed = int(self.hwnd or 0) != int(hwnd)
             self.hwnd = int(hwnd)
+            self._target_binding_verified = True
+            try:
+                _thread_id, process_id = win32process.GetWindowThreadProcessId(int(hwnd))
+                self._target_process_id = int(process_id or 0)
+                self._target_process_name = str(
+                    win32._process_name(self._target_process_id)  # type: ignore[attr-defined]
+                    if self._target_process_id else ""
+                ).casefold()
+            except Exception:
+                # The visible HWND itself remains a valid binding even when
+                # Windows denies process-image inspection.
+                pass
+            try:
+                self._target_window_class = str(win32gui.GetClassName(int(hwnd)) or "")
+            except Exception:
+                pass
             if target_changed:
                 # Element ids and input anchors are scoped to one observed
                 # window. Carrying them across a target transition can act on
@@ -1186,6 +1323,166 @@ class ToolSession(
         if self._window_alive(self.hwnd):
             self._bind_perception_target(int(self.hwnd))
             self._ensure_screen_watch("target")
+
+    def _recover_bound_target_window(self) -> int | None:
+        """Rebind a stale HWND to the same previously proven application.
+
+        Recovery is deliberately unavailable before a real target has been
+        established. Candidates must match the remembered process identity or,
+        for a verified launcher-to-app handoff, the explicit application hint.
+        This keeps spatial input fail-closed without treating a replaceable
+        top-level window handle as permanent identity.
+        """
+        if self._window_alive(self.hwnd):
+            return int(self.hwnd)
+        if not self._target_binding_verified:
+            return None
+
+        previous_hwnd = int(self.hwnd or 0)
+        previous_pid = int(self._target_process_id or 0)
+        previous_process = str(self._target_process_name or "").casefold()
+        previous_class = str(self._target_window_class or "").casefold()
+        try:
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground = 0
+
+        # Process names shared by many unrelated applications are not strong
+        # enough on their own; they also need the verified app/title hint.
+        generic_hosts = {
+            "applicationframehost.exe",
+            "electron.exe",
+            "runtimebroker.exe",
+        }
+        candidates: list[tuple[int, int, dict[str, Any], str]] = []
+        for window in win32.list_windows():
+            try:
+                candidate_hwnd = int(window.get("hwnd") or 0)
+                candidate_pid = int(window.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not candidate_hwnd or not self._window_alive(candidate_hwnd):
+                continue
+            title = str(window.get("title") or "")
+            class_name = str(window.get("class_name") or "")
+            hint_match = self._matches_target_hint(title, class_name)
+            try:
+                process_name = str(
+                    win32._process_name(candidate_pid)  # type: ignore[attr-defined]
+                    if candidate_pid else ""
+                ).casefold()
+            except Exception:
+                process_name = ""
+
+            same_pid = bool(previous_pid and candidate_pid == previous_pid)
+            same_process = bool(
+                previous_process and process_name and process_name == previous_process
+            )
+            if same_process and process_name in generic_hosts and not hint_match and not same_pid:
+                same_process = False
+            if not (same_pid or same_process or hint_match):
+                continue
+
+            score = 0
+            if same_pid:
+                score += 120
+            if same_process:
+                score += 80
+            if hint_match:
+                score += 45
+            if previous_class and class_name.casefold() == previous_class:
+                score += 12
+            if candidate_hwnd == foreground:
+                score += 20
+            candidates.append((score, candidate_hwnd, window, process_name))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        score, recovered_hwnd, recovered_window, recovered_process = candidates[0]
+        preserved_hint = self.target_hint
+        self._remember_target(recovered_hwnd, preserved_hint)
+        self._last_scope_recovery = {
+            "reason": "same_application_window_rebound",
+            "previous_target_hwnd": previous_hwnd,
+            "target_hwnd": recovered_hwnd,
+            "target_pid": int(recovered_window.get("pid") or 0),
+            "target_process": recovered_process,
+            "target_title": str(recovered_window.get("title") or ""),
+            "identity_score": score,
+            "authoritative_frame_required": True,
+        }
+        return recovered_hwnd
+
+    def _refresh_bound_target_window(self) -> int | None:
+        """Follow a verified application's live foreground successor window.
+
+        A durable application session cannot use one top-level HWND as its
+        identity.  Launchers, Chromium/Electron apps, UWP shells, games, and
+        even ordinary modal/navigation flows may replace the visible window
+        while the original handle is still alive or while it is disappearing.
+        Prefer a live foreground root only when it is proven related to the
+        existing binding by ownership/process identity or by the explicit app
+        hint established during launch.  Otherwise retain the current target;
+        if that target is stale, fall back to the broader same-application
+        recovery scan above.
+        """
+        current = int(self.hwnd or 0)
+        current_alive = self._window_alive(current)
+        if not self._target_binding_verified:
+            return current if current_alive else None
+
+        try:
+            foreground = int(win32gui.GetForegroundWindow() or 0)
+            foreground_root = int(
+                win32gui.GetAncestor(foreground, _GA_ROOT) or foreground
+            ) if foreground else 0
+        except Exception:
+            foreground = foreground_root = 0
+
+        for candidate in dict.fromkeys((foreground_root, foreground)):
+            if (
+                not candidate
+                or candidate == current
+                or not self._window_alive(candidate)
+            ):
+                continue
+            try:
+                title = str(win32._window_text(candidate) or "")
+                class_name = str(win32gui.GetClassName(candidate) or "")
+            except Exception:
+                title = class_name = ""
+            hint_match = self._matches_target_hint(title, class_name)
+            related = bool(
+                current_alive
+                and self._window_related_to_target(candidate, current)
+            )
+            same_process = bool(
+                current_alive
+                and self._same_window_process(candidate, current)
+            )
+            if not (hint_match or related or same_process):
+                continue
+
+            previous_hwnd = current
+            preserved_hint = self.target_hint
+            self._remember_target(candidate, preserved_hint)
+            self._last_scope_recovery = {
+                "reason": "foreground_application_successor_rebound",
+                "previous_target_hwnd": previous_hwnd,
+                "target_hwnd": int(candidate),
+                "target_title": title,
+                "target_class": class_name,
+                "hint_match": bool(hint_match),
+                "related_window": bool(related),
+                "same_process": bool(same_process),
+                "authoritative_frame_required": True,
+            }
+            return int(candidate)
+
+        if current_alive:
+            return current
+        return self._recover_bound_target_window()
 
     def _bind_perception_target(self, hwnd: int) -> None:
         controller = getattr(self, "_fast_gui_controller", None)
@@ -1288,7 +1585,15 @@ class ToolSession(
                 logger.debug("communication adapter cleanup failed", exc_info=True)
             self.communication_adapter = None
         try:
+            cancel_pointer_timeout = getattr(self, "_cancel_pointer_hold_timeout", None)
+            if callable(cancel_pointer_timeout):
+                cancel_pointer_timeout()
             released = executor.release_held_mouse_buttons()
+            clear_pointer_constraint = getattr(
+                self, "_clear_pointer_constraint", None,
+            )
+            if callable(clear_pointer_constraint):
+                clear_pointer_constraint()
             if released:
                 BUS.publish(
                     "input_cleanup",

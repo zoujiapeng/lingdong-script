@@ -6,6 +6,7 @@ import ctypes
 import hashlib
 import json
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable
 
@@ -59,6 +60,45 @@ INTERACTION_STAGE_TYPES = {
 
 _MAX_LOCAL_CAUSAL_CHANGE_RATIO = 0.05
 _MAX_SAME_FRAME_PLAN_ATTEMPTS = 2
+_POINTER_SESSION_LOCK = threading.RLock()
+_POINTER_SESSIONS: dict[str, ToolSession] = {}
+
+
+def _pointer_session_key(context: dict[str, Any]) -> str:
+    return str(context.get("run_id") or "").strip()
+
+
+def _registered_pointer_session(
+    context: dict[str, Any],
+) -> ToolSession | None:
+    key = _pointer_session_key(context)
+    if not key:
+        return None
+    with _POINTER_SESSION_LOCK:
+        return _POINTER_SESSIONS.get(key)
+
+
+def _register_pointer_session(
+    context: dict[str, Any], session: ToolSession,
+) -> None:
+    key = _pointer_session_key(context)
+    if not key:
+        return
+    with _POINTER_SESSION_LOCK:
+        _POINTER_SESSIONS[key] = session
+
+
+def _discard_registered_pointer_session(
+    context: dict[str, Any], session: Any | None = None,
+) -> ToolSession | None:
+    key = _pointer_session_key(context)
+    if not key:
+        return None
+    with _POINTER_SESSION_LOCK:
+        registered = _POINTER_SESSIONS.get(key)
+        if session is not None and registered is not session:
+            return None
+        return _POINTER_SESSIONS.pop(key, None)
 
 
 def _local_causal_change_ratio(
@@ -913,6 +953,35 @@ class InteractionStageEngine:
         return binding
 
     @staticmethod
+    def _release_pointer_session(
+        context: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        local_session = context.pop("_interaction_pointer_session", None)
+        registered_session = _discard_registered_pointer_session(context)
+        sessions: list[Any] = []
+        for candidate in (local_session, registered_session):
+            if candidate is not None and all(
+                candidate is not item for item in sessions
+            ):
+                sessions.append(candidate)
+        for session in sessions:
+            try:
+                close = getattr(session, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        state["pointer_hold"] = {
+            "active": False,
+            "button": "",
+            "since_frame_id": 0,
+            "release_reason": reason,
+        }
+
+    @staticmethod
     def _resolve_hwnd(source: str) -> int:
         source = str(source or "").strip()
         if source and source not in {"active_window", "foreground", "current"}:
@@ -1358,6 +1427,11 @@ class InteractionStageEngine:
         }:
             return None
         state = self._state(context, contract)
+        self._release_pointer_session(
+            context,
+            state,
+            reason=f"recovery:{failure_type}",
+        )
         details = failure_details if isinstance(failure_details, dict) else {}
         audit_details = {
             key: details[key]
@@ -1527,7 +1601,7 @@ class InteractionStageEngine:
                 for key in (
                     "turn_index", "verified_turn_history", "external_change",
                     "detected_surface", "surface_region", "interaction_region",
-                    "last_failure",
+                    "last_failure", "pointer_hold",
                 )
                 if state.get(key) is not None
             }
@@ -1649,6 +1723,12 @@ class InteractionStageEngine:
                     if will_retry:
                         validation_feedback = feedback
                         continue
+                    if state.get("pointer_hold", {}).get("active") is True:
+                        self._release_pointer_session(
+                            context,
+                            state,
+                            reason="interaction_plan_invalid_while_held",
+                        )
                     model_elapsed_ms = int(
                         (time.monotonic() - model_started) * 1000
                     )
@@ -1667,6 +1747,12 @@ class InteractionStageEngine:
                         interaction_state=dict(state),
                     ) from exc
                 except Exception as exc:
+                    if state.get("pointer_hold", {}).get("active") is True:
+                        self._release_pointer_session(
+                            context,
+                            state,
+                            reason="interaction_inference_failed_while_held",
+                        )
                     model_elapsed_ms = int(
                         (time.monotonic() - model_started) * 1000
                     )
@@ -1689,6 +1775,12 @@ class InteractionStageEngine:
                     "schema_validation_feedback_retry:accepted"
                 )
             if decision.continuation == "blocked":
+                if state.get("pointer_hold", {}).get("active") is True:
+                    self._release_pointer_session(
+                        context,
+                        state,
+                        reason="interaction_blocked_while_held",
+                    )
                 raise _failure(
                     "the authoritative frame did not ground a causal interaction: "
                     + (decision.blocked_reason or "; ".join(decision.ambiguity)),
@@ -2584,15 +2676,30 @@ class InteractionStageEngine:
             )
             if not any(item.get("action") != "wait_stable" for item in actions):
                 raise _failure("semantic turn contained no mutation", "interaction_action_empty")
-            session = ToolSession(
-                stop_event=stop_event,
-                task=contract.task,
-                runtime_profile=RuntimeProfile(desktop=True, coding=False),
-                task_intent=contract.intent,
-                communication_context={"active": False},
+            existing_pointer_session = context.get(
+                "_interaction_pointer_session"
+            )
+            if not isinstance(existing_pointer_session, ToolSession):
+                existing_pointer_session = _registered_pointer_session(
+                    context,
+                )
+            session = (
+                existing_pointer_session
+                if isinstance(existing_pointer_session, ToolSession)
+                else ToolSession(
+                    stop_event=stop_event,
+                    task=contract.task,
+                    runtime_profile=RuntimeProfile(
+                        desktop=True, coding=False,
+                    ),
+                    task_intent=contract.intent,
+                    communication_context={"active": False},
+                )
             )
             session.run_id = context["run_id"]
             controller_started = time.monotonic()
+            keep_pointer_session = False
+            result: dict[str, Any] = {}
             try:
                 session._remember_target(hwnd, str(target.get("title") or ""))
                 session._visual_frame_id = int(state["frame_id"])
@@ -2600,14 +2707,75 @@ class InteractionStageEngine:
                 session._screen_epoch = int(state["frame_id"])
                 session._visual_frame_scope = "target_window"
                 session._visual_frame_region = dict(target["frame_region"])
-                result = _json(session.dispatch("run_action_batch", {
+                batch_args = {
                     "actions": actions,
                     "stop_on_error": True,
                     "subgoal": decision.expected_effect.description,
                     "sync": {"wait_stable": True, "timeout_s": 5.0},
-                }).text)
+                }
+                if decision.pointer_hold_before or decision.pointer_hold_after:
+                    batch_args["pointer_session"] = {
+                        "before": decision.pointer_hold_before,
+                        "after": decision.pointer_hold_after,
+                    }
+                result = _json(session.dispatch(
+                    "run_action_batch", batch_args,
+                ).text)
+                # Production ToolSession exposes the physical pointer state.
+                # Lightweight test/embedding shims created before held-pointer
+                # support may not; treating those as released preserves strict
+                # failure for a contracted hold without breaking ordinary
+                # click/drag transactions.
+                hold_status_reader = getattr(
+                    session, "_pointer_hold_status", None,
+                )
+                hold_status = (
+                    hold_status_reader()
+                    if callable(hold_status_reader)
+                    else {"active": False, "button": ""}
+                )
+                expected_hold = decision.pointer_hold_after
+                if expected_hold:
+                    if not (
+                        hold_status.get("active") is True
+                        and hold_status.get("button") == expected_hold
+                    ):
+                        result = {
+                            **result,
+                            "ok": False,
+                            "failure_type": "pointer_hold_lost",
+                            "error": (
+                                "Controller did not retain the contracted "
+                                "held pointer across the fresh-frame boundary"
+                            ),
+                        }
+                    elif result.get("ok") is True:
+                        keep_pointer_session = True
+                        context["_interaction_pointer_session"] = session
+                        _register_pointer_session(context, session)
+                elif hold_status.get("active") is True:
+                    result = {
+                        **result,
+                        "ok": False,
+                        "failure_type": "pointer_release_missing",
+                        "error": (
+                            "Controller left a mouse button held after the "
+                            "typed decision required release"
+                        ),
+                    }
             finally:
-                session.close()
+                if not keep_pointer_session:
+                    context.pop("_interaction_pointer_session", None)
+                    _discard_registered_pointer_session(context, session)
+                    session.close()
+            state["pointer_hold"] = {
+                "active": bool(keep_pointer_session),
+                "button": decision.pointer_hold_after if keep_pointer_session else "",
+                "since_frame_id": (
+                    int(state.get("frame_id") or 0)
+                    if keep_pointer_session else 0
+                ),
+            }
             controller_elapsed_ms = preparation_elapsed_ms + int(
                 (time.monotonic() - controller_started) * 1000,
             )
@@ -2672,6 +2840,7 @@ class InteractionStageEngine:
                     "input_preparation": preparation_result,
                     "color_preparation_evidence": color_preparation_evidence,
                     "controller_result": result,
+                    "pointer_hold": dict(state.get("pointer_hold") or {}),
                     "expected_effect": decision.expected_effect.model_dump(mode="json"),
                 },
             })
@@ -2929,6 +3098,12 @@ class InteractionStageEngine:
                 ),
             )
             if change.get("changed") is not True:
+                if state.get("pointer_hold", {}).get("active") is True:
+                    self._release_pointer_session(
+                        context,
+                        state,
+                        reason="held_pointer_produced_no_causal_change",
+                    )
                 raise _failure(
                     "interaction transaction produced no causal change in its "
                     "declared ROI or contract-authorized remote feedback region",
@@ -3021,11 +3196,20 @@ class InteractionStageEngine:
             has_deferred_program = bool(
                 deferred_program.get("remaining_actions")
             )
+            held_pointer_progress = bool(
+                decision.continuation == "reobserve"
+                and decision.pointer_hold_after
+                and isinstance(state.get("pointer_hold"), dict)
+                and state["pointer_hold"].get("active") is True
+                and state["pointer_hold"].get("button")
+                == decision.pointer_hold_after
+            )
             use_typed_transition_provider = bool(
                 selected_effect_provider
                 == "typed_direct_manipulation_completion"
                 and selected_terminal_provider
                 == "typed_direct_manipulation_completion"
+                and any(item.action == "drag" for item in decision.actions)
             )
             typed_completion = verify_typed_direct_manipulation_completion(
                 decision,
@@ -3094,7 +3278,35 @@ class InteractionStageEngine:
             }
             model_calls = 0
             model_elapsed_ms = 0
-            if use_typed_transition_provider:
+            if held_pointer_progress:
+                semantic = {
+                    "ok": True,
+                    "verified": True,
+                    "semantic_visual_verified": False,
+                    "task_complete": False,
+                    "observed": [
+                        "the held pointer remained active while the current "
+                        "typed prefix caused a fresh-frame change in its "
+                        "declared effect region"
+                    ],
+                    "issues": [],
+                    "local_effect_issues": [],
+                    "completion_issues": [
+                        "the dynamic interaction remains held and requires "
+                        "fresh-frame semantic planning before release"
+                    ],
+                    "verify_method": "held-pointer-causal-progress",
+                    "expected_effect": decision.expected_effect.model_dump(
+                        mode="json"
+                    ),
+                    "verifier_contract": {
+                        "selected_provider": "grounded_transaction_progress",
+                        "pointer_hold": dict(state.get("pointer_hold") or {}),
+                        "causal_roi_change": change,
+                        "model_call_skipped": True,
+                    },
+                }
+            elif use_typed_transition_provider:
                 semantic = {
                     "ok": True,
                     "verified": typed_completion.get("verified") is True,
@@ -3277,7 +3489,7 @@ class InteractionStageEngine:
                 "interaction.local_effect_verified",
                 provider=(
                     "grounded_transaction_progress"
-                    if has_deferred_program
+                    if has_deferred_program or held_pointer_progress
                     else (
                         "typed_direct_manipulation_completion"
                         if use_typed_transition_provider

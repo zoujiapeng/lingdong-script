@@ -26,6 +26,7 @@ from .action_contract import (
     BATCH_MUTATING_ACTIONS,
     BATCH_OBSERVE_ACTIONS,
     build_action_envelope,
+    parse_atomic_action,
     validate_batch_actions,
 )
 from .element_cache import ElementCache, LocateResult, anchor_from_dict
@@ -399,25 +400,10 @@ def _normalise_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
       {"tool":"click", "element_id": 1}
       {"click": {"element_id": 1}}
     """
-    name = str(action.get("action") or action.get("tool") or "")
-    if name:
-        args = {k: v for k, v in action.items() if k not in {"action", "tool", "params"}}
-        params = action.get("params")
-        if isinstance(params, dict):
-            args = {**params, **args}
-        return _normalise_wait_condition(name, args)
-    if len(action) == 1:
-        only_name, only_args = next(iter(action.items()))
-        name = str(only_name)
-        if isinstance(only_args, dict):
-            return _normalise_wait_condition(name, dict(only_args))
-        if name == "hotkey":
-            keys = list(only_args) if isinstance(only_args, list) else [only_args]
-            return name, {"keys": [str(key) for key in keys]}
-        if name in {"type_text", "type_into_element"}:
-            return name, {"text": str(only_args)}
-        return name, {"value": only_args}
-    return "", {}
+    parsed = parse_atomic_action(action)
+    if parsed is None:
+        return "", {}
+    return _normalise_wait_condition(parsed.name, parsed.inputs)
 
 
 def _normalise_wait_condition(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -645,6 +631,33 @@ def _upgrade_semantic_action(name: str, args: dict[str, Any]) -> tuple[str, dict
     if name == "type_text" and _has_anchor_hint(args):
         return "type_into_element", args, name
     return name, args, ""
+
+
+_ARITHMETIC_KEYBOARD_SEQUENCE_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)?(?:\s*(?:[+*/xX\u00d7\u00f7-])\s*"
+    r"\d+(?:\.\d+)?){1,10}\s*=\s*$"
+)
+
+
+def _single_arithmetic_type_args(
+    actions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return args for a lone effect-sensitive arithmetic type action.
+
+    RawDeviceExecutor intentionally minimizes overhead, but a successful
+    SendInput call does not prove that a calculator/kiosk keypad accepted a
+    printable expression.  ToolSession owns the visible-effect probe and the
+    semantic keypad recovery, so exact arithmetic sequences must not bypass it
+    when they appear inside run_action_batch.
+    """
+    if len(actions) != 1 or not isinstance(actions[0], dict):
+        return None
+    name, args = _normalise_action(actions[0])
+    if name != "type_text" or not _ARITHMETIC_KEYBOARD_SEQUENCE_RE.fullmatch(
+        str(args.get("text") or "")
+    ):
+        return None
+    return args
 
 
 class FastGuiController:
@@ -3313,25 +3326,59 @@ class FastGuiController:
         stop_on_error: bool = True,
         sync: dict[str, Any] | bool | None = None,
         subgoal: str = "",
+        pointer_hold_before: str = "",
+        pointer_hold_after: str = "",
     ) -> dict[str, Any]:
+        pointer_hold_before = str(pointer_hold_before or "").strip().casefold()
+        pointer_hold_after = str(pointer_hold_after or "").strip().casefold()
+        arithmetic_type_args = _single_arithmetic_type_args(actions)
         actions = _stable_batch_actions(actions, subgoal)
-        stale_buttons = action_executor.release_held_mouse_buttons()
-        if stale_buttons:
+        if arithmetic_type_args is not None and actions:
+            stabilized_name, stabilized_args = _normalise_action(actions[0])
+            if stabilized_name == "type_text":
+                arithmetic_type_args = stabilized_args
+        if pointer_hold_before:
+            owned_buttons = [
+                button
+                for button in ("left", "right", "middle")
+                if action_executor.agent_holds_mouse_button(button)
+            ]
+            entry_state_matches = owned_buttons == [pointer_hold_before]
+            stale_buttons = (
+                [] if entry_state_matches
+                else action_executor.release_held_mouse_buttons()
+            )
+        else:
+            # Preserve the historical fail-closed cleanup for every ordinary
+            # batch. Only an explicit pointer-session contract may retain an
+            # agent-owned button across this boundary.
+            stale_buttons = action_executor.release_held_mouse_buttons()
+            entry_state_matches = not stale_buttons
+        if not entry_state_matches:
             return {
                 "ok": False,
                 "verified": False,
                 "blocked": True,
-                "failure_type": "STALE_CONTINUOUS_INPUT_RECOVERED",
+                "failure_type": (
+                    "POINTER_SESSION_STATE_MISMATCH"
+                    if pointer_hold_before
+                    else "STALE_CONTINUOUS_INPUT_RECOVERED"
+                ),
                 "input_cleanup": {
                     "released_mouse_buttons": stale_buttons,
-                    "reason": "button hold cannot cross controller transactions",
+                    "reason": "pointer session entry state did not match its contract",
                 },
                 "error": (
-                    "A mouse button from an earlier transaction was still held. "
-                    "It was released safely; re-observe before retrying."
+                    "Physical pointer state did not match the declared "
+                    f"before-state {pointer_hold_before or 'released'}; "
+                    "all agent-owned buttons were released safely."
                 ),
             }
-        validation_errors = validate_batch_actions(actions)
+        validation_errors = validate_batch_actions(
+            actions,
+            pointer_hold_before=pointer_hold_before,
+            pointer_hold_after=pointer_hold_after,
+        )
         if validation_errors:
             return {
                 "ok": False,
@@ -3351,6 +3398,50 @@ class FastGuiController:
                 }],
                 "validation_errors": validation_errors,
                 "error": "; ".join(validation_errors),
+            }
+        if arithmetic_type_args is not None:
+            # Route before acquiring the outer controller transaction.  The
+            # ToolSession may recover by running a semantic keypad controller
+            # transaction whose observed app hwnd differs from the launch
+            # proxy hwnd; nesting that under the old window resource would be
+            # a forbidden resource escalation.
+            arithmetic_type_args = _with_batch_expect_defaults(
+                "type_text", arithmetic_type_args,
+            )
+            result = self.session.dispatch("type_text", arithmetic_type_args)
+            data = _json_dict(result.text)
+            ok = bool(data) and not _failed(result) and data.get("ok") is not False
+            verified = bool(ok and data.get("verified") is True)
+            needs_observe = bool(ok and not verified)
+            return {
+                "ok": ok,
+                "verified": verified,
+                "subgoal": str(subgoal or ""),
+                "controller_state": {
+                    "phase": "verified" if verified else "needs_observe" if ok else "blocked",
+                    "verified": verified,
+                    "needs_observe": needs_observe,
+                    "failed_at": None if ok else 1,
+                    "last_action": "type_text",
+                    "needs_llm_reason": not ok,
+                },
+                "results": [{
+                    "index": 1,
+                    "action": "type_text",
+                    "ok": ok,
+                    "verified": verified,
+                    "terminal": result.terminal,
+                    "preview": result.text[:800],
+                    "data": data if data else {"preview": result.text[:800]},
+                }],
+                "metrics": {
+                    "action_count": 1,
+                    "failed_at": None if ok else 1,
+                    "verified_tool_session_route": True,
+                    "nested_metrics": data.get("metrics") if isinstance(data, dict) else {},
+                },
+                "arithmetic_input_route": "verified_tool_session",
+                "needs_observe": needs_observe,
             }
         has_mutation = False
         has_clipboard = False
@@ -3375,8 +3466,46 @@ class FastGuiController:
                 )
                 return payload
             finally:
-                released = action_executor.release_held_mouse_buttons()
-                if released:
+                held_after = [
+                    button
+                    for button in ("left", "right", "middle")
+                    if action_executor.agent_holds_mouse_button(button)
+                ]
+                preserve_pointer = bool(
+                    pointer_hold_after
+                    and payload is not None
+                    and payload.get("ok") is True
+                    and held_after == [pointer_hold_after]
+                )
+                if preserve_pointer:
+                    payload["pointer_session"] = {
+                        "active": True,
+                        "button": pointer_hold_after,
+                        "before": pointer_hold_before,
+                        "after": pointer_hold_after,
+                    }
+                else:
+                    released = action_executor.release_held_mouse_buttons()
+                if pointer_hold_after and not preserve_pointer and payload is not None:
+                    payload["ok"] = False
+                    payload["verified"] = False
+                    payload["failure_type"] = "POINTER_HOLD_NOT_ESTABLISHED"
+                    payload["input_cleanup"] = {
+                        "released_mouse_buttons": released,
+                        "reason": "declared pointer hold was not present at transaction exit",
+                    }
+                    payload["error"] = (
+                        "The Controller could not prove the declared held-pointer "
+                        "state at the fresh-frame boundary."
+                    )
+                    state = payload.get("controller_state")
+                    if isinstance(state, dict):
+                        state.update({
+                            "phase": "blocked",
+                            "verified": False,
+                            "needs_observe": True,
+                        })
+                elif released:
                     BUS.publish(
                         "input_cleanup",
                         run_id=getattr(self.session, "run_id", None),

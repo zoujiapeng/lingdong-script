@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 
 ALLOWED_BATCH_ACTIONS = {
@@ -118,6 +118,17 @@ class ActionEnvelope:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class AtomicAction:
+    """One model-declared action after syntax-only normalization."""
+
+    ordinal: int
+    name: str
+    inputs: dict[str, Any]
+    source_path: str
+    is_container: bool = False
+
+
 def _region_dict(value: Any) -> dict[str, int] | None:
     if isinstance(value, (list, tuple)) and len(value) == 4:
         aliases = dict(zip(("left", "top", "width", "height"), value))
@@ -174,6 +185,8 @@ def action_reference_system(name: str, args: dict[str, Any]) -> str:
 
 
 def action_source_reference_system(args: dict[str, Any]) -> str | None:
+    if args.get("source_image_coordinates") is not None:
+        return "submitted_image_pixels"
     if args.get("source_frame_coordinates") is not None:
         return "frame_normalized_0_1000"
     return None
@@ -224,29 +237,116 @@ def supported_actions() -> tuple[str, ...]:
     return tuple(sorted(ALLOWED_BATCH_ACTIONS))
 
 
+def _action_name(value: Any) -> str:
+    return str(value or "").strip().casefold().replace("-", "_")
+
+
+def parse_atomic_action(
+    value: Any,
+    *,
+    ordinal: int = 0,
+    source_path: str = "$",
+) -> AtomicAction | None:
+    """Parse explicit or shorthand action JSON without adding task semantics."""
+    if not isinstance(value, dict):
+        return None
+    action_or_tool = value.get("action") or value.get("tool")
+    explicit_name = action_or_tool or value.get("name")
+    if explicit_name:
+        name = _action_name(explicit_name)
+        params = value.get("params")
+        discriminator_keys = {"action", "tool", "params"}
+        if not action_or_tool:
+            discriminator_keys.add("name")
+        inputs = {
+            **(params if isinstance(params, dict) else {}),
+            **{
+                key: item
+                for key, item in value.items()
+                if key not in discriminator_keys
+            },
+        }
+    elif len(value) == 1:
+        raw_name, raw_inputs = next(iter(value.items()))
+        name = _action_name(raw_name)
+        if isinstance(raw_inputs, dict):
+            inputs = dict(raw_inputs)
+        elif name == "hotkey":
+            keys = list(raw_inputs) if isinstance(raw_inputs, (list, tuple)) else [raw_inputs]
+            inputs = {"keys": [str(key) for key in keys]}
+        elif name in {"type_text", "type_into_element"}:
+            inputs = {"text": str(raw_inputs)}
+        else:
+            inputs = {"value": raw_inputs}
+    else:
+        return None
+    if not name:
+        return None
+    return AtomicAction(
+        ordinal=max(0, int(ordinal)),
+        name=name,
+        inputs=inputs,
+        source_path=str(source_path or "$"),
+    )
+
+
+def iter_atomic_actions(
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    include_container: bool = False,
+) -> Iterator[AtomicAction]:
+    """Yield direct or container child actions in their declared order."""
+    root_name = _action_name(tool_name)
+    root_inputs = dict(args or {})
+    is_container = root_name in {"run_action_batch", "execute_subgoal"}
+    if not is_container:
+        if root_name:
+            yield AtomicAction(0, root_name, root_inputs, "$")
+        return
+    ordinal = 0
+    if include_container:
+        yield AtomicAction(ordinal, root_name, root_inputs, "$", is_container=True)
+        ordinal += 1
+
+    declared: list[tuple[str, str, Any]] = []
+    if root_name == "execute_subgoal":
+        declared.append(("click_element", "click", root_inputs.get("click")))
+        clicks = root_inputs.get("clicks")
+        if isinstance(clicks, list):
+            declared.extend(("click_element", f"clicks[{index}]", item) for index, item in enumerate(clicks))
+        declared.extend([
+            ("type_into_element", "input", root_inputs.get("input")),
+            ("draw_strokes", "draw", root_inputs.get("draw")),
+            ("drag", "drag", root_inputs.get("drag")),
+        ])
+        for field, action_name in (("draws", "draw_strokes"), ("drags", "drag")):
+            values = root_inputs.get(field)
+            if isinstance(values, list):
+                declared.extend((action_name, f"{field}[{index}]", item) for index, item in enumerate(values))
+
+    for action_name, source_path, inputs in declared:
+        if not isinstance(inputs, dict):
+            continue
+        yield AtomicAction(ordinal, action_name, dict(inputs), source_path)
+        ordinal += 1
+    children = root_inputs.get("actions")
+    for index, child in enumerate(children if isinstance(children, list) else []):
+        atomic = parse_atomic_action(child, ordinal=ordinal, source_path=f"actions[{index}]")
+        if atomic is not None:
+            yield atomic
+            ordinal += 1
+
+
 def batch_action_name(action: dict[str, Any]) -> str:
-    """Return the action name for explicit and shorthand batch formats."""
-    name = str(action.get("action") or action.get("tool") or "").strip()
-    if name:
-        return name
-    if len(action) == 1:
-        return str(next(iter(action))).strip()
-    return ""
+    """Compatibility wrapper around the canonical action parser."""
+    parsed = parse_atomic_action(action)
+    return parsed.name if parsed is not None else ""
 
 
 def batch_action_args(action: dict[str, Any]) -> dict[str, Any]:
-    if action.get("action") or action.get("tool"):
-        explicit = {
-            key: value
-            for key, value in action.items()
-            if key not in {"action", "tool", "params"}
-        }
-        params = action.get("params")
-        return {**(params if isinstance(params, dict) else {}), **explicit}
-    if len(action) == 1:
-        _name, value = next(iter(action.items()))
-        return dict(value) if isinstance(value, dict) else {"value": value}
-    return {}
+    parsed = parse_atomic_action(action)
+    return dict(parsed.inputs) if parsed is not None else {}
 
 
 def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
@@ -315,8 +415,19 @@ def _missing_action_fields(name: str, args: dict[str, Any]) -> str:
     return ""
 
 
-def validate_batch_actions(actions: Any) -> list[str]:
-    """Validate action shape without importing the heavyweight controller."""
+def validate_batch_actions(
+    actions: Any,
+    *,
+    pointer_hold_before: str = "",
+    pointer_hold_after: str = "",
+) -> list[str]:
+    """Validate action shape and its explicit pointer-session transition.
+
+    Ordinary batches remain self-contained and must balance every mouse-down.
+    A controller-owned pointer session may cross an authoritative-frame
+    boundary only when the caller declares the exact button state before and
+    after this batch.
+    """
     if not isinstance(actions, list) or not actions:
         return ["config.actions must be a non-empty array"]
     errors: list[str] = []
@@ -333,11 +444,20 @@ def validate_batch_actions(actions: Any) -> list[str]:
             missing = _missing_action_fields(name, batch_action_args(action))
             if missing:
                 errors.append(f"action {index} ({name}) {missing}")
-    # A raw button hold may never cross a Controller/model boundary.  Permit
-    # multiple sequential gestures, but require each one to be balanced in
-    # this exact batch and allow only bounded movement/wait primitives while
-    # the button is held.  Atomic ``drag`` remains the preferred common path.
-    held_button = ""
+    before = str(pointer_hold_before or "").strip().casefold()
+    after = str(pointer_hold_after or "").strip().casefold()
+    valid_buttons = {"", "left", "right", "middle"}
+    if before not in valid_buttons:
+        errors.append("pointer_hold_before must be left, right, middle, or empty")
+        before = ""
+    if after not in valid_buttons:
+        errors.append("pointer_hold_after must be left, right, middle, or empty")
+        after = ""
+
+    # Permit multiple sequential gestures, but allow only bounded
+    # movement/wait primitives while a button is held. Atomic ``drag`` remains
+    # the preferred common path when every endpoint is already visible.
+    held_button = before
     held_at = 0
     allowed_while_held = {
         "move_mouse", "wait", "wait_change", "wait_for_visual_change",
@@ -351,9 +471,10 @@ def validate_batch_actions(actions: Any) -> list[str]:
         button = str(args.get("button") or "left").casefold()
         if name == "mouse_down":
             if held_button:
+                origin = f"action {held_at}" if held_at else "the prior frame"
                 errors.append(
                     f"action {index} (mouse_down) cannot press {button} while "
-                    f"{held_button} from action {held_at} is still held"
+                    f"{held_button} from {origin} is still held"
                 )
             else:
                 held_button = button
@@ -374,12 +495,19 @@ def validate_batch_actions(actions: Any) -> list[str]:
                 held_at = 0
             continue
         if held_button and name and name not in allowed_while_held:
+            origin = f"action {held_at}" if held_at else "the prior frame"
             errors.append(
                 f"action {index} ({name}) is not allowed while mouse button "
-                f"{held_button} from action {held_at} is held"
+                f"{held_button} from {origin} is held"
             )
-    if held_button:
+    if held_button and not after:
+        origin = f"action {held_at} (mouse_down)" if held_at else "the prior-frame mouse_down"
         errors.append(
-            f"action {held_at} (mouse_down) has no matching mouse_up in this batch"
+            f"{origin} has no matching mouse_up in this batch"
+        )
+    elif after and held_button != after:
+        errors.append(
+            f"pointer session must end with {after} held, but batch ends with "
+            f"{held_button or 'no button'} held"
         )
     return errors

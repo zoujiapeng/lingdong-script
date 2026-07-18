@@ -234,7 +234,8 @@ def test_scheduler_thread_executes_due_task_through_unified_runner(tmp_path, mon
 
     fake_session = SimpleNamespace(
         recent=lambda: ["prior context"],
-        append=lambda *args: session_rows.append(args),
+        snapshot=lambda: (7, ["prior context"]),
+        append=lambda *args, **_kwargs: session_rows.append(args) or True,
         all=lambda: list(session_rows),
     )
     fake_recorder = SimpleNamespace(start=lambda _run_id: None, stop=lambda: None)

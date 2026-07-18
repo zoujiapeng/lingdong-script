@@ -26,7 +26,11 @@ _MESSAGE_SPEECH_ACT_RELATION = re.compile(
     re.IGNORECASE,
 )
 _CAPTURE_VERB = re.compile(r"截图|截取|捕获|capture|screenshot", re.IGNORECASE)
-_DRAW_VERB = re.compile(r"绘制|(?<!刚)(?<!已)画(?!图(?:里|中|应用|窗口|软件)|板|好)|draw|paint|sketch", re.IGNORECASE)
+_DRAW_VERB = re.compile(
+    r"绘制|(?<!刚)(?<!已)(?<!的)画(?!图(?:里|中|应用|窗口|软件)|板|布|面|笔|质|风|廊|框|像|好)|"
+    r"draw|paint|sketch",
+    re.IGNORECASE,
+)
 _SAVE_VERB = re.compile(r"保存|另存为|导出|save|export", re.IGNORECASE)
 _TEXT_MEDIA = re.compile(r"消息|信息|文字|文本|message|text", re.IGNORECASE)
 _IMAGE_MEDIA = re.compile(r"截图|截取|图片|照片|图像|image|photo|screenshot|capture", re.IGNORECASE)
@@ -157,6 +161,13 @@ _VISUAL_CONTEXT_CUE = re.compile(
     r"\b(?:marked|labelled|labeled)\b",
     re.IGNORECASE,
 )
+_UI_AFFORDANCE_CUE = re.compile(
+    r"滑块|控件|按钮|图标|卡片|棋子|方块|窗口|面板|列表|条目|画布|棋盘|"
+    r"游戏|验证|进度条|滚动条|时间轴|节点|手柄|"
+    r"\b(?:slider|control|button|icon|card|tile|piece|window|panel|list|item|"
+    r"canvas|board|game|verification|progress\s*bar|scroll\s*bar|timeline|node|handle)\b",
+    re.IGNORECASE,
+)
 
 # These predicates intrinsically describe pointer/UI input.  Ambiguous verbs
 # such as generic "press", "move", or "place" require independent visual or
@@ -230,14 +241,14 @@ _IMPERATIVE_POINTER_RELATION = re.compile(
     r"(?:(?:请|麻烦)(?:你)?|帮(?:我)?|现在|然后|接着|随后|再)?\s*"
     r"(?:(?:在|从)\s*[^，,。.!！？；;]{1,48}?(?:里|中|上|内)?\s*)?"
     r"(?:点击(?!率|量|数)|点按|点一下|点(?!击率|击量|击数)|按一下|按下|"
-    r"单击|双击|右击|右键(?:点击|单击|一下)?|勾选|取消勾选|悬停|长按|"
+    r"单击|双击|右击|右键(?:点击|单击|一下)?|勾选|取消勾选|悬停|长按|按住|抓住|"
     r"框选|拖选|拖(?:动|拽)?|拉动|滑动)\s*"
     r"[^，,。.!！？；;]{1,80}"
     r"|"
     r"(?:^|[,.;!?])\s*"
     r"(?:(?:please|now|then)\s+|(?:(?:can|could|would)\s+you\s+))?"
     r"(?:(?:in|on|inside|within|from)\s+[^,.;!?]{1,48},?\s+)?"
-    r"(?:click|tap|press|drag|swipe|double[- ]click|right[- ]click|hover|"
+    r"(?:click|tap|press|hold|grab|drag|swipe|double[- ]click|right[- ]click|hover|"
     r"check|uncheck|long[- ]press|box[- ]select)\b\s+(?:on\s+)?[^,.;!?]{1,80}"
     r")",
     re.IGNORECASE,
@@ -323,6 +334,201 @@ _SOURCE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _GENERIC_SOURCE_RELATION = re.compile(
     r"(?:在|查看|看看|观察|根据)\s*(?:当前|已打开的)?\s*"
     r"([^，,。.!！？]{1,32}?)(?:应用|程序|软件|窗口|界面|页面)(?:里|中|上)?",
+    re.IGNORECASE,
+)
+
+# Application names are open ended.  These relations capture the grammatical
+# tool/source slot before a downstream action instead of maintaining a product
+# allowlist, while leaving its literal spelling intact for installed-app
+# discovery (which can later correct aliases and typos).
+_APP_SCOPED_ACTION = (
+    r"搜索|查找|查询|播放|点击|点赞|下载|上传|发送|发给|截图|截取|保存|"
+    r"导出|输入|选择|进入|登录|查看|看看|观察|操作|处理|完成|分析|编辑|转换|转成|"
+    r"计算|运算|求和|求积|拖动|拖拽|滑动|长按|按住|按下|抓住|松开|释放|"
+    r"游玩|玩|交互|绘制|"
+    r"(?<!刚)(?<!已)(?<!的)画(?!图(?:里|中|应用|窗口|软件)|板|好)|"
+    r"search|find|look\s*up|play|click|like|download|upload|send|capture|"
+    r"save|export|type|select|navigate|log\s*in|inspect|observe|operate|handle|"
+    r"complete|interact|drag|drop|swipe|hold|analy[sz]e|edit|convert|calculate|"
+    r"compute|evaluate|draw|paint|sketch"
+)
+_APP_SCOPED_ACTION_RE = re.compile(_APP_SCOPED_ACTION, re.IGNORECASE)
+_UNTYPED_APP_ACTION_RE = re.compile(
+    r"搜索|查找|查询|播放|点击|点赞|下载|上传|输入|选择|进入|登录|查看|看看|观察|"
+    r"操作|处理|完成|拖动|拖拽|滑动|长按|按住|按下|抓住|松开|释放|"
+    r"游玩|玩|交互|分析|编辑|转换|转成|"
+    r"计算|运算|求和|求积|复制|粘贴|"
+    r"search|find|look\s*up|play|click|like|download|upload|type|select|navigate|"
+    r"log\s*in|inspect|observe|operate|handle|complete|interact|drag|drop|swipe|"
+    r"hold|analy[sz]e|edit|convert|calculate|compute|evaluate|copy|paste",
+    re.IGNORECASE,
+)
+_GENERIC_TOOL_SOURCE_RELATION = re.compile(
+    rf"(?:^|[，,。.!！？；;])\s*(?:请|麻烦|帮我|请你)?\s*"
+    rf"(?:用|使用|在|去)\s*"
+    rf"(?P<source>[A-Za-z0-9_.+\-\u4e00-\u9fff][A-Za-z0-9_.+\-\u4e00-\u9fff ]{{0,39}}?)"
+    rf"(?:软件|应用|客户端|程序)?(?:里|里面|中|上)?\s*(?:帮我|来)?\s*"
+    rf"(?=(?:{_APP_SCOPED_ACTION}))",
+    re.IGNORECASE,
+)
+_DEICTIC_SURFACE_SOURCE = re.compile(
+    r"^(?:(?:(?:当前|现在|现有|这个|该|已打开(?:的)?|可见(?:的)?|眼前(?:的)?)\s*)*"
+    r"(?:页面|界面|窗口|屏幕|画面|画布|视图|应用|软件)(?:里|里面|中|上|内)?|"
+    r"(?:(?:当前|现在|现有|这个|该|已打开(?:的)?|可见(?:的)?|眼前(?:的)?)\s*)+|"
+    r"(?:the\s+)?(?:(?:current(?:ly)?|visible|active|open|already\s+open)\s+)*"
+    r"(?:page|interface|window|screen|canvas|view|app(?:lication)?)|"
+    r"(?:the\s+)?(?:(?:current(?:ly)?|visible|active|open|already\s+open)\s*)+)$",
+    re.IGNORECASE,
+)
+_DEICTIC_SURFACE_PREFIX = re.compile(
+    r"^(?:(?:(?:当前|现在|现有|这个|该|已打开(?:的)?|可见(?:的)?|眼前(?:的)?)\s*)+"
+    r"(?:页面|界面|窗口|屏幕|画面|画布|视图|应用|软件)(?:里|里面|中|上|内)?|"
+    r"(?:the\s+)?(?:(?:current(?:ly)?|visible|active|open|already\s+open)\s+)+"
+    r"(?:page|interface|window|screen|canvas|view|app(?:lication)?)(?:\s+(?:in|on))?)",
+    re.IGNORECASE,
+)
+
+
+def _is_deictic_surface_source(value: str) -> bool:
+    """Return whether a parsed source is a reference to the live surface.
+
+    Open-ended application grammar deliberately accepts unknown names.  It can
+    therefore overrun a deictic locative when a later multilingual action word
+    supplies the first known boundary (for example ``当前可见窗口中按住蓝色
+    HOLD...``).  A deictic surface prefix is still authoritative scene context,
+    never an installed-application identity, even when the captured candidate
+    contains part of the following command.
+    """
+
+    candidate = str(value or "").strip(" \t\r\n'\"“”‘’")
+    return bool(
+        candidate
+        and (
+            _DEICTIC_SURFACE_SOURCE.fullmatch(candidate)
+            or _DEICTIC_SURFACE_PREFIX.match(candidate)
+        )
+    )
+_INPUT_METHOD_SOURCE = re.compile(
+    r"^(?:(?:鼠标|键盘|触摸|点击|点按|拖动|拖拽|滑动|按键|快捷键|手势|"
+    r"mouse|keyboard|touch|click|tap|drag|swipe|gesture)"
+    r"(?:和|与|及|、|\s|and)*)+$",
+    re.IGNORECASE,
+)
+_CURRENT_OPEN_APP_RESOURCE = re.compile(
+    r"(?:当前|现在|刚才|刚刚)?\s*(?:打开的|已打开的)\s*"
+    r"(?P<source>[A-Za-z][A-Za-z0-9_.+\- ]{1,31}|[\u4e00-\u9fff]{2,20})"
+    r"(?=笔记|文档|文件|页面|窗口|内容|应用|软件)",
+    re.IGNORECASE,
+)
+_PLAY_APPLICATION_RELATION = re.compile(
+    r"(?:游玩|(?<!游)玩)\s*(?:一下\s*)?"
+    r"(?P<source>[A-Za-z0-9_.+\-\u4e00-\u9fff][A-Za-z0-9_.+\-\u4e00-\u9fff ]{1,39}?)"
+    r"(?=\s*(?:$|[，,。.!！？；;]))",
+    re.IGNORECASE,
+)
+
+
+def _application_mentions(text: str, *, launch_target: str = "") -> list[str]:
+    """Return ordered, open-ended application constraints from the request.
+
+    ``source`` is necessarily scalar for older contracts, but a real desktop
+    goal may name several applications.  Preserve every grounded mention in
+    source order so the generic agent can plan cross-application handoffs
+    without whichever known alias happened to be checked first winning.
+    """
+
+    found: list[tuple[int, str]] = []
+    known_spans: list[tuple[int, int]] = []
+    for name, pattern in (*_SOURCE_PATTERNS, *_CHANNEL_PATTERNS):
+        if name == "Email":
+            continue
+        for match in pattern.finditer(text):
+            found.append((int(match.start()), name))
+            known_spans.append((int(match.start()), int(match.end())))
+    for match in _GENERIC_TOOL_SOURCE_RELATION.finditer(text):
+        source_span = (
+            int(match.start("source")),
+            int(match.end("source")),
+        )
+        if any(
+            source_span[0] < known_end and known_start < source_span[1]
+            for known_start, known_end in known_spans
+        ):
+            # A canonical source/channel pattern already owns these exact
+            # characters.  Do not turn one mention such as ``画板`` into two
+            # apparent applications (``Paint`` and ``画板``).
+            continue
+        candidate = str(match.group("source") or "").strip()
+        candidate = re.sub(
+            r"(?:软件|应用|客户端|程序)$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip(" \t\r\n'\"“”‘’")[:64]
+        if (
+            candidate
+            and not _is_deictic_surface_source(candidate)
+            and not _INPUT_METHOD_SOURCE.fullmatch(candidate)
+        ):
+            found.append((int(match.start("source")), candidate))
+    current_resource = _CURRENT_OPEN_APP_RESOURCE.search(text)
+    if current_resource:
+        candidate = str(current_resource.group("source") or "").strip(
+            " \t\r\n'\"“”‘’"
+        )[:64]
+        if candidate and not _is_deictic_surface_source(candidate):
+            found.append((int(current_resource.start("source")), candidate))
+    played_application = _PLAY_APPLICATION_RELATION.search(text)
+    if played_application:
+        candidate = str(played_application.group("source") or "").strip(
+            " \t\r\n'\"“”‘’"
+        )[:64]
+        if candidate and not _is_deictic_surface_source(candidate):
+            found.append((int(played_application.start("source")), candidate))
+    if launch_target:
+        position = text.casefold().find(str(launch_target).casefold())
+        found.append((position if position >= 0 else 0, str(launch_target)))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for _position, value in sorted(found, key=lambda item: item[0]):
+        key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value.casefold())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(value)
+    return ordered
+
+# A launch command may be followed by an arbitrary in-app workflow.  The old
+# full-match grammar treated that entire suffix as the application name.  Keep
+# the launch target and the semantic tail separate so the compiler can route
+# the *whole* request through the GUI agent.
+_OPEN_APPLICATION_PREFIX = re.compile(
+    r"^\s*(?:(?:请|麻烦|劳驾)(?:你)?\s*)?(?:(?:帮我|帮忙)\s*)?"
+    r"(?P<zh_verb>打开|启动|运行)\s*(?:一个\s*)?"
+    r"(?P<zh_body>[^。.!！？]{1,240})\s*[。.!！？]?\s*$|"
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+    r"(?P<en_verb>open|launch|start|run)\b\s+"
+    r"(?P<en_body>[^.!?]{1,240})\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+_FOLLOWUP_ACTION_RELATION = re.compile(
+    rf"(?:\s*(?:，|,|并且|并|然后|再|接着|随后)\s*|\s+)"
+    rf"(?=(?:{_APP_SCOPED_ACTION}))|"
+    rf"(?=去[A-Za-z0-9_\u4e00-\u9fff]{{1,32}}(?:里|里面|中|上)?(?:{_APP_SCOPED_ACTION}))|"
+    rf"(?=(?:{_APP_SCOPED_ACTION}))",
+    re.IGNORECASE,
+)
+
+_ASSISTANT_META_QUERY = re.compile(
+    r"(?:你|助手|agent).{0,12}(?:干嘛|做什么|能干嘛|会什么|能做什么|有什么能力|做什么用)|"
+    r"what\s+can\s+you\s+do|what\s+are\s+your\s+capabilities|"
+    r"what\s+do\s+you\s+do",
+    re.IGNORECASE,
+)
+_CAPABILITY_DEMONSTRATION = re.compile(
+    r"(?:演示|示范|展示).{0,20}(?:能力|能做什么|功能)|"
+    r"demonstrat(?:e|ion).{0,30}(?:capabilit|what\s+you\s+can\s+do)",
     re.IGNORECASE,
 )
 
@@ -427,6 +633,8 @@ def _recipient_after_channel(text: str, channel: str) -> str:
         rf"(?:用|通过|via)\s*{escaped}\s*给\s*([^，。,.]{{1,30}}?)(?=发|发送|传|分享)",
         rf"(?:用|通过|via)\s*{escaped}\s*(?:发给|发送给|给|传给|分享到)\s*([^，。,.]{{1,40}})",
         rf"(?:用|通过|via)\s*{escaped}\s*(?:找)?\s*([^，。,.]{{1,30}}?)(?=聊天|聊|chat)",
+        rf"(?:去|打开|进入)?\s*{escaped}\s*(?:里|中)?\s*(?:找|搜索|打开|进入)\s*"
+        rf"([^，。,.]{{1,30}}?)(?=持续聊天|一直聊天|继续聊天|不停聊天|保持聊天|聊天|聊|chat)",
     )
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -458,7 +666,7 @@ def _recipient_from_relation(text: str) -> str:
 
 def _drawing_subject(text: str) -> str:
     match = re.search(
-        r"(?:绘制|(?<!刚)(?<!已)画)\s*(?!板|图(?:里|中|应用|软件))([^，。,.]{1,48}?)(?=然后|并|再|后|截图|截取|保存|[，。,.]|$)",
+        r"(?:绘制|(?<!刚)(?<!已)(?<!的)画)\s*(?!板|图(?:里|中|应用|软件))([^，。,.]{1,48}?)(?=然后|并|再|后|截图|截取|保存|[，。,.]|$)",
         text,
         re.IGNORECASE,
     )
@@ -467,26 +675,46 @@ def _drawing_subject(text: str) -> str:
     return _strip_recipient(match.group(1)) if match else ""
 
 
-def _application_launch_target(text: str) -> str:
-    """Return a target only for a complete, application-shaped launch clause.
+def _application_launch_parts(text: str) -> tuple[str, str]:
+    """Return ``(application, remaining_workflow)`` for a launch command.
 
-    ``open`` is ambiguous for files and URLs; those media-shaped targets stay
-    on the semantic task route.  ``launch/start/run`` and their Chinese
-    equivalents are process predicates, so arbitrary application names remain
-    supported without a product-name allowlist.
+    The remaining workflow is intentionally left as user-authored text.  The
+    structural parser need not understand every future application action; it
+    only needs to ensure that the compiler cannot mistake the whole workflow
+    for an executable name or silently discard it.
     """
 
-    match = _OPEN_APPLICATION_RELATION.fullmatch(text)
+    match = _OPEN_APPLICATION_PREFIX.fullmatch(text)
     if not match:
-        return ""
+        return "", ""
     verb = str(match.group("zh_verb") or match.group("en_verb") or "").casefold()
-    target = str(match.group("zh_target") or match.group("en_target") or "")
+    body = str(match.group("zh_body") or match.group("en_body") or "").strip()
+    if not body:
+        return "", ""
+
+    split_at = -1
+    for candidate in _FOLLOWUP_ACTION_RELATION.finditer(body):
+        if candidate.start() > 0:
+            split_at = candidate.start()
+            break
+    if split_at > 0:
+        target = body[:split_at].rstrip(" \t\r\n，,、;；")
+        remainder = body[split_at:].lstrip(" \t\r\n，,、;；")
+    else:
+        target, remainder = body, ""
     target = target.strip(" \t\r\n'\"“”‘’")[:80]
+    remainder = remainder.strip()[:240]
     if not target:
-        return ""
+        return "", ""
     if verb in {"打开", "open"} and _NON_APPLICATION_OPEN_TARGET.search(target):
-        return ""
-    return target
+        return "", ""
+    return target, remainder
+
+
+def _application_launch_target(text: str) -> str:
+    """Compatibility helper returning only the application identity."""
+
+    return _application_launch_parts(text)[0]
 
 
 def _actor_assignments(text: str) -> dict[str, dict[str, str]]:
@@ -565,6 +793,14 @@ def _interaction_candidate(text: str, source: str) -> InteractionIntent:
             visual_grounding
             or spatial_transfer
             or _INHERENT_UI_POINTER.search(text)
+            # A command-shaped continuous-pointer predicate is itself a live
+            # GUI relation in this desktop agent.  This lets novel sliders,
+            # pieces, handles and game objects enter the generic visual loop
+            # without cataloguing their nouns or their applications.
+            or (
+                _CONTINUOUS_POINTER_PREDICATE.search(text)
+                and _UI_AFFORDANCE_CUE.search(text)
+            )
         )
     )
     contextual_manipulation = bool(
@@ -833,10 +1069,10 @@ class TaskIntentParser:
         # "运行测试/构建脚本" is an execution predicate over a workspace
         # resource, not an application name.  Resolve that relation before the
         # otherwise open-ended launch grammar.
-        launch_target = (
-            _application_launch_target(text)
+        launch_target, semantic_tail = (
+            _application_launch_parts(text)
             if candidate_domain == "general"
-            else ""
+            else ("", "")
         )
         if launch_target:
             operations.append("open")
@@ -875,14 +1111,74 @@ class TaskIntentParser:
                 # they are not application identities.  Keep these commands
                 # target-bound to active_window instead of inventing a source
                 # application named "current".
-                if not re.fullmatch(r"(?:当前|现有|这个|该|已打开的?)", candidate_source):
+                if (
+                    not _is_deictic_surface_source(candidate_source)
+                    and not _INPUT_METHOD_SOURCE.fullmatch(candidate_source)
+                ):
                     source = candidate_source
+        if not source:
+            generic_tool_source = _GENERIC_TOOL_SOURCE_RELATION.search(text)
+            if generic_tool_source:
+                candidate_source = generic_tool_source.group("source").strip()
+                candidate_source = re.sub(
+                    r"(?:软件|应用|客户端|程序)$", "", candidate_source,
+                    flags=re.IGNORECASE,
+                ).strip(" \t\r\n'\"“”‘’")[:64]
+                if (
+                    not _is_deictic_surface_source(candidate_source)
+                    and not _INPUT_METHOD_SOURCE.fullmatch(candidate_source)
+                ):
+                    source = candidate_source
+        if not source:
+            current_resource = _CURRENT_OPEN_APP_RESOURCE.search(text)
+            if current_resource:
+                source = current_resource.group("source").strip()
+                source = source.strip(" \t\r\n'\"“”‘’")[:64]
+        if not source:
+            played_application = _PLAY_APPLICATION_RELATION.search(text)
+            if played_application:
+                source = str(played_application.group("source") or "").strip(
+                    " \t\r\n'\"“”‘’"
+                )[:64]
+        if semantic_tail:
+            # The launch target is also the application constraint for the
+            # remaining workflow.  Preserve it instead of asking the semantic
+            # runner to rediscover an app from a truncated goal.
+            source = source or launch_target
+            if _UNTYPED_APP_ACTION_RE.search(semantic_tail):
+                operations.append("operate")
+
+        applications = _application_mentions(text, launch_target=launch_target)
+        if applications:
+            # Keep the scalar compatibility field aligned with the first app
+            # the user asked the agent to operate.  The complete ordered list
+            # remains available to the lossless desktop stage.
+            source = applications[0]
+        elif source:
+            applications = [source]
+
+        if _CAPABILITY_DEMONSTRATION.search(text):
+            operations.append("demonstrate")
+        elif _ASSISTANT_META_QUERY.search(text):
+            operations.append("respond")
+
         interaction = _merge_semantic_interaction(
             _interaction_candidate(text, source),
             extracted,
         )
         if interaction.active:
             operations.append("interact")
+        if (
+            source
+            and not interaction.active
+            and _UNTYPED_APP_ACTION_RE.search(text)
+            and not (launch_target and not semantic_tail)
+            and not any(
+                operation in operations
+                for operation in ("draw", "capture", "save", "send", "operate")
+            )
+        ):
+            operations.append("operate")
         # Keep capture intent separate from the source application.  A user
         # asking for the application/window gets the full window; a drawing
         # screenshot without that qualifier gets the detected work surface.
@@ -990,6 +1286,15 @@ class TaskIntentParser:
         }
         if launch_target:
             provenance["destination"] = "application_launch_relation"
+        if semantic_tail:
+            provenance["semantic_tail"] = semantic_tail
+            provenance["operation_coverage"] = "launch_plus_semantic_tail"
+        if "demonstrate" in operations:
+            provenance["operation_coverage"] = "capability_demonstration_relation"
+        elif "respond" in operations:
+            provenance["operation_coverage"] = "assistant_meta_query_relation"
+        if send_mode == "continuous_chat":
+            provenance["continuous_session"] = "explicit_persistent_communication_relation"
         if ambiguous and extracted:
             for field in tuple(ambiguous):
                 value = str(extracted.get(field) or "").strip()
@@ -1006,7 +1311,8 @@ class TaskIntentParser:
                 provenance[field] = "semantic_extractor"
 
         signals = sum(bool(value) for value in (
-            operations, media_type != "none", channel, recipient, source, subject,
+            operations, media_type != "none", channel, recipient, source,
+            applications, subject,
             interaction.active,
         ))
         confidence = min(0.99, 0.42 + signals * 0.09 - len(ambiguous) * 0.08)
@@ -1019,6 +1325,7 @@ class TaskIntentParser:
             channel=channel,
             recipient=recipient,
             source=source,
+            applications=applications,
             capture_scope=capture_scope,
             destination=destination,
             send_mode=send_mode,

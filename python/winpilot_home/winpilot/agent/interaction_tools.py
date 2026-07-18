@@ -5,6 +5,7 @@ import json
 import hashlib
 import inspect
 import math
+import re
 import sys
 import time
 from typing import Any
@@ -22,6 +23,11 @@ from .tool_result import ToolResult
 
 _CANCEL_TEXTS = {"cancel", "\u53d6\u6d88"}
 _INPUT_ROLES = {"edit", "combobox", "\u7f16\u8f91", "\u7ec4\u5408\u6846"}
+_ACTIONABLE_HIT_ROLES = (
+    "button", "link", "hyperlink", "menuitem", "menu item", "tabitem",
+    "tab item", "checkbox", "radio", "listitem", "treeitem", "splitbutton",
+    "\u6309\u94ae", "\u94fe\u63a5", "\u83dc\u5355\u9879", "\u9009\u9879\u5361", "\u590d\u9009", "\u5355\u9009",
+)
 _DANGEROUS_POWER_TERMS = (
     "shutdown", "shut down", "restart", "sign out", "log off", "sleep", "hibernate",
     "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
@@ -33,6 +39,40 @@ _POWER_TASK_ALLOW_TERMS = (
     "\u5173\u673a", "\u91cd\u542f", "\u91cd\u65b0\u542f\u52a8", "\u6ce8\u9500",
     "\u7761\u7720", "\u4f11\u7720", "\u7535\u6e90", "\u7535\u6c60",
 )
+
+_TYPED_ARITHMETIC_SEQUENCE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?(?:\s*(?:[+*/xX\u00d7\u00f7-])\s*"
+    r"\d+(?:\.\d+)?){1,10})\s*=\s*$"
+)
+_KEYPAD_OPERATOR_LABELS = {
+    "+": "Plus",
+    "-": "Minus",
+    "*": "Multiply by",
+    "/": "Divide by",
+    ".": "Decimal separator",
+}
+
+
+def _typed_arithmetic_expression(value: Any) -> str:
+    """Return a restricted expression only for a complete ``...=`` sequence."""
+    match = _TYPED_ARITHMETIC_SEQUENCE_RE.fullmatch(str(value or ""))
+    if not match:
+        return ""
+    return (
+        re.sub(r"\s+", "", match.group(1))
+        .replace("\u00d7", "*")
+        .replace("\u00f7", "/")
+        .replace("X", "*")
+        .replace("x", "*")
+    )
+
+
+def _semantic_keypad_click_specs(expression: str) -> list[dict[str, Any]]:
+    clicks: list[dict[str, Any]] = [{"label": "Clear"}]
+    for char in expression:
+        clicks.append({"label": char if char.isdigit() else _KEYPAD_OPERATOR_LABELS[char]})
+    clicks.append({"label": "Equals"})
+    return clicks
 
 
 def _call_with_optional_hwnd(fn, *args, hwnd: int | None = None):
@@ -80,6 +120,77 @@ def _looks_like_cancel_element(text: str, role: str) -> bool:
 def _looks_like_input_element(role: str) -> bool:
     role_text = (role or "").strip().casefold()
     return role_text in _INPUT_ROLES or "edit" in role_text or "combo" in role_text
+
+
+def _actionable_semantic_hit(
+    element: Any,
+    *,
+    authored_point: tuple[int, int] | None = None,
+) -> bool:
+    """Whether a fresh point can be refined to this structured visual target.
+
+    This is intentionally based on element provenance, geometry and confidence,
+    never an application or label allow-list.  Native actionable controls are
+    accepted, as are compact high-confidence OCR controls/text that lie under
+    the model's already-authored click.  Broad containers and owner-drawn
+    canvases keep the exact visual coordinate: snapping those to their center
+    can move a correct click hundreds of pixels away from a child affordance.
+    """
+    source = str(getattr(element, "source", "") or "").strip().casefold()
+    role = str(getattr(element, "role", "") or "").strip().casefold()
+    text = str(getattr(element, "text", "") or "").strip()
+    try:
+        elem_id = int(getattr(element, "elem_id", -1) or -1)
+        width = int(getattr(element, "width", 0) or 0)
+        height = int(getattr(element, "height", 0) or 0)
+        cx = int(getattr(element, "cx", 0) or 0)
+        cy = int(getattr(element, "cy", 0) or 0)
+        confidence = float(getattr(element, "confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if elem_id <= 0 or width <= 0 or height <= 0:
+        return False
+
+    native_actionable = bool(
+        source in {"uia", "win32"}
+        and any(marker in role for marker in _ACTIONABLE_HIT_ROLES)
+    )
+    visual_control = bool(
+        source in {"ocr", "ocr-control"}
+        and text
+        and confidence >= (0.48 if source == "ocr-control" else 0.68)
+        and width <= 320
+        and height <= 96
+        and (
+            source == "ocr-control"
+            or role in {"text", "label", "statictext", "static text"}
+            or any(marker in role for marker in _ACTIONABLE_HIT_ROLES)
+        )
+    )
+    if not native_actionable and not visual_control:
+        return False
+
+    structural_role = any(marker in role for marker in (
+        "listitem", "list item", "treeitem", "tree item", "menuitem", "menu item",
+    ))
+    if structural_role and (not text or width > 280 or height > 140):
+        return False
+    if not text and (width > 128 or height > 128):
+        return False
+
+    if authored_point is not None:
+        authored_x, authored_y = authored_point
+        center_distance = math.hypot(cx - authored_x, cy - authored_y)
+        # A snap is a local correction, not a second target decision.  The cap
+        # rejects large parent containers while still allowing an edge click on
+        # an ordinary button/link to settle at its stable center.
+        max_center_shift = max(
+            24.0,
+            min(96.0, 0.55 * math.hypot(float(width), float(height))),
+        )
+        if center_distance > max_center_shift:
+            return False
+    return True
 
 
 def _prefer_physical_text_input(element: Any, text: str, task: str) -> bool:
@@ -330,6 +441,62 @@ class InteractionToolMixin:
         hits.sort(key=lambda item: item[0])
         return hits[0][1]
 
+    def _semantic_element_near_point(self, x: int, y: int):
+        """Return a compact fresh semantic target at or just beside a point.
+
+        OCR boxes often cover only glyph ink while a user/model clicks the icon
+        or padding beside it.  A small edge tolerance makes that grounding useful
+        without letting an unrelated distant control replace the visual target.
+        """
+        snapshot = getattr(self, "snapshot", None)
+        elements = getattr(snapshot, "elements", None) or []
+        candidates: list[tuple[float, float, int, Any]] = []
+        for element in elements:
+            try:
+                left = int(getattr(element, "left", 0))
+                top = int(getattr(element, "top", 0))
+                width = int(getattr(element, "width", 0))
+                height = int(getattr(element, "height", 0))
+                cx = int(getattr(element, "cx", left + width // 2))
+                cy = int(getattr(element, "cy", top + height // 2))
+            except (TypeError, ValueError):
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            right = left + width
+            bottom = top + height
+            edge_dx = max(left - x, 0, x - right)
+            edge_dy = max(top - y, 0, y - bottom)
+            edge_distance = math.hypot(edge_dx, edge_dy)
+            if edge_distance > 24.0:
+                continue
+            # Plain OCR describes glyph geometry, not control ownership.  A
+            # single OCR box can merge several adjacent actions into one text
+            # row; centering an authored point that is already inside that box
+            # can silently replace the selected left/right sub-action with a
+            # different neighbour.  Preserve such exact visual coordinates.
+            # OCR-control and native elements may still center because their
+            # boxes represent one structured control, while plain OCR remains
+            # useful for correcting a click just outside the glyph bounds.
+            source = str(
+                getattr(element, "source", "") or ""
+            ).strip().casefold()
+            if source == "ocr" and edge_distance <= 1e-6:
+                continue
+            if not _actionable_semantic_hit(
+                element,
+                authored_point=(x, y),
+            ):
+                continue
+            center_distance = math.hypot(cx - x, cy - y)
+            # Containing boxes win over nearby boxes; then prefer the smallest
+            # local correction and the most precise geometry.
+            candidates.append((edge_distance, center_distance, width * height, element))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        return candidates[0][3]
+
     def _blocked_power_click_result(self, element) -> ToolResult | None:
         if _task_allows_power_action(getattr(self, "task", "")):
             return None
@@ -374,6 +541,85 @@ class InteractionToolMixin:
             pass
         return self.hwnd
 
+    @staticmethod
+    def _spatial_constraint_region(
+        args: dict,
+    ) -> tuple[Region | None, str]:
+        raw = args.get("_constraint_region")
+        if raw is None:
+            raw = args.get("constraint_region")
+        if raw is None:
+            return None, ""
+        if isinstance(raw, Region):
+            region = raw
+        elif isinstance(raw, dict):
+            try:
+                region = Region(
+                    int(raw.get("x", raw.get("left"))),
+                    int(raw.get("y", raw.get("top"))),
+                    int(raw["width"]),
+                    int(raw["height"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                return None, "constraint_region requires integer x/y/width/height"
+        else:
+            return None, "constraint_region must be an object"
+        if region.width <= 0 or region.height <= 0:
+            return None, "constraint_region width and height must be positive"
+        return region, ""
+
+    @staticmethod
+    def _point_in_spatial_constraint(
+        region: Region,
+        x: int,
+        y: int,
+    ) -> bool:
+        return bool(
+            region.left <= int(x) < region.right
+            and region.top <= int(y) < region.bottom
+        )
+
+    def _spatial_constraint_block(
+        self,
+        args: dict,
+        points: list[tuple[int, int]],
+        *,
+        action: str,
+    ) -> ToolResult | None:
+        region, error = self._spatial_constraint_region(args)
+        if error:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "blocked": True,
+                "failure_type": "INVALID_SPATIAL_CONSTRAINT",
+                "error": error,
+            }))
+        if region is None:
+            return None
+        for index, (x, y) in enumerate(points):
+            if self._point_in_spatial_constraint(region, x, y):
+                continue
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "SPATIAL_CONSTRAINT_VIOLATION",
+                "action": action,
+                "constraint_region": {
+                    "x": region.left,
+                    "y": region.top,
+                    "width": region.width,
+                    "height": region.height,
+                },
+                "rejected_point": [int(x), int(y)],
+                "rejected_point_index": index,
+                "error": (
+                    "The requested spatial action leaves its declared action "
+                    "region. Nothing was executed."
+                ),
+            }))
+        return None
+
     def _verification_watcher(self):
         try:
             return self._fast_controller().watcher
@@ -381,6 +627,40 @@ class InteractionToolMixin:
             return None
 
     def _t_click(self, args: dict) -> ToolResult:
+        semantic_keys = (
+            "label", "text_query", "fallback_text", "role",
+            "expected_region", "visual_anchor", "anchor",
+        )
+        semantic_target = bool(
+            args.get("element_id") is None
+            and not (args.get("x") is not None and args.get("y") is not None)
+            and any(args.get(key) not in (None, "", []) for key in semantic_keys)
+        )
+        if semantic_target:
+            # Direct native-vision turns should not have to detour through a
+            # special subgoal just to use the same semantic locator already
+            # available to controller batches.  The controller performs a
+            # fresh UIA/OCR observe when necessary, resolves the anchor, applies
+            # visual servo immediately before mouse-down, and returns its real
+            # effect evidence.  Its eventual physical click bypasses this
+            # ToolSession handler, so this route cannot recurse.
+            payload = self._fast_controller().execute(
+                [{"action": "click", **dict(args)}],
+                stop_on_error=True,
+                subgoal="click the currently grounded visible target",
+            )
+            return ToolResult(
+                self._fmt(payload),
+                replay={
+                    "tool": "click",
+                    "semantic_target": {
+                        key: args.get(key)
+                        for key in semantic_keys
+                        if args.get(key) not in (None, "", [])
+                    },
+                    "controller_routed": True,
+                },
+            )
         executor_mod = _tools_attr("executor", executor)
         verify_mod = _tools_attr("verify", verify)
         element_id = args.get("element_id")
@@ -432,27 +712,129 @@ class InteractionToolMixin:
                                 text=element.text)
                     return {"ok": True, "via": "uia_invoke"}
                 click_kwargs = {"prepositioned": True} if prepositioned else {}
+                if physical:
+                    # ``physical`` is an execution guarantee, not merely a UIA
+                    # preference.  Owner-drawn Chromium/DirectUI surfaces may
+                    # accept PostMessage syntactically while ignoring it, so a
+                    # grounded physical request must reach SendInput.
+                    click_kwargs["force_physical"] = True
                 return executor_mod.click(
                     x, y, button=button, double=double,
                     hwnd=self._action_hwnd(), **click_kwargs,
                 )
         elif "x" in args and "y" in args:
             x, y = int(args["x"]), int(args["y"])
-            replay["coords"] = [x, y]
+            authored_x, authored_y = x, y
             hit = self._element_at_point(x, y)
             if hit is not None:
                 blocked = self._blocked_power_click_result(hit)
                 if blocked is not None:
                     return blocked
+            semantic_hit = None
+            semantic_candidate = self._semantic_element_near_point(x, y)
+            if (
+                semantic_candidate is not None
+                and bool(CONFIG.get(
+                    "controller", "coordinate_semantic_snap", default=False,
+                ))
+                and not bool(args.get("disable_semantic_snap"))
+            ):
+                resolved, _ = self._resolve_element(
+                    int(getattr(semantic_candidate, "elem_id", -1) or -1),
+                )
+                if resolved is not None:
+                    semantic_hit = resolved
+                    resolved_source = str(
+                        getattr(resolved, "source", "") or ""
+                    ).strip().casefold()
+                    try:
+                        resolved_left = int(getattr(resolved, "left", 0) or 0)
+                        resolved_top = int(getattr(resolved, "top", 0) or 0)
+                        resolved_width = int(getattr(resolved, "width", 0) or 0)
+                        resolved_height = int(getattr(resolved, "height", 0) or 0)
+                    except (TypeError, ValueError):
+                        resolved_left = resolved_top = 0
+                        resolved_width = resolved_height = 0
+                    broad_plain_ocr = bool(
+                        resolved_source == "ocr"
+                        and resolved_width > 0
+                        and resolved_height > 0
+                        and (
+                            resolved_width >= 72
+                            or resolved_width >= resolved_height * 3
+                        )
+                    )
+                    if broad_plain_ocr:
+                        # A plain OCR rectangle can be one merged row containing
+                        # several independent actions.  If an authored point is
+                        # just outside the glyph ink, projecting it to the nearest
+                        # interior pixel preserves the intended left/right
+                        # subtarget.  Re-centering the whole row can silently turn
+                        # "first action" into a neighbouring action.
+                        inset_x = max(1, min(3, resolved_width // 12))
+                        inset_y = max(1, min(3, resolved_height // 6))
+                        min_x = resolved_left + inset_x
+                        max_x = resolved_left + resolved_width - inset_x
+                        min_y = resolved_top + inset_y
+                        max_y = resolved_top + resolved_height - inset_y
+                        x = max(min_x, min(authored_x, max_x))
+                        y = max(min_y, min(authored_y, max_y))
+                        snap_mode = "nearest_plain_ocr_subtarget"
+                    else:
+                        x, y = int(resolved.cx), int(resolved.cy)
+                        snap_mode = "semantic_center"
+                    replay["semantic_hit_snap"] = {
+                        "element_id": int(resolved.elem_id),
+                        "text": str(resolved.text or "")[:120],
+                        "role": str(resolved.role or ""),
+                        "source": str(resolved.source or ""),
+                        "mode": snap_mode,
+                        "authored_coords": [authored_x, authored_y],
+                        "snapped_coords": [x, y],
+                    }
+            replay["coords"] = [x, y]
 
             def action() -> dict:
+                if (
+                    semantic_hit is not None
+                    and button == "left"
+                    and not double
+                    and not physical
+                    and executor_mod.uia_invoke(semantic_hit)
+                ):
+                    BUS.publish(
+                        "action",
+                        action="semantic_hit_uia_invoke",
+                        elem_id=semantic_hit.elem_id,
+                        text=semantic_hit.text,
+                        authored_coords=[authored_x, authored_y],
+                        snapped_coords=[x, y],
+                    )
+                    return {
+                        "ok": True,
+                        "via": "semantic_hit_uia_invoke",
+                        "semantic_hit_snap": replay["semantic_hit_snap"],
+                    }
                 click_kwargs = {"prepositioned": True} if prepositioned else {}
-                return executor_mod.click(
+                if physical:
+                    click_kwargs["force_physical"] = True
+                clicked = executor_mod.click(
                     x, y, button=button, double=double,
                     hwnd=self._action_hwnd(), **click_kwargs,
                 )
+                if semantic_hit is not None and isinstance(clicked, dict):
+                    clicked.setdefault("semantic_hit_snap", replay["semantic_hit_snap"])
+                return clicked
         else:
             return ToolResult("click 需要 element_id 或 x,y 坐标")
+
+        constraint_block = self._spatial_constraint_block(
+            args,
+            [(x, y)],
+            action="click",
+        )
+        if constraint_block is not None:
+            return constraint_block
 
         result = verify_mod.run_with_verify(
             "click", action, expect=args.get("expect"), hwnd=self.hwnd,
@@ -493,6 +875,24 @@ class InteractionToolMixin:
                     "source": "last_clicked_input",
                 })
 
+        arithmetic_expression = (
+            _typed_arithmetic_expression(text)
+            if element is None
+            else ""
+        )
+        arithmetic_probe_before = None
+        arithmetic_probe_region = None
+        if arithmetic_expression:
+            target = self._action_hwnd()
+            if target:
+                try:
+                    arithmetic_probe_region = window_region(target)
+                    arithmetic_probe_before = _tools_attr("capture", capture)(
+                        arithmetic_probe_region
+                    )
+                except Exception as exc:
+                    logger.debug("arithmetic input pre-capture failed: %s", exc)
+
         def action() -> dict:
             target = self._action_hwnd()
             if element is not None:
@@ -531,6 +931,81 @@ class InteractionToolMixin:
             hwnd=self.hwnd, retryable=False, timeout_s=_expect_timeout(args),
             stop_event=self.stop_event, watcher=self._verification_watcher(),
             run_id=getattr(self, "run_id", None))
+        arithmetic_visual_ratio: float | None = None
+        if arithmetic_probe_before is not None and arithmetic_probe_region is not None:
+            try:
+                time.sleep(0.12)
+                arithmetic_probe_after = _tools_attr("capture", capture)(
+                    arithmetic_probe_region
+                )
+                arithmetic_visual_ratio = float(
+                    vision_cv.diff_ratio(arithmetic_probe_before, arithmetic_probe_after)
+                )
+                result["input_visual_change_ratio"] = round(arithmetic_visual_ratio, 6)
+                result["input_visual_change_detected"] = bool(
+                    arithmetic_visual_ratio >= 0.0008
+                )
+            except Exception as exc:
+                logger.debug("arithmetic input post-capture failed: %s", exc)
+        if (
+            arithmetic_expression
+            and arithmetic_visual_ratio is not None
+            and arithmetic_visual_ratio < 0.0008
+            and result.get("ok") is True
+            and not result.get("blocked")
+        ):
+            # Calculator-style and kiosk keypads often ignore injected text
+            # even while SendInput itself reports success.  Recover through
+            # the same visible semantic-anchor controller used for arbitrary
+            # GUIs, then require the deterministic result on the target UI.
+            try:
+                from ..fast.subgoal import SubgoalExecutor
+                from .done_verifier import _safe_arithmetic_value
+
+                expected_value = _safe_arithmetic_value(arithmetic_expression)
+                expected_text = (
+                    str(expected_value)
+                    if isinstance(expected_value, int)
+                    else format(expected_value, ".12g")
+                )
+                self.snapshot = None
+                self._observe_cache = None
+                fallback = SubgoalExecutor(
+                    self,
+                    self._fast_controller(),
+                ).execute({
+                    "subgoal": f"Calculate {arithmetic_expression}",
+                    "clicks": _semantic_keypad_click_specs(arithmetic_expression),
+                    "verify_texts": [expected_text],
+                })
+                try:
+                    fallback_payload = json.loads(fallback.text or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    fallback_payload = {"result_preview": fallback.text[:800]}
+                if not isinstance(fallback_payload, dict):
+                    fallback_payload = {"result": fallback_payload}
+                fallback_payload["input_fallback"] = {
+                    "used": True,
+                    "reason": "keyboard_input_had_no_visible_effect",
+                    "expression": arithmetic_expression,
+                    "expected_text": expected_text,
+                    "initial_visual_change_ratio": round(arithmetic_visual_ratio, 6),
+                    "strategy": "semantic_visible_keypad_buttons",
+                }
+                fallback_payload["initial_keyboard_result"] = result
+                fallback.text = self._fmt(fallback_payload)
+                fallback.replay = {
+                    **(fallback.replay or {}),
+                    "fallback_from": "type_text",
+                    "expression": arithmetic_expression,
+                }
+                return fallback
+            except Exception as exc:
+                result["input_fallback"] = {
+                    "used": False,
+                    "reason": "semantic_keypad_fallback_failed",
+                    "error": str(exc)[:500],
+                }
         if not args.get("expect"):
             result.setdefault("verified", False)
             result.setdefault("verify_detail", "未提供 expect；ok 只表示输入动作已执行，必须 observe/read_text 确认文本位置")
@@ -660,6 +1135,20 @@ class InteractionToolMixin:
             x2, y2 = adjusted_drop["x"], adjusted_drop["y"]
         points = args.get("points") if isinstance(args.get("points"), list) else None
         duration = float(args.get("duration", 0.4))
+        constraint_points = [(x1, y1)]
+        for point in points or []:
+            try:
+                constraint_points.append((int(point[0]), int(point[1])))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+        constraint_points.append((x2, y2))
+        constraint_block = self._spatial_constraint_block(
+            args,
+            constraint_points,
+            action="drag",
+        )
+        if constraint_block is not None:
+            return constraint_block
         region = self._drag_feedback_region(x1, y1, x2, y2, points)
         before = None
         try:
@@ -1196,6 +1685,13 @@ class InteractionToolMixin:
             all_coords.extend((point[0], point[1]) for point in stroke)
         if not strokes:
             return ToolResult("draw_strokes 没有有效笔画（每条至少需要2个点）")
+        constraint_block = self._spatial_constraint_block(
+            args,
+            all_coords,
+            action="draw_strokes",
+        )
+        if constraint_block is not None:
+            return constraint_block
         xs = [c[0] for c in all_coords]
         ys = [c[1] for c in all_coords]
         pad = 28

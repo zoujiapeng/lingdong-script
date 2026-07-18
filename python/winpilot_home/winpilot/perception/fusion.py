@@ -227,9 +227,40 @@ def _merge(primary: list[UIElement], secondary: list[UIElement]) -> list[UIEleme
     for cand in secondary:
         duplicate = False
         for kept in merged:
+            # UIA/Win32 text is structural metadata, not proof that the same
+            # label is painted in the authoritative frame.  Preserve an
+            # explicit provenance bit only when pixel OCR independently sees
+            # matching text inside the same compact visible region.  Native
+            # visual consumers can then demote hidden/off-surface provider
+            # nodes without throwing away a genuinely useful exact anchor.
+            if cand.source == "ocr" and kept.source != "ocr" and cand.text:
+                cand_text = re.sub(r"\s+", "", cand.text).casefold()
+                kept_text = re.sub(r"\s+", "", kept.text or "").casefold()
+                center_inside = bool(
+                    kept.left <= cand.cx <= kept.left + kept.width
+                    and kept.top <= cand.cy <= kept.top + kept.height
+                )
+                compact_container = bool(
+                    kept.width * kept.height
+                    <= max(1, cand.width * cand.height) * 30
+                )
+                text_matches = bool(
+                    kept_text
+                    and (
+                        cand_text in kept_text
+                        or kept_text in cand_text
+                    )
+                )
+                if center_inside and compact_container and text_matches:
+                    if "pixel_text_confirmed" not in kept.states:
+                        kept.states.append("pixel_text_confirmed")
+                    kept.extra["pixel_text_source"] = "ocr_overlap"
             if cand.iou(kept) >= _DEDUP_IOU:
                 if cand.text and not kept.text:
                     kept.text = cand.text  # graft OCR text onto unnamed element
+                    if cand.source == "ocr" and "pixel_text_confirmed" not in kept.states:
+                        kept.states.append("pixel_text_confirmed")
+                        kept.extra["pixel_text_source"] = "ocr_graft"
                 if cand.text and kept.text and cand.text.strip() in kept.text:
                     duplicate = True
                     break

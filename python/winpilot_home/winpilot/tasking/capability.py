@@ -9,13 +9,48 @@ from .contracts import CapabilitySelection, StageType, TaskContract, TaskStage
 
 
 CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
+    "desktop.execute": (
+        "open_app", "launch", "find_app", "find_program",
+        "list_installed_apps", "list_windows", "scan_windows", "focus_window",
+        "observe", "screen_watch", "read_text", "screenshot",
+        "click", "type_text", "hotkey", "scroll", "move_mouse", "mouse_down", "mouse_up",
+        "drag", "draw_strokes",
+        "run_action_batch", "execute_subgoal", "wait",
+        "capture_artifact", "paste_image_file",
+        "open_conversation", "send_text", "send_artifact", "verify_delivery",
+        "record_facts", "revise_plan", "complete_subgoal",
+        "discover_mcp_tools", "call_mcp_tool",
+    ),
     "app.open": ("open_app",),
     "window.focus": ("focus_window",),
     "visual.observe": ("observe", "screenshot"),
     "visual.read_text": ("read_text",),
     "visual.semantic_verify": ("vlm_verify", "observe"),
+    "visual.spatial_interaction": (
+        "click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
+        "run_action_batch", "execute_subgoal",
+    ),
+    # Closed-loop visual action policy shared by arbitrary applications.  It
+    # covers discrete controls, held input, direct/guided drags, free paths and
+    # short controller transactions, then returns to a fresh observation.  The
+    # capability deliberately says nothing about an application or task type.
+    "visual.adaptive_interaction": (
+        "observe", "screen_watch", "click", "move_mouse", "mouse_down", "mouse_up",
+        "drag", "draw_strokes",
+        "run_action_batch", "execute_subgoal", "wait",
+    ),
+    # Application-agnostic surface manipulation.  This is deliberately not a
+    # drawing-app capability: boards, timelines, graph editors, remote
+    # desktops, canvases and ordinary list/pane rearrangement all consume the
+    # same target-bound click/drag/path primitives and ROI constraints.
+    "visual.surface_manipulation": (
+        "click", "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
+        "run_action_batch", "execute_subgoal",
+    ),
     "visual.artifact_match": ("verify_delivery",),
     "controller.transaction": ("run_action_batch", "execute_subgoal"),
+    # Compatibility alias for older contracts. New contracts depend on the
+    # application-agnostic visual.spatial_interaction capability instead.
     "drawing.render": ("draw_strokes", "drag"),
     "artifact.create_edit": ("type_text", "run_action_batch"),
     "artifact.capture": ("capture_artifact", "screenshot"),
@@ -57,18 +92,24 @@ CAPABILITY_TO_TOOLS: dict[str, tuple[str, ...]] = {
 
 _COMPONENT_CAPABILITIES: dict[str, set[str]] = {
     "local_controller": {
-        "app.open", "window.focus", "visual.observe", "visual.read_text",
-        "controller.transaction", "artifact.save",
+        "desktop.execute", "app.open", "window.focus", "visual.observe", "visual.read_text",
+        "controller.transaction", "visual.spatial_interaction",
+        "visual.adaptive_interaction",
+        "visual.surface_manipulation", "artifact.save",
     },
     "artifact_store": {"artifact.capture", "artifact.hash", "artifact.read"},
     "llm_visual_stage": {
-        "drawing.render", "artifact.create_edit", "visual.semantic_verify",
+        "desktop.execute", "drawing.render", "visual.spatial_interaction",
+        "visual.adaptive_interaction",
+        "visual.surface_manipulation",
+        "artifact.create_edit", "visual.semantic_verify",
         "visual.observe", "controller.transaction", "app.open", "window.focus",
         "interaction.infer",
     },
     "interaction_controller": {
         "window.focus", "visual.observe", "visual.bind_target", "visual.region_bind",
         "controller.transaction", "interaction.perform",
+        "visual.adaptive_interaction",
         "interaction.prepare_input_mode",
         "interaction.verify_local_effect", "interaction.verify_transition",
         "interaction.wait_external_change",
@@ -93,10 +134,16 @@ _COMMUNICATION_ADAPTER_CAPABILITIES = {
 _STAGE_BASE: dict[StageType, set[str]] = {
     StageType.OPEN_APPLICATION: {"app.open", "window.focus"},
     StageType.FOCUS_WINDOW: {"window.focus", "visual.observe"},
+    StageType.EXECUTE_DESKTOP_TASK: {
+        "desktop.execute", "app.open", "window.focus", "visual.observe",
+        "visual.read_text", "controller.transaction", "visual.spatial_interaction",
+        "visual.adaptive_interaction", "visual.semantic_verify",
+    },
     StageType.CREATE_OR_EDIT_ARTIFACT: {"artifact.create_edit", "visual.semantic_verify"},
     StageType.DRAW_ARTIFACT: {
         "app.open", "window.focus", "controller.transaction",
-        "drawing.render", "visual.semantic_verify",
+        "visual.spatial_interaction", "visual.surface_manipulation",
+        "visual.semantic_verify",
     },
     StageType.CAPTURE_ARTIFACT: {"window.focus", "artifact.capture", "artifact.hash"},
     StageType.SAVE_ARTIFACT: {"artifact.save", "artifact.hash"},
@@ -123,7 +170,7 @@ _STAGE_BASE: dict[StageType, set[str]] = {
     StageType.INFER_INTERACTION: {"visual.observe", "interaction.infer"},
     StageType.PERFORM_TURN: {
         "interaction.perform", "interaction.prepare_input_mode",
-        "controller.transaction", "visual.observe",
+        "controller.transaction", "visual.observe", "visual.adaptive_interaction",
     },
     StageType.VERIFY_LOCAL_EFFECT: {
         "interaction.verify_local_effect", "visual.observe",
@@ -204,7 +251,8 @@ class CapabilityPlanner:
         }:
             choices.append(ComponentChoice("artifact_store", "managed artifact identity"))
         if stage.type in {
-            StageType.DRAW_ARTIFACT, StageType.CREATE_OR_EDIT_ARTIFACT, StageType.VERIFY_ARTIFACT,
+            StageType.EXECUTE_DESKTOP_TASK, StageType.DRAW_ARTIFACT,
+            StageType.CREATE_OR_EDIT_ARTIFACT, StageType.VERIFY_ARTIFACT,
             StageType.INFER_INTERACTION,
         }:
             choices.append(ComponentChoice("llm_visual_stage", "semantic content judgement"))
@@ -285,6 +333,8 @@ class CapabilityPlanner:
             )
         elif stage.type == StageType.DRAW_ARTIFACT:
             model_role = "visual_artifact_planner"
+        elif stage.type == StageType.EXECUTE_DESKTOP_TASK:
+            model_role = "semantic_stage"
         elif stage.type in {
             StageType.EXECUTE_WORKSPACE_TASK,
             StageType.RESEARCH_INFORMATION,
@@ -352,12 +402,35 @@ class CapabilityPlanner:
             missing.update(selection.missing_capabilities)
         return contract.model_copy(update={
             "stages": stages,
-            "satisfiable": not missing,
+            "satisfiable": bool(
+                not missing
+                and (
+                    contract.compiler_version != "typed-stage-5"
+                    or (
+                        contract.requirement_coverage.complete
+                        and not contract.requirement_coverage.uncovered_requirement_ids
+                    )
+                )
+            ),
             "missing_capabilities": sorted(missing),
         })
 
     @staticmethod
     def assert_satisfiable(contract: TaskContract) -> None:
+        if (
+            contract.compiler_version == "typed-stage-5"
+            and (
+                not contract.requirement_coverage.complete
+                or contract.requirement_coverage.uncovered_requirement_ids
+            )
+        ):
+            raise CapabilityUnsatisfiedError(
+                "task contract has uncovered user requirements: "
+                + ", ".join(
+                    contract.requirement_coverage.uncovered_requirement_ids
+                    or ["unknown"]
+                )
+            )
         missing = set(contract.missing_capabilities)
         for stage in contract.stages:
             if stage.execution:

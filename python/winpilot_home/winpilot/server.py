@@ -296,6 +296,7 @@ def _run_agent_job(
     *,
     schedule_id: str = "",
     schedule_name: str = "",
+    expected_session_generation: int | None = None,
 ) -> dict[str, Any]:
     STATE.bind_runner(runner)
     trace_mod.RECORDER.start(runner.run_id)
@@ -311,8 +312,19 @@ def _run_agent_job(
     BUS.publish("chat", run_id=runner.run_id, role="user", content=runner.task)
     try:
         result = runner.run()
-        SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
-        BUS.publish("session", action="append", count=len(SESSION.all()))
+        appended = SESSION.append(
+            runner.task,
+            runner.status,
+            runner.result_text,
+            runner.run_id,
+            expected_generation=expected_session_generation,
+        )
+        BUS.publish(
+            "session",
+            action="append" if appended else "stale_append_ignored",
+            count=len(SESSION.all()),
+            run_id=runner.run_id,
+        )
         if schedule_id:
             agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
             BUS.publish(
@@ -334,12 +346,23 @@ def _run_agent_job(
         logger.exception("agent runtime job crashed")
         runner.status = "error"
         runner.result_text = f"Agent runtime job crashed: {exc}"
-        SESSION.append(runner.task, runner.status, runner.result_text, runner.run_id)
+        appended = SESSION.append(
+            runner.task,
+            runner.status,
+            runner.result_text,
+            runner.run_id,
+            expected_generation=expected_session_generation,
+        )
         if schedule_id:
             agent_scheduler.mark_finished(schedule_id, runner.run_id, runner.status)
         BUS.publish("agent_error", run_id=runner.run_id, error=str(exc))
         BUS.publish("agent_done", run_id=runner.run_id, status=runner.status, result=runner.result_text)
-        BUS.publish("session", action="append", count=len(SESSION.all()))
+        BUS.publish(
+            "session",
+            action="append" if appended else "stale_append_ignored",
+            count=len(SESSION.all()),
+            run_id=runner.run_id,
+        )
         return {
             "ok": False,
             "run_id": runner.run_id,
@@ -409,10 +432,11 @@ def _try_start_scheduled(entry: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         max_steps_override = None
     stop_event = threading.Event()
+    session_generation, session_context = SESSION.snapshot()
     runner = build_runner(
         task,
         stop_event=stop_event,
-        session_context=SESSION.recent(),
+        session_context=session_context,
         max_steps_override=max_steps_override,
     )
     job_id = f"schedule-{schedule_id}-{runner.run_id}"
@@ -425,6 +449,7 @@ def _try_start_scheduled(entry: dict[str, Any]) -> bool:
             runner,
             schedule_id=schedule_id,
             schedule_name=str(entry.get("name") or ""),
+            expected_session_generation=session_generation,
         ),
         resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
         metadata={"run_id": runner.run_id, "task": task, "schedule_id": schedule_id},
@@ -562,11 +587,12 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
         if human_mod.RECORDER.is_recording():
             raise HTTPException(409, "已有任务在运行，请先停止")
         stop_event = threading.Event()
+        session_generation, session_context = SESSION.snapshot()
         max_steps = req.max_steps if req.max_steps and req.max_steps > 0 else None
         runner = build_runner(
             task,
             stop_event=stop_event,
-            session_context=SESSION.recent(),
+            session_context=session_context,
             max_steps_override=max_steps,
         )
         job_id = f"agent-{runner.run_id}"
@@ -574,7 +600,10 @@ def start_chat(req: ChatRequest) -> dict[str, Any]:
         STATE.run_jobs[runner.run_id] = job_id
         job = RUNTIME_JOBS.submit(
             "agent",
-            lambda _stop: _run_agent_job(runner),
+            lambda _stop: _run_agent_job(
+                runner,
+                expected_session_generation=session_generation,
+            ),
             resources=(_INTERACTIVE_RUNTIME_RESOURCE,),
             metadata={"run_id": runner.run_id, "task": task},
             job_id=job_id,
@@ -852,15 +881,22 @@ def validate_arp_graph(graph: ArpGraph) -> dict[str, Any]:
 @app.post("/api/v2/task-contracts/compile")
 def compile_task_contract(req: ContractCompileRequest) -> dict[str, Any]:
     try:
+        session_generation, session_context = SESSION.snapshot()
         contract, graph = TaskContractCompiler().compile_graph(
             req.task,
             max_steps=req.max_steps,
             cold_start=req.cold_start,
+            session_context=session_context,
+            require_gui=req.require_gui,
+            allow_unsatisfied=True,
         )
+        graph.metadata["session_generation"] = session_generation
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
         "ok": True,
+        "needs_input": bool(contract.clarification_questions),
+        "clarification_questions": list(contract.clarification_questions),
         "contract": contract.model_dump(mode="json"),
         "graph": graph.model_dump(mode="json"),
     }
@@ -884,6 +920,18 @@ def validate_automation_ir_execution(automation: dict[str, Any]) -> dict[str, An
 
 
 def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecution:
+    current_session_generation = SESSION.generation()
+    raw_session_generation = graph.metadata.get("session_generation")
+    expected_session_generation = (
+        current_session_generation
+        if raw_session_generation is None
+        else int(raw_session_generation)
+    )
+    if expected_session_generation != current_session_generation:
+        raise RuntimeError(
+            "Session context changed after this task contract was compiled. "
+            "Compile it again before starting the run."
+        )
     contract_data = graph.metadata.get("task_contract")
     if isinstance(contract_data, dict):
         from .tasking.contracts import TaskContract
@@ -909,7 +957,46 @@ def _start_arp_execution(graph: ArpGraph, inputs: dict[str, Any]) -> ArpExecutio
         try:
             finalize_memory_feedback(finished)
         finally:
-            trace_mod.RECORDER.stop()
+            try:
+                snapshot = finished.to_dict()
+                contract_data = finished.graph.metadata.get("task_contract")
+                contract_data = contract_data if isinstance(contract_data, dict) else {}
+                artifact_snapshot = snapshot.get("artifacts")
+                artifacts = (
+                    artifact_snapshot.get("artifacts")
+                    if isinstance(artifact_snapshot, dict)
+                    and isinstance(artifact_snapshot.get("artifacts"), list)
+                    else []
+                )
+                raw_result = snapshot.get("result")
+                result_text = (
+                    raw_result
+                    if isinstance(raw_result, str)
+                    else json.dumps(raw_result, ensure_ascii=False)
+                )
+                if not str(result_text or "").strip():
+                    result_text = str(snapshot.get("error") or "")
+                appended = SESSION.append(
+                    str(contract_data.get("task") or finished.graph.name or ""),
+                    str(snapshot.get("status") or ""),
+                    str(result_text or ""),
+                    finished.run_id,
+                    intent=(
+                        contract_data.get("intent")
+                        if isinstance(contract_data.get("intent"), dict)
+                        else {}
+                    ),
+                    artifacts=artifacts,
+                    expected_generation=expected_session_generation,
+                )
+                BUS.publish(
+                    "session",
+                    action="append" if appended else "stale_append_ignored",
+                    count=len(SESSION.all()),
+                    run_id=finished.run_id,
+                )
+            finally:
+                trace_mod.RECORDER.stop()
 
     execution = ARP_RUNS.prepare(
         graph,
@@ -959,7 +1046,13 @@ def start_arp_run(req: ArpRunRequest) -> dict[str, Any]:
         legacy_task = legacy_goal_graph_task(graph)
         if legacy_task is not None:
             task, max_steps = legacy_task
-            _contract, graph = TaskContractCompiler().compile_graph(task, max_steps=max_steps)
+            session_generation, session_context = SESSION.snapshot()
+            _contract, graph = TaskContractCompiler().compile_graph(
+                task,
+                max_steps=max_steps,
+                session_context=session_context,
+            )
+            graph.metadata["session_generation"] = session_generation
         execution = _start_arp_execution(graph, req.inputs)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1850,9 +1943,9 @@ def session_list() -> list[dict[str, Any]]:
 
 @app.delete("/api/session")
 def session_clear() -> dict[str, Any]:
-    SESSION.clear()
-    BUS.publish("session", action="clear", count=0)
-    return {"ok": True}
+    generation = SESSION.clear()
+    BUS.publish("session", action="clear", count=0, generation=generation)
+    return {"ok": True, "generation": generation}
 
 
 # ---------------------------------------------------------------- websocket
