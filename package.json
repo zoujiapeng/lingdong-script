@@ -1,7 +1,7 @@
 {
   "name": "lingdong-script",
   "version": "1.1.0",
-  "description": "Windows 通用 GUI 智能代理与自动化运行平台",
+  "description": "视觉优先、证据闭环的 Windows GUI Agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zoujiapeng/lingdong-script.git"

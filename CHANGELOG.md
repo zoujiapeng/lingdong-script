@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Documentation and branch consolidation (2026-07-18)
+
+- Re-audited the repository documentation against the current Electron entrypoint, Task Contract/ARP runtime, native-vision loop, Controller primitives, memory policy, MCP boundary, legacy Flow/Browser compatibility code, and known architectural debt.
+- Replaced volatile run-by-run prose with durable architecture invariants: authoritative pixels, one client path, one action transaction, evidence-gated completion, generic pointer primitives, compiler limits, and memory as acceleration rather than capability.
+- Added `docs/testing.md` as the canonical definition of real Electron-client E2E, cold-start isolation, multi-turn context, the 11 black-box probes, mixed long tasks, external oracles, focus interference, reporting, and release gates.
+- Updated the architecture audit to distinguish reusable generic mechanisms from remaining duplication and application-specific debt. The old browser-based visual guide is intentionally not merged because it is a parallel presentation artifact rather than a runtime fact source.
+- Re-ran the current WinPilot suite after replacing the client harness's undeclared `pywinauto` dependency with the repository-supported `uiautomation + Win32`: `1985 passed, 13 skipped`. The visible Electron cold-start `dynamic-hold` rerun passed trusted external pointer ground truth, and both GitHub Actions jobs passed. These are mechanism checks, not a claim that all 11 real tasks pass.
+
 ### Cross-frame pointer control and native-client stress matrix (2026-07-18)
 
 - Generalized continuous pointer execution beyond drawing. Typed direct manipulation now supports a Controller-owned `pointer_hold_before/after` session across authoritative frames, allowing a target or route to be revealed only after the button is already down. Held sessions accept only movement and the matching release, have bounded timeout/cleanup, and are released on cancellation, mismatch, failure, or terminal transitions.
