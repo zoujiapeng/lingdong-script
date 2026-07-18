@@ -76,6 +76,7 @@ describe('native execution context', () => {
   it('derives foreground handoff from typed stages instead of task keywords', () => {
     expect(requiresDesktopHandoff(contractWith([{ type: 'ObserveScene' }]))).toBe(true);
     expect(requiresDesktopHandoff(contractWith([{ type: 'SendArtifact' }]))).toBe(true);
+    expect(requiresDesktopHandoff(contractWith([{ type: 'ExecuteDesktopTask' }]))).toBe(true);
     expect(requiresDesktopHandoff(contractWith([{ type: 'ExecuteWorkspaceTask' }]))).toBe(false);
     expect(requiresDesktopHandoff(contractWith([{ type: 'ResearchInformation' }]))).toBe(false);
     expect(requiresDesktopHandoff(contractWith([{ type: 'TransformData' }]))).toBe(false);

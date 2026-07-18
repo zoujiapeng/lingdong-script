@@ -124,6 +124,10 @@ _DEFAULTS: dict[str, Any] = {
         "visual_servo_mode": "adaptive",
         "visual_servo_recent_change_ms": 900,
         "visual_servo_strict": True,
+        # Accessibility/OCR may be requested as diagnostics, but they must not
+        # silently choose or move a target selected from authoritative pixels.
+        "semantic_grounding_assist": False,
+        "coordinate_semantic_snap": False,
     },
     "ocr": {"use_gpu": True, "min_confidence": 0.55},
     "search": {"everything_es_path": "", "everything_exe_path": ""},

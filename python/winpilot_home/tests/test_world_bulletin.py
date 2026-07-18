@@ -1102,3 +1102,320 @@ def test_duplicate_action_guard_blocks_fourth_identical_side_effect(monkeypatch)
     assert result["blocked"] is True
     assert result["repeat_count"] == 4
     assert result["needs_replan"] is True
+
+
+def test_read_only_discovery_guard_blocks_third_identical_result(monkeypatch):
+    import json
+
+    from winpilot.agent import tools
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="find an installed application")
+    monkeypatch.setattr(tools.scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    calls: list[dict] = []
+
+    def same_result(args):
+        calls.append(dict(args))
+        return ToolResult('{"ok": true, "results": []}')
+
+    session._t_find_program = same_result
+    args = {"name": "missing-app"}
+
+    assert json.loads(session.dispatch("find_program", args).text)["ok"] is True
+    assert json.loads(session.dispatch("find_program", args).text)["ok"] is True
+    blocked = json.loads(session.dispatch("find_program", args).text)
+
+    assert blocked["blocked"] is True
+    assert blocked["discovery_repeat_guard"] is True
+    assert blocked["needs_replan"] is True
+    assert len(calls) == 2
+
+
+def test_dynamic_pointer_session_uses_absolute_lease_and_releases(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    held = {"left": False}
+    calls = []
+    timers = []
+
+    class FakeTimer:
+        def __init__(self, timeout, callback):
+            self.timeout = timeout
+            self.callback = callback
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+    def move_mouse(x, y, hwnd=None):
+        calls.append(("move", x, y, hwnd))
+        return {"ok": True}
+
+    def mouse_down(button="left", hwnd=None):
+        held[button] = True
+        calls.append(("down", button, hwnd))
+        return {"ok": True, "button": button}
+
+    def mouse_up(button="left"):
+        was_held = held.get(button, False)
+        held[button] = False
+        calls.append(("up", button))
+        return {"ok": was_held, "button": button}
+
+    monkeypatch.setattr("winpilot.agent.desktop_tools.threading.Timer", FakeTimer)
+    monkeypatch.setattr("winpilot.agent.desktop_tools.executor.move_mouse", move_mouse)
+    monkeypatch.setattr("winpilot.agent.desktop_tools.executor.mouse_down", mouse_down)
+    monkeypatch.setattr("winpilot.agent.desktop_tools.executor.mouse_up", mouse_up)
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": held.get(button, False),
+    )
+
+    session = ToolSession(task="steer a dynamic visible object")
+    session._action_hwnd = lambda: 77
+    down = json.loads(session._t_mouse_down({
+        "x": 10,
+        "y": 20,
+        "_constraint_region": {"x": 0, "y": 0, "width": 100, "height": 100},
+        "source_frame_coordinates": {
+            "constraint_frame_region": {
+                "x": 0.0, "y": 0.0, "width": 1000.0, "height": 1000.0,
+            },
+        },
+    }).text)
+    moved = json.loads(session._t_move_mouse({"x": 30, "y": 40}).text)
+    released = json.loads(session._t_mouse_up({"x": 50, "y": 60}).text)
+
+    assert down["pointer_hold_active"] is True
+    assert moved["pointer_hold_active"] is True
+    assert released["pointer_hold_active"] is False
+    assert held["left"] is False
+    assert session._pointer_hold_constraint_region is None
+    assert session._pointer_hold_constraint_frame_region is None
+    assert calls == [
+        ("move", 10, 20, 77),
+        ("down", "left", 77),
+        ("move", 30, 40, 77),
+        ("move", 50, 60, 77),
+        ("up", "left"),
+    ]
+    # The lease starts at mouse_down and is absolute.  A weak visual policy
+    # cannot keep the desktop button held forever by repeatedly moving it.
+    assert len(timers) == 1
+    assert all(timer.started for timer in timers)
+    assert all(timer.cancelled for timer in timers)
+
+
+def test_mouse_up_defaults_to_the_actual_held_button(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    held = {"right": True}
+    released = []
+    session = ToolSession(task="finish a generic held-pointer gesture")
+    session._pointer_hold_button = "right"
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": held.get(button, False),
+    )
+
+    def mouse_up(button="left"):
+        released.append(button)
+        held[button] = False
+        return {"ok": True, "button": button}
+
+    monkeypatch.setattr("winpilot.agent.desktop_tools.executor.mouse_up", mouse_up)
+
+    result = json.loads(session._t_mouse_up({}).text)
+
+    assert result["ok"] is True
+    assert result["pointer_hold_active"] is False
+    assert released == ["right"]
+
+
+def test_held_pointer_hard_region_blocks_outside_move_and_release(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    session = ToolSession(task="stay inside one visible interaction area")
+    session._pointer_hold_button = "left"
+    session._pointer_hold_constraint_region = {
+        "x": 10, "y": 10, "width": 100, "height": 100,
+    }
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda _button="left": True,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.move_mouse",
+        lambda x, y, hwnd=None: calls.append(("move", x, y)) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.cursor_position",
+        lambda: {"ok": True, "x": 200, "y": 200},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.mouse_up",
+        lambda button="left": calls.append(("up", button)) or {"ok": True},
+    )
+
+    move = json.loads(session._t_move_mouse({"x": 200, "y": 200}).text)
+    release = json.loads(session._t_mouse_up({}).text)
+
+    assert move["failure_type"] == "SPATIAL_CONSTRAINT_VIOLATION"
+    assert release["failure_type"] == "SPATIAL_CONSTRAINT_VIOLATION"
+    assert calls == []
+    assert session._pointer_hold_button == "left"
+
+
+def test_mouse_down_rejects_a_second_agent_held_button(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    session = ToolSession(task="continue one generic pointer gesture")
+    session._pointer_hold_button = "left"
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": button == "left",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.mouse_down",
+        lambda button="left", hwnd=None: calls.append((button, hwnd)) or {"ok": True},
+    )
+
+    result = json.loads(session._t_mouse_down({"button": "right"}).text)
+
+    assert result["ok"] is False
+    assert result["pointer_hold_active"] is True
+    assert result["pointer_hold_button"] == "left"
+    assert calls == []
+    assert session._pointer_hold_button == "left"
+
+
+def test_mouse_up_rejects_a_button_mismatch_without_losing_hold_state(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    calls = []
+    session = ToolSession(task="continue a generic held-pointer gesture")
+    session._pointer_hold_button = "middle"
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": button == "middle",
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.mouse_up",
+        lambda button="left": calls.append(button) or {"ok": True},
+    )
+
+    result = json.loads(session._t_mouse_up({"button": "left"}).text)
+
+    assert result["ok"] is False
+    assert result["pointer_hold_active"] is True
+    assert result["pointer_hold_button"] == "middle"
+    assert calls == []
+    assert session._pointer_hold_button == "middle"
+
+
+def test_failed_mouse_up_keeps_runtime_hold_state_truthful(monkeypatch):
+    import json
+
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="release a generic held-pointer gesture")
+    session._pointer_hold_button = "left"
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": True,
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.mouse_up",
+        lambda button="left": {"ok": False, "button": button, "error": "device busy"},
+    )
+
+    result = json.loads(session._t_mouse_up({}).text)
+
+    assert result["ok"] is False
+    assert result["pointer_hold_active"] is True
+    assert result["pointer_hold_button"] == "left"
+    assert session._pointer_hold_button == "left"
+
+
+def test_pointer_timeout_does_not_claim_release_when_button_remains_held(monkeypatch):
+    from winpilot.agent.tools import ToolSession
+
+    callbacks = []
+
+    class FakeTimer:
+        def __init__(self, _timeout, callback):
+            callbacks.append(callback)
+            self.daemon = False
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr("winpilot.agent.desktop_tools.threading.Timer", FakeTimer)
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.mouse_up",
+        lambda button="left": {"ok": False, "button": button, "error": "device busy"},
+    )
+    monkeypatch.setattr(
+        "winpilot.agent.desktop_tools.executor.agent_holds_mouse_button",
+        lambda button="left": True,
+    )
+    session = ToolSession(task="bound a generic held-pointer gesture")
+
+    session._arm_pointer_hold_timeout("left")
+    callbacks[0]()
+
+    assert session._pointer_hold_button == "left"
+    assert session._pointer_hold_timer is None
+
+
+def test_empty_mcp_discovery_budget_blocks_synonym_loop(monkeypatch):
+    import json
+
+    from winpilot.agent import tools
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="complete a desktop task")
+    monkeypatch.setattr(tools.scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    calls: list[str] = []
+
+    def empty_result(args):
+        calls.append(str(args.get("query") or ""))
+        return ToolResult('{"ok": true, "tools": [], "gui_fallback_available": true}')
+
+    session._t_discover_mcp_tools = empty_result
+    for query in ("office", "document", "desktop automation"):
+        assert json.loads(session.dispatch(
+            "discover_mcp_tools", {"query": query},
+        ).text)["ok"] is True
+
+    blocked = json.loads(session.dispatch(
+        "discover_mcp_tools", {"query": "application control"},
+    ).text)
+
+    assert blocked["blocked"] is True
+    assert blocked["empty_mcp_discovery_budget_exhausted"] is True
+    assert blocked["gui_fallback_required"] is True
+    assert calls == ["office", "document", "desktop automation"]

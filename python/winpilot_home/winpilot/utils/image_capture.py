@@ -467,6 +467,73 @@ def jpeg_diff_ratio_in_normalized_roi(
         return None
 
 
+def jpeg_color_activation_in_normalized_roi(
+    image_a_b64: str,
+    image_b_b64: str,
+    roi: tuple[float, float, float, float],
+    *,
+    saturation_threshold: int = 72,
+    value_threshold: int = 45,
+) -> dict[str, float | bool] | None:
+    """Measure a local achromatic-to-colour state transition.
+
+    Toggle icons commonly encode an active state by filling a previously gray
+    glyph with colour.  This helper is deliberately semantic-free: it inspects
+    only the central part of the authoritative action ROI and reports the
+    saturated-pixel delta.  Callers still decide whether that evidence should
+    protect a recently changed control from an immediate inverse click.
+    """
+    try:
+        raw_a = np.frombuffer(base64.b64decode(image_a_b64), dtype=np.uint8)
+        raw_b = np.frombuffer(base64.b64decode(image_b_b64), dtype=np.uint8)
+        image_a = cv2.imdecode(raw_a, cv2.IMREAD_COLOR)
+        image_b = cv2.imdecode(raw_b, cv2.IMREAD_COLOR)
+        if image_a is None or image_b is None or image_a.shape != image_b.shape:
+            return None
+        height, width = image_a.shape[:2]
+        left, top, right, bottom = (
+            max(0.0, min(1000.0, float(value))) for value in roi
+        )
+        if right <= left or bottom <= top or width <= 0 or height <= 0:
+            return None
+        center_x = (left + right) / 2.0
+        center_y = (top + bottom) / 2.0
+        half_width = min(30.0, max(12.0, (right - left) / 2.0))
+        half_height = min(30.0, max(12.0, (bottom - top) / 2.0))
+        crop_left = max(0.0, center_x - half_width)
+        crop_top = max(0.0, center_y - half_height)
+        crop_right = min(1000.0, center_x + half_width)
+        crop_bottom = min(1000.0, center_y + half_height)
+        x1 = max(0, min(width - 1, int(np.floor(crop_left / 1000.0 * width))))
+        y1 = max(0, min(height - 1, int(np.floor(crop_top / 1000.0 * height))))
+        x2 = max(x1 + 1, min(width, int(np.ceil(crop_right / 1000.0 * width))))
+        y2 = max(y1 + 1, min(height, int(np.ceil(crop_bottom / 1000.0 * height))))
+
+        def colour_ratio(image: np.ndarray) -> float:
+            hsv = cv2.cvtColor(image[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+            coloured = (
+                (hsv[:, :, 1] >= int(saturation_threshold))
+                & (hsv[:, :, 2] >= int(value_threshold))
+            )
+            return float(coloured.mean()) if coloured.size else 0.0
+
+        before = colour_ratio(image_a)
+        after = colour_ratio(image_b)
+        delta = after - before
+        return {
+            "before_ratio": round(before, 6),
+            "after_ratio": round(after, 6),
+            "delta": round(delta, 6),
+            "activated": bool(after >= 0.01 and delta >= 0.008),
+            "roi_left": round(crop_left, 2),
+            "roi_top": round(crop_top, 2),
+            "roi_right": round(crop_right, 2),
+            "roi_bottom": round(crop_bottom, 2),
+        }
+    except Exception:
+        return None
+
+
 def jpeg_diff_ratios_in_normalized_rois(
     image_a_b64: str,
     image_b_b64: str,

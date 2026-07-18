@@ -4,6 +4,7 @@ from __future__ import annotations
 from ..config import CONFIG
 from ..utils.log import BUS, logger
 from . import playbooks
+from .gui_plan_helpers import _pure_open_goal_matches_bound_target
 from .planner import Plan, make_plan, planning_enabled, should_plan_upfront
 
 
@@ -28,8 +29,15 @@ class ContextGuidanceMixin:
         self.messages.append({"role": "user", "content": content})
 
     def _maybe_plan_upfront(self, client) -> None:
-        """Create an upfront plan for clearly multi-step tasks."""
-        if not should_plan_upfront(
+        """Create a provisional plan for long-horizon or full desktop stages."""
+        forced_by_stage = bool(
+            getattr(
+                getattr(self, "runtime_profile", None),
+                "plan_upfront",
+                False,
+            )
+        )
+        if not forced_by_stage and not should_plan_upfront(
             self.task,
             task_intent=self.task_intent,
         ):
@@ -40,6 +48,7 @@ class ContextGuidanceMixin:
             client,
             model,
             self.task,
+            runtime_context=self._planning_runtime_context(),
             on_response=lambda response: self._track_aux_model_response(
                 response, purpose="planner", model=model,
             ),
@@ -47,9 +56,77 @@ class ContextGuidanceMixin:
         if not steps:
             return
         self.session.plan = Plan(steps)
+        if int(getattr(self.session, "hwnd", 0) or 0):
+            for index, step in enumerate(self.session.plan.steps, start=1):
+                if step.get("done"):
+                    continue
+                if not _pure_open_goal_matches_bound_target(
+                    str(step.get("goal") or ""),
+                    str(getattr(self.session, "target_hint", "") or ""),
+                ):
+                    break
+                if self.session.plan.complete(index):
+                    BUS.publish(
+                        "agent_plan",
+                        run_id=self.run_id,
+                        action="auto_complete",
+                        index=index,
+                        source="prebound_target_window",
+                        plan=self.session.plan.snapshot(),
+                    )
+                break
         self.messages.append({"role": "user", "content": self.session.plan.render()})
         BUS.publish("agent_plan", run_id=self.run_id, action="init",
                     plan=self.session.plan.snapshot())
+
+    def _planning_runtime_context(self) -> str:
+        """Compact facts already visible before the provisional plan call."""
+        intent = getattr(self, "task_intent", {}) or {}
+        ambiguous_fields = (
+            list(intent.get("ambiguous_fields") or [])
+            if isinstance(intent, dict)
+            else list(getattr(intent, "ambiguous_fields", []) or [])
+        )
+        unresolved = [
+            " ".join(str(field or "").split())
+            for field in ambiguous_fields
+            if str(field or "").strip()
+        ]
+        snapshot = getattr(getattr(self, "session", None), "snapshot", None)
+        parts: list[str] = []
+        if unresolved:
+            parts.append(
+                "Unresolved facts to discover from the live environment: "
+                + ", ".join(dict.fromkeys(unresolved))
+            )
+        session = getattr(self, "session", None)
+        bound_hwnd = int(getattr(session, "hwnd", 0) or 0)
+        target_hint = " ".join(
+            str(getattr(session, "target_hint", "") or "").split()
+        )
+        if bound_hwnd:
+            parts.append(
+                "Current target is already bound and open: "
+                f"{target_hint or '(title unavailable)'} (hwnd={bound_hwnd})"
+            )
+        if snapshot is None:
+            return "\n".join(parts)[:2400]
+        visible: list[str] = []
+        seen: set[str] = set()
+        for element in list(getattr(snapshot, "elements", []) or []):
+            value = " ".join(str(getattr(element, "text", "") or "").split())
+            key = value.casefold()
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            visible.append(value[:100])
+            if len(visible) >= 24:
+                break
+        title = " ".join(str(getattr(snapshot, "title", "") or "").split())
+        parts.append(f"Current window title: {title or '(untitled)'}")
+        if visible:
+            parts.append("Currently visible labels: " + " | ".join(visible))
+        return "\n".join(parts)[:2400]
 
     def _surface_world_advisory(self) -> None:
         """Append compact world/visual advisories when they carry signal."""

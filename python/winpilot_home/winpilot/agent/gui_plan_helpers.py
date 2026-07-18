@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from ..config import CONFIG
+from ..perception.app_aliases import expand as expand_app_aliases
 from .task_rules import (
     _is_communication_task,
     _is_gui_only_task,
@@ -121,8 +122,29 @@ def _looks_like_pure_open_plan_goal(goal: str) -> bool:
     return not any(term.casefold() in text for term in _OPEN_PLAN_MIXED_ACTION_TERMS)
 
 
+def _pure_open_goal_matches_bound_target(goal: str, target_hint: str) -> bool:
+    """Require a pure open step to name the already-bound app before reuse."""
+
+    if not _looks_like_pure_open_plan_goal(goal):
+        return False
+    goal_text = str(goal or "").casefold()
+    if any(term in goal_text for term in ("current app", "current window", "当前应用", "当前窗口")):
+        return True
+    compact_goal = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", goal_text)
+    if not compact_goal:
+        return False
+    for alias in expand_app_aliases(str(target_hint or "")):
+        compact_alias = re.sub(
+            r"[^0-9a-z\u4e00-\u9fff]+", "", str(alias or "").casefold()
+        )
+        if len(compact_alias) >= 2 and compact_alias in compact_goal:
+            return True
+    return False
+
+
 __all__ = (
     "_schema_profile_for_task",
     "_looks_like_native_gui_operation_task",
     "_looks_like_pure_open_plan_goal",
+    "_pure_open_goal_matches_bound_target",
 )

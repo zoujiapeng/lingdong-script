@@ -5,7 +5,8 @@ import json
 import re
 from typing import Any
 
-from ..fast.controller import BATCH_MUTATING_ACTIONS, FastGuiController
+from ..fast.action_contract import BATCH_MUTATING_ACTIONS, iter_atomic_actions
+from ..fast.controller import FastGuiController
 from ..fast.perception_daemon import PERCEPTION_DAEMON
 from ..fast.subgoal import SubgoalExecutor
 from ..perception import win32
@@ -240,15 +241,10 @@ class FastToolMixin:
 
     @staticmethod
     def _batch_has_mutation(actions: list) -> bool:
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            name = str(action.get("action") or action.get("tool") or "")
-            if not name and len(action) == 1:
-                name = str(next(iter(action.keys())))
-            if name in BATCH_MUTATING_ACTIONS:
-                return True
-        return False
+        return any(
+            action.name in BATCH_MUTATING_ACTIONS
+            for action in iter_atomic_actions("run_action_batch", {"actions": actions})
+        )
 
     def _t_execute_subgoal(self, args: dict) -> ToolResult:
         if not isinstance(args, dict):
@@ -373,12 +369,77 @@ class FastToolMixin:
             sync = {"mode": "stable", "stable_ms": 250, "timeout_s": 2.0}
         else:
             sync = None
-        result = self._fast_controller().execute(
-            actions,
-            stop_on_error=stop_on_error,
-            sync=sync,
-            subgoal=str(args.get("subgoal") or ""),
+        pointer_session = (
+            dict(args.get("pointer_session") or {})
+            if isinstance(args.get("pointer_session"), dict)
+            else {}
         )
+        pointer_hold_before = str(
+            pointer_session.get("before") or ""
+        ).strip().casefold()
+        pointer_hold_after = str(
+            pointer_session.get("after") or ""
+        ).strip().casefold()
+        execute_kwargs = {
+            "stop_on_error": stop_on_error,
+            "sync": sync,
+            "subgoal": str(args.get("subgoal") or ""),
+        }
+        if pointer_session:
+            execute_kwargs.update({
+                "pointer_hold_before": pointer_hold_before,
+                "pointer_hold_after": pointer_hold_after,
+            })
+        result = self._fast_controller().execute(actions, **execute_kwargs)
+        if result.get("ok") is True:
+            if pointer_hold_after:
+                self._pointer_hold_button = pointer_hold_after
+                # A continuation keeps the lease that began with the press.
+                # Re-arming here lets a weak policy hold input indefinitely.
+                if pointer_hold_before != pointer_hold_after:
+                    arm_pointer_timeout = getattr(
+                        self, "_arm_pointer_hold_timeout", None,
+                    )
+                    if callable(arm_pointer_timeout):
+                        result.setdefault("pointer_session", {})["timeout_s"] = (
+                            arm_pointer_timeout(pointer_hold_after)
+                        )
+            elif pointer_session:
+                cancel_pointer_timeout = getattr(
+                    self, "_cancel_pointer_hold_timeout", None,
+                )
+                if callable(cancel_pointer_timeout):
+                    cancel_pointer_timeout()
+                self._pointer_hold_button = ""
+                clear_pointer_constraint = getattr(
+                    self, "_clear_pointer_constraint", None,
+                )
+                if callable(clear_pointer_constraint):
+                    clear_pointer_constraint()
+        elif pointer_session:
+            hold_status = getattr(self, "_pointer_hold_status", None)
+            status = hold_status() if callable(hold_status) else {
+                "active": bool(pointer_hold_before or pointer_hold_after),
+                "button": pointer_hold_before or pointer_hold_after,
+            }
+            if status.get("active"):
+                self._pointer_hold_button = str(status.get("button") or "")
+                result.setdefault("pointer_session", {}).update({
+                    "active": True,
+                    "button": self._pointer_hold_button,
+                })
+            else:
+                cancel_pointer_timeout = getattr(
+                    self, "_cancel_pointer_hold_timeout", None,
+                )
+                if callable(cancel_pointer_timeout):
+                    cancel_pointer_timeout()
+                self._pointer_hold_button = ""
+                clear_pointer_constraint = getattr(
+                    self, "_clear_pointer_constraint", None,
+                )
+                if callable(clear_pointer_constraint):
+                    clear_pointer_constraint()
         return ToolResult(self._fmt(result))
 
     def _t_screen_watch(self, args: dict) -> ToolResult:

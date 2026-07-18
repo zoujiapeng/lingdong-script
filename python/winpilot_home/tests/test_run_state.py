@@ -34,6 +34,23 @@ def test_run_state_expected_action_failure_recovers():
     assert "text not visible" in state.guidance()
 
 
+def test_run_state_reads_batch_expect_from_params():
+    from winpilot.agent.run_state import RunStateMachine
+
+    state = RunStateMachine()
+    state.after_tool(
+        "run_action_batch",
+        {"actions": [{
+            "action": "click",
+            "params": {"x": 1, "y": 2, "expect": {"text": "opened"}},
+        }]},
+        json.dumps({"ok": True, "verified": False, "verify_detail": "not opened"}),
+    )
+
+    assert state.phase == "recovering"
+    assert state.unverified_actions == 1
+
+
 def test_run_state_batch_with_final_plain_observe_keeps_action_debt():
     from winpilot.agent.run_state import RunStateMachine
 

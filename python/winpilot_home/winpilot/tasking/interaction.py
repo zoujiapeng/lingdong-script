@@ -786,6 +786,10 @@ class InteractionDecision(BaseModel):
     continuation: Literal["finish", "reobserve", "wait_external", "blocked"]
     blocked_reason: str = ""
     wait_for_external_change: bool = False
+    # Runtime-injected ownership carried across authoritative frames.  The
+    # semantic model never gets to invent this field: canonicalization replaces
+    # any supplied value with the Controller's live held-button state.
+    pointer_hold_before: Literal["", "left", "right", "middle"] = ""
     frame_id: int = Field(default=0, ge=0)
     observation_artifact_id: str = ""
     _canonicalization_repairs: tuple[str, ...] = PrivateAttr(default=())
@@ -997,22 +1001,81 @@ class InteractionDecision(BaseModel):
             and all(name == "move_mouse" for name in spatial_names[1:-1])
             and spatial[0].button == spatial[-1].button
         )
+        open_pointer_prefix = bool(
+            not self.pointer_hold_before
+            and spatial_names
+            and spatial_names[0] == "mouse_down"
+            and "mouse_up" not in spatial_names
+            and all(name == "move_mouse" for name in spatial_names[1:])
+        )
+        held_pointer_continuation = bool(
+            self.pointer_hold_before
+            and spatial_names
+            and "mouse_down" not in spatial_names
+            and all(name == "move_mouse" for name in spatial_names[:-1])
+            and spatial_names[-1] in {"move_mouse", "mouse_up"}
+            and all(
+                item.action != "mouse_up"
+                or item.button == self.pointer_hold_before
+                for item in spatial
+            )
+        )
+        if self.pointer_hold_before and not held_pointer_continuation:
+            raise ValueError(
+                "an active held pointer accepts only move_mouse steps and an "
+                "optional matching mouse_up"
+            )
         if (
-            any(name in {"mouse_down", "mouse_up"} for name in spatial_names)
+            not self.pointer_hold_before
+            and any(name in {"mouse_down", "mouse_up"} for name in spatial_names)
             and not continuous_pointer_transaction
+            and not open_pointer_prefix
         ):
             raise ValueError(
-                "mouse_down/move_mouse/mouse_up must form one balanced continuous transaction"
+                "mouse_down/move_mouse/mouse_up must form a balanced transaction "
+                "or a causal held-pointer prefix ending at a fresh-frame boundary"
             )
+        leaves_pointer_held = bool(
+            open_pointer_prefix
+            or (
+                held_pointer_continuation
+                and spatial_names[-1] != "mouse_up"
+            )
+        )
+        if leaves_pointer_held:
+            if self.continuation != "reobserve":
+                raise ValueError(
+                    "a held pointer may cross a frame only with "
+                    "continuation=reobserve; otherwise mouse_down/move_mouse/"
+                    "mouse_up must form a balanced continuous transaction"
+                )
+            if not spatial[-1].requires_fresh_frame_after:
+                raise ValueError(
+                    "a held-pointer prefix must request a fresh frame after its last move"
+                )
         if (
             len(spatial) > 1
             and not continuous_pointer_transaction
+            and not open_pointer_prefix
+            and not held_pointer_continuation
             and any(item.requires_fresh_frame_after for item in spatial[:-1])
         ):
             raise ValueError(
                 "multiple spatial actions require an intermediate authoritative frame"
             )
         return self
+
+    @property
+    def pointer_hold_after(self) -> str:
+        """Return the Controller-owned mouse button after this decision."""
+
+        button = str(self.pointer_hold_before or "")
+        for action in self.actions:
+            if action.action == "mouse_down":
+                button = action.button
+            elif action.action == "mouse_up":
+                button = ""
+        return button
 
     @property
     def canonicalization_repairs(self) -> tuple[str, ...]:
@@ -1209,10 +1272,19 @@ def _planning_prompt(
         "3. Choose the primitive from visible affordance evidence, not desired outcome or "
         "application convention. Every action declares interaction_mechanism and concrete "
         "affordance_evidence. Visible controls/objects use semantic_control or object_anchor.\n"
-        "4. Point actions use frame_x/frame_y inside any declared region. Drag uses visible "
+        "4. Point actions use frame_x/frame_y inside their semantic region. mouse_down uses "
+        "source_region; hover, move_mouse, and mouse_up are destination actions and use "
+        "target_region (omit a stale pickup source_region). Drag uses visible "
         "source_region and target_region; use direct only for a clear straight route, otherwise "
         "guided frame_points at all bends with source-footprint clearance. Block if no full route "
-        "is proven. source_inside_target means the translated whole source must fit.\n"
+        "is proven. source_inside_target means the translated whole source must fit. A drag is "
+        "always one down/move/up transaction. If the pointer must remain held while a later "
+        "destination is revealed by a new frame, emit mouse_down at the grounded source followed "
+        "by move_mouse only to the currently known checkpoint, omit mouse_up, and use reobserve. "
+        "When prior state says pointer_hold.active, never start another drag or mouse_down: emit "
+        "move_mouse steps toward newly visible geometry and mouse_up only at the true release "
+        "condition. This protocol applies to any dynamic control, game, timeline, map, editor, "
+        "or other live surface.\n"
         "5. Freehand input uses draw_strokes, free_path, target_region, target_anchor, and "
         "stroke_paths. Each stroke_paths item is one separate down/move/up path. Use "
         "target_region_0_1000 inside a bounded writable child; use frame_0_1000 only for a "
@@ -1354,6 +1426,16 @@ def _canonicalize_model_decision(
     """
     normalized = dict(raw)
     repairs: list[str] = []
+
+    live_hold = prior_state.get("pointer_hold")
+    live_hold_button = ""
+    if isinstance(live_hold, dict) and live_hold.get("active") is True:
+        candidate_button = str(live_hold.get("button") or "left").casefold()
+        if candidate_button in _MOUSE_BUTTONS:
+            live_hold_button = candidate_button
+    if normalized.get("pointer_hold_before") != live_hold_button:
+        normalized["pointer_hold_before"] = live_hold_button
+        repairs.append("pointer_hold_before:controller_state")
 
     aliases = {
         "sceneSummary": "scene_summary",
@@ -1587,6 +1669,56 @@ def _canonicalize_model_decision(
                 if mapped is not action.get(key):
                     action[key] = mapped
                     repairs.append(f"actions[{index}].{key}:shape->flat_region")
+            # Destination pointer actions describe where the cursor/held
+            # object is going now. Providers sometimes copy the pickup
+            # object's source_region from an earlier action into that
+            # destination action. When the proposed point is demonstrably in
+            # the declared target and demonstrably outside that copied source,
+            # remove only the contradictory source binding. This does not
+            # invent or move a point; ambiguous/outside geometry still fails
+            # closed during Pydantic validation.
+            if (
+                canonical_name in {"hover", "move_mouse", "mouse_up"}
+                and action.get("source_region")
+                and action.get("target_region")
+            ):
+                try:
+                    destination_point = (
+                        _coord(
+                            action.get("frame_x"),
+                            f"actions[{index}].frame_x",
+                        ),
+                        _coord(
+                            action.get("frame_y"),
+                            f"actions[{index}].frame_y",
+                        ),
+                    )
+                    source_bounds = _region(
+                        action.get("source_region"),
+                        f"actions[{index}].source_region",
+                    )
+                    target_bounds = _region(
+                        action.get("target_region"),
+                        f"actions[{index}].target_region",
+                    )
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if (
+                        _point_in_region(destination_point, target_bounds)
+                        and not _point_in_region(destination_point, source_bounds)
+                    ):
+                        action["source_region"] = []
+                        repairs.append(
+                            f"actions[{index}].source_region:removed_stale_"
+                            "pickup_from_destination_action"
+                        )
+                        if action.get("source_candidate_id"):
+                            action["source_candidate_id"] = ""
+                            repairs.append(
+                                f"actions[{index}].source_candidate_id:"
+                                "removed_with_stale_pickup"
+                            )
             effect_region = _optional_effect_region(action.get("expected_effect_region"))
             if effect_region != action.get("expected_effect_region"):
                 action["expected_effect_region"] = effect_region
@@ -1632,6 +1764,91 @@ def _canonicalize_model_decision(
             if action.get("grounding_mode") is None:
                 action.pop("grounding_mode", None)
                 repairs.append(f"actions[{index}].grounding_mode:null->auto")
+            # Providers often express the correct semantic mechanism (keep the
+            # pointer held across a causally required fresh frame) while using
+            # the atomic ``drag`` primitive.  When that intent is explicit and
+            # this is the only current-frame action, lower it to an open
+            # mouse_down/move_mouse prefix without inventing any geometry.  The
+            # Controller will retain the press lease until a later fresh-frame
+            # plan emits the matching mouse_up.
+            if (
+                len(actions) == 1
+                and canonical_name == "drag"
+                and action.get("interaction_mechanism") == "press_hold"
+                and str(normalized.get("continuation") or "").casefold()
+                == "reobserve"
+                and not live_hold_button
+            ):
+                down_action = {
+                    "action": "mouse_down",
+                    "frame_x": action.get("frame_x1"),
+                    "frame_y": action.get("frame_y1"),
+                    "source_region": list(action.get("source_region") or []),
+                    "source_candidate_id": str(
+                        action.get("source_candidate_id") or ""
+                    ),
+                    "grounding_mode": "object_anchor",
+                    "interaction_mechanism": "press_hold",
+                    "affordance_evidence": str(
+                        action.get("affordance_evidence") or ""
+                    ),
+                    "button": str(action.get("button") or "left"),
+                    "requires_fresh_frame_after": False,
+                    "rationale": str(action.get("rationale") or ""),
+                }
+                move_action = {
+                    "action": "move_mouse",
+                    "frame_x": action.get("frame_x2"),
+                    "frame_y": action.get("frame_y2"),
+                    "target_region": list(action.get("target_region") or []),
+                    "target_candidate_id": str(
+                        action.get("target_candidate_id") or ""
+                    ),
+                    "target_anchor": list(action.get("target_anchor") or []),
+                    "grounding_mode": "object_anchor",
+                    "interaction_mechanism": "pointer_motion",
+                    "affordance_evidence": str(
+                        action.get("affordance_evidence") or ""
+                    ),
+                    "expected_effect_region": list(
+                        action.get("expected_effect_region") or []
+                    ),
+                    "effect_region_binding": str(
+                        action.get("effect_region_binding") or "target_region"
+                    ),
+                    "requires_fresh_frame_after": True,
+                    "rationale": str(action.get("rationale") or ""),
+                }
+                fixed_actions.extend((down_action, move_action))
+                effect_payload = normalized.get("expected_effect")
+                if isinstance(effect_payload, dict):
+                    effect_payload = dict(effect_payload)
+                    if effect_payload.get("region_binding") == "target_region":
+                        effect_payload["binding_action_index"] = 1
+                    normalized["expected_effect"] = effect_payload
+                requirements = normalized.get("resolution_requirements")
+                if isinstance(requirements, list):
+                    target_requirements = []
+                    for requirement in requirements:
+                        if (
+                            isinstance(requirement, dict)
+                            and requirement.get("kind") == "spatial_geometry"
+                            and int(requirement.get("action_index") or 0) == 0
+                        ):
+                            target_requirements.append({
+                                **requirement,
+                                "action_index": 1,
+                                "description": (
+                                    str(requirement.get("description") or "")
+                                    + " Resolve the currently visible held-pointer "
+                                    "checkpoint independently."
+                                ).strip(),
+                            })
+                    requirements.extend(target_requirements)
+                repairs.append(
+                    f"actions[{index}].drag:press_hold->open_pointer_prefix"
+                )
+                continue
             fixed_actions.append(action)
         # A provider may omit the dependency flag while still returning an
         # explicit ordered spatial batch.  The ordered list itself asserts
@@ -1830,6 +2047,38 @@ def _canonicalize_model_decision(
                 normalized.get("continuation") or "reobserve"
             ).strip().casefold()
             actions = actions[:dependency_index + 1]
+            # A held pointer makes the next authoritative frame part of the
+            # control loop: the destination may only appear, move, or become
+            # safe to release after the retained prefix has executed.  Any
+            # continuation proposed from the old pixels is therefore stale,
+            # even when it is merely a mouse_up with no coordinates.  Drop
+            # that continuation and let the next frame produce a newly
+            # grounded plan.  Stable, independent batches (for example,
+            # several already-visible clicks) still use the deferred program
+            # below because they do not carry physical pointer state across
+            # the frame boundary.
+            held_button_after_prefix = str(live_hold_button or "")
+            for item in actions:
+                if not isinstance(item, dict):
+                    continue
+                action_name = str(item.get("action") or "")
+                if action_name == "mouse_down":
+                    candidate_button = str(
+                        item.get("button") or "left"
+                    ).casefold()
+                    held_button_after_prefix = (
+                        candidate_button
+                        if candidate_button in _MOUSE_BUTTONS
+                        else "left"
+                    )
+                elif action_name == "mouse_up":
+                    held_button_after_prefix = ""
+            if held_button_after_prefix and deferred_actions:
+                deferred_actions = []
+                program_continuation = "reobserve"
+                repairs.append(
+                    "deferred_actions:discarded_at_held_pointer_frame_boundary"
+                )
             normalized["actions"] = actions
             normalized["_runtime_deferred_actions"] = deferred_actions
             normalized["_runtime_program_continuation"] = program_continuation
@@ -1933,8 +2182,36 @@ def _canonicalize_model_action_geometry(
             normalized_actions.append(candidate)
             continue
         action = dict(candidate)
+        action_name = str(action.get("action") or "")
         if (
-            action.get("action") != "drag"
+            action_name in _POINT_ACTIONS
+            and (action.get("frame_x") is None or action.get("frame_y") is None)
+        ):
+            # An explicit target anchor is already the semantic planner's
+            # chosen current-frame point. Copy it into the point-action fields
+            # only when both coordinates are finite and it is contained by
+            # the declared target region. This removes redundant provider
+            # schema drift without inventing a destination; outside or
+            # partial anchors remain fail-closed.
+            anchor = action.get("target_anchor")
+            try:
+                target = _region(action.get("target_region"), "target_region")
+                anchor_point = (
+                    _coord(anchor[0], "target_anchor[0]"),
+                    _coord(anchor[1], "target_anchor[1]"),
+                )
+            except (IndexError, TypeError, ValueError):
+                pass
+            else:
+                if _point_in_region(anchor_point, target):
+                    action["frame_x"], action["frame_y"] = anchor_point
+                    if repairs is not None:
+                        repairs.append(
+                            f"actions[{action_index}].frame_point:"
+                            "copied_from_explicit_target_anchor"
+                        )
+        if (
+            action_name != "drag"
             or action.get("placement_requirement") != "source_inside_target"
         ):
             normalized_actions.append(action)
@@ -2150,6 +2427,16 @@ def validate_primary_action_modality(
         for item in decision.actions
         if item.action in action_modalities
     }
+    # Once the Controller owns a live press, pointer motion is no longer a
+    # neutral hover: it is the middle of the same drag transaction spanning
+    # authoritative frames.  The model cannot forge pointer_hold_before, so
+    # recognizing this continuation preserves the contract modality without
+    # weakening ordinary standalone move_mouse plans.
+    if (
+        decision.pointer_hold_before
+        and any(item.action == "move_mouse" for item in decision.actions)
+    ):
+        planned.add("drag")
     if primary not in planned:
         raise InteractionPlanOutputError(
             f"interaction plan omitted contract primary modality {primary!r}",
@@ -2235,11 +2522,22 @@ def _bind_visible_region_candidates(
         if str(item.get("candidate_id") or "")
     }
 
+    def finite_vector(value: Any, length: int) -> bool:
+        return bool(
+            isinstance(value, (list, tuple))
+            and len(value) == length
+            and all(
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and math.isfinite(float(item))
+                for item in value
+            )
+        )
+
     def same_region(first: Any, second: Any) -> bool:
         return bool(
-            isinstance(first, list)
-            and isinstance(second, list)
-            and len(first) == len(second) == 4
+            finite_vector(first, 4)
+            and finite_vector(second, 4)
             and all(
                 abs(float(left) - float(right)) <= 1e-6
                 for left, right in zip(first, second)
@@ -2248,8 +2546,7 @@ def _bind_visible_region_candidates(
 
     def inside(point: Any, bounds: list[float]) -> bool:
         return bool(
-            isinstance(point, list)
-            and len(point) == 2
+            finite_vector(point, 2)
             and bounds[0] <= float(point[0]) <= bounds[2]
             and bounds[1] <= float(point[1]) <= bounds[3]
         )
@@ -2339,14 +2636,15 @@ def _bind_visible_region_candidates(
                     code="interaction_region_candidate_unknown",
                     repairs=repairs,
                 )
-            bounds = [float(value) for value in candidate.get("bounds") or []]
-            if len(bounds) != 4:
+            raw_bounds = candidate.get("bounds") or []
+            if not finite_vector(raw_bounds, 4):
                 raise InteractionPlanOutputError(
                     f"{label} selected malformed current-frame region "
                     f"{candidate_id!r}",
                     code="interaction_region_candidate_invalid",
                     repairs=repairs,
                 )
+            bounds = [float(value) for value in raw_bounds]
             original = original_source if role == "source" else original_target
             locator_proves_target = bool(
                 role == "target"

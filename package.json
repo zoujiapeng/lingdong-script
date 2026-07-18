@@ -1,7 +1,7 @@
 {
   "name": "lingdong-script",
   "version": "1.1.0",
-  "description": "Windows 通用 GUI 智能代理与自动化运行平台",
+  "description": "视觉优先、证据闭环的 Windows GUI Agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zoujiapeng/lingdong-script.git"
@@ -31,9 +31,13 @@
     "clean:runtime": "node scripts/clean-artifacts.cjs --runtime",
     "eval:list": "python scripts/gui_eval_run.py --list-suites",
     "eval:summary": "python scripts/eval_summary.py",
-    "eval:gui:smoke": "python scripts/gui_eval_run.py --suite gui-smoke",
-    "eval:gui:manipulation": "python scripts/gui_eval_run.py --suite gui-manipulation",
-    "eval:gui:deep": "python scripts/gui_eval_run.py --suite gui-deep-10",
+    "eval:integration:smoke": "python scripts/gui_eval_run.py --suite gui-smoke",
+    "eval:integration:manipulation": "python scripts/gui_eval_run.py --suite gui-manipulation",
+    "eval:integration:deep": "python scripts/gui_eval_run.py --suite gui-deep-10",
+    "e2e:client:original": "python scripts/client_e2e_run.py --suite original",
+    "e2e:client:mixed": "python scripts/client_e2e_run.py --suite mixed",
+    "e2e:client:all": "python scripts/client_e2e_run.py --suite all",
+    "e2e:client:visual": "python scripts/client_visual_e2e_run.py --suite all",
     "cli": "node dist/cli/cli/index.js",
     "ai": "node dist/ai-interface/index.js",
     "ai:mcp": "node dist/ai-interface/index.js --mode mcp",

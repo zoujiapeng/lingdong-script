@@ -79,6 +79,38 @@ def test_session_context_only_for_referential_tasks():
     assert session.should_include_context("继续刚才那个") is True
 
 
+def test_session_generation_rejects_a_late_result_after_clear():
+    from winpilot.agent.session import SessionMemory
+
+    memory = SessionMemory()
+    old_generation, context = memory.snapshot()
+    assert context == []
+
+    new_generation = memory.clear()
+
+    assert new_generation == old_generation + 1
+    assert memory.append(
+        "old task", "done", "late result", "old-run",
+        expected_generation=old_generation,
+    ) is False
+    assert memory.all() == []
+    assert memory.append(
+        "new task", "done", "current result", "new-run",
+        expected_generation=new_generation,
+    ) is True
+    assert [item["run_id"] for item in memory.all()] == ["new-run"]
+
+
+def test_clearing_an_empty_session_still_advances_the_generation():
+    from winpilot.agent.session import SessionMemory
+
+    memory = SessionMemory()
+
+    assert memory.clear() == 1
+    assert memory.clear() == 2
+    assert memory.snapshot() == (2, [])
+
+
 def test_fold_checkpoint_preserves_goal_screen_and_recent_evidence():
     from winpilot.agent.loop import AgentRunner
 

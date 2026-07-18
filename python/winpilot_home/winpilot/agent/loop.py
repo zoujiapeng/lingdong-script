@@ -7,6 +7,7 @@ function-calling history, context folding, and tool-result repair behaviors.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -16,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import win32gui
+
 from ..config import CONFIG, TRACES_DIR
 from ..memory import compiler, experience
 from ..model_adapter import (
@@ -24,10 +27,14 @@ from ..model_adapter import (
     empty_usage_total,
     model_profile_from_config,
 )
-from ..perception import fusion, intent, vlm
+from ..perception import fusion, intent, reducer, vlm
 from ..perception.surface_binding import InteractionRegion, SurfaceBinding
 from ..runtime_info import runtime_fingerprint
-from ..fast.action_contract import build_action_envelope
+from ..fast.action_contract import (
+    build_action_envelope,
+    iter_atomic_actions,
+    parse_atomic_action,
+)
 from ..utils.image_capture import (
     capture_window_jpeg_b64,
     credible_work_surface_frame_bounds,
@@ -38,7 +45,7 @@ from ..utils.image_capture import (
     window_client_region,
 )
 from ..utils.log import BUS, logger
-from ..utils.screenshot import virtual_screen_region, window_region
+from ..utils.screenshot import Region, virtual_screen_region, window_region
 from ..utils.trace_payload import sanitize_trace_payload
 from . import playbooks, prompts, session as session_mod
 from .context_guidance import ContextGuidanceMixin
@@ -54,11 +61,13 @@ from .gui_plan_helpers import (
     _looks_like_pure_open_plan_goal,
     _schema_profile_for_task,
 )
+from .graphical_affordances import detect_graphical_affordances
 from .planner import planning_enabled
 from .partial_output_guard import PartialOutputDestructiveGuard
 from .reflection import ReflectionMixin
 from .run_state import ACTION_TOOLS as _RUN_ACTION_TOOLS, RunStateMachine
 from .runtime_profile import RuntimeProfile, build_runtime_profile
+from .scene_coverage import SceneCoverageLedger
 from .semantic_progress import (
     ContinuousSemanticProgress,
     GeometryFingerprint,
@@ -147,7 +156,7 @@ _NATIVE_CONTEXT_MAX_DIRECTIVE_CHARS = 4000
 _NATIVE_CONTEXT_MAX_SUMMARY_CHARS = 3200
 _NATIVE_NO_PROGRESS_RATIO = 0.0005
 _NATIVE_NO_PROGRESS_STREAK = 2
-_NATIVE_NO_PROGRESS_MAX_BLOCKS = 2
+_NATIVE_NO_PROGRESS_MAX_BLOCKS = 4
 _NATIVE_STAGNATION_SPATIAL_TOOLS = {
     "click", "scroll", "drag", "draw_strokes", "move_mouse",
     "tray_click", "coordinate_click_test", "run_action_batch",
@@ -860,6 +869,7 @@ def _unexecuted_constraint_category(result_text: str) -> str:
         "semantic_progress_guard",
         "continuous_pointer_guard",
         "native_no_progress_guard",
+        "scene_coverage_guard",
         "constraint_rejection_guard",
     }
     if any(any_true(payload, marker) for marker in excluded):
@@ -877,6 +887,7 @@ def _unexecuted_constraint_category(result_text: str) -> str:
         ("work_surface_fail_closed", "work_surface_fail_closed"),
         ("visual_preflight_failed", "visual_preflight_failed"),
         ("cooperative_input", "cooperative_input_scope"),
+        ("native_point_scope_guard", "native_point_scope"),
     ):
         if any_true(payload, marker):
             return category
@@ -1162,9 +1173,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._inline_stage_semantic_attempted = False
         self._inline_stage_semantic_passed = False
         self._inline_stage_semantic_last_verdict: dict[str, Any] = {}
+        self._surface_output_semantic_passed = False
         self._inline_stage_semantic_region: dict[str, int] = {}
         self._inline_stage_repair_pending = False
         self._inline_stage_base_draw_count = 0
+        self._inline_stage_forward_repair_rejections = 0
+        self._inline_stage_completion_decision_required = False
         self._model_adapter = None
         self._last_llm_model = ""
         self._last_llm_thinking_enabled = False
@@ -1198,6 +1212,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._visual_frame_region: tuple[int, int, int, int] | None = None
         self._visual_frame_scope = ""
         self._visual_frame_scope_reason = ""
+        self._visual_submitted_size: tuple[int, int] | None = None
         self._visual_work_surface_frame_bounds: tuple[int, int, int, int] | None = None
         self._visual_work_surface_frame_id = 0
         self._visual_work_surface_anchor_bounds: tuple[int, int, int, int] | None = None
@@ -1224,6 +1239,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         self._native_no_progress_signature = ""
         self._native_no_progress_streak = 0
         self._native_no_progress_block_count = 0
+        # Keep stagnation debt per spatial action signature. Alternating two
+        # ineffective clicks/scrolls must not erase the evidence that each one
+        # already failed on unchanged pixels.
+        self._native_no_progress_streaks: dict[str, int] = {}
+        self._native_no_progress_block_counts: dict[str, int] = {}
+        self._pixel_graphical_candidates: list[dict[str, Any]] = []
+        self._pixel_graphical_frame_id = 0
+        self._scene_coverage = SceneCoverageLedger(
+            max_scenes=int(CONFIG.get(
+                "controller", "scene_coverage_max_scenes", default=24,
+            ) or 24),
+            revisit_change_ratio=float(CONFIG.get(
+                "controller", "scene_revisit_change_ratio", default=0.0012,
+            ) or 0.0012),
+        )
+        self._visual_semantic_assist_count = 0
         self._continuous_pointer_setup_clicks = 0
         self._continuous_pointer_low_change_clicks = 0
         self._continuous_pointer_guard_blocks = 0
@@ -1244,6 +1275,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         This is deliberately explicit: a new AgentRunner must not rediscover
         or lose the application state established by the preceding stage.
         """
+        # StageRuntime reaches this method only after validating an app-open or
+        # explicit desktop handoff. Preserve that trust even if the app swaps
+        # its top-level HWND between the open result and this runner starting.
+        self.session._target_binding_verified = True
         self.session._remember_target(int(hwnd), str(hint or ""))
 
     @staticmethod
@@ -1352,24 +1387,45 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """
         if not self.runtime_profile.inline_semantic_verification:
             return None
-        if str(tool_name or "") not in {"execute_subgoal", "run_action_batch"}:
+        if str(tool_name or "") not in {
+            "execute_subgoal", "run_action_batch", "draw_strokes", "drag",
+        }:
             return None
-        if payload.get("ok") is not True or payload.get("blocked") is True:
+        if payload.get("blocked") is True:
             return None
         packet = payload.get("evidence_packet")
         scene = packet.get("scene_structure") if isinstance(packet, dict) else None
+        direct_surface_action = str(tool_name or "") in {"draw_strokes", "drag"}
         try:
             executed_draw_count = int((scene or {}).get("executed_draw_count") or 0)
         except (TypeError, ValueError):
             executed_draw_count = 0
+        if direct_surface_action and payload.get("ok") is True:
+            executed_draw_count = max(1, executed_draw_count)
         if executed_draw_count <= 0:
             return None
+        if payload.get("ok") is not True and payload.get("input_applied") is not True:
+            return None
+        # A compound visual transaction can commit most of its paths and then
+        # fail on one late primitive.  Those pixels are not rolled back.  Treat
+        # that result as a committed base for semantic verification and repair
+        # budgeting; otherwise a retry overlays a second complete scene on top
+        # of the first and destroys both.  Fresh pixels still decide success.
+        partial_visual_commit = bool(
+            payload.get("ok") is not True
+            and payload.get("input_applied") is True
+        )
         current_region = self._inline_semantic_region(payload)
         self._inline_stage_semantic_region = self._merge_inline_semantic_regions(
             self._inline_stage_semantic_region,
             current_region,
         )
-        verify_args: dict[str, Any] = {"criteria": self.task}
+        verify_args: dict[str, Any] = {
+            "criteria": (
+                str(self.runtime_profile.surface_output_criteria or "").strip()
+                or self.task
+            )
+        }
         verify_args.update(self._inline_stage_semantic_region)
         self.model_request_count += 1
         started = time.monotonic()
@@ -1385,6 +1441,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             verdict = {}
         verdict["elapsed_ms"] = elapsed_ms
         verdict["inline_stage_verifier"] = True
+        verdict["partial_visual_commit"] = partial_visual_commit
         args = {**verify_args, "inline_stage_verifier": True}
         self._record_step("vlm_verify", args, verify_result.replay)
         self._track_verification("vlm_verify", verify_result.text)
@@ -1400,6 +1457,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         )
         self._inline_stage_semantic_attempted = True
         self._inline_stage_semantic_passed = passed
+        self._surface_output_semantic_passed = passed
         self._inline_stage_semantic_last_verdict = dict(verdict)
         BUS.publish(
             "task_stage_inline_verify",
@@ -1410,8 +1468,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             verdict=verdict,
         )
         if passed:
-            self._done_verified = True
             self._had_verified_action = True
+            # Legacy single-purpose DrawArtifact runs may terminate directly.
+            # A general desktop stage can still have later application,
+            # communication, save, or verification clauses, so a successful
+            # surface subgoal is evidence rather than whole-task completion.
+            if str(self.runtime_profile.stage_type or "") == "DrawArtifact":
+                self._done_verified = True
         return verdict
 
     @staticmethod
@@ -1453,10 +1516,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """
         if not self.runtime_profile.inline_semantic_verification:
             return
-        if str(self.runtime_profile.stage_type or "") != "DrawArtifact":
+        if not self.runtime_profile.surface_output_mode:
             return
         if verdict.get("semantic_visual_verified") is True:
             self._inline_stage_repair_pending = False
+            self._inline_stage_forward_repair_rejections = 0
+            self._inline_stage_completion_decision_required = False
             return
         if str(tool_name or "") != "execute_subgoal":
             return
@@ -1468,6 +1533,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         ):
             self._inline_stage_base_draw_count = len(draws)
         self._inline_stage_repair_pending = True
+
+    def _inline_stage_max_repair_draws(self) -> int:
+        base_count = max(1, int(self._inline_stage_base_draw_count or 1))
+        return max(1, min(4, (base_count + 2) // 3))
 
     def _inline_stage_forward_repair_guard(
         self,
@@ -1481,10 +1550,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return None
         draws = args.get("draws")
         base_count = max(1, int(self._inline_stage_base_draw_count or 1))
-        max_repair_draws = max(1, min(4, (base_count + 2) // 3))
+        max_repair_draws = self._inline_stage_max_repair_draws()
         draw_count = len(draws) if isinstance(draws, list) else 0
         if 0 < draw_count <= max_repair_draws:
+            self._inline_stage_forward_repair_rejections = 0
+            self._inline_stage_completion_decision_required = False
             return None
+        self._inline_stage_forward_repair_rejections += 1
+        if self._inline_stage_forward_repair_rejections >= 3:
+            self._inline_stage_completion_decision_required = True
         return {
             "ok": False,
             "verified": False,
@@ -1493,6 +1567,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "base_draw_count": base_count,
             "proposed_draw_count": draw_count,
             "max_repair_draws": max_repair_draws,
+            "repair_contract_rejections": self._inline_stage_forward_repair_rejections,
+            "completion_decision_required": self._inline_stage_completion_decision_required,
             "error": (
                 "The base composition already exists. This repair transaction was not "
                 "executed because it would redraw too much of the scene. Submit one "
@@ -1627,7 +1703,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         useful = (
             "frame_x", "frame_y", "frame_x1", "frame_y1", "frame_x2", "frame_y2",
             "element_id", "label", "fallback_text", "direction", "amount", "keys",
-            "name", "title", "subgoal", "index", "operation",
+            "name", "title", "subgoal", "index", "operation", "artifact_id",
+            "app", "recipient", "scope", "source_hwnd",
         )
         compact = {key: args[key] for key in useful if key in args}
         if "text" in args:
@@ -1676,7 +1753,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         keys = (
             "ok", "verified", "blocked", "native_action_executed",
             "visual_change_detected", "visual_change_ratio", "no_visual_progress",
-            "error", "fast_path_advice",
+            "error", "failure_type", "artifact_id", "requested_artifact_id",
+            "artifact_resolution", "fast_path_advice",
         )
         compact = {key: payload[key] for key in keys if key in payload}
         auto = payload.get("auto_visual_verify")
@@ -1743,6 +1821,42 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 rendered = ""
             if rendered:
                 lines.append(f"Current mutable plan: {rendered[:1200]}")
+        pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
+        pointer_status = (
+            pointer_status_fn() if callable(pointer_status_fn) else {"active": False}
+        )
+        if pointer_status.get("active"):
+            held_move_count = 0
+            gesture_start_found = False
+            for history_name, history_args, _history_result in reversed(
+                self._tool_history
+            ):
+                actions = list(iter_atomic_actions(history_name, history_args))
+                for atomic in reversed(actions):
+                    if atomic.name == "mouse_down":
+                        gesture_start_found = True
+                        break
+                    if atomic.name == "move_mouse":
+                        held_move_count += 1
+                if gesture_start_found:
+                    break
+            lines.append(
+                "Dynamic pointer state: the agent is still holding the "
+                f"{pointer_status.get('button') or 'left'} mouse button after "
+                f"{held_move_count} continuation move(s). Decide release first from the newest "
+                "frame: if the held object or pointer has reached the intended final release "
+                "target, call mouse_up at that target now. Only when the release condition is "
+                "not yet visible may you call exactly one move_mouse. Do not repeatedly "
+                "micro-adjust inside a valid target, start another action, or claim completion "
+                "while the button remains held."
+            )
+            pointer_constraint = pointer_status.get("constraint_frame_region")
+            if isinstance(pointer_constraint, dict):
+                lines.append(
+                    "Held-pointer hard boundary (inherited automatically on every move/release, "
+                    "current-frame 0..1000): "
+                    f"{pointer_constraint}. Never leave it."
+                )
         # Count only the latest uninterrupted draw sequence. A later click,
         # hotkey, app switch, or other visual mutation may have opened a new
         # document/surface even when the HWND stayed the same; older drawings
@@ -1788,6 +1902,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "measurable forward draw/drag correction grounded in the newest frame; "
                 "done becomes available again after its pixels visibly change."
             )
+        scene_coverage_summary = self._scene_coverage.context_summary()
+        if scene_coverage_summary:
+            lines.append(scene_coverage_summary)
         recent = self._tool_history[-_NATIVE_CONTEXT_RECENT_ACTIONS:]
         if recent:
             lines.append("Recent transactions (oldest to newest):")
@@ -1963,7 +2080,60 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         step: int,
     ) -> list[dict[str, Any]]:
         """Avoid a duplicate structured observe on the first native frame."""
-        selected = tools
+        selected = self._project_bound_visual_tools(tools)
+        if self._inline_stage_completion_decision_required:
+            # Three schema-invalid whole-scene proposals after a failed fresh
+            # semantic verdict are not progress.  End honestly instead of
+            # burning the remaining step budget on parameter variations.
+            return [
+                item for item in selected
+                if str(item.get("function", {}).get("name") or "") == "blocked"
+            ]
+        pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
+        pointer_status = (
+            pointer_status_fn() if callable(pointer_status_fn) else {"active": False}
+        )
+        if pointer_status.get("active"):
+            # A raw press is a short leased interaction session.  Until it is
+            # released, expose only actions that can advance or safely finish
+            # that same gesture.  Every move still returns a fresh frame, so
+            # the model can visually steer rather than committing an open-loop
+            # path from the pre-press image.
+            held_order = ("mouse_up", "move_mouse", "wait", "blocked", "fail")
+            held_by_name = {
+                str(item.get("function", {}).get("name") or ""): item
+                for item in selected
+            }
+            selected = [
+                held_by_name[name] for name in held_order if name in held_by_name
+            ]
+        if self._inline_stage_repair_pending:
+            # Prompt prose is not an execution contract.  Reflect the current
+            # forward-only budget in the actual function schema seen by the
+            # model so every provider gets the same bounded repair affordance.
+            selected = copy.deepcopy(selected)
+            max_repair_draws = self._inline_stage_max_repair_draws()
+            for item in selected:
+                function = item.get("function", {}) if isinstance(item, dict) else {}
+                if str(function.get("name") or "") != "execute_subgoal":
+                    continue
+                parameters = function.get("parameters") or {}
+                properties = parameters.get("properties") or {}
+                draws = properties.get("draws")
+                if isinstance(draws, dict):
+                    draws["minItems"] = 1
+                    draws["maxItems"] = max_repair_draws
+                    draws["description"] = (
+                        "Forward-only repair only. Include 1.."
+                        f"{max_repair_draws} missing parts or localized contour repairs "
+                        "grounded in the current frame; never repeat the complete scene."
+                    )
+                function["description"] = (
+                    "A base composition already exists. Submit exactly one bounded "
+                    f"forward-only repair containing at most {max_repair_draws} draws. "
+                    "Preserve all existing correct pixels and do not redraw the whole subject."
+                )
+                break
         if (
             step == 1
             and self._native_visual_context_enabled()
@@ -1994,6 +2164,87 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 if str(item.get("function", {}).get("name") or "") in forward_names
             ]
         return selected
+
+    def _project_bound_visual_tools(
+        self,
+        tools: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep a bound visual decision small without precompiling its actions.
+
+        The root task remains lossless.  Structured intent only decides which
+        provider families must be visible; pixels and the model still decide
+        the actual interaction.  An unbound/stale target retains the complete
+        compatibility tool set.
+        """
+        if not (
+            str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask"
+            and self._native_visual_context_enabled()
+            and self._has_fresh_visual_grounding()
+            and self.session._window_alive(self.session.hwnd)
+        ):
+            return tools
+
+        allowed = {
+            "observe", "click", "type_text", "hotkey", "scroll",
+            "move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes",
+            "wait", "done", "blocked", "fail",
+        }
+        operations = {
+            str(item or "").strip().casefold()
+            for item in (self.task_intent.get("operation") or [])
+        }
+        applications = {
+            str(item or "").strip()
+            for item in (self.task_intent.get("applications") or [])
+            if str(item or "").strip()
+        }
+        resource_types = {
+            str(item or "").strip().casefold()
+            for item in (self.task_intent.get("resource_types") or [])
+            if str(item or "").strip()
+        }
+        target_verified = bool(
+            getattr(self.session, "_target_binding_verified", False)
+        )
+        needs_app_provider = not target_verified or len(applications) > 1
+        needs_communication = _is_communication_task(self.task_intent)
+        needs_artifact = bool(
+            operations.intersection({"capture", "save", "send", "export"})
+            or str(self.task_intent.get("media_type") or "").casefold()
+            not in {"", "none", "text"}
+        )
+        needs_controller_provider = bool(
+            resource_types
+            or operations.intersection({
+                "create", "edit", "convert", "format", "save", "export",
+            })
+            or self.runtime_profile.surface_output_mode
+        )
+
+        if needs_app_provider:
+            allowed.update({
+                "open_app", "focus_window", "list_windows", "find_app",
+                "find_program", "list_installed_apps", "launch",
+            })
+        if needs_artifact:
+            allowed.update({"capture_artifact", "screenshot", "paste_image_file"})
+        if needs_communication:
+            allowed.update({
+                "open_conversation", "send_text", "send_artifact",
+                "verify_delivery", "read_text",
+            })
+        if needs_controller_provider:
+            allowed.update({
+                "run_action_batch", "execute_subgoal",
+                "discover_mcp_tools", "call_mcp_tool",
+            })
+        if needs_app_provider or needs_communication or needs_controller_provider:
+            allowed.update({"revise_plan", "complete_subgoal", "record_facts"})
+
+        return [
+            item for item in tools
+            if str(item.get("function", {}).get("name") or "") in allowed
+        ]
 
     def _append_tool_result(self, tool_call_id: str, result_text: str,
                             summary: str = "",
@@ -2048,6 +2299,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "error",
             "warning",
             "fast_path_advice",
+            "action_executed",
+            "native_point_scope_guard",
+            "scope_reason",
+            "scene_coverage_guard",
+            "current_scene_id",
+            "current_scene_visit_count",
+            "proposed_edge",
+            "prior_target_scene_ids",
+            "cycle_scene_path",
+            "artifact_id",
+            "requested_artifact_id",
+            "artifact_resolution",
             "scene_structure",
             "draw_actions_summary",
         )
@@ -2195,6 +2458,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         args: dict[str, Any],
         *,
         frame_region: tuple[int, int, int, int] | None = None,
+        submitted_size: tuple[int, int] | None = None,
     ) -> str:
         """Stable coarse identity for one model-grounded spatial mutation."""
         name = str(tool_name or "").strip().casefold()
@@ -2224,6 +2488,75 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         source = payload.get("source_frame_coordinates")
         if isinstance(source, dict):
             payload = {**payload, **source}
+        else:
+            image_source = payload.get("source_image_coordinates")
+            if isinstance(image_source, dict):
+                payload = {**payload, **image_source}
+                raw_size = image_source.get("submitted_image_size")
+                if (
+                    isinstance(raw_size, (list, tuple))
+                    and len(raw_size) == 2
+                ):
+                    try:
+                        submitted_size = (int(raw_size[0]), int(raw_size[1]))
+                    except (TypeError, ValueError):
+                        pass
+
+        # A model may express the same target with exact submitted-image
+        # pixels on one turn and normalized frame coordinates on the next.
+        # Canonicalize both to frame coordinates before hashing, otherwise a
+        # harmless representation switch bypasses stagnation/oscillation
+        # guards and can repeatedly toggle or miss the same visual control.
+        if (
+            isinstance(submitted_size, (list, tuple))
+            and len(submitted_size) == 2
+        ):
+            try:
+                image_width = max(1, int(submitted_size[0]))
+                image_height = max(1, int(submitted_size[1]))
+            except (TypeError, ValueError):
+                image_width = image_height = 0
+            if image_width and image_height:
+                def image_to_frame(value: Any, extent: int) -> float:
+                    return float(value) * 1000.0 / max(1, extent - 1)
+
+                image_pairs = (
+                    ("image_x", "image_y", "frame_x", "frame_y"),
+                    ("image_x1", "image_y1", "frame_x1", "frame_y1"),
+                    ("image_x2", "image_y2", "frame_x2", "frame_y2"),
+                )
+                for image_x, image_y, frame_x, frame_y in image_pairs:
+                    if (
+                        frame_x not in payload
+                        and frame_y not in payload
+                        and image_x in payload
+                        and image_y in payload
+                    ):
+                        try:
+                            payload[frame_x] = image_to_frame(
+                                payload[image_x], image_width,
+                            )
+                            payload[frame_y] = image_to_frame(
+                                payload[image_y], image_height,
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                if "frame_points" not in payload and isinstance(
+                    payload.get("image_points"), list,
+                ):
+                    frame_points: list[list[float]] = []
+                    for point in payload["image_points"]:
+                        if not isinstance(point, (list, tuple)) or len(point) != 2:
+                            continue
+                        try:
+                            frame_points.append([
+                                image_to_frame(point[0], image_width),
+                                image_to_frame(point[1], image_height),
+                            ])
+                        except (TypeError, ValueError):
+                            continue
+                    if frame_points:
+                        payload["frame_points"] = frame_points
 
         def normalize(value: Any, key: str = "") -> Any:
             if isinstance(value, dict):
@@ -2234,7 +2567,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if isinstance(value, (list, tuple)):
                 return [normalize(child, key) for child in value]
             if isinstance(value, (int, float)) and (
-                key.startswith("frame_") or key in {"x", "y", "x1", "y1", "x2", "y2"}
+                key.startswith(("frame_", "image_"))
+                or key in {"x", "y", "x1", "y1", "x2", "y2"}
             ):
                 # Small coordinate jitter should not bypass the repeat guard.
                 return int(round(float(value) / 25.0) * 25)
@@ -2242,16 +2576,28 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 return value.strip().casefold()[:160]
             return value if isinstance(value, (int, float, bool)) or value is None else str(value)[:160]
 
+        has_frame_geometry = any(
+            key in payload for key in (
+                "frame_x", "frame_y", "frame_x1", "frame_y1",
+                "frame_x2", "frame_y2", "frame_points", "frame_strokes",
+            )
+        )
         keys = (
             "frame_x", "frame_y", "frame_x1", "frame_y1", "frame_x2", "frame_y2",
-            "frame_points", "frame_strokes", "normalized_strokes", "element_id", "label",
+            "frame_points", "frame_strokes", "constraint_frame_region",
+            "image_x", "image_y", "image_x1", "image_y1", "image_x2", "image_y2",
+            "image_points",
+            "normalized_strokes", "element_id", "label",
             "fallback_text", "role", "expected_region", "direction", "amount", "name",
         )
         canonical = {
             "tool": name,
             "frame_region": list(frame_region or ()),
             "target": {
-                key: normalize(payload[key], key) for key in keys if key in payload
+                key: normalize(payload[key], key)
+                for key in keys
+                if key in payload
+                and not (has_frame_geometry and key.startswith("image_"))
             },
         }
         if not canonical["target"]:
@@ -2268,7 +2614,29 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         return max(0.0, min(0.05, value))
 
     def _continuous_pointer_output_requested(self) -> bool:
-        directives = "\n".join(self._native_visual_user_directives[-4:])
+        directives = "\n".join(
+            getattr(self, "_native_visual_user_directives", [])[-4:]
+        )
+        # Fresh user directives may legitimately change the active task while
+        # it is running.  Otherwise a typed desktop stage must trust the
+        # compiler-owned intent instead of reclassifying an antecedent in the
+        # original prose (for example, an existing drawing that is now only an
+        # input to capture/send).
+        if directives and _requests_continuous_pointer_output(directives):
+            return True
+        if str(self.runtime_profile.stage_type or "") == "ExecuteDesktopTask":
+            operations = {
+                str(item or "").strip().casefold()
+                for item in (self.task_intent.get("operation") or [])
+            }
+            interaction = self.task_intent.get("interaction") or {}
+            interaction_active = bool(
+                interaction.get("active")
+                if isinstance(interaction, dict)
+                else getattr(interaction, "active", False)
+            )
+            if "draw" not in operations and not interaction_active:
+                return False
         return _requests_continuous_pointer_output(
             f"{self.task}\n{directives}" if directives else self.task
         )
@@ -3052,18 +3420,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._native_no_progress_signature = ""
             self._native_no_progress_streak = 0
             self._native_no_progress_block_count = 0
+            self._native_no_progress_streaks.clear()
+            self._native_no_progress_block_counts.clear()
             return
         if float(change_ratio) <= self._native_no_progress_threshold():
-            if action_signature == self._native_no_progress_signature:
-                self._native_no_progress_streak += 1
-            else:
-                self._native_no_progress_signature = action_signature
-                self._native_no_progress_streak = 1
-                self._native_no_progress_block_count = 0
+            streak = self._native_no_progress_streaks.get(action_signature, 0) + 1
+            self._native_no_progress_streaks[action_signature] = streak
+            self._native_no_progress_signature = action_signature
+            self._native_no_progress_streak = streak
+            self._native_no_progress_block_count = self._native_no_progress_block_counts.get(
+                action_signature, 0,
+            )
             return
         self._native_no_progress_signature = ""
         self._native_no_progress_streak = 0
         self._native_no_progress_block_count = 0
+        self._native_no_progress_streaks.clear()
+        self._native_no_progress_block_counts.clear()
 
     def _native_no_progress_guard(
         self,
@@ -3074,17 +3447,38 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             tool_name,
             args,
             frame_region=self._visual_frame_region,
+            submitted_size=self._visual_submitted_size,
+        )
+        legacy_streak = (
+            self._native_no_progress_streak
+            if signature and signature == self._native_no_progress_signature
+            else 0
+        )
+        streak = max(
+            legacy_streak,
+            self._native_no_progress_streaks.get(signature, 0) if signature else 0,
         )
         if (
             not signature
-            or signature != self._native_no_progress_signature
-            or self._native_no_progress_streak < int(CONFIG.get(
+            or streak < int(CONFIG.get(
                 "controller", "native_no_progress_streak",
                 default=_NATIVE_NO_PROGRESS_STREAK,
             ) or _NATIVE_NO_PROGRESS_STREAK)
         ):
             return None
-        self._native_no_progress_block_count += 1
+        legacy_blocks = (
+            self._native_no_progress_block_count
+            if signature == self._native_no_progress_signature
+            else 0
+        )
+        block_count = max(
+            legacy_blocks,
+            self._native_no_progress_block_counts.get(signature, 0),
+        ) + 1
+        self._native_no_progress_block_counts[signature] = block_count
+        self._native_no_progress_signature = signature
+        self._native_no_progress_streak = streak
+        self._native_no_progress_block_count = block_count
         return {
             "ok": False,
             "verified": False,
@@ -3092,7 +3486,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             "native_no_progress_guard": True,
             "no_visual_progress": True,
             "repeat_signature": signature,
-            "no_progress_streak": self._native_no_progress_streak,
+            "no_progress_streak": streak,
             "observed_change_ratio": round(float(self._last_visual_change_ratio or 0.0), 6),
             "strategy_change_required": True,
             "error": (
@@ -3102,8 +3496,346 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "is not evidence of success."
             ),
             "needs_replan": True,
-            "repeated_guard_blocks": self._native_no_progress_block_count,
+            "repeated_guard_blocks": block_count,
         }
+
+    def _native_no_progress_semantic_recovery(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        block: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Upgrade one missed visual click with current-frame structure.
+
+        A no-progress frame triggers a fresh, locally focused semantic
+        observation.  That evidence used to arrive after the model's click,
+        while the repeat guard rejected the next attempt before ToolSession
+        could use it.  Permit exactly the first blocked retry to bind a nearby
+        actionable element from that same authoritative frame.  Further
+        failures remain blocked, so this cannot become an unbounded click
+        loop or consume stale accessibility geometry.
+        """
+        if (
+            str(tool_name or "").casefold() != "click"
+            or int(block.get("repeated_guard_blocks") or 0) != 1
+            or args.get("element_id") is not None
+            or bool(args.get("double"))
+            or str(args.get("button") or "left").casefold() != "left"
+        ):
+            return None
+        semantic_frame_id = int(getattr(
+            self.session, "_semantic_grounding_frame_id", 0,
+        ) or 0)
+        if not semantic_frame_id or semantic_frame_id != int(
+            getattr(self, "_visual_frame_id", 0) or 0
+        ):
+            return None
+        snapshot = getattr(self.session, "snapshot", None)
+        if (
+            snapshot is None
+            or int(getattr(snapshot, "hwnd", 0) or 0)
+            != int(getattr(self, "_visual_frame_hwnd", 0) or 0)
+        ):
+            return None
+        try:
+            mapped = self._map_normalized_frame_coordinates(
+                "click", dict(args),
+            )
+            x = int(mapped["x"])
+            y = int(mapped["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        resolver = getattr(self.session, "_semantic_element_near_point", None)
+        candidate = resolver(x, y) if callable(resolver) else None
+        try:
+            element_id = int(getattr(candidate, "elem_id", -1) or -1)
+        except (TypeError, ValueError):
+            element_id = -1
+        if element_id <= 0:
+            return None
+        recovered = {"element_id": element_id}
+        if bool(args.get("physical")):
+            recovered["physical"] = True
+        BUS.publish(
+            "native_no_progress_semantic_recovery",
+            run_id=self.run_id,
+            frame_id=semantic_frame_id,
+            repeat_signature=str(block.get("repeat_signature") or ""),
+            element_id=element_id,
+            element_source=str(getattr(candidate, "source", "") or ""),
+            element_role=str(getattr(candidate, "role", "") or ""),
+            authored_coords=[x, y],
+            recovered_coords=[
+                int(getattr(candidate, "cx", x) or x),
+                int(getattr(candidate, "cy", y) or y),
+            ],
+        )
+        return recovered
+
+    def _refresh_visual_target_binding(
+        self,
+        *,
+        reason: str,
+    ) -> tuple[int, bool]:
+        """Refresh a verified app binding without adopting unrelated windows."""
+        previous = int(getattr(self.session, "hwnd", 0) or 0)
+        refresh = getattr(self.session, "_refresh_bound_target_window", None)
+        recovered: int | None = None
+        if callable(refresh):
+            try:
+                recovered = refresh()
+            except Exception:
+                recovered = None
+        else:
+            alive = getattr(self.session, "_window_alive", None)
+            recover = getattr(self.session, "_recover_bound_target_window", None)
+            try:
+                stale = bool(previous and callable(alive) and not alive(previous))
+            except Exception:
+                stale = False
+            if stale and callable(recover):
+                try:
+                    recovered = recover()
+                except Exception:
+                    recovered = None
+        current = int(getattr(self.session, "hwnd", 0) or recovered or previous)
+        if recovered and current != int(recovered):
+            remember = getattr(self.session, "_remember_target", None)
+            if callable(remember):
+                try:
+                    remember(int(recovered), str(
+                        getattr(self.session, "target_hint", "") or ""
+                    ))
+                    current = int(getattr(self.session, "hwnd", 0) or recovered)
+                except Exception:
+                    current = int(recovered)
+        changed = bool(current and current != previous)
+        if changed:
+            BUS.publish(
+                "visual_target_rebound",
+                run_id=self.run_id,
+                reason=str(reason or "visual_binding_refresh"),
+                previous_target_hwnd=previous,
+                target_hwnd=current,
+                recovery=(
+                    dict(getattr(self.session, "_last_scope_recovery", {}) or {})
+                    if isinstance(
+                        getattr(self.session, "_last_scope_recovery", None), dict,
+                    )
+                    else None
+                ),
+                authoritative_frame_required=True,
+            )
+        return current, changed
+
+    @staticmethod
+    def _mapped_spatial_points(
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> list[tuple[str, int, int]]:
+        """Return physical points that a mapped native action will touch."""
+        name = str(tool_name or "").strip().casefold()
+        if name == "run_action_batch":
+            points: list[tuple[str, int, int]] = []
+            for action in args.get("actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                child_name = str(
+                    action.get("action") or action.get("tool") or ""
+                ).strip().casefold()
+                if child_name:
+                    child_args = {
+                        key: value for key, value in action.items()
+                        if key not in {"action", "tool"}
+                    }
+                    points.extend(AgentRunner._mapped_spatial_points(
+                        child_name, child_args,
+                    ))
+            return points
+
+        raw_points: list[tuple[Any, Any]] = []
+        if name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+            raw_points.append((args.get("x"), args.get("y")))
+        elif name == "drag":
+            raw_points.extend([
+                (args.get("x1"), args.get("y1")),
+                *((point[0], point[1]) for point in (args.get("points") or [])
+                  if isinstance(point, (list, tuple)) and len(point) == 2),
+                (args.get("x2"), args.get("y2")),
+            ])
+        elif name == "draw_strokes":
+            raw_points.extend(
+                (point[0], point[1])
+                for stroke in (args.get("strokes") or [])
+                if isinstance(stroke, list)
+                for point in stroke
+                if isinstance(point, (list, tuple)) and len(point) == 2
+            )
+        points = []
+        for x, y in raw_points:
+            try:
+                points.append((name, int(x), int(y)))
+            except (TypeError, ValueError):
+                continue
+        return points
+
+    def _native_point_scope_guard(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Keep raw native points off system UI and unrelated windows."""
+        # Synthetic/legacy callers use short placeholders rather than a real
+        # authoritative JPEG.  There is no trustworthy pixel-to-window point
+        # contract to validate in that mode; production frames are far larger.
+        if len(str(getattr(self, "_last_visual_feedback_b64", "") or "")) < 128:
+            return None
+        points = self._mapped_spatial_points(tool_name, args)
+        if not points:
+            return None
+        target, target_rebound = self._refresh_visual_target_binding(
+            reason="native_point_scope_guard",
+        )
+        if (
+            target_rebound
+            and self._visual_frame_scope == "target_window"
+            and int(self._visual_frame_hwnd or 0) != int(target or 0)
+        ):
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "action_executed": False,
+                "native_point_scope_guard": True,
+                "scope_reason": "target_rebound_requires_fresh_frame",
+                "target_hwnd": int(target or 0),
+                "previous_frame_hwnd": int(self._visual_frame_hwnd or 0),
+                "needs_replan": False,
+                "error": (
+                    "The verified application replaced its target window after the "
+                    "authoritative crop was captured. No input was sent; consume a fresh "
+                    "frame from the rebound target before retrying the spatial action."
+                ),
+            }
+        related = getattr(self.session, "_window_related_to_target", None)
+        same_process = getattr(self.session, "_same_window_process", None)
+        strict_actions = {
+            "click", "scroll", "mouse_down", "draw_strokes",
+        }
+        taskbar_classes = {"shell_traywnd", "shell_secondarytraywnd"}
+        for action, x, y in points:
+            try:
+                point_hwnd = int(win32gui.WindowFromPoint((x, y)) or 0)
+                root = int(
+                    win32gui.GetAncestor(point_hwnd, 2) or point_hwnd
+                ) if point_hwnd else 0
+                class_name = str(
+                    win32gui.GetClassName(root) if root else ""
+                ).strip()
+                title = str(
+                    win32gui.GetWindowText(root) if root else ""
+                ).strip()
+            except Exception:
+                point_hwnd = root = 0
+                class_name = title = ""
+            reason = ""
+            if class_name.casefold() in taskbar_classes:
+                reason = "system_taskbar_surface"
+            elif action in strict_actions and target:
+                belongs = bool(
+                    root
+                    and (
+                        (callable(related) and related(root, target))
+                        or (callable(same_process) and same_process(root, target))
+                    )
+                )
+                if not belongs:
+                    reason = "unrelated_window_surface" if root else "no_window_at_point"
+            if not reason:
+                continue
+            return {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "action_executed": False,
+                "native_point_scope_guard": True,
+                "scope_reason": reason,
+                "action": action,
+                "point": [x, y],
+                "point_hwnd": root,
+                "point_window_class": class_name[:80],
+                "point_window_title": title[:120],
+                "target_hwnd": target,
+                "needs_replan": False,
+                "error": (
+                    "The mapped point belongs to the Windows taskbar or an unrelated "
+                    "top-level window, not the bound target surface. No input was sent. "
+                    "Inspect the current authoritative frame, refocus/rebind the intended "
+                    "window, and choose a point inside its visible client content. Use a "
+                    "dedicated tray/taskbar tool for intentional system-shell interaction."
+                ),
+            }
+        return None
+
+    def _explicit_repeated_click_requested(self) -> bool:
+        text = str(self.task or "").casefold()
+        return bool(re.search(
+            r"(?:\u8fde\u7eed|\u53cd\u590d|\u91cd\u590d|\u591a\u6b21|\u4e0d\u505c|\u4e00\u76f4|\u72c2\u70b9|\u8fde\u70b9)"
+            r"|(?:\u70b9\u51fb|\u70b9|\u6309)\s*\d+\s*\u6b21"
+            r"|\b(?:repeatedly|multiple\s+times|keep\s+clicking|rapid(?:ly)?\s+click)\b"
+            r"|\bclick\b[^.!?]{0,40}\b\d+\s+times\b",
+            text,
+        ))
+
+    def _scene_coverage_guard(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Reject one measured scroll-loop edge on the current real scene.
+
+        The ledger owns no application vocabulary.  It can intervene only
+        after authoritative pixels prove that the current viewport was seen
+        before and the identical scroll edge has already been traversed from
+        it.  Other spatial actions remain available, including arbitrary game
+        drags and explicit repeated-input tasks.
+        """
+        if not bool(CONFIG.get(
+            "controller", "scene_coverage_enabled", default=True,
+        )):
+            return None
+        signature = self._native_spatial_action_signature(
+            tool_name,
+            args,
+            frame_region=self._visual_frame_region,
+            submitted_size=self._visual_submitted_size,
+        )
+        block = self._scene_coverage.guard_repeated_edge(
+            action=tool_name,
+            action_args=args,
+            action_signature=signature,
+            explicit_repeat=self._explicit_repeated_click_requested(),
+        )
+        if block:
+            BUS.publish(
+                "scene_coverage_guard",
+                run_id=self.run_id,
+                tool=tool_name,
+                current_scene_id=block.get("current_scene_id"),
+                current_scene_visit_count=block.get(
+                    "current_scene_visit_count",
+                ),
+                proposed_edge=block.get("proposed_edge"),
+                proposed_scroll_direction=block.get(
+                    "proposed_scroll_direction",
+                ),
+                prior_edge_count=block.get("prior_edge_count"),
+                prior_target_scene_ids=block.get(
+                    "prior_target_scene_ids",
+                ),
+                cycle_scene_path=block.get("cycle_scene_path"),
+            )
+        return block
 
     def _stable_visual_work_surface(
         self,
@@ -3156,11 +3888,294 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             result.policy,
         )
 
+    def _visual_semantic_grounding_assist(
+        self,
+        *,
+        hwnd: int,
+        frame_region: Any,
+        force_refresh: bool,
+        focus_frame_roi: tuple[float, float, float, float] | None = None,
+    ) -> tuple[str, Any | None, dict[str, Any]]:
+        """Return compact UIA/OCR anchors aligned to a native visual frame.
+
+        Native pixels remain authoritative, but a vision model should not have
+        to estimate the center of text-rendered controls from scratch after a
+        miss.  This path is deliberately application-agnostic: it reuses a
+        recent daemon snapshot when possible and otherwise performs one bounded
+        pixel-text fusion pass.  The resulting element ids stay usable by the
+        same semantic click controller, while every physical action still goes
+        through fresh-frame and visual-servo checks.
+        """
+        if not bool(CONFIG.get(
+            "controller", "semantic_grounding_assist", default=False,
+        )):
+            return "", None, {"enabled": False}
+        max_refreshes = max(0, int(CONFIG.get(
+            "controller", "semantic_grounding_assist_max_refreshes", default=12,
+        ) or 12))
+        snapshot = getattr(self.session, "snapshot", None)
+        try:
+            snapshot_matches = bool(
+                snapshot is not None
+                and int(getattr(snapshot, "hwnd", 0) or 0) == int(hwnd)
+                and getattr(snapshot, "elements", None)
+            )
+        except (TypeError, ValueError):
+            snapshot_matches = False
+        source = "session_snapshot" if snapshot_matches else ""
+
+        if not snapshot_matches and not force_refresh:
+            try:
+                from ..fast.perception_daemon import PERCEPTION_DAEMON
+
+                daemon_snapshot = PERCEPTION_DAEMON.latest_snapshot(
+                    int(hwnd), max_age_ms=5_000,
+                )
+                if daemon_snapshot is not None and getattr(
+                    daemon_snapshot, "elements", None,
+                ):
+                    snapshot = daemon_snapshot
+                    snapshot_matches = True
+                    source = "perception_daemon"
+            except Exception:
+                logger.debug("semantic grounding daemon lookup failed", exc_info=True)
+
+        refresh_allowed = self._visual_semantic_assist_count < max_refreshes
+        if force_refresh or not snapshot_matches:
+            if not refresh_allowed:
+                return "", None, {
+                    "enabled": True,
+                    "source": source or "none",
+                    "refresh_budget_exhausted": True,
+                    "refresh_count": self._visual_semantic_assist_count,
+                }
+            self._visual_semantic_assist_count += 1
+            try:
+                snapshot = fusion.observe(
+                    int(hwnd),
+                    include_icons=False,
+                    perception_mode="pixel_text",
+                    stop_event=self.stop_event,
+                )
+                snapshot_matches = bool(getattr(snapshot, "elements", None))
+                source = "fresh_pixel_text_fusion"
+            except Exception as exc:
+                logger.debug("semantic grounding refresh failed: %s", exc)
+                return "", None, {
+                    "enabled": True,
+                    "source": "fresh_pixel_text_fusion",
+                    "error": str(exc)[:240],
+                    "refresh_count": self._visual_semantic_assist_count,
+                }
+
+        if snapshot is None or not snapshot_matches:
+            return "", None, {
+                "enabled": True,
+                "source": source or "none",
+                "candidate_count": 0,
+                "refresh_count": self._visual_semantic_assist_count,
+            }
+
+        # Element ids are only turn-local, but must be unique and positive for
+        # the semantic controller. Incremental OCR snapshots do not always pass
+        # through the final fusion id assignment.
+        seen_ids: set[int] = set()
+        next_id = 1
+        for element in list(getattr(snapshot, "elements", None) or []):
+            try:
+                elem_id = int(getattr(element, "elem_id", -1) or -1)
+            except (TypeError, ValueError):
+                elem_id = -1
+            if elem_id <= 0 or elem_id in seen_ids:
+                while next_id in seen_ids:
+                    next_id += 1
+                element.elem_id = next_id
+                elem_id = next_id
+            seen_ids.add(elem_id)
+            next_id = max(next_id, elem_id + 1)
+
+        try:
+            recent_changes = self.session._fast_screen_status()
+        except Exception:
+            recent_changes = {}
+        reduced = reducer.reduce_snapshot(
+            snapshot,
+            task=self.task,
+            recent_changes=recent_changes,
+            # Keep enough ranked structure to recover a small unlabeled
+            # control near a failed visual target. The final model payload is
+            # still compacted below; this does not expose a full accessibility
+            # tree or favor any particular application.
+            max_candidates=36,
+            communication_context=getattr(
+                self.session, "communication_context", None,
+            ),
+        )
+        all_candidates: list[dict[str, Any]] = []
+        frame_left = int(frame_region.left)
+        frame_top = int(frame_region.top)
+        frame_width = max(1, int(frame_region.width))
+        frame_height = max(1, int(frame_region.height))
+        for item in reduced.get("top_candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            bbox = item.get("bbox")
+            center = item.get("center")
+            if not (
+                isinstance(bbox, (list, tuple)) and len(bbox) == 4
+                and isinstance(center, (list, tuple)) and len(center) == 2
+            ):
+                continue
+            try:
+                left = float(bbox[0])
+                top = float(bbox[1])
+                width = max(1.0, float(bbox[2]))
+                height = max(1.0, float(bbox[3]))
+                cx = float(center[0])
+                cy = float(center[1])
+            except (TypeError, ValueError):
+                continue
+            right = left + width
+            bottom = top + height
+            if (
+                right <= frame_left
+                or bottom <= frame_top
+                or left >= frame_left + frame_width
+                or top >= frame_top + frame_height
+            ):
+                continue
+
+            def frame_value(value: float, origin: int, extent: int) -> int:
+                return max(0, min(1000, int(round(
+                    (value - origin) * 1000.0 / max(1, extent - 1)
+                ))))
+
+            all_candidates.append({
+                "element_id": item.get("elem_id"),
+                "label": re.sub(r"\s+", " ", str(item.get("label") or "")).strip()[:80],
+                "role": str(item.get("role") or "element")[:32],
+                "center_frame": [
+                    frame_value(cx, frame_left, frame_width),
+                    frame_value(cy, frame_top, frame_height),
+                ],
+                "bbox_frame": [
+                    frame_value(left, frame_left, frame_width),
+                    frame_value(top, frame_top, frame_height),
+                    frame_value(right, frame_left, frame_width),
+                    frame_value(bottom, frame_top, frame_height),
+                ],
+                "source": str(item.get("source") or "unknown")[:20],
+            })
+        if not all_candidates:
+            return "", snapshot, {
+                "enabled": True,
+                "source": source,
+                "candidate_count": 0,
+                "refresh_count": self._visual_semantic_assist_count,
+            }
+
+        focus_candidates: list[dict[str, Any]] = []
+        if isinstance(focus_frame_roi, (list, tuple)) and len(focus_frame_roi) == 4:
+            try:
+                focus_left, focus_top, focus_right, focus_bottom = (
+                    max(0.0, min(1000.0, float(value)))
+                    for value in focus_frame_roi
+                )
+            except (TypeError, ValueError):
+                focus_left = focus_top = focus_right = focus_bottom = 0.0
+            if focus_right > focus_left and focus_bottom > focus_top:
+                padding = 35.0
+                focus_left = max(0.0, focus_left - padding)
+                focus_top = max(0.0, focus_top - padding)
+                focus_right = min(1000.0, focus_right + padding)
+                focus_bottom = min(1000.0, focus_bottom + padding)
+                for candidate in all_candidates:
+                    box = candidate.get("bbox_frame")
+                    if not isinstance(box, list) or len(box) != 4:
+                        continue
+                    if (
+                        float(box[2]) < focus_left
+                        or float(box[3]) < focus_top
+                        or float(box[0]) > focus_right
+                        or float(box[1]) > focus_bottom
+                    ):
+                        continue
+                    focused = dict(candidate)
+                    focused["near_failed_action"] = True
+                    focus_candidates.append(focused)
+                    if len(focus_candidates) >= 10:
+                        break
+
+        candidates: list[dict[str, Any]] = []
+        seen_candidate_ids: set[Any] = set()
+        for candidate in [*focus_candidates, *all_candidates[:12]]:
+            identity = candidate.get("element_id")
+            if identity in seen_candidate_ids:
+                # Preserve the recovery annotation if this candidate was also
+                # one of the task-ranked defaults.
+                continue
+            seen_candidate_ids.add(identity)
+            candidates.append(candidate)
+            if len(candidates) >= 18:
+                break
+
+        # Keep the snapshot live after frame injection so label/element_id
+        # actions resolve against exactly this advisory. A visual preflight and
+        # controller servo still fail closed if the real pixels move meanwhile.
+        self.session.snapshot = snapshot
+        self.session._observe_cache = None
+        line = (
+            "Fresh text/structure anchors (advisory localization only; current pixels decide meaning and state): "
+            + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+            + ". Prefer click(label=...) or click(element_id=...) for a stable text control; "
+            "use image_* coordinates for purely graphical targets. "
+            + (
+                "Candidates marked near_failed_action are fresh structured affordances in or "
+                "beside the last ineffective target. Use an exact element_id if one matches the "
+                "visible control; otherwise leave that failed region or change the operation, "
+                "rather than jittering the old coordinates. "
+                if focus_candidates else ""
+            )
+        )
+        return line, snapshot, {
+            "enabled": True,
+            "source": source,
+            "candidate_count": len(candidates),
+            "focus_candidate_count": len(focus_candidates),
+            "refresh_count": self._visual_semantic_assist_count,
+        }
+
+    def _visual_graphical_grounding_assist(
+        self,
+        image_b64: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Expose pixel-only control hypotheses without inventing semantics."""
+        candidates = detect_graphical_affordances(
+            image_b64,
+            max_candidates=int(CONFIG.get(
+                "controller", "pixel_graphical_max_candidates", default=16,
+            ) or 16),
+        )
+        if not candidates:
+            return "", []
+        return (
+            "Pixel-native graphical affordance hypotheses from this exact frame: "
+            + json.dumps(candidates, ensure_ascii=False, separators=(",", ":"))
+            + ". These unlabeled boxes have no inferred application meaning and are "
+            "not completion evidence. Use the displayed pixels and root goal to choose "
+            "at most one plausible graphical target, click its center_frame, then inspect "
+            "the real post-action transition. Repeated layout_family values identify only "
+            "a measured visual column, not a hard-coded control type. ",
+            candidates,
+        )
+
     def _inject_visual_frame(
         self,
         *,
         phase: str,
         action: str = "",
+        action_args: dict[str, Any] | None = None,
+        action_executed: bool = True,
         image_b64: str = "",
         frame_region: Any | None = None,
         result_preview: str = "",
@@ -3178,6 +4193,9 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         """
         if not _main_model_has_vision():
             return False
+        self._refresh_visual_target_binding(
+            reason=f"{str(phase or 'visual')}_frame_capture",
+        )
         hwnd = int(getattr(self.session, "hwnd", 0) or 0)
         previous_frame_id = int(self._visual_frame_id or 0)
         previous_b64 = self._last_visual_feedback_b64
@@ -3337,12 +4355,57 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 and change_ratio is not None
                 and float(change_ratio) <= self._native_no_progress_threshold()
             )
+            semantic_grounding_line = ""
+            semantic_grounding_snapshot = None
+            semantic_grounding_meta: dict[str, Any] = {}
+            needs_semantic_reanchor = bool(
+                hwnd
+                and (
+                    phase == "initial"
+                    or no_visual_progress
+                    or (
+                        phase == "post_action"
+                        and (
+                            not change_comparable
+                            or (previous_hwnd and previous_hwnd != hwnd)
+                        )
+                    )
+                )
+            )
+            if needs_semantic_reanchor:
+                (
+                    semantic_grounding_line,
+                    semantic_grounding_snapshot,
+                    semantic_grounding_meta,
+                ) = self._visual_semantic_grounding_assist(
+                    hwnd=hwnd,
+                    frame_region=region,
+                    force_refresh=True,
+                    focus_frame_roi=(action_roi if no_visual_progress else None),
+                )
+            (
+                graphical_grounding_line,
+                pixel_graphical_candidates,
+            ) = self._visual_graphical_grounding_assist(b64)
             max_side = 1120
             scale = min(1.0, max_side / max(1, region.width, region.height))
             submitted_width = max(1, int(region.width * scale))
             submitted_height = max(1, int(region.height * scale))
+            self._visual_submitted_size = (submitted_width, submitted_height)
             self._visual_frame_id += 1
             frame_id = self._visual_frame_id
+            self._pixel_graphical_candidates = [
+                dict(item) for item in pixel_graphical_candidates
+            ]
+            self._pixel_graphical_frame_id = frame_id
+            BUS.publish(
+                "pixel_graphical_affordances",
+                run_id=self.run_id,
+                frame_id=frame_id,
+                hwnd=hwnd,
+                candidate_count=len(pixel_graphical_candidates),
+                candidates=pixel_graphical_candidates,
+            )
             self._visual_work_surface_frame_bounds = work_surface_bounds
             self._visual_work_surface_frame_id = frame_id if work_surface_bounds else 0
             self._visual_work_surface_blocked_reason = surface_blocked_reason
@@ -3350,6 +4413,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 frame_id if surface_blocked_reason else 0
             )
             epoch = int(getattr(self.session, "_screen_epoch", 0) or 0)
+            scene_coverage_state = self._scene_coverage.record_frame(
+                image_b64=b64,
+                hwnd=hwnd,
+                frame_region=region_tuple,
+                frame_id=frame_id,
+                phase=phase,
+                action=action,
+                action_args=action_args,
+                action_signature=action_signature,
+                action_executed=bool(action_executed),
+            )
+            if scene_coverage_state:
+                BUS.publish(
+                    "scene_coverage",
+                    run_id=self.run_id,
+                    **scene_coverage_state,
+                )
             action_line = f" after action {action!r}" if action else ""
             preview_line = (
                 " Tool output preview is diagnostic only: "
@@ -3371,6 +4451,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         "NO VISUAL PROGRESS DETECTED. Do not claim success and do not repeat "
                         "the same spatial action; inspect the pixels and change strategy. "
                     )
+                    if str(action or "").casefold() == "scroll":
+                        progress_line += (
+                            "For scroll recovery, remember that amount<0 moves down and amount>0 "
+                            "moves up; use the goal and visible scrollbar to choose the opposite "
+                            "sign or a different scrollable region instead of repeating this wheel input. "
+                        )
                 else:
                     progress_line += "Visible pixels changed; judge whether that change serves the task. "
             elif phase == "post_action":
@@ -3410,13 +4496,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                             "not visually clear, do not guess or continue blindly. "
                             f"Frame scope={scope}; selection_reason={scope_reason}. "
                             f"{scope_line}{progress_line}{surface_line}"
-                            f"物理屏幕区域 left={region.left}, top={region.top}, "
-                            f"width={region.width}, height={region.height}；"
-                            f"提交图片约 {submitted_width}x{submitted_height}。"
-                            "直接依据此图操作时必须使用 frame_x/frame_y（0..1000，"
-                            "相对整张当前帧）；运行时会映射到物理屏幕。不要自行按图片"
-                            "像素缩放，也不要把图片坐标填进 x/y。结构化 observe 的"
-                            f"目标应使用 element_id；物理 x/y 仅供控制器内部使用。{preview_line}]"
+                            f"{semantic_grounding_line}{graphical_grounding_line}"
+                            f"Exact submitted-image size={submitted_width}x{submitted_height} pixels. "
+                            "For a purely visual click, scroll, press, move or drag, prefer the image_* "
+                            "tool fields copied directly from this displayed image: x must be within "
+                            f"0..{submitted_width - 1} and y within 0..{submitted_height - 1}. "
+                            "The runtime maps those pixels back to the physical capture. The frame_* "
+                            "0..1000 fields are an alternative; never mix image_*, frame_* or physical "
+                            "coordinates. When the target has stable visible text, prefer a semantic "
+                            "click label/text_query over either coordinate form. "
+                            f"Physical capture region left={region.left}, top={region.top}, "
+                            f"width={region.width}, height={region.height}. "
+                            "Do not estimate physical x/y yourself; those coordinates are reserved "
+                            "for the controller after it maps the selected image_* or frame_* source. "
+                            f"{preview_line}]"
                         ),
                     },
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
@@ -3442,6 +4535,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "width": int(region.width),
                 "height": int(region.height),
             }
+            self.session._visual_submitted_size = [submitted_width, submitted_height]
             self.session._visual_work_surface_frame_bounds = (
                 list(work_surface_bounds) if work_surface_bounds is not None else None
             )
@@ -3473,6 +4567,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 # only inside the transaction; the next model turn must
                 # re-ground structure if it chooses a structured action.
                 self._invalidate_structured_grounding()
+                if (
+                    semantic_grounding_snapshot is not None
+                    and int(getattr(semantic_grounding_snapshot, "hwnd", 0) or 0) == hwnd
+                ):
+                    self.session.snapshot = semantic_grounding_snapshot
+                    self.session._semantic_grounding_frame_id = frame_id
+                    self.session._semantic_grounding_epoch = epoch
             BUS.publish(
                 "visual_feedback",
                 run_id=self.run_id,
@@ -3505,6 +4606,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 ),
                 no_visual_progress=no_visual_progress,
                 no_progress_streak=int(self._native_no_progress_streak),
+                semantic_grounding=semantic_grounding_meta,
+                pixel_graphical_candidate_count=len(
+                    pixel_graphical_candidates
+                ),
                 work_surface_frame_bounds=(
                     list(work_surface_bounds) if work_surface_bounds is not None else None
                 ),
@@ -3534,6 +4639,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         or controller refresh silently ground against the previous pixels.
         """
         self.session.snapshot = None
+        self.session._semantic_grounding_frame_id = 0
+        self.session._semantic_grounding_epoch = -1
         self.session._observe_cache = None
         self.session._last_native_frame_capture = None
 
@@ -3562,6 +4669,30 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             except (TypeError, ValueError):
                 return None
             return parsed if 0.0 <= parsed <= 1000.0 else None
+
+        def submitted_image_point(
+            payload: dict[str, Any],
+            x_key: str,
+            y_key: str,
+        ) -> tuple[float, float] | None:
+            submitted = self._visual_submitted_size
+            if not submitted or x_key not in payload or y_key not in payload:
+                return None
+            try:
+                image_x = float(payload[x_key])
+                image_y = float(payload[y_key])
+            except (TypeError, ValueError):
+                return None
+            image_width, image_height = submitted
+            if not (
+                0.0 <= image_x <= max(0, image_width - 1)
+                and 0.0 <= image_y <= max(0, image_height - 1)
+            ):
+                return None
+            return (
+                image_x * 1000.0 / max(1, image_width - 1),
+                image_y * 1000.0 / max(1, image_height - 1),
+            )
 
         def add_rect(
             left: float,
@@ -3691,6 +4822,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         continue
                     collect(str(child_name), child_args)
                 return
+            source_frame = payload.get("source_frame_coordinates")
+            if isinstance(source_frame, dict) and source_frame:
+                # Mapped execution payloads retain their authoritative source
+                # coordinates.  Reuse those for a later semantic/post-OCR
+                # preflight instead of expanding back to the whole desktop.
+                collect(
+                    name,
+                    {
+                        **{
+                            key: value for key, value in payload.items()
+                            if key != "source_frame_coordinates"
+                        },
+                        **source_frame,
+                    },
+                )
+                return
             if name == "execute_subgoal":
                 click_specs = []
                 if isinstance(payload.get("click"), dict):
@@ -3705,11 +4852,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     add_element(input_spec.get("element_id")) or add_semantic_target(input_spec)
                     add_expected_region(input_spec.get("expected_region"))
                 return
-            if name in {"click", "scroll", "move_mouse"}:
+            if name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
                 x = number(payload.get("frame_x"))
                 y = number(payload.get("frame_y"))
                 if x is not None and y is not None:
                     add_points([(x, y)])
+                    return
+                image_point = submitted_image_point(payload, "image_x", "image_y")
+                if image_point is not None:
+                    add_points([image_point])
                     return
             elif name == "drag":
                 points: list[tuple[float, float]] = []
@@ -3718,11 +4869,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     y = number(payload.get(y_key))
                     if x is not None and y is not None:
                         points.append((x, y))
+                for x_key, y_key in (
+                    ("image_x1", "image_y1"), ("image_x2", "image_y2"),
+                ):
+                    image_point = submitted_image_point(payload, x_key, y_key)
+                    if image_point is not None:
+                        points.append(image_point)
                 for raw in payload.get("frame_points") or []:
                     if isinstance(raw, (list, tuple)) and len(raw) == 2:
                         x, y = number(raw[0]), number(raw[1])
                         if x is not None and y is not None:
                             points.append((x, y))
+                for raw in payload.get("image_points") or []:
+                    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                        image_point = submitted_image_point(
+                            {"image_x": raw[0], "image_y": raw[1]},
+                            "image_x",
+                            "image_y",
+                        )
+                        if image_point is not None:
+                            points.append(image_point)
                 if points:
                     add_points(points)
                     return
@@ -3838,6 +5004,53 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         # real JPEGs. Production frames are substantially larger.
         if len(previous) < 128:
             return "", 0.0, "", None
+        previous_target = int(getattr(self.session, "hwnd", 0) or 0)
+        hwnd, target_rebound = self._refresh_visual_target_binding(
+            reason="visual_preflight",
+        )
+        if (
+            target_rebound
+            and self._visual_frame_scope != "full_desktop"
+            and int(self._visual_frame_hwnd or 0) != int(hwnd or 0)
+        ):
+            started = time.monotonic()
+            try:
+                decision = select_visual_capture_scope(
+                    hwnd or None,
+                    task=self.task,
+                    related_window=getattr(
+                        self.session, "_window_related_to_target", None,
+                    ),
+                )
+                region = decision.region
+                current = capture_window_jpeg_b64(hwnd, region=region)
+                error = "" if current else "fresh rebound target capture returned empty"
+            except Exception as exc:
+                current = ""
+                region = None
+                error = str(exc)
+            BUS.publish(
+                "visual_preflight",
+                run_id=self.run_id,
+                ok=bool(current),
+                changed=bool(current),
+                target_rebound=True,
+                previous_target_hwnd=previous_target,
+                target_hwnd=int(hwnd or 0),
+                capture_region=(
+                    [int(region.left), int(region.top), int(region.width), int(region.height)]
+                    if region is not None else None
+                ),
+                decision_scope="target_rebound",
+                capture_latency_ms=int((time.monotonic() - started) * 1000),
+                error=error,
+            )
+            if current:
+                # A successor-window crop is not pixel-comparable with the old
+                # target crop.  Returning it as a changed frame cancels this
+                # action and attaches the new authoritative target in one turn.
+                return current, 1.0, "", region
+            return "", None, error, region
         if not self._has_fresh_visual_grounding():
             # Freshness is checked once before entering preflight, but the
             # foreground window, epoch, or capture scope can change in that
@@ -4022,22 +5235,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         def contains_frame_coordinate(value: Any) -> bool:
             if isinstance(value, dict):
                 return any(
-                    str(key).startswith("frame_") or contains_frame_coordinate(child)
+                    str(key).startswith(("frame_", "image_"))
+                    or contains_frame_coordinate(child)
                     for key, child in value.items()
                 )
             if isinstance(value, list):
                 return any(contains_frame_coordinate(child) for child in value)
             return False
-
-        def batch_action_name(action: Any) -> str:
-            if not isinstance(action, dict):
-                return ""
-            name = str(action.get("action") or action.get("tool") or "").strip()
-            if name:
-                return name
-            if len(action) == 1:
-                return str(next(iter(action))).strip()
-            return ""
 
         def frame_dependent_batch_action(action: Any) -> tuple[str, bool]:
             """Return whether a child consumes coordinates from this exact frame.
@@ -4047,23 +5251,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             mutation.  Raw frame coordinates and element ids cannot be safely
             rebound and therefore keep the one-per-authoritative-frame limit.
             """
-            if not isinstance(action, dict):
+            parsed = parse_atomic_action(action)
+            if parsed is None:
                 return "", False
-            name = batch_action_name(action)
-            if action.get("action") or action.get("tool"):
-                params = action.get("params") if isinstance(action.get("params"), dict) else {}
-                values = {
-                    **params,
-                    **{key: value for key, value in action.items() if key not in {"action", "tool", "params"}},
-                }
-            elif len(action) == 1:
-                _name, raw = next(iter(action.items()))
-                values = dict(raw) if isinstance(raw, dict) else {"value": raw}
-            else:
-                values = {}
+            name, values = parsed.name, parsed.inputs
             frame_keys = {
                 "frame_x", "frame_y", "frame_x1", "frame_y1",
                 "frame_x2", "frame_y2", "frame_points", "frame_strokes",
+                "image_x", "image_y", "image_x1", "image_y1",
+                "image_x2", "image_y2", "image_points",
             }
             physical_keys = {"x", "y", "x1", "y1", "x2", "y2", "points", "strokes"}
             depends = bool(
@@ -4148,6 +5344,225 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             return args
         left, top, width, height = region
         mapped = dict(args)
+        if (
+            tool_name in {"move_mouse", "mouse_up"}
+            and "constraint_frame_region" not in mapped
+            and "constraint_region" not in mapped
+            and "_constraint_region" not in mapped
+        ):
+            pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
+            pointer_status = (
+                pointer_status_fn()
+                if callable(pointer_status_fn)
+                else {"active": False}
+            )
+            inherited_constraint = pointer_status.get("constraint_frame_region")
+            if pointer_status.get("active") and isinstance(
+                inherited_constraint, dict
+            ):
+                mapped["constraint_frame_region"] = dict(inherited_constraint)
+        image_source: dict[str, Any] = {}
+
+        def numeric_image_value(value: Any, field: str) -> float:
+            if isinstance(value, bool):
+                raise ValueError(f"{field} must be a numeric submitted-image pixel coordinate")
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{field} must be a numeric submitted-image pixel coordinate"
+                ) from None
+
+        def convert_image_pair(
+            image_x_key: str,
+            image_y_key: str,
+            frame_x_key: str,
+            frame_y_key: str,
+        ) -> bool:
+            present = (image_x_key in mapped, image_y_key in mapped)
+            if not any(present):
+                return False
+            if not all(present):
+                raise ValueError(
+                    f"{tool_name} requires both {image_x_key} and {image_y_key}"
+                )
+            if frame_x_key in mapped or frame_y_key in mapped:
+                raise ValueError(
+                    f"{tool_name} received mixed submitted-image and normalized-frame coordinates"
+                )
+            submitted = self._visual_submitted_size
+            if not submitted or submitted[0] <= 0 or submitted[1] <= 0:
+                raise ValueError(
+                    f"{tool_name} submitted-image coordinates require the current frame image dimensions"
+                )
+            image_width, image_height = submitted
+            image_x = numeric_image_value(mapped.pop(image_x_key), image_x_key)
+            image_y = numeric_image_value(mapped.pop(image_y_key), image_y_key)
+            if not (
+                0.0 <= image_x <= max(0, image_width - 1)
+                and 0.0 <= image_y <= max(0, image_height - 1)
+            ):
+                raise ValueError(
+                    f"{image_x_key}/{image_y_key} must stay inside the exact submitted "
+                    f"image bounds 0..{max(0, image_width - 1)} by "
+                    f"0..{max(0, image_height - 1)}"
+                )
+            mapped[frame_x_key] = (
+                image_x * 1000.0 / max(1, image_width - 1)
+            )
+            mapped[frame_y_key] = (
+                image_y * 1000.0 / max(1, image_height - 1)
+            )
+            image_source[image_x_key] = image_x
+            image_source[image_y_key] = image_y
+            return True
+
+        if tool_name in {"click", "scroll", "move_mouse", "mouse_down", "mouse_up"}:
+            convert_image_pair("image_x", "image_y", "frame_x", "frame_y")
+        elif tool_name == "drag":
+            image_endpoint_present = any(
+                key in mapped
+                for key in ("image_x1", "image_y1", "image_x2", "image_y2")
+            )
+            if image_endpoint_present:
+                first_image = convert_image_pair(
+                    "image_x1", "image_y1", "frame_x1", "frame_y1",
+                )
+                second_image = convert_image_pair(
+                    "image_x2", "image_y2", "frame_x2", "frame_y2",
+                )
+                if not first_image or not second_image:
+                    raise ValueError(
+                        "drag submitted-image coordinates require both complete endpoints"
+                    )
+                if "frame_points" in mapped:
+                    raise ValueError(
+                        "drag received image endpoints with normalized frame_points"
+                    )
+                if "image_points" in mapped:
+                    raw_image_points = mapped.pop("image_points")
+                    if not isinstance(raw_image_points, list):
+                        raise ValueError("image_points must be an array of [x,y] pixels")
+                    converted_points: list[list[float]] = []
+                    original_points: list[list[float]] = []
+                    for index, raw_point in enumerate(raw_image_points):
+                        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+                            raise ValueError(f"image_points[{index}] must be [x,y]")
+                        temporary = {
+                            "image_x": raw_point[0],
+                            "image_y": raw_point[1],
+                        }
+                        prior = mapped
+                        mapped = temporary
+                        try:
+                            convert_image_pair(
+                                "image_x", "image_y", "frame_x", "frame_y",
+                            )
+                            converted_points.append([
+                                float(mapped["frame_x"]), float(mapped["frame_y"]),
+                            ])
+                            original_points.append([
+                                float(image_source.pop("image_x")),
+                                float(image_source.pop("image_y")),
+                            ])
+                        finally:
+                            mapped = prior
+                    mapped["frame_points"] = converted_points
+                    image_source["image_points"] = original_points
+            elif "image_points" in mapped:
+                raise ValueError(
+                    "image_points require drag endpoints in the same submitted-image coordinate source"
+                )
+        constraint_frame_region: dict[str, float] | None = None
+        if "constraint_frame_region" in mapped:
+            if "constraint_region" in mapped or "_constraint_region" in mapped:
+                raise ValueError(
+                    f"{tool_name} received both frame and physical action constraints"
+                )
+            raw_constraint = mapped.pop("constraint_frame_region")
+            try:
+                if isinstance(raw_constraint, (list, tuple)) and len(raw_constraint) == 4:
+                    constraint_x = float(raw_constraint[0])
+                    constraint_y = float(raw_constraint[1])
+                    constraint_right = float(raw_constraint[2])
+                    constraint_bottom = float(raw_constraint[3])
+                    constraint_width = constraint_right - constraint_x
+                    constraint_height = constraint_bottom - constraint_y
+                elif isinstance(raw_constraint, dict):
+                    constraint_x = float(raw_constraint["x"])
+                    constraint_y = float(raw_constraint["y"])
+                    constraint_width = float(raw_constraint["width"])
+                    constraint_height = float(raw_constraint["height"])
+                else:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    "constraint_frame_region requires [left,top,right,bottom] "
+                    "numeric bounds"
+                ) from None
+            if (
+                constraint_x < 0
+                or constraint_y < 0
+                or constraint_width <= 0
+                or constraint_height <= 0
+                or constraint_x + constraint_width > 1000
+                or constraint_y + constraint_height > 1000
+            ):
+                raise ValueError(
+                    "constraint_frame_region must be a positive rectangle fully inside "
+                    "the current whole-frame 0..1000 bounds"
+                )
+            constraint_frame_region = {
+                "x": constraint_x,
+                "y": constraint_y,
+                "width": constraint_width,
+                "height": constraint_height,
+            }
+            physical_left = left + int(round(
+                constraint_x * max(1, width - 1) / 1000.0
+            ))
+            physical_top = top + int(round(
+                constraint_y * max(1, height - 1) / 1000.0
+            ))
+            physical_right = left + int(round(
+                (constraint_x + constraint_width) * max(1, width - 1) / 1000.0
+            ))
+            physical_bottom = top + int(round(
+                (constraint_y + constraint_height) * max(1, height - 1) / 1000.0
+            ))
+            mapped["_constraint_region"] = {
+                "x": physical_left,
+                "y": physical_top,
+                "width": max(1, physical_right - physical_left),
+                "height": max(1, physical_bottom - physical_top),
+            }
+
+        def require_points_inside_constraint(
+            points: list[tuple[float, float]],
+            *,
+            source_name: str,
+        ) -> None:
+            if constraint_frame_region is None:
+                return
+            boundary_left = constraint_frame_region["x"]
+            boundary_top = constraint_frame_region["y"]
+            boundary_right = boundary_left + constraint_frame_region["width"]
+            boundary_bottom = boundary_top + constraint_frame_region["height"]
+            for point_index, (point_x, point_y) in enumerate(points):
+                if not (
+                    boundary_left <= float(point_x) <= boundary_right
+                    and boundary_top <= float(point_y) <= boundary_bottom
+                ):
+                    raise NativeFrameCoordinateError(
+                        (
+                            f"{source_name}[{point_index}] leaves the declared "
+                            "constraint_frame_region; the action was not executed"
+                        ),
+                        action_constraint_failed=True,
+                        constraint_frame_region=dict(constraint_frame_region),
+                        rejected_point=[float(point_x), float(point_y)],
+                        rejected_point_index=point_index,
+                    )
 
         if tool_name == "run_action_batch":
             actions = mapped.get("actions")
@@ -4189,27 +5604,11 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
 
             local_mutation_seen = False
             for index, action in enumerate(actions):
-                if not isinstance(action, dict):
+                parsed = parse_atomic_action(action)
+                if parsed is None:
                     mapped_actions.append(action)
                     continue
-                name = str(action.get("action") or action.get("tool") or "")
-                action_args: dict[str, Any]
-                if name:
-                    action_args = {
-                        key: value
-                        for key, value in action.items()
-                        if key not in {"action", "tool", "params"}
-                    }
-                    params = action.get("params")
-                    if isinstance(params, dict):
-                        action_args = {**params, **action_args}
-                elif len(action) == 1:
-                    name, raw_args = next(iter(action.items()))
-                    name = str(name)
-                    action_args = dict(raw_args) if isinstance(raw_args, dict) else {"value": raw_args}
-                else:
-                    mapped_actions.append(action)
-                    continue
+                name, action_args = parsed.name, dict(parsed.inputs)
                 if local_mutation_seen and name in {"click_element", "type_into_element"}:
                     action_args["_rebind_after_mutation"] = True
                 try:
@@ -4322,6 +5721,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             if mapped_point is not None:
                 mapped["x"], mapped["y"] = mapped_point
                 source = {"frame_x": mapped.pop("frame_x"), "frame_y": mapped.pop("frame_y")}
+                require_points_inside_constraint(
+                    [(float(source["frame_x"]), float(source["frame_y"]))],
+                    source_name="click_point",
+                )
                 used = True
             else:
                 # This method only processes model-authored tool arguments.
@@ -4330,7 +5733,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 # label. Controller-generated physical coordinates are added
                 # later, after this boundary, so no model x/y needs a bypass.
                 require_normalized_instead_of_physical(("x", "y"))
-                if tool_name != "click" or not (
+                pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
+                pointer_status = (
+                    pointer_status_fn()
+                    if callable(pointer_status_fn)
+                    else {"active": False}
+                )
+                if tool_name == "mouse_up" and pointer_status.get("active"):
+                    pass
+                elif tool_name != "click" or not (
                     mapped.get("element_id") is not None
                     or any(mapped.get(key) for key in (
                         "label", "fallback_text", "role", "expected_region", "visual_anchor",
@@ -4373,6 +5784,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         physical_points.append([physical[0], physical[1]])
                     mapped["points"] = physical_points
                     source["frame_points"] = raw_points
+                constraint_points = [
+                    (float(source["frame_x1"]), float(source["frame_y1"])),
+                    *[
+                        (float(raw_point[0]), float(raw_point[1]))
+                        for raw_point in (source.get("frame_points") or [])
+                    ],
+                    (float(source["frame_x2"]), float(source["frame_y2"])),
+                ]
+                require_points_inside_constraint(
+                    constraint_points,
+                    source_name="drag_path",
+                )
                 used = True
             else:
                 require_normalized_instead_of_physical(("x1", "y1", "x2", "y2", "points"))
@@ -4562,6 +5985,10 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                                 composition_affine_fit=fit_evidence,
                             )
 
+                require_points_inside_constraint(
+                    [point for stroke in normalized_strokes for point in stroke],
+                    source_name="frame_strokes",
+                )
                 simplified_strokes = [
                     _simplify_dense_frame_stroke(stroke)
                     for stroke in normalized_strokes
@@ -4605,9 +6032,18 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 require_normalized_instead_of_physical(("strokes",))
                 raise ValueError("draw_strokes requires frame_strokes from the current frame")
         if used:
+            if constraint_frame_region is not None:
+                source["constraint_frame_region"] = dict(
+                    constraint_frame_region
+                )
             mapped["coordinate_space"] = "current_frame_normalized_0_1000"
             mapped["visual_frame_id"] = self._visual_frame_id
             mapped["source_frame_coordinates"] = source
+            if image_source:
+                mapped["source_image_coordinates"] = {
+                    **image_source,
+                    "submitted_image_size": list(self._visual_submitted_size or ()),
+                }
         return mapped
 
     # ----------------------------------------------------------------- api
@@ -5078,14 +6514,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     values.append(value.strip())
         actions = args.get("actions")
         if isinstance(actions, list):
-            for action in actions:
-                if not isinstance(action, dict):
-                    continue
-                payload = action
-                if len(action) == 1 and not ("action" in action or "tool" in action):
-                    only_args = next(iter(action.values()))
-                    payload = only_args if isinstance(only_args, dict) else {}
-                values.extend(AgentRunner._expect_visible_values(payload))
+            for action in iter_atomic_actions("run_action_batch", args):
+                values.extend(AgentRunner._expect_visible_values(action.inputs))
         return values
 
     def _track_visible_evidence(self, tool_name: str, args: dict, result_text: str) -> None:
@@ -6030,7 +7460,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "source_action_ok", "source_action_verified",
                 "needs_observe", "native_action_executed",
                 "native_post_action_frame_pending", "last_action",
-                "fast_path_advice", "metrics",
+                "fast_path_advice", "metrics", "failure_type",
+                "action_executed",
+                "native_point_scope_guard", "scope_reason",
+                "scene_coverage_guard", "current_scene_id",
+                "current_scene_visit_count", "proposed_edge",
+                "prior_target_scene_ids", "cycle_scene_path",
+                "artifact_id", "requested_artifact_id", "artifact_resolution",
             )
             if data.get(key) is not None
         }
@@ -6090,7 +7526,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         try:
             data = json.loads(batch_result.text or "{}")
         except (json.JSONDecodeError, TypeError):
-            data = {}
+            data = {
+                "ok": False,
+                "verified": False,
+                "blocked": True,
+                "failure_type": "INVALID_CONTROLLER_RESULT",
+                "error": str(batch_result.text or "Controller returned an empty result"),
+            }
         if not isinstance(data, dict):
             data = {}
 
@@ -6118,6 +7560,20 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         }
         if data.get("fast_path_advice"):
             wrapped["fast_path_advice"] = data.get("fast_path_advice")
+        for key in (
+            "error",
+            "blocked",
+            "failure_type",
+            "needs_llm_reason",
+            "missing_live_target",
+            "scope_guard",
+            "input_cleanup",
+            "validation_errors",
+            "controller_state",
+            "native_action_executed",
+        ):
+            if key in data:
+                wrapped[key] = data.get(key)
         if source_child:
             wrapped["source_action_ok"] = source_child.get("ok")
             if "verified" in source_child:
@@ -6141,6 +7597,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 "verify_method",
                 "nonvisual_summary",
                 "frame_stroke_preparation",
+                "semantic_hit_snap",
             ):
                 if key in source and key not in wrapped:
                     wrapped[key] = source[key]
@@ -7387,6 +8844,176 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             image_b64=result.image_b64,
         )
 
+    @staticmethod
+    def _looks_like_artifact_capture_plan_goal(goal: str) -> bool:
+        return bool(re.search(
+            r"\b(?:capture|screenshot|screen\s*shot|snapshot)\b|"
+            r"截图|截屏|屏幕快照|(?:抓取|截取).{0,12}(?:图像|画面|作品|画作|窗口|内容|区域)|"
+            r"获取.{0,8}(?:截图|图像)",
+            str(goal or ""),
+            re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _looks_like_artifact_source_inspection_plan_goal(goal: str) -> bool:
+        text = str(goal or "")
+        if re.search(
+            r"\b(?:save|export|send|share|upload|edit|draw|open|launch)\b|"
+            r"(?<!未)保存|另存|导出|发送|分享|上传|编辑|绘制|画出|打开|启动",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:confirm|check|inspect|locate|find|verify|identify|determine)\b|"
+                r"确认|检查|查看|找到|定位|识别|判断|核实",
+                text,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\b(?:current|source|content|work|artifact|drawing|image|window|"
+                r"document|canvas|unsaved)\b|当前|来源|内容|作品|画作|图像|窗口|"
+                r"文档|画布|未保存",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_managed_artifact_storage_plan_goal(goal: str) -> bool:
+        text = str(goal or "")
+        if re.search(
+            r"\b(?:send|share|upload|attach|deliver)\b|发送|分享|上传|附加|交付",
+            text,
+            re.IGNORECASE,
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:save|store|persist|write)\b|保存|另存|存储|写入",
+                text,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\b(?:screenshot|image|artifact|file|capture)\b|截图|截屏|图像|"
+                r"产物|文件",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    def _maybe_auto_complete_artifact_capture_plan_item(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: ToolResult,
+    ) -> ToolResult:
+        """Advance one capture todo only from a current-run managed artifact."""
+        if tool_name not in {"screenshot", "capture_artifact"}:
+            return result
+        try:
+            payload = json.loads(result.text or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return result
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            return result
+        artifact = payload.get("artifact")
+        artifact = artifact if isinstance(artifact, dict) else {}
+        artifact_id = str(
+            payload.get("artifact_id") or artifact.get("artifact_id") or ""
+        ).strip()
+        artifact_sha = str(
+            payload.get("sha256") or artifact.get("sha256") or ""
+        ).strip()
+        if not artifact_id or not artifact_sha:
+            return result
+
+        plan = getattr(self.session, "plan", None)
+        steps = getattr(plan, "steps", None) or []
+        if not steps:
+            return result
+        candidates: list[tuple[int, dict[str, Any], str]] = []
+        capture_seen = False
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict) or step.get("done"):
+                continue
+            goal = str(step.get("goal") or "")
+            if not capture_seen and self._looks_like_artifact_source_inspection_plan_goal(goal):
+                candidates.append((index, step, "managed_artifact_source_evidence"))
+                continue
+            if not capture_seen and self._looks_like_artifact_capture_plan_goal(goal):
+                candidates.append((index, step, "managed_artifact_capture"))
+                capture_seen = True
+                continue
+            if (
+                capture_seen
+                and (payload.get("managed_path") or artifact.get("managed_path"))
+                and self._looks_like_managed_artifact_storage_plan_goal(goal)
+            ):
+                candidates.append((index, step, "managed_artifact_path"))
+                continue
+            break
+        if not capture_seen:
+            return result
+
+        completed = [
+            item
+            for item in (payload.get("auto_completed_plan_items") or [])
+            if isinstance(item, dict)
+        ]
+        newly_completed: list[dict[str, Any]] = []
+        for index, step, source in candidates:
+            if not self._plan_check_satisfied_by_subgoal(
+                step.get("check"), payload,
+            ):
+                break
+            if not plan.complete(index):
+                break
+            item = {
+                "index": index,
+                "goal": str(step.get("goal") or "")[:160],
+                "source": source,
+                "artifact_id": artifact_id,
+            }
+            completed.append(item)
+            newly_completed.append(item)
+            BUS.publish(
+                "agent_plan",
+                run_id=self.run_id,
+                action="auto_complete",
+                index=index,
+                source=f"{tool_name}.{source}",
+                plan=plan.snapshot(),
+            )
+        if not newly_completed:
+            return result
+        payload["auto_completed_plan_items"] = completed
+        payload["plan_after_auto_complete"] = plan.render()
+        if plan.all_done():
+            payload["plan_all_done"] = True
+        payload["fast_path_advice"] = (
+            str(payload.get("fast_path_advice") or "").strip()
+            + " A verified current-run artifact completed the capture plan item. "
+              f"Use exact artifact_id {artifact_id} for the next handoff; do not capture "
+              "or save it again, and do not rename the handle."
+        ).strip()
+        self._trace_debug("artifact_capture_plan_auto_completed", {
+            "run_id": self.run_id,
+            "tool": tool_name,
+            "args": args,
+            "completed": newly_completed,
+            "artifact_id": artifact_id,
+        })
+        return ToolResult(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            is_observe=result.is_observe,
+            terminal=result.terminal,
+            summary=result.summary,
+            replay=result.replay,
+            image_b64=result.image_b64,
+        )
+
     @classmethod
     def _looks_like_new_blank_plan_goal(cls, goal: str) -> bool:
         key = cls._plan_text_key(goal)
@@ -7437,19 +9064,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 or ""
             ))
         elif tool_name == "run_action_batch":
-            for action in args.get("actions") or []:
-                if not isinstance(action, dict):
-                    continue
-                name = str(action.get("action") or action.get("tool") or "")
-                action_args = action
-                if not name and len(action) == 1:
-                    name, nested = next(iter(action.items()))
-                    action_args = nested if isinstance(nested, dict) else {"text": nested}
-                if name in {"type_text", "type_into_element"}:
+            for action in iter_atomic_actions(tool_name, args):
+                if action.name in {"type_text", "type_into_element"}:
                     values.append(str(
-                        action_args.get("text")
-                        or action_args.get("text_input")
-                        or action_args.get("value")
+                        action.inputs.get("text")
+                        or action.inputs.get("text_input")
+                        or action.inputs.get("value")
                         or ""
                     ))
         return [value for value in values if value]
@@ -7932,6 +9552,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
         post_tool_hints: list[str] = []
         visual_transaction_seen = False
         visual_feedback_action = ""
+        visual_feedback_args: dict[str, Any] = {}
+        visual_feedback_action_executed = True
         visual_feedback_result = ""
         visual_feedback_signature = ""
         visual_feedback_roi: tuple[float, float, float, float] | None = None
@@ -8004,10 +9626,22 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             preflight_capture_region = None
             frame_coordinate_error = ""
             frame_coordinate_meta: dict[str, Any] = {}
+            pointer_status_fn = getattr(self.session, "_pointer_hold_status", None)
+            pointer_status = (
+                pointer_status_fn()
+                if callable(pointer_status_fn)
+                else {"active": False}
+            )
+            pointer_continuation = bool(
+                pointer_status.get("active")
+                and tc.function.name in {"move_mouse", "mouse_up"}
+            )
             continuous_pointer_block = None
             no_progress_block = None
             partial_output_block = None
             semantic_progress_block = None
+            native_point_scope_block = None
+            scene_coverage_block = None
             forward_repair_block = self._inline_stage_forward_repair_guard(
                 tc.function.name,
                 args,
@@ -8052,12 +9686,29 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     no_progress_block = self._native_no_progress_guard(
                         tc.function.name, args,
                     )
+                    if no_progress_block:
+                        recovered_args = (
+                            self._native_no_progress_semantic_recovery(
+                                tc.function.name,
+                                args,
+                                no_progress_block,
+                            )
+                        )
+                        if recovered_args is not None:
+                            args = recovered_args
+                            no_progress_block = None
+                    if not no_progress_block:
+                        scene_coverage_block = self._scene_coverage_guard(
+                            tc.function.name,
+                            args,
+                        )
             runtime_guard_block = (
                 partial_output_block
                 or continuous_pointer_block
                 or semantic_progress_block
                 or forward_repair_block
                 or no_progress_block
+                or scene_coverage_block
             )
             if (
                 closed_loop
@@ -8087,6 +9738,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 and not terminal_barrier
                 and not frame_coordinate_error
                 and not runtime_guard_block
+                and not pointer_continuation
             ):
                 (
                     preflight_changed_image,
@@ -8113,6 +9765,26 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     # a frame that is no longer current.
                     frame_coordinate_error = str(exc)
                     frame_coordinate_meta = dict(getattr(exc, "metadata", {}) or {})
+
+            if (
+                closed_loop
+                and _main_model_has_vision()
+                and not needs_grounding
+                and not turn_barrier
+                and not terminal_barrier
+                and not frame_coordinate_error
+                and not preflight_changed_image
+                and not preflight_error
+                and not runtime_guard_block
+            ):
+                native_point_scope_block = self._native_point_scope_guard(
+                    tc.function.name,
+                    args,
+                )
+                runtime_guard_block = (
+                    native_point_scope_block
+                    or runtime_guard_block
+                )
 
             args = self._maybe_upgrade_exact_save_as(tc.function.name, args)
             args = self._maybe_upgrade_spreadsheet_action_batch(tc.function.name, args)
@@ -8222,6 +9894,30 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     ),
                     "needs_replan": False,
                 }, ensure_ascii=False))
+            elif native_point_scope_block:
+                post_tool_hints.append(
+                    "[native target-scope invariant] The proposed physical point "
+                    "resolved to the taskbar or an unrelated top-level window and "
+                    "was not executed. Rebind/focus the intended target and keep the "
+                    "next point inside its visible client content; do not jitter near "
+                    "the system boundary."
+                )
+                result = ToolResult(json.dumps(
+                    native_point_scope_block,
+                    ensure_ascii=False,
+                ))
+            elif scene_coverage_block:
+                post_tool_hints.append(
+                    "[scene coverage invariant] Real pixels prove that the current "
+                    "viewport was visited before and this spatial edge was already "
+                    "traversed from it. The repeated input was not sent. Choose "
+                    "a different visual frontier, target, scrollable region, or "
+                    "navigation route; a return to an old scene is not progress."
+                )
+                result = ToolResult(json.dumps(
+                    scene_coverage_block,
+                    ensure_ascii=False,
+                ))
             elif partial_output_block:
                 if (
                     self._continuous_pointer_output_requested()
@@ -8288,6 +9984,13 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     terminal="reply" if stop_after_block else None,
                 )
             elif no_progress_block:
+                post_tool_hints.append(
+                    "[mandatory spatial replan] The last target region is now excluded until the "
+                    "visible state materially changes. On the next turn, do not call the same tool "
+                    "at that point or nearby jittered coordinates. Choose a genuinely different "
+                    "visible affordance/element_id, scroll or navigate to new content, use a keyboard "
+                    "route, or report that the requested effect cannot currently be verified."
+                )
                 stop_after_block = (
                     self._native_no_progress_block_count
                     >= int(CONFIG.get(
@@ -8402,6 +10105,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             result = self._maybe_auto_complete_new_document_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_open_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_verified_subgoal_plan_items(tc.function.name, args, result)
+            result = self._maybe_auto_complete_artifact_capture_plan_item(tc.function.name, args, result)
             result = self._maybe_auto_complete_document_format_plan_items(tc.function.name, args, result)
             result = self._maybe_auto_complete_desktop_drag_plan_item(tc.function.name, args, result)
             self._record_text_continuous_pointer_outcome(
@@ -8426,10 +10130,17 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     and result.terminal not in {"fail", "error", "stopped"}
                 ):
                     visual_feedback_action = tc.function.name
+                    visual_feedback_args = dict(args)
+                    visual_feedback_action_executed = bool(
+                        visual_result_data.get("action_executed") is not False
+                        and visual_result_data.get("state_transition_skipped") is not True
+                        and visual_result_data.get("skipped") is not True
+                    )
                     visual_feedback_signature = self._native_spatial_action_signature(
                         tc.function.name,
                         args,
                         frame_region=self._visual_frame_region,
+                        submitted_size=self._visual_submitted_size,
                     )
                     visual_feedback_roi = authored_target_roi
                     if visual_result_data:
@@ -8441,7 +10152,12 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                         # the pixels attached to the very next model turn.
                         visual_result_data["needs_observe"] = False
                         visual_result_data["native_post_action_frame_pending"] = True
-                        if visual_result_data.get("ok") is True:
+                        if (
+                            visual_result_data.get("ok") is True
+                            and visual_result_data.get("action_executed") is not False
+                            and visual_result_data.get("state_transition_skipped") is not True
+                            and visual_result_data.get("skipped") is not True
+                        ):
                             # Execution provenance only: the fresh frame below
                             # still decides whether the input achieved the goal.
                             visual_result_data["native_action_executed"] = True
@@ -8546,6 +10262,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 # silently invalidating grounding and forcing an observe loop.
                 visual_transaction_seen = True
                 visual_feedback_action = f"{tc.function.name}:local_recovery"
+                visual_feedback_args = dict(args)
+                visual_feedback_action_executed = True
                 visual_feedback_result = result.text or ""
             elapsed_ms = int((time.monotonic() - started) * 1000)
             state_terminal = None if result.terminal == "done" else result.terminal
@@ -8753,6 +10471,15 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                     "constraint_rejection_streak",
                     "constraint_rejection_limit",
                     "partial_output_destructive_guard",
+                    "action_executed",
+                    "native_point_scope_guard",
+                    "scope_reason",
+                    "scene_coverage_guard",
+                    "current_scene_id",
+                    "current_scene_visit_count",
+                    "proposed_edge",
+                    "prior_target_scene_ids",
+                    "cycle_scene_path",
                     "guard_blocks",
                     "safe_stop",
                     "blocked",
@@ -8808,6 +10535,8 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             self._inject_visual_frame(
                 phase="post_action",
                 action=visual_feedback_action,
+                action_args=visual_feedback_args,
+                action_executed=visual_feedback_action_executed,
                 result_preview=visual_feedback_result,
                 action_signature=visual_feedback_signature,
                 action_roi=visual_feedback_roi,
@@ -8840,9 +10569,23 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             re.IGNORECASE,
         ):
             return
+        # A typed stage has already validated and bound its requested app. Its
+        # top-level HWND may nevertheless be replaced during startup. Reuse or
+        # reopen that proven application identity instead of reparsing the
+        # complete natural-language goal as an app name.
+        if self.session._window_alive(self.session.hwnd):
+            return
+        recovered = self.session._recover_bound_target_window()
+        if recovered:
+            return
+
         from ..fast.subgoal import _initial_task_app_target
 
-        target = _initial_task_app_target(task)
+        target = (
+            str(self.session.target_hint or "").strip()
+            if self.session._target_binding_verified
+            else _initial_task_app_target(task)
+        )
         if not target:
             return
         args = {"name": target}
@@ -8916,13 +10659,16 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             playbook_text=playbooks.render_section(matched_books),
             style=str(CONFIG.get("agent", "prompt_style", default="compact")),
             main_model_has_vision=_main_model_has_vision(),
-            continuous_pointer_output=_requests_continuous_pointer_output(self.task),
+            continuous_pointer_output=self._continuous_pointer_output_requested(),
             runtime_section=self.runtime_profile.prompt_section())
         self.messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": self.task},
         ]
-        if _is_communication_task(self.task_intent):
+        if (
+            _is_communication_task(self.task_intent)
+            and str(self.runtime_profile.stage_type or "") != "ExecuteDesktopTask"
+        ):
             payloads = _quoted_payloads(self.task)
             communication_mode = _communication_mode(self.task_intent)
             wants_decor = any(k in (self.task or "").lower() for k in (
@@ -9023,7 +10769,6 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
                 })
         if (
             self.session_context
-            and self.runtime_profile.experience_enabled
             and CONFIG.get("agent", "session_memory", default=True)
             and session_mod.should_include_context(self.task)
         ):
@@ -9058,6 +10803,7 @@ class AgentRunner(ContextGuidanceMixin, ReflectionMixin, DoneVerifierMixin):
             required_capabilities=self.runtime_profile.required_capabilities,
             stage_tools=self.runtime_profile.stage_tools,
             stage_type=self.runtime_profile.stage_type,
+            surface_output_mode=self.runtime_profile.surface_output_mode,
         )
         if self.runtime_profile.model_tool_allowlist:
             allowed_stage_tools = set(self.runtime_profile.model_tool_allowlist)

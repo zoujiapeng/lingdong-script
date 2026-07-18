@@ -16,6 +16,7 @@ import win32gui
 
 from ..action import executor
 from ..config import CONFIG
+from ..fast.action_contract import iter_atomic_actions
 from ..perception import win32
 from .tool_result import ToolResult
 
@@ -54,37 +55,20 @@ _SPATIAL_TARGET_REQUIRED = {
 }
 
 
-def _batch_action_parts(value: Any) -> tuple[str, dict[str, Any]]:
-    if not isinstance(value, dict):
-        return "", {}
-    name = str(value.get("action") or value.get("tool") or "").strip()
-    if name:
-        nested = value.get("params") if isinstance(value.get("params"), dict) else {}
-        return name, {
-            **nested,
-            **{key: item for key, item in value.items() if key not in {"action", "tool", "params"}},
-        }
-    if len(value) == 1:
-        name, nested = next(iter(value.items()))
-        return str(name), dict(nested) if isinstance(nested, dict) else {"value": nested}
-    return "", {}
-
-
 def _batch_establishes_target_before_spatial(args: dict[str, Any]) -> bool:
     """Whether a target-less batch establishes scope before its first pointer action."""
     established = False
-    for value in args.get("actions") or []:
-        name, child = _batch_action_parts(value)
-        if name == "focus_window" and (
-            child.get("hwnd") or str(child.get("title") or "").strip()
+    for action in iter_atomic_actions("run_action_batch", args):
+        if action.name == "focus_window" and (
+            action.inputs.get("hwnd") or str(action.inputs.get("title") or "").strip()
         ):
             established = True
             continue
-        if name == "launch" and str(child.get("command") or "").strip():
+        if action.name == "launch" and str(action.inputs.get("command") or "").strip():
             # Launch is allowed, but it does not prove a target until a later
             # focus_window binds the concrete hwnd/title.
             continue
-        if name in _SPATIAL_TARGET_REQUIRED:
+        if action.name in _SPATIAL_TARGET_REQUIRED:
             return established
     return True
 
@@ -95,9 +79,9 @@ def _requires_live_target(tool_name: str, args: dict[str, Any]) -> bool:
     if tool_name == "run_action_batch":
         return not _batch_establishes_target_before_spatial(args)
     if tool_name == "execute_subgoal":
-        return bool(
-            any(isinstance(args.get(key), dict) and args.get(key) for key in ("click", "draw"))
-            or any(isinstance(args.get(key), list) and args.get(key) for key in ("clicks", "draws"))
+        return any(
+            action.name in _SPATIAL_TARGET_REQUIRED
+            for action in iter_atomic_actions(tool_name, args)
         )
     return False
 
@@ -329,6 +313,15 @@ def ensure_scope(session, tool_name: str, args: dict[str, Any]) -> ToolResult | 
     # launch/focus/discovery step.  Inferring the first target here would adopt
     # whichever foreground window the human happens to own.
     target = getattr(session, "hwnd", None)
+    if target and not _window_alive(target):
+        recover_bound_target = getattr(session, "_recover_bound_target_window", None)
+        if callable(recover_bound_target):
+            try:
+                rebound = recover_bound_target()
+            except Exception:
+                rebound = None
+            if rebound and _window_alive(rebound):
+                target = int(rebound)
     explicit_scope = args.get("target_window") if isinstance(args.get("target_window"), dict) else {}
     if not _window_alive(target) and _window_alive(explicit_scope.get("hwnd")):
         target = int(explicit_scope["hwnd"])

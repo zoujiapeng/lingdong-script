@@ -13,6 +13,7 @@ TASK_CONTRACT_FORMAT = "task-contract/1"
 class StageType(str, Enum):
     OPEN_APPLICATION = "OpenApplication"
     FOCUS_WINDOW = "FocusWindow"
+    EXECUTE_DESKTOP_TASK = "ExecuteDesktopTask"
     CREATE_OR_EDIT_ARTIFACT = "CreateOrEditArtifact"
     DRAW_ARTIFACT = "DrawArtifact"
     CAPTURE_ARTIFACT = "CaptureArtifact"
@@ -129,6 +130,7 @@ class TaskIntent(BaseModel):
     channel: str = ""
     recipient: str = ""
     source: str = ""
+    applications: list[str] = Field(default_factory=list)
     capture_scope: str = "window"
     destination: str = ""
     send_mode: Literal[
@@ -142,6 +144,35 @@ class TaskIntent(BaseModel):
     ambiguous_fields: list[str] = Field(default_factory=list)
     provenance: dict[str, str] = Field(default_factory=dict)
     interaction: InteractionIntent = Field(default_factory=InteractionIntent)
+
+
+class TaskRequirement(BaseModel):
+    """One user-visible requirement retained from the original request.
+
+    Requirements are deliberately separate from stages.  A planner may choose
+    one semantic desktop stage or several typed stages, but it may not silently
+    discard a requirement simply because the structural parser only
+    understood the first verb in the utterance.
+    """
+
+    id: str
+    text: str
+    kind: str = "semantic_goal"
+    stage_ids: list[str] = Field(default_factory=list)
+    completion_predicates: list[str] = Field(default_factory=list)
+    required: bool = True
+    source_span: list[int] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequirementCoverage(BaseModel):
+    """Compile-time proof that every required clause has an execution path."""
+
+    complete: bool = False
+    strategy: str = "unverified"
+    covered_requirement_ids: list[str] = Field(default_factory=list)
+    uncovered_requirement_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class StateBinding(BaseModel):
@@ -237,6 +268,12 @@ class TaskContract(BaseModel):
     stages: list[TaskStage]
     obligations: list[CompletionObligation]
     final_conditions: list[str]
+    requirements: list[TaskRequirement] = Field(default_factory=list)
+    requirement_coverage: RequirementCoverage = Field(
+        default_factory=RequirementCoverage,
+    )
+    clarification_questions: list[str] = Field(default_factory=list)
+    session_context: list[dict[str, Any]] = Field(default_factory=list)
     session: InteractionSessionContract | None = None
     satisfiable: bool = False
     missing_capabilities: list[str] = Field(default_factory=list)
@@ -248,8 +285,14 @@ class ContractCompileRequest(BaseModel):
     task: str
     max_steps: int = Field(default=40, ge=1, le=400)
     cold_start: bool = False
+    # The visible Electron cockpit is explicitly a GUI-agent surface.  This
+    # product fact is more reliable than guessing execution media from verbs.
+    require_gui: bool = False
 
 
 class ContractCompileResponse(BaseModel):
+    ok: bool = True
+    needs_input: bool = False
+    clarification_questions: list[str] = Field(default_factory=list)
     contract: TaskContract
     graph: dict[str, Any]

@@ -1726,23 +1726,58 @@ def test_visual_action_success_rejects_conflicting_or_terminal_metadata():
     assert _successful_action({"result_meta": {"ok": True}, "terminal": "fail"}) is False
 
 
-def test_eval_frontend_graph_matches_agent_cockpit_contract():
-    from scripts.gui_eval_run import _frontend_goal_graph
+def test_eval_frontend_compiles_through_same_contract_endpoint(monkeypatch):
+    from scripts import gui_eval_run
 
-    graph = _frontend_goal_graph("type a date, then draw a cat", 40)
+    calls = []
+    typed_graph = {
+        "format": "arp/1",
+        "nodes": [{"id": "stage", "kind": "task_stage"}],
+        "metadata": {"routing": "typed-stage-runtime"},
+    }
+    contract = {
+        "task_id": "task-parity",
+        "satisfiable": True,
+        "stages": [{
+            "type": "ExecuteDesktopTask",
+            "required_capabilities": ["desktop.execute"],
+            "execution": {"required_capabilities": ["visual.observe"]},
+        }],
+    }
 
-    assert graph["format"] == "arp/1"
-    assert graph["metadata"] == {
-        "source": "agent-cockpit",
-        "routing": "verified-skill-first-agent-on-miss-or-failure",
-    }
-    assert [node["kind"] for node in graph["nodes"]] == [
-        "start", "skill_replay", "agent_goal", "end",
-    ]
-    goal = next(node for node in graph["nodes"] if node["id"] == "goal")
-    assert goal["config"] == {
-        "goal": "type a date, then draw a cat",
-        "max_steps": 40,
-    }
-    assert graph["policy"]["allow_shell"] is False
-    assert graph["policy"]["require_evidence_on_done"] is True
+    def request(method, url, payload=None, token=""):
+        calls.append((method, url, payload, token))
+        return {
+            "ok": True,
+            "needs_input": False,
+            "clarification_questions": [],
+            "contract": contract,
+            "graph": typed_graph,
+        }
+
+    monkeypatch.setattr(gui_eval_run, "_request_json", request)
+    actual_contract, actual_graph = gui_eval_run._compile_frontend_task(
+        "http://127.0.0.1:8765",
+        "type a date, then draw a cat",
+        40,
+        cold_start=True,
+        token="secret",
+    )
+
+    assert calls == [(
+        "POST",
+        "http://127.0.0.1:8765/api/v2/task-contracts/compile",
+        {
+            "task": "type a date, then draw a cat",
+            "max_steps": 40,
+            "cold_start": True,
+        },
+        "secret",
+    )]
+    assert actual_contract is contract
+    assert actual_graph is typed_graph
+    inputs = gui_eval_run._frontend_eval_inputs(contract)
+    assert inputs["execution_context"]["task_id"] == "task-parity"
+    assert inputs["execution_context"]["desktop_handoff"]["required"] is True
+    assert inputs["execution_context"]["entrypoint"] == "web_workbench"
+    assert all(node["kind"] != "agent_goal" for node in actual_graph["nodes"])
