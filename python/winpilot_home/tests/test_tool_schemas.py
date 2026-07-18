@@ -22,6 +22,20 @@ def test_open_app_is_prioritized_before_manual_app_discovery_loop():
     assert open_app["function"]["parameters"]["required"] == ["name"]
 
 
+def test_open_conversation_can_discover_an_unresolved_channel():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(planning=True, coding_runtime=False, allow_shell=False)
+    open_conversation = next(
+        tool for tool in tools
+        if tool["function"]["name"] == "open_conversation"
+    )["function"]
+
+    assert open_conversation["parameters"]["required"] == ["recipient"]
+    assert "app" in open_conversation["parameters"]["properties"]
+    assert "omit app" in open_conversation["description"]
+
+
 def test_execute_subgoal_schema_warns_verify_only_needs_target_window():
     from winpilot.agent.tool_schemas import tool_schemas
 
@@ -140,7 +154,7 @@ def test_strict_gui_schema_hides_file_tools_without_hiding_gui_tools():
     assert {"execute_subgoal", "run_action_batch", "launch", "screenshot", "done"} <= names
 
 
-def test_raw_press_primitives_are_exposed_only_inside_validated_controller_batch():
+def test_dynamic_pointer_primitives_are_top_level_and_batch_validated():
     from winpilot.agent.tool_schemas import tool_schemas
 
     tools = tool_schemas(
@@ -151,7 +165,8 @@ def test_raw_press_primitives_are_exposed_only_inside_validated_controller_batch
         profile="standard",
     )
     names = set(_names(tools))
-    assert {"mouse_down", "mouse_up", "hold_key"}.isdisjoint(names)
+    assert {"move_mouse", "mouse_down", "mouse_up"} <= names
+    assert "hold_key" not in names
 
     batch = next(
         tool["function"] for tool in tools
@@ -161,7 +176,12 @@ def test_raw_press_primitives_are_exposed_only_inside_validated_controller_batch
         variant["properties"]["action"]["const"]
         for variant in batch["parameters"]["properties"]["actions"]["items"]["oneOf"]
     }
-    assert {"mouse_down", "mouse_up", "hold_key"} <= variants
+    assert {"move_mouse", "mouse_down", "mouse_up", "hold_key"} <= variants
+    pointer_session = batch["parameters"]["properties"]["pointer_session"]
+    assert set(pointer_session["properties"]) == {"before", "after"}
+    assert pointer_session["properties"]["after"]["enum"] == [
+        "", "left", "right", "middle",
+    ]
 
 
 def test_coding_runtime_keeps_file_tools_even_when_gui_files_are_hidden():
@@ -204,6 +224,9 @@ def test_lean_gui_profile_keeps_controller_tools_and_hides_unrelated_tools():
         "fail",
         "revise_plan",
         "complete_subgoal",
+        "move_mouse",
+        "mouse_down",
+        "mouse_up",
     } <= names
     assert {"find_app", "find_program", "tray_click"}.isdisjoint(names)
     assert {
@@ -211,9 +234,6 @@ def test_lean_gui_profile_keeps_controller_tools_and_hides_unrelated_tools():
         "find_image",
         "color_probe",
         "clipboard_read",
-        "mouse_down",
-        "mouse_up",
-        "move_mouse",
         "list_installed_apps",
     }.isdisjoint(names)
 
@@ -391,8 +411,11 @@ def test_native_gui_auto_profile_reduces_model_schema_to_18_relevant_tools(monke
     )
     names = set(_names(tools))
 
-    assert len(tools) == 18
-    assert {"open_app", "click", "type_text", "draw_strokes", "done"} <= names
+    assert len(tools) == 21
+    assert {
+        "open_app", "click", "type_text", "draw_strokes", "move_mouse",
+        "mouse_down", "mouse_up", "done",
+    } <= names
     assert {
         "schedule_task",
         "find_program",
@@ -401,10 +424,31 @@ def test_native_gui_auto_profile_reduces_model_schema_to_18_relevant_tools(monke
         "run_action_batch",
         "capture_template",
         "clipboard_read",
-        "mouse_down",
         "screenshot",
         "list_installed_apps",
     }.isdisjoint(names)
+
+
+def test_native_dynamic_pointer_motion_requires_coordinates_but_release_does_not():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(profile="lean_gui", native_vision=True)
+    by_name = {tool["function"]["name"]: tool["function"] for tool in tools}
+
+    for name in ("move_mouse", "mouse_down"):
+        params = by_name[name]["parameters"]
+        props = params["properties"]
+        assert {"x", "y"}.isdisjoint(props)
+        assert {"frame_x", "frame_y", "image_x", "image_y"} <= set(props)
+        assert params["oneOf"] == [
+            {"required": ["frame_x", "frame_y"]},
+            {"required": ["image_x", "image_y"]},
+        ]
+
+    release = by_name["mouse_up"]
+    assert release["parameters"]["required"] == []
+    assert "oneOf" not in release["parameters"]
+    assert "release immediately" in release["description"]
 
 
 def test_draw_strokes_schema_hard_bounds_one_turn_geometry_budget():
@@ -497,6 +541,24 @@ def test_revise_plan_schema_supports_live_atomic_mutations():
     assert "at any time" in revise["function"]["description"]
 
 
+def test_lean_revise_plan_keeps_lossless_full_replacement_only():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    tools = tool_schemas(
+        planning=True,
+        coding_runtime=False,
+        allow_shell=False,
+        profile="lean_gui",
+    )
+    revise = next(tool for tool in tools if tool["function"]["name"] == "revise_plan")
+    params = revise["function"]["parameters"]
+
+    assert set(params["properties"]) == {"steps"}
+    assert params["required"] == ["steps"]
+    assert "oneOf" not in params
+    assert "complete ordered steps" in revise["function"]["description"]
+
+
 def test_native_vision_hides_redundant_secondary_vlm_tools(monkeypatch):
     from winpilot.agent import tool_schemas as schemas
 
@@ -508,7 +570,7 @@ def test_native_vision_hides_redundant_secondary_vlm_tools(monkeypatch):
     assert {"vlm_describe", "vlm_verify"}.isdisjoint(native)
 
 
-def test_native_vision_exposes_only_normalized_frame_coordinates():
+def test_native_vision_exposes_image_pixels_and_normalized_frame_coordinates():
     from winpilot.agent import tool_schemas as schemas
 
     def by_name(tools, name):
@@ -535,17 +597,25 @@ def test_native_vision_exposes_only_normalized_frame_coordinates():
             }.isdisjoint(names)
 
         click = by_name(native, "click")["function"]["parameters"]
-        assert {"frame_x", "frame_y"} <= set(click["properties"])
+        assert {"frame_x", "frame_y", "image_x", "image_y", "label"} <= set(click["properties"])
         assert {"x", "y"}.isdisjoint(click["properties"])
 
         scroll = by_name(native, "scroll")["function"]["parameters"]
-        assert {"frame_x", "frame_y", "amount"} <= set(scroll["required"])
+        assert scroll["required"] == ["amount"]
+        assert {frozenset(item["required"]) for item in scroll["oneOf"]} == {
+            frozenset({"frame_x", "frame_y"}),
+            frozenset({"image_x", "image_y"}),
+        }
         assert {"x", "y"}.isdisjoint(scroll["properties"])
 
         drag = by_name(native, "drag")["function"]["parameters"]
-        assert {"frame_x1", "frame_y1", "frame_x2", "frame_y2"} <= set(drag["required"])
+        assert drag["required"] == []
+        assert {frozenset(item["required"]) for item in drag["oneOf"]} == {
+            frozenset({"frame_x1", "frame_y1", "frame_x2", "frame_y2"}),
+            frozenset({"image_x1", "image_y1", "image_x2", "image_y2"}),
+        }
         assert {"x1", "y1", "x2", "y2", "points"}.isdisjoint(drag["properties"])
-        assert "frame_points" in drag["properties"]
+        assert {"frame_points", "image_points"} <= set(drag["properties"])
 
         draw_tool = by_name(native, "draw_strokes")["function"]
         draw = draw_tool["parameters"]
@@ -577,9 +647,10 @@ def test_native_vision_exposes_only_normalized_frame_coordinates():
             assert "click" in batch_item["properties"]["action"]["enum"]
             assert "one spatial action" in batch_text
             assert "direct click/scroll/drag/draw_strokes" in batch_text
-            assert "frame_x/frame_y" in batch_text
+            assert "image_x/image_y" in batch_text
+            assert "frame_*" in batch_text
             assert "frame_strokes" in batch_text
-            assert "Never send physical" in batch_text
+            assert "physical x/y" in batch_text
             assert "at most one spatial mutation" in batch_text
             assert "element_id" in batch_text
             assert "next real post-action frame" in batch_text
@@ -651,6 +722,37 @@ def test_native_action_batch_typed_variants_use_frame_coordinates():
     assert "effect_region" not in variants["drag"]["properties"]
 
 
+def test_direct_spatial_tools_expose_generic_hard_region_constraints():
+    from winpilot.agent.tool_schemas import tool_schemas
+
+    native = {
+        tool["function"]["name"]: tool["function"]
+        for tool in tool_schemas(native_vision=True)
+    }
+    text_only = {
+        tool["function"]["name"]: tool["function"]
+        for tool in tool_schemas(native_vision=False)
+    }
+    for name in (
+        "click", "scroll", "move_mouse", "mouse_down", "mouse_up", "drag",
+        "draw_strokes",
+    ):
+        native_props = native[name]["parameters"]["properties"]
+        text_props = text_only[name]["parameters"]["properties"]
+        assert "constraint_frame_region" in native_props
+        assert "constraint_region" not in native_props
+        assert "constraint_region" in text_props
+        assert "constraint_frame_region" not in text_props
+
+    batch = native["run_action_batch"]["parameters"]["properties"]["actions"]
+    variants = {
+        item["properties"]["action"]["const"]: item["properties"]
+        for item in batch["items"]["oneOf"]
+    }
+    for name in ("move_mouse", "mouse_down", "mouse_up", "drag", "draw_strokes"):
+        assert "constraint_frame_region" in variants[name]
+
+
 def test_native_vision_lean_profile_has_small_single_action_operator():
     import json
 
@@ -688,4 +790,9 @@ def test_native_vision_lean_profile_has_small_single_action_operator():
         "blocked",
     } <= names
     assert len(native) < len(text_only)
-    assert len(json.dumps(native, ensure_ascii=False)) < 10_000
+    # The native operator now exposes both exact submitted-image pixels and
+    # normalized frame coordinates plus semantic click anchors. Keep that
+    # general grounding contract compact enough for one decision turn.
+    # Three explicit cross-frame pointer transitions add a small fixed schema
+    # cost but avoid hiding dynamic steering inside an opaque macro.
+    assert len(json.dumps(native, ensure_ascii=False)) < 16_000

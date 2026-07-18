@@ -746,6 +746,71 @@ def test_unique_partition_locator_binds_current_pixel_candidate_without_id():
     )
 
 
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (
+            {
+                "action": "click",
+                "target_candidate_id": "target-region",
+                "target_region": [500, 300, 700, 500],
+                "target_anchor": None,
+                "frame_x": None,
+                "frame_y": None,
+            },
+            {"frame_x": 600.0, "frame_y": 400.0},
+        ),
+        (
+            {
+                "action": "drag",
+                "source_candidate_id": "source-region",
+                "target_candidate_id": "target-region",
+                "source_region": [100, 300, 200, 400],
+                "target_region": [500, 300, 700, 500],
+                "target_anchor": None,
+                "frame_x1": None,
+                "frame_y1": None,
+                "frame_x2": None,
+                "frame_y2": None,
+            },
+            {
+                "frame_x1": 150.0,
+                "frame_y1": 350.0,
+                "frame_x2": 600.0,
+                "frame_y2": 400.0,
+            },
+        ),
+    ],
+)
+def test_candidate_binding_resolves_null_optional_points_from_current_pixels(
+    action,
+    expected,
+):
+    from winpilot.tasking.interaction import _bind_visible_region_candidates
+
+    inventory = [
+        {
+            "candidate_id": "source-region",
+            "bounds": [100.0, 300.0, 200.0, 400.0],
+            "center": [150.0, 350.0],
+        },
+        {
+            "candidate_id": "target-region",
+            "bounds": [500.0, 300.0, 700.0, 500.0],
+            "center": [600.0, 400.0],
+        },
+    ]
+
+    bound = _bind_visible_region_candidates(
+        {"actions": [action]},
+        inventory,
+        repairs=[],
+    )
+
+    for key, value in expected.items():
+        assert bound["actions"][0][key] == value
+
+
 def test_region_inventory_does_not_offer_frame_spanning_structural_band():
     from winpilot.tasking.interaction import _merge_current_region_inventories
 
@@ -1097,6 +1162,81 @@ def test_visual_planner_normalizes_only_omitted_stable_batch_dependencies(
     assert (
         "actions:truncated_at_explicit_fresh_frame_dependency"
         in bounded.canonicalization_repairs
+    )
+
+
+def test_visual_planner_replans_stale_release_after_held_pointer_frame_boundary(
+    monkeypatch, tmp_path,
+):
+    from winpilot.tasking import interaction
+
+    raw = {
+        "scene_summary": "the held pointer reached the visible checkpoint",
+        "mode": "direct_visual_manipulation",
+        "turn_owner": "agent",
+        "agent_should_act": True,
+        "surface_region": [0, 0, 1000, 1000],
+        "interaction_region": [0, 0, 1000, 1000],
+        "roles": {},
+        "rules": ["keep holding until a later frame proves release is valid"],
+        "confidence": 0.95,
+        "ambiguity": [],
+        "actions": [
+            {
+                "action": "move_mouse",
+                "target_region": [700, 200, 900, 400],
+                "target_anchor": [800, 300],
+                "grounding_mode": "object_anchor",
+                "interaction_mechanism": "pointer_motion",
+                "affordance_evidence": "visible destination in this frame",
+                "requires_fresh_frame_after": True,
+            },
+            {
+                "action": "mouse_up",
+                "interaction_mechanism": "press_hold",
+                "affordance_evidence": (
+                    "release only if the next authoritative frame still proves it"
+                ),
+                "requires_fresh_frame_after": False,
+            },
+        ],
+        "expected_effect": {
+            "description": "the held pointer moves to the visible destination",
+            "region": [700, 200, 900, 400],
+            "region_binding": "target_region",
+            "binding_action_index": 0,
+            "minimum_change_ratio": 0.001,
+            "semantic_verification_required": True,
+        },
+        "continuation": "finish",
+    }
+    monkeypatch.setattr(
+        interaction.vlm,
+        "structured_json_from_image",
+        lambda *_args, **_kwargs: raw,
+    )
+    image = tmp_path / "held-pointer-frame.png"
+    image.write_bytes(b"frame")
+
+    decision = interaction.plan_interaction(
+        image,
+        task="continue the currently held pointer using each new visual frame",
+        intent={},
+        frame_id=14,
+        observation_artifact_id="held-pointer-frame",
+        prior_state={"pointer_hold": {"active": True, "button": "left"}},
+        primary_action_modality="drag",
+    )
+
+    assert [item.action for item in decision.actions] == ["move_mouse"]
+    assert decision.pointer_hold_before == "left"
+    assert decision.pointer_hold_after == "left"
+    assert decision.continuation == "reobserve"
+    assert decision.deferred_actions == ()
+    assert decision.program_continuation == "reobserve"
+    assert (
+        "deferred_actions:discarded_at_held_pointer_frame_boundary"
+        in decision.canonicalization_repairs
     )
 
 
@@ -3825,3 +3965,38 @@ def test_unrelated_window_change_is_not_new_failed_action_evidence(tmp_path):
     assert unrelated_result["method"] == "causal_regions_unchanged"
     assert causal_result["repeats"] is False
     assert causal_result["method"] == "causal_regions_changed"
+
+
+def test_pointer_cleanup_uses_run_registry_if_graph_context_loses_local_object():
+    from winpilot.tasking.interaction_stage_runtime import (
+        InteractionStageEngine,
+        _POINTER_SESSIONS,
+    )
+
+    closed = []
+
+    class Session:
+        def close(self):
+            closed.append(True)
+
+    session = Session()
+    context = {"run_id": "run-pointer-registry"}
+    state = {"pointer_hold": {
+        "active": True,
+        "button": "left",
+        "since_frame_id": 3,
+    }}
+    _POINTER_SESSIONS[context["run_id"]] = session
+
+    InteractionStageEngine._release_pointer_session(
+        context, state, reason="model_plan_invalid",
+    )
+
+    assert closed == [True]
+    assert context["run_id"] not in _POINTER_SESSIONS
+    assert state["pointer_hold"] == {
+        "active": False,
+        "button": "",
+        "since_frame_id": 0,
+        "release_reason": "model_plan_invalid",
+    }

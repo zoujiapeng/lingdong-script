@@ -864,6 +864,254 @@ def test_model_actions_never_imply_missing_mutation_authorization():
     )
 
 
+def test_press_hold_drag_is_lowered_to_an_open_cross_frame_pointer_prefix():
+    from winpilot.tasking.interaction import (
+        InteractionDecision,
+        _canonicalize_model_decision,
+    )
+
+    raw = {
+        "scene_summary": "a held object and a currently visible checkpoint",
+        "mode": "direct_visual_manipulation",
+        "turn_owner": "agent",
+        "agent_should_act": True,
+        "surface_region": [0, 0, 1000, 1000],
+        "interaction_region": [0, 0, 1000, 1000],
+        "roles": {},
+        "rules": ["keep the pointer held until later geometry is visible"],
+        "confidence": 0.92,
+        "ambiguity": [],
+        "actions": [{
+            "action": "drag",
+            "frame_x1": 150,
+            "frame_y1": 500,
+            "frame_x2": 500,
+            "frame_y2": 500,
+            "source_region": [100, 450, 200, 550],
+            "target_region": [440, 440, 560, 560],
+            "target_anchor": [500, 500],
+            "grounding_mode": "object_anchor",
+            "interaction_mechanism": "press_hold",
+            "affordance_evidence": "the source and current checkpoint are visible",
+            "placement_requirement": "point_inside_target",
+            "expected_effect_region": [440, 440, 560, 560],
+            "effect_region_binding": "target_region",
+            "requires_fresh_frame_after": True,
+        }],
+        "expected_effect": {
+            "description": "the checkpoint reveals the next live geometry",
+            "region": [440, 440, 560, 560],
+            "region_binding": "target_region",
+            "binding_action_index": 0,
+            "semantic_verification_required": True,
+        },
+        "continuation": "reobserve",
+    }
+
+    normalized, repairs = _canonicalize_model_decision(raw, prior_state={})
+    decision = InteractionDecision.model_validate(normalized)
+
+    assert [item.action for item in decision.actions] == [
+        "mouse_down", "move_mouse",
+    ]
+    assert decision.pointer_hold_before == ""
+    assert decision.pointer_hold_after == "left"
+    assert decision.actions[0].requires_fresh_frame_after is False
+    assert decision.actions[1].requires_fresh_frame_after is True
+    assert decision.expected_effect.binding_action_index == 1
+    assert "actions[0].drag:press_hold->open_pointer_prefix" in repairs
+
+
+def test_destination_pointer_action_drops_only_a_provably_stale_pickup_region():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "move_mouse",
+            "frame_x": 700,
+            "frame_y": 500,
+            "source_region": [100, 400, 200, 600],
+            "source_candidate_id": "pickup-1",
+            "target_region": [650, 450, 750, 550],
+            "target_candidate_id": "destination-1",
+            "grounding_mode": "object_anchor",
+        }],
+    }, prior_state={})
+
+    action = InteractionAction.model_validate(normalized["actions"][0])
+    assert action.source_region == []
+    assert action.source_candidate_id == ""
+    assert action.target_region == [650.0, 450.0, 750.0, 550.0]
+    assert (
+        "actions[0].source_region:removed_stale_pickup_from_destination_action"
+        in repairs
+    )
+
+
+def test_destination_pointer_action_keeps_ambiguous_region_conflicts_fail_closed():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "move_mouse",
+            "frame_x": 500,
+            "frame_y": 500,
+            "source_region": [100, 400, 200, 600],
+            "target_region": [650, 450, 750, 550],
+            "grounding_mode": "object_anchor",
+        }],
+    }, prior_state={})
+
+    assert not any("removed_stale_pickup" in item for item in repairs)
+    with pytest.raises(ValidationError, match="inside source_region"):
+        InteractionAction.model_validate(normalized["actions"][0])
+
+
+def test_point_action_copies_a_valid_explicit_target_anchor_into_missing_coordinates():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_action_geometry,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "move_mouse",
+            "target_region": [700, 200, 900, 400],
+            "target_anchor": [800, 300],
+            "grounding_mode": "object_anchor",
+        }],
+    }, prior_state={"pointer_hold": {"active": True, "button": "left"}})
+    normalized = _canonicalize_model_action_geometry(
+        normalized, allow_local_resolution=True, repairs=repairs,
+    )
+    action = InteractionAction.model_validate(normalized["actions"][0])
+
+    assert (action.frame_x, action.frame_y) == (800.0, 300.0)
+    assert (
+        "actions[0].frame_point:copied_from_explicit_target_anchor"
+        in repairs
+    )
+
+
+def test_point_action_does_not_copy_an_anchor_outside_its_declared_target():
+    from winpilot.tasking.interaction import (
+        InteractionAction,
+        _canonicalize_model_action_geometry,
+        _canonicalize_model_decision,
+    )
+
+    normalized, repairs = _canonicalize_model_decision({
+        "agent_should_act": True,
+        "actions": [{
+            "action": "move_mouse",
+            "target_region": [700, 200, 900, 400],
+            "target_anchor": [500, 500],
+            "grounding_mode": "object_anchor",
+        }],
+    }, prior_state={"pointer_hold": {"active": True, "button": "left"}})
+    normalized = _canonicalize_model_action_geometry(
+        normalized, allow_local_resolution=True, repairs=repairs,
+    )
+
+    assert not any("copied_from_explicit_target_anchor" in item for item in repairs)
+    with pytest.raises(ValidationError, match="target_anchor|frame_x"):
+        InteractionAction.model_validate(normalized["actions"][0])
+
+
+def test_active_pointer_can_move_on_a_fresh_frame_and_release_at_the_goal():
+    from winpilot.tasking.interaction import InteractionDecision
+
+    decision = InteractionDecision.model_validate({
+        "scene_summary": "the final destination appeared while the pointer stayed held",
+        "mode": "direct_visual_manipulation",
+        "turn_owner": "agent",
+        "agent_should_act": True,
+        "surface_region": [0, 0, 1000, 1000],
+        "interaction_region": [0, 0, 1000, 1000],
+        "confidence": 0.95,
+        "pointer_hold_before": "left",
+        "actions": [
+            {
+                "action": "move_mouse",
+                "frame_x": 800,
+                "frame_y": 300,
+                "target_region": [740, 240, 860, 360],
+                "grounding_mode": "object_anchor",
+                "interaction_mechanism": "pointer_motion",
+                "affordance_evidence": "the newly visible destination is bounded",
+                "requires_fresh_frame_after": False,
+            },
+            {
+                "action": "mouse_up",
+                "frame_x": 800,
+                "frame_y": 300,
+                "target_region": [740, 240, 860, 360],
+                "grounding_mode": "object_anchor",
+                "interaction_mechanism": "press_hold",
+                "affordance_evidence": "the held object is inside the final destination",
+                "button": "left",
+                "expected_effect_region": [740, 240, 860, 360],
+                "effect_region_binding": "target_region",
+            },
+        ],
+        "expected_effect": {
+            "description": "release completes the requested visible state",
+            "region": [740, 240, 860, 360],
+            "region_binding": "target_region",
+            "binding_action_index": 1,
+            "semantic_verification_required": True,
+        },
+        "continuation": "finish",
+    })
+
+    assert decision.pointer_hold_after == ""
+
+
+def test_active_pointer_rejects_a_second_atomic_drag():
+    from pydantic import ValidationError
+
+    from winpilot.tasking.interaction import InteractionDecision
+
+    with pytest.raises(ValidationError, match="active held pointer"):
+        InteractionDecision.model_validate({
+            "scene_summary": "a destination is visible while the pointer is held",
+            "mode": "direct_visual_manipulation",
+            "turn_owner": "agent",
+            "agent_should_act": True,
+            "surface_region": [0, 0, 1000, 1000],
+            "interaction_region": [0, 0, 1000, 1000],
+            "confidence": 0.95,
+            "pointer_hold_before": "left",
+            "actions": [{
+                "action": "drag",
+                "frame_x1": 200,
+                "frame_y1": 500,
+                "frame_x2": 800,
+                "frame_y2": 300,
+                "source_region": [150, 450, 250, 550],
+                "target_region": [740, 240, 860, 360],
+                "interaction_mechanism": "direct_manipulation",
+                "affordance_evidence": "visible source and destination",
+            }],
+            "expected_effect": {
+                "description": "move into the destination",
+                "region": [740, 240, 860, 360],
+                "semantic_verification_required": True,
+            },
+            "continuation": "finish",
+        })
+
+
 def test_model_conflicting_stroke_spaces_are_not_repaired_or_executed():
     from winpilot.tasking.interaction import (
         InteractionAction,

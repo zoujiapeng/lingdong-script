@@ -27,7 +27,7 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 - `observe` 是只读操作；即使识别出聊天输入区也只返回 Controller 提案，不会暗中发送。原生视觉的点击、滚动、拖拽和笔画统一使用当前整帧的 `frame_*` 归一化坐标（0..1000），运行时映射到同一次截图的物理窗口区域；模型不能把缩放后的 JPEG 像素冒充物理 `x/y`。
 - 没有匹配当前 hwnd/screen epoch/窗口区域的新鲜画面时动作会被拦截。动作落下前会再次截图：能从当前帧可靠定位动作目标时，只检查目标外扩 `controller.visual_preflight_target_margin`（默认 60/1000）后的 ROI，变化比例超过 `controller.visual_preflight_target_change_ratio`（默认 `0.01`）才取消；无法可靠定位目标时退回整窗检查，阈值为 `controller.visual_preflight_change_ratio`（默认 `0.0025`）。取消后会返回新帧。目标含糊或结果看不清时应 `blocked`/安全暂停，不会猜坐标继续执行。
 - 低延迟 GUI 已落地 batch/subgoal、默认 3 FPS 的变化触发 watcher、变化 ROI 增量 OCR/Win32 预取、视觉元素缓存、anchor 复验、点击前局部视觉伺服、瞬态 press 采样、Skill replay、证据 done gate 和实时指标。确定性 Adapter 使用 `structured_ui` 先取 UIA/Win32 结构，只在收件人、确认框或短控件等义务区域做 scoped OCR；前台义务 OCR 会排在尚未开始的后台预测 OCR 前，释放 Perception lease 会取消排队分析并丢弃已经过期的后台结果。
-- 通用实时交互的 typed action 覆盖点击/双击、悬停、指针移动、拖拽、连续笔画、滚动、颜色选择、文本输入、快捷键、限时按键和稳定等待；`mouse_down → move/wait → mouse_up` 只允许作为同一批次内经过平衡校验的连续事务，不作为三个不受约束的顶层模型工具暴露。长拖拽和长路径的新鲜度检查沿路径最多均匀抽样 12 个局部 ROI，避免用一个大包围框把端点或局部变化稀释掉。
+- 通用实时交互的 typed action 覆盖点击/双击、悬停、指针移动、拖拽、连续笔画、滚动、颜色选择、文本输入、快捷键、限时按键和稳定等待。已知路径仍在一个平衡事务中执行 `mouse_down → move/wait → mouse_up`；目标或路线必须在按下后才出现时，Controller 可通过 `pointer_hold_before/after` 在权威新帧之间保留一次有超时和强制清理的真实按压，后续帧只准继续移动或匹配释放。跨帧时旧的未执行空间坐标会被丢弃并按新画面重规划。这套能力面向滑块、验证控件、地图/时间轴、编辑器和游戏式直接操控，不属于绘图专用通道。长拖拽和长路径的新鲜度检查沿路径最多均匀抽样 12 个局部 ROI，避免用一个大包围框把端点或局部变化稀释掉。
 - 系统提示词已收敛为稳定的紧凑闭环契约：真实画面优先，结构化感知只作提示；domain playbook 默认关闭。绘图、签名、拖拽、手写等只属于同一套“连续指针几何”通用路径，画猫/画狗不是生产专属能力。
 - 模型可随时用 `revise_plan` 替换或清空任务列表，也可原子执行 add/update/remove/move/reopen；任务列表是可变工作状态，不是完成证据。
 - `controller.multi_input_cooperation` 是默认关闭的实验开关。开启后优先后台安全的窗口消息/UIA 动作，不抢占其他前台窗口的键盘焦点；长物理动作中若用户移动鼠标或切换前台，用户取得控制权，Agent 安全停止该动作。Windows 仍只有一个系统鼠标和一个键盘焦点，这不是虚拟出第二套硬件。
@@ -54,12 +54,12 @@ Windows 低延迟 GUI Agent + Agent Runtime Platform（ARP）。当前产品由�
 | ARP / Automation IR | `automation-ir/1` 是新 artifact 的规范中间层。Flow editor 在 IR 的 `runtime.arp_graph` 中保存一次编译后的 `arp/1` 投影及 fingerprint，后端校验后直接运行；WPS/FlowScript/DSL 是兼容 adapter，不是新的并行事实源。 |
 | Memory / Skill | Agent run 只经 `memory/compiler.py` 写入一次；同名候选保留谱系而不删除旧版本。实际复用同时检查任务意图、app/window、stage/parameters/anchors（存在时）和脚本摘要。前端分开展示已验证技能、草稿/无效脚本、长期记忆和进程内 session memory。 |
 | Task Contract / Artifact | 前端自然语言入口先生成 `task-contract/1`：结构化 intent、typed stages、每阶段 capability selection、artifact binding、evidence provider 和 completion obligation。`ArtifactStore` 将用户工件与模型观察帧分离，并以 run-scoped `artifact_id`、哈希、来源、时间贯穿投递和验收。 |
-| 实时视觉交互 | `SurfaceBinding` 将交互面绑定到一个新鲜目标 hwnd、capture scope、窗口 client authority 和 frame identity；`InteractionRegion` 是该帧 0..1000 坐标空间中的显式安全区域。语义模型只提出一个 typed turn，Controller 在本地连续执行并返回动作后权威帧；区域外动作、陈旧帧、目标失焦或含糊表面均 fail-closed。 |
+| 实时视觉交互 | `SurfaceBinding` 将交互面绑定到一个新鲜目标 hwnd、capture scope、窗口 client authority 和 frame identity；`InteractionRegion` 是该帧 0..1000 坐标空间中的显式约束区域。语义模型提出 typed turn，Controller 可在本地执行完整短事务，也可保留一个由运行时证明的 held-pointer session，跨新帧观察动态出现的目标后继续拖动。任何模型伪造的 held 状态、跨帧旧坐标、区域外动作、陈旧帧、目标失焦或未配对释放都会被拒绝或清理。 |
 | 输入机制合同 | 连续路径执行前先满足 `interaction.prepare_input_mode`。Controller 从当前可访问界面证明自由绘制模式，发现选择、形状、文字等冲突模式时按语义控件切换并复核 Selected/Checked 或新鲜界面状态；只点到控件、只有工具返回 `ok` 或缺少后置状态都不能放行。注册表描述输入机制和通用控件语义，不绑定应用名、测试图形或屏幕坐标。 |
 | 提示词与计划 | 默认发送紧凑、通用、视觉优先的系统契约，不注入应用专属 recipe；模型可实时重排、增删或重新打开 todo。 |
 | 多输入协同 | 实验开关默认关闭；开启时实行人类优先的焦点/光标仲裁并 fail-closed，不能把它描述成两套真实鼠标键盘并发。 |
 | 前端与运行时 | “智能代理、流程工作台、运行记录、技能与学习、系统设置”共用 `/api/v2` 和 WebSocket；contract v2 与源码指纹会拒绝陈旧 Python 服务，不再依赖 iframe Agent 页面。运行列表与 job 列表是轻量摘要，详情按 run id 加载；重启后从 trace/manifest 恢复历史阶段、能力、工件、证据和完成合同。节点主列表、搜索与最近入口共享 compiler/catalog 可达性交集。 |
-| 真实能力 | 计算器、记事本、网页靶场、连续指针/拖拽和真实 Paint→QQ 工件链已有回归。2026-07-17 的最终自主视觉矩阵覆盖完整拖入、精确点击、顺序点击、滑块和四个通道方向，`8 passed, 1 deselected in 155.79s`，全部由浏览器 trusted pointer ground truth 判定；需要真人继续操作的共享回合只验收 Agent 自己已完成且进入 `waiting_external`，不冒充终态成功。关闭 Skill/Memory 的 QQ run `arp-20260716-215314-7f98cd` 是前一日从同一 Task Contract/ARP 路径创建并发送当前 run 工件的历史真实证据，本轮没有再次对外发送。测试对象和收件人只是样本参数，生产代码没有对象模板、收件人别名或物理坐标分支。这仍只是单机固定样本，不是统计成功率，更不是“达到人类通用视觉能力”的证明。微信、Steam、抖音、网易云等复杂软件尚未完成同等级真实 E2E。 |
+| 真实能力 | 计算器、记事本、网页靶场、连续指针/拖拽和真实 Paint→QQ 工件链已有回归。2026-07-18 又从可见 Electron 客户端、冷启动关闭 Skill/Memory 的同一入口完成 7/7 trusted-pointer 矩阵：完整拖入、滑块、按住后动态揭示目标、三个限区通道变体和一个类游戏拖动。测试对象只是样本参数，生产代码没有对象模板、应用名或固定屏幕坐标分支。它证明的是通用输入与闭环机制，不是《植物大战僵尸》、验证码或任意未知应用已经通过。当天真实 QQ 空间任务仍因 Windows Shell Experience 抢焦点而在 80 步后失败；随后焦点恢复链已修改并做了单元与手工验证，但尚未再次跑这条 QQ 任务，因此不能宣称 QQ 已修复。微信、Steam、抖音、网易云等复杂软件也尚未完成同等级真实 E2E。 |
 
 2026-07-17 的客户端同入口冷启动首回合 `arp-20260717-035253-f61869` 特意从冲突的 Selection 模式开始：系统用 1 次模型调用识别当前共享状态，Controller 自动切换到 Brushes、选择红色并在当前像素解析出的空区域画出 X，typed local verifier 证明输入模式、区域、两条路径和红色像素；用户预先画出的黑色圆圈不计为 Agent 输出。Observe / Infer / Perform / Verify 分别为 0.84 / 13.55 / 7.07 / 0.65 秒，约 22.1 秒的首回合仍不适合实时陪玩，主要瓶颈是首次语义规划。该持续会话随后因测试观察导致目标失焦而失败，因此这里只把它记录为“真实客户端首回合证据”，不冒充终态 E2E 通过。
 
@@ -96,6 +96,8 @@ npm run build:all
 
 2026-07-17 当前工作树的最终全量验证为 WinPilot `1827 passed, 13 skipped, 1 warning`、根 Python `2508 passed`、Vitest `209/209 passed`，TypeScript typecheck、Vite/Electron、CLI 与 AI build 全部通过。13 个常规 skip 是必须显式授权真实桌面或真实通信的 opt-in Windows E2E；本轮另行显式运行自主视觉矩阵 `8/8`，共享回合因需要真人继续而被排除在终态矩阵之外。Paint→QQ 的 `1/1` 是 2026-07-16 的历史真实发送证据，本轮没有再次发送。这里不使用 mock 代替 E2E，也不把单机运行记录描述成统计泛化评测；GitHub 是否可发布还要看推送后当前提交的 Actions 结果。
 
+2026-07-18 针对本轮改动重新运行 WinPilot 全量测试，结果为 `1929 passed, 13 skipped, 2 warnings`；`npm run typecheck` 的 renderer、Electron main、CLI 和 AI 四套 TypeScript 配置全部通过。另有真实客户端 7/7 视觉矩阵通过。这里没有重跑根 Python、Vitest 或 production build，因此沿用上段历史结果时必须保留日期，不能把它们写成本轮新证据。
+
 清理生成产物和缓存：
 
 ```bash
@@ -113,6 +115,10 @@ python scripts/gui_eval_run.py "用计算器计算6和7的和" --base-url http:/
 报告写到忽略目录 `python/winpilot_home/evals/`，trace 和截图在 `python/winpilot_home/traces/`。汇总中的 `verified_success` 只统计同时满足未超时、`status=done`、有外部 ground truth 且通过、policy 通过、性能预算通过并且没有 unverified done 标记的 run；没有检查项的报告记为 `ungrounded`，不再把 agent 自报 done 算成功。
 
 单次手工成功不能换算成“成功率”。2026-07-17 的通用实时交互 opt-in E2E 从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入，而不是直接调用内部 Controller。最终自主矩阵 `drag_fit`、`precise_click`、`ordered_clicks`、`slider`、`corridor_drag_v0..v3` 为 `8 passed, 1 deselected in 155.79s`；对应 run 为 `arp-20260717-172312-b1ad02`、`arp-20260717-172329-9fdf84`、`arp-20260717-172351-1cb6a4`、`arp-20260717-172418-b96691`、`arp-20260717-172434-dbed8e`、`arp-20260717-172453-7d12af`、`arp-20260717-172511-2a9a15`、`arp-20260717-172529-78a6aa`。八项均为 `done`，外部 ground truth 全部通过，0 次 replan/recovery；合计 10 次模型调用（平均 1.25、最多 2），Controller 平均 2,377 ms。浏览器分别验证完整对象落入、唯一目标点击、严格的 `1→2→3` 顺序、滑块终点和四种路径的合法性/minimum clearance；frame lineage、当前像素 grounding、source footprint、路径与 effect evidence 同时参与。模型调用次数是 trace 中的性能观测项，不是固定正确性阈值；复杂歧义或恢复场景允许增加调用，运行时只拒绝无界循环和不可满足路径。`shared_turn` 必须等真人继续，因此本轮只保留“Agent 回合已验证后进入 waiting_external”的非终态检查点，不将用户缺席记作 Agent 动作失败，也不计入自主终态矩阵。
+
+2026-07-18 的 `scripts/client_visual_e2e_run.py` 进一步从真实 Electron 客户端输入任务，并把受控浏览器窗口交还给桌面 Agent；七个 case 全部开启冷启动且 trace 中 `experience_policy=disabled`，最终 `7/7` 由浏览器 `isTrusted` 指针事件判定通过。矩阵包含 `drag-fit`、`slider`、`dynamic-hold`、`corridor-v0/v1/v3` 和 `game-drag-v2`；其中 `dynamic-hold` 只发生一次 pointerdown，到达 checkpoint 后才显示此前不存在的目标，Agent 读取新画面后继续移动并在目标内释放。报告在 `output/playwright/client-visual-e2e/20260718-072426-suite/suite-report.json`。这不是对真实验证码或具体游戏的通过声明，而是对它们所需的通用滑动、限区路径、跨帧按住和动态目标控制原语的端到端证据。
+
+`scripts/client_e2e_run.py --suite original|mixed|all` 固化了用户给出的 11 条原始任务、三条组合长任务和一条 11 项串联任务；它逐条从可见客户端提交，默认重置 session，并核对冷启动经验隔离。该 harness 只是保证真实测试入口和报告标准，不意味着尚未执行或失败的 case 已经通过。
 
 同日用户授权的最终真实 QQ E2E run `arp-20260716-215314-7f98cd` 对“用画板画一头猪然后截图打开QQ发送给我的手机”设置 `cold_start=true`，关闭 Skill/Memory，并从同一前端路径在 69.896 秒内完成 2 次模型调用；模型耗时 17,318 ms、Controller 51,309 ms。`DrawArtifact`、`CaptureArtifact`、`OpenConversation`、`SendArtifact`、`VerifyDelivery` 均为 `done`，0 个 Skill replay，每一阶段的 verifier requirements 都属于 exposed capabilities，trace 还保留实际选择的 evidence provider。它创建当前 run 工件 `art-7cb4d57e14af4211`（SHA-256 `b3e725f49ca3247506dbd7517fd405c9b892b2c7f329060a562316db1c38d01a`，866×413，10,370 bytes），打开“我的手机”，执行真实发送，并在发送后可见图片气泡中得到 209 个 good matches / 163 个 homography inliers；匹配区域相对发送前基线变化率为 0.0597，Completion Contract 全部满足。绘图语义验收认为主体可辨认，但 `detail_level=low`；这不是高审美质量声明。
 

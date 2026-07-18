@@ -243,10 +243,36 @@ def verify(region: Region, criteria: str) -> dict:
     region = region.clamp_to_screen()
     b64, _scale = _encode_region(region, max_side=1120)
     settings = _settings()
+    criteria_text = str(criteria or "").strip()
+    colorfulness_required = bool(re.search(
+        r"\b(?:colorful|colourful|multicolou?r(?:ed)?)\b|(?:彩色|多彩|五颜六色)",
+        criteria_text,
+        re.IGNORECASE,
+    ))
+    detail_required = bool(re.search(
+        r"\b(?:detail(?:ed)?|intricate|high[- ]quality)\b|(?:精细|精致|细节|高质量)",
+        criteria_text,
+        re.IGNORECASE,
+    ))
+    aesthetic_quality_required = bool(re.search(
+        r"\b(?:beautiful|pretty|polished|professional|aesthetic|attractive)\b|"
+        r"(?:好看|漂亮|美观|精美|专业|有质感)",
+        criteria_text,
+        re.IGNORECASE,
+    ))
     prompt = (
         "You are a strict visual completion verifier for a GUI agent. Judge only "
         "what is visibly present in the screenshot; do not infer success from the "
-        "request. Criteria: " + str(criteria or "").strip() + "\n"
+        "request. Criteria: " + criteria_text + "\n"
+        "Project the criteria literally. Never invent an aesthetic requirement: a "
+        "monochrome, simple, or low-detail result can pass when the requested subject "
+        "and every explicitly requested property are clearly recognizable. Color, "
+        "beauty, polish, realism, and decorative detail are mandatory only when the "
+        "criteria explicitly request them. Do not list an unrequested aesthetic as an "
+        "issue. "
+        f"Explicit colorful requirement={colorfulness_required}; explicit detail "
+        f"requirement={detail_required}; explicit aesthetic-quality "
+        f"requirement={aesthetic_quality_required}.\n"
         "Return ONLY one JSON object with keys: passed (boolean), confidence "
         "(0..1), subject_present (boolean or null), colorful (boolean or null), "
         "detail_level (low|medium|high|unknown), observed (array of short strings), "
@@ -295,21 +321,68 @@ def verify(region: Region, criteria: str) -> dict:
         issues_valid = isinstance(issues, list) and all(
             isinstance(issue, str) for issue in issues
         )
-        no_issues = issues_valid and not any(issue.strip() for issue in issues)
+        relevant_issues: list[str] = []
+        ignored_unrequested_issues: list[str] = []
+        semantic_failure = re.compile(
+            r"recogniz|unrecogniz|subject|object|absent|not present|not visible|"
+            r"unrelated|unfinished|incomplete|abstract|silhouette|structure|"
+            r"disconnect|overlap|无法识别|不可识别|主体|缺失|不存在|未完成|抽象|轮廓|结构|断开",
+            re.IGNORECASE,
+        )
+        color_aesthetic = re.compile(
+            r"colou?r|colorful|monochrome|black.?and.?white|彩色|颜色|色彩|黑白|单色",
+            re.IGNORECASE,
+        )
+        detail_aesthetic = re.compile(
+            r"detail|basic|crude|simple|rough|polish|aesthetic|pretty|beautiful|"
+            r"quality|decorat|精细|细节|简单|简陋|粗糙|好看|漂亮|美观|精美|装饰|质量",
+            re.IGNORECASE,
+        )
+        for issue in issues if issues_valid else []:
+            fragments = [
+                part.strip()
+                for part in re.split(r"[;；。]+", issue)
+                if part.strip()
+            ] or [issue.strip()]
+            kept: list[str] = []
+            ignored: list[str] = []
+            for fragment in fragments:
+                semantic = bool(semantic_failure.search(fragment))
+                unrequested_color = bool(
+                    color_aesthetic.search(fragment)
+                    and not colorfulness_required
+                )
+                unrequested_quality = bool(
+                    detail_aesthetic.search(fragment)
+                    and not detail_required
+                    and not aesthetic_quality_required
+                )
+                if not semantic and (unrequested_color or unrequested_quality):
+                    ignored.append(fragment)
+                else:
+                    kept.append(fragment)
+            if kept:
+                relevant_issues.append("; ".join(kept))
+            if ignored:
+                ignored_unrequested_issues.append("; ".join(ignored))
+        no_issues = issues_valid and not relevant_issues
         subject_present = verdict.get("subject_present")
         subject_consistent = subject_present is True
         detail_level = str(verdict.get("detail_level") or "").strip().casefold()
         detail_valid = detail_level in {"low", "medium", "high", "unknown"}
-        detail_required = bool(re.search(
-            r"\b(?:detail(?:ed)?|intricate|high[- ]quality)\b|(?:精细|精致|细节|高质量)",
-            str(criteria or ""),
-            re.IGNORECASE,
-        ))
         detail_consistent = detail_valid and (
             not detail_required or detail_level == "high"
         )
+        aesthetic_only_override = bool(
+            not raw_passed
+            and issues_valid
+            and ignored_unrequested_issues
+            and not relevant_issues
+            and subject_consistent
+        )
+        effective_passed = bool(raw_passed or aesthetic_only_override)
         passed = bool(
-            raw_passed
+            effective_passed
             and confidence_valid
             and float(confidence) >= min_confidence
             and no_issues
@@ -332,8 +405,16 @@ def verify(region: Region, criteria: str) -> dict:
             "verified": passed,
             "semantic_visual_verified": passed,
             "verify_method": "semantic-vlm",
-            "criteria": str(criteria or "").strip(),
+            "criteria": criteria_text,
             "verdict": verdict,
+            "effective_issues": relevant_issues,
+            "ignored_unrequested_issues": ignored_unrequested_issues,
+            "aesthetic_only_override": aesthetic_only_override,
+            "explicit_requirements": {
+                "colorful": colorfulness_required,
+                "detail": detail_required,
+                "aesthetic_quality": aesthetic_quality_required,
+            },
             "verify_confidence": float(confidence) if confidence_valid else None,
             "verify_min_confidence": min_confidence,
             "rejection_reasons": rejection_reasons,

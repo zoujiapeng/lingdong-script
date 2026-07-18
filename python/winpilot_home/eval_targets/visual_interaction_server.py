@@ -27,6 +27,52 @@ STATE: dict[str, Any] = {
 }
 
 
+def _accepted_success_event(events: list[dict[str, Any]], index: int) -> bool:
+    """Accept dynamic-hold success only after a trusted in-goal release."""
+
+    event = events[index]
+    if not (
+        event.get("type") == "scenario_success"
+        and event.get("trusted") is True
+        and event.get("succeeded") is True
+    ):
+        return False
+    if event.get("scenario") != "dynamic_hold":
+        return True
+
+    details = event.get("details") or {}
+    if not (
+        details.get("succeeded") is True
+        and int(details.get("down_count") or 0) == 1
+        and details.get("checkpoint_reached") is True
+        and details.get("goal_revealed_after_down") is True
+        and details.get("inside_goal") is True
+        and details.get("completion_event") == "pointerup"
+    ):
+        return False
+    case_id = str(event.get("case_id") or "")
+    seed = int(event.get("seed") or 0)
+    for release in reversed(events[:index]):
+        if (
+            str(release.get("case_id") or "") == case_id
+            and release.get("scenario") == "dynamic_hold"
+            and int(release.get("seed") or 0) == seed
+            and release.get("type") == "pointerup"
+        ):
+            release_details = release.get("details") or {}
+            return bool(
+                release.get("trusted") is True
+                and release.get("succeeded") is True
+                and release_details.get("succeeded") is True
+                and int(release_details.get("down_count") or 0) == 1
+                and release_details.get("checkpoint_reached") is True
+                and release_details.get("goal_revealed_after_down") is True
+                and release_details.get("inside_goal") is True
+                and release_details.get("completion_event") == "pointerup"
+            )
+    return False
+
+
 def _state_snapshot(case_id: str = "") -> dict[str, Any]:
     """Return ground truth scoped to one independently executing case.
 
@@ -43,12 +89,14 @@ def _state_snapshot(case_id: str = "") -> dict[str, Any]:
         item for item in snapshot.get("events") or []
         if str(item.get("case_id") or "") == normalized_case
     ]
-    success_event = next((
-        item for item in reversed(events)
-        if item.get("type") == "scenario_success"
-        and item.get("trusted") is True
-        and item.get("succeeded") is True
-    ), None)
+    success_event = next(
+        (
+            item
+            for index, item in reversed(list(enumerate(events)))
+            if _accepted_success_event(events, index)
+        ),
+        None,
+    )
     latest = success_event or (events[-1] if events else {})
     result: dict[str, Any] = {
         "ready": snapshot.get("ready") is True,
@@ -143,11 +191,7 @@ class Handler(BaseHTTPRequestHandler):
         with STATE_LOCK:
             STATE["events"].append(safe)
             STATE["events"] = STATE["events"][-240:]
-            if (
-                safe.get("type") == "scenario_success"
-                and safe.get("trusted") is True
-                and safe.get("succeeded") is True
-            ):
+            if _accepted_success_event(STATE["events"], len(STATE["events"]) - 1):
                 STATE["success"] = True
                 STATE["completed_at"] = time.time()
                 STATE["case_id"] = str(safe.get("case_id") or "")

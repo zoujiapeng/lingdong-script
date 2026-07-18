@@ -172,37 +172,106 @@ def test_open_app_reuses_title_matched_window_when_process_snapshot_misses(monke
     assert focused == [33]
 
 
-def test_open_app_reopens_background_process_once_without_shell(monkeypatch):
-    from winpilot.agent import tools
+def test_open_app_restores_background_window_without_launching_duplicate(monkeypatch):
+    from winpilot.agent import system_tools, tools
     from winpilot.agent.tools import ToolSession
-    from winpilot.agent.tool_result import ToolResult
 
     session = ToolSession(task="open the chat app")
-    calls = []
+    session._window_alive = lambda hwnd: bool(hwnd)
+    session._t_launch = lambda _args: (_ for _ in ()).throw(
+        AssertionError("must not launch a duplicate process")
+    )
+    focused = []
+    shown = []
     monkeypatch.setattr(
         tools,
         "win32",
-        SimpleNamespace(find_app=lambda _name: {
-            "running": True,
-            "process_count": 7,
-            "windows": [{"hwnd": 11, "title": "Chat", "visible": False}],
-        }),
+        SimpleNamespace(
+            find_app=lambda _name: {
+                "running": True,
+                "process_count": 7,
+                "windows": [{"hwnd": 11, "title": "Chat", "visible": False}],
+            },
+            find_window=lambda _name: None,
+        ),
     )
-    session._t_launch = lambda args: calls.append(args) or ToolResult(json.dumps({
-        "ok": True,
-        "verified": True,
-        "target_hwnd": 44,
-        "launch_window": {"hwnd": 44, "title": "Chat"},
-    }))
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(
+            focus_window=lambda hwnd: focused.append(hwnd) or {"ok": True, "hwnd": hwnd},
+        ),
+    )
+    monkeypatch.setattr(system_tools.win32gui, "GetWindowText", lambda _hwnd: "Chat")
+    monkeypatch.setattr(system_tools.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(system_tools.win32gui, "GetClassName", lambda _hwnd: "ChatWindow")
+    monkeypatch.setattr(system_tools.win32gui, "GetWindowRect", lambda _hwnd: (0, 0, 1000, 700))
+    monkeypatch.setattr(system_tools.win32gui, "GetWindow", lambda *_args: 0)
+    monkeypatch.setattr(system_tools.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(system_tools.win32gui, "IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        system_tools.win32gui,
+        "ShowWindow",
+        lambda hwnd, mode: shown.append((hwnd, mode)) or True,
+    )
 
     data = json.loads(session._t_open_app({"name": "Chat"}).text)
 
     assert data["ok"] is True
     assert data["verified"] is True
-    assert data["route"] == "reopen_background_app"
-    assert data["target_hwnd"] == 44
-    assert calls == [{"command": "Chat"}]
-    assert "shell" in data["fast_path_advice"].casefold()
+    assert data["route"] == "existing_hidden_window"
+    assert data["target_hwnd"] == 11
+    assert focused == [11]
+    assert shown and shown[0][0] == 11
+    assert "do not launch another instance" in data["fast_path_advice"].casefold()
+
+
+def test_open_app_refuses_duplicate_when_existing_hidden_window_cannot_restore(monkeypatch):
+    from winpilot.agent import system_tools, tools
+    from winpilot.agent.tools import ToolSession
+
+    session = ToolSession(task="open the chat app")
+    session._window_alive = lambda hwnd: bool(hwnd)
+    session._t_launch = lambda _args: (_ for _ in ()).throw(
+        AssertionError("must not launch a duplicate process")
+    )
+    monkeypatch.setattr(
+        tools,
+        "win32",
+        SimpleNamespace(
+            find_app=lambda _name: {
+                "running": True,
+                "process_count": 2,
+                "windows": [{"hwnd": 11, "title": "Chat", "visible": False}],
+            },
+            find_window=lambda _name: None,
+        ),
+    )
+    monkeypatch.setattr(
+        tools,
+        "executor",
+        SimpleNamespace(focus_window=lambda _hwnd: {"ok": False}),
+    )
+    monkeypatch.setattr(
+        tools,
+        "tray",
+        SimpleNamespace(click_tray_icon=lambda *_args, **_kwargs: {"ok": False}),
+    )
+    monkeypatch.setattr(system_tools.win32gui, "GetWindowText", lambda _hwnd: "Chat")
+    monkeypatch.setattr(system_tools.win32gui, "IsWindow", lambda _hwnd: True)
+    monkeypatch.setattr(system_tools.win32gui, "GetClassName", lambda _hwnd: "ChatWindow")
+    monkeypatch.setattr(system_tools.win32gui, "GetWindowRect", lambda _hwnd: (0, 0, 1000, 700))
+    monkeypatch.setattr(system_tools.win32gui, "GetWindow", lambda *_args: 0)
+    monkeypatch.setattr(system_tools.win32gui, "IsIconic", lambda _hwnd: False)
+    monkeypatch.setattr(system_tools.win32gui, "IsWindowVisible", lambda _hwnd: False)
+    monkeypatch.setattr(system_tools.win32gui, "ShowWindow", lambda *_args: True)
+
+    data = json.loads(session._t_open_app({"name": "Chat"}).text)
+
+    assert data["ok"] is False
+    assert data["blocked"] is True
+    assert data["failure_type"] == "background_instance_restore_failed"
+    assert data["background_recovery"]["duplicate_launch_unsafe"] is True
 
 
 def test_open_app_failure_advice_does_not_require_an_unexposed_scan_tool(monkeypatch):

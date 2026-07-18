@@ -66,7 +66,7 @@ def test_frontend_task_contract_compile_endpoint_returns_typed_satisfiable_graph
     data = response.json()
     assert data["contract"]["satisfiable"] is True
     assert [stage["type"] for stage in data["contract"]["stages"]] == [
-        "DrawArtifact", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
+        "ExecuteDesktopTask", "CaptureArtifact", "OpenConversation", "SendArtifact", "VerifyDelivery",
     ]
     assert "task_stage" in {node["kind"] for node in data["graph"]["nodes"]}
     assert "agent_goal" not in {node["kind"] for node in data["graph"]["nodes"]}
@@ -89,13 +89,58 @@ def test_frontend_compile_cold_start_disables_skill_and_memory_paths(client):
     assert "skill_replay" not in {node["kind"] for node in data["graph"]["nodes"]}
 
 
-def test_compile_reports_missing_adapter_before_starting_a_run(client):
+def test_visible_client_can_require_the_lossless_generic_gui_route(client):
+    task = "把这个弄好"
+    response = client.post(
+        "/api/v2/task-contracts/compile",
+        json={"task": task, "cold_start": True, "require_gui": True},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [stage["type"] for stage in data["contract"]["stages"]] == [
+        "ExecuteDesktopTask",
+    ]
+    assert data["contract"]["stages"][0]["parameters"]["goal"] == task
+    assert isinstance(data["graph"]["metadata"]["session_generation"], int)
+
+
+def test_session_clear_invalidates_a_previously_compiled_graph(client):
+    compiled = client.post(
+        "/api/v2/task-contracts/compile",
+        json={"task": "把这个弄好", "cold_start": True, "require_gui": True},
+    )
+    assert compiled.status_code == 200
+    graph = compiled.json()["graph"]
+
+    cleared = client.delete("/api/session")
+    assert cleared.status_code == 200
+    assert isinstance(cleared.json()["generation"], int)
+
+    started = client.post(
+        "/api/v2/arp/runs",
+        json={"graph": graph, "inputs": {}},
+    )
+    assert started.status_code == 409
+    assert "Session context changed" in started.json()["detail"]
+
+
+def test_compile_defers_discoverable_fields_to_the_live_desktop(client):
     response = client.post(
         "/api/v2/task-contracts/compile",
         json={"task": "把截图发给测试联系人", "max_steps": 20},
     )
-    assert response.status_code == 422
-    assert "missing capabilities" in response.json()["detail"]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["needs_input"] is False
+    assert data["contract"]["satisfiable"] is True
+    assert data["clarification_questions"] == []
+    assert [stage["type"] for stage in data["contract"]["stages"]] == [
+        "ExecuteDesktopTask",
+    ]
+    stage = data["contract"]["stages"][0]
+    assert stage["parameters"]["runtime_resolution_fields"] == ["channel"]
+    assert stage["parameters"]["preserve_original_intent"] is True
 
 
 def test_validate_and_run_arp_graph_through_api(client):

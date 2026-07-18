@@ -41,6 +41,23 @@ SUPPORTED_CONDITIONS = (
     "screen_stable", "color_match",
 ) + groundtruth.GROUNDTRUTH_KEYS
 
+_CONDITION_ALIASES = {
+    # Models commonly describe the already-substring-based window_title
+    # predicate with this more explicit spelling.  Canonicalize it instead of
+    # spending an entire GUI step on an avoidable schema failure.
+    "window_title_contains": "window_title",
+}
+
+
+def _canonical_expect(expect: dict) -> dict:
+    normalized = dict(expect or {})
+    for alias, canonical in _CONDITION_ALIASES.items():
+        if alias not in normalized:
+            continue
+        normalized.setdefault(canonical, normalized[alias])
+        normalized.pop(alias, None)
+    return normalized
+
 # Only checks that are intrinsically read-only may overlap UI perception.
 # shell_true deliberately stays synchronous because an arbitrary PowerShell
 # expression cannot be proven side-effect free.
@@ -576,6 +593,7 @@ def _eval_once(expect: dict, hwnd: int | None, level: int,
                groundtruth_probe: _AsyncGroundTruthProbe | None = None,
                require_changed_text_evidence: bool = False) -> VerifyOutcome:
     """Evaluate every condition in the expect dict once (AND semantics)."""
+    expect = _canonical_expect(expect)
     methods: list[str] = []
     # Deterministic checks may already be running in the background. Evaluate
     # visible conditions first so their UIA/OCR latency overlaps that work.
@@ -674,7 +692,22 @@ def check(expect: dict, hwnd: int | None = None,
 
     ``stop_event`` (threading.Event) lets a Stop abort the polling loop early
     instead of waiting out the timeout."""
+    expect = _canonical_expect(expect)
     started = time.monotonic()
+    unsupported = sorted(
+        set(expect) - set(SUPPORTED_CONDITIONS) - {"timeout_s", "allow_preexisting"}
+    )
+    if unsupported:
+        return VerifyOutcome(
+            False,
+            "不支持的验证条件: " + ", ".join(unsupported),
+            "schema",
+            trace={
+                "poll_count": 0,
+                "elapsed_ms": 0,
+                "unsupported_conditions": unsupported,
+            },
+        )
     deadline = started + timeout_s
     level = 0
     polls = 0

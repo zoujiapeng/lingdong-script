@@ -45,6 +45,157 @@ def test_batch_contract_rejects_unbalanced_or_unbounded_continuous_input():
     ]))
 
 
+def test_batch_contract_accepts_explicit_cross_frame_pointer_transitions():
+    from winpilot.fast.action_contract import validate_batch_actions
+
+    assert validate_batch_actions([
+        {"action": "move_mouse", "x": 100, "y": 120},
+        {"action": "mouse_down", "button": "left"},
+        {"action": "move_mouse", "x": 220, "y": 180},
+    ], pointer_hold_after="left") == []
+    assert validate_batch_actions([
+        {"action": "move_mouse", "x": 320, "y": 280},
+        {"action": "mouse_up", "button": "left"},
+    ], pointer_hold_before="left") == []
+    assert validate_batch_actions([
+        {"action": "move_mouse", "x": 320, "y": 280},
+    ], pointer_hold_before="left", pointer_hold_after="left") == []
+
+
+def test_controller_preserves_only_an_explicit_cross_frame_pointer_session(monkeypatch):
+    from winpilot.agent import scope_guard
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast import controller as controller_mod
+    from winpilot.fast.controller import FastGuiController
+
+    monkeypatch.setattr(scope_guard, "ensure_scope", lambda *_args, **_kwargs: None)
+    held = set()
+    calls = []
+
+    def release_all():
+        released = sorted(held)
+        held.clear()
+        return released
+
+    monkeypatch.setattr(
+        controller_mod.action_executor,
+        "agent_holds_mouse_button",
+        lambda button="left": button in held,
+    )
+    monkeypatch.setattr(
+        controller_mod.action_executor,
+        "release_held_mouse_buttons",
+        release_all,
+    )
+
+    class Session:
+        hwnd = 17
+        run_id = "cross-frame-pointer-session"
+        snapshot = None
+        _screen_epoch = 1
+
+        def dispatch(self, name, args):
+            calls.append((name, dict(args)))
+            if name == "mouse_down":
+                held.add(str(args.get("button") or "left"))
+            elif name == "mouse_up":
+                held.discard(str(args.get("button") or "left"))
+            return ToolResult('{"ok": true}')
+
+    controller = FastGuiController(Session())
+    first = controller.execute([
+        {"action": "move_mouse", "x": 100, "y": 120},
+        {"action": "mouse_down", "button": "left"},
+        {"action": "move_mouse", "x": 220, "y": 180},
+    ], sync=False, pointer_hold_after="left")
+
+    assert first["ok"] is True
+    assert first["pointer_session"]["button"] == "left"
+    assert held == {"left"}
+
+    second = controller.execute([
+        {"action": "move_mouse", "x": 320, "y": 280},
+        {"action": "mouse_up", "button": "left"},
+    ], sync=False, pointer_hold_before="left")
+
+    assert second["ok"] is True
+    assert held == set()
+    assert [name for name, _args in calls] == [
+        "move_mouse", "mouse_down", "move_mouse", "move_mouse", "mouse_up",
+    ]
+
+
+def test_batch_pointer_continuation_preserves_one_absolute_lease():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    class Controller:
+        def execute(self, actions, **kwargs):
+            return {"ok": True, "results": [], "pointer_session": {}}
+
+    class Session(FastToolMixin):
+        def __init__(self):
+            self._fast_gui_controller = Controller()
+            self._pointer_hold_button = ""
+            self.armed = []
+            self.cancelled = 0
+
+        def _fmt(self, value):
+            return json.dumps(value)
+
+        def _arm_pointer_hold_timeout(self, button):
+            self.armed.append(button)
+            return 75.0
+
+        def _cancel_pointer_hold_timeout(self):
+            self.cancelled += 1
+
+    session = Session()
+    session._t_run_action_batch({
+        "actions": [{"action": "mouse_down", "x": 10, "y": 10}],
+        "pointer_session": {"before": "", "after": "left"},
+    })
+    session._t_run_action_batch({
+        "actions": [{"action": "move_mouse", "x": 20, "y": 20}],
+        "pointer_session": {"before": "left", "after": "left"},
+    })
+    session._t_run_action_batch({
+        "actions": [{"action": "mouse_up", "button": "left"}],
+        "pointer_session": {"before": "left", "after": ""},
+    })
+
+    assert session.armed == ["left"]
+    assert session.cancelled == 1
+    assert session._pointer_hold_button == ""
+
+
+def test_failed_batch_does_not_silently_forget_a_held_pointer():
+    from winpilot.agent.fast_tools import FastToolMixin
+
+    class Controller:
+        def execute(self, actions, **kwargs):
+            return {"ok": False, "error": "interrupted", "results": []}
+
+    class Session(FastToolMixin):
+        def __init__(self):
+            self._fast_gui_controller = Controller()
+            self._pointer_hold_button = "left"
+
+        def _fmt(self, value):
+            return json.dumps(value)
+
+        def _pointer_hold_status(self):
+            return {"active": True, "button": "left"}
+
+    session = Session()
+    result = json.loads(session._t_run_action_batch({
+        "actions": [{"action": "move_mouse", "x": 20, "y": 20}],
+        "pointer_session": {"before": "left", "after": "left"},
+    }).text)
+
+    assert result["pointer_session"] == {"active": True, "button": "left"}
+    assert session._pointer_hold_button == "left"
+
+
 def test_controller_releases_held_pointer_when_transaction_aborts(monkeypatch):
     from winpilot.agent import scope_guard
     from winpilot.agent.tool_result import ToolResult
@@ -3639,6 +3790,31 @@ def test_native_prebind_hides_text_controller_observe_request(monkeypatch):
     assert "needs_observe" not in history_result
     assert "Observe it once" not in history_result
     assert "do not call observe merely to reconfirm" in model_message
+
+
+def test_native_prebind_reuses_verified_app_hint_after_window_replacement(monkeypatch):
+    from winpilot.agent.loop import AgentRunner
+    from winpilot.agent.tools import ToolResult
+
+    runner = AgentRunner("打开QQ去QQ空间里面点赞看到的所有说说")
+    runner.messages = [{"role": "system", "content": "system"}]
+    runner.session.hwnd = 41
+    runner.session.target_hint = "QQ"
+    runner.session._target_binding_verified = True
+    calls = []
+
+    monkeypatch.setattr(runner.session, "_window_alive", lambda _hwnd: False)
+    monkeypatch.setattr(runner.session, "_recover_bound_target_window", lambda: None)
+
+    def dispatch(tool, args):
+        calls.append((tool, args))
+        return ToolResult('{"ok": true, "verified": true, "target_hwnd": 42}')
+
+    monkeypatch.setattr(runner.session, "dispatch", dispatch)
+
+    runner._prebind_initial_gui_target()
+
+    assert calls == [("open_app", {"name": "QQ"})]
 
 
 def test_run_action_batch_open_app_recovers_hallucinated_preobserve_element_id():
@@ -9710,3 +9886,35 @@ def test_direct_subgoal_refreshes_same_hwnd_snapshot_before_grounding():
     assert click_args.get("element_id") == 2
     assert click_args.get("element_id") != 1
     assert payload["ok"] is True
+
+
+def test_controller_arithmetic_batch_uses_verified_tool_session_path():
+    from types import SimpleNamespace
+
+    from winpilot.agent.tool_result import ToolResult
+    from winpilot.fast.controller import FastGuiController
+
+    calls = []
+
+    class Session:
+        def dispatch(self, name, args):
+            calls.append((name, dict(args)))
+            return ToolResult('{"ok": true, "verified": true, "input_fallback": {"used": true}}')
+
+    controller = FastGuiController(Session())
+    controller.raw_device = SimpleNamespace(
+        supports=lambda _name: True,
+        execute=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("arithmetic input must not bypass ToolSession")
+        ),
+    )
+
+    result = controller.execute(
+        [{"action": "type_text", "text": "86+79="}],
+        subgoal="Calculate 86 + 79",
+    )
+
+    assert calls == [("type_text", {"text": "86+79="})]
+    assert result["verified"] is True
+    assert result["arithmetic_input_route"] == "verified_tool_session"
+    assert result["results"][0]["data"]["input_fallback"]["used"] is True

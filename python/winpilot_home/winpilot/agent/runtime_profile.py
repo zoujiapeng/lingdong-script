@@ -45,7 +45,11 @@ class RuntimeProfile:
     stage_guidance: str = ""
     model_tool_allowlist: tuple[str, ...] = ()
     inline_semantic_verification: bool = False
+    adaptive_visual_interaction: bool = False
+    surface_output_mode: bool = False
+    surface_output_criteria: str = ""
     experience_enabled: bool = True
+    plan_upfront: bool = False
 
     @property
     def label(self) -> str:
@@ -107,7 +111,11 @@ class RuntimeProfile:
             "stage_guidance": self.stage_guidance,
             "model_tool_allowlist": list(self.model_tool_allowlist),
             "inline_semantic_verification": self.inline_semantic_verification,
+            "adaptive_visual_interaction": self.adaptive_visual_interaction,
+            "surface_output_mode": self.surface_output_mode,
+            "surface_output_criteria": self.surface_output_criteria,
             "experience_enabled": self.experience_enabled,
+            "plan_upfront": self.plan_upfront,
         }
 
     def prompt_section(self) -> str:
@@ -119,6 +127,26 @@ class RuntimeProfile:
                 "criteria. Do not require these implementation words or numbers to appear "
                 "in the output.\n"
                 + self.stage_guidance.strip()
+            )
+        if self.adaptive_visual_interaction:
+            sections.append(
+                "# Active runtime capability: adaptive visual interaction\n"
+                "Use the latest authoritative target-window frame as the only coordinate source. "
+                "Select the smallest goal-relevant click, press/hold, drag, guided path, stroke, "
+                "keyboard action, or short controller batch that the visible affordance supports. "
+                "Prefer semantic label/text grounding for stable visible controls. For purely visual "
+                "geometry, use the exact submitted-image pixel fields stated with the current frame; "
+                "the runtime maps them to the desktop without model-side resizing arithmetic. "
+                "Use one continuous drag when the whole static route is visible. If a useful next point "
+                "only becomes knowable after pressing or moving, call mouse_down, inspect the automatically "
+                "returned fresh frame, use one or more move_mouse turns grounded in each new frame, then "
+                "mouse_up. This is the same generic held-pointer loop for sliders, drag/drop, games, "
+                "timelines, remote surfaces, and other interactive scenes. "
+                "Bind spatial input to the current frame and a constraint_frame_region whenever "
+                "the action belongs inside a board, pane, lane, canvas, game area, or other ROI. "
+                "After every action whose effect can change later geometry, obtain a fresh frame, "
+                "verify the intended semantic effect, and replan from that new state. A dispatched "
+                "input or a changed pixel region is progress evidence, never whole-task completion."
             )
         if not self.coding:
             return "\n\n".join(sections)
@@ -164,6 +192,7 @@ def build_runtime_profile(
     """Decide which runtimes are active inside the single AgentRunner."""
     coding_enabled = bool(CONFIG.get("coding", "enabled", default=True))
     stage_execution = getattr(stage, "execution", None)
+    stage_parameters = dict(getattr(stage, "parameters", {}) or {})
     if task_contract is not None and stage is not None:
         # A typed stage has already been classified and capability-planned.  Do
         # not let a generated stage goal re-enable Coding Runtime through an
@@ -214,17 +243,63 @@ def build_runtime_profile(
     experience_enabled = str(
         getattr(task_contract, "experience_policy", "allow") or "allow"
     ).casefold() != "disabled"
+    stage_type = str(getattr(getattr(stage, "type", None), "value", "") or "")
+    declared_capabilities = {
+        str(item or "").strip().casefold()
+        for item in (
+            tuple(getattr(stage_execution, "required_capabilities", ()) or ())
+            + tuple(getattr(stage_execution, "exposed_capabilities", ()) or ())
+        )
+    }
+    adaptive_visual_interaction = bool(
+        stage_type == "ExecuteDesktopTask"
+        or "visual.adaptive_interaction" in declared_capabilities
+    )
+    surface_output_mode = bool(
+        stage_type == "DrawArtifact"
+        or str(stage_parameters.get("surface_output_mode") or "").strip()
+    )
+    surface_subject = str(
+        stage_parameters.get("surface_output_subject")
+        or stage_parameters.get("subject")
+        or ""
+    ).strip()
+    surface_quality = str(
+        stage_parameters.get("surface_output_quality")
+        or stage_parameters.get("quality")
+        or "normal"
+    ).strip().casefold()
+    surface_output_criteria = ""
+    if surface_output_mode:
+        subject = surface_subject or "the requested visible surface output"
+        surface_output_criteria = (
+            f"The current target application visibly contains {subject}. "
+            + (
+                "It must satisfy the explicitly requested polished and detailed quality."
+                if surface_quality == "detailed"
+                else "It must be clearly recognizable; do not require unrequested decoration."
+            )
+        )
     stage_values = {
         "task_contract_id": str(getattr(task_contract, "task_id", "") or ""),
-        "stage_type": str(getattr(getattr(stage, "type", None), "value", "") or ""),
+        "stage_type": stage_type,
         "required_capabilities": tuple(getattr(stage_execution, "required_capabilities", ()) or ()),
         "exposed_capabilities": tuple(getattr(stage_execution, "exposed_capabilities", ()) or ()),
         "stage_tools": tuple(getattr(stage_execution, "tools", ()) or ()),
         "domain_adapter": str(getattr(stage_execution, "adapter", "") or ""),
         "stage_guidance": str(stage_guidance or "").strip(),
         "model_tool_allowlist": tuple(str(item) for item in model_tool_allowlist if str(item)),
-        "inline_semantic_verification": bool(inline_semantic_verification),
+        "inline_semantic_verification": bool(
+            inline_semantic_verification or surface_output_mode
+        ),
+        "adaptive_visual_interaction": adaptive_visual_interaction,
+        "surface_output_mode": surface_output_mode,
+        "surface_output_criteria": surface_output_criteria,
         "experience_enabled": experience_enabled,
+        "plan_upfront": bool(
+            str(getattr(getattr(stage, "type", None), "value", "") or "")
+            == "ExecuteDesktopTask"
+        ),
     }
     if not use_coding:
         return RuntimeProfile(

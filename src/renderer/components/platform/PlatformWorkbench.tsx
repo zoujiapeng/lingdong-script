@@ -8,6 +8,7 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
+  CircleHelp,
   CircleStop,
   Clock3,
   Database,
@@ -45,6 +46,7 @@ import { PropertyPanel } from '../PropertyPanel/PropertyPanel';
 import { useStore } from '../../store';
 import type { UIState } from '../../types';
 import { useControlPlane } from '../../platform/useControlPlane';
+import { TaskClarificationRequired } from '../../platform/client';
 import type {
   AgentSchedule,
   ArpExecutionSnapshot,
@@ -871,6 +873,7 @@ function AgentCockpit({ plane }: { plane: Plane }) {
   const [coldStart, setColdStart] = useState(() => localStorage.getItem('arp-cold-start') === '1');
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [clarificationQuestions, setClarificationQuestions] = useState<string[]>([]);
   const run = plane.currentRun;
   const arp = plane.arpSnapshot;
   const active = Boolean(run && ACTIVE_STATUSES.has(run.status));
@@ -894,12 +897,17 @@ function AgentCockpit({ plane }: { plane: Plane }) {
     }
     setSubmitting(true);
     setActionError('');
+    setClarificationQuestions([]);
     try {
       localStorage.setItem('arp-last-goal', goal.trim());
       localStorage.setItem('arp-cold-start', coldStart ? '1' : '0');
       await plane.startGoal(goal.trim(), maxSteps, coldStart);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
+      if (error instanceof TaskClarificationRequired) {
+        setClarificationQuestions(error.questions);
+      } else {
+        setActionError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -919,16 +927,19 @@ function AgentCockpit({ plane }: { plane: Plane }) {
         <textarea
           className="arp-goal-input"
           value={goal}
-          onChange={(event) => setGoal(event.target.value)}
+          onChange={(event) => {
+            setGoal(event.target.value);
+            setClarificationQuestions([]);
+          }}
           onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') execute(); }}
           placeholder="描述希望代理在这台电脑上完成的目标……"
           disabled={active}
         />
         <div className="arp-command-actions">
           <label className="arp-step-control">步骤上限<input type="number" min={1} max={400} value={maxSteps} onChange={(event) => setMaxSteps(Number(event.target.value) || 40)} disabled={active} /></label>
-          <label className="arp-cold-start-control" title="禁用 Skill 重放、经验提示与会话记忆；用于真实冷启动验收">
+          <label className="arp-cold-start-control" title="禁用 Skill 重放与长期经验提示；仍保留当前对话中的短期指代，用于真实冷启动验收">
             <input type="checkbox" checked={coldStart} onChange={(event) => setColdStart(event.target.checked)} disabled={active} />
-            冷启动（禁用 Skill/Memory）
+            冷启动（禁用 Skill/长期经验）
           </label>
           <div className="arp-action-spacer" />
           {active ? (
@@ -939,6 +950,16 @@ function AgentCockpit({ plane }: { plane: Plane }) {
             </button>
           )}
         </div>
+        {clarificationQuestions.length > 0 && (
+          <div className="arp-clarification" role="status">
+            <CircleHelp size={15} />
+            <div>
+              <strong>任务尚未启动，请先补充必要信息</strong>
+              <span>{clarificationQuestions.join('；')}</span>
+              <small>把答案补充到上面的指令中，然后重新运行。</small>
+            </div>
+          </div>
+        )}
         {actionError && <div className="arp-inline-error"><XCircle size={14} />{actionError}</div>}
         {runtimeIssue && !actionError && <div className="arp-inline-error"><XCircle size={14} />{runtimeIssue} 当前控制器版本不兼容，应用会自动替换空闲控制器；如果刚刚热更新过，请重启一次桌面应用。</div>}
         {modelProfile?.model && modelProfile?.supports_vision === false && <div className="arp-inline-error"><Eye size={14} />{String(modelProfile.model)} 不接受图像输入。像素密集型 GUI 任务将使用较慢的感知/控制器回退路径，请选择支持视觉的主模型。</div>}
@@ -1524,7 +1545,7 @@ function AssetsView({ plane, openStudio }: { plane: Plane; openStudio: () => voi
             <div className="arp-memory-tabs">
               <button className={memoryView === 'long' ? 'active' : ''} onClick={() => setMemoryView('long')}>长期 {memories.length}</button>
               <button className={memoryView === 'session' ? 'active' : ''} onClick={() => setMemoryView('session')}>会话 {sessions.length}</button>
-              {memoryView === 'session' && sessions.length > 0 && <button className="arp-icon-button" title="清空会话记忆" onClick={clearSessions} disabled={busy}><X size={13} /></button>}
+              {memoryView === 'session' && <button className="arp-icon-button" title="清空会话记忆" onClick={clearSessions} disabled={busy}><X size={13} /></button>}
             </div>
           </div>
           <div className="arp-asset-list">

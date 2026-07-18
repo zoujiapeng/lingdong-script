@@ -1,6 +1,7 @@
 from winpilot.agent import planner
 from winpilot.agent import context_guidance
 from winpilot.tasking.contracts import TaskIntent
+from types import SimpleNamespace
 
 
 def test_plan_drops_button_label_echo_text_check():
@@ -185,6 +186,116 @@ def test_context_guidance_passes_runner_typed_intent_to_planner(monkeypatch):
         "task": "opaque task",
         "task_intent": typed_intent,
     }
+
+
+def test_full_desktop_stage_forces_a_provisional_plan_with_live_context(monkeypatch):
+    observed: dict = {}
+
+    def unexpected_heuristic(*_args, **_kwargs):
+        raise AssertionError("a typed full desktop stage must not depend on text heuristics")
+
+    def fake_make_plan(_client, model, task, **kwargs):
+        observed.update({
+            "model": model,
+            "task": task,
+            "runtime_context": kwargs.get("runtime_context"),
+        })
+        return [{"goal": "inspect the live environment before choosing a route"}]
+
+    monkeypatch.setattr(context_guidance, "should_plan_upfront", unexpected_heuristic)
+    monkeypatch.setattr(context_guidance, "make_plan", fake_make_plan)
+    monkeypatch.setattr(
+        context_guidance.CONFIG,
+        "get",
+        lambda *path, default=None: {"model": "test-model"}
+        if path == ("api",) else default,
+    )
+
+    class Runner(context_guidance.ContextGuidanceMixin):
+        task = "opaque adaptive desktop goal"
+        task_intent = {
+            "operation": ["operate"],
+            "ambiguous_fields": ["channel"],
+        }
+        runtime_profile = SimpleNamespace(plan_upfront=True)
+        session = SimpleNamespace(
+            plan=None,
+            snapshot=SimpleNamespace(
+                title="Current App",
+                elements=[SimpleNamespace(text="Visible control")],
+            ),
+        )
+        messages = []
+        run_id = "run-plan"
+
+        @staticmethod
+        def _track_aux_model_response(*_args, **_kwargs):
+            return None
+
+    runner = Runner()
+    runner._maybe_plan_upfront(client=object())
+
+    assert observed == {
+        "model": "test-model",
+        "task": "opaque adaptive desktop goal",
+        "runtime_context": (
+            "Unresolved facts to discover from the live environment: channel\n"
+            "Current window title: Current App\n"
+            "Currently visible labels: Visible control"
+        ),
+    }
+    assert runner.session.plan.steps[0]["goal"] == (
+        "inspect the live environment before choosing a route"
+    )
+
+
+def test_prebound_target_is_planner_context_and_satisfies_open_step(monkeypatch):
+    observed: dict = {}
+
+    def fake_make_plan(_client, _model, _task, **kwargs):
+        observed["runtime_context"] = kwargs.get("runtime_context")
+        return ["打开画图", "截取当前作品"]
+
+    monkeypatch.setattr(context_guidance, "make_plan", fake_make_plan)
+    monkeypatch.setattr(
+        context_guidance.CONFIG,
+        "get",
+        lambda *path, default=None: {"model": "test-model"}
+        if path == ("api",) else default,
+    )
+
+    class Runner(context_guidance.ContextGuidanceMixin):
+        task = "capture the current work"
+        task_intent = {"operation": ["capture"]}
+        runtime_profile = SimpleNamespace(plan_upfront=True)
+        session = SimpleNamespace(
+            plan=None,
+            snapshot=None,
+            hwnd=321,
+            target_hint="Paint",
+        )
+        messages = []
+        run_id = "run-prebound-plan"
+
+        @staticmethod
+        def _track_aux_model_response(*_args, **_kwargs):
+            return None
+
+    runner = Runner()
+    runner._maybe_plan_upfront(client=object())
+
+    assert observed["runtime_context"] == (
+        "Current target is already bound and open: Paint (hwnd=321)"
+    )
+    assert [step["done"] for step in runner.session.plan.steps] == [True, False]
+
+
+def test_prebound_target_does_not_satisfy_opening_a_different_app():
+    from winpilot.agent.gui_plan_helpers import _pure_open_goal_matches_bound_target
+
+    assert _pure_open_goal_matches_bound_target("打开画图", "Paint") is True
+    assert _pure_open_goal_matches_bound_target("打开微信", "Paint") is False
+    assert _pure_open_goal_matches_bound_target("打开当前窗口", "Paint") is True
 
 
 def test_should_plan_upfront_keeps_raw_parse_as_legacy_fallback(monkeypatch):

@@ -203,6 +203,14 @@ not an app-specific calculator rule.
 
 Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`action/raw_device.py` 直接调用常见动作 handler，避免每个子动作重新经过完整 `ToolSession.dispatch()`。物理鼠标/键盘全局单写；明确后台安全的 PostMessage 动作才按 hwnd 并发。复杂工具仍走完整 dispatch，确保权限、scope 和证据边界不丢失。
 
+### 跨帧连续指针
+
+连续指针不是 `DrawArtifact → Paint` 的特例。普通 drag、自由路径、滑块、验证控件、地图/时间轴、编辑器和游戏式对象操控都使用同一组 typed action、帧坐标、约束区域和 Controller 执行器。
+
+路径和终点在当前画面已经可见时，运行时把 down/move/up 作为一个平衡事务执行。终点必须在按住或经过 checkpoint 后才出现时，当前 turn 可以只执行 `mouse_down + move_mouse` 并返回新鲜帧；Controller 将真实状态写入 `pointer_hold_after`，下一个决策的 `pointer_hold_before` 只能由运行时注入，模型不能自行声称“仍在按住”。持有期间只接受 move 和同按钮 release，任何新 down、错误按钮、物理状态不一致、超时、取消、异常或无因果变化都会释放 Agent 持有的按钮并终止该 session。
+
+权威新帧也是空间计划边界：跨过边界后不会继续执行旧 turn 里预先猜出的目标坐标，旧 deferred spatial actions 会被丢弃，模型必须根据新画面重新定位。OCR 只作为语义辅助；若一个普通 OCR 框把相邻多个小控件合在一起，运行时保留模型在框内给出的具体子目标坐标，不再无条件吸附到整块文字中心。第一次同帧 no-progress 还可以把当前视觉坐标升级为附近可操作的 UIA/Win32 `element_id` 后重试一次，后续仍无进展则正常拦截。
+
 通信发送后的 artifact 核验先做 ORB feature matching + RANSAC homography，同时检查 inlier 比例、投影框尺度/边界和发送前后局部变化。强几何证据全部成立时立即返回，不继续支付 14 个尺度的 edge-template 搜索；稀疏线稿、重裁切或大形变导致 keypoint 不足时才 fallback 到 subject-agnostic 多尺度边缘匹配。fallback 更慢且更容易含糊，仍须通过发送后变化与正确会话约束，不能仅凭相似边缘完成合同。
 
 排查字段：
@@ -239,6 +247,10 @@ Controller batch 外层只取得一次 Desktop Action Queue 组合 lease；`acti
 汇总只把严格核验的 run 计入 `verified_success`：必须未超时、`status=done`、policy 和性能预算通过、外部 ground truth 存在且通过，并且没有 unverified done。没有检查项的报告标记为 `ungrounded`，不计成功；报告的 Git、模型、视觉配置 hash、display/DPI provenance 用来保证不同运行可比。
 
 通用实时交互的 opt-in 测试是 `python/winpilot_home/tests/test_windows_visual_interaction_e2e.py`。它启动真实受控浏览器目标，从 `/api/v2/task-contracts/compile` 与 `/api/v2/arp/runs` 进入生产路径，由浏览器记录 trusted pointer events；测试不 monkeypatch Controller，也不把内部函数调用冒充 E2E。2026-07-17 的最终自主矩阵覆盖完整拖入、精确点击、严格顺序点击、滑块和四个确定性 corridor 方向，结果 `8 passed, 1 deselected in 155.79s`。八个 run 全部 `done`、外部 ground truth 全部通过、0 次 replan/recovery，合计 10 次模型调用（平均 1.25、最多 2），Controller 平均 2,377 ms。ground truth 分别检查 whole-object placement、唯一目标、`1→2→3`、slider band 和 path validity/minimum clearance；执行还要求 observation artifact lineage、局部视觉 grounding、source footprint、路径证明和 effect evidence 成立。模型调用数和分阶段耗时保留为比较指标，但不以“必须两次”替代正确性；复杂歧义与恢复允许额外调用。`shared_turn` 需要真人继续，因此只验证 Agent 自己的两笔有效路径和随后 `waiting_external` 状态，不计入自主终态通过。该可控靶场只验证物理输入、坐标映射、阶段闭环和审计字段，不代表未知软件、移动目标、遮挡、动画、多显示器、高 DPI 或长会话的统计成功率。
+
+2026-07-18 新增的 `scripts/client_visual_e2e_run.py` 不直接调用后端：它在可见 Electron 客户端里填写任务、打开冷启动、点击运行，再恢复受控目标窗口，最终用外部 trusted browser pointer events 判定。`drag-fit`、`slider`、`dynamic-hold`、三个 corridor 方向和 `game-drag-v2` 共 `7/7` 通过，所有 run 的经验策略均为 disabled。`dynamic-hold` 验证了“按下后才显示目标”的真实跨帧状态，而不是把完整路线预先写死。报告为 `output/playwright/client-visual-e2e/20260718-072426-suite/suite-report.json`。
+
+真实桌面任务使用 `scripts/client_e2e_run.py`；`--suite original` 跑用户给出的 11 条原始任务，`--suite mixed` 跑组合长任务，`--suite all` 跑两者。默认每个 case 清空 session 场景上下文并强制冷启动经验隔离，持续聊天 case 另有 persistent probe。2026-07-18 对 QQ 空间点赞 case 的最后一次真实运行在 80 步后失败，随后客户端恢复前台也超时；对应 trace `arp-20260718-075223-92a997` 显示 Windows Shell Experience 抢占前台，旧焦点链无法夺回目标窗口。代码随后增加了 Escape 清理瞬态 shell、thread-input attach、SwitchToThisWindow 与 topmost pulse 等有界 fallback，并通过单元测试和现场手工复现验证，但没有第四次重跑 QQ，因此该 case 仍记为未通过。
 
 当前已复盘的本地诚实基线之一是 2026-07-14 的单次真实前端冷启动：空白 Paint 收到“用画板画一只猫”，约 55.3 秒，2 次点击、1 次 `draw_strokes`，没有进入 undo/clear 循环。结果可辨认但粗糙且语义有歧义，不能称为“好看”。对应 trace/eval、模型、显示/DPI 和配置没有作为公开基准提交，所以这只是链路/延迟样本，不是可复现的统计成功率；必须积累带完整 provenance 的固定任务、多次运行与外部 ground truth 后才能报告成功率。
 

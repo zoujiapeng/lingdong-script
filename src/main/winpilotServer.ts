@@ -88,11 +88,50 @@ function requestEphemeralPort(): Promise<number> {
   });
 }
 
+function requestSpecificPort(port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(port, HOST, () => {
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(port);
+      });
+    });
+  });
+}
+
+/**
+ * Generate renderer-safe candidates independently of the host's configured
+ * ephemeral range. Some Windows installations allocate port 0 from a custom
+ * low range (for example 1024-15000), so repeated port-0 allocations may not
+ * reach Chromium's safe range before the startup retry budget is exhausted.
+ */
+export function rendererSafePortCandidates(seed: number, count = 256): number[] {
+  const preferredStart = 49_152;
+  const span = 65_535 - preferredStart + 1;
+  const normalizedSeed = Math.abs(Math.trunc(seed || 0)) % span;
+  const limit = Math.max(1, Math.min(Math.trunc(count || 1), span));
+  return Array.from({ length: limit }, (_, index) => (
+    preferredStart + ((normalizedSeed + index) % span)
+  ));
+}
+
 /** Find a free loopback port that an Electron renderer is allowed to fetch. */
-async function findFreePort(): Promise<number> {
+export async function findFreePort(): Promise<number> {
   for (let attempt = 0; attempt < 32; attempt += 1) {
     const port = await requestEphemeralPort();
     if (isRendererSafePort(port)) return port;
+  }
+  const seed = Date.now() + process.pid;
+  for (const port of rendererSafePortCandidates(seed)) {
+    try {
+      return await requestSpecificPort(port);
+    } catch (error: any) {
+      if (error?.code === 'EADDRINUSE' || error?.code === 'EACCES') continue;
+      throw error;
+    }
   }
   throw new Error('未找到浏览器可访问的本地端口');
 }

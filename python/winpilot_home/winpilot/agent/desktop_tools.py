@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import threading
 from io import BytesIO
 from pathlib import Path
 
@@ -10,12 +11,103 @@ from ..action import executor
 from ..action.verify import _match_visible_text
 from ..config import CONFIG
 from ..perception import vision_cv
+from ..utils.log import BUS, logger
 from ..utils.screenshot import Region, capture, desktop_geometry, screen_size, window_region
 from .interaction_tools import _call_with_optional_hwnd, normalize_key_sequence
 from .tool_result import ToolResult
 
 
 class DesktopToolMixin:
+    def _cancel_pointer_hold_timeout(self) -> None:
+        timer = getattr(self, "_pointer_hold_timer", None)
+        self._pointer_hold_timer = None
+        self._pointer_hold_generation = int(
+            getattr(self, "_pointer_hold_generation", 0) or 0
+        ) + 1
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                logger.debug("pointer hold timer cancellation failed", exc_info=True)
+
+    def _arm_pointer_hold_timeout(self, button: str) -> float:
+        self._cancel_pointer_hold_timeout()
+        timeout_s = max(15.0, min(180.0, float(CONFIG.get(
+            "controller", "pointer_hold_timeout_s", default=75.0,
+        ) or 75.0)))
+        generation = int(getattr(self, "_pointer_hold_generation", 0) or 0)
+        self._pointer_hold_button = str(button or "left")
+
+        def expire() -> None:
+            if generation != int(getattr(self, "_pointer_hold_generation", 0) or 0):
+                return
+            held_button = str(getattr(self, "_pointer_hold_button", "") or "")
+            if not held_button:
+                return
+            try:
+                result = executor.mouse_up(held_button)
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            checker = getattr(executor, "agent_holds_mouse_button", None)
+            still_active = (
+                bool(checker(held_button))
+                if callable(checker)
+                else not bool(result.get("ok"))
+            )
+            self._pointer_hold_button = held_button if still_active else ""
+            if not still_active:
+                self._clear_pointer_constraint()
+            self._pointer_hold_timer = None
+            BUS.publish(
+                "input_cleanup",
+                run_id=getattr(self, "run_id", None),
+                released_mouse_buttons=([held_button] if not still_active else []),
+                reason=(
+                    "pointer_hold_timeout_release_failed"
+                    if still_active else "pointer_hold_timeout"
+                ),
+                result=result,
+            )
+
+        timer = threading.Timer(timeout_s, expire)
+        timer.daemon = True
+        self._pointer_hold_timer = timer
+        timer.start()
+        return timeout_s
+
+    def _pointer_hold_status(self) -> dict:
+        button = str(getattr(self, "_pointer_hold_button", "") or "")
+        if not button:
+            self._clear_pointer_constraint()
+            return {"active": False, "button": ""}
+        checker = getattr(executor, "agent_holds_mouse_button", None)
+        active = bool(checker(button)) if callable(checker) else True
+        if not active:
+            self._cancel_pointer_hold_timeout()
+            self._pointer_hold_button = ""
+            self._clear_pointer_constraint()
+        status = {"active": active, "button": button if active else ""}
+        frame_constraint = getattr(
+            self, "_pointer_hold_constraint_frame_region", None,
+        )
+        if active and isinstance(frame_constraint, dict):
+            status["constraint_frame_region"] = dict(frame_constraint)
+        return status
+
+    def _clear_pointer_constraint(self) -> None:
+        self._pointer_hold_constraint_region = None
+        self._pointer_hold_constraint_frame_region = None
+
+    def _pointer_args_with_inherited_constraint(self, args: dict) -> dict:
+        effective = dict(args)
+        if not any(key in effective for key in (
+            "_constraint_region", "constraint_region", "constraint_frame_region",
+        )):
+            inherited = getattr(self, "_pointer_hold_constraint_region", None)
+            if isinstance(inherited, dict):
+                effective["_constraint_region"] = dict(inherited)
+        return effective
+
     def _managed_artifacts(self):
         run_id = str(getattr(self, "run_id", "") or "").strip()
         if not run_id:
@@ -56,6 +148,17 @@ class DesktopToolMixin:
 
     def _t_mouse_down(self, args: dict) -> ToolResult:
         button = str(args.get("button", "left"))
+        active_hold = self._pointer_hold_status()
+        if active_hold.get("active"):
+            held_button = str(active_hold.get("button") or "left")
+            return ToolResult(self._fmt({
+                "ok": False,
+                "error": (
+                    f"cannot press {button}; the agent already holds {held_button}"
+                ),
+                "pointer_hold_active": True,
+                "pointer_hold_button": held_button,
+            }))
         target = getattr(self, "_action_hwnd", lambda: None)()
         preposition = None
         if args.get("x") is not None or args.get("y") is not None:
@@ -64,6 +167,13 @@ class DesktopToolMixin:
                     "ok": False,
                     "error": "mouse_down requires x and y together",
                 }))
+            constraint_block = self._spatial_constraint_block(
+                args,
+                [(int(args["x"]), int(args["y"]))],
+                action="mouse_down",
+            )
+            if constraint_block is not None:
+                return constraint_block
             preposition = _call_with_optional_hwnd(
                 executor.move_mouse,
                 int(args["x"]),
@@ -79,12 +189,52 @@ class DesktopToolMixin:
         result = _call_with_optional_hwnd(
             executor.mouse_down, button, hwnd=target,
         )
+        if result.get("ok") is True:
+            timeout_s = self._arm_pointer_hold_timeout(button)
+            physical_constraint = args.get("_constraint_region")
+            if physical_constraint is None:
+                physical_constraint = args.get("constraint_region")
+            self._pointer_hold_constraint_region = (
+                dict(physical_constraint)
+                if isinstance(physical_constraint, dict) else None
+            )
+            source_frame = args.get("source_frame_coordinates")
+            frame_constraint = (
+                source_frame.get("constraint_frame_region")
+                if isinstance(source_frame, dict) else None
+            )
+            self._pointer_hold_constraint_frame_region = (
+                dict(frame_constraint)
+                if isinstance(frame_constraint, dict) else None
+            )
+            result.update({
+                "pointer_hold_active": True,
+                "pointer_hold_timeout_s": timeout_s,
+                "next_action": (
+                    "inspect the fresh frame; release with mouse_up if the final "
+                    "target is reached, otherwise make one move_mouse continuation"
+                ),
+            })
         if preposition is not None:
             result["preposition"] = preposition
         return ToolResult(self._fmt(result))
 
     def _t_mouse_up(self, args: dict) -> ToolResult:
-        button = str(args.get("button", "left"))
+        args = self._pointer_args_with_inherited_constraint(args)
+        hold = self._pointer_hold_status()
+        held_button = str(hold.get("button") or "") if hold.get("active") else ""
+        requested_button = str(args.get("button") or "")
+        if held_button and requested_button and requested_button != held_button:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "error": (
+                    f"mouse_up requested {requested_button}, but the active "
+                    f"agent-held button is {held_button}"
+                ),
+                "pointer_hold_active": True,
+                "pointer_hold_button": held_button,
+            }))
+        button = requested_button or held_button or "left"
         target = getattr(self, "_action_hwnd", lambda: None)()
         preposition = None
         if args.get("x") is not None or args.get("y") is not None:
@@ -93,18 +243,55 @@ class DesktopToolMixin:
                     "ok": False,
                     "error": "mouse_up requires x and y together",
                 }))
+            release_point = (int(args["x"]), int(args["y"]))
+            constraint_block = self._spatial_constraint_block(
+                args, [release_point], action="mouse_up",
+            )
+            if constraint_block is not None:
+                return constraint_block
             preposition = _call_with_optional_hwnd(
                 executor.move_mouse,
                 int(args["x"]),
                 int(args["y"]),
                 hwnd=target,
             )
+        elif any(key in args for key in ("_constraint_region", "constraint_region")):
+            cursor = executor.cursor_position()
+            if cursor.get("ok") is not True:
+                return ToolResult(self._fmt({
+                    "ok": False,
+                    "blocked": True,
+                    "error": "cannot verify current cursor against the held-pointer constraint",
+                    "pointer_hold_active": bool(held_button),
+                }))
+            constraint_block = self._spatial_constraint_block(
+                args,
+                [(int(cursor["x"]), int(cursor["y"]))],
+                action="mouse_up",
+            )
+            if constraint_block is not None:
+                return constraint_block
         # Releasing an agent-owned button is safety cleanup and must still run
         # if cursor prepositioning was interrupted by lost ownership.
         result = executor.mouse_up(button=button)
+        checker = getattr(executor, "agent_holds_mouse_button", None)
+        still_active = bool(checker(button)) if callable(checker) else not bool(
+            result.get("ok")
+        )
+        if still_active:
+            self._pointer_hold_button = button
+            result["ok"] = False
+            result["pointer_hold_active"] = True
+            result["pointer_hold_button"] = button
+            result.setdefault("error", "mouse button remains held after mouse_up")
+        else:
+            self._cancel_pointer_hold_timeout()
+            self._pointer_hold_button = ""
+            self._clear_pointer_constraint()
+            result["pointer_hold_active"] = False
         if preposition is not None:
             result["preposition"] = preposition
-            if preposition.get("ok") is not True:
+            if preposition.get("ok") is not True and not still_active:
                 result["ok"] = False
                 result["error"] = (
                     preposition.get("error")
@@ -113,11 +300,30 @@ class DesktopToolMixin:
         return ToolResult(self._fmt(result))
 
     def _t_move_mouse(self, args: dict) -> ToolResult:
+        args = self._pointer_args_with_inherited_constraint(args)
         x, y = int(args["x"]), int(args["y"])
         target = getattr(self, "_action_hwnd", lambda: None)()
+        hold = self._pointer_hold_status()
+        constraint_block = self._spatial_constraint_block(
+            args, [(x, y)], action="move_mouse",
+        )
+        if constraint_block is not None:
+            return constraint_block
         result = _call_with_optional_hwnd(
             executor.move_mouse, x, y, hwnd=target,
         )
+        if result.get("ok") is True and hold.get("active"):
+            physical_constraint = args.get("_constraint_region")
+            if isinstance(physical_constraint, dict):
+                self._pointer_hold_constraint_region = dict(physical_constraint)
+            result.update({
+                "pointer_hold_active": True,
+                "pointer_hold_button": hold["button"],
+                "next_action": (
+                    "inspect the fresh frame; call mouse_up now if the intended "
+                    "release condition is visible, otherwise move once more"
+                ),
+            })
         return ToolResult(self._fmt(result))
 
     def _t_screenshot(self, args: dict) -> ToolResult:
@@ -248,11 +454,22 @@ class DesktopToolMixin:
         store, registry = self._managed_artifacts()
         if store is None:
             return ToolResult(self._fmt({"ok": False, "error": "capture_artifact requires an active run_id"}))
+        scope = str(args.get("scope") or "window").strip().casefold()
+        if scope not in {"window", "screen", "canvas", "region"}:
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "failure_type": "invalid_artifact_scope",
+                "error": (
+                    "capture_artifact scope must be one of window, screen, canvas, or region; "
+                    f"received {scope!r}. Do not invent semantic scope names."
+                ),
+            }))
         hwnd = int(args.get("source_hwnd") or getattr(self, "hwnd", 0) or 0)
         region = args.get("region") if isinstance(args.get("region"), dict) else None
         try:
             artifact = store.capture_artifact(
-                scope=str(args.get("scope") or "window"),
+                scope=scope,
                 source_hwnd=hwnd,
                 region=region,
                 purpose="user_output",
@@ -268,7 +485,18 @@ class DesktopToolMixin:
             artifact_id=artifact.artifact_id,
             metadata={"sha256": artifact.sha256, "source_window": artifact.source_window},
         ) if registry is not None else None
-        return ToolResult(self._fmt({"ok": True, "artifact": artifact.model_dump(mode="json"), "evidence": evidence}))
+        return ToolResult(self._fmt({
+            "ok": True,
+            "artifact_id": artifact.artifact_id,
+            "sha256": artifact.sha256,
+            "managed_path": artifact.managed_path,
+            "artifact": artifact.model_dump(mode="json"),
+            "evidence": evidence,
+            "fast_path_advice": (
+                f"The exact managed artifact_id is {artifact.artifact_id}. Pass this exact "
+                "value to send_artifact; do not invent or rename the handle."
+            ),
+        }))
 
     def _communication_adapter(self, app: str = "", recipient: str = ""):
         from ..tasking.adapters import CommunicationAdapter, DomainAdapterRegistry
@@ -289,34 +517,271 @@ class DesktopToolMixin:
             store=store,
             evidence=registry,
             stop_event=getattr(self, "stop_event", None),
+            task_intent=getattr(self, "task_intent", None),
         )
         self.communication_adapter = adapter
         if recipient:
             adapter.recipient = str(recipient)
         return adapter
 
+    def _discover_communication_route(self, recipient: str) -> dict:
+        """Ground and bind one installed communication route for a recipient.
+
+        Adapter registration is extensible capability metadata, not proof that
+        an app exists or that a recipient is available.  Rank only candidates
+        grounded by the live process/window list or installed-app index, then
+        require the adapter to prove both the recipient header and composer.
+        """
+
+        from ..perception import apps as app_catalog
+        from ..perception import win32 as win32_perception
+        from ..tasking.adapters import DomainAdapterRegistry
+
+        recipient = str(recipient or "").strip()
+        if not recipient:
+            return {
+                "ok": False,
+                "verified": False,
+                "failure_type": "recipient_not_resolved",
+                "error": "open_conversation requires a recipient",
+            }
+        store, registry = self._managed_artifacts()
+        if store is None or registry is None:
+            return {
+                "ok": False,
+                "verified": False,
+                "failure_type": "run_context_missing",
+                "error": "communication route discovery requires an active run_id",
+            }
+
+        candidates: list[dict] = []
+        discovery_errors: list[dict] = []
+        for descriptor in DomainAdapterRegistry.registered_adapters():
+            app_name = str(descriptor.get("app_name") or "").strip()
+            if not app_name:
+                continue
+            running: dict = {}
+            visible_window: dict | None = None
+            installed: list[dict] = []
+            try:
+                running = win32_perception.find_app(app_name) or {}
+            except Exception as exc:
+                discovery_errors.append({"app": app_name, "source": "process", "error": str(exc)})
+            try:
+                visible_window = win32_perception.find_window(app_name)
+            except Exception as exc:
+                discovery_errors.append({"app": app_name, "source": "window", "error": str(exc)})
+            try:
+                installed = app_catalog.resolve(app_name, max_results=3) or []
+            except Exception as exc:
+                discovery_errors.append({"app": app_name, "source": "installed_apps", "error": str(exc)})
+
+            best_install = installed[0] if installed else {}
+            match_score = int(best_install.get("match_score") or (100 if best_install else 0))
+            installed_grounded = bool(
+                best_install
+                and (
+                    match_score >= 65
+                    or str(best_install.get("match_kind") or "") != "fuzzy"
+                )
+            )
+            running_grounded = bool(running.get("running"))
+            window_grounded = bool(visible_window)
+            if not (running_grounded or window_grounded or installed_grounded):
+                continue
+            rank = (
+                300 if bool(running.get("has_visible_window")) or window_grounded
+                else 200 if running_grounded
+                else 100
+            ) + min(match_score, 100)
+            candidates.append({
+                **descriptor,
+                "rank": rank,
+                "grounding": {
+                    "running": running_grounded,
+                    "visible_window": window_grounded,
+                    "installed": installed_grounded,
+                    "installed_match": str(best_install.get("name") or ""),
+                    "installed_match_score": match_score,
+                },
+            })
+
+        candidates.sort(
+            key=lambda item: (
+                -int(item.get("rank") or 0),
+                str(item.get("adapter_id") or "").casefold(),
+            )
+        )
+        attempts: list[dict] = []
+        for candidate in candidates[:4]:
+            adapter = None
+            try:
+                adapter = DomainAdapterRegistry.create(
+                    str(candidate.get("adapter_id") or ""),
+                    run_id=str(getattr(self, "run_id", "")),
+                    task=str(getattr(self, "task", "")),
+                    store=store,
+                    evidence=registry,
+                    stop_event=getattr(self, "stop_event", None),
+                    task_intent=getattr(self, "task_intent", None),
+                )
+                opened = adapter.open_conversation(recipient)
+                composer = adapter.resolve_composer() if opened.get("ok") is True else {}
+                route_ok = bool(opened.get("ok") is True and composer.get("ok") is True)
+                attempt = {
+                    "adapter_id": str(candidate.get("adapter_id") or ""),
+                    "app": str(candidate.get("app_name") or ""),
+                    "grounding": candidate.get("grounding") or {},
+                    "recipient_verified": bool(opened.get("ok") is True),
+                    "composer_verified": bool(composer.get("ok") is True),
+                }
+                if not route_ok:
+                    attempt["failure_type"] = str(
+                        composer.get("failure_type")
+                        or opened.get("failure_type")
+                        or "communication_route_unverified"
+                    )
+                    attempt["error"] = str(
+                        composer.get("error") or opened.get("error") or ""
+                    )[:1200]
+                attempts.append(attempt)
+                if route_ok:
+                    self.communication_adapter = adapter
+                    hwnd = int(getattr(adapter.session, "hwnd", 0) or 0)
+                    if hwnd:
+                        self._remember_target(
+                            hwnd,
+                            str(
+                                getattr(adapter.session, "target_hint", "")
+                                or candidate.get("app_name")
+                                or ""
+                            ),
+                        )
+                    return {
+                        "ok": True,
+                        "verified": True,
+                        "route_discovered": True,
+                        "channel": str(candidate.get("adapter_id") or ""),
+                        "app": str(candidate.get("app_name") or ""),
+                        "recipient": recipient,
+                        "target_hwnd": hwnd or None,
+                        "grounding": candidate.get("grounding") or {},
+                        "conversation": opened,
+                        "composer": composer,
+                        "attempts": attempts,
+                        "fast_path_advice": (
+                            "The recipient and composer are now verified and bound. "
+                            "Continue directly with send_text or send_artifact; do not rediscover the route."
+                        ),
+                    }
+            except Exception as exc:
+                attempts.append({
+                    "adapter_id": str(candidate.get("adapter_id") or ""),
+                    "app": str(candidate.get("app_name") or ""),
+                    "grounding": candidate.get("grounding") or {},
+                    "failure_type": "communication_route_error",
+                    "error": str(exc)[:1200],
+                })
+            if adapter is not None:
+                try:
+                    adapter.close()
+                except Exception:
+                    pass
+
+        return {
+            "ok": False,
+            "verified": False,
+            "route_unresolved": True,
+            "failure_type": "communication_route_unresolved",
+            "recipient": recipient,
+            "grounded_candidates": [
+                {
+                    "adapter_id": str(item.get("adapter_id") or ""),
+                    "app": str(item.get("app_name") or ""),
+                    "grounding": item.get("grounding") or {},
+                }
+                for item in candidates
+            ],
+            "attempts": attempts,
+            "discovery_errors": discovery_errors,
+            "gui_fallback_required": True,
+            "error": (
+                "No registered, locally grounded communication adapter could prove both "
+                "the requested recipient and a usable composer. Continue with general GUI "
+                "discovery for another installed client, or report the visible blocker; do not guess a channel."
+            ),
+            "fast_path_advice": (
+                "Do not repeat open_conversation with the same missing channel. Use the returned "
+                "attempt evidence to choose a different installed GUI route."
+            ),
+        }
+
     def _t_open_conversation(self, args: dict) -> ToolResult:
         try:
-            adapter = self._communication_adapter(str(args.get("app") or ""), str(args.get("recipient") or ""))
-            result = adapter.open_conversation(str(args.get("recipient") or ""))
+            app = str(args.get("app") or "").strip()
+            recipient = str(args.get("recipient") or "").strip()
+            if not app:
+                return ToolResult(self._fmt(
+                    self._discover_communication_route(recipient)
+                ))
+            adapter = self._communication_adapter(app, recipient)
+            result = adapter.open_conversation(recipient)
             if result.get("ok") is True:
-                result["composer"] = adapter.resolve_composer()
+                composer = adapter.resolve_composer()
+                result["composer"] = composer
+                result["verified"] = bool(composer.get("ok") is True)
+                if composer.get("ok") is not True:
+                    result["ok"] = False
+                    result["failure_type"] = str(
+                        composer.get("failure_type") or "composer_not_resolved"
+                    )
+                    result["error"] = str(
+                        composer.get("error")
+                        or "recipient was opened but the composer could not be verified"
+                    )
             self.hwnd = adapter.session.hwnd
             return ToolResult(self._fmt(result))
         except Exception as exc:
             return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
 
     def _t_send_artifact(self, args: dict) -> ToolResult:
+        requested_artifact_id = str(args.get("artifact_id") or "").strip()
         try:
             adapter = self._communication_adapter(str(args.get("app") or ""), str(args.get("recipient") or ""))
-            artifact_id = str(args.get("artifact_id") or "")
+            store, _registry = self._managed_artifacts()
+            if store is None:
+                raise ValueError("send_artifact requires an active run_id")
+            artifact, resolution = store.resolve_sendable(requested_artifact_id)
+            artifact_id = artifact.artifact_id
             staged = adapter.paste_or_attach_artifact(artifact_id)
             if staged.get("ok") is not True:
-                return ToolResult(self._fmt(staged))
+                return ToolResult(self._fmt({
+                    **staged,
+                    "artifact_id": artifact_id,
+                    "requested_artifact_id": requested_artifact_id,
+                    "artifact_resolution": resolution,
+                }))
             sent = adapter.send_current_composer(artifact_id=artifact_id)
-            return ToolResult(self._fmt({"ok": sent.get("ok") is True, "artifact_id": artifact_id, "staged": staged, "sent": sent}))
+            return ToolResult(self._fmt({
+                "ok": sent.get("ok") is True,
+                "artifact_id": artifact_id,
+                "requested_artifact_id": requested_artifact_id,
+                "artifact_resolution": resolution,
+                "staged": staged,
+                "sent": sent,
+                "fast_path_advice": (
+                    f"Artifact {artifact_id} was resolved and sent through the bound route. "
+                    "Use this resolved id for verify_delivery."
+                ),
+            }))
         except Exception as exc:
-            return ToolResult(self._fmt({"ok": False, "error": str(exc)}))
+            return ToolResult(self._fmt({
+                "ok": False,
+                "verified": False,
+                "failure_type": "artifact_reference_unresolved",
+                "requested_artifact_id": requested_artifact_id,
+                "error": str(exc),
+            }))
 
     def _t_send_text(self, args: dict) -> ToolResult:
         try:

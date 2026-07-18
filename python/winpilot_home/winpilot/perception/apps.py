@@ -15,10 +15,13 @@ Sources (merged, deduped, scored):
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from ..utils.log import logger
@@ -51,6 +54,13 @@ _SKIP_WORDS = ("卸载", "uninstall", "帮助", "help", "网站", "website", "re
 
 def _start_menu_entries() -> list[dict]:
     entries: list[dict] = []
+    shortcut_shell = None
+    try:
+        import win32com.client
+
+        shortcut_shell = win32com.client.Dispatch("WScript.Shell")
+    except Exception:
+        shortcut_shell = None
     for base in _START_MENU_DIRS:
         if not base.exists():
             continue
@@ -59,7 +69,28 @@ def _start_menu_entries() -> list[dict]:
                 name = lnk.stem
                 if any(w in name.lower() for w in _SKIP_WORDS):
                     continue
-                entries.append({"name": name, "target": str(lnk), "kind": "lnk"})
+                aliases: list[str] = []
+                if shortcut_shell is not None:
+                    try:
+                        shortcut = shortcut_shell.CreateShortcut(str(lnk))
+                        target_path = str(shortcut.TargetPath or "").strip()
+                        arguments = str(shortcut.Arguments or "").strip()
+                        if target_path:
+                            aliases.extend([
+                                Path(target_path).stem,
+                                Path(target_path).parent.name,
+                                target_path,
+                            ])
+                        if arguments:
+                            aliases.append(arguments)
+                    except Exception:
+                        pass
+                entries.append({
+                    "name": name,
+                    "target": str(lnk),
+                    "kind": "lnk",
+                    "aliases": list(dict.fromkeys(item for item in aliases if item)),
+                })
         except OSError as exc:
             logger.debug("开始菜单扫描失败 %s: %s", base, exc)
     return entries
@@ -208,14 +239,63 @@ def _index() -> list[dict]:
     return deduped
 
 
+def _normalized(value: str) -> str:
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+
 def _score(name_lower: str, query_lower: str) -> int:
-    if name_lower == query_lower:
+    """Score literal and typo-tolerant names without product-specific rules."""
+
+    name = _normalized(name_lower)
+    query = _normalized(query_lower)
+    if not name or not query:
+        return 0
+    if name == query:
         return 100
-    if name_lower.startswith(query_lower):
-        return 80
-    if query_lower in name_lower:
-        return 60
+    if name.startswith(query):
+        return 82
+    if query in name:
+        return 72
+    if len(name) >= 4 and len(query) >= 4:
+        ratio = SequenceMatcher(None, name, query).ratio()
+        if ratio >= 0.78:
+            return 45 + int(ratio * 20)
     return 0
+
+
+def _entry_terms(entry: dict) -> list[str]:
+    target = str(entry.get("target") or "")
+    terms = [str(entry.get("name") or "")]
+    terms.extend(str(item) for item in (entry.get("aliases") or []) if str(item).strip())
+    if target:
+        terms.extend([
+            Path(target).stem,
+            Path(target).parent.name,
+        ])
+        terms.extend(
+            item for item in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", target)
+            if len(item) >= 3
+        )
+    return list(dict.fromkeys(item for item in terms if item.strip()))
+
+
+def _score_entry(entry: dict, variants: list[str], literal_query: str) -> tuple[int, int, str]:
+    best = 0
+    literal = 0
+    matched_term = ""
+    name = str(entry.get("name") or "")
+    for term in _entry_terms(entry):
+        term_score = max((_score(term, variant) for variant in variants), default=0)
+        # Display-name matches remain slightly stronger than executable/path
+        # aliases, but an exact discovered binary alias must still beat an
+        # unrelated fuzzy display name.
+        if term != name and term_score:
+            term_score = max(1, term_score - 3)
+        if term_score > best:
+            best, matched_term = term_score, term
+        literal = max(literal, _score(term, literal_query))
+    return best, literal, matched_term
 
 
 def resolve(query: str, max_results: int = 5) -> list[dict]:
@@ -229,11 +309,7 @@ def resolve(query: str, max_results: int = 5) -> list[dict]:
     # Inbox tools have stable launch targets. Resolve them before the slower
     # StartApps/shortcut index so a cold desktop task does not pay that scan.
     fast_scored = [
-        (
-            max(_score(entry["name"].lower(), variant) for variant in query_variants),
-            _score(entry["name"].lower(), q),
-            entry,
-        )
+        (*_score_entry(entry, query_variants, q)[:2], entry)
         for entry in (_system_tool_entries() + _wps_suite_entries())
     ]
     fast_scored = [item for item in fast_scored if item[0]]
@@ -242,16 +318,39 @@ def resolve(query: str, max_results: int = 5) -> list[dict]:
         # same launch target and score.  The returned name is also evidence
         # and a later title hint, so turning 画图 into "paint" is observable.
         fast_scored.sort(key=lambda item: (-item[0], -item[1]))
-        return [entry for _score_value, _literal_score, entry in fast_scored[:max_results]]
+        return [
+            {
+                **entry,
+                "match_score": score,
+                "match_kind": "literal_or_alias",
+            }
+            for score, _literal_score, entry in fast_scored[:max_results]
+        ]
     scored = []
     for e in _index():
-        s = max(_score(e["name"].lower(), variant) for variant in query_variants)
+        s, literal_score, matched_term = _score_entry(e, query_variants, q)
         if s:
             # shortcuts are the most reliable launch targets; appid next
             s += {"lnk": 2, "appid": 1}.get(e["kind"], 0)
-            scored.append((s, e))
-    scored.sort(key=lambda t: -t[0])
-    results = [e for _s, e in scored[:max_results]]
+            scored.append((s, literal_score, matched_term, e))
+    scored.sort(key=lambda item: (-item[0], -item[1], str(item[3].get("name") or "").casefold()))
+    results = [
+        {
+            **entry,
+            "aliases": list(dict.fromkeys([
+                *(str(item) for item in (entry.get("aliases") or []) if str(item).strip()),
+                str(matched_term or ""),
+            ])),
+            "match_score": score,
+            "matched_term": matched_term,
+            "match_kind": (
+                "fuzzy"
+                if score < 70
+                else ("target_alias" if _normalized(matched_term) != _normalized(entry.get("name") or "") else "literal_or_alias")
+            ),
+        }
+        for score, _literal, matched_term, entry in scored[:max_results]
+    ]
     if results:
         return results
     # Last resort: Everything filename search for an exe.
@@ -286,6 +385,7 @@ def launch_target(entry: dict) -> dict:
             "target": target,
             "arguments": arguments,
             "name": entry.get("name"),
+            "aliases": list(entry.get("aliases") or []),
         }
     except OSError as exc:
         return {"ok": False, "error": str(exc), "target": target}

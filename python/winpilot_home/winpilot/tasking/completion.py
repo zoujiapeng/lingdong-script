@@ -140,6 +140,51 @@ class CompletionContractVerifier:
         if omitted:
             errors.append("obligations omitted from final conditions: " + ", ".join(omitted))
 
+        if self.contract.compiler_version == "typed-stage-5" and not self.contract.requirements:
+            errors.append("task contract has no retained user requirements")
+        requirement_ids = [item.id for item in self.contract.requirements]
+        duplicate_requirements = sorted(
+            key for key, count in Counter(requirement_ids).items() if count > 1
+        )
+        if duplicate_requirements:
+            errors.append("duplicate requirement ids: " + ", ".join(duplicate_requirements))
+        known_predicates = {
+            obligation.evidence_predicate for obligation in self.contract.obligations
+        }
+        for requirement in self.contract.requirements:
+            unknown_stages = sorted(set(requirement.stage_ids) - known_stages)
+            if unknown_stages:
+                errors.append(
+                    f"requirement {requirement.id!r} references unknown stages: "
+                    + ", ".join(unknown_stages)
+                )
+            unknown_predicates = sorted(
+                set(requirement.completion_predicates) - known_predicates
+            )
+            if unknown_predicates:
+                errors.append(
+                    f"requirement {requirement.id!r} references unknown completion predicates: "
+                    + ", ".join(unknown_predicates)
+                )
+            if requirement.required and (
+                not requirement.stage_ids or not requirement.completion_predicates
+            ):
+                errors.append(
+                    f"required requirement {requirement.id!r} has no executable completion binding"
+                )
+        coverage = self.contract.requirement_coverage
+        expected_covered = {
+            item.id for item in self.contract.requirements if item.required
+        }
+        declared_covered = set(coverage.covered_requirement_ids)
+        declared_uncovered = set(coverage.uncovered_requirement_ids)
+        if self.contract.compiler_version == "typed-stage-5" and (
+            coverage.complete is not True
+            or declared_uncovered
+            or expected_covered - declared_covered
+        ):
+            errors.append("task requirement coverage is incomplete")
+
         producer_refs = {
             output.name
             for stage in self.contract.stages
